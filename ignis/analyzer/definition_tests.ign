@@ -24,12 +24,40 @@ function definitionStorePushAssignsDeterministicInsertionOrderIds(): void {
   let enumSym: Analyzer::SymbolId = table.intern("enumVal");
   let varSym: Analyzer::SymbolId = table.intern("var");
 
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let boolId: Analyzer::TypeId = types.intern(Analyzer::Type::BOOLEAN);
+  let stubTypeId: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+
   let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
 
-  let id0: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(funcSym));
-  let id1: Analyzer::DefinitionId = store.push(Analyzer::Definition::Record(recSym));
-  let id2: Analyzer::DefinitionId = store.push(Analyzer::Definition::Enum(enumSym));
-  let id3: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variable(varSym));
+  let id0: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: funcSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidId,
+  }));
+  let id1: Analyzer::DefinitionId = store.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: recSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: stubTypeId,
+  }));
+  let id2: Analyzer::DefinitionId = store.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
+    name: enumSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    variants: Vector::new<Analyzer::DefinitionId>(),
+    typeId: stubTypeId,
+  }));
+  let id3: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
+    name: varSym,
+    visibility: Analyzer::Visibility::PRIVATE,
+    declaredType: boolId,
+    mutable: false,
+  }));
 
   Test::assertEq<u32>(id0.raw(), 0);
   Test::assertEq<u32>(id1.raw(), 1);
@@ -46,49 +74,89 @@ function definitionStoreGetRoundTripsEachVariant(): void {
   let enumSym: Analyzer::SymbolId = table.intern("enumVal");
   let varSym: Analyzer::SymbolId = table.intern("var");
 
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let boolId: Analyzer::TypeId = types.intern(Analyzer::Type::BOOLEAN);
+  let stubTypeId: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+
   let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
 
-  let id0: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(funcSym));
-  let id1: Analyzer::DefinitionId = store.push(Analyzer::Definition::Record(recSym));
-  let id2: Analyzer::DefinitionId = store.push(Analyzer::Definition::Enum(enumSym));
-  let id3: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variable(varSym));
+  let id0: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: funcSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidId,
+  }));
+  let id1: Analyzer::DefinitionId = store.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: recSym,
+    visibility: Analyzer::Visibility::PRIVATE,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: stubTypeId,
+  }));
+  let id2: Analyzer::DefinitionId = store.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
+    name: enumSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    variants: Vector::new<Analyzer::DefinitionId>(),
+    typeId: stubTypeId,
+  }));
+  let id3: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
+    name: varSym,
+    visibility: Analyzer::Visibility::PRIVATE,
+    declaredType: boolId,
+    mutable: false,
+  }));
 
   match (store.get(id0)) {
     Option::SOME(def) -> match (def) {
-      Analyzer::Definition::Function(name) -> Test::assertEq<u32>(name.raw(), funcSym.raw()),
-      Analyzer::Definition::Record(_) -> @panic("expected Function variant"),
-      Analyzer::Definition::Enum(_) -> @panic("expected Function variant"),
-      Analyzer::Definition::Variable(_) -> @panic("expected Function variant"),
+      Analyzer::Definition::Function(wrapper) -> Test::assertEq<u32>(wrapper.name.raw(), funcSym.raw()),
+      Analyzer::Definition::Record(_)         -> @panic("expected Function variant"),
+      Analyzer::Definition::Enum(_)           -> @panic("expected Function variant"),
+      Analyzer::Definition::Variable(_)       -> @panic("expected Function variant"),
+      Analyzer::Definition::Field(_)          -> @panic("expected Function variant"),
+      Analyzer::Definition::Variant(_)        -> @panic("expected Function variant"),
+      Analyzer::Definition::TypeParam(_)      -> @panic("expected Function variant"),
     },
     Option::NONE -> @panic("expected Some for id0 but got None"),
   };
 
   match (store.get(id1)) {
     Option::SOME(def) -> match (def) {
-      Analyzer::Definition::Function(_) -> @panic("expected Record variant"),
-      Analyzer::Definition::Record(name) -> Test::assertEq<u32>(name.raw(), recSym.raw()),
-      Analyzer::Definition::Enum(_) -> @panic("expected Record variant"),
-      Analyzer::Definition::Variable(_) -> @panic("expected Record variant"),
+      Analyzer::Definition::Function(_)       -> @panic("expected Record variant"),
+      Analyzer::Definition::Record(wrapper)   -> Test::assertEq<u32>(wrapper.name.raw(), recSym.raw()),
+      Analyzer::Definition::Enum(_)           -> @panic("expected Record variant"),
+      Analyzer::Definition::Variable(_)       -> @panic("expected Record variant"),
+      Analyzer::Definition::Field(_)          -> @panic("expected Record variant"),
+      Analyzer::Definition::Variant(_)        -> @panic("expected Record variant"),
+      Analyzer::Definition::TypeParam(_)      -> @panic("expected Record variant"),
     },
     Option::NONE -> @panic("expected Some for id1 but got None"),
   };
 
   match (store.get(id2)) {
     Option::SOME(def) -> match (def) {
-      Analyzer::Definition::Function(_) -> @panic("expected Enum variant"),
-      Analyzer::Definition::Record(_) -> @panic("expected Enum variant"),
-      Analyzer::Definition::Enum(name) -> Test::assertEq<u32>(name.raw(), enumSym.raw()),
-      Analyzer::Definition::Variable(_) -> @panic("expected Enum variant"),
+      Analyzer::Definition::Function(_)       -> @panic("expected Enum variant"),
+      Analyzer::Definition::Record(_)         -> @panic("expected Enum variant"),
+      Analyzer::Definition::Enum(wrapper)     -> Test::assertEq<u32>(wrapper.name.raw(), enumSym.raw()),
+      Analyzer::Definition::Variable(_)       -> @panic("expected Enum variant"),
+      Analyzer::Definition::Field(_)          -> @panic("expected Enum variant"),
+      Analyzer::Definition::Variant(_)        -> @panic("expected Enum variant"),
+      Analyzer::Definition::TypeParam(_)      -> @panic("expected Enum variant"),
     },
     Option::NONE -> @panic("expected Some for id2 but got None"),
   };
 
   match (store.get(id3)) {
     Option::SOME(def) -> match (def) {
-      Analyzer::Definition::Function(_) -> @panic("expected Variable variant"),
-      Analyzer::Definition::Record(_) -> @panic("expected Variable variant"),
-      Analyzer::Definition::Enum(_) -> @panic("expected Variable variant"),
-      Analyzer::Definition::Variable(name) -> Test::assertEq<u32>(name.raw(), varSym.raw()),
+      Analyzer::Definition::Function(_)         -> @panic("expected Variable variant"),
+      Analyzer::Definition::Record(_)           -> @panic("expected Variable variant"),
+      Analyzer::Definition::Enum(_)             -> @panic("expected Variable variant"),
+      Analyzer::Definition::Variable(wrapper)   -> Test::assertEq<u32>(wrapper.name.raw(), varSym.raw()),
+      Analyzer::Definition::Field(_)            -> @panic("expected Variable variant"),
+      Analyzer::Definition::Variant(_)          -> @panic("expected Variable variant"),
+      Analyzer::Definition::TypeParam(_)        -> @panic("expected Variable variant"),
     },
     Option::NONE -> @panic("expected Some for id3 but got None"),
   };
@@ -99,10 +167,25 @@ function definitionStoreLengthCountsDuplicatePushes(): void {
   let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
   let sym: Analyzer::SymbolId = table.intern("foo");
 
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+
   let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
 
-  let id0: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(sym));
-  let id1: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(sym));
+  let id0: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: sym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidId,
+  }));
+  let id1: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: sym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidId,
+  }));
 
   Test::assertEq<u64>(store.length(), 2);
   Test::assert(id0.raw() != id1.raw());
@@ -115,14 +198,610 @@ function definitionNameReturnsEmbeddedSymbolIdForEachVariant(): void {
   let recSym: Analyzer::SymbolId = table.intern("rec");
   let enumSym: Analyzer::SymbolId = table.intern("enumVal");
   let varSym: Analyzer::SymbolId = table.intern("var");
+  let fieldSym: Analyzer::SymbolId = table.intern("field");
+  let variantSym: Analyzer::SymbolId = table.intern("variant");
+  let typeParamSym: Analyzer::SymbolId = table.intern("typeParam");
 
-  let funcDef: Analyzer::Definition = Analyzer::Definition::Function(funcSym);
-  let recDef: Analyzer::Definition = Analyzer::Definition::Record(recSym);
-  let enumDef: Analyzer::Definition = Analyzer::Definition::Enum(enumSym);
-  let varDef: Analyzer::Definition = Analyzer::Definition::Variable(varSym);
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let i32Id: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+  let stubTypeId: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+  let stubDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(99);
+
+  let funcDef: Analyzer::Definition = Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: funcSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidId,
+  });
+  let recDef: Analyzer::Definition = Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: recSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: stubTypeId,
+  });
+  let enumDef: Analyzer::Definition = Analyzer::Definition::Enum(Analyzer::EnumDef {
+    name: enumSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    variants: Vector::new<Analyzer::DefinitionId>(),
+    typeId: stubTypeId,
+  });
+  let varDef: Analyzer::Definition = Analyzer::Definition::Variable(Analyzer::VariableDef {
+    name: varSym,
+    visibility: Analyzer::Visibility::PRIVATE,
+    declaredType: i32Id,
+    mutable: false,
+  });
+  let fieldDef: Analyzer::Definition = Analyzer::Definition::Field(Analyzer::FieldDef {
+    name: fieldSym,
+    fieldType: i32Id,
+    owner: stubDefId,
+    index: 0,
+  });
+  let variantDef: Analyzer::Definition = Analyzer::Definition::Variant(Analyzer::VariantDef {
+    name: variantSym,
+    payload: Vector::new<Analyzer::TypeId>(),
+    owner: stubDefId,
+    tagValue: 0,
+  });
+  let typeParamDef: Analyzer::Definition = Analyzer::Definition::TypeParam(Analyzer::TypeParamDef {
+    name: typeParamSym,
+    owner: stubDefId,
+    index: 0,
+  });
 
   Test::assertEq<u32>(funcDef.name().raw(), funcSym.raw());
   Test::assertEq<u32>(recDef.name().raw(), recSym.raw());
   Test::assertEq<u32>(enumDef.name().raw(), enumSym.raw());
   Test::assertEq<u32>(varDef.name().raw(), varSym.raw());
+  Test::assertEq<u32>(fieldDef.name().raw(), fieldSym.raw());
+  Test::assertEq<u32>(variantDef.name().raw(), variantSym.raw());
+  Test::assertEq<u32>(typeParamDef.name().raw(), typeParamSym.raw());
+}
+
+// --- New tests for Phase 1 RED -> GREEN ---
+
+@test
+function definitionVisibilityEqualityHolds(): void {
+  let pub1: Analyzer::Visibility = Analyzer::Visibility::PUBLIC;
+  let pub2: Analyzer::Visibility = Analyzer::Visibility::PUBLIC;
+  let priv1: Analyzer::Visibility = Analyzer::Visibility::PRIVATE;
+  let priv2: Analyzer::Visibility = Analyzer::Visibility::PRIVATE;
+
+  let pubMatchesPub: boolean = match (pub1) {
+    Analyzer::Visibility::PUBLIC -> match (pub2) {
+      Analyzer::Visibility::PUBLIC -> true,
+      Analyzer::Visibility::PRIVATE -> false,
+    },
+    Analyzer::Visibility::PRIVATE -> false,
+  };
+
+  let pubMatchesPriv: boolean = match (pub1) {
+    Analyzer::Visibility::PUBLIC -> match (priv1) {
+      Analyzer::Visibility::PUBLIC -> true,
+      Analyzer::Visibility::PRIVATE -> false,
+    },
+    Analyzer::Visibility::PRIVATE -> false,
+  };
+
+  let privMatchesPriv: boolean = match (priv1) {
+    Analyzer::Visibility::PUBLIC -> false,
+    Analyzer::Visibility::PRIVATE -> match (priv2) {
+      Analyzer::Visibility::PUBLIC -> false,
+      Analyzer::Visibility::PRIVATE -> true,
+    },
+  };
+
+  Test::assert(pubMatchesPub);
+  Test::assert(!pubMatchesPriv);
+  Test::assert(privMatchesPriv);
+}
+
+@test
+function definitionVariableDefRoundTrip(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let sym: Analyzer::SymbolId = table.intern("myVar");
+
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let boolId: Analyzer::TypeId = types.intern(Analyzer::Type::BOOLEAN);
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let id: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
+    name: sym,
+    visibility: Analyzer::Visibility::PRIVATE,
+    declaredType: boolId,
+    mutable: true,
+  }));
+
+  match (store.get(id)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(_)       -> @panic("expected Variable variant"),
+      Analyzer::Definition::Record(_)         -> @panic("expected Variable variant"),
+      Analyzer::Definition::Enum(_)           -> @panic("expected Variable variant"),
+      Analyzer::Definition::Variable(wrapper) -> {
+        Test::assertEq<u32>(wrapper.name.raw(), sym.raw());
+        Test::assertEq<u32>(wrapper.declaredType.raw(), boolId.raw());
+        Test::assert(wrapper.mutable);
+
+        let isPrivate: boolean = match (wrapper.visibility) {
+          Analyzer::Visibility::PUBLIC  -> false,
+          Analyzer::Visibility::PRIVATE -> true,
+        };
+
+        Test::assert(isPrivate);
+      },
+      Analyzer::Definition::Field(_)          -> @panic("expected Variable variant"),
+      Analyzer::Definition::Variant(_)        -> @panic("expected Variable variant"),
+      Analyzer::Definition::TypeParam(_)      -> @panic("expected Variable variant"),
+    },
+    Option::NONE -> @panic("expected Some but got None"),
+  };
+}
+
+@test
+function definitionFieldDefRoundTrip(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let sym: Analyzer::SymbolId = table.intern("myField");
+
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let i32Id: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+
+  let ownerDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(99);
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let id: Analyzer::DefinitionId = store.push(Analyzer::Definition::Field(Analyzer::FieldDef {
+    name: sym,
+    fieldType: i32Id,
+    owner: ownerDefId,
+    index: 0,
+  }));
+
+  match (store.get(id)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(_)    -> @panic("expected Field variant"),
+      Analyzer::Definition::Record(_)      -> @panic("expected Field variant"),
+      Analyzer::Definition::Enum(_)        -> @panic("expected Field variant"),
+      Analyzer::Definition::Variable(_)    -> @panic("expected Field variant"),
+      Analyzer::Definition::Field(wrapper) -> {
+        Test::assertEq<u32>(wrapper.name.raw(), sym.raw());
+        Test::assertEq<u32>(wrapper.fieldType.raw(), i32Id.raw());
+        Test::assertEq<u32>(wrapper.owner.raw(), ownerDefId.raw());
+        Test::assertEq<u32>(wrapper.index, 0);
+      },
+      Analyzer::Definition::Variant(_)     -> @panic("expected Field variant"),
+      Analyzer::Definition::TypeParam(_)   -> @panic("expected Field variant"),
+    },
+    Option::NONE -> @panic("expected Some but got None"),
+  };
+}
+
+@test
+function definitionVariantDefRoundTripWithPayload(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let sym: Analyzer::SymbolId = table.intern("SomeVariant");
+
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let i32Id: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+
+  let ownerDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(99);
+
+  let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  payload.push(i32Id);
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let id: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variant(Analyzer::VariantDef {
+    name: sym,
+    payload: payload,
+    owner: ownerDefId,
+    tagValue: 1,
+  }));
+
+  match (store.get(id)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(_)       -> @panic("expected Variant variant"),
+      Analyzer::Definition::Record(_)         -> @panic("expected Variant variant"),
+      Analyzer::Definition::Enum(_)           -> @panic("expected Variant variant"),
+      Analyzer::Definition::Variable(_)       -> @panic("expected Variant variant"),
+      Analyzer::Definition::Field(_)          -> @panic("expected Variant variant"),
+      Analyzer::Definition::Variant(wrapper)  -> {
+        Test::assertEq<u64>(wrapper.payload.length(), 1);
+        Test::assertEq<u32>(wrapper.tagValue, 1);
+      },
+      Analyzer::Definition::TypeParam(_)      -> @panic("expected Variant variant"),
+    },
+    Option::NONE -> @panic("expected Some but got None"),
+  };
+}
+
+@test
+function definitionVariantDefRoundTripEmpty(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let sym: Analyzer::SymbolId = table.intern("NoneVariant");
+
+  let ownerDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(99);
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let id: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variant(Analyzer::VariantDef {
+    name: sym,
+    payload: Vector::new<Analyzer::TypeId>(),
+    owner: ownerDefId,
+    tagValue: 0,
+  }));
+
+  match (store.get(id)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(_)       -> @panic("expected Variant variant"),
+      Analyzer::Definition::Record(_)         -> @panic("expected Variant variant"),
+      Analyzer::Definition::Enum(_)           -> @panic("expected Variant variant"),
+      Analyzer::Definition::Variable(_)       -> @panic("expected Variant variant"),
+      Analyzer::Definition::Field(_)          -> @panic("expected Variant variant"),
+      Analyzer::Definition::Variant(wrapper)  -> {
+        Test::assertEq<u64>(wrapper.payload.length(), 0);
+        Test::assertEq<u32>(wrapper.tagValue, 0);
+      },
+      Analyzer::Definition::TypeParam(_)      -> @panic("expected Variant variant"),
+    },
+    Option::NONE -> @panic("expected Some but got None"),
+  };
+}
+
+@test
+function definitionTypeParamDefRoundTrip(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let sym: Analyzer::SymbolId = table.intern("T");
+
+  let ownerDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(42);
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let id: Analyzer::DefinitionId = store.push(Analyzer::Definition::TypeParam(Analyzer::TypeParamDef {
+    name: sym,
+    owner: ownerDefId,
+    index: 0,
+  }));
+
+  match (store.get(id)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(_)          -> @panic("expected TypeParam variant"),
+      Analyzer::Definition::Record(_)            -> @panic("expected TypeParam variant"),
+      Analyzer::Definition::Enum(_)              -> @panic("expected TypeParam variant"),
+      Analyzer::Definition::Variable(_)          -> @panic("expected TypeParam variant"),
+      Analyzer::Definition::Field(_)             -> @panic("expected TypeParam variant"),
+      Analyzer::Definition::Variant(_)           -> @panic("expected TypeParam variant"),
+      Analyzer::Definition::TypeParam(wrapper)   -> {
+        Test::assertEq<u32>(wrapper.name.raw(), sym.raw());
+        Test::assertEq<u32>(wrapper.owner.raw(), ownerDefId.raw());
+        Test::assertEq<u32>(wrapper.index, 0);
+      },
+    },
+    Option::NONE -> @panic("expected Some but got None"),
+  };
+}
+
+@test
+function definitionFunctionDefRoundTrip(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let funcSym: Analyzer::SymbolId = table.intern("myFunc");
+  let paramSym: Analyzer::SymbolId = table.intern("myParam");
+
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let i32Id: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  // Push the parameter VariableDef first so we can reference it from FunctionDef.
+  let paramDefId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
+    name: paramSym,
+    visibility: Analyzer::Visibility::PRIVATE,
+    declaredType: i32Id,
+    mutable: false,
+  }));
+
+  let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  params.push(paramDefId);
+
+  let id: Analyzer::DefinitionId = store.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: funcSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: params,
+    returnType: voidId,
+  }));
+
+  match (store.get(id)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(wrapper)  -> {
+        Test::assertEq<u32>(wrapper.name.raw(), funcSym.raw());
+        Test::assertEq<u32>(wrapper.returnType.raw(), voidId.raw());
+        Test::assertEq<u64>(wrapper.params.length(), 1);
+        Test::assertEq<u64>(wrapper.typeParams.length(), 0);
+
+        let isPublic: boolean = match (wrapper.visibility) {
+          Analyzer::Visibility::PUBLIC  -> true,
+          Analyzer::Visibility::PRIVATE -> false,
+        };
+
+        Test::assert(isPublic);
+      },
+      Analyzer::Definition::Record(_)          -> @panic("expected Function variant"),
+      Analyzer::Definition::Enum(_)            -> @panic("expected Function variant"),
+      Analyzer::Definition::Variable(_)        -> @panic("expected Function variant"),
+      Analyzer::Definition::Field(_)           -> @panic("expected Function variant"),
+      Analyzer::Definition::Variant(_)         -> @panic("expected Function variant"),
+      Analyzer::Definition::TypeParam(_)       -> @panic("expected Function variant"),
+    },
+    Option::NONE -> @panic("expected Some but got None"),
+  };
+}
+
+@test
+function definitionRecordDefRoundTrip(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let recSym: Analyzer::SymbolId = table.intern("MyRecord");
+  let f0Sym: Analyzer::SymbolId = table.intern("field0");
+  let f1Sym: Analyzer::SymbolId = table.intern("field1");
+
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let i32Id: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+  let stubTypeId: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+
+  // Placeholder owner for fields (the record's future id — use stub since fields are pushed first).
+  let stubOwner: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(99);
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let fid0: Analyzer::DefinitionId = store.push(Analyzer::Definition::Field(Analyzer::FieldDef {
+    name: f0Sym,
+    fieldType: i32Id,
+    owner: stubOwner,
+    index: 0,
+  }));
+  let fid1: Analyzer::DefinitionId = store.push(Analyzer::Definition::Field(Analyzer::FieldDef {
+    name: f1Sym,
+    fieldType: i32Id,
+    owner: stubOwner,
+    index: 1,
+  }));
+
+  let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  fields.push(fid0);
+  fields.push(fid1);
+
+  let id: Analyzer::DefinitionId = store.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: recSym,
+    visibility: Analyzer::Visibility::PRIVATE,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: fields,
+    typeId: stubTypeId,
+  }));
+
+  match (store.get(id)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(_)        -> @panic("expected Record variant"),
+      Analyzer::Definition::Record(wrapper)    -> {
+        Test::assertEq<u64>(wrapper.fields.length(), 2);
+
+        match (wrapper.fields.get(0)) {
+          Option::SOME(gotFid0) -> Test::assertEq<u32>(gotFid0.raw(), fid0.raw()),
+          Option::NONE -> @panic("expected fields[0] to be Some"),
+        };
+
+        match (wrapper.fields.get(1)) {
+          Option::SOME(gotFid1) -> Test::assertEq<u32>(gotFid1.raw(), fid1.raw()),
+          Option::NONE -> @panic("expected fields[1] to be Some"),
+        };
+
+        let isPrivate: boolean = match (wrapper.visibility) {
+          Analyzer::Visibility::PUBLIC  -> false,
+          Analyzer::Visibility::PRIVATE -> true,
+        };
+
+        Test::assert(isPrivate);
+      },
+      Analyzer::Definition::Enum(_)            -> @panic("expected Record variant"),
+      Analyzer::Definition::Variable(_)        -> @panic("expected Record variant"),
+      Analyzer::Definition::Field(_)           -> @panic("expected Record variant"),
+      Analyzer::Definition::Variant(_)         -> @panic("expected Record variant"),
+      Analyzer::Definition::TypeParam(_)       -> @panic("expected Record variant"),
+    },
+    Option::NONE -> @panic("expected Some but got None"),
+  };
+}
+
+@test
+function definitionEnumDefRoundTrip(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let enumSym: Analyzer::SymbolId = table.intern("MyEnum");
+  let v0Sym: Analyzer::SymbolId = table.intern("Variant0");
+  let v1Sym: Analyzer::SymbolId = table.intern("Variant1");
+
+  let stubTypeId: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+  let stubOwner: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(99);
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let vid0: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variant(Analyzer::VariantDef {
+    name: v0Sym,
+    payload: Vector::new<Analyzer::TypeId>(),
+    owner: stubOwner,
+    tagValue: 0,
+  }));
+  let vid1: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variant(Analyzer::VariantDef {
+    name: v1Sym,
+    payload: Vector::new<Analyzer::TypeId>(),
+    owner: stubOwner,
+    tagValue: 1,
+  }));
+
+  let mut variants: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  variants.push(vid0);
+  variants.push(vid1);
+
+  let id: Analyzer::DefinitionId = store.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
+    name: enumSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    variants: variants,
+    typeId: stubTypeId,
+  }));
+
+  match (store.get(id)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(_)      -> @panic("expected Enum variant"),
+      Analyzer::Definition::Record(_)        -> @panic("expected Enum variant"),
+      Analyzer::Definition::Enum(wrapper)    -> {
+        Test::assertEq<u64>(wrapper.variants.length(), 2);
+
+        match (wrapper.variants.get(0)) {
+          Option::SOME(gotVid0) -> Test::assertEq<u32>(gotVid0.raw(), vid0.raw()),
+          Option::NONE -> @panic("expected variants[0] to be Some"),
+        };
+
+        match (wrapper.variants.get(1)) {
+          Option::SOME(gotVid1) -> Test::assertEq<u32>(gotVid1.raw(), vid1.raw()),
+          Option::NONE -> @panic("expected variants[1] to be Some"),
+        };
+      },
+      Analyzer::Definition::Variable(_)      -> @panic("expected Enum variant"),
+      Analyzer::Definition::Field(_)         -> @panic("expected Enum variant"),
+      Analyzer::Definition::Variant(_)       -> @panic("expected Enum variant"),
+      Analyzer::Definition::TypeParam(_)     -> @panic("expected Enum variant"),
+    },
+    Option::NONE -> @panic("expected Some but got None"),
+  };
+}
+
+@test
+function definitionSubDefFromParentRetrieval(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let recSym: Analyzer::SymbolId = table.intern("Container");
+  let f0Sym: Analyzer::SymbolId = table.intern("alpha");
+  let f1Sym: Analyzer::SymbolId = table.intern("beta");
+
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let i32Id: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+  let stubTypeId: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+
+  let stubOwner: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(99);
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let fid0: Analyzer::DefinitionId = store.push(Analyzer::Definition::Field(Analyzer::FieldDef {
+    name: f0Sym,
+    fieldType: i32Id,
+    owner: stubOwner,
+    index: 0,
+  }));
+  let fid1: Analyzer::DefinitionId = store.push(Analyzer::Definition::Field(Analyzer::FieldDef {
+    name: f1Sym,
+    fieldType: i32Id,
+    owner: stubOwner,
+    index: 1,
+  }));
+
+  let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  fields.push(fid0);
+  fields.push(fid1);
+
+  store.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: recSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: fields,
+    typeId: stubTypeId,
+  }));
+
+  // Sub-defs must be retrievable independently via their own DefinitionIds.
+  match (store.get(fid0)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(_)    -> @panic("expected Field variant for fid0"),
+      Analyzer::Definition::Record(_)      -> @panic("expected Field variant for fid0"),
+      Analyzer::Definition::Enum(_)        -> @panic("expected Field variant for fid0"),
+      Analyzer::Definition::Variable(_)    -> @panic("expected Field variant for fid0"),
+      Analyzer::Definition::Field(wrapper) -> Test::assertEq<u32>(wrapper.name.raw(), f0Sym.raw()),
+      Analyzer::Definition::Variant(_)     -> @panic("expected Field variant for fid0"),
+      Analyzer::Definition::TypeParam(_)   -> @panic("expected Field variant for fid0"),
+    },
+    Option::NONE -> @panic("expected Some for fid0 but got None"),
+  };
+
+  match (store.get(fid1)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Function(_)    -> @panic("expected Field variant for fid1"),
+      Analyzer::Definition::Record(_)      -> @panic("expected Field variant for fid1"),
+      Analyzer::Definition::Enum(_)        -> @panic("expected Field variant for fid1"),
+      Analyzer::Definition::Variable(_)    -> @panic("expected Field variant for fid1"),
+      Analyzer::Definition::Field(wrapper) -> Test::assertEq<u32>(wrapper.name.raw(), f1Sym.raw()),
+      Analyzer::Definition::Variant(_)     -> @panic("expected Field variant for fid1"),
+      Analyzer::Definition::TypeParam(_)   -> @panic("expected Field variant for fid1"),
+    },
+    Option::NONE -> @panic("expected Some for fid1 but got None"),
+  };
+}
+
+@test
+function definitionLengthAfterMixedVariants(): void {
+  let mut table: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let sym: Analyzer::SymbolId = table.intern("x");
+
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let i32Id: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+
+  let stubOwner: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(99);
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  // Push 3 FieldDefs.
+  store.push(Analyzer::Definition::Field(Analyzer::FieldDef {
+    name: sym,
+    fieldType: i32Id,
+    owner: stubOwner,
+    index: 0,
+  }));
+  store.push(Analyzer::Definition::Field(Analyzer::FieldDef {
+    name: sym,
+    fieldType: i32Id,
+    owner: stubOwner,
+    index: 1,
+  }));
+  store.push(Analyzer::Definition::Field(Analyzer::FieldDef {
+    name: sym,
+    fieldType: i32Id,
+    owner: stubOwner,
+    index: 2,
+  }));
+
+  // Push 2 VariantDefs.
+  store.push(Analyzer::Definition::Variant(Analyzer::VariantDef {
+    name: sym,
+    payload: Vector::new<Analyzer::TypeId>(),
+    owner: stubOwner,
+    tagValue: 0,
+  }));
+  store.push(Analyzer::Definition::Variant(Analyzer::VariantDef {
+    name: sym,
+    payload: Vector::new<Analyzer::TypeId>(),
+    owner: stubOwner,
+    tagValue: 1,
+  }));
+
+  // Push 1 FunctionDef.
+  store.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: sym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidId,
+  }));
+
+  Test::assertEq<u64>(store.length(), 6);
 }

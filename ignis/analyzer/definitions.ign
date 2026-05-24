@@ -1,23 +1,128 @@
 import IndexVec from "@compiler::indexing";
 
 export namespace Analyzer {
+  /// Visibility of a top-level declaration in a module.
+  /// Stored on `FunctionDef`, `RecordDef`, `EnumDef`, and `VariableDef`.
+  /// Sub-definition wrappers (FieldDef, VariantDef, TypeParamDef) inherit access
+  /// from their parent and do not carry their own visibility field.
+  enum Visibility {
+    PUBLIC,
+    PRIVATE,
+
+    /// Exhaustive 2×2 nested-match equality. No wildcard arms so that adding
+    /// a future variant forces a compile error here.
+    public equals(&self, other: &Analyzer::Visibility): boolean {
+      return match (self) {
+        Analyzer::Visibility::PUBLIC -> match (other) {
+          Analyzer::Visibility::PUBLIC  -> true,
+          Analyzer::Visibility::PRIVATE -> false,
+        },
+        Analyzer::Visibility::PRIVATE -> match (other) {
+          Analyzer::Visibility::PUBLIC  -> false,
+          Analyzer::Visibility::PRIVATE -> true,
+        },
+      };
+    }
+  }
+
+  /// Payload wrapper for the `Definition::TypeParam` variant.
+  /// Holds the interned name, the owning definition, and the parameter's
+  /// positional index within that definition's type-parameter list.
+  record TypeParamDef {
+    public name: Analyzer::SymbolId;
+    public owner: Analyzer::DefinitionId;
+    public index: u32;
+  }
+
+  /// Payload wrapper for the `Definition::Field` variant.
+  /// Holds the interned name, the field's declared type, the owning record's
+  /// definition id, and the positional index within the record's field list.
+  record FieldDef {
+    public name: Analyzer::SymbolId;
+    public fieldType: Analyzer::TypeId;
+    public owner: Analyzer::DefinitionId;
+    public index: u32;
+  }
+
+  /// Payload wrapper for the `Definition::Variant` variant.
+  /// `payload` holds the types carried by the variant in declaration order;
+  /// an empty vector represents a fieldless variant.
+  record VariantDef {
+    public name: Analyzer::SymbolId;
+    public payload: Vector<Analyzer::TypeId>;
+    public owner: Analyzer::DefinitionId;
+    public tagValue: u32;
+  }
+
+  /// Payload wrapper for the `Definition::Variable` variant.
+  /// Used for local variables and function parameters stored as sub-definitions.
+  /// Named `mutable` to avoid the reserved keyword `mut`.
+  record VariableDef {
+    public name: Analyzer::SymbolId;
+    public visibility: Analyzer::Visibility;
+    public declaredType: Analyzer::TypeId;
+    public mutable: boolean;
+  }
+
+  /// Payload wrapper for the `Definition::Function` variant.
+  /// `params` is a vector of `DefinitionId`s referencing `Variable` sub-defs
+  /// in declaration order. `typeParams` holds `TypeParam` sub-def ids.
+  record FunctionDef {
+    public name: Analyzer::SymbolId;
+    public visibility: Analyzer::Visibility;
+    public typeParams: Vector<Analyzer::DefinitionId>;
+    public params: Vector<Analyzer::DefinitionId>;
+    public returnType: Analyzer::TypeId;
+  }
+
+  /// Payload wrapper for the `Definition::Record` variant.
+  /// `fields` is a vector of `DefinitionId`s referencing `Field` sub-defs.
+  /// `typeId` is the interned `Type::Record(defId)` for this definition.
+  /// Named `RecordDef` to avoid clashing with the `record` keyword.
+  record RecordDef {
+    public name: Analyzer::SymbolId;
+    public visibility: Analyzer::Visibility;
+    public typeParams: Vector<Analyzer::DefinitionId>;
+    public fields: Vector<Analyzer::DefinitionId>;
+    public typeId: Analyzer::TypeId;
+  }
+
+  /// Payload wrapper for the `Definition::Enum` variant.
+  /// `variants` is a vector of `DefinitionId`s referencing `Variant` sub-defs.
+  /// `typeId` is the interned `Type::Enum(defId)` for this definition.
+  /// Named `EnumDef` to avoid clashing with the `enum` keyword.
+  record EnumDef {
+    public name: Analyzer::SymbolId;
+    public visibility: Analyzer::Visibility;
+    public typeParams: Vector<Analyzer::DefinitionId>;
+    public variants: Vector<Analyzer::DefinitionId>;
+    public typeId: Analyzer::TypeId;
+  }
+
   /// A named declaration in the analyzer's definition store.
-  /// Each variant carries the interned symbol for the declaration's name.
+  /// Each variant wraps a `*Def` record that carries the declaration's full payload.
   /// Method `name()` is exhaustive — no wildcard arm — so adding a future
   /// variant forces a compile error at every call site.
   enum Definition {
-    Function(Analyzer::SymbolId),
-    Record(Analyzer::SymbolId),
-    Enum(Analyzer::SymbolId),
-    Variable(Analyzer::SymbolId),
+    Function(Analyzer::FunctionDef),
+    Record(Analyzer::RecordDef),
+    Enum(Analyzer::EnumDef),
+    Variable(Analyzer::VariableDef),
+    Field(Analyzer::FieldDef),
+    Variant(Analyzer::VariantDef),
+    TypeParam(Analyzer::TypeParamDef),
 
     /// Returns the interned symbol for this definition's declared name.
+    /// Exhaustive across all seven variants — no wildcard arm.
     public name(&self): Analyzer::SymbolId {
       return match (self) {
-        Analyzer::Definition::Function(name) -> name,
-        Analyzer::Definition::Record(name)   -> name,
-        Analyzer::Definition::Enum(name)     -> name,
-        Analyzer::Definition::Variable(name) -> name,
+        Analyzer::Definition::Function(wrapper)   -> wrapper.name,
+        Analyzer::Definition::Record(wrapper)     -> wrapper.name,
+        Analyzer::Definition::Enum(wrapper)       -> wrapper.name,
+        Analyzer::Definition::Variable(wrapper)   -> wrapper.name,
+        Analyzer::Definition::Field(wrapper)      -> wrapper.name,
+        Analyzer::Definition::Variant(wrapper)    -> wrapper.name,
+        Analyzer::Definition::TypeParam(wrapper)  -> wrapper.name,
       };
     }
   }
