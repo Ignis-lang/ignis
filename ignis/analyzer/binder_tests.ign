@@ -1,0 +1,616 @@
+import Test from "std::test";
+
+import SourceSpan from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+
+/// Build a zero-byte source span suitable for test diagnostics.
+function dummySpan(): SourceSpan {
+  return SourceSpan::new("binder_test.ign", 0, 0);
+}
+
+/// Assert that `Analyzer::Binder::findDef(output, rawId)` returns SOME value (i.e., the item was predeclared).
+function assertItemPredeclared(output: &Analyzer::Binder::BinderOutput, rawId: u32): void {
+  match (Analyzer::Binder::findDef(output, rawId)) {
+    Option::SOME(_) -> {},
+    Option::NONE -> @panic("expected item to be predeclared in nodeDefs but it was absent"),
+  };
+}
+
+/// Assert that `Analyzer::Binder::findDef(output, rawId)` returns NONE (i.e., the item was NOT predeclared).
+function assertItemNotPredeclared(output: &Analyzer::Binder::BinderOutput, rawId: u32): void {
+  match (Analyzer::Binder::findDef(output, rawId)) {
+    Option::SOME(_) -> @panic("expected item to be absent from nodeDefs but it was present"),
+    Option::NONE -> {},
+  };
+}
+
+/// Scenario: Empty module produces no definitions.
+/// Spec: predeclare-only entry point — empty roots yields empty output.
+@test
+function binderHandlesEmptyRoots(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let module: Ast::Module = Ast::Module::init();
+
+  let typeStoreLengthBefore: u64 = typeStore.length();
+
+  let roots: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(defStore.length(), 0);
+  Test::assertEq<u64>(Analyzer::Binder::nodeDefCount(&output), 0);
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  // TypeStore must not grow (primitives only, no new entries).
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthBefore);
+}
+
+/// Scenario: Single top-level record.
+/// Spec: Record predeclaration — one record yields one definition, no TypeStore growth.
+@test
+function binderPredeclaresSingleRecord(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let typeStoreLengthBefore: u64 = typeStore.length();
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // One definition allocated.
+  Test::assertEq<u64>(defStore.length(), 1);
+
+  // nodeDefs maps the record ItemId to the definition.
+  assertItemPredeclared(&output, recordId.raw());
+
+  // TypeStore must not grow for pass-1 (VOID sentinel used, already cached).
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthBefore);
+
+  // No diagnostics.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: Three top-level items (record, enum, record) — mutual forward-ref setup.
+/// Spec: records and enums each get one placeholder definition in declaration order.
+@test
+function binderPredeclaresMutualReferences(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let idA: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("A"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let idB: Ast::ItemId = module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: dummySpan(),
+    name: String::create("B"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let idC: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("C"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(defStore.length(), 3);
+  assertItemPredeclared(&output, idA.raw());
+  assertItemPredeclared(&output, idB.raw());
+  assertItemPredeclared(&output, idC.raw());
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: Record nested inside a namespace.
+/// Spec: namespace recursion — namespace and inner record both receive DefinitionIds.
+@test
+function binderRecursesIntoNamespace(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Add inner record as non-root item first.
+  let innerId: Ast::ItemId = module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Vec2"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Build namespace containing the inner record.
+  let mut nsItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItems.push(innerId);
+
+  let nsId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: dummySpan(),
+    name: String::create("Math"),
+    items: nsItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // Namespace + inner record = 2 definitions.
+  Test::assertEq<u64>(defStore.length(), 2);
+  assertItemPredeclared(&output, nsId.raw());
+  assertItemPredeclared(&output, innerId.raw());
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: Duplicate record names at global scope.
+/// Spec: duplicate type name diagnostic — first decl kept, second dropped.
+@test
+function binderEmitsDuplicateNameDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let firstId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Foo"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let secondId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Foo"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // Only one definition allocated (first Foo kept, second dropped).
+  Test::assertEq<u64>(defStore.length(), 1);
+
+  // Exactly one error diagnostic.
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  // First record is in nodeDefs; second is not.
+  assertItemPredeclared(&output, firstId.raw());
+  assertItemNotPredeclared(&output, secondId.raw());
+}
+
+/// Scenario: Same record name in two different namespaces is NOT a duplicate.
+/// Spec: "Same name in different namespaces is not a duplicate" — each namespace
+/// uses its own scope key (itemId.raw()), so "Node" in NsA and "Node" in NsB
+/// never share a scope entry.
+@test
+function binderSameNameInDifferentNamespacesIsNotDuplicate(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // NsA contains record "Node".
+  let nodeInAId: Ast::ItemId = module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Node"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut nsAItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsAItems.push(nodeInAId);
+
+  let nsAId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: dummySpan(),
+    name: String::create("NsA"),
+    items: nsAItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // NsB contains record "Node" — same name, different namespace scope.
+  let nodeInBId: Ast::ItemId = module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Node"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut nsBItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsBItems.push(nodeInBId);
+
+  let nsBId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: dummySpan(),
+    name: String::create("NsB"),
+    items: nsBItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // 4 definitions: NsA, NsA::Node, NsB, NsB::Node — no duplicates.
+  Test::assertEq<u64>(defStore.length(), 4);
+
+  // No duplicate diagnostics.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  // All four items are predeclared.
+  assertItemPredeclared(&output, nsAId.raw());
+  assertItemPredeclared(&output, nodeInAId.raw());
+  assertItemPredeclared(&output, nsBId.raw());
+  assertItemPredeclared(&output, nodeInBId.raw());
+}
+
+/// Scenario: Two runs over identical input produce identical DefinitionIds.
+/// Spec: deterministic output — same push-order ids in both runs, verified element-wise.
+@test
+function binderProducesIdenticalOutputsAcrossTwoRuns(): void {
+  // Capture primitive baseline before any run so the assertion is independent
+  // of the concrete primitive count in TypeStore::init().
+  let baselineStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let typeStoreLengthBefore: u64 = baselineStore.length();
+
+  // Build run A: record "Point" + namespace "Math" containing enum "Color".
+  let mut moduleA: Ast::Module = Ast::Module::init();
+
+  let _pointIdA: Ast::ItemId = moduleA.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let colorIdA: Ast::ItemId = moduleA.addItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: dummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut nsItemsA: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItemsA.push(colorIdA);
+
+  let _nsIdA: Ast::ItemId = moduleA.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: dummySpan(),
+    name: String::create("Math"),
+    items: nsItemsA,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut defStoreA: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStoreA: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbolsA: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let outputA: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &moduleA.roots,
+    &mut defStoreA,
+    &mut typeStoreA,
+    &mut symbolsA,
+    &moduleA,
+  );
+
+  // Build run B: identical structure.
+  let mut moduleB: Ast::Module = Ast::Module::init();
+
+  let _pointIdB: Ast::ItemId = moduleB.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let colorIdB: Ast::ItemId = moduleB.addItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: dummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut nsItemsB: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItemsB.push(colorIdB);
+
+  let _nsIdB: Ast::ItemId = moduleB.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: dummySpan(),
+    name: String::create("Math"),
+    items: nsItemsB,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut defStoreB: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStoreB: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbolsB: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let outputB: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &moduleB.roots,
+    &mut defStoreB,
+    &mut typeStoreB,
+    &mut symbolsB,
+    &moduleB,
+  );
+
+  // Both runs produce the same number of definitions.
+  Test::assertEq<u64>(defStoreA.length(), defStoreB.length());
+
+  // Both runs map the same count of items.
+  Test::assertEq<u64>(Analyzer::Binder::nodeDefCount(&outputA), Analyzer::Binder::nodeDefCount(&outputB));
+
+  // Both typeStores have the same length (no growth during pass-1).
+  Test::assertEq<u64>(typeStoreA.length(), typeStoreB.length());
+  Test::assertEq<u64>(typeStoreA.length(), typeStoreLengthBefore);
+
+  // Verify determinism: DefinitionId ordinals must be identical at each index.
+  // This proves push-order stability, not just count parity (spec §deterministic-output).
+  let count: u64 = outputA.defIds.length();
+  let mut index: u64 = 0;
+
+  while (index < count) {
+    if (let Option::SOME(idA) = outputA.defIds.get(index)) {
+      if (let Option::SOME(idB) = outputB.defIds.get(index)) {
+        Test::assertEq<u32>(idA.raw(), idB.raw());
+      }
+    }
+    index += 1;
+  }
+}
+
+/// Scenario: Single top-level type alias.
+/// Spec: TypeAlias predeclaration — one TypeAlias yields one definition, TypeStore unchanged.
+@test
+function binderPredeclaresTypeAlias(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let typeStoreLengthBefore: u64 = typeStore.length();
+
+  // Build a dummy type syntax node to serve as the alias target.
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create("i32"));
+  let targetTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: dummySpan(),
+    segments: segments,
+  }));
+
+  let aliasId: Ast::ItemId = module.addRootItem(Ast::Item::Node::TypeAlias(Ast::Item::TypeAlias {
+    span: dummySpan(),
+    name: String::create("Index"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    value: targetTypeId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // One placeholder definition allocated for the type alias.
+  Test::assertEq<u64>(defStore.length(), 1);
+
+  // The alias ItemId is mapped in nodeDefs.
+  assertItemPredeclared(&output, aliasId.raw());
+
+  // TypeStore must not grow during pass-1.
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthBefore);
+
+  // No diagnostics.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: Single top-level trait.
+/// Spec: Trait predeclaration — one Trait yields one definition, TypeStore unchanged.
+@test
+function binderPredeclaresTrait(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let typeStoreLengthBefore: u64 = typeStore.length();
+
+  let traitId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Trait(Ast::Item::Trait {
+    span: dummySpan(),
+    name: String::create("Clone"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // One placeholder definition allocated for the trait.
+  Test::assertEq<u64>(defStore.length(), 1);
+
+  // The trait ItemId is mapped in nodeDefs.
+  assertItemPredeclared(&output, traitId.raw());
+
+  // TypeStore must not grow during pass-1.
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthBefore);
+
+  // No diagnostics.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: Record wrapped in Export::Declaration.
+/// Spec: export unwrapping — the inner record's NodeId is mapped, not the export wrapper.
+@test
+function binderUnwrapsExportDeclaration(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Add the inner record as a non-root item so we capture its ItemId.
+  let innerRecordId: Ast::ItemId = module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Foo"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Wrap it in an Export::Declaration and add THAT as the root.
+  let exportId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Export(Ast::Item::Export {
+    span: dummySpan(),
+    declaration: Option::SOME(innerRecordId),
+    items: Vector::new<Ast::ImportBinding>(),
+    source: Option::NONE,
+    sourceSpan: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // Exactly one definition: the inner record (not the export wrapper).
+  Test::assertEq<u64>(defStore.length(), 1);
+
+  // The inner record's NodeId is in nodeDefs.
+  assertItemPredeclared(&output, innerRecordId.raw());
+
+  // The export wrapper itself is NOT in nodeDefs.
+  assertItemNotPredeclared(&output, exportId.raw());
+
+  // No diagnostics.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: Function is silently skipped.
+/// Spec: functions and variables are not predeclared — roots containing only a Function
+/// leave defStore empty and nodeDefs empty.
+@test
+function binderSkipsFunctionRoots(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let typeStoreLengthBefore: u64 = typeStore.length();
+
+  // Build a minimal dummy function body (empty block).
+  let bodyId: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: dummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let _fnId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // Function must not create any definition in pass-1.
+  Test::assertEq<u64>(defStore.length(), 0);
+
+  // nodeDefs must be empty.
+  Test::assertEq<u64>(Analyzer::Binder::nodeDefCount(&output), 0);
+
+  // TypeStore must not grow.
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthBefore);
+
+  // No diagnostics.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}

@@ -1,0 +1,349 @@
+import SourceSpan from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, Severity from "@compiler::diagnostics";
+import DiagnosticCode from "@compiler::diagnostics";
+import LabelKind from "@compiler::diagnostics";
+
+import Ast from "@compiler::ast";
+
+/// Pass-1 binder for the Ignis selfhost compiler.
+///
+/// `Binder::predeclareRoots` performs a single pre-declaration walk over
+/// `roots` and allocates one placeholder `Definition` for each type
+/// declaration found (Record, Enum, TypeAlias, Trait, Namespace). Functions,
+/// variables, constants, imports, and extern blocks are silently skipped.
+///
+/// Invariant: `TypeStore.length()` MUST NOT change during this pass. All
+/// placeholder definitions use `typeStore.intern(Analyzer::Type::VOID)` as
+/// the sentinel `typeId`; the real `Type::Record` / `Type::Enum` entries are
+/// allocated in pass 2.
+///
+/// Note on nodeDefs representation: the design called for `HashMap<u32, DefinitionId>`.
+/// `u32` does not satisfy the `Hash & Eq` bounds on `std::collections::HashMap`, and
+/// sub-namespace types (a NodeKey wrapper) are inaccessible from external test code
+/// due to Ignis namespace resolution constraints in this selfhost revision. We use
+/// parallel `Vector<u32>` / `Vector<Analyzer::DefinitionId>` instead. `findDef`
+/// provides O(n) lookup — acceptable for the small scope of pass-1 test scenarios.
+/// This is documented as ADR-1 (parallel-vector fallback).
+export namespace Analyzer {
+  namespace Binder {
+    /// Internal mutable state threaded through the pass-1 walk.
+    ///
+    /// Per ADR-4: stores hold `&mut` borrow-style state via explicit parameter
+    /// threading because Ignis borrow checker rejects `&mut` fields inside records.
+    /// `nodeIds` / `defIds` are the output accumulator (co-indexed parallel vectors).
+    /// `scopeKeys` tracks scope keys; parallel to `scopeSyms` and `scopeSpans` for
+    /// the first-seen span used in duplicate diagnostics.
+    record BinderState {
+      public nodeIds: Vector<u32>;
+      public defIds: Vector<Analyzer::DefinitionId>;
+      public diagnostics: DiagnosticBag;
+      public scopeKeys: Vector<u64>;
+      public scopeSyms: Vector<Analyzer::SymbolId>;
+      public scopeSpans: Vector<SourceSpan>;
+    }
+
+    /// Output produced by `predeclareRoots`.
+    ///
+    /// `nodeIds[i]` is the raw `u32` of an `Ast::ItemId` and `defIds[i]` is the
+    /// corresponding placeholder `Analyzer::DefinitionId`. The vectors are co-indexed
+    /// and always have the same length.
+    ///
+    /// `diagnostics` carries any errors emitted during the walk.
+    record BinderOutput {
+      public nodeIds: Vector<u32>;
+      public defIds: Vector<Analyzer::DefinitionId>;
+      public diagnostics: DiagnosticBag;
+    }
+
+    /// Returns the count of predeclared definitions (number of mapped items).
+    function nodeDefCount(output: &Analyzer::Binder::BinderOutput): u64 {
+      return output.nodeIds.length();
+    }
+
+    /// Returns the `DefinitionId` for the given raw item id, or `NONE` if not mapped.
+    /// Linear scan — O(n). Suitable for pass-1 test assertions.
+    function findDef(output: &Analyzer::Binder::BinderOutput, rawId: u32): Option<Analyzer::DefinitionId> {
+      let mut index: u64 = 0;
+      let count: u64 = output.nodeIds.length();
+      let mut found: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      while (index < count) {
+        if (let Option::SOME(storedId) = output.nodeIds.get(index)) {
+          if (*storedId == rawId) {
+            if (let Option::SOME(defId) = output.defIds.get(index)) {
+              found = Option::SOME(*defId);
+            }
+          }
+        }
+        index += 1;
+      }
+
+      return found;
+    }
+
+    /// Check if (scopeKey, sym) has already been declared in `state.scopeKeys`.
+    /// Returns the first-seen span as SOME if it is a duplicate, NONE otherwise.
+    ///
+    /// Takes `&mut BinderState` (rather than `&BinderState`) to avoid Ignis
+    /// type-mismatch errors when the call site holds `&mut` — Ignis does not
+    /// auto-coerce `&mut T` to `&T`.
+    function findDuplicateSpan(
+      state: &mut Analyzer::Binder::BinderState,
+      scopeKey: u64,
+      sym: Analyzer::SymbolId,
+    ): Option<SourceSpan> {
+      let mut index: u64 = 0;
+      let count: u64 = state.scopeKeys.length();
+      let mut result: Option<SourceSpan> = Option::NONE;
+
+      while (index < count) {
+        if (let Option::SOME(sk) = state.scopeKeys.get(index)) {
+          if (let Option::SOME(ss) = state.scopeSyms.get(index)) {
+            if (*sk == scopeKey && ss.raw() == sym.raw()) {
+              if (let Option::SOME(span) = state.scopeSpans.get(index)) {
+                result = Option::SOME(*span);
+              }
+            }
+          }
+        }
+        index += 1;
+      }
+
+      return result;
+    }
+
+    /// Record (scopeKey, sym, span) into the scope-tracking tables.
+    function recordScopeEntry(
+      state: &mut Analyzer::Binder::BinderState,
+      scopeKey: u64,
+      sym: Analyzer::SymbolId,
+      span: SourceSpan,
+    ): void {
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.scopeKeys.push(scopeKey);
+      stateRef.scopeSyms.push(sym);
+      stateRef.scopeSpans.push(span);
+    }
+
+    /// Allocate a placeholder `Definition::Record` (used for Record, TypeAlias, Trait,
+    /// and Namespace — all map to the same placeholder shape in pass 1).
+    ///
+    /// The `typeId` field is set to the VOID sentinel so TypeStore does not grow.
+    /// Pass 2 will overwrite `typeId` with the real `Type::Record(defId)`.
+    function allocateRecordPlaceholder(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      sym: Analyzer::SymbolId,
+    ): Analyzer::DefinitionId {
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
+      let typeParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let placeholder: Analyzer::RecordDef = Analyzer::RecordDef {
+        name: sym,
+        visibility: Analyzer::Visibility::PUBLIC,
+        typeParams: typeParams,
+        fields: fields,
+        typeId: sentinelId,
+      };
+      return defsRef.push(Analyzer::Definition::Record(placeholder));
+    }
+
+    /// Allocate a placeholder `Definition::Enum`.
+    ///
+    /// The `typeId` field is set to the VOID sentinel so TypeStore does not grow.
+    function allocateEnumPlaceholder(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      sym: Analyzer::SymbolId,
+    ): Analyzer::DefinitionId {
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
+      let typeParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let variants: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let placeholder: Analyzer::EnumDef = Analyzer::EnumDef {
+        name: sym,
+        visibility: Analyzer::Visibility::PUBLIC,
+        typeParams: typeParams,
+        variants: variants,
+        typeId: sentinelId,
+      };
+      return defsRef.push(Analyzer::Definition::Enum(placeholder));
+    }
+
+    /// Core predeclaration helper for a named type declaration (Record, Enum,
+    /// TypeAlias, Trait).
+    ///
+    /// Performs duplicate-name detection within `scopeKey`. On first occurrence,
+    /// allocates a placeholder definition and records the mapping. On duplicate,
+    /// emits a diagnostic and skips allocation.
+    ///
+    /// `isEnum` distinguishes Enum from all other type declaration kinds;
+    /// non-Enum kinds (Record, TypeAlias, Trait, Namespace) use the Record
+    /// placeholder per ADR-2/design §2.
+    function predeclareTypeDecl(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      itemId: Ast::ItemId,
+      name: &String,
+      span: SourceSpan,
+      scopeKey: u64,
+      isEnum: boolean,
+    ): void {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
+
+      let duplicateOpt: Option<SourceSpan> = findDuplicateSpan(state, scopeKey, sym);
+
+      if (let Option::SOME(_firstSpan) = duplicateOpt) {
+        // Duplicate name — emit diagnostic, skip allocation.
+        let message: String = String::create("duplicate top-level type name: ").concat(name.toStr());
+        let mut diag: Diagnostic = Diagnostic::new(
+          Severity::ERROR,
+          DiagnosticCode::TYPE_ALREADY_DEFINED,
+          message.toStr(),
+          span,
+        );
+        diag.addLabel(LabelKind::PRIMARY, span, "second declaration here");
+        let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+        stateRef.diagnostics.push(diag);
+        return;
+      }
+
+      // First occurrence — allocate placeholder and record the mapping.
+      // Ignis does not support if-expressions as initializers; use explicit branches.
+      if (isEnum) {
+        let defId: Analyzer::DefinitionId = allocateEnumPlaceholder(defStore, typeStore, sym);
+        let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+        stateRef.nodeIds.push(itemId.raw());
+        stateRef.defIds.push(defId);
+      } else {
+        let defId: Analyzer::DefinitionId = allocateRecordPlaceholder(defStore, typeStore, sym);
+        let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+        stateRef.nodeIds.push(itemId.raw());
+        stateRef.defIds.push(defId);
+      }
+
+      recordScopeEntry(state, scopeKey, sym, span);
+    }
+
+    /// Dispatch a single item to the appropriate predeclaration handler.
+    /// `scopeKey` is the raw id of the enclosing namespace, or 0 for global scope.
+    ///
+    /// Silently skips: Function, Variable, Constant, Import, Extern.
+    /// Extern is treated as a leaf: the selfhost `Ast::Item::Extern` has no
+    /// `items` field (unlike the Rust reference). Known gap — see future slice.
+    function predeclareItem(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+      itemId: Ast::ItemId,
+      scopeKey: u64,
+    ): void {
+      let nodeOpt: Option<&Ast::Item::Node> = ast.items.get(itemId);
+
+      if (let Option::SOME(node) = nodeOpt) {
+        match (node) {
+          Ast::Item::Node::Record(r) -> {
+            predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &r.name, r.span, scopeKey, false);
+          },
+          Ast::Item::Node::Enum(e) -> {
+            predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &e.name, e.span, scopeKey, true);
+          },
+          Ast::Item::Node::TypeAlias(a) -> {
+            // TODO pass-2: real TypeAlias variant. Using Record placeholder per ADR-2.
+            predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &a.name, a.span, scopeKey, false);
+          },
+          Ast::Item::Node::Trait(t) -> {
+            // TODO pass-2: real Trait variant. Using Record placeholder per ADR-2.
+            // Known divergence from Rust binder: Ignis selfhost lacks a Definition::Trait variant.
+            predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &t.name, t.span, scopeKey, false);
+          },
+          Ast::Item::Node::Namespace(ns) -> {
+            // Allocate a placeholder for the namespace node itself (spec §namespace-recursion).
+            predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &ns.name, ns.span, scopeKey, false);
+
+            // Recurse into children using itemId.raw() as the child scope key.
+            let childScopeKey: u64 = itemId.raw() as u64;
+            let mut childIndex: u64 = 0;
+
+            while (childIndex < ns.items.length()) {
+              if (let Option::SOME(childId) = ns.items.get(childIndex)) {
+                predeclareItem(state, defStore, typeStore, symbols, ast, *childId, childScopeKey);
+              }
+              childIndex += 1;
+            }
+          },
+          Ast::Item::Node::Export(ex) -> {
+            // Export wrapper: predeclare the inner declaration if present.
+            // The export node itself does NOT receive a DefinitionId (spec §export-unwrapping).
+            if (let Option::SOME(innerItemId) = ex.declaration) {
+              predeclareItem(state, defStore, typeStore, symbols, ast, innerItemId, scopeKey);
+            }
+          },
+          Ast::Item::Node::Extern(_ex) -> {
+            // Known gap: selfhost Ast::Item::Extern lacks an `items` field.
+            // The Rust binder recurses into Extern.items; we treat Extern as a leaf here.
+            // Future slice: extend Ast::Item::Extern with items: Vector<Ast::ItemId>.
+          },
+          Ast::Item::Node::Function(_) -> {},
+          Ast::Item::Node::Import(_) -> {},
+          Ast::Item::Node::Constant(_) -> {},
+        };
+      }
+    }
+
+    /// Walk `roots` and predeclare every type declaration found (depth-first,
+    /// pre-order). Returns a `BinderOutput` with the allocated definitions and
+    /// any duplicate-name diagnostics.
+    ///
+    /// Postcondition: `typeStore.length()` is identical before and after the call
+    /// (sentinel typeId = VOID, already cached in every fresh TypeStore at id 13).
+    function predeclareRoots(
+      roots: &Vector<Ast::ItemId>,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+    ): Analyzer::Binder::BinderOutput {
+      let nodeIds: Vector<u32> = Vector::new<u32>();
+      let defIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let diagnostics: DiagnosticBag = DiagnosticBag::init();
+      let scopeKeys: Vector<u64> = Vector::new<u64>();
+      let scopeSyms: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let scopeSpans: Vector<SourceSpan> = Vector::new<SourceSpan>();
+
+      let mut state: Analyzer::Binder::BinderState = Analyzer::Binder::BinderState {
+        nodeIds: nodeIds,
+        defIds: defIds,
+        diagnostics: diagnostics,
+        scopeKeys: scopeKeys,
+        scopeSyms: scopeSyms,
+        scopeSpans: scopeSpans,
+      };
+
+      let mut index: u64 = 0;
+
+      while (index < roots.length()) {
+        if (let Option::SOME(itemId) = roots.get(index)) {
+          predeclareItem(&mut state, defStore, typeStore, symbols, ast, *itemId, 0);
+        }
+        index += 1;
+      }
+
+      let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::BinderOutput {
+        nodeIds: state.nodeIds,
+        defIds: state.defIds,
+        diagnostics: state.diagnostics,
+      };
+
+      return output;
+    }
+  }
+}
