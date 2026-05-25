@@ -318,82 +318,38 @@ export namespace Analyzer {
       };
     }
 
-    /// Return true iff the type node at `typeId` is a single-segment Path.
+    /// Return the Path node at `typeId` as an owned `Option<Path>`, deep-copying
+    /// the segments Vector so the caller owns its own backing storage.
     ///
-    /// Used by the Generic arm to validate that the base is a simple name.
-    /// Returns a plain boolean to avoid returning any Vector-containing type
-    /// (which triggers the C codegen double-free bug on multiple struct copies).
-    // TODO(codegen-vector-double-free): workaround for C codegen bug — multiple struct
-    // copies share a Vector<String> backing array, causing a double-free at runtime.
-    // All three helpers (isBasePathSingleSegment, getBasePathSpan, getBasePathFirstSegment)
-    // exist to avoid returning Option<Ast::Type::Path> from this call site.
-    function isBasePathSingleSegment(module: &Ast::Module, typeId: Ast::TypeId): boolean {
+    /// Used by the Generic arm to validate that the base is a single-segment Path
+    /// and to recover its name + span.
+    function extractBasePath(module: &Ast::Module, typeId: Ast::TypeId): Option<Ast::Type::Path> {
       let Option::SOME(node) = module.types.get(typeId) else {
-        return false;
+        return Option::NONE;
       };
 
       match (node) {
         Ast::Type::Node::Path(p) -> {
-          return p.segments.length() == 1;
+          let mut newSegs: Vector<String> = Vector::new<String>();
+          let mut i: u64 = 0;
+          while (i < p.segments.length()) {
+            let Option::SOME(s) = p.segments.get(i) else {
+              i += 1;
+              continue;
+            };
+            newSegs.push(s.clone());
+            i += 1;
+          }
+          let newPath: Ast::Type::Path = Ast::Type::Path { span: p.span, segments: newSegs };
+          return Option::SOME(newPath);
         },
-        Ast::Type::Node::Pointer(_) -> { return false; },
-        Ast::Type::Node::Reference(_) -> { return false; },
-        Ast::Type::Node::Tuple(_) -> { return false; },
-        Ast::Type::Node::Slice(_) -> { return false; },
-        Ast::Type::Node::FixedArray(_) -> { return false; },
-        Ast::Type::Node::Function(_) -> { return false; },
-        Ast::Type::Node::Generic(_) -> { return false; },
-      };
-    }
-
-    /// Return the span of the Path node at `typeId`.
-    ///
-    /// Used by the Generic arm after `isBasePathSingleSegment` confirms the kind.
-    /// Returns a dummy span if the node is absent or is not a Path.
-    // TODO(codegen-vector-double-free): primitive return type avoids the double-free
-    // that would occur if this returned the full Path struct (see isBasePathSingleSegment).
-    function getBasePathSpan(module: &Ast::Module, typeId: Ast::TypeId): SourceSpan {
-      let Option::SOME(node) = module.types.get(typeId) else {
-        return SourceSpan::new("", 0, 0);
-      };
-
-      match (node) {
-        Ast::Type::Node::Path(p) -> { return p.span; },
-        Ast::Type::Node::Pointer(_) -> { return SourceSpan::new("", 0, 0); },
-        Ast::Type::Node::Reference(_) -> { return SourceSpan::new("", 0, 0); },
-        Ast::Type::Node::Tuple(_) -> { return SourceSpan::new("", 0, 0); },
-        Ast::Type::Node::Slice(_) -> { return SourceSpan::new("", 0, 0); },
-        Ast::Type::Node::FixedArray(_) -> { return SourceSpan::new("", 0, 0); },
-        Ast::Type::Node::Function(_) -> { return SourceSpan::new("", 0, 0); },
-        Ast::Type::Node::Generic(_) -> { return SourceSpan::new("", 0, 0); },
-      };
-    }
-
-    /// Return a cloned copy of the first segment of the Path node at `typeId`.
-    ///
-    /// Used by the Generic arm after `isBasePathSingleSegment` confirms the kind.
-    /// Returns an empty String if the node is absent, not a Path, or has no segments.
-    // TODO(codegen-vector-double-free): returns String (single heap allocation, not a
-    // Vector-containing struct) to avoid the double-free at the call site in resolveTypeNode.
-    function getBasePathFirstSegment(module: &Ast::Module, typeId: Ast::TypeId): String {
-      let Option::SOME(node) = module.types.get(typeId) else {
-        return String::create("");
-      };
-
-      match (node) {
-        Ast::Type::Node::Path(p) -> {
-          let Option::SOME(seg) = p.segments.get(0) else {
-            return String::create("");
-          };
-          return seg.clone();
-        },
-        Ast::Type::Node::Pointer(_) -> { return String::create(""); },
-        Ast::Type::Node::Reference(_) -> { return String::create(""); },
-        Ast::Type::Node::Tuple(_) -> { return String::create(""); },
-        Ast::Type::Node::Slice(_) -> { return String::create(""); },
-        Ast::Type::Node::FixedArray(_) -> { return String::create(""); },
-        Ast::Type::Node::Function(_) -> { return String::create(""); },
-        Ast::Type::Node::Generic(_) -> { return String::create(""); },
+        Ast::Type::Node::Pointer(_) -> { return Option::NONE; },
+        Ast::Type::Node::Reference(_) -> { return Option::NONE; },
+        Ast::Type::Node::Tuple(_) -> { return Option::NONE; },
+        Ast::Type::Node::Slice(_) -> { return Option::NONE; },
+        Ast::Type::Node::FixedArray(_) -> { return Option::NONE; },
+        Ast::Type::Node::Function(_) -> { return Option::NONE; },
+        Ast::Type::Node::Generic(_) -> { return Option::NONE; },
       };
     }
 
@@ -799,19 +755,28 @@ export namespace Analyzer {
           }
 
           // Validate base: must be a single-segment Path.
-          // TODO(codegen-vector-double-free): use three primitive-returning helpers
-          // instead of extractBasePath to avoid the C codegen double-free bug
-          // (multiple struct copies sharing the same Vector<String> backing array).
           let gSpan: SourceSpan = g.span;
 
-          if (!isBasePathSingleSegment(module, g.base)) {
+          let Option::SOME(basePath) = extractBasePath(module, g.base) else {
+            emitUndefinedType(state, gSpan, "generic base must be a single-segment path");
+            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+            return tsRef.intern(Analyzer::Type::VOID);
+          };
+
+          if (basePath.segments.length() != 1) {
             emitUndefinedType(state, gSpan, "generic base must be a single-segment path");
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           }
 
-          let baseNameStr: String = getBasePathFirstSegment(module, g.base);
-          let basePathSpan: SourceSpan = getBasePathSpan(module, g.base);
+          let Option::SOME(firstSeg) = basePath.segments.get(0) else {
+            emitUndefinedType(state, gSpan, "generic base must be a single-segment path");
+            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+            return tsRef.intern(Analyzer::Type::VOID);
+          };
+
+          let baseNameStr: String = firstSeg.clone();
+          let basePathSpan: SourceSpan = basePath.span;
 
           let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
           let sym: Analyzer::SymbolId = symbolsRef.intern(baseNameStr.toStr());

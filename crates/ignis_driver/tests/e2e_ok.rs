@@ -6374,6 +6374,52 @@ function main(): i32 {
   );
 }
 
+// Regression: returning Option<Record> where the Record contains a Vector<String>
+// and destructuring the result with let-else used to be reported as a C codegen
+// double-free during the selfhost resolver port (engram
+// bugfix/codegen-vector-string-double-free, obs #5892). The original failing
+// `extractBasePath` body was never committed and could not be reconstructed; this
+// test pins the equivalent shape so any future regression is caught by LSan rather
+// than by a downstream selfhost slice.
+#[test]
+fn e2e_option_record_with_vector_string_let_else_destructure() {
+  e2e_workspace_std_test(
+    "option_record_with_vector_string_let_else_destructure",
+    r#"
+import Vector from "std::vector";
+import String from "std::string";
+
+record Path {
+  public segments: Vector<String>;
+}
+
+function maybePath(n: i32): Option<Path> {
+  if (n == 0) {
+    return Option::NONE;
+  }
+
+  let mut segs: Vector<String> = Vector::new<String>();
+  segs.push(String::create("alpha"));
+  segs.push(String::create("beta"));
+
+  let p: Path = Path {
+    segments: segs,
+  };
+
+  return Option::SOME(p);
+}
+
+function main(): i32 {
+  let Option::SOME(path) = maybePath(1) else {
+    return 1;
+  };
+
+  return path.segments.length() as i32;
+}
+"#,
+  );
+}
+
 #[test]
 fn e2e_match_payload_binding_moves_owned_payload_to_helper() {
   e2e_workspace_std_test(
@@ -6420,3 +6466,4 @@ function main(): i32 {
 "#,
   );
 }
+
