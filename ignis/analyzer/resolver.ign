@@ -1,0 +1,1171 @@
+import
+  SourceSpan,
+  Diagnostic,
+  DiagnosticBag,
+  Severity,
+  DiagnosticCode,
+  LabelKind,
+from "@compiler::diagnostics";
+
+import Ast from "@compiler::ast";
+
+/// Type-syntax resolver for the Ignis selfhost compiler.
+///
+/// `Resolver::resolveTypes` fills every VOID-sentinel type slot left by the
+/// pass-1 and pass-2 binder by walking `Ast::Type::Node` annotations on
+/// top-level Definitions and interning the corresponding `Analyzer::Type` via
+/// `TypeStore` helpers. Definitions are patched in-place via
+/// `DefinitionStore::replace` (ADR-R4).
+///
+/// Supported items: Record (fields), Enum (type params only; variant payloads
+/// deferred ADR-R5), Function (params + return type), Constant (annotation).
+///
+/// Supported type nodes: Path (primitives, type params, nominals), Pointer,
+/// Reference, Tuple, Slice, FixedArray, Function, Generic.
+///
+/// All helper functions are defined before their callers (no forward references).
+/// `resolveTypeNode` is self-recursive. Generic resolution is inlined into
+/// the `Generic(g)` match arm of `resolveTypeNode` to break the mutual-recursion
+/// cycle that would otherwise require forward references.
+export namespace Analyzer {
+  namespace Resolver {
+    /// Per-run mutable state threaded through the resolver walk.
+    ///
+    /// Per ADR-4: stores hold &mut borrow-style state via explicit parameter
+    /// threading because Ignis borrow checker rejects &mut fields inside records.
+    ///
+    /// `globalNameSyms` / `globalNameDefs` are co-indexed parallel vectors
+    /// mapping interned type-name symbols to their DefinitionIds (Records and
+    /// Enums only). Built once at the start of `resolveTypes`.
+    record ResolverState {
+      public diagnostics: DiagnosticBag;
+      public globalNameSyms: Vector<Analyzer::SymbolId>;
+      public globalNameDefs: Vector<Analyzer::DefinitionId>;
+    }
+
+    /// Type-parameter scope for one item walk (Record, Enum, or Function).
+    ///
+    /// Parallel vectors per binder ADR-1 (HashMap on SymbolId unavailable).
+    /// `syms[i]` is the interned name of the i-th type parameter;
+    /// `typeIds[i]` is the corresponding `Type::Param(sym)` interned in TypeStore.
+    /// Lookup is innermost-first (linear scan). Scope is discarded on item exit.
+    record TypeParamScope {
+      public syms: Vector<Analyzer::SymbolId>;
+      public typeIds: Vector<Analyzer::TypeId>;
+    }
+
+    /// Output produced by `resolveTypes`.
+    ///
+    /// `diagnostics` carries all resolver-emitted errors. Callers merge with
+    /// binder diagnostics as needed — resolver does not re-emit binder errors.
+    record ResolverOutput {
+      public diagnostics: DiagnosticBag;
+    }
+
+    // =========================================================================
+    // Leaf helpers — no calls to other resolver functions.
+    // =========================================================================
+
+    /// Emit a `DiagnosticCode::UNDEFINED_TYPE` (I0043) ERROR diagnostic.
+    ///
+    /// All resolver errors reuse this single code with discriminating message text
+    /// (ADR-R2: Diagnostic Code Reuse).
+    function emitUndefinedType(
+      state: &mut Analyzer::Resolver::ResolverState,
+      span: SourceSpan,
+      message: str,
+    ): void {
+      let mut diag: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        DiagnosticCode::UNDEFINED_TYPE,
+        message,
+        span,
+      );
+      diag.addLabel(LabelKind::PRIMARY, span, message);
+      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
+    /// Linear scan of `scope.syms` for a matching symbol.
+    /// Returns the index (for `scope.typeIds.get(idx)`) on match, NONE otherwise.
+    function scopeLookup(
+      scope: &Analyzer::Resolver::TypeParamScope,
+      sym: Analyzer::SymbolId,
+    ): Option<u64> {
+      let mut index: u64 = 0;
+
+      while (index < scope.syms.length()) {
+        let Option::SOME(stored) = scope.syms.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (stored.raw() == sym.raw()) {
+          return Option::SOME(index);
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Linear scan of `state.globalNameSyms` for a matching symbol.
+    /// Returns the corresponding `DefinitionId` on match, NONE otherwise.
+    ///
+    /// Takes `&mut` per binder ADR-4 pattern (no auto-coercion of &mut to &).
+    function globalLookup(
+      state: &mut Analyzer::Resolver::ResolverState,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::DefinitionId> {
+      let mut index: u64 = 0;
+
+      while (index < state.globalNameSyms.length()) {
+        let Option::SOME(stored) = state.globalNameSyms.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (stored.raw() == sym.raw()) {
+          let Option::SOME(defId) = state.globalNameDefs.get(index) else {
+            index += 1;
+            continue;
+          };
+
+          return Option::SOME(*defId);
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Map a primitive type name string to its pre-interned `TypeId`.
+    ///
+    /// Returns NONE for non-primitive names. All 15 primitive names are handled
+    /// with `String::create(name).equals("prim")` comparisons — `str == str`
+    /// is not supported in Ignis selfhost. TypeStore does not grow.
+    ///
+    /// A `mut` local alias is required per Ignis borrow conventions (ADR-4)
+    /// to call `&mut self` methods on the `typeStore` parameter.
+    function primitiveForName(
+      typeStore: &mut Analyzer::TypeStore,
+      name: str,
+    ): Option<Analyzer::TypeId> {
+      let nameStr: String = String::create(name);
+      let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+
+      if (nameStr.equals("i8")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::I8));
+      }
+      if (nameStr.equals("i16")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::I16));
+      }
+      if (nameStr.equals("i32")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::I32));
+      }
+      if (nameStr.equals("i64")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::I64));
+      }
+      if (nameStr.equals("u8")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::U8));
+      }
+      if (nameStr.equals("u16")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::U16));
+      }
+      if (nameStr.equals("u32")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::U32));
+      }
+      if (nameStr.equals("u64")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::U64));
+      }
+      if (nameStr.equals("f32")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::F32));
+      }
+      if (nameStr.equals("f64")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::F64));
+      }
+      if (nameStr.equals("boolean")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::BOOLEAN));
+      }
+      if (nameStr.equals("char")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::CHAR));
+      }
+      if (nameStr.equals("str")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::STR));
+      }
+      if (nameStr.equals("void")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::VOID));
+      }
+      if (nameStr.equals("never")) {
+        return Option::SOME(tsRef.intern(Analyzer::Type::NEVER));
+      }
+
+      return Option::NONE;
+    }
+
+    /// Extract the annotation TypeId from a Pattern::Binding node.
+    /// Returns NONE for all other pattern kinds or if the pattern is absent.
+    function patternAnnotation(module: &Ast::Module, patId: Ast::PatternId): Option<Ast::TypeId> {
+      let Option::SOME(pat) = module.patterns.get(patId) else {
+        return Option::NONE;
+      };
+
+      match (pat) {
+        Ast::Pattern::Node::Binding(b) -> {
+          return b.annotation;
+        },
+        Ast::Pattern::Node::Wildcard(_) -> {
+          return Option::NONE;
+        },
+        Ast::Pattern::Node::Path(_) -> {
+          return Option::NONE;
+        },
+        Ast::Pattern::Node::Literal(_) -> {
+          return Option::NONE;
+        },
+        Ast::Pattern::Node::Tuple(_) -> {
+          return Option::NONE;
+        },
+        Ast::Pattern::Node::Or(_) -> {
+          return Option::NONE;
+        },
+      };
+    }
+
+    /// Look up the DefinitionId for a given raw ItemId, searching pass-1 then pass-2.
+    function lookupDef(
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      rawId: u32,
+    ): Option<Analyzer::DefinitionId> {
+      let pass1Result: Option<Analyzer::DefinitionId> = Analyzer::Binder::findDef(pass1, rawId);
+
+      if (pass1Result.isSome()) {
+        return pass1Result;
+      }
+
+      return Analyzer::Binder::findDef(pass2, rawId);
+    }
+
+    /// Map a `DefinitionId` known to be a Record or Enum to the corresponding
+    /// `Type::Record(defId)` or `Type::Enum(defId)` interned in TypeStore.
+    function nominalTypeFor(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      defId: Analyzer::DefinitionId,
+    ): Analyzer::TypeId {
+      let Option::SOME(def) = defStore.get(defId) else {
+        @panic("nominalTypeFor: defId not in store — invariant broken");
+      };
+
+      match (def) {
+        Analyzer::Definition::Record(_) -> {
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.recordType(defId);
+        },
+        Analyzer::Definition::Enum(_) -> {
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.enumType(defId);
+        },
+        Analyzer::Definition::Function(_) -> {
+          @panic("nominalTypeFor: Function in global index — invariant broken");
+        },
+        Analyzer::Definition::Variable(_) -> {
+          @panic("nominalTypeFor: Variable in global index — invariant broken");
+        },
+        Analyzer::Definition::Field(_) -> {
+          @panic("nominalTypeFor: Field in global index — invariant broken");
+        },
+        Analyzer::Definition::Variant(_) -> {
+          @panic("nominalTypeFor: Variant in global index — invariant broken");
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          @panic("nominalTypeFor: TypeParam in global index — invariant broken");
+        },
+      };
+    }
+
+    /// Return the type-parameter arity of a definition.
+    function arityOf(defStore: &mut Analyzer::DefinitionStore, defId: Analyzer::DefinitionId): u64 {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return 0;
+      };
+
+      match (def) {
+        Analyzer::Definition::Record(rec) -> {
+          return rec.typeParams.length();
+        },
+        Analyzer::Definition::Enum(en) -> {
+          return en.typeParams.length();
+        },
+        Analyzer::Definition::Function(_) -> {
+          return 0;
+        },
+        Analyzer::Definition::Variable(_) -> {
+          return 0;
+        },
+        Analyzer::Definition::Field(_) -> {
+          return 0;
+        },
+        Analyzer::Definition::Variant(_) -> {
+          return 0;
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          return 0;
+        },
+      };
+    }
+
+    /// Return true iff the type node at `typeId` is a single-segment Path.
+    ///
+    /// Used by the Generic arm to validate that the base is a simple name.
+    /// Returns a plain boolean to avoid returning any Vector-containing type
+    /// (which triggers the C codegen double-free bug on multiple struct copies).
+    // TODO(codegen-vector-double-free): workaround for C codegen bug — multiple struct
+    // copies share a Vector<String> backing array, causing a double-free at runtime.
+    // All three helpers (isBasePathSingleSegment, getBasePathSpan, getBasePathFirstSegment)
+    // exist to avoid returning Option<Ast::Type::Path> from this call site.
+    function isBasePathSingleSegment(module: &Ast::Module, typeId: Ast::TypeId): boolean {
+      let Option::SOME(node) = module.types.get(typeId) else {
+        return false;
+      };
+
+      match (node) {
+        Ast::Type::Node::Path(p) -> {
+          return p.segments.length() == 1;
+        },
+        Ast::Type::Node::Pointer(_) -> { return false; },
+        Ast::Type::Node::Reference(_) -> { return false; },
+        Ast::Type::Node::Tuple(_) -> { return false; },
+        Ast::Type::Node::Slice(_) -> { return false; },
+        Ast::Type::Node::FixedArray(_) -> { return false; },
+        Ast::Type::Node::Function(_) -> { return false; },
+        Ast::Type::Node::Generic(_) -> { return false; },
+      };
+    }
+
+    /// Return the span of the Path node at `typeId`.
+    ///
+    /// Used by the Generic arm after `isBasePathSingleSegment` confirms the kind.
+    /// Returns a dummy span if the node is absent or is not a Path.
+    // TODO(codegen-vector-double-free): primitive return type avoids the double-free
+    // that would occur if this returned the full Path struct (see isBasePathSingleSegment).
+    function getBasePathSpan(module: &Ast::Module, typeId: Ast::TypeId): SourceSpan {
+      let Option::SOME(node) = module.types.get(typeId) else {
+        return SourceSpan::new("", 0, 0);
+      };
+
+      match (node) {
+        Ast::Type::Node::Path(p) -> { return p.span; },
+        Ast::Type::Node::Pointer(_) -> { return SourceSpan::new("", 0, 0); },
+        Ast::Type::Node::Reference(_) -> { return SourceSpan::new("", 0, 0); },
+        Ast::Type::Node::Tuple(_) -> { return SourceSpan::new("", 0, 0); },
+        Ast::Type::Node::Slice(_) -> { return SourceSpan::new("", 0, 0); },
+        Ast::Type::Node::FixedArray(_) -> { return SourceSpan::new("", 0, 0); },
+        Ast::Type::Node::Function(_) -> { return SourceSpan::new("", 0, 0); },
+        Ast::Type::Node::Generic(_) -> { return SourceSpan::new("", 0, 0); },
+      };
+    }
+
+    /// Return a cloned copy of the first segment of the Path node at `typeId`.
+    ///
+    /// Used by the Generic arm after `isBasePathSingleSegment` confirms the kind.
+    /// Returns an empty String if the node is absent, not a Path, or has no segments.
+    // TODO(codegen-vector-double-free): returns String (single heap allocation, not a
+    // Vector-containing struct) to avoid the double-free at the call site in resolveTypeNode.
+    function getBasePathFirstSegment(module: &Ast::Module, typeId: Ast::TypeId): String {
+      let Option::SOME(node) = module.types.get(typeId) else {
+        return String::create("");
+      };
+
+      match (node) {
+        Ast::Type::Node::Path(p) -> {
+          let Option::SOME(seg) = p.segments.get(0) else {
+            return String::create("");
+          };
+          return seg.clone();
+        },
+        Ast::Type::Node::Pointer(_) -> { return String::create(""); },
+        Ast::Type::Node::Reference(_) -> { return String::create(""); },
+        Ast::Type::Node::Tuple(_) -> { return String::create(""); },
+        Ast::Type::Node::Slice(_) -> { return String::create(""); },
+        Ast::Type::Node::FixedArray(_) -> { return String::create(""); },
+        Ast::Type::Node::Function(_) -> { return String::create(""); },
+        Ast::Type::Node::Generic(_) -> { return String::create(""); },
+      };
+    }
+
+    /// Build a `TypeParamScope` for one item's generic parameters.
+    function buildTypeParamScope(
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      genericParams: &Vector<Ast::GenericParam>,
+    ): Analyzer::Resolver::TypeParamScope {
+      let mut syms: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut typeIds: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < genericParams.length()) {
+        let Option::SOME(param) = genericParams.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+        let sym: Analyzer::SymbolId = symbolsRef.intern(param.name.toStr());
+
+        let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+        let typeId: Analyzer::TypeId = tsRef.param(sym);
+
+        syms.push(sym);
+        typeIds.push(typeId);
+        index += 1;
+      }
+
+      return Analyzer::Resolver::TypeParamScope { syms: syms, typeIds: typeIds };
+    }
+
+    // =========================================================================
+    // Patch helpers — mutate DefinitionStore in-place (ADR-R4).
+    // =========================================================================
+
+    /// Patch `FieldDef.fieldType` at `fieldDefId` via `DefinitionStore::replace`.
+    function patchFieldType(
+      defStore: &mut Analyzer::DefinitionStore,
+      fieldDefId: Analyzer::DefinitionId,
+      typeId: Analyzer::TypeId,
+    ): void {
+      let Option::SOME(existing) = defStore.get(fieldDefId) else {
+        return;
+      };
+
+      match (existing) {
+        Analyzer::Definition::Field(f) -> {
+          let updated: Analyzer::FieldDef = Analyzer::FieldDef {
+            name: f.name,
+            fieldType: typeId,
+            owner: f.owner,
+            index: f.index,
+          };
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.replace(fieldDefId, Analyzer::Definition::Field(updated));
+        },
+        Analyzer::Definition::Record(_) -> {},
+        Analyzer::Definition::Enum(_) -> {},
+        Analyzer::Definition::Function(_) -> {},
+        Analyzer::Definition::Variable(_) -> {},
+        Analyzer::Definition::Variant(_) -> {},
+        Analyzer::Definition::TypeParam(_) -> {},
+      };
+    }
+
+    /// Patch `VariableDef.declaredType` at `varDefId` via `DefinitionStore::replace`.
+    function patchVariableType(
+      defStore: &mut Analyzer::DefinitionStore,
+      varDefId: Analyzer::DefinitionId,
+      typeId: Analyzer::TypeId,
+    ): void {
+      let Option::SOME(existing) = defStore.get(varDefId) else {
+        return;
+      };
+
+      match (existing) {
+        Analyzer::Definition::Variable(v) -> {
+          let updated: Analyzer::VariableDef = Analyzer::VariableDef {
+            name: v.name,
+            visibility: v.visibility,
+            declaredType: typeId,
+            mutable: v.mutable,
+          };
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.replace(varDefId, Analyzer::Definition::Variable(updated));
+        },
+        Analyzer::Definition::Record(_) -> {},
+        Analyzer::Definition::Enum(_) -> {},
+        Analyzer::Definition::Function(_) -> {},
+        Analyzer::Definition::Field(_) -> {},
+        Analyzer::Definition::Variant(_) -> {},
+        Analyzer::Definition::TypeParam(_) -> {},
+      };
+    }
+
+    /// Patch `FunctionDef.returnType` at `fnDefId` via `DefinitionStore::replace`.
+    function patchReturnType(
+      defStore: &mut Analyzer::DefinitionStore,
+      fnDefId: Analyzer::DefinitionId,
+      typeId: Analyzer::TypeId,
+    ): void {
+      let Option::SOME(existing) = defStore.get(fnDefId) else {
+        return;
+      };
+
+      match (existing) {
+        Analyzer::Definition::Function(fn_) -> {
+          let updated: Analyzer::FunctionDef = Analyzer::FunctionDef {
+            name: fn_.name,
+            visibility: fn_.visibility,
+            typeParams: fn_.typeParams,
+            params: fn_.params,
+            returnType: typeId,
+          };
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.replace(fnDefId, Analyzer::Definition::Function(updated));
+        },
+        Analyzer::Definition::Record(_) -> {},
+        Analyzer::Definition::Enum(_) -> {},
+        Analyzer::Definition::Variable(_) -> {},
+        Analyzer::Definition::Field(_) -> {},
+        Analyzer::Definition::Variant(_) -> {},
+        Analyzer::Definition::TypeParam(_) -> {},
+      };
+    }
+
+    // =========================================================================
+    // Extract helpers — copy sub-vecs to release borrows before mutable ops.
+    // =========================================================================
+
+    /// Extract a copy of RecordDef.fields, releasing the immutable borrow.
+    function extractRecordFields(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      match (def) {
+        Analyzer::Definition::Record(rec) -> {
+          let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+          let mut index: u64 = 0;
+
+          while (index < rec.fields.length()) {
+            let Option::SOME(fieldId) = rec.fields.get(index) else {
+              index += 1;
+              continue;
+            };
+
+            out.push(*fieldId);
+            index += 1;
+          }
+
+          return out;
+        },
+        Analyzer::Definition::Enum(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Function(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Variable(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Field(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Variant(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+      };
+    }
+
+    /// Extract a copy of FunctionDef.params, releasing the immutable borrow.
+    function extractFunctionParams(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      match (def) {
+        Analyzer::Definition::Function(fn_) -> {
+          let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+          let mut index: u64 = 0;
+
+          while (index < fn_.params.length()) {
+            let Option::SOME(paramId) = fn_.params.get(index) else {
+              index += 1;
+              continue;
+            };
+
+            out.push(*paramId);
+            index += 1;
+          }
+
+          return out;
+        },
+        Analyzer::Definition::Record(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Enum(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Variable(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Field(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Variant(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+      };
+    }
+
+    // =========================================================================
+    // Type resolution — resolvePath is a leaf; resolveTypeNode is self-recursive
+    // with generic resolution inlined to avoid mutual-recursion forward refs.
+    // =========================================================================
+
+    /// Resolve a single-segment `Ast::Type::Path` to an `Analyzer::TypeId`.
+    ///
+    /// Resolution order:
+    ///   1. Primitive names (15 `String::create().equals()` compares).
+    ///   2. Type-param scope (innermost-first linear scan).
+    ///   3. Global type-name index (linear scan).
+    ///   4. Unknown: emit UNDEFINED_TYPE + return VOID.
+    ///
+    /// Multi-segment paths emit UNDEFINED_TYPE — not yet supported.
+    function resolvePath(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      scope: &Analyzer::Resolver::TypeParamScope,
+      p: &Ast::Type::Path,
+    ): Analyzer::TypeId {
+      if (p.segments.length() == 0) {
+        emitUndefinedType(state, p.span, "empty type path");
+        let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+        return tsRef.intern(Analyzer::Type::VOID);
+      }
+
+      if (p.segments.length() > 1) {
+        emitUndefinedType(state, p.span, "multi-segment type paths are not yet supported");
+        let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+        return tsRef.intern(Analyzer::Type::VOID);
+      }
+
+      let Option::SOME(nameStr) = p.segments.get(0) else {
+        let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+        return tsRef.intern(Analyzer::Type::VOID);
+      };
+
+      // 1. Primitive check.
+      let primOpt: Option<Analyzer::TypeId> = primitiveForName(typeStore, nameStr.toStr());
+
+      if (let Option::SOME(primId) = primOpt) {
+        return primId;
+      }
+
+      // 2. Type-param scope.
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(nameStr.toStr());
+      let scopeIdxOpt: Option<u64> = scopeLookup(scope, sym);
+
+      if (let Option::SOME(idx) = scopeIdxOpt) {
+        let Option::SOME(tid) = scope.typeIds.get(idx) else {
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.intern(Analyzer::Type::VOID);
+        };
+        return *tid;
+      }
+
+      // 3. Global type-name index.
+      let globalOpt: Option<Analyzer::DefinitionId> = globalLookup(state, sym);
+
+      if (let Option::SOME(defId) = globalOpt) {
+        return nominalTypeFor(defStore, typeStore, defId);
+      }
+
+      // 4. Unknown.
+      let message: String = String::create("unknown type name: `").concat(nameStr.toStr()).concat("`");
+      emitUndefinedType(state, p.span, message.toStr());
+      let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+      return tsRef.intern(Analyzer::Type::VOID);
+    }
+
+    /// Dispatch an `Ast::Type::Node` to the appropriate resolution logic.
+    ///
+    /// Self-recursive. Generic resolution is inlined in the `Generic(g)` arm to
+    /// break the mutual-recursion cycle that would require a forward reference.
+    ///
+    /// On any error, emits a diagnostic and returns `Type::VOID` so callers always
+    /// receive a well-formed TypeId.
+    function resolveTypeNode(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      scope: &Analyzer::Resolver::TypeParamScope,
+      typeId: Ast::TypeId,
+    ): Analyzer::TypeId {
+      let Option::SOME(node) = module.types.get(typeId) else {
+        let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+        return tsRef.intern(Analyzer::Type::VOID);
+      };
+
+      match (node) {
+        Ast::Type::Node::Path(p) -> {
+          return resolvePath(state, defStore, typeStore, symbols, module, scope, &p);
+        },
+        Ast::Type::Node::Pointer(p) -> {
+          // TODO(pointer-mutability): p.mutable is silently dropped.
+          let inner: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, scope, p.pointee);
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.pointer(inner);
+        },
+        Ast::Type::Node::Reference(r) -> {
+          let inner: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, scope, r.target);
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          if (r.mutable) {
+            return tsRef.mutableReference(inner);
+          }
+          return tsRef.reference(inner);
+        },
+        Ast::Type::Node::Tuple(t) -> {
+          let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut index: u64 = 0;
+
+          while (index < t.elements.length()) {
+            let Option::SOME(elemId) = t.elements.get(index) else {
+              index += 1;
+              continue;
+            };
+
+            let elem: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, scope, *elemId);
+            elements.push(elem);
+            index += 1;
+          }
+
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.tuple(elements);
+        },
+        Ast::Type::Node::Slice(s) -> {
+          let inner: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, scope, s.element);
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.slice(inner);
+        },
+        Ast::Type::Node::FixedArray(a) -> {
+          let inner: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, scope, a.element);
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.fixedArray(inner, a.size);
+        },
+        Ast::Type::Node::Function(f) -> {
+          let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut index: u64 = 0;
+
+          while (index < f.parameters.length()) {
+            let Option::SOME(paramId) = f.parameters.get(index) else {
+              index += 1;
+              continue;
+            };
+
+            let param: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, scope, *paramId);
+            params.push(param);
+            index += 1;
+          }
+
+          let ret: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, scope, f.returnType);
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.functionType(params, ret);
+        },
+        Ast::Type::Node::Generic(g) -> {
+          // ---- Inlined generic resolution (breaks mutual-recursion cycle) ----
+
+          // Resolve arguments first — collect recursive diagnostics in source order.
+          let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut argIndex: u64 = 0;
+
+          while (argIndex < g.arguments.length()) {
+            let Option::SOME(argId) = g.arguments.get(argIndex) else {
+              argIndex += 1;
+              continue;
+            };
+
+            let argType: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, scope, *argId);
+            args.push(argType);
+            argIndex += 1;
+          }
+
+          // Validate base: must be a single-segment Path.
+          // TODO(codegen-vector-double-free): use three primitive-returning helpers
+          // instead of extractBasePath to avoid the C codegen double-free bug
+          // (multiple struct copies sharing the same Vector<String> backing array).
+          let gSpan: SourceSpan = g.span;
+
+          if (!isBasePathSingleSegment(module, g.base)) {
+            emitUndefinedType(state, gSpan, "generic base must be a single-segment path");
+            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+            return tsRef.intern(Analyzer::Type::VOID);
+          }
+
+          let baseNameStr: String = getBasePathFirstSegment(module, g.base);
+          let basePathSpan: SourceSpan = getBasePathSpan(module, g.base);
+
+          let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+          let sym: Analyzer::SymbolId = symbolsRef.intern(baseNameStr.toStr());
+
+          // Type-param in generic position is invalid.
+          if (scopeLookup(scope, sym).isSome()) {
+            let message: String = String::create("type parameter `")
+              .concat(baseNameStr.toStr())
+              .concat("` cannot take generic arguments");
+            emitUndefinedType(state, gSpan, message.toStr());
+            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+            return tsRef.intern(Analyzer::Type::VOID);
+          }
+
+          // Primitive in generic position is invalid.
+          let primCheck: Option<Analyzer::TypeId> = primitiveForName(typeStore, baseNameStr.toStr());
+
+          if (primCheck.isSome()) {
+            let message: String = String::create("primitive type `")
+              .concat(baseNameStr.toStr())
+              .concat("` does not take generic arguments");
+            emitUndefinedType(state, gSpan, message.toStr());
+            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+            return tsRef.intern(Analyzer::Type::VOID);
+          }
+
+          // Global lookup.
+          let globalOpt: Option<Analyzer::DefinitionId> = globalLookup(state, sym);
+
+          let Option::SOME(defId) = globalOpt else {
+            let message: String = String::create("unknown generic type: `")
+              .concat(baseNameStr.toStr())
+              .concat("`");
+            emitUndefinedType(state, basePathSpan, message.toStr());
+            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+            return tsRef.intern(Analyzer::Type::VOID);
+          };
+
+          // Arity check.
+          let expectedArity: u64 = arityOf(defStore, defId);
+          let actualArity: u64 = args.length();
+
+          if (actualArity != expectedArity) {
+            let message: String = String::create("`")
+              .concat(baseNameStr.toStr())
+              .concat("` expects ")
+              .concat(expectedArity)
+              .concat(" type arguments, found ")
+              .concat(actualArity);
+            emitUndefinedType(state, gSpan, message.toStr());
+            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+            return tsRef.intern(Analyzer::Type::VOID);
+          }
+
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.instance(defId, args);
+        },
+      };
+    }
+
+    // =========================================================================
+    // Item-level resolution — calls resolveTypeNode.
+    // =========================================================================
+
+    /// Resolve the declared type annotation on a module-level constant.
+    function resolveConstant(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      c: &Ast::Item::Constant,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = lookupDef(pass1, pass2, itemId.raw());
+      let Option::SOME(defId) = defIdOpt else {
+        return;
+      };
+
+      if (let Option::SOME(annotationTypeId) = c.annotation) {
+        let scope: Analyzer::Resolver::TypeParamScope = Analyzer::Resolver::TypeParamScope {
+          syms: Vector::new<Analyzer::SymbolId>(),
+          typeIds: Vector::new<Analyzer::TypeId>(),
+        };
+
+        let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId);
+        patchVariableType(defStore, defId, resolved);
+      }
+    }
+
+    /// Resolve an Enum item.
+    ///
+    /// Builds a TypeParamScope but does not resolve variant payload types —
+    /// selfhost AST has no payload type-annotation slot (ADR-R5).
+    function resolveEnum(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      e: &Ast::Item::Enum,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = lookupDef(pass1, pass2, itemId.raw());
+      let Option::SOME(_defId) = defIdOpt else {
+        return;
+      };
+
+      let _scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &e.genericParameters);
+    }
+
+    /// Resolve all field type annotations in a Record item.
+    ///
+    /// Walks fields[i] (PatternId) positionally against RecordDef.fields[i]
+    /// (DefinitionId) per ADR-R1.
+    function resolveRecord(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      r: &Ast::Item::Record,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = lookupDef(pass1, pass2, itemId.raw());
+      let Option::SOME(defId) = defIdOpt else {
+        return;
+      };
+
+      let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &r.genericParameters);
+      let fieldDefIds: Vector<Analyzer::DefinitionId> = extractRecordFields(defStore, defId);
+
+      let mut fieldIndex: u64 = 0;
+
+      while (fieldIndex < fieldDefIds.length()) {
+        let Option::SOME(fieldDefId) = fieldDefIds.get(fieldIndex) else {
+          fieldIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(fieldPatId) = r.fields.get(fieldIndex) else {
+          fieldIndex += 1;
+          continue;
+        };
+
+        let annotationOpt: Option<Ast::TypeId> = patternAnnotation(module, *fieldPatId);
+
+        if (let Option::SOME(annotationTypeId) = annotationOpt) {
+          let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId);
+          patchFieldType(defStore, *fieldDefId, resolved);
+        }
+
+        fieldIndex += 1;
+      }
+    }
+
+    /// Resolve function parameter declared types and return type.
+    ///
+    /// Walks params[i] (PatternId) against FunctionDef.params[i] (DefinitionId)
+    /// positionally per ADR-R1. No diagnostic if return type annotation absent.
+    function resolveFunction(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      f: &Ast::Item::Function,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = lookupDef(pass1, pass2, itemId.raw());
+      let Option::SOME(defId) = defIdOpt else {
+        return;
+      };
+
+      let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &f.genericParameters);
+      let paramDefIds: Vector<Analyzer::DefinitionId> = extractFunctionParams(defStore, defId);
+
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < paramDefIds.length()) {
+        let Option::SOME(paramDefId) = paramDefIds.get(paramIndex) else {
+          paramIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(paramPatId) = f.parameters.get(paramIndex) else {
+          paramIndex += 1;
+          continue;
+        };
+
+        let annotationOpt: Option<Ast::TypeId> = patternAnnotation(module, *paramPatId);
+
+        if (let Option::SOME(annotationTypeId) = annotationOpt) {
+          let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId);
+          patchVariableType(defStore, *paramDefId, resolved);
+        }
+
+        paramIndex += 1;
+      }
+
+      if (let Option::SOME(retTypeId) = f.returnType) {
+        let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, retTypeId);
+        patchReturnType(defStore, defId, resolved);
+      }
+    }
+
+    // =========================================================================
+    // Top-level walk — buildGlobalNameIndex, resolveItem, resolveTypes.
+    // =========================================================================
+
+    /// Populate `state.globalNameSyms` / `state.globalNameDefs` from one
+    /// `BinderOutput`. Records and Enums only — these are the only types
+    /// addressable as type names.
+    ///
+    /// Called twice (pass-1 then pass-2). Duplicate names not deduplicated —
+    /// first-hit wins in `globalLookup`, so pass-1 entries take precedence.
+    function buildGlobalNameIndex(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      binderOutput: &Analyzer::Binder::BinderOutput,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < binderOutput.defIds.length()) {
+        let Option::SOME(defId) = binderOutput.defIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(def) = defStore.get(*defId) else {
+          index += 1;
+          continue;
+        };
+
+        match (def) {
+          Analyzer::Definition::Record(rec) -> {
+            let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+            stateRef.globalNameSyms.push(rec.name);
+            stateRef.globalNameDefs.push(*defId);
+          },
+          Analyzer::Definition::Enum(en) -> {
+            let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+            stateRef.globalNameSyms.push(en.name);
+            stateRef.globalNameDefs.push(*defId);
+          },
+          Analyzer::Definition::Function(_) -> {},
+          Analyzer::Definition::Variable(_) -> {},
+          Analyzer::Definition::Field(_) -> {},
+          Analyzer::Definition::Variant(_) -> {},
+          Analyzer::Definition::TypeParam(_) -> {},
+        };
+
+        index += 1;
+      }
+    }
+
+    /// Dispatch a single item to the appropriate resolver handler.
+    ///
+    /// Self-recursive for Namespace and Export. TypeAlias/Trait deferred (ADR-R6).
+    function resolveItem(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+    ): void {
+      let Option::SOME(node) = module.items.get(itemId) else {
+        return;
+      };
+
+      match (node) {
+        Ast::Item::Node::Record(r) -> {
+          resolveRecord(state, defStore, typeStore, symbols, module, pass1, pass2, itemId, &r);
+        },
+        Ast::Item::Node::Enum(e) -> {
+          resolveEnum(state, defStore, typeStore, symbols, module, pass1, pass2, itemId, &e);
+        },
+        Ast::Item::Node::Function(f) -> {
+          resolveFunction(state, defStore, typeStore, symbols, module, pass1, pass2, itemId, &f);
+        },
+        Ast::Item::Node::Constant(c) -> {
+          resolveConstant(state, defStore, typeStore, symbols, module, pass1, pass2, itemId, &c);
+        },
+        Ast::Item::Node::Namespace(ns) -> {
+          let mut childIndex: u64 = 0;
+
+          while (childIndex < ns.items.length()) {
+            let Option::SOME(childId) = ns.items.get(childIndex) else {
+              childIndex += 1;
+              continue;
+            };
+
+            resolveItem(state, defStore, typeStore, symbols, module, pass1, pass2, *childId);
+            childIndex += 1;
+          }
+        },
+        Ast::Item::Node::Export(ex) -> {
+          if (let Option::SOME(innerItemId) = ex.declaration) {
+            resolveItem(state, defStore, typeStore, symbols, module, pass1, pass2, innerItemId);
+          }
+        },
+        Ast::Item::Node::TypeAlias(_) -> {},
+        Ast::Item::Node::Trait(_) -> {},
+        Ast::Item::Node::Import(_) -> {},
+        Ast::Item::Node::Extern(_) -> {},
+      };
+    }
+
+    /// Resolve all type-syntax annotations in `module` against `defStore` and
+    /// `typeStore`, patching Definitions in-place.
+    ///
+    /// Must be called after both `predeclareRoots` (pass-1) and `completeRoots`
+    /// (pass-2). Returns a `ResolverOutput` with resolver-only diagnostics.
+    function resolveTypes(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+    ): Analyzer::Resolver::ResolverOutput {
+      let mut state: Analyzer::Resolver::ResolverState = Analyzer::Resolver::ResolverState {
+        diagnostics: DiagnosticBag::init(),
+        globalNameSyms: Vector::new<Analyzer::SymbolId>(),
+        globalNameDefs: Vector::new<Analyzer::DefinitionId>(),
+      };
+
+      buildGlobalNameIndex(&mut state, defStore, pass1);
+      buildGlobalNameIndex(&mut state, defStore, pass2);
+
+      let mut index: u64 = 0;
+
+      while (index < module.roots.length()) {
+        let Option::SOME(itemId) = module.roots.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        resolveItem(&mut state, defStore, typeStore, symbols, module, pass1, pass2, *itemId);
+        index += 1;
+      }
+
+      return Analyzer::Resolver::ResolverOutput { diagnostics: state.diagnostics };
+    }
+  }
+}

@@ -1,0 +1,2745 @@
+import Test from "std::test";
+
+import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+
+/// Build a zero-byte source span suitable for test diagnostics.
+function resolverDummySpan(): SourceSpan {
+  return SourceSpan::new("resolver_test.ign", 0, 0);
+}
+
+/// Run pass-1 + pass-2 binder, then the resolver on the given module.
+/// Returns the resolver output. All stores are mutated in-place.
+function runResolver(
+  defStore: &mut Analyzer::DefinitionStore,
+  typeStore: &mut Analyzer::TypeStore,
+  symbols: &mut Analyzer::SymbolTable,
+  module: &Ast::Module,
+): Analyzer::Resolver::ResolverOutput {
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    defStore,
+    typeStore,
+    symbols,
+    module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    defStore,
+    typeStore,
+    symbols,
+    module,
+    &pass1,
+  );
+
+  return Analyzer::Resolver::resolveTypes(
+    defStore,
+    typeStore,
+    symbols,
+    module,
+    &pass1,
+    &pass2,
+  );
+}
+
+/// Get the FieldDef at `index` inside the RecordDef identified by `recordItemId`.
+///
+/// Follows the binder_tests convention: all values are extracted via nested
+/// match / let-else chains with no block tail expressions.
+function getFieldDef(
+  defStore: &mut Analyzer::DefinitionStore,
+  typeStore: &mut Analyzer::TypeStore,
+  module: &Ast::Module,
+  recordItemId: Ast::ItemId,
+  pass1: &Analyzer::Binder::BinderOutput,
+  fieldIndex: u64,
+): Analyzer::FieldDef {
+  let Option::SOME(defId) = Analyzer::Binder::findDef(pass1, recordItemId.raw()) else {
+    @panic("record not found in pass-1 output");
+  };
+
+  match (defStore.get(defId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(rec) -> {
+        let Option::SOME(fidRef) = rec.fields.get(fieldIndex) else {
+          @panic("field index out of bounds");
+        };
+
+        match (defStore.get(*fidRef)) {
+          Option::SOME(fieldDef) -> match (fieldDef) {
+            Analyzer::Definition::Field(fd) -> {
+              return Analyzer::FieldDef {
+                name: fd.name,
+                fieldType: fd.fieldType,
+                owner: fd.owner,
+                index: fd.index,
+              };
+            },
+            Analyzer::Definition::Record(_) -> @panic("expected Field, got Record"),
+            Analyzer::Definition::Enum(_) -> @panic("expected Field, got Enum"),
+            Analyzer::Definition::Function(_) -> @panic("expected Field, got Function"),
+            Analyzer::Definition::Variable(_) -> @panic("expected Field, got Variable"),
+            Analyzer::Definition::Variant(_) -> @panic("expected Field, got Variant"),
+            Analyzer::Definition::TypeParam(_) -> @panic("expected Field, got TypeParam"),
+          },
+          Option::NONE -> @panic("defStore.get returned NONE for field defId"),
+        };
+      },
+      Analyzer::Definition::Enum(_) -> @panic("expected Record, got Enum"),
+      Analyzer::Definition::Function(_) -> @panic("expected Record, got Function"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Record, got Variable"),
+      Analyzer::Definition::Field(_) -> @panic("expected Record, got Field"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Record, got Variant"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Record, got TypeParam"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE for record defId"),
+  };
+
+  @panic("getFieldDef: unreachable after match");
+}
+
+/// Add a simple Path type annotation to the module and return its TypeId.
+function addPathType(module: &mut Ast::Module, name: str): Ast::TypeId {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create(name));
+
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: segments,
+  }));
+}
+
+/// Add a field Pattern::Binding with a type annotation to the module.
+function addAnnotatedField(
+  module: &mut Ast::Module,
+  name: str,
+  typeAnnotation: Ast::TypeId
+): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: resolverDummySpan(),
+    name: String::create(name),
+    annotation: Option::SOME(typeAnnotation),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+// ============================================================
+// Phase 1: Scaffolding + empty-module no-op
+// ============================================================
+
+/// Scenario: Empty module produces no diagnostics and stores are unchanged.
+@test
+function resolveEmptyModuleIsNoOp(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let typeStoreLengthBefore: u64 = typeStore.length();
+  let defStoreLengthBefore: u64 = defStore.length();
+
+  let output: Analyzer::Resolver::ResolverOutput = runResolver(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthBefore);
+  Test::assertEq<u64>(defStore.length(), defStoreLengthBefore);
+}
+
+// ============================================================
+// Phase 2: Primitive type resolution
+// ============================================================
+
+/// Scenario: Record with i32 and str fields — both slots resolved, TypeStore unchanged.
+@test
+function resolveResolvesPrimitiveFieldTypes(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let typeAnnotationX: Ast::TypeId = addPathType(&mut module, "i32");
+  let typeAnnotationY: Ast::TypeId = addPathType(&mut module, "str");
+
+  let fieldX: Ast::PatternId = addAnnotatedField(&mut module, "x", typeAnnotationX);
+  let fieldY: Ast::PatternId = addAnnotatedField(&mut module, "y", typeAnnotationY);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldX);
+  fields.push(fieldY);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Run pass-1 to set up defStore.
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let typeStoreLengthAfterBinder: u64 = typeStore.length();
+
+  let _output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // Primitives must not grow TypeStore.
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthAfterBinder);
+
+  let i32Id: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  let strId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::STR);
+
+  let fdX: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+  let fdY: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 1);
+
+  Test::assertEq<u32>(fdX.fieldType.raw(), i32Id.raw());
+  Test::assertEq<u32>(fdY.fieldType.raw(), strId.raw());
+  Test::assertEq<u64>(_output.diagnostics.length(), 0);
+}
+
+// ============================================================
+// Phase 3: Compound type resolution
+// ============================================================
+
+/// Scenario: Record with &str (immutable) and &mut str (mutable) reference fields.
+@test
+function resolveResolvesReferenceField(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let strTypeId: Ast::TypeId = addPathType(&mut module, "str");
+
+  let immutRefTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Reference(Ast::Type::Reference {
+    span: resolverDummySpan(),
+    mutable: false,
+    target: strTypeId,
+  }));
+
+  let mutRefTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Reference(Ast::Type::Reference {
+    span: resolverDummySpan(),
+    mutable: true,
+    target: strTypeId,
+  }));
+
+  let fieldName: Ast::PatternId = addAnnotatedField(&mut module, "name", immutRefTypeId);
+  let fieldRaw: Ast::PatternId = addAnnotatedField(&mut module, "raw", mutRefTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldName);
+  fields.push(fieldRaw);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Foo"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let typeStoreLengthAfterBinder: u64 = typeStore.length();
+
+  let _output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // TypeStore grew by 2 (one immutable Reference, one mutable Reference).
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthAfterBinder + 2);
+
+  let strId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::STR);
+  let immutRefId: Analyzer::TypeId = typeStore.reference(strId);
+  let mutRefId: Analyzer::TypeId = typeStore.mutableReference(strId);
+
+  let fdName: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+  let fdRaw: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 1);
+
+  Test::assertEq<u32>(fdName.fieldType.raw(), immutRefId.raw());
+  Test::assertEq<u32>(fdRaw.fieldType.raw(), mutRefId.raw());
+  Test::assertEq<u64>(_output.diagnostics.length(), 0);
+}
+
+/// Scenario: Record with *u8 pointer field. TypeStore grows by 1.
+/// Note: pointer mutability flag is silently dropped (TODO(pointer-mutability)).
+@test
+function resolveResolvesPointerField(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u8TypeId: Ast::TypeId = addPathType(&mut module, "u8");
+
+  let ptrTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Pointer(Ast::Type::Pointer {
+    span: resolverDummySpan(),
+    mutable: false,
+    pointee: u8TypeId,
+  }));
+
+  let fieldPtr: Ast::PatternId = addAnnotatedField(&mut module, "ptr", ptrTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldPtr);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Raw"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let typeStoreLengthAfterBinder: u64 = typeStore.length();
+
+  let _output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // TypeStore grew by 1 (Pointer(u8)).
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthAfterBinder + 1);
+
+  let u8Id: Analyzer::TypeId = typeStore.intern(Analyzer::Type::U8);
+  let ptrId: Analyzer::TypeId = typeStore.pointer(u8Id);
+
+  let fdPtr: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+
+  Test::assertEq<u32>(fdPtr.fieldType.raw(), ptrId.raw());
+  Test::assertEq<u64>(_output.diagnostics.length(), 0);
+}
+
+/// Scenario: Record with (i32, boolean) tuple field. TypeStore grows by 1.
+@test
+function resolveResolvesTupleField(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let boolTypeId: Ast::TypeId = addPathType(&mut module, "boolean");
+
+  let mut tupleElements: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  tupleElements.push(i32TypeId);
+  tupleElements.push(boolTypeId);
+
+  let tupleTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Tuple(Ast::Type::Tuple {
+    span: resolverDummySpan(),
+    elements: tupleElements,
+  }));
+
+  let fieldPair: Ast::PatternId = addAnnotatedField(&mut module, "pair", tupleTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldPair);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Container"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let typeStoreLengthAfterBinder: u64 = typeStore.length();
+
+  let _output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // TypeStore grew by 1 (Tuple([i32, boolean])).
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthAfterBinder + 1);
+
+  let i32Id: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  let boolId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::BOOLEAN);
+  let mut tupleElems: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  tupleElems.push(i32Id);
+  tupleElems.push(boolId);
+  let tupleId: Analyzer::TypeId = typeStore.tuple(tupleElems);
+
+  let fdPair: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+
+  Test::assertEq<u32>(fdPair.fieldType.raw(), tupleId.raw());
+  Test::assertEq<u64>(_output.diagnostics.length(), 0);
+}
+
+/// Scenario: Record with [i32] slice field. TypeStore grows by 1.
+@test
+function resolveResolvesSliceField(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+
+  let sliceTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Slice(Ast::Type::Slice {
+    span: resolverDummySpan(),
+    element: i32TypeId,
+  }));
+
+  let fieldItems: Ast::PatternId = addAnnotatedField(&mut module, "items", sliceTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldItems);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("SliceHolder"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let typeStoreLengthAfterBinder: u64 = typeStore.length();
+
+  let _output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // TypeStore grew by 1 (Slice(i32)).
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthAfterBinder + 1);
+
+  let i32Id: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  let sliceId: Analyzer::TypeId = typeStore.slice(i32Id);
+
+  let fdItems: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+
+  Test::assertEq<u32>(fdItems.fieldType.raw(), sliceId.raw());
+  Test::assertEq<u64>(_output.diagnostics.length(), 0);
+}
+
+/// Scenario: Record with [u8; 16] fixed-array field. TypeStore grows by 1.
+@test
+function resolveResolvesFixedArrayField(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u8TypeId: Ast::TypeId = addPathType(&mut module, "u8");
+
+  let fixedArrTypeId: Ast::TypeId = module.addType(Ast::Type::Node::FixedArray(Ast::Type::FixedArray {
+    span: resolverDummySpan(),
+    element: u8TypeId,
+    size: 16,
+  }));
+
+  let fieldBuf: Ast::PatternId = addAnnotatedField(&mut module, "buf", fixedArrTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldBuf);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Buffer"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let typeStoreLengthAfterBinder: u64 = typeStore.length();
+
+  let _output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // TypeStore grew by 1 (FixedArray(u8, 16)).
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthAfterBinder + 1);
+
+  let u8Id: Analyzer::TypeId = typeStore.intern(Analyzer::Type::U8);
+  let fixedArrId: Analyzer::TypeId = typeStore.fixedArray(u8Id, 16);
+
+  let fdBuf: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+
+  Test::assertEq<u32>(fdBuf.fieldType.raw(), fixedArrId.raw());
+  Test::assertEq<u64>(_output.diagnostics.length(), 0);
+}
+
+/// Scenario: Record with (i32) -> str function-type field. TypeStore grows by 1.
+@test
+function resolveResolvesFunctionTypeField(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let strTypeId: Ast::TypeId = addPathType(&mut module, "str");
+
+  let mut fnParams: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  fnParams.push(i32TypeId);
+
+  let fnTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Function(Ast::Type::Function {
+    span: resolverDummySpan(),
+    parameters: fnParams,
+    returnType: strTypeId,
+  }));
+
+  let fieldCb: Ast::PatternId = addAnnotatedField(&mut module, "callback", fnTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldCb);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Transformer"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let typeStoreLengthAfterBinder: u64 = typeStore.length();
+
+  let _output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // TypeStore grew by 1 (Function([i32], str)).
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthAfterBinder + 1);
+
+  let i32Id: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  let strId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::STR);
+  let mut fnParamsResolved: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fnParamsResolved.push(i32Id);
+  let fnId: Analyzer::TypeId = typeStore.functionType(fnParamsResolved, strId);
+
+  let fdCb: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+
+  Test::assertEq<u32>(fdCb.fieldType.raw(), fnId.raw());
+  Test::assertEq<u64>(_output.diagnostics.length(), 0);
+}
+
+// ============================================================
+// Phase 4: Function type-syntax resolution
+// ============================================================
+
+/// Scenario: function add(a: i32, b: i32): i32 — both params and return type resolved.
+@test
+function resolveResolvesFunctionParamsAndReturn(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32AnnotA: Ast::TypeId = addPathType(&mut module, "i32");
+  let i32AnnotB: Ast::TypeId = addPathType(&mut module, "i32");
+  let i32AnnotRet: Ast::TypeId = addPathType(&mut module, "i32");
+
+  let paramA: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: resolverDummySpan(),
+    name: String::create("a"),
+    annotation: Option::SOME(i32AnnotA),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let paramB: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: resolverDummySpan(),
+    name: String::create("b"),
+    annotation: Option::SOME(i32AnnotB),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(paramA);
+  params.push(paramB);
+
+  let bodyId: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: resolverDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let fnId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: resolverDummySpan(),
+    name: String::create("add"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32AnnotRet),
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let _output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let i32Id: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+
+  // Find the FunctionDef in pass-2 output.
+  let Option::SOME(fnDefId) = Analyzer::Binder::findDef(&pass2, fnId.raw()) else {
+    @panic("function not found in pass-2 output");
+  };
+
+  let Option::SOME(fnDef) = defStore.get(fnDefId) else {
+    @panic("defStore.get returned NONE for function");
+  };
+
+  match (fnDef) {
+    Analyzer::Definition::Function(fn_) -> {
+      // Return type resolved to i32.
+      Test::assertEq<u32>(fn_.returnType.raw(), i32Id.raw());
+
+      // Both params resolved to i32.
+      Test::assertEq<u64>(fn_.params.length(), 2);
+
+      let Option::SOME(param0Id) = fn_.params.get(0) else {
+        @panic("missing param 0");
+      };
+      let Option::SOME(param1Id) = fn_.params.get(1) else {
+        @panic("missing param 1");
+      };
+
+      let Option::SOME(p0) = defStore.get(*param0Id) else {
+        @panic("param 0 defStore miss");
+      };
+      let Option::SOME(p1) = defStore.get(*param1Id) else {
+        @panic("param 1 defStore miss");
+      };
+
+      match (p0) {
+        Analyzer::Definition::Variable(v) -> {
+          Test::assertEq<u32>(v.declaredType.raw(), i32Id.raw());
+        },
+        Analyzer::Definition::Record(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Enum(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Function(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Field(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
+        Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+      };
+
+      match (p1) {
+        Analyzer::Definition::Variable(v) -> {
+          Test::assertEq<u32>(v.declaredType.raw(), i32Id.raw());
+        },
+        Analyzer::Definition::Record(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Enum(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Function(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Field(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
+        Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+      };
+    },
+    Analyzer::Definition::Record(_) -> @panic("expected Function"),
+    Analyzer::Definition::Enum(_) -> @panic("expected Function"),
+    Analyzer::Definition::Variable(_) -> @panic("expected Function"),
+    Analyzer::Definition::Field(_) -> @panic("expected Function"),
+    Analyzer::Definition::Variant(_) -> @panic("expected Function"),
+    Analyzer::Definition::TypeParam(_) -> @panic("expected Function"),
+  };
+
+  Test::assertEq<u64>(_output.diagnostics.length(), 0);
+}
+
+/// Scenario: function with no return type annotation — VOID slot unchanged, no diagnostic.
+@test
+function resolveLeavesFunctionReturnVoidWhenAbsent(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let bodyId: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: resolverDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let fnId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: resolverDummySpan(),
+    name: String::create("doSomething"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+
+  let Option::SOME(fnDefId) = Analyzer::Binder::findDef(&pass2, fnId.raw()) else {
+    @panic("function not found in pass-2 output");
+  };
+
+  let Option::SOME(fnDef) = defStore.get(fnDefId) else {
+    @panic("defStore.get NONE");
+  };
+
+  match (fnDef) {
+    Analyzer::Definition::Function(fn_) -> {
+      // Return type must still be VOID (no annotation).
+      Test::assertEq<u32>(fn_.returnType.raw(), voidId.raw());
+    },
+    Analyzer::Definition::Record(_) -> @panic("expected Function"),
+    Analyzer::Definition::Enum(_) -> @panic("expected Function"),
+    Analyzer::Definition::Variable(_) -> @panic("expected Function"),
+    Analyzer::Definition::Field(_) -> @panic("expected Function"),
+    Analyzer::Definition::Variant(_) -> @panic("expected Function"),
+    Analyzer::Definition::TypeParam(_) -> @panic("expected Function"),
+  };
+
+  // No diagnostic for absent return type.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+// ============================================================
+// Phase 5: Constant + Enum no-op
+// ============================================================
+
+/// Scenario: let MAX: u64 = ... — constant annotation resolved to u64.
+@test
+function resolveResolvesConstantAnnotation(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u64AnnotId: Ast::TypeId = addPathType(&mut module, "u64");
+
+  // Dummy constant value expression.
+  let valueExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: resolverDummySpan(),
+    value: Ast::Expression::LiteralValue::UInt(100),
+  }));
+
+  let constId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+    span: resolverDummySpan(),
+    name: String::create("MAX"),
+    annotation: Option::SOME(u64AnnotId),
+    value: valueExpr,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let u64Id: Analyzer::TypeId = typeStore.intern(Analyzer::Type::U64);
+
+  let Option::SOME(constDefId) = Analyzer::Binder::findDef(&pass2, constId.raw()) else {
+    @panic("constant not found in pass-2 output");
+  };
+
+  let Option::SOME(constDef) = defStore.get(constDefId) else {
+    @panic("defStore.get NONE for constant");
+  };
+
+  match (constDef) {
+    Analyzer::Definition::Variable(v) -> {
+      Test::assertEq<u32>(v.declaredType.raw(), u64Id.raw());
+    },
+    Analyzer::Definition::Record(_) -> @panic("expected Variable"),
+    Analyzer::Definition::Enum(_) -> @panic("expected Variable"),
+    Analyzer::Definition::Function(_) -> @panic("expected Variable"),
+    Analyzer::Definition::Field(_) -> @panic("expected Variable"),
+    Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
+    Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+  };
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: enum Direction { NORTH, SOUTH, EAST, WEST } — no TypeStore growth for payloads.
+@test
+function resolveEnumUnitVariantsHaveNoPayloadGrowth(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let northPat: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: resolverDummySpan(),
+    name: String::create("NORTH"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let southPat: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: resolverDummySpan(),
+    name: String::create("SOUTH"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(northPat);
+  variants.push(southPat);
+
+  let _enumId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: resolverDummySpan(),
+    name: String::create("Direction"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let typeStoreLengthAfterBinder: u64 = typeStore.length();
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // Resolver must not grow TypeStore for enum unit variants.
+  Test::assertEq<u64>(typeStore.length(), typeStoreLengthAfterBinder);
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+// ============================================================
+// Phase 6: Nominal type resolution
+// ============================================================
+
+/// Scenario: Line { origin: Point } — origin field resolves to Type::Record(pointDefId).
+@test
+function resolveResolvesUserRecordByName(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Define Point record with no fields.
+  let pointId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Define Line record with origin: Point.
+  let originTypeId: Ast::TypeId = addPathType(&mut module, "Point");
+  let originField: Ast::PatternId = addAnnotatedField(&mut module, "origin", originTypeId);
+
+  let mut lineFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  lineFields.push(originField);
+
+  let lineId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Line"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: lineFields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // Find Point's DefinitionId.
+  let Option::SOME(pointDefId) = Analyzer::Binder::findDef(&pass1, pointId.raw()) else {
+    @panic("Point not found in pass-1");
+  };
+
+  let expectedTypeId: Analyzer::TypeId = typeStore.recordType(pointDefId);
+
+  let fdOrigin: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, lineId, &pass1, 0);
+
+  Test::assertEq<u32>(fdOrigin.fieldType.raw(), expectedTypeId.raw());
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: Container { tag: Direction } where Direction is an enum.
+@test
+function resolveResolvesUserEnumByName(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Define Direction enum with no variants.
+  let directionId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: resolverDummySpan(),
+    name: String::create("Direction"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Define Container with tag: Direction.
+  let tagTypeId: Ast::TypeId = addPathType(&mut module, "Direction");
+  let tagField: Ast::PatternId = addAnnotatedField(&mut module, "tag", tagTypeId);
+
+  let mut containerFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  containerFields.push(tagField);
+
+  let containerId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Container"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: containerFields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let Option::SOME(directionDefId) = Analyzer::Binder::findDef(&pass1, directionId.raw()) else {
+    @panic("Direction not found in pass-1");
+  };
+
+  let expectedTypeId: Analyzer::TypeId = typeStore.enumType(directionDefId);
+
+  let fdTag: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, containerId, &pass1, 0);
+
+  Test::assertEq<u32>(fdTag.fieldType.raw(), expectedTypeId.raw());
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+// ============================================================
+// Phase 7: Type-parameter scope
+// ============================================================
+
+/// Scenario: record Box<T> { value: T } — value field resolves to Type::Param(T sym).
+@test
+function resolveResolvesTypeParamInRecord(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = addPathType(&mut module, "T");
+  let valueField: Ast::PatternId = addAnnotatedField(&mut module, "value", tTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(valueField);
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let boxId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Box"),
+    genericParameters: genericParams,
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // The interned sym for "T".
+  let tSym: Analyzer::SymbolId = symbols.intern("T");
+  let expectedTypeId: Analyzer::TypeId = typeStore.param(tSym);
+
+  let fdValue: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, boxId, &pass1, 0);
+
+  Test::assertEq<u32>(fdValue.fieldType.raw(), expectedTypeId.raw());
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: function id<T>(x: T): T — both param and return type resolve to Type::Param(T).
+@test
+function resolveResolvesTypeParamInFunction(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tAnnotParam: Ast::TypeId = addPathType(&mut module, "T");
+  let tAnnotRet: Ast::TypeId = addPathType(&mut module, "T");
+
+  let paramX: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: resolverDummySpan(),
+    name: String::create("x"),
+    annotation: Option::SOME(tAnnotParam),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(paramX);
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let bodyId: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: resolverDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let fnId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: resolverDummySpan(),
+    name: String::create("id"),
+    genericParameters: genericParams,
+    parameters: params,
+    returnType: Option::SOME(tAnnotRet),
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let tSym: Analyzer::SymbolId = symbols.intern("T");
+  let expectedTypeId: Analyzer::TypeId = typeStore.param(tSym);
+
+  let Option::SOME(fnDefId) = Analyzer::Binder::findDef(&pass2, fnId.raw()) else {
+    @panic("function not found in pass-2 output");
+  };
+
+  let Option::SOME(fnDef) = defStore.get(fnDefId) else {
+    @panic("defStore.get NONE for function");
+  };
+
+  match (fnDef) {
+    Analyzer::Definition::Function(fn_) -> {
+      Test::assertEq<u32>(fn_.returnType.raw(), expectedTypeId.raw());
+
+      let Option::SOME(p0Id) = fn_.params.get(0) else {
+        @panic("missing param 0");
+      };
+
+      let Option::SOME(p0) = defStore.get(*p0Id) else {
+        @panic("param 0 defStore miss");
+      };
+
+      match (p0) {
+        Analyzer::Definition::Variable(v) -> {
+          Test::assertEq<u32>(v.declaredType.raw(), expectedTypeId.raw());
+        },
+        Analyzer::Definition::Record(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Enum(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Function(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Field(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
+        Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+      };
+    },
+    Analyzer::Definition::Record(_) -> @panic("expected Function"),
+    Analyzer::Definition::Enum(_) -> @panic("expected Function"),
+    Analyzer::Definition::Variable(_) -> @panic("expected Function"),
+    Analyzer::Definition::Field(_) -> @panic("expected Function"),
+    Analyzer::Definition::Variant(_) -> @panic("expected Function"),
+    Analyzer::Definition::TypeParam(_) -> @panic("expected Function"),
+  };
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: type-param T shadows global record of the same name.
+@test
+function resolveTypeParamShadowsGlobalRecord(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Top-level record named "T".
+  let _topTId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Generic record Box<T> with field value: T. The type-param "T" shadows the global "T".
+  let tTypeId: Ast::TypeId = addPathType(&mut module, "T");
+  let valueField: Ast::PatternId = addAnnotatedField(&mut module, "value", tTypeId);
+
+  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  boxFields.push(valueField);
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let boxId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Box"),
+    genericParameters: genericParams,
+    fields: boxFields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let tSym: Analyzer::SymbolId = symbols.intern("T");
+  let paramTypeId: Analyzer::TypeId = typeStore.param(tSym);
+
+  let fdValue: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, boxId, &pass1, 0);
+
+  // Must resolve to Param(T), not to the global record named T.
+  Test::assertEq<u32>(fdValue.fieldType.raw(), paramTypeId.raw());
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+// ============================================================
+// Phase 8: Generic instance resolution
+// ============================================================
+
+/// Scenario: field wrapped: Box<i32> resolves to Type::Instance(boxDefId, [i32]).
+@test
+function resolveResolvesGenericInstance(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Define Box<T> record.
+  let mut boxGenericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  boxGenericParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let boxId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Box"),
+    genericParameters: boxGenericParams,
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Define Container with wrapped: Box<i32>.
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+
+  let mut boxTypeSegments: Vector<String> = Vector::new<String>();
+  boxTypeSegments.push(String::create("Box"));
+  let boxPathTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: boxTypeSegments,
+  }));
+
+  let mut genericArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  genericArgs.push(i32TypeId);
+
+  let boxI32TypeId: Ast::TypeId = module.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+    span: resolverDummySpan(),
+    base: boxPathTypeId,
+    arguments: genericArgs,
+  }));
+
+  let wrappedField: Ast::PatternId = addAnnotatedField(&mut module, "wrapped", boxI32TypeId);
+
+  let mut containerFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  containerFields.push(wrappedField);
+
+  let containerId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Container"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: containerFields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let Option::SOME(boxDefId) = Analyzer::Binder::findDef(&pass1, boxId.raw()) else {
+    @panic("Box not found in pass-1");
+  };
+
+  let i32Id: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  let mut expectedArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  expectedArgs.push(i32Id);
+  let expectedTypeId: Analyzer::TypeId = typeStore.instance(boxDefId, expectedArgs);
+
+  let fdWrapped: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, containerId, &pass1, 0);
+
+  Test::assertEq<u32>(fdWrapped.fieldType.raw(), expectedTypeId.raw());
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+// ============================================================
+// Phase 9: In-place patching audit
+// ============================================================
+
+/// Scenario: resolveTypes stores resolved TypeId directly in defStore (not side-table).
+@test
+function resolveDoesNotUseSideTable(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32AnnotId: Ast::TypeId = addPathType(&mut module, "i32");
+  let fieldX: Ast::PatternId = addAnnotatedField(&mut module, "x", i32AnnotId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldX);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("MyRecord"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let _output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let i32Id: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+
+  // Read FieldDef directly from defStore — must reflect patched value.
+  let fdX: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+
+  Test::assertEq<u32>(fdX.fieldType.raw(), i32Id.raw());
+}
+
+// ============================================================
+// Phase 10: Diagnostics
+// ============================================================
+
+/// Scenario: field typed NotAType — exactly 1 UNDEFINED_TYPE diagnostic, slot stays VOID.
+@test
+function resolveEmitsUnknownTypeDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let unknownTypeId: Ast::TypeId = addPathType(&mut module, "NotAType");
+  let fieldX: Ast::PatternId = addAnnotatedField(&mut module, "x", unknownTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldX);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Broken"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // Exactly 1 diagnostic.
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  // Diagnostic code must be UNDEFINED_TYPE ("I0043").
+  let Option::SOME(diag) = output.diagnostics.get(0) else {
+    @panic("expected diagnostic at index 0");
+  };
+
+  let expectedCode: String = String::create(DiagnosticCode::UNDEFINED_TYPE);
+  let actualCode: String = String::create(diag.code);
+  Test::assertEq<boolean>(actualCode.equals(&expectedCode), true);
+
+  // Field slot must stay VOID.
+  let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+  let fdX: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+  Test::assertEq<u32>(fdX.fieldType.raw(), voidId.raw());
+}
+
+/// Scenario: field typed Foo::Bar (multi-segment) — 1 UNDEFINED_TYPE diagnostic.
+@test
+function resolveEmitsMultiSegmentNotSupported(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Build a two-segment path type: Foo::Bar.
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create("Foo"));
+  segments.push(String::create("Bar"));
+
+  let multiSegTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: segments,
+  }));
+
+  let fieldX: Ast::PatternId = addAnnotatedField(&mut module, "x", multiSegTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldX);
+
+  let _recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("MultiSeg"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let Option::SOME(diag) = output.diagnostics.get(0) else {
+    @panic("expected diagnostic at index 0");
+  };
+
+  let expectedCode: String = String::create(DiagnosticCode::UNDEFINED_TYPE);
+  let actualCode: String = String::create(diag.code);
+  Test::assertEq<boolean>(actualCode.equals(&expectedCode), true);
+}
+
+/// Scenario: Vector<i32, str> where Vector<T> expects 1 arg — 1 UNDEFINED_TYPE diagnostic.
+@test
+function resolveEmitsWrongArityDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Define Vector<T> (arity 1).
+  let mut vectorGenericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  vectorGenericParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let _vectorId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("MyVector"),
+    genericParameters: vectorGenericParams,
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Field typed MyVector<i32, str> (arity 2 vs expected 1).
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let strTypeId: Ast::TypeId = addPathType(&mut module, "str");
+
+  let mut baseSegments: Vector<String> = Vector::new<String>();
+  baseSegments.push(String::create("MyVector"));
+  let basePathTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: baseSegments,
+  }));
+
+  let mut genericArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  genericArgs.push(i32TypeId);
+  genericArgs.push(strTypeId);
+
+  let wrongArityTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+    span: resolverDummySpan(),
+    base: basePathTypeId,
+    arguments: genericArgs,
+  }));
+
+  let fieldV: Ast::PatternId = addAnnotatedField(&mut module, "v", wrongArityTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldV);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("WrongArity"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let Option::SOME(diag) = output.diagnostics.get(0) else {
+    @panic("expected diagnostic at index 0");
+  };
+
+  let expectedCode: String = String::create(DiagnosticCode::UNDEFINED_TYPE);
+  let actualCode: String = String::create(diag.code);
+  Test::assertEq<boolean>(actualCode.equals(&expectedCode), true);
+
+  // Slot stays VOID.
+  let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+  let fdV: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+  Test::assertEq<u32>(fdV.fieldType.raw(), voidId.raw());
+}
+
+/// Scenario: i32<str> — primitive in generic position — 1 UNDEFINED_TYPE diagnostic.
+@test
+function resolveEmitsNotGenericForPrimitive(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let strTypeId: Ast::TypeId = addPathType(&mut module, "str");
+
+  let mut baseSegments: Vector<String> = Vector::new<String>();
+  baseSegments.push(String::create("i32"));
+  let basePathTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: baseSegments,
+  }));
+
+  let mut genericArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  genericArgs.push(strTypeId);
+
+  let invalidTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+    span: resolverDummySpan(),
+    base: basePathTypeId,
+    arguments: genericArgs,
+  }));
+
+  let fieldX: Ast::PatternId = addAnnotatedField(&mut module, "x", invalidTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldX);
+
+  let _recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("PrimGeneric"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let Option::SOME(diag) = output.diagnostics.get(0) else {
+    @panic("expected diagnostic at index 0");
+  };
+
+  let expectedCode: String = String::create(DiagnosticCode::UNDEFINED_TYPE);
+  let actualCode: String = String::create(diag.code);
+  Test::assertEq<boolean>(actualCode.equals(&expectedCode), true);
+}
+
+/// Scenario: record Box<T> with field wrapped: T<i32> — type-param in generic position.
+@test
+function resolveEmitsGenericOnTypeParam(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+
+  let mut baseSegments: Vector<String> = Vector::new<String>();
+  baseSegments.push(String::create("T"));
+  let basePathTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: baseSegments,
+  }));
+
+  let mut genericArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  genericArgs.push(i32TypeId);
+
+  let invalidTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+    span: resolverDummySpan(),
+    base: basePathTypeId,
+    arguments: genericArgs,
+  }));
+
+  let wrappedField: Ast::PatternId = addAnnotatedField(&mut module, "wrapped", invalidTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(wrappedField);
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let _boxId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Box"),
+    genericParameters: genericParams,
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let Option::SOME(diag) = output.diagnostics.get(0) else {
+    @panic("expected diagnostic at index 0");
+  };
+
+  let expectedCode: String = String::create(DiagnosticCode::UNDEFINED_TYPE);
+  let actualCode: String = String::create(diag.code);
+  Test::assertEq<boolean>(actualCode.equals(&expectedCode), true);
+}
+
+// ============================================================
+// Phase 11: Cross-cutting tests
+// ============================================================
+
+/// Scenario: two runs over identical input produce identical TypeStore length and slot values.
+@test
+function resolveProducesIdenticalOutputsAcrossTwoRuns(): void {
+  // Run A.
+  let mut defStoreA: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStoreA: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbolsA: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut moduleA: Ast::Module = Ast::Module::init();
+
+  let typeAnnotA: Ast::TypeId = addPathType(&mut moduleA, "i32");
+  let fieldXA: Ast::PatternId = addAnnotatedField(&mut moduleA, "x", typeAnnotA);
+  let mut fieldsA: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fieldsA.push(fieldXA);
+
+  let recordIdA: Ast::ItemId = moduleA.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fieldsA,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1A: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &moduleA.roots,
+    &mut defStoreA,
+    &mut typeStoreA,
+    &mut symbolsA,
+    &moduleA,
+  );
+
+  let pass2A: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &moduleA.roots,
+    &mut defStoreA,
+    &mut typeStoreA,
+    &mut symbolsA,
+    &moduleA,
+    &pass1A,
+  );
+
+  let _outputA: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStoreA,
+    &mut typeStoreA,
+    &mut symbolsA,
+    &moduleA,
+    &pass1A,
+    &pass2A,
+  );
+
+  // Run B.
+  let mut defStoreB: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStoreB: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbolsB: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut moduleB: Ast::Module = Ast::Module::init();
+
+  let typeAnnotB: Ast::TypeId = addPathType(&mut moduleB, "i32");
+  let fieldXB: Ast::PatternId = addAnnotatedField(&mut moduleB, "x", typeAnnotB);
+  let mut fieldsB: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fieldsB.push(fieldXB);
+
+  let recordIdB: Ast::ItemId = moduleB.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fieldsB,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1B: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &moduleB.roots,
+    &mut defStoreB,
+    &mut typeStoreB,
+    &mut symbolsB,
+    &moduleB,
+  );
+
+  let pass2B: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &moduleB.roots,
+    &mut defStoreB,
+    &mut typeStoreB,
+    &mut symbolsB,
+    &moduleB,
+    &pass1B,
+  );
+
+  let _outputB: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStoreB,
+    &mut typeStoreB,
+    &mut symbolsB,
+    &moduleB,
+    &pass1B,
+    &pass2B,
+  );
+
+  // TypeStore lengths must be equal.
+  Test::assertEq<u64>(typeStoreA.length(), typeStoreB.length());
+
+  // Field slot TypeIds must be equal.
+  let fdA: Analyzer::FieldDef = getFieldDef(&mut defStoreA, &mut typeStoreA, &moduleA, recordIdA, &pass1A, 0);
+  let fdB: Analyzer::FieldDef = getFieldDef(&mut defStoreB, &mut typeStoreB, &moduleB, recordIdB, &pass1B, 0);
+
+  Test::assertEq<u32>(fdA.fieldType.raw(), fdB.fieldType.raw());
+}
+
+// ============================================================
+// Phase 12: Missing spec scenario coverage (W1-W4)
+// ============================================================
+
+/// Scenario: Non-VOID slot is not overwritten — idempotence proof.
+///
+/// Pre-populate a FieldDef's fieldType with the i32 TypeId before calling
+/// resolveTypes. The field annotation is also i32, so the resolved value
+/// equals the pre-set value. Assert the slot is unchanged after resolution
+/// and no diagnostic is emitted.
+@test
+function resolverDoesNotOverwriteAlreadyResolvedSlot(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeAnnot: Ast::TypeId = addPathType(&mut module, "i32");
+  let fieldPat: Ast::PatternId = addAnnotatedField(&mut module, "x", i32TypeAnnot);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldPat);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // Pre-populate the field's fieldType to i32 before calling the resolver.
+  let i32TypeId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  let fd: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+
+  let Option::SOME(pointDefId) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("Point not found in pass-1");
+  };
+
+  let Option::SOME(pointDef) = defStore.get(pointDefId) else {
+    @panic("defStore.get NONE for Point");
+  };
+
+  match (pointDef) {
+    Analyzer::Definition::Record(rec) -> {
+      let Option::SOME(fieldDefIdRef) = rec.fields.get(0) else {
+        @panic("fields.get(0) NONE");
+      };
+
+      let preSet: Analyzer::FieldDef = Analyzer::FieldDef {
+        name: fd.name,
+        fieldType: i32TypeId,
+        owner: fd.owner,
+        index: fd.index,
+      };
+
+      defStore.replace(*fieldDefIdRef, Analyzer::Definition::Field(preSet));
+    },
+    Analyzer::Definition::Enum(_) -> @panic("expected Record"),
+    Analyzer::Definition::Function(_) -> @panic("expected Record"),
+    Analyzer::Definition::Variable(_) -> @panic("expected Record"),
+    Analyzer::Definition::Field(_) -> @panic("expected Record"),
+    Analyzer::Definition::Variant(_) -> @panic("expected Record"),
+    Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+  };
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // Slot should still hold i32 — resolver resolves the annotation (i32) and
+  // writes the same value back, so the TypeId is unchanged.
+  let fdAfter: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+
+  Test::assertEq<u32>(fdAfter.fieldType.raw(), i32TypeId.raw());
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: Pair<Box<i32>, boolean> — nested concrete generic instance.
+///
+/// Asserts that the outer resolved TypeId is Instance(pairDefId, [Instance(boxDefId, [i32]), boolean])
+/// matching the spec scenario exactly.
+@test
+function resolverResolvesConcreteNestedGenericInstance(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Define Box<T>.
+  let mut boxParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  boxParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let boxId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Box"),
+    genericParameters: boxParams,
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Define Pair<A, B>.
+  let mut pairParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  pairParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("A"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+  pairParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("B"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let pairId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Pair"),
+    genericParameters: pairParams,
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Build type annotation: Pair<Box<i32>, boolean>.
+  let i32PathId: Ast::TypeId = addPathType(&mut module, "i32");
+
+  let mut boxSegments: Vector<String> = Vector::new<String>();
+  boxSegments.push(String::create("Box"));
+  let boxPathId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: boxSegments,
+  }));
+
+  let mut boxArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  boxArgs.push(i32PathId);
+  let boxI32TypeId: Ast::TypeId = module.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+    span: resolverDummySpan(),
+    base: boxPathId,
+    arguments: boxArgs,
+  }));
+
+  let booleanPathId: Ast::TypeId = addPathType(&mut module, "boolean");
+
+  let mut pairSegments: Vector<String> = Vector::new<String>();
+  pairSegments.push(String::create("Pair"));
+  let pairPathId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: pairSegments,
+  }));
+
+  let mut pairArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  pairArgs.push(boxI32TypeId);
+  pairArgs.push(booleanPathId);
+  let nestedTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+    span: resolverDummySpan(),
+    base: pairPathId,
+    arguments: pairArgs,
+  }));
+
+  // Define Container with a field typed Pair<Box<i32>, boolean>.
+  let nestedField: Ast::PatternId = addAnnotatedField(&mut module, "nested", nestedTypeId);
+  let mut containerFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  containerFields.push(nestedField);
+
+  let containerId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Container"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: containerFields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let Option::SOME(boxDefId) = Analyzer::Binder::findDef(&pass1, boxId.raw()) else {
+    @panic("Box not found in pass-1");
+  };
+
+  let Option::SOME(pairDefId) = Analyzer::Binder::findDef(&pass1, pairId.raw()) else {
+    @panic("Pair not found in pass-1");
+  };
+
+  // Build expected: Instance(pairDefId, [Instance(boxDefId, [i32]), boolean]).
+  let i32TypeId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  let booleanTypeId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::BOOLEAN);
+
+  let mut innerArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  innerArgs.push(i32TypeId);
+  let boxI32Id: Analyzer::TypeId = typeStore.instance(boxDefId, innerArgs);
+
+  let mut outerArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  outerArgs.push(boxI32Id);
+  outerArgs.push(booleanTypeId);
+  let expectedId: Analyzer::TypeId = typeStore.instance(pairDefId, outerArgs);
+
+  let fdNested: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, containerId, &pass1, 0);
+
+  Test::assertEq<u32>(fdNested.fieldType.raw(), expectedId.raw());
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: Two fields both typed Box<i32> resolve to the same TypeId.
+///
+/// Proves TypeStore structural deduplication: identical generic instances
+/// intern to the same slot rather than growing the store twice.
+@test
+function resolverCachesIdenticalGenericInstance(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Define Box<T>.
+  let mut boxParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  boxParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let boxId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Box"),
+    genericParameters: boxParams,
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Two independent Box<i32> annotations — same structure, separate AST nodes.
+  let i32AnnotA: Ast::TypeId = addPathType(&mut module, "i32");
+  let mut boxSegA: Vector<String> = Vector::new<String>();
+  boxSegA.push(String::create("Box"));
+  let boxPathA: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: boxSegA,
+  }));
+  let mut boxArgsA: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  boxArgsA.push(i32AnnotA);
+  let boxI32A: Ast::TypeId = module.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+    span: resolverDummySpan(),
+    base: boxPathA,
+    arguments: boxArgsA,
+  }));
+
+  let i32AnnotB: Ast::TypeId = addPathType(&mut module, "i32");
+  let mut boxSegB: Vector<String> = Vector::new<String>();
+  boxSegB.push(String::create("Box"));
+  let boxPathB: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: boxSegB,
+  }));
+  let mut boxArgsB: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  boxArgsB.push(i32AnnotB);
+  let boxI32B: Ast::TypeId = module.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+    span: resolverDummySpan(),
+    base: boxPathB,
+    arguments: boxArgsB,
+  }));
+
+  // Container with two fields: first: Box<i32>, second: Box<i32>.
+  let fieldFirst: Ast::PatternId = addAnnotatedField(&mut module, "first", boxI32A);
+  let fieldSecond: Ast::PatternId = addAnnotatedField(&mut module, "second", boxI32B);
+
+  let mut containerFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  containerFields.push(fieldFirst);
+  containerFields.push(fieldSecond);
+
+  let containerId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Container"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: containerFields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let fdFirst: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, containerId, &pass1, 0);
+  let fdSecond: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, containerId, &pass1, 1);
+
+  // Both fields must resolve to the SAME TypeId — TypeStore dedup proof.
+  Test::assertEq<u32>(fdFirst.fieldType.raw(), fdSecond.fieldType.raw());
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: enum Option<T> { NONE, SOME(T) } — variant payload remains deferred (ADR-R5).
+///
+/// The resolver does not resolve variant payload type annotations. After resolveTypes,
+/// the SOME variant's payload slot remains VOID (binder sentinel) and no diagnostic
+/// is emitted — deferral is intentional, not erroneous.
+@test
+function resolverEnumVariantWithPayloadTypeParamIsDeferred(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // NONE variant — unit, no payload.
+  let nonePat: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: resolverDummySpan(),
+    name: String::create("NONE"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // SOME(T) variant — Path pattern with one argument slot representing the payload.
+  let someTArg: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut someArgs: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  someArgs.push(someTArg);
+
+  let mut someSegments: Vector<String> = Vector::new<String>();
+  someSegments.push(String::create("SOME"));
+
+  let somePat: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+    span: resolverDummySpan(),
+    segments: someSegments,
+    arguments: someArgs,
+  }));
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(nonePat);
+  variants.push(somePat);
+
+  // Option<T> generic enum.
+  let mut optionParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  optionParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let optionId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: resolverDummySpan(),
+    name: String::create("Option"),
+    genericParameters: optionParams,
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // No diagnostic — deferral is intentional per ADR-R5.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  // Retrieve the Option enum's DefinitionId and find the SOME variant's DefinitionId.
+  let Option::SOME(optionDefId) = Analyzer::Binder::findDef(&pass1, optionId.raw()) else {
+    @panic("Option not found in pass-1");
+  };
+
+  let Option::SOME(optionDef) = defStore.get(optionDefId) else {
+    @panic("defStore.get NONE for Option");
+  };
+
+  match (optionDef) {
+    Analyzer::Definition::Enum(en) -> {
+      // variants[0] = NONE (unit), variants[1] = SOME (payload).
+      let Option::SOME(someDefIdRef) = en.variants.get(1) else {
+        @panic("SOME variant not found at index 1");
+      };
+
+      let Option::SOME(someDef) = defStore.get(*someDefIdRef) else {
+        @panic("defStore.get NONE for SOME variant");
+      };
+
+      match (someDef) {
+        Analyzer::Definition::Variant(v) -> {
+          // Payload slot must remain VOID — resolver defers variant payloads (ADR-R5).
+          let Option::SOME(payloadId) = v.payload.get(0) else {
+            @panic("SOME variant payload is empty — expected one VOID sentinel");
+          };
+
+          let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+
+          Test::assertEq<u32>(payloadId.raw(), voidId.raw());
+        },
+        Analyzer::Definition::Record(_) -> @panic("expected Variant, got Record"),
+        Analyzer::Definition::Enum(_) -> @panic("expected Variant, got Enum"),
+        Analyzer::Definition::Function(_) -> @panic("expected Variant, got Function"),
+        Analyzer::Definition::Variable(_) -> @panic("expected Variant, got Variable"),
+        Analyzer::Definition::Field(_) -> @panic("expected Variant, got Field"),
+        Analyzer::Definition::TypeParam(_) -> @panic("expected Variant, got TypeParam"),
+      };
+    },
+    Analyzer::Definition::Record(_) -> @panic("expected Enum, got Record"),
+    Analyzer::Definition::Function(_) -> @panic("expected Enum, got Function"),
+    Analyzer::Definition::Variable(_) -> @panic("expected Enum, got Variable"),
+    Analyzer::Definition::Field(_) -> @panic("expected Enum, got Field"),
+    Analyzer::Definition::Variant(_) -> @panic("expected Enum, got Variant"),
+    Analyzer::Definition::TypeParam(_) -> @panic("expected Enum, got TypeParam"),
+  };
+}
+
+/// Scenario: Wrapper<T> with field inner: Box<T> resolves to Type::Instance(boxDefId, [Param(T)]).
+@test
+function resolveResolvesWrapperGenericWithTypeParam(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Define Box<T>.
+  let mut boxGenericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  boxGenericParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let boxId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Box"),
+    genericParameters: boxGenericParams,
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Define Wrapper<T> with field inner: Box<T>.
+  let tTypeId: Ast::TypeId = addPathType(&mut module, "T");
+
+  let mut boxTypeSegments: Vector<String> = Vector::new<String>();
+  boxTypeSegments.push(String::create("Box"));
+  let boxPathTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: boxTypeSegments,
+  }));
+
+  let mut boxArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  boxArgs.push(tTypeId);
+
+  let boxTTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+    span: resolverDummySpan(),
+    base: boxPathTypeId,
+    arguments: boxArgs,
+  }));
+
+  let innerField: Ast::PatternId = addAnnotatedField(&mut module, "inner", boxTTypeId);
+
+  let mut wrapperFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  wrapperFields.push(innerField);
+
+  let mut wrapperGenericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  wrapperGenericParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let wrapperId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Wrapper"),
+    genericParameters: wrapperGenericParams,
+    fields: wrapperFields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let Option::SOME(boxDefId) = Analyzer::Binder::findDef(&pass1, boxId.raw()) else {
+    @panic("Box not found in pass-1");
+  };
+
+  let tSym: Analyzer::SymbolId = symbols.intern("T");
+  let tParamId: Analyzer::TypeId = typeStore.param(tSym);
+
+  let mut expectedArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  expectedArgs.push(tParamId);
+  let expectedTypeId: Analyzer::TypeId = typeStore.instance(boxDefId, expectedArgs);
+
+  let fdInner: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, wrapperId, &pass1, 0);
+
+  Test::assertEq<u32>(fdInner.fieldType.raw(), expectedTypeId.raw());
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
