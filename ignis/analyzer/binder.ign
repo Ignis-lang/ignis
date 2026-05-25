@@ -180,6 +180,50 @@ export namespace Analyzer {
       return defsRef.push(Analyzer::Definition::Enum(placeholder));
     }
 
+    /// Allocate a placeholder `Definition::TypeAlias` for pass-1.
+    ///
+    /// Both `aliasedType` and `typeId` are set to the VOID sentinel.
+    /// Pass-2 fills `typeId` with `Type::Alias(defId)`; resolver fills `aliasedType`.
+    function allocateTypeAliasPlaceholder(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      sym: Analyzer::SymbolId,
+    ): Analyzer::DefinitionId {
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
+      let placeholder: Analyzer::TypeAliasDef = Analyzer::TypeAliasDef {
+        name: sym,
+        visibility: Analyzer::Visibility::PUBLIC,
+        typeParams: Vector::new<Analyzer::DefinitionId>(),
+        aliasedType: sentinelId,
+        typeId: sentinelId,
+      };
+      return defsRef.push(Analyzer::Definition::TypeAlias(placeholder));
+    }
+
+    /// Allocate a placeholder `Definition::Trait` for pass-1.
+    ///
+    /// All vectors are empty; `typeId` is the VOID sentinel (ADR-C6 — no `Type::Trait`).
+    function allocateTraitPlaceholder(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      sym: Analyzer::SymbolId,
+    ): Analyzer::DefinitionId {
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
+      let placeholder: Analyzer::TraitDef = Analyzer::TraitDef {
+        name: sym,
+        visibility: Analyzer::Visibility::PUBLIC,
+        typeParams: Vector::new<Analyzer::DefinitionId>(),
+        methods: Vector::new<Analyzer::DefinitionId>(),
+        assocTypes: Vector::new<Analyzer::DefinitionId>(),
+        typeId: sentinelId,
+      };
+      return defsRef.push(Analyzer::Definition::Trait(placeholder));
+    }
+
     /// Core predeclaration helper for a named type declaration (Record, Enum,
     /// TypeAlias, Trait).
     ///
@@ -187,9 +231,8 @@ export namespace Analyzer {
     /// allocates a placeholder definition and records the mapping. On duplicate,
     /// emits a diagnostic and skips allocation.
     ///
-    /// `isEnum` distinguishes Enum from all other type declaration kinds;
-    /// non-Enum kinds (Record, TypeAlias, Trait, Namespace) use the Record
-    /// placeholder per ADR-2/design §2.
+    /// `isEnum` distinguishes Enum from Record; TypeAlias and Trait use their own
+    /// dedicated placeholder allocators (see `allocateTypeAliasPlaceholder` / `allocateTraitPlaceholder`).
     function predeclareTypeDecl(
       state: &mut Analyzer::Binder::BinderState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -264,13 +307,50 @@ export namespace Analyzer {
             predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &e.name, e.span, scopeKey, true);
           },
           Ast::Item::Node::TypeAlias(a) -> {
-            // TODO pass-2: real TypeAlias variant. Using Record placeholder per ADR-2.
-            predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &a.name, a.span, scopeKey, false);
+            let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+            let sym: Analyzer::SymbolId = symbolsRef.intern(a.name.toStr());
+            let duplicateOpt: Option<SourceSpan> = findDuplicateSpan(state, scopeKey, sym);
+            if (let Option::SOME(_) = duplicateOpt) {
+              let message: String = String::create("duplicate top-level type name: ").concat(a.name.toStr());
+              let mut diag: Diagnostic = Diagnostic::new(
+                Severity::ERROR,
+                DiagnosticCode::TYPE_ALREADY_DEFINED,
+                message.toStr(),
+                a.span,
+              );
+              diag.addLabel(LabelKind::PRIMARY, a.span, "second declaration here");
+              let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+              stateRef.diagnostics.push(diag);
+            } else {
+              let defId: Analyzer::DefinitionId = allocateTypeAliasPlaceholder(defStore, typeStore, sym);
+              let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+              stateRef.nodeIds.push(itemId.raw());
+              stateRef.defIds.push(defId);
+              recordScopeEntry(state, scopeKey, sym, a.span);
+            }
           },
           Ast::Item::Node::Trait(t) -> {
-            // TODO pass-2: real Trait variant. Using Record placeholder per ADR-2.
-            // Known divergence from Rust binder: Ignis selfhost lacks a Definition::Trait variant.
-            predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &t.name, t.span, scopeKey, false);
+            let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+            let sym: Analyzer::SymbolId = symbolsRef.intern(t.name.toStr());
+            let duplicateOpt: Option<SourceSpan> = findDuplicateSpan(state, scopeKey, sym);
+            if (let Option::SOME(_) = duplicateOpt) {
+              let message: String = String::create("duplicate top-level type name: ").concat(t.name.toStr());
+              let mut diag: Diagnostic = Diagnostic::new(
+                Severity::ERROR,
+                DiagnosticCode::TYPE_ALREADY_DEFINED,
+                message.toStr(),
+                t.span,
+              );
+              diag.addLabel(LabelKind::PRIMARY, t.span, "second declaration here");
+              let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+              stateRef.diagnostics.push(diag);
+            } else {
+              let defId: Analyzer::DefinitionId = allocateTraitPlaceholder(defStore, typeStore, sym);
+              let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+              stateRef.nodeIds.push(itemId.raw());
+              stateRef.defIds.push(defId);
+              recordScopeEntry(state, scopeKey, sym, t.span);
+            }
           },
           Ast::Item::Node::Namespace(ns) -> {
             // Allocate a placeholder for the namespace node itself (spec §namespace-recursion).
@@ -699,6 +779,8 @@ export namespace Analyzer {
         Analyzer::Definition::Field(_) -> false,
         Analyzer::Definition::Variant(_) -> false,
         Analyzer::Definition::TypeParam(_) -> false,
+        Analyzer::Definition::TypeAlias(_) -> false,
+        Analyzer::Definition::Trait(_) -> false,
       };
 
       if (!isRecord) {
@@ -759,6 +841,8 @@ export namespace Analyzer {
         Analyzer::Definition::Field(_) -> false,
         Analyzer::Definition::Variant(_) -> false,
         Analyzer::Definition::TypeParam(_) -> false,
+        Analyzer::Definition::TypeAlias(_) -> false,
+        Analyzer::Definition::Trait(_) -> false,
       };
 
       if (!isEnum) {
@@ -789,6 +873,10 @@ export namespace Analyzer {
     /// Binds type parameters only. Alias body resolution is deferred to the
     /// resolver/typecheck phase. The placeholder typeId advances from VOID to
     /// `Type::Record(defId)` so downstream phases see a non-VOID entry.
+    /// Complete a TypeAlias definition (pass-2).
+    ///
+    /// Binds type parameters. Leaves `aliasedType` as VOID (resolver fills it via
+    /// `resolveTypeAliasBody`). Sets `typeId` to `Type::Alias(defId)` (ADR-C7).
     function completeTypeAlias(
       state: &mut Analyzer::Binder::BinderState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -803,37 +891,59 @@ export namespace Analyzer {
         return;
       };
 
-      // Read placeholder name before allocating sub-defs to scope the immutable borrow.
       let defOpt: Option<&Analyzer::Definition> = defStore.get(defId);
       let Option::SOME(existing) = defOpt else {
         return;
       };
 
-      let placeholderName: Analyzer::SymbolId = existing.name();
+      match (existing) {
+        Analyzer::Definition::TypeAlias(old) -> {
+          let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &alias.genericParameters, defId);
 
-      // Allocate type params (immutable borrow on defStore released above).
-      let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &alias.genericParameters, defId);
+          let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+          let realTypeId: Analyzer::TypeId = typesRef.aliasType(defId);
 
-      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
-      let realTypeId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::Record(defId));
-
-      // TypeAlias fields are empty (no fields — it is a stand-in Record placeholder).
-      let newRec: Analyzer::RecordDef = Analyzer::RecordDef {
-        name: placeholderName,
-        visibility: Analyzer::Visibility::PUBLIC,
-        typeParams: typeParams,
-        fields: Vector::new<Analyzer::DefinitionId>(),
-        typeId: realTypeId,
+          let updated: Analyzer::TypeAliasDef = Analyzer::TypeAliasDef {
+            name: old.name,
+            visibility: old.visibility,
+            typeParams: typeParams,
+            aliasedType: old.aliasedType,
+            typeId: realTypeId,
+          };
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.replace(defId, Analyzer::Definition::TypeAlias(updated));
+        },
+        Analyzer::Definition::Record(_) -> {
+          @panic("completeTypeAlias: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::Enum(_) -> {
+          @panic("completeTypeAlias: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::Function(_) -> {
+          @panic("completeTypeAlias: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::Variable(_) -> {
+          @panic("completeTypeAlias: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::Field(_) -> {
+          @panic("completeTypeAlias: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::Variant(_) -> {
+          @panic("completeTypeAlias: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          @panic("completeTypeAlias: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::Trait(_) -> {
+          @panic("completeTypeAlias: invariant broken — expected TypeAlias at defId");
+        },
       };
-      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
-      defsRef.replace(defId, Analyzer::Definition::Record(newRec));
     }
 
-    /// Complete a Trait placeholder (pass-1 Record stand-in).
+    /// Complete a Trait definition (pass-2).
     ///
-    /// Binds type parameters only. Trait methods are deferred per ADR-5 — a follow-up
-    /// slice introduces `RecordDef.methods` and the recursion. The placeholder typeId
-    /// advances to `Type::Record(defId)`.
+    /// Binds type parameters. `methods` and `assocTypes` remain empty (ADR-5 carry-forward).
+    /// `typeId` stays VOID — no `Type::Trait` variant in this slice (ADR-C6).
     function completeTrait(
       state: &mut Analyzer::Binder::BinderState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -853,22 +963,46 @@ export namespace Analyzer {
         return;
       };
 
-      let placeholderName: Analyzer::SymbolId = existing.name();
+      match (existing) {
+        Analyzer::Definition::Trait(old) -> {
+          let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &trait_.genericParameters, defId);
 
-      let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &trait_.genericParameters, defId);
-
-      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
-      let realTypeId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::Record(defId));
-
-      let newRec: Analyzer::RecordDef = Analyzer::RecordDef {
-        name: placeholderName,
-        visibility: Analyzer::Visibility::PUBLIC,
-        typeParams: typeParams,
-        fields: Vector::new<Analyzer::DefinitionId>(),
-        typeId: realTypeId,
+          let updated: Analyzer::TraitDef = Analyzer::TraitDef {
+            name: old.name,
+            visibility: old.visibility,
+            typeParams: typeParams,
+            methods: Vector::new<Analyzer::DefinitionId>(),
+            assocTypes: Vector::new<Analyzer::DefinitionId>(),
+            typeId: old.typeId,
+          };
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.replace(defId, Analyzer::Definition::Trait(updated));
+        },
+        Analyzer::Definition::Record(_) -> {
+          @panic("completeTrait: invariant broken — expected Trait at defId");
+        },
+        Analyzer::Definition::Enum(_) -> {
+          @panic("completeTrait: invariant broken — expected Trait at defId");
+        },
+        Analyzer::Definition::Function(_) -> {
+          @panic("completeTrait: invariant broken — expected Trait at defId");
+        },
+        Analyzer::Definition::Variable(_) -> {
+          @panic("completeTrait: invariant broken — expected Trait at defId");
+        },
+        Analyzer::Definition::Field(_) -> {
+          @panic("completeTrait: invariant broken — expected Trait at defId");
+        },
+        Analyzer::Definition::Variant(_) -> {
+          @panic("completeTrait: invariant broken — expected Trait at defId");
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          @panic("completeTrait: invariant broken — expected Trait at defId");
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          @panic("completeTrait: invariant broken — expected Trait at defId");
+        },
       };
-      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
-      defsRef.replace(defId, Analyzer::Definition::Record(newRec));
 
       // TODO(methods-binder): walk trait_.methods to bind trait method stubs. Deferred ADR-5.
     }

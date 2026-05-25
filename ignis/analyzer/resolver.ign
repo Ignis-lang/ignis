@@ -249,6 +249,46 @@ export namespace Analyzer {
       return Analyzer::Binder::findDef(pass2, rawId);
     }
 
+    /// Return true if `defId` resolves to a `Definition::Trait` in `defStore`.
+    function isTraitDef(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): boolean {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return false;
+      };
+
+      match (def) {
+        Analyzer::Definition::Trait(_) -> {
+          return true;
+        },
+        Analyzer::Definition::Record(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Enum(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Function(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Variable(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Field(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Variant(_) -> {
+          return false;
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          return false;
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          return false;
+        },
+      };
+    }
+
     /// Map a `DefinitionId` known to be a Record or Enum to the corresponding
     /// `Type::Record(defId)` or `Type::Enum(defId)` interned in TypeStore.
     function nominalTypeFor(
@@ -284,6 +324,15 @@ export namespace Analyzer {
         Analyzer::Definition::TypeParam(_) -> {
           @panic("nominalTypeFor: TypeParam in global index — invariant broken");
         },
+        Analyzer::Definition::TypeAlias(_) -> {
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.aliasType(defId);
+        },
+        Analyzer::Definition::Trait(_) -> {
+          // Trait used in type position: return VOID; caller emits the diagnostic.
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.intern(Analyzer::Type::VOID);
+        },
       };
     }
 
@@ -314,6 +363,12 @@ export namespace Analyzer {
         },
         Analyzer::Definition::TypeParam(_) -> {
           return 0;
+        },
+        Analyzer::Definition::TypeAlias(alias) -> {
+          return alias.typeParams.length();
+        },
+        Analyzer::Definition::Trait(trait_) -> {
+          return trait_.typeParams.length();
         },
       };
     }
@@ -414,6 +469,8 @@ export namespace Analyzer {
         Analyzer::Definition::Variable(_) -> {},
         Analyzer::Definition::Variant(_) -> {},
         Analyzer::Definition::TypeParam(_) -> {},
+        Analyzer::Definition::TypeAlias(_) -> {},
+        Analyzer::Definition::Trait(_) -> {},
       };
     }
 
@@ -444,6 +501,8 @@ export namespace Analyzer {
         Analyzer::Definition::Field(_) -> {},
         Analyzer::Definition::Variant(_) -> {},
         Analyzer::Definition::TypeParam(_) -> {},
+        Analyzer::Definition::TypeAlias(_) -> {},
+        Analyzer::Definition::Trait(_) -> {},
       };
     }
 
@@ -475,6 +534,8 @@ export namespace Analyzer {
         Analyzer::Definition::Field(_) -> {},
         Analyzer::Definition::Variant(_) -> {},
         Analyzer::Definition::TypeParam(_) -> {},
+        Analyzer::Definition::TypeAlias(_) -> {},
+        Analyzer::Definition::Trait(_) -> {},
       };
     }
 
@@ -526,6 +587,12 @@ export namespace Analyzer {
         Analyzer::Definition::TypeParam(_) -> {
           return Vector::new<Analyzer::DefinitionId>();
         },
+        Analyzer::Definition::TypeAlias(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Trait(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
       };
     }
 
@@ -571,6 +638,12 @@ export namespace Analyzer {
           return Vector::new<Analyzer::DefinitionId>();
         },
         Analyzer::Definition::TypeParam(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Trait(_) -> {
           return Vector::new<Analyzer::DefinitionId>();
         },
       };
@@ -640,6 +713,14 @@ export namespace Analyzer {
       let globalOpt: Option<Analyzer::DefinitionId> = globalLookup(state, sym);
 
       if (let Option::SOME(defId) = globalOpt) {
+        // Trait names are not valid in type position.
+        if (isTraitDef(defStore, defId)) {
+          let message: String = String::create("trait `").concat(nameStr.toStr()).concat("` cannot be used in type position");
+          emitUndefinedType(state, p.span, message.toStr());
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.intern(Analyzer::Type::VOID);
+        }
+
         return nominalTypeFor(defStore, typeStore, defId);
       }
 
@@ -676,9 +757,11 @@ export namespace Analyzer {
           return resolvePath(state, defStore, typeStore, symbols, module, scope, &p);
         },
         Ast::Type::Node::Pointer(p) -> {
-          // TODO(pointer-mutability): p.mutable is silently dropped.
           let inner: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, scope, p.pointee);
           let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          if (p.mutable) {
+            return tsRef.mutablePointer(inner);
+          }
           return tsRef.pointer(inner);
         },
         Ast::Type::Node::Reference(r) -> {
@@ -991,6 +1074,73 @@ export namespace Analyzer {
       }
     }
 
+    /// Resolve the alias body of a TypeAlias item and patch `TypeAliasDef.aliasedType`.
+    ///
+    /// Looks up the DefinitionId from pass-1/pass-2 output, resolves `a.value`
+    /// via `resolveTypeNode` (with the alias's own type-param scope), then
+    /// reconstructs the `TypeAliasDef` with `aliasedType` filled and replaces it.
+    function resolveTypeAliasBody(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      a: &Ast::Item::TypeAlias,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = lookupDef(pass1, pass2, itemId.raw());
+      let Option::SOME(defId) = defIdOpt else {
+        return;
+      };
+
+      let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &a.genericParameters);
+      let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, a.value);
+
+      let Option::SOME(existing) = defStore.get(defId) else {
+        return;
+      };
+
+      match (existing) {
+        Analyzer::Definition::TypeAlias(old) -> {
+          let updated: Analyzer::TypeAliasDef = Analyzer::TypeAliasDef {
+            name: old.name,
+            visibility: old.visibility,
+            typeParams: old.typeParams,
+            aliasedType: resolved,
+            typeId: old.typeId,
+          };
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.replace(defId, Analyzer::Definition::TypeAlias(updated));
+        },
+        Analyzer::Definition::Record(_) -> {
+          @panic("resolveTypeAliasBody: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::Enum(_) -> {
+          @panic("resolveTypeAliasBody: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::Function(_) -> {
+          @panic("resolveTypeAliasBody: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::Variable(_) -> {
+          @panic("resolveTypeAliasBody: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::Field(_) -> {
+          @panic("resolveTypeAliasBody: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::Variant(_) -> {
+          @panic("resolveTypeAliasBody: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          @panic("resolveTypeAliasBody: invariant broken — expected TypeAlias at defId");
+        },
+        Analyzer::Definition::Trait(_) -> {
+          @panic("resolveTypeAliasBody: invariant broken — expected TypeAlias at defId");
+        },
+      };
+    }
+
     // =========================================================================
     // Top-level walk — buildGlobalNameIndex, resolveItem, resolveTypes.
     // =========================================================================
@@ -1035,6 +1185,16 @@ export namespace Analyzer {
           Analyzer::Definition::Field(_) -> {},
           Analyzer::Definition::Variant(_) -> {},
           Analyzer::Definition::TypeParam(_) -> {},
+          Analyzer::Definition::TypeAlias(alias) -> {
+            let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+            stateRef.globalNameSyms.push(alias.name);
+            stateRef.globalNameDefs.push(*defId);
+          },
+          Analyzer::Definition::Trait(trait_) -> {
+            let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+            stateRef.globalNameSyms.push(trait_.name);
+            stateRef.globalNameDefs.push(*defId);
+          },
         };
 
         index += 1;
@@ -1089,7 +1249,9 @@ export namespace Analyzer {
             resolveItem(state, defStore, typeStore, symbols, module, pass1, pass2, innerItemId);
           }
         },
-        Ast::Item::Node::TypeAlias(_) -> {},
+        Ast::Item::Node::TypeAlias(a) -> {
+          resolveTypeAliasBody(state, defStore, typeStore, symbols, module, pass1, pass2, itemId, &a);
+        },
         Ast::Item::Node::Trait(_) -> {},
         Ast::Item::Node::Import(_) -> {},
         Ast::Item::Node::Extern(_) -> {},

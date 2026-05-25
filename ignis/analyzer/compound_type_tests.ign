@@ -12,8 +12,8 @@ import Analyzer from "@compiler::analyzer";
 function probeEqOnPayloadVariant(): void {
   let idZero: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
 
-  let pointer1: Analyzer::Type = Analyzer::Type::Pointer(idZero);
-  let pointer2: Analyzer::Type = Analyzer::Type::Pointer(idZero);
+  let pointer1: Analyzer::Type = Analyzer::Type::Pointer(Analyzer::PointerType { pointee: idZero, mutable: false });
+  let pointer2: Analyzer::Type = Analyzer::Type::Pointer(Analyzer::PointerType { pointee: idZero, mutable: false });
   let reference1: Analyzer::Type = Analyzer::Type::Reference(Analyzer::ReferenceType { referent: idZero, mutable: false });
 
   Test::assert(pointer1.equals(&pointer2));
@@ -166,7 +166,7 @@ function equalsDistinguishesPointerFromReference(): void {
   let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
 
-  let ptrType: Analyzer::Type = Analyzer::Type::Pointer(idI32);
+  let ptrType: Analyzer::Type = Analyzer::Type::Pointer(Analyzer::PointerType { pointee: idI32, mutable: false });
   let refType: Analyzer::Type = Analyzer::Type::Reference(Analyzer::ReferenceType { referent: idI32, mutable: false });
 
   Test::assert(!ptrType.equals(&refType));
@@ -1282,4 +1282,64 @@ function nameOfResolvedRecursesIntoCompounds(): void {
   let refId: Analyzer::TypeId = store.reference(instId);
 
   Test::assertEq<str>(store.nameOfResolved(refId, &defs, &syms).toStr(), "&Vector<i32>");
+}
+
+// Phase 1A — RED tests: PointerType mutability (tasks 1.1-1.5)
+
+@test
+function pointerDifferentMutabilityInternsDistinct(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let immutable: Analyzer::TypeId = store.pointer(idI32);
+  let mutable_: Analyzer::TypeId = store.mutablePointer(idI32);
+
+  Test::assert(immutable.raw() != mutable_.raw());
+}
+
+@test
+function pointerEqualMutabilityCaches(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let first: Analyzer::TypeId = store.mutablePointer(idI32);
+  let second: Analyzer::TypeId = store.mutablePointer(idI32);
+
+  Test::assertEq<u32>(first.raw(), second.raw());
+}
+
+@test
+function pointerNameImmutable(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let ptrId: Analyzer::TypeId = store.pointer(idI32);
+
+  Test::assertEq<str>(store.nameOf(ptrId).toStr(), "*i32");
+}
+
+@test
+function pointerNameMutable(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let ptrId: Analyzer::TypeId = store.mutablePointer(idI32);
+
+  Test::assertEq<str>(store.nameOf(ptrId).toStr(), "*mut i32");
+}
+
+@test
+function pointerEqualsRejectsMutabilityMismatch(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let immutable: Analyzer::TypeId = store.pointer(idI32);
+  let mutable_: Analyzer::TypeId = store.mutablePointer(idI32);
+
+  let Option::SOME(immutableType) = store.get(immutable) else {
+    @panic("expected type to exist");
+  };
+  let Option::SOME(mutableType) = store.get(mutable_) else {
+    @panic("expected type to exist");
+  };
+
+  Test::assert(!immutableType.equals(mutableType));
 }

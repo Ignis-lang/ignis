@@ -99,6 +99,29 @@ export namespace Analyzer {
     public typeId: Analyzer::TypeId;
   }
 
+  /// Payload wrapper for the `Definition::TypeAlias` variant.
+  /// `aliasedType` is filled by the resolver pass; VOID sentinel until then.
+  /// `typeId` is interned as `Type::Alias(defId)` by binder pass-2.
+  record TypeAliasDef {
+    public name: Analyzer::SymbolId;
+    public visibility: Analyzer::Visibility;
+    public typeParams: Vector<Analyzer::DefinitionId>;
+    public aliasedType: Analyzer::TypeId;
+    public typeId: Analyzer::TypeId;
+  }
+
+  /// Payload wrapper for the `Definition::Trait` variant.
+  /// `methods` and `assocTypes` remain empty in this slice (ADR-5 carry-forward).
+  /// `typeId` stays VOID — no `Type::Trait` variant in this slice (ADR-C6).
+  record TraitDef {
+    public name: Analyzer::SymbolId;
+    public visibility: Analyzer::Visibility;
+    public typeParams: Vector<Analyzer::DefinitionId>;
+    public methods: Vector<Analyzer::DefinitionId>;
+    public assocTypes: Vector<Analyzer::DefinitionId>;
+    public typeId: Analyzer::TypeId;
+  }
+
   /// A named declaration in the analyzer's definition store.
   /// Each variant wraps a `*Def` record that carries the declaration's full payload.
   /// Method `name()` is exhaustive — no wildcard arm — so adding a future
@@ -111,9 +134,11 @@ export namespace Analyzer {
     Field(Analyzer::FieldDef),
     Variant(Analyzer::VariantDef),
     TypeParam(Analyzer::TypeParamDef),
+    TypeAlias(Analyzer::TypeAliasDef),
+    Trait(Analyzer::TraitDef),
 
     /// Returns the interned symbol for this definition's declared name.
-    /// Exhaustive across all seven variants — no wildcard arm.
+    /// Exhaustive across all nine variants — no wildcard arm.
     public name(&self): Analyzer::SymbolId {
       return match (self) {
         Analyzer::Definition::Function(wrapper)   -> wrapper.name,
@@ -123,6 +148,8 @@ export namespace Analyzer {
         Analyzer::Definition::Field(wrapper)      -> wrapper.name,
         Analyzer::Definition::Variant(wrapper)    -> wrapper.name,
         Analyzer::Definition::TypeParam(wrapper)  -> wrapper.name,
+        Analyzer::Definition::TypeAlias(wrapper)  -> wrapper.name,
+        Analyzer::Definition::Trait(wrapper)      -> wrapper.name,
       };
     }
   }

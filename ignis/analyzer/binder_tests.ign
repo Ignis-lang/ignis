@@ -663,6 +663,8 @@ function binderReplaceRoundTrip(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Record, got Field"),
       Analyzer::Definition::Variant(_) -> @panic("expected Record, got Variant"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Record, got TypeParam"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Record, got TypeAlias"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Record, got Trait"),
     },
     Option::NONE -> @panic("expected defStore.get to return SOME after replace"),
   };
@@ -773,6 +775,8 @@ function binderCompleteRecordZeroFields(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Record"),
       Analyzer::Definition::Variant(_) -> @panic("expected Record"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Record"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Record"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };
@@ -870,6 +874,8 @@ function binderCompleteRecordWithFields(): void {
             Analyzer::Definition::Variable(_) -> @panic("expected Field"),
             Analyzer::Definition::Variant(_) -> @panic("expected Field"),
             Analyzer::Definition::TypeParam(_) -> @panic("expected Field"),
+            Analyzer::Definition::TypeAlias(_) -> @panic("expected Field"),
+            Analyzer::Definition::Trait(_) -> @panic("expected Field"),
           },
           Option::NONE -> @panic("field 0 not found"),
         };
@@ -891,6 +897,8 @@ function binderCompleteRecordWithFields(): void {
             Analyzer::Definition::Variable(_) -> @panic("expected Field"),
             Analyzer::Definition::Variant(_) -> @panic("expected Field"),
             Analyzer::Definition::TypeParam(_) -> @panic("expected Field"),
+            Analyzer::Definition::TypeAlias(_) -> @panic("expected Field"),
+            Analyzer::Definition::Trait(_) -> @panic("expected Field"),
           },
           Option::NONE -> @panic("field 1 not found"),
         };
@@ -901,6 +909,8 @@ function binderCompleteRecordWithFields(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Record"),
       Analyzer::Definition::Variant(_) -> @panic("expected Record"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Record"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Record"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };
@@ -969,6 +979,8 @@ function binderCompleteEnumZeroVariants(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Enum"),
       Analyzer::Definition::Variant(_) -> @panic("expected Enum"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Enum"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Enum"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };
@@ -1076,6 +1088,8 @@ function binderCompleteEnumMixedVariants(): void {
             Analyzer::Definition::Variable(_) -> @panic("expected Variant"),
             Analyzer::Definition::Field(_) -> @panic("expected Variant"),
             Analyzer::Definition::TypeParam(_) -> @panic("expected Variant"),
+            Analyzer::Definition::TypeAlias(_) -> @panic("expected Variant"),
+            Analyzer::Definition::Trait(_) -> @panic("expected Variant"),
           },
           Option::NONE -> @panic("variant 0 not found"),
         };
@@ -1106,6 +1120,8 @@ function binderCompleteEnumMixedVariants(): void {
             Analyzer::Definition::Variable(_) -> @panic("expected Variant"),
             Analyzer::Definition::Field(_) -> @panic("expected Variant"),
             Analyzer::Definition::TypeParam(_) -> @panic("expected Variant"),
+            Analyzer::Definition::TypeAlias(_) -> @panic("expected Variant"),
+            Analyzer::Definition::Trait(_) -> @panic("expected Variant"),
           },
           Option::NONE -> @panic("variant 1 not found"),
         };
@@ -1116,6 +1132,8 @@ function binderCompleteEnumMixedVariants(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Enum"),
       Analyzer::Definition::Variant(_) -> @panic("expected Enum"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Enum"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Enum"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };
@@ -1203,6 +1221,8 @@ function binderCompleteRecordWithTypeParam(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Record"),
       Analyzer::Definition::Variant(_) -> @panic("expected Record"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Record"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Record"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };
@@ -1262,7 +1282,7 @@ function binderCompleteTypeAliasWithTypeParam(): void {
     &pass1,
   );
 
-  // TypeAlias grows TypeStore by 1 (Type::Record(defId)) and defStore by 1 (TypeParamDef).
+  // TypeAlias grows TypeStore by 1 (Type::Alias(defId)) and defStore by 1 (TypeParamDef).
   Test::assertEq<u64>(typeStore.length(), typeStoreLengthBefore + 1);
   Test::assertEq<u64>(defStore.length(), defStoreAfterPass1 + 1);
 
@@ -1272,15 +1292,113 @@ function binderCompleteTypeAliasWithTypeParam(): void {
 
   match (defStore.get(defIdFound)) {
     Option::SOME(def) -> match (def) {
-      Analyzer::Definition::Record(rec) -> {
-        Test::assertEq<u64>(rec.typeParams.length(), 1);
+      Analyzer::Definition::TypeAlias(a) -> {
+        Test::assertEq<u64>(a.typeParams.length(), 1);
       },
-      Analyzer::Definition::Enum(_) -> @panic("expected Record (alias stand-in)"),
-      Analyzer::Definition::Function(_) -> @panic("expected Record"),
-      Analyzer::Definition::Variable(_) -> @panic("expected Record"),
-      Analyzer::Definition::Field(_) -> @panic("expected Record"),
-      Analyzer::Definition::Variant(_) -> @panic("expected Record"),
-      Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+      Analyzer::Definition::Record(_) -> @panic("expected TypeAlias, got Record"),
+      Analyzer::Definition::Enum(_) -> @panic("expected TypeAlias, got Enum"),
+      Analyzer::Definition::Function(_) -> @panic("expected TypeAlias, got Function"),
+      Analyzer::Definition::Variable(_) -> @panic("expected TypeAlias, got Variable"),
+      Analyzer::Definition::Field(_) -> @panic("expected TypeAlias, got Field"),
+      Analyzer::Definition::Variant(_) -> @panic("expected TypeAlias, got Variant"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected TypeAlias, got TypeParam"),
+      Analyzer::Definition::Trait(_) -> @panic("expected TypeAlias, got Trait"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+}
+
+/// Scenario 6 — Generic Trait type-param sub-defs.
+/// Given `trait Container<T> { }`, after binder pass-2 TraitDef.typeParams has length 1
+/// and the sub-def at that slot is a Definition::TypeParam named "T".
+/// Methods and assocTypes remain empty (ADR-5 carry-forward).
+@test
+function binderCompleteTraitWithTypeParam(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let typeStoreLengthBefore: u64 = typeStore.length();
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(Ast::GenericParam {
+    span: dummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let traitId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Trait(Ast::Item::Trait {
+    span: dummySpan(),
+    name: String::create("Container"),
+    genericParameters: genericParams,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let defStoreAfterPass1: u64 = defStore.length();
+
+  let _pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // pass-2 adds 1 TypeParam sub-def; TypeStore grows by 1 (Type::Alias for the trait).
+  Test::assertEq<u64>(defStore.length(), defStoreAfterPass1 + 1);
+
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, traitId.raw()) else {
+    @panic("trait not found in pass-1 output");
+  };
+
+  match (defStore.get(defIdFound)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Trait(t) -> {
+        Test::assertEq<u64>(t.typeParams.length(), 1);
+        Test::assertEq<u64>(t.methods.length(), 0);
+        Test::assertEq<u64>(t.assocTypes.length(), 0);
+
+        let Option::SOME(typeParamDefId) = t.typeParams.get(0) else {
+          @panic("typeParams.get(0) returned NONE");
+        };
+
+        match (defStore.get(*typeParamDefId)) {
+          Option::SOME(paramDef) -> match (paramDef) {
+            Analyzer::Definition::TypeParam(tp) -> {
+              let expectedSym: Analyzer::SymbolId = symbols.intern("T");
+              Test::assertEq<u32>(tp.name.raw(), expectedSym.raw());
+            },
+            Analyzer::Definition::Record(_) -> @panic("expected TypeParam, got Record"),
+            Analyzer::Definition::Enum(_) -> @panic("expected TypeParam, got Enum"),
+            Analyzer::Definition::Function(_) -> @panic("expected TypeParam, got Function"),
+            Analyzer::Definition::Variable(_) -> @panic("expected TypeParam, got Variable"),
+            Analyzer::Definition::Field(_) -> @panic("expected TypeParam, got Field"),
+            Analyzer::Definition::Variant(_) -> @panic("expected TypeParam, got Variant"),
+            Analyzer::Definition::TypeAlias(_) -> @panic("expected TypeParam, got TypeAlias"),
+            Analyzer::Definition::Trait(_) -> @panic("expected TypeParam, got Trait"),
+          },
+          Option::NONE -> @panic("defStore.get returned NONE for typeParam defId"),
+        };
+      },
+      Analyzer::Definition::Record(_) -> @panic("expected Trait, got Record"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Trait, got Enum"),
+      Analyzer::Definition::Function(_) -> @panic("expected Trait, got Function"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Trait, got Variable"),
+      Analyzer::Definition::Field(_) -> @panic("expected Trait, got Field"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Trait, got Variant"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Trait, got TypeParam"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Trait, got TypeAlias"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };
@@ -1397,6 +1515,8 @@ function binderBindFunctionTwoParams(): void {
             Analyzer::Definition::Field(_) -> @panic("expected Variable"),
             Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
             Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+            Analyzer::Definition::TypeAlias(_) -> @panic("expected Variable"),
+            Analyzer::Definition::Trait(_) -> @panic("expected Variable"),
           },
           Option::NONE -> @panic("param 0 not found"),
         };
@@ -1407,6 +1527,8 @@ function binderBindFunctionTwoParams(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Function"),
       Analyzer::Definition::Variant(_) -> @panic("expected Function"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Function"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Function"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Function"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };
@@ -1482,6 +1604,8 @@ function binderBindFunctionWithTypeParams(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Function"),
       Analyzer::Definition::Variant(_) -> @panic("expected Function"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Function"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Function"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Function"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };
@@ -1566,6 +1690,8 @@ function binderBindConstant(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Variable"),
       Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Variable"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Variable"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };
@@ -1714,6 +1840,8 @@ function binderCompleteExportUnwrap(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Variable"),
       Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Variable"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Variable"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };
@@ -1791,6 +1919,8 @@ function binderDuplicateFieldName(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Record"),
       Analyzer::Definition::Variant(_) -> @panic("expected Record"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Record"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Record"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };
@@ -1866,6 +1996,8 @@ function binderDuplicateVariantName(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Enum"),
       Analyzer::Definition::Variant(_) -> @panic("expected Enum"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Enum"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Enum"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };
@@ -1951,6 +2083,8 @@ function binderDuplicateParamName(): void {
       Analyzer::Definition::Field(_) -> @panic("expected Function"),
       Analyzer::Definition::Variant(_) -> @panic("expected Function"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Function"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Function"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Function"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
   };

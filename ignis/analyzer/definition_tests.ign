@@ -805,3 +805,130 @@ function definitionLengthAfterMixedVariants(): void {
 
   Test::assertEq<u64>(store.length(), 6);
 }
+
+// Phase 2A RED tests: TypeAliasDef and TraitDef round-trips (tasks 2.1–2.4)
+
+@test
+function typeAliasDefRoundTrip(): void {
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let nameSym: Analyzer::SymbolId = syms.intern("MyInt");
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let defId: Analyzer::DefinitionId = store.push(Analyzer::Definition::TypeAlias(Analyzer::TypeAliasDef {
+    name: nameSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    aliasedType: voidId,
+    typeId: voidId,
+  }));
+
+  match (store.get(defId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::TypeAlias(alias) -> {
+        Test::assertEq<u32>(alias.name.raw(), nameSym.raw());
+        Test::assertEq<u64>(alias.typeParams.length(), 0);
+        Test::assertEq<u32>(alias.aliasedType.raw(), voidId.raw());
+        Test::assertEq<u32>(alias.typeId.raw(), voidId.raw());
+      },
+      Analyzer::Definition::Record(_) -> @panic("expected TypeAlias"),
+      Analyzer::Definition::Enum(_) -> @panic("expected TypeAlias"),
+      Analyzer::Definition::Function(_) -> @panic("expected TypeAlias"),
+      Analyzer::Definition::Variable(_) -> @panic("expected TypeAlias"),
+      Analyzer::Definition::Field(_) -> @panic("expected TypeAlias"),
+      Analyzer::Definition::Variant(_) -> @panic("expected TypeAlias"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected TypeAlias"),
+      Analyzer::Definition::Trait(_) -> @panic("expected TypeAlias"),
+    },
+    Option::NONE -> @panic("expected Some after push"),
+  };
+}
+
+@test
+function traitDefRoundTrip(): void {
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let nameSym: Analyzer::SymbolId = syms.intern("Display");
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let defId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Trait(Analyzer::TraitDef {
+    name: nameSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    methods: Vector::new<Analyzer::DefinitionId>(),
+    assocTypes: Vector::new<Analyzer::DefinitionId>(),
+    typeId: voidId,
+  }));
+
+  match (store.get(defId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Trait(trait_) -> {
+        Test::assertEq<u32>(trait_.name.raw(), nameSym.raw());
+        Test::assertEq<u64>(trait_.typeParams.length(), 0);
+        Test::assertEq<u64>(trait_.methods.length(), 0);
+        Test::assertEq<u64>(trait_.assocTypes.length(), 0);
+        Test::assertEq<u32>(trait_.typeId.raw(), voidId.raw());
+      },
+      Analyzer::Definition::Record(_) -> @panic("expected Trait"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Trait"),
+      Analyzer::Definition::Function(_) -> @panic("expected Trait"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Trait"),
+      Analyzer::Definition::Field(_) -> @panic("expected Trait"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Trait"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Trait"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Trait"),
+    },
+    Option::NONE -> @panic("expected Some after push"),
+  };
+}
+
+@test
+function definitionNameCoversTypeAlias(): void {
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let nameSym: Analyzer::SymbolId = syms.intern("Alias");
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let defId: Analyzer::DefinitionId = store.push(Analyzer::Definition::TypeAlias(Analyzer::TypeAliasDef {
+    name: nameSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    aliasedType: voidId,
+    typeId: voidId,
+  }));
+
+  let Option::SOME(def) = store.get(defId) else {
+    @panic("expected def");
+  };
+
+  Test::assertEq<u32>(def.name().raw(), nameSym.raw());
+}
+
+@test
+function definitionNameCoversTrait(): void {
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let nameSym: Analyzer::SymbolId = syms.intern("MyTrait");
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let defId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Trait(Analyzer::TraitDef {
+    name: nameSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    methods: Vector::new<Analyzer::DefinitionId>(),
+    assocTypes: Vector::new<Analyzer::DefinitionId>(),
+    typeId: voidId,
+  }));
+
+  let Option::SOME(def) = store.get(defId) else {
+    @panic("expected def");
+  };
+
+  Test::assertEq<u32>(def.name().raw(), nameSym.raw());
+}

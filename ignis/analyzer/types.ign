@@ -21,6 +21,13 @@ export namespace Analyzer {
     public returnType: Analyzer::TypeId;
   }
 
+  /// Wrapper record for the Pointer variant payload.
+  /// Holds the pointee type id and a `mutable` flag distinguishing `*T` from `*mut T`.
+  record PointerType {
+    public pointee: Analyzer::TypeId;
+    public mutable: boolean;
+  }
+
   /// Wrapper record for the Reference variant payload.
   /// Holds the referent type id and a `mutable` flag distinguishing `&T` from `&mut T`.
   record ReferenceType {
@@ -58,7 +65,7 @@ export namespace Analyzer {
     VOID,
     NEVER,
 
-    Pointer(Analyzer::TypeId),
+    Pointer(Analyzer::PointerType),
     Reference(Analyzer::ReferenceType),
     Slice(Analyzer::TypeId),
     FixedArray(Analyzer::TypeId, u64),
@@ -77,6 +84,11 @@ export namespace Analyzer {
     /// `Monomorphizer::run` completes.
     Instance(Analyzer::InstanceType),
 
+    /// Nominal type alias, identified by its `DefinitionId`. The resolver fills
+    /// `TypeAliasDef.aliasedType`; typecheck makes aliases transparent by
+    /// following the `aliasedType` chain.
+    Alias(Analyzer::DefinitionId),
+
     public name(&self): str {
       return match (self) {
         Analyzer::Type::I8 -> "i8",
@@ -94,7 +106,7 @@ export namespace Analyzer {
         Analyzer::Type::STR -> "str",
         Analyzer::Type::VOID -> "void",
         Analyzer::Type::NEVER -> "never",
-        Analyzer::Type::Pointer(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
+        Analyzer::Type::Pointer(p) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::Reference(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::Slice(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::FixedArray(_, _) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
@@ -104,6 +116,7 @@ export namespace Analyzer {
         Analyzer::Type::Enum(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::Param(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
         Analyzer::Type::Instance(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
+        Analyzer::Type::Alias(_) -> @panic("Analyzer::Type::name called on compound variant; use TypeStore::nameOf"),
       };
     }
 
@@ -140,6 +153,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::I16 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -167,6 +181,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::I32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -194,6 +209,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::I64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -221,6 +237,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::U8 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -248,6 +265,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::U16 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -275,6 +293,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::U32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -302,6 +321,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::U64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -329,6 +349,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::F32 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -356,6 +377,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::F64 -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -383,6 +405,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::BOOLEAN -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -410,6 +433,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::CHAR -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -437,6 +461,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::STR -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -464,6 +489,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::VOID -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -491,6 +517,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::NEVER -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -518,6 +545,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::Pointer(p) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -535,7 +563,7 @@ export namespace Analyzer {
           Analyzer::Type::STR -> false,
           Analyzer::Type::VOID -> false,
           Analyzer::Type::NEVER -> false,
-          Analyzer::Type::Pointer(q) -> p.equals(&q),
+          Analyzer::Type::Pointer(q) -> p.pointee.raw() == q.pointee.raw() && p.mutable == q.mutable,
           Analyzer::Type::Reference(_) -> false,
           Analyzer::Type::Slice(_) -> false,
           Analyzer::Type::FixedArray(_, _) -> false,
@@ -545,6 +573,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::Reference(r) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -572,6 +601,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::Slice(e) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -599,6 +629,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::FixedArray(e, n) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -626,6 +657,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::Tuple(a) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -653,6 +685,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::Function(f) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -680,6 +713,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::Record(defId) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -707,6 +741,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::Enum(defId) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -734,6 +769,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(otherDefId) -> defId.raw() == otherDefId.raw(),
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::Param(s1) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -761,6 +797,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(s2) -> s1.equals(&s2),
           Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(_) -> false,
         },
         Analyzer::Type::Instance(i1) -> match (other) {
           Analyzer::Type::I8 -> false,
@@ -788,6 +825,35 @@ export namespace Analyzer {
           Analyzer::Type::Enum(_) -> false,
           Analyzer::Type::Param(_) -> false,
           Analyzer::Type::Instance(i2) -> i1.definition.raw() == i2.definition.raw() && Analyzer::Type::typeIdVectorsEqual(&i1.typeArguments, &i2.typeArguments),
+          Analyzer::Type::Alias(_) -> false,
+        },
+        Analyzer::Type::Alias(a1) -> match (other) {
+          Analyzer::Type::I8 -> false,
+          Analyzer::Type::I16 -> false,
+          Analyzer::Type::I32 -> false,
+          Analyzer::Type::I64 -> false,
+          Analyzer::Type::U8 -> false,
+          Analyzer::Type::U16 -> false,
+          Analyzer::Type::U32 -> false,
+          Analyzer::Type::U64 -> false,
+          Analyzer::Type::F32 -> false,
+          Analyzer::Type::F64 -> false,
+          Analyzer::Type::BOOLEAN -> false,
+          Analyzer::Type::CHAR -> false,
+          Analyzer::Type::STR -> false,
+          Analyzer::Type::VOID -> false,
+          Analyzer::Type::NEVER -> false,
+          Analyzer::Type::Pointer(_) -> false,
+          Analyzer::Type::Reference(_) -> false,
+          Analyzer::Type::Slice(_) -> false,
+          Analyzer::Type::FixedArray(_, _) -> false,
+          Analyzer::Type::Tuple(_) -> false,
+          Analyzer::Type::Function(_) -> false,
+          Analyzer::Type::Record(_) -> false,
+          Analyzer::Type::Enum(_) -> false,
+          Analyzer::Type::Param(_) -> false,
+          Analyzer::Type::Instance(_) -> false,
+          Analyzer::Type::Alias(a2) -> a1.raw() == a2.raw(),
         },
       };
     }
@@ -905,7 +971,7 @@ export namespace Analyzer {
         Analyzer::Type::STR -> self.primStr,
         Analyzer::Type::VOID -> self.primVoid,
         Analyzer::Type::NEVER -> self.primNever,
-        Analyzer::Type::Pointer(p) -> self.internCompound(Analyzer::Type::Pointer(p)),
+        Analyzer::Type::Pointer(p) -> self.internCompound(Analyzer::Type::Pointer(p)),  // dedup by PointerType.equals (pointee + mutable)
         Analyzer::Type::Reference(r) -> self.internCompound(Analyzer::Type::Reference(r)),
         Analyzer::Type::Slice(e) -> self.internCompound(Analyzer::Type::Slice(e)),
         Analyzer::Type::FixedArray(e, n) -> self.internCompound(Analyzer::Type::FixedArray(e, n)),
@@ -915,6 +981,7 @@ export namespace Analyzer {
         Analyzer::Type::Enum(defId) -> self.internCompound(Analyzer::Type::Enum(defId)),
         Analyzer::Type::Param(symbol) -> self.internCompound(Analyzer::Type::Param(symbol)),
         Analyzer::Type::Instance(instance) -> self.internCompound(Analyzer::Type::Instance(instance)),
+        Analyzer::Type::Alias(defId) -> self.internCompound(Analyzer::Type::Alias(defId)),
       };
     }
 
@@ -943,9 +1010,14 @@ export namespace Analyzer {
       return self.types.push(kind);
     }
 
-    /// Returns the canonical id for a pointer-to-`pointee` type.
+    /// Returns the canonical id for an immutable pointer-to-`pointee` type (`*T`).
     public pointer(&mut self, pointee: Analyzer::TypeId): Analyzer::TypeId {
-      return self.intern(Analyzer::Type::Pointer(pointee));
+      return self.intern(Analyzer::Type::Pointer(Analyzer::PointerType { pointee: pointee, mutable: false }));
+    }
+
+    /// Returns the canonical id for a mutable pointer-to-`pointee` type (`*mut T`).
+    public mutablePointer(&mut self, pointee: Analyzer::TypeId): Analyzer::TypeId {
+      return self.intern(Analyzer::Type::Pointer(Analyzer::PointerType { pointee: pointee, mutable: true }));
     }
 
     /// Returns the canonical id for an immutable reference to `referent` (&T).
@@ -995,6 +1067,13 @@ export namespace Analyzer {
     /// Named `enumType` because `enum` is a reserved keyword in Ignis.
     public enumType(&mut self, defId: Analyzer::DefinitionId): Analyzer::TypeId {
       return self.intern(Analyzer::Type::Enum(defId));
+    }
+
+    /// Returns the canonical id for a type alias identified by `defId`.
+    /// The alias is structurally distinct from `Record(defId)` and `Enum(defId)`
+    /// even when the same defId is used (different variant tag).
+    public aliasType(&mut self, defId: Analyzer::DefinitionId): Analyzer::TypeId {
+      return self.intern(Analyzer::Type::Alias(defId));
     }
 
     /// Returns the canonical id for an unresolved generic parameter identified by `name`.
@@ -1048,6 +1127,16 @@ export namespace Analyzer {
       }
 
       return result.concat(")");
+    }
+
+    /// Formats a pointer type as "*T" when immutable, "*mut T" when mutable.
+    /// Recurses through nameOf for the pointee name.
+    private pointerNameOf(&self, ptrType: &Analyzer::PointerType): String {
+      if (ptrType.mutable) {
+        return String::create("*mut ").concat(self.nameOf(ptrType.pointee).toStr());
+      }
+
+      return String::create("*").concat(self.nameOf(ptrType.pointee).toStr());
     }
 
     /// Formats a reference type as "&T" when immutable, "&mut T" when mutable.
@@ -1114,7 +1203,7 @@ export namespace Analyzer {
           Analyzer::Type::STR -> String::create(type_.name()),
           Analyzer::Type::VOID -> String::create(type_.name()),
           Analyzer::Type::NEVER -> String::create(type_.name()),
-          Analyzer::Type::Pointer(pointee) -> String::create("*").concat(self.nameOf(pointee).toStr()),
+          Analyzer::Type::Pointer(p) -> self.pointerNameOf(&p),
           Analyzer::Type::Reference(refType) -> self.referenceNameOf(&refType),
           Analyzer::Type::Slice(element) -> self.nameOf(element).concat("[]"),
           Analyzer::Type::FixedArray(element, length) -> self.nameOf(element).concat("[").concat(String::create(length).toStr()).concat("]"),
@@ -1124,6 +1213,7 @@ export namespace Analyzer {
           Analyzer::Type::Enum(defId) -> String::create("<enum:DefId(").concat(String::create(defId.raw()).toStr()).concat(")>"),
           Analyzer::Type::Param(symbol) -> String::create("<param:Symbol(").concat(String::create(symbol.raw()).toStr()).concat(")>"),
           Analyzer::Type::Instance(instance) -> self.instanceNameOf(&instance),
+          Analyzer::Type::Alias(defId) -> String::create("<alias:DefId(").concat(String::create(defId.raw()).toStr()).concat(")>"),
         };
       }
 
@@ -1247,6 +1337,23 @@ export namespace Analyzer {
       }
 
       return result.concat(")");
+    }
+
+    /// Formats a pointer type as "*T" or "*mut T", using `nameOfResolved`
+    /// for the pointee to produce real nominal names.
+    private pointerNameOfResolved(
+      &self,
+      ptrType: &Analyzer::PointerType,
+      defs: &Analyzer::DefinitionStore,
+      syms: &Analyzer::SymbolTable,
+    ): String {
+      if (ptrType.mutable) {
+        return String::create("*mut ")
+          .concat(self.nameOfResolved(ptrType.pointee, defs, syms).toStr());
+      }
+
+      return String::create("*")
+        .concat(self.nameOfResolved(ptrType.pointee, defs, syms).toStr());
     }
 
     /// Formats a reference type as "&T" or "&mut T", using `nameOfResolved`
@@ -1396,8 +1503,7 @@ export namespace Analyzer {
           Analyzer::Type::STR -> String::create(type_.name()),
           Analyzer::Type::VOID -> String::create(type_.name()),
           Analyzer::Type::NEVER -> String::create(type_.name()),
-          Analyzer::Type::Pointer(pointee) -> String::create("*")
-            .concat(self.nameOfResolved(pointee, defs, syms).toStr()),
+          Analyzer::Type::Pointer(p) -> self.pointerNameOfResolved(&p, defs, syms),
           Analyzer::Type::Reference(refType) -> self.referenceNameOfResolved(&refType, defs, syms),
           Analyzer::Type::Slice(element) -> self.nameOfResolved(element, defs, syms).concat("[]"),
           Analyzer::Type::FixedArray(element, length) -> self.nameOfResolved(element, defs, syms)
@@ -1415,6 +1521,7 @@ export namespace Analyzer {
               .concat(")>"),
           },
           Analyzer::Type::Instance(inst) -> self.instanceNameOfResolved(&inst, defs, syms),
+          Analyzer::Type::Alias(defId) -> String::create("<alias:DefId(").concat(String::create(defId.raw()).toStr()).concat(")>"),
         };
       }
 

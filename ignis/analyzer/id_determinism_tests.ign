@@ -309,3 +309,121 @@ function combinedTypeAndDefinitionStoreReplayIsByteForByteStable(): void {
 
   assertIdVectorsEqual(&mergedA, &mergedB);
 }
+
+/// Scenario: push one Record, one Enum, one Function, one TypeAlias, one Trait in order.
+/// Two independent runs over the same sequence must produce byte-equal DefinitionId values.
+/// Task 2.13 — determinism gate for new variants.
+@test
+function definitionStoreTypeAliasAndTraitIdsAreDeterministic(): void {
+  let mut tableA: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let recSymA: Analyzer::SymbolId = tableA.intern("MyRecord");
+  let enumSymA: Analyzer::SymbolId = tableA.intern("MyEnum");
+  let funcSymA: Analyzer::SymbolId = tableA.intern("myFunc");
+  let aliasSymA: Analyzer::SymbolId = tableA.intern("MyAlias");
+  let traitSymA: Analyzer::SymbolId = tableA.intern("MyTrait");
+
+  let mut typesA: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidA: Analyzer::TypeId = typesA.intern(Analyzer::Type::VOID);
+  let stubA: Analyzer::TypeId = typesA.intern(Analyzer::Type::I32);
+
+  let mut defsA: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut idsA: Vector<u32> = Vector::new<u32>();
+
+  idsA.push(defsA.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: recSymA,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: stubA,
+  })).raw());
+
+  idsA.push(defsA.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
+    name: enumSymA,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    variants: Vector::new<Analyzer::DefinitionId>(),
+    typeId: stubA,
+  })).raw());
+
+  idsA.push(defsA.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: funcSymA,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidA,
+  })).raw());
+
+  idsA.push(defsA.push(Analyzer::Definition::TypeAlias(Analyzer::TypeAliasDef {
+    name: aliasSymA,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    aliasedType: voidA,
+    typeId: voidA,
+  })).raw());
+
+  idsA.push(defsA.push(Analyzer::Definition::Trait(Analyzer::TraitDef {
+    name: traitSymA,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    methods: Vector::new<Analyzer::DefinitionId>(),
+    assocTypes: Vector::new<Analyzer::DefinitionId>(),
+    typeId: voidA,
+  })).raw());
+
+  let mut tableB: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let recSymB: Analyzer::SymbolId = tableB.intern("MyRecord");
+  let enumSymB: Analyzer::SymbolId = tableB.intern("MyEnum");
+  let funcSymB: Analyzer::SymbolId = tableB.intern("myFunc");
+  let aliasSymB: Analyzer::SymbolId = tableB.intern("MyAlias");
+  let traitSymB: Analyzer::SymbolId = tableB.intern("MyTrait");
+
+  let mut typesB: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidB: Analyzer::TypeId = typesB.intern(Analyzer::Type::VOID);
+  let stubB: Analyzer::TypeId = typesB.intern(Analyzer::Type::I32);
+
+  let mut defsB: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut idsB: Vector<u32> = Vector::new<u32>();
+
+  idsB.push(defsB.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: recSymB,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    typeId: stubB,
+  })).raw());
+
+  idsB.push(defsB.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
+    name: enumSymB,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    variants: Vector::new<Analyzer::DefinitionId>(),
+    typeId: stubB,
+  })).raw());
+
+  idsB.push(defsB.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: funcSymB,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidB,
+  })).raw());
+
+  idsB.push(defsB.push(Analyzer::Definition::TypeAlias(Analyzer::TypeAliasDef {
+    name: aliasSymB,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    aliasedType: voidB,
+    typeId: voidB,
+  })).raw());
+
+  idsB.push(defsB.push(Analyzer::Definition::Trait(Analyzer::TraitDef {
+    name: traitSymB,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    methods: Vector::new<Analyzer::DefinitionId>(),
+    assocTypes: Vector::new<Analyzer::DefinitionId>(),
+    typeId: voidB,
+  })).raw());
+
+  assertIdVectorsEqual(&idsA, &idsB);
+}

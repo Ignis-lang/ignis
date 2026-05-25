@@ -83,6 +83,8 @@ function getFieldDef(
             Analyzer::Definition::Variable(_) -> @panic("expected Field, got Variable"),
             Analyzer::Definition::Variant(_) -> @panic("expected Field, got Variant"),
             Analyzer::Definition::TypeParam(_) -> @panic("expected Field, got TypeParam"),
+            Analyzer::Definition::TypeAlias(_) -> @panic("expected Field, got TypeAlias"),
+            Analyzer::Definition::Trait(_) -> @panic("expected Field, got Trait"),
           },
           Option::NONE -> @panic("defStore.get returned NONE for field defId"),
         };
@@ -93,6 +95,8 @@ function getFieldDef(
       Analyzer::Definition::Field(_) -> @panic("expected Record, got Field"),
       Analyzer::Definition::Variant(_) -> @panic("expected Record, got Variant"),
       Analyzer::Definition::TypeParam(_) -> @panic("expected Record, got TypeParam"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Record, got TypeAlias"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Record, got Trait"),
     },
     Option::NONE -> @panic("defStore.get returned NONE for record defId"),
   };
@@ -313,8 +317,7 @@ function resolveResolvesReferenceField(): void {
   Test::assertEq<u64>(_output.diagnostics.length(), 0);
 }
 
-/// Scenario: Record with *u8 pointer field. TypeStore grows by 1.
-/// Note: pointer mutability flag is silently dropped (TODO(pointer-mutability)).
+/// Scenario: Record with *u8 (immutable) pointer field. TypeStore grows by 1.
 @test
 function resolveResolvesPointerField(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
@@ -797,6 +800,8 @@ function resolveResolvesFunctionParamsAndReturn(): void {
         Analyzer::Definition::Field(_) -> @panic("expected Variable"),
         Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
         Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+        Analyzer::Definition::TypeAlias(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Trait(_) -> @panic("expected Variable"),
       };
 
       match (p1) {
@@ -809,6 +814,8 @@ function resolveResolvesFunctionParamsAndReturn(): void {
         Analyzer::Definition::Field(_) -> @panic("expected Variable"),
         Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
         Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+        Analyzer::Definition::TypeAlias(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Trait(_) -> @panic("expected Variable"),
       };
     },
     Analyzer::Definition::Record(_) -> @panic("expected Function"),
@@ -817,6 +824,8 @@ function resolveResolvesFunctionParamsAndReturn(): void {
     Analyzer::Definition::Field(_) -> @panic("expected Function"),
     Analyzer::Definition::Variant(_) -> @panic("expected Function"),
     Analyzer::Definition::TypeParam(_) -> @panic("expected Function"),
+    Analyzer::Definition::TypeAlias(_) -> @panic("expected Function"),
+    Analyzer::Definition::Trait(_) -> @panic("expected Function"),
   };
 
   Test::assertEq<u64>(_output.diagnostics.length(), 0);
@@ -893,6 +902,8 @@ function resolveLeavesFunctionReturnVoidWhenAbsent(): void {
     Analyzer::Definition::Field(_) -> @panic("expected Function"),
     Analyzer::Definition::Variant(_) -> @panic("expected Function"),
     Analyzer::Definition::TypeParam(_) -> @panic("expected Function"),
+    Analyzer::Definition::TypeAlias(_) -> @panic("expected Function"),
+    Analyzer::Definition::Trait(_) -> @panic("expected Function"),
   };
 
   // No diagnostic for absent return type.
@@ -973,6 +984,8 @@ function resolveResolvesConstantAnnotation(): void {
     Analyzer::Definition::Field(_) -> @panic("expected Variable"),
     Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
     Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+    Analyzer::Definition::TypeAlias(_) -> @panic("expected Variable"),
+    Analyzer::Definition::Trait(_) -> @panic("expected Variable"),
   };
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
@@ -1368,6 +1381,8 @@ function resolveResolvesTypeParamInFunction(): void {
         Analyzer::Definition::Field(_) -> @panic("expected Variable"),
         Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
         Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+        Analyzer::Definition::TypeAlias(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Trait(_) -> @panic("expected Variable"),
       };
     },
     Analyzer::Definition::Record(_) -> @panic("expected Function"),
@@ -1376,6 +1391,8 @@ function resolveResolvesTypeParamInFunction(): void {
     Analyzer::Definition::Field(_) -> @panic("expected Function"),
     Analyzer::Definition::Variant(_) -> @panic("expected Function"),
     Analyzer::Definition::TypeParam(_) -> @panic("expected Function"),
+    Analyzer::Definition::TypeAlias(_) -> @panic("expected Function"),
+    Analyzer::Definition::Trait(_) -> @panic("expected Function"),
   };
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
@@ -2216,6 +2233,8 @@ function resolverDoesNotOverwriteAlreadyResolvedSlot(): void {
     Analyzer::Definition::Field(_) -> @panic("expected Record"),
     Analyzer::Definition::Variant(_) -> @panic("expected Record"),
     Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+    Analyzer::Definition::TypeAlias(_) -> @panic("expected Record"),
+    Analyzer::Definition::Trait(_) -> @panic("expected Record"),
   };
 
   let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
@@ -2625,6 +2644,8 @@ function resolverEnumVariantWithPayloadTypeParamIsDeferred(): void {
         Analyzer::Definition::Variable(_) -> @panic("expected Variant, got Variable"),
         Analyzer::Definition::Field(_) -> @panic("expected Variant, got Field"),
         Analyzer::Definition::TypeParam(_) -> @panic("expected Variant, got TypeParam"),
+        Analyzer::Definition::TypeAlias(_) -> @panic("expected Variant, got TypeAlias"),
+        Analyzer::Definition::Trait(_) -> @panic("expected Variant, got Trait"),
       };
     },
     Analyzer::Definition::Record(_) -> @panic("expected Enum, got Record"),
@@ -2633,6 +2654,8 @@ function resolverEnumVariantWithPayloadTypeParamIsDeferred(): void {
     Analyzer::Definition::Field(_) -> @panic("expected Enum, got Field"),
     Analyzer::Definition::Variant(_) -> @panic("expected Enum, got Variant"),
     Analyzer::Definition::TypeParam(_) -> @panic("expected Enum, got TypeParam"),
+    Analyzer::Definition::TypeAlias(_) -> @panic("expected Enum, got TypeAlias"),
+    Analyzer::Definition::Trait(_) -> @panic("expected Enum, got Trait"),
   };
 }
 
@@ -2741,5 +2764,388 @@ function resolveResolvesWrapperGenericWithTypeParam(): void {
   let fdInner: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, wrapperId, &pass1, 0);
 
   Test::assertEq<u32>(fdInner.fieldType.raw(), expectedTypeId.raw());
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+// ============================================================
+// Phase 2A RED tests — TypeAlias body resolution and Trait diagnostics
+// ============================================================
+
+/// Scenario: `type MyInt = i32;` — after resolver, TypeAliasDef.aliasedType == i32TypeId.
+/// Task 2.9.
+@test
+function resolveResolvesTypeAliasBody(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32AnnId: Ast::TypeId = addPathType(&mut module, "i32");
+
+  let aliasId: Ast::ItemId = module.addRootItem(Ast::Item::Node::TypeAlias(Ast::Item::TypeAlias {
+    span: resolverDummySpan(),
+    name: String::create("MyInt"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    value: i32AnnId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let Option::SOME(defId) = Analyzer::Binder::findDef(&pass1, aliasId.raw()) else {
+    @panic("alias not found in pass-1 output");
+  };
+
+  let Option::SOME(def) = defStore.get(defId) else {
+    @panic("defStore.get returned NONE for alias defId");
+  };
+
+  let i32Id: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+
+  match (def) {
+    Analyzer::Definition::TypeAlias(a) -> {
+      // aliasedType must be resolved to i32, not VOID sentinel.
+      Test::assertEq<boolean>(a.aliasedType.raw() == voidId.raw(), false);
+      Test::assertEq<u32>(a.aliasedType.raw(), i32Id.raw());
+    },
+    Analyzer::Definition::Record(_) -> @panic("expected TypeAlias, got Record"),
+    Analyzer::Definition::Enum(_) -> @panic("expected TypeAlias, got Enum"),
+    Analyzer::Definition::Function(_) -> @panic("expected TypeAlias, got Function"),
+    Analyzer::Definition::Variable(_) -> @panic("expected TypeAlias, got Variable"),
+    Analyzer::Definition::Field(_) -> @panic("expected TypeAlias, got Field"),
+    Analyzer::Definition::Variant(_) -> @panic("expected TypeAlias, got Variant"),
+    Analyzer::Definition::TypeParam(_) -> @panic("expected TypeAlias, got TypeParam"),
+    Analyzer::Definition::Trait(_) -> @panic("expected TypeAlias, got Trait"),
+  };
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: `trait Foo {} function f(): Foo { ... }` — resolver emits 1 UNDEFINED_TYPE
+/// diagnostic because a trait name cannot appear in type position, and the function's
+/// return type slot stays VOID.
+/// Task 2.11.
+@test
+function resolveEmitsTraitInTypePositionDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Declare the trait.
+  let _traitId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Trait(Ast::Item::Trait {
+    span: resolverDummySpan(),
+    name: String::create("Foo"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // A function with return type `Foo` (trait name in type position).
+  let fooRetAnnotId: Ast::TypeId = addPathType(&mut module, "Foo");
+
+  let bodyId: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: resolverDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let fnId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: resolverDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(fooRetAnnotId),
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // Exactly 1 diagnostic with code UNDEFINED_TYPE.
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let Option::SOME(diag) = output.diagnostics.get(0) else {
+    @panic("expected diagnostic at index 0");
+  };
+
+  let expectedCode: String = String::create(DiagnosticCode::UNDEFINED_TYPE);
+  let actualCode: String = String::create(diag.code);
+  Test::assertEq<boolean>(actualCode.equals(&expectedCode), true);
+
+  // Function return type slot stays VOID.
+  let Option::SOME(fnDefId) = Analyzer::Binder::findDef(&pass2, fnId.raw()) else {
+    @panic("function not found in pass-2 output");
+  };
+
+  let Option::SOME(fnDef) = defStore.get(fnDefId) else {
+    @panic("defStore.get returned NONE for function");
+  };
+
+  let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+
+  match (fnDef) {
+    Analyzer::Definition::Function(fn_) -> {
+      Test::assertEq<u32>(fn_.returnType.raw(), voidId.raw());
+    },
+    Analyzer::Definition::Record(_) -> @panic("expected Function, got Record"),
+    Analyzer::Definition::Enum(_) -> @panic("expected Function, got Enum"),
+    Analyzer::Definition::Variable(_) -> @panic("expected Function, got Variable"),
+    Analyzer::Definition::Field(_) -> @panic("expected Function, got Field"),
+    Analyzer::Definition::Variant(_) -> @panic("expected Function, got Variant"),
+    Analyzer::Definition::TypeParam(_) -> @panic("expected Function, got TypeParam"),
+    Analyzer::Definition::TypeAlias(_) -> @panic("expected Function, got TypeAlias"),
+    Analyzer::Definition::Trait(_) -> @panic("expected Function, got Trait"),
+  };
+}
+
+/// Scenario: Record field typed `*mut u8` — resolver produces mutablePointer(u8).
+/// Task 2.12.
+@test
+function resolveResolvesMutablePointerField(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u8TypeId: Ast::TypeId = addPathType(&mut module, "u8");
+
+  let mutPtrTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Pointer(Ast::Type::Pointer {
+    span: resolverDummySpan(),
+    mutable: true,
+    pointee: u8TypeId,
+  }));
+
+  let fieldPtr: Ast::PatternId = addAnnotatedField(&mut module, "ptr", mutPtrTypeId);
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldPtr);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("RawMut"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let _output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let u8Id: Analyzer::TypeId = typeStore.intern(Analyzer::Type::U8);
+  let mutPtrId: Analyzer::TypeId = typeStore.mutablePointer(u8Id);
+
+  let fdPtr: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+
+  Test::assertEq<u32>(fdPtr.fieldType.raw(), mutPtrId.raw());
+  Test::assertEq<u64>(_output.diagnostics.length(), 0);
+}
+
+/// Scenario 4 — Generic TypeAlias type-param sub-defs.
+/// Given `type Pair<T> = Wrapper<T>` where `record Wrapper<T> {}` is also in scope,
+/// after binder pass-2 and resolver:
+///   - TypeAliasDef.typeParams has length 1 (a TypeParam sub-def named "T")
+///   - TypeAliasDef.aliasedType resolves to Type::Instance(wrapperDefId, [Param(T)])
+/// Covers spec Scenario 4 and exercises the buildTypeParamScope path in resolveTypeAliasBody.
+/// Task 2.10 (previously skipped).
+@test
+function resolverResolvesGenericTypeAliasWithTypeParam(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Define Wrapper<T> record (the RHS target of the alias).
+  let mut wrapperGenericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  wrapperGenericParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let wrapperId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Wrapper"),
+    genericParameters: wrapperGenericParams,
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Build `Wrapper<T>` type syntax for the alias body.
+  let tBodyAnnotId: Ast::TypeId = addPathType(&mut module, "T");
+
+  let mut wrapperSegments: Vector<String> = Vector::new<String>();
+  wrapperSegments.push(String::create("Wrapper"));
+  let wrapperPathTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: wrapperSegments,
+  }));
+
+  let mut aliasBodyArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  aliasBodyArgs.push(tBodyAnnotId);
+
+  let wrapperTTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+    span: resolverDummySpan(),
+    base: wrapperPathTypeId,
+    arguments: aliasBodyArgs,
+  }));
+
+  // Define `type Pair<T> = Wrapper<T>`.
+  let mut pairGenericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  pairGenericParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let aliasId: Ast::ItemId = module.addRootItem(Ast::Item::Node::TypeAlias(Ast::Item::TypeAlias {
+    span: resolverDummySpan(),
+    name: String::create("Pair"),
+    genericParameters: pairGenericParams,
+    value: wrapperTTypeId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // Retrieve the alias definition after the resolver has patched it.
+  let Option::SOME(aliasDefId) = Analyzer::Binder::findDef(&pass1, aliasId.raw()) else {
+    @panic("alias not found in pass-1 output");
+  };
+
+  let Option::SOME(aliasDef) = defStore.get(aliasDefId) else {
+    @panic("defStore.get returned NONE for alias defId");
+  };
+
+  let Option::SOME(wrapperDefId) = Analyzer::Binder::findDef(&pass1, wrapperId.raw()) else {
+    @panic("Wrapper not found in pass-1");
+  };
+
+  match (aliasDef) {
+    Analyzer::Definition::TypeAlias(a) -> {
+      // typeParams must contain exactly 1 sub-def (the T TypeParam).
+      Test::assertEq<u64>(a.typeParams.length(), 1);
+
+      // aliasedType must be non-VOID and equal to Instance(Wrapper, [Param(T)]).
+      let voidId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::VOID);
+      Test::assertEq<boolean>(a.aliasedType.raw() == voidId.raw(), false);
+
+      let tSym: Analyzer::SymbolId = symbols.intern("T");
+      let tParamId: Analyzer::TypeId = typeStore.param(tSym);
+
+      let mut expectedArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      expectedArgs.push(tParamId);
+      let expectedAliasedType: Analyzer::TypeId = typeStore.instance(wrapperDefId, expectedArgs);
+
+      Test::assertEq<u32>(a.aliasedType.raw(), expectedAliasedType.raw());
+    },
+    Analyzer::Definition::Record(_) -> @panic("expected TypeAlias, got Record"),
+    Analyzer::Definition::Enum(_) -> @panic("expected TypeAlias, got Enum"),
+    Analyzer::Definition::Function(_) -> @panic("expected TypeAlias, got Function"),
+    Analyzer::Definition::Variable(_) -> @panic("expected TypeAlias, got Variable"),
+    Analyzer::Definition::Field(_) -> @panic("expected TypeAlias, got Field"),
+    Analyzer::Definition::Variant(_) -> @panic("expected TypeAlias, got Variant"),
+    Analyzer::Definition::TypeParam(_) -> @panic("expected TypeAlias, got TypeParam"),
+    Analyzer::Definition::Trait(_) -> @panic("expected TypeAlias, got Trait"),
+  };
+
   Test::assertEq<u64>(output.diagnostics.length(), 0);
 }
