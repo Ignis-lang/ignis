@@ -6381,6 +6381,57 @@ function main(): i32 {
 // `extractBasePath` body was never committed and could not be reconstructed; this
 // test pins the equivalent shape so any future regression is caught by LSan rather
 // than by a downstream selfhost slice.
+// Regression: an enum variant that carries a `String` (or any heap-owning) payload,
+// constructed and matched, triggers a runtime `free(): invalid pointer` double-free.
+// Reproduced in the selfhost resolver-expressions slice (commit TBD): swapping
+// `enum ResolvedRef { ..., Unresolved }` to `enum ResolvedRef { ..., Unresolved(String) }`
+// per spec REQ-A1 made 5 selfhost tests crash with `free(): invalid pointer`. The slice
+// shipped with a unit-variant workaround documented as a deviation; this regression
+// test pins the failing shape so the dedicated codegen-fix slice has a reliable repro.
+//
+// This is a distinct shape from `e2e_option_record_with_vector_string_let_else_destructure`
+// — that test passes today because the prior `Vector<String>` repro turned out to be
+// either incidentally fixed or never reproducible. The `String`-payload-in-enum-variant
+// shape below is genuinely failing on current HEAD; this test is expected to be FAILING
+// (or marked `#[ignore]`) until the codegen-fix slice lands.
+//
+// Engram bugfix/codegen-vector-string-double-free (#5892) tracks the fix.
+#[test]
+#[ignore = "captures the live codegen double-free repro; unignore once the codegen-fix slice lands"]
+fn e2e_enum_variant_string_payload_match_double_free_repro() {
+  e2e_workspace_std_test(
+    "enum_variant_string_payload_match_double_free_repro",
+    r#"
+import String from "std::string";
+
+enum Reason {
+  Empty,
+  Unknown(String),
+}
+
+function makeReason(kind: i32): Reason {
+  if (kind == 0) {
+    return Reason::Empty;
+  }
+
+  return Reason::Unknown(String::create("not-found"));
+}
+
+function reasonLen(r: Reason): u64 {
+  return match (r) {
+    Reason::Empty -> 0,
+    Reason::Unknown(s) -> s.length(),
+  };
+}
+
+function main(): i32 {
+  let r: Reason = makeReason(1);
+  return reasonLen(r) as i32;
+}
+"#,
+  );
+}
+
 #[test]
 fn e2e_option_record_with_vector_string_let_else_destructure() {
   e2e_workspace_std_test(

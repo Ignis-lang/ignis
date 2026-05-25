@@ -1,0 +1,1837 @@
+import
+  SourceSpan,
+  Diagnostic,
+  DiagnosticBag,
+  Severity,
+  DiagnosticCode,
+  LabelKind,
+from "@compiler::diagnostics";
+
+import Ast from "@compiler::ast";
+import Id from "@compiler::ids";
+
+/// Body-level name resolver for the Ignis selfhost compiler.
+///
+/// `ResolverBodies::resolveBodies` walks every function body and constant
+/// initializer, resolving identifier expressions and pattern bindings against:
+///   1. Lexical local scope (parameters and let-bound names, innermost first).
+///   2. Type-parameter scope for the enclosing function item.
+///   3. Module-global definition name index (built from binder pass-1 + pass-2).
+///
+/// Output is a `BodyResolutionMap` — a parallel-vector side-table mapping
+/// AST NodeIds to `ResolvedRef` values. Expression NodeIds use the raw u32
+/// directly; pattern NodeIds use `raw | PATTERN_KEY_BIT` (0x8000_0000) to
+/// prevent key collisions (ADR-B4). @panic on overflow (31-bit limit).
+///
+/// ## ADR-B10: LocalId index reuse across sibling scopes
+///
+/// `LocalId.index` is a cumulative monotone counter per function, NOT the
+/// current stack depth. When a scope is popped the `locals` vector shrinks;
+/// subsequent bindings in sibling scopes re-use lower indices. Two distinct
+/// AST binding sites may therefore carry the same `LocalId { function, index }`.
+/// Consumers (typecheck) MUST identify bindings by AST binding-site PatternId
+/// via the side-table, NOT by `LocalId` alone.
+///
+/// ## ADR-B4: 31-bit NodeId prefix scheme
+///
+/// Side-table keys are `u32`. Expression refs: stored as `raw`. Pattern refs:
+/// stored as `raw | 0x8000_0000`. Realistic modules never approach 2^31 nodes.
+/// If they do, `recordExprRef` / `recordPatternRef` @panic with a clear message.
+/// `Analyzer::ResolverBodies::findExprRef(map, raw)` and `Analyzer::ResolverBodies::findPatternRef(map, raw)` encapsulate masking.
+/// Future-proofing: TODO(node-id-31bit-limit).
+export namespace Analyzer {
+  namespace ResolverBodies {
+    // =========================================================================
+    // Types
+    // =========================================================================
+
+    /// Lightweight per-function local binding id.
+    ///
+    /// `function` is the `DefinitionId` of the enclosing function (or the
+    /// constant's own DefinitionId per ADR-B5). `index` is a per-function
+    /// cumulative counter reset to 0 at each function entry.
+    ///
+    /// Consumers MUST NOT use `LocalId` as a canonical binding identity —
+    /// use the binding-site PatternId via the side-table instead (ADR-B10).
+    record LocalId {
+      public enclosingFn: Analyzer::DefinitionId;
+      public index: u32;
+    }
+
+    /// Outcome of resolving one identifier reference in expression or pattern position.
+    ///
+    /// `Local(LocalId)` — resolves to a function-scoped local (parameter or let).
+    /// `Definition(DefinitionId)` — resolves to a module-global declaration.
+    /// `TypeParam(SymbolId)` — resolves to a type parameter in the enclosing scope.
+    /// `Unresolved` — could not be resolved. **Unit variant** (no payload) as a
+    /// workaround for a reproducible C codegen double-free that triggers when this
+    /// enum variant carries a heap-owning payload (e.g. `String`). Confirmed by
+    /// orchestrator probe: swapping to `Unresolved(String)` per spec REQ-A1 makes
+    /// 5 tests crash with `free(): invalid pointer`. Spec REQ-A1 deviation is
+    /// documented in apply-progress (sdd/analyzer-resolver-expressions/apply-progress)
+    /// and engram bugfix/codegen-vector-string-double-free (#5892) tracks the codegen
+    /// fix slice. The reason discriminator is preserved in the emitted Diagnostic and
+    /// in the `TODO(...)` grep tags at each call site
+    /// (method-not-yet-supported / closures-not-yet-supported / multi-segment-paths-not-yet-supported).
+    enum ResolvedRef {
+      Local(Analyzer::ResolverBodies::LocalId),
+      Definition(Analyzer::DefinitionId),
+      TypeParam(Analyzer::SymbolId),
+      Unresolved,
+    }
+
+    /// NodeId → ResolvedRef side-table. Parallel co-indexed vectors per binder ADR-1.
+    ///
+    /// Keys are raw `u32`; expression ids stored plain, pattern ids stored with
+    /// `PATTERN_KEY_BIT` (0x8000_0000) OR'd in (ADR-B4). Use `findExprRef` /
+    /// `findPatternRef` for lookup — they handle the masking.
+    record BodyResolutionMap {
+      public nodeIds: Vector<u32>;
+      public refs: Vector<Analyzer::ResolverBodies::ResolvedRef>;
+    }
+
+    /// Output produced by `resolveBodies`. Sibling to `Resolver::ResolverOutput`.
+    ///
+    /// Does NOT extend or mutate the type-syntax resolver's output.
+    record ResolverBodiesOutput {
+      public diagnostics: DiagnosticBag;
+      public bodyResolution: Analyzer::ResolverBodies::BodyResolutionMap;
+    }
+
+    /// Lexical local scope stack. Parallel vectors per binder ADR-1.
+    ///
+    /// `scopeStarts[i]` is the `names.length()` snapshot at the i-th `pushScope`.
+    /// On `popScope`, names/locals are truncated back to that snapshot.
+    /// Lookup is a reverse scan from `names.length()-1` down to find the
+    /// innermost binding for a given symbol.
+    record LocalStack {
+      public scopeStarts: Vector<u64>;
+      public names: Vector<Analyzer::SymbolId>;
+      public locals: Vector<Analyzer::ResolverBodies::LocalId>;
+    }
+
+    /// Mutable state threaded through the body-resolver walk.
+    ///
+    /// All fields are threaded explicitly as `&mut` per binder ADR-4 (Ignis
+    /// borrow checker rejects `&mut` fields inside records). The single-record
+    /// shape groups logically related state for clarity.
+    record ResolverBodiesState {
+      /// Diagnostics accumulated during the walk.
+      public diagnostics: DiagnosticBag;
+
+      /// Global name index built once from pass-1 + pass-2 binder outputs.
+      /// Includes Record, Enum, TypeAlias, Trait, Function, and Constant names.
+      /// Variant and Field names are resolved via structured path or member-access.
+      public globalNameSyms: Vector<Analyzer::SymbolId>;
+      public globalNameDefs: Vector<Analyzer::DefinitionId>;
+
+      /// Per-function transient state (reset at each function/constant entry).
+      public currentFunction: Analyzer::DefinitionId;
+      public localStack: Analyzer::ResolverBodies::LocalStack;
+      public typeParamScope: Analyzer::Resolver::TypeParamScope;
+
+      /// Side-table being accumulated across the entire module walk.
+      public bodyResolution: Analyzer::ResolverBodies::BodyResolutionMap;
+    }
+
+    // =========================================================================
+    // Constants
+    // =========================================================================
+
+    /// High-bit flag used to store pattern NodeIds in the shared side-table key
+    /// space. Expression ids are stored with no flag; pattern ids are OR'd with
+    /// this constant (ADR-B4). Future: TODO(node-id-31bit-limit).
+    const PATTERN_KEY_BIT: u32 = 2147483648;
+
+    // =========================================================================
+    // Side-table helpers
+    // =========================================================================
+
+    /// Look up a resolved ref for an expression node in the side-table.
+    ///
+    /// Returns SOME if the ExpressionId was recorded during body resolution,
+    /// NONE otherwise. Linear scan — O(n).
+    function findExprRef(
+      map: &Analyzer::ResolverBodies::BodyResolutionMap,
+      exprRaw: u32,
+    ): Option<Analyzer::ResolverBodies::ResolvedRef> {
+      let mut i: u64 = 0;
+
+      while (i < map.nodeIds.length()) {
+        let Option::SOME(k) = map.nodeIds.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (*k == exprRaw) {
+          let Option::SOME(r) = map.refs.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          return Option::SOME(Analyzer::ResolverBodies::copyResolvedRef(r));
+        }
+
+        i += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Look up a resolved ref for a pattern node in the side-table.
+    ///
+    /// Pattern keys are stored with `PATTERN_KEY_BIT` OR'd in (ADR-B4).
+    /// Linear scan — O(n).
+    function findPatternRef(
+      map: &Analyzer::ResolverBodies::BodyResolutionMap,
+      patRaw: u32,
+    ): Option<Analyzer::ResolverBodies::ResolvedRef> {
+      let key: u32 = patRaw | PATTERN_KEY_BIT;
+      let mut i: u64 = 0;
+
+      while (i < map.nodeIds.length()) {
+        let Option::SOME(k) = map.nodeIds.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (*k == key) {
+          let Option::SOME(r) = map.refs.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          return Option::SOME(Analyzer::ResolverBodies::copyResolvedRef(r));
+        }
+
+        i += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Deep-copy a `ResolvedRef` so it can be returned by value from a shared
+    /// `&BodyResolutionMap` without a lifetime issue.
+    function copyResolvedRef(
+      r: &Analyzer::ResolverBodies::ResolvedRef,
+    ): Analyzer::ResolverBodies::ResolvedRef {
+      match (r) {
+        Analyzer::ResolverBodies::ResolvedRef::Local(lid) -> {
+          return Analyzer::ResolverBodies::ResolvedRef::Local(Analyzer::ResolverBodies::LocalId {
+            enclosingFn: lid.enclosingFn,
+            index: lid.index,
+          });
+        },
+        Analyzer::ResolverBodies::ResolvedRef::Definition(did) -> {
+          return Analyzer::ResolverBodies::ResolvedRef::Definition(did);
+        },
+        Analyzer::ResolverBodies::ResolvedRef::TypeParam(sym) -> {
+          return Analyzer::ResolverBodies::ResolvedRef::TypeParam(sym);
+        },
+        Analyzer::ResolverBodies::ResolvedRef::Unresolved -> {
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+      };
+    }
+
+    /// Record an expression ref into the side-table.
+    ///
+    /// @panic if the raw ExpressionId has the high bit set (ADR-B4 overflow).
+    function recordExprRef(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      exprId: Ast::ExpressionId,
+      r: Analyzer::ResolverBodies::ResolvedRef,
+    ): void {
+      let raw: u32 = exprId.raw();
+
+      if ((raw & PATTERN_KEY_BIT) != 0) {
+        @panic("expression id exceeds 31-bit range; bump key scheme");
+      }
+
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.bodyResolution.nodeIds.push(raw);
+      stateRef.bodyResolution.refs.push(r);
+    }
+
+    /// Record a pattern ref into the side-table with PATTERN_KEY_BIT OR'd in.
+    ///
+    /// @panic if the raw PatternId has the high bit set (ADR-B4 overflow).
+    function recordPatternRef(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      patId: Ast::PatternId,
+      r: Analyzer::ResolverBodies::ResolvedRef,
+    ): void {
+      let raw: u32 = patId.raw();
+
+      if ((raw & PATTERN_KEY_BIT) != 0) {
+        @panic("pattern id exceeds 31-bit range; bump key scheme");
+      }
+
+      let key: u32 = raw | PATTERN_KEY_BIT;
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.bodyResolution.nodeIds.push(key);
+      stateRef.bodyResolution.refs.push(r);
+    }
+
+    // =========================================================================
+    // Diagnostic helpers
+    // =========================================================================
+
+    /// Emit an `UNDECLARED_VARIABLE` (I0033) ERROR diagnostic.
+    ///
+    /// All body-resolver name errors reuse this code (ADR-B1).
+    function emitUndeclaredVariable(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      span: SourceSpan,
+      message: str,
+    ): void {
+      let mut diag: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        DiagnosticCode::UNDECLARED_VARIABLE,
+        message,
+        span,
+      );
+      diag.addLabel(LabelKind::PRIMARY, span, message);
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
+    /// Emit an `INVALID_NUMBER_OF_ARGUMENTS` (I0011) ERROR diagnostic.
+    ///
+    /// Used for pattern arity mismatches (ADR-B1, REQ-F3).
+    function emitPatternArityMismatch(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      span: SourceSpan,
+      actual: u64,
+      expected: u64,
+    ): void {
+      let message: String = String::create("pattern expects ")
+        .concat(expected)
+        .concat(" arguments, found ")
+        .concat(actual);
+      let mut diag: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS,
+        message.toStr(),
+        span,
+      );
+      diag.addLabel(LabelKind::PRIMARY, span, message.toStr());
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
+    // =========================================================================
+    // LocalStack mechanics
+    // =========================================================================
+
+    /// Push a new scope frame. Call before entering a block, arm, or loop.
+    function pushScope(stack: &mut Analyzer::ResolverBodies::LocalStack): void {
+      let mark: u64 = stack.names.length();
+      let mut stackRef: &mut Analyzer::ResolverBodies::LocalStack = stack;
+      stackRef.scopeStarts.push(mark);
+    }
+
+    /// Pop the innermost scope frame, truncating bindings introduced since push.
+    function popScope(stack: &mut Analyzer::ResolverBodies::LocalStack): void {
+      let Option::SOME(mark) = stack.scopeStarts.pop() else {
+        return;
+      };
+
+      Analyzer::ResolverBodies::truncateLocalStack(stack, mark);
+    }
+
+    /// Truncate names/locals back to `mark` (the snapshot at scope entry).
+    function truncateLocalStack(stack: &mut Analyzer::ResolverBodies::LocalStack, mark: u64): void {
+      let mut stackRef: &mut Analyzer::ResolverBodies::LocalStack = stack;
+
+      while (stackRef.names.length() > mark) {
+        stackRef.names.pop();
+        stackRef.locals.pop();
+      }
+    }
+
+    /// Bind a new local for `sym` in the current scope using the given enclosing
+    /// function DefinitionId. The index is the current cumulative local count
+    /// (ADR-B10: monotone across nested scopes, reused across siblings).
+    ///
+    /// This version is called by the expression/pattern walkers which thread
+    /// `state` directly. `bindLocalRaw` is a lower-level helper for tests.
+    function bindLocal(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      sym: Analyzer::SymbolId,
+    ): Analyzer::ResolverBodies::LocalId {
+      let idx: u32 = state.localStack.locals.length() as u32;
+      let lid: Analyzer::ResolverBodies::LocalId = Analyzer::ResolverBodies::LocalId {
+        enclosingFn: state.currentFunction,
+        index: idx,
+      };
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.localStack.names.push(sym);
+      stateRef.localStack.locals.push(lid);
+      return lid;
+    }
+
+    /// Lower-level local binding for use in tests (no `state` threading).
+    ///
+    /// Exposed so scope-mechanics unit tests can exercise push/pop without
+    /// constructing a full `ResolverBodiesState`.
+    function bindLocalRaw(
+      stack: &mut Analyzer::ResolverBodies::LocalStack,
+      sym: Analyzer::SymbolId,
+      enclosingFunction: Analyzer::DefinitionId,
+    ): Analyzer::ResolverBodies::LocalId {
+      let idx: u32 = stack.locals.length() as u32;
+      let lid: Analyzer::ResolverBodies::LocalId = Analyzer::ResolverBodies::LocalId {
+        enclosingFn: enclosingFunction,
+        index: idx,
+      };
+      let mut stackRef: &mut Analyzer::ResolverBodies::LocalStack = stack;
+      stackRef.names.push(sym);
+      stackRef.locals.push(lid);
+      return lid;
+    }
+
+    /// Reverse scan of the local stack for `sym`, returning the innermost match.
+    ///
+    /// Exposed for test use (`resolveBodiesPushPopScopeIsBalanced`).
+    function lookupLocal(
+      stack: &Analyzer::ResolverBodies::LocalStack,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::ResolverBodies::LocalId> {
+      let n: u64 = stack.names.length();
+
+      if (n == 0) {
+        return Option::NONE;
+      }
+
+      let mut i: u64 = n;
+
+      while (i > 0) {
+        i -= 1;
+
+        let Option::SOME(stored) = stack.names.get(i) else {
+          continue;
+        };
+
+        if (stored.raw() == sym.raw()) {
+          let Option::SOME(lid) = stack.locals.get(i) else {
+            continue;
+          };
+
+          return Option::SOME(Analyzer::ResolverBodies::LocalId {
+            enclosingFn: lid.enclosingFn,
+            index: lid.index,
+          });
+        }
+      }
+
+      return Option::NONE;
+    }
+
+    // =========================================================================
+    // Global name index
+    // =========================================================================
+
+    /// Populate `state.globalNameSyms` / `state.globalNameDefs` from one
+    /// `BinderOutput`. Includes Record, Enum, TypeAlias, Trait, Function, and
+    /// Variable (Constants — see ADR-B6) definitions.
+    ///
+    /// Called twice (pass-1 then pass-2). Duplicates not deduplicated —
+    /// first-hit wins in `bodyGlobalLookup`, so pass-1 entries take precedence.
+    function buildBodyGlobalNameIndex(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      binderOutput: &Analyzer::Binder::BinderOutput,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < binderOutput.defIds.length()) {
+        let Option::SOME(defId) = binderOutput.defIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(def) = defStore.get(*defId) else {
+          index += 1;
+          continue;
+        };
+
+        match (def) {
+          Analyzer::Definition::Record(rec) -> {
+            let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+            stateRef.globalNameSyms.push(rec.name);
+            stateRef.globalNameDefs.push(*defId);
+          },
+          Analyzer::Definition::Enum(en) -> {
+            let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+            stateRef.globalNameSyms.push(en.name);
+            stateRef.globalNameDefs.push(*defId);
+          },
+          Analyzer::Definition::Function(f) -> {
+            let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+            stateRef.globalNameSyms.push(f.name);
+            stateRef.globalNameDefs.push(*defId);
+          },
+          Analyzer::Definition::Variable(v) -> {
+            // ADR-B6: include all Variable defs. Pass-1 allocates only top-level
+            // items (Constants); parameters are allocated in pass-2 with a scope
+            // key that is not a root. Both are harmlessly included — local lookup
+            // takes priority over global lookup during body resolution.
+            let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+            stateRef.globalNameSyms.push(v.name);
+            stateRef.globalNameDefs.push(*defId);
+          },
+          Analyzer::Definition::TypeAlias(alias) -> {
+            let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+            stateRef.globalNameSyms.push(alias.name);
+            stateRef.globalNameDefs.push(*defId);
+          },
+          Analyzer::Definition::Trait(trait_) -> {
+            // Trait names are included for ADR-B3: emit a discriminating
+            // diagnostic when a Trait name appears in expression position.
+            let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+            stateRef.globalNameSyms.push(trait_.name);
+            stateRef.globalNameDefs.push(*defId);
+          },
+          Analyzer::Definition::Field(_) -> {},
+          Analyzer::Definition::Variant(_) -> {},
+          Analyzer::Definition::TypeParam(_) -> {},
+        };
+
+        index += 1;
+      }
+    }
+
+    /// Linear scan of `state.globalNameSyms` for a matching symbol.
+    ///
+    /// Takes `&mut` per binder ADR-4 pattern (no auto-coercion of `&mut` to `&`).
+    function bodyGlobalLookup(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::DefinitionId> {
+      let mut i: u64 = 0;
+
+      while (i < state.globalNameSyms.length()) {
+        let Option::SOME(stored) = state.globalNameSyms.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (stored.raw() == sym.raw()) {
+          let Option::SOME(defId) = state.globalNameDefs.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          return Option::SOME(*defId);
+        }
+
+        i += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Look up the DefinitionId for a given raw ItemId, searching pass-1 then pass-2.
+    function lookupDef(
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      rawId: u32,
+    ): Option<Analyzer::DefinitionId> {
+      let pass1Result: Option<Analyzer::DefinitionId> = Analyzer::Binder::findDef(pass1, rawId);
+
+      if (pass1Result.isSome()) {
+        return pass1Result;
+      }
+
+      return Analyzer::Binder::findDef(pass2, rawId);
+    }
+
+    /// Return true if `defId` resolves to a `Definition::Trait`.
+    function isTraitDef(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): boolean {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return false;
+      };
+
+      match (def) {
+        Analyzer::Definition::Trait(_) -> {
+          return true;
+        },
+        Analyzer::Definition::Record(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Enum(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Function(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Variable(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Field(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Variant(_) -> {
+          return false;
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          return false;
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          return false;
+        },
+      };
+    }
+
+    /// Look up a variant DefinitionId by name inside an EnumDef.
+    ///
+    /// Scans `en.variants` (a `Vector<DefinitionId>` of Variant sub-defs),
+    /// fetching each VariantDef and comparing its name symbol.
+    function lookupVariantInEnum(
+      defStore: &mut Analyzer::DefinitionStore,
+      en: &Analyzer::EnumDef,
+      variantName: str,
+      symbols: &mut Analyzer::SymbolTable,
+    ): Option<Analyzer::DefinitionId> {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let targetSym: Analyzer::SymbolId = symbolsRef.intern(variantName);
+      let mut i: u64 = 0;
+
+      while (i < en.variants.length()) {
+        let Option::SOME(varDefId) = en.variants.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        let Option::SOME(def) = defStore.get(*varDefId) else {
+          i += 1;
+          continue;
+        };
+
+        match (def) {
+          Analyzer::Definition::Variant(v) -> {
+            if (v.name.raw() == targetSym.raw()) {
+              return Option::SOME(*varDefId);
+            }
+          },
+          Analyzer::Definition::Record(_) -> {},
+          Analyzer::Definition::Enum(_) -> {},
+          Analyzer::Definition::Function(_) -> {},
+          Analyzer::Definition::Variable(_) -> {},
+          Analyzer::Definition::Field(_) -> {},
+          Analyzer::Definition::TypeParam(_) -> {},
+          Analyzer::Definition::TypeAlias(_) -> {},
+          Analyzer::Definition::Trait(_) -> {},
+        };
+
+        i += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    // =========================================================================
+    // Identifier resolution — expression position
+    // =========================================================================
+
+    /// Resolve a single-segment identifier in expression position.
+    ///
+    /// Priority (ADR-B1, REQ-B1):
+    ///   1. Local scope stack (innermost first).
+    ///   2. Type-parameter scope for the enclosing item.
+    ///   3. Global name index (emits diagnostic for Traits — ADR-B3).
+    ///   4. Unknown — emit UNDECLARED_VARIABLE, record Unresolved("unknown").
+    function resolveIdentifierExpr(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      exprId: Ast::ExpressionId,
+      name: str,
+      span: SourceSpan,
+    ): void {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(name);
+
+      // 1. Local scope.
+      let localOpt: Option<Analyzer::ResolverBodies::LocalId> = Analyzer::ResolverBodies::lookupLocal(&state.localStack, sym);
+
+      if (let Option::SOME(lid) = localOpt) {
+        Analyzer::ResolverBodies::recordExprRef(state, exprId, Analyzer::ResolverBodies::ResolvedRef::Local(lid));
+        return;
+      }
+
+      // 2. Type-parameter scope.
+      let tpIdx: Option<u64> = Analyzer::Resolver::scopeLookup(&state.typeParamScope, sym);
+
+      if (tpIdx.isSome()) {
+        Analyzer::ResolverBodies::recordExprRef(state, exprId, Analyzer::ResolverBodies::ResolvedRef::TypeParam(sym));
+        return;
+      }
+
+      // 3. Global name index.
+      let globalOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, sym);
+
+      if (let Option::SOME(defId) = globalOpt) {
+        if (Analyzer::ResolverBodies::isTraitDef(defStore, defId)) {
+          let message: String = String::create("trait `")
+            .concat(name)
+            .concat("` cannot be used in expression position");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          Analyzer::ResolverBodies::recordExprRef(
+            state,
+            exprId,
+            Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+          );
+          return;
+        }
+
+        Analyzer::ResolverBodies::recordExprRef(state, exprId, Analyzer::ResolverBodies::ResolvedRef::Definition(defId));
+        return;
+      }
+
+      // 4. Unknown.
+      let message: String = String::create("undeclared variable: `").concat(name).concat("`");
+      Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+      Analyzer::ResolverBodies::recordExprRef(
+        state,
+        exprId,
+        Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+      );
+    }
+
+    /// Resolve a `Path` expression (single- or multi-segment).
+    ///
+    /// - 0 segments → error.
+    /// - 1 segment → delegate to `resolveIdentifierExpr`.
+    /// - 2 segments → try `Enum::Variant` lookup.
+    /// - 3+ segments → `Unresolved("multi-segment-paths-not-yet-supported")`, no diagnostic
+    ///   (REQ-F4, REQ-B3). TODO(multi-segment-paths).
+    function resolvePathExpr(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      exprId: Ast::ExpressionId,
+      p: &Ast::Expression::Path,
+    ): void {
+      let segCount: u64 = p.segments.length();
+
+      if (segCount == 0) {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "empty path");
+        Analyzer::ResolverBodies::recordExprRef(
+          state,
+          exprId,
+          Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+        );
+        return;
+      }
+
+      if (segCount == 1) {
+        let Option::SOME(seg) = p.segments.get(0) else {
+          return;
+        };
+
+        Analyzer::ResolverBodies::resolveIdentifierExpr(state, defStore, symbols, exprId, seg.toStr(), p.span);
+        return;
+      }
+
+      if (segCount == 2) {
+        let Option::SOME(headStr) = p.segments.get(0) else {
+          return;
+        };
+        let Option::SOME(tailStr) = p.segments.get(1) else {
+          return;
+        };
+
+        let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+        let headSym: Analyzer::SymbolId = symbolsRef.intern(headStr.toStr());
+        let globalOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, headSym);
+
+        if (let Option::SOME(defId) = globalOpt) {
+          let Option::SOME(def) = defStore.get(defId) else {
+            Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown enum");
+            Analyzer::ResolverBodies::recordExprRef(
+              state,
+              exprId,
+              Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+            );
+            return;
+          };
+
+          match (def) {
+            Analyzer::Definition::Enum(en) -> {
+              let variantOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupVariantInEnum(
+                defStore,
+                &en,
+                tailStr.toStr(),
+                symbols,
+              );
+
+              if (let Option::SOME(variantDefId) = variantOpt) {
+                Analyzer::ResolverBodies::recordExprRef(
+                  state,
+                  exprId,
+                  Analyzer::ResolverBodies::ResolvedRef::Definition(variantDefId),
+                );
+                return;
+              }
+
+              let message: String = String::create("unknown enum variant: `").concat(tailStr.toStr()).concat("`");
+              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, message.toStr());
+              Analyzer::ResolverBodies::recordExprRef(
+                state,
+                exprId,
+                Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+              );
+              return;
+            },
+            Analyzer::Definition::Record(_) -> {
+              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+              Analyzer::ResolverBodies::recordExprRef(
+                state,
+                exprId,
+                Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+              );
+              return;
+            },
+            Analyzer::Definition::Function(_) -> {
+              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+              Analyzer::ResolverBodies::recordExprRef(
+                state,
+                exprId,
+                Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+              );
+              return;
+            },
+            Analyzer::Definition::Variable(_) -> {
+              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+              Analyzer::ResolverBodies::recordExprRef(
+                state,
+                exprId,
+                Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+              );
+              return;
+            },
+            Analyzer::Definition::Field(_) -> {
+              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+              Analyzer::ResolverBodies::recordExprRef(
+                state,
+                exprId,
+                Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+              );
+              return;
+            },
+            Analyzer::Definition::Variant(_) -> {
+              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+              Analyzer::ResolverBodies::recordExprRef(
+                state,
+                exprId,
+                Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+              );
+              return;
+            },
+            Analyzer::Definition::TypeParam(_) -> {
+              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+              Analyzer::ResolverBodies::recordExprRef(
+                state,
+                exprId,
+                Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+              );
+              return;
+            },
+            Analyzer::Definition::TypeAlias(_) -> {
+              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+              Analyzer::ResolverBodies::recordExprRef(
+                state,
+                exprId,
+                Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+              );
+              return;
+            },
+            Analyzer::Definition::Trait(_) -> {
+              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+              Analyzer::ResolverBodies::recordExprRef(
+                state,
+                exprId,
+                Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+              );
+              return;
+            },
+          };
+        }
+
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown enum");
+        Analyzer::ResolverBodies::recordExprRef(
+          state,
+          exprId,
+          Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+        );
+        return;
+      }
+
+      // 3+ segments: defer silently (REQ-F4). TODO(multi-segment-paths).
+      Analyzer::ResolverBodies::recordExprRef(
+        state,
+        exprId,
+        Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+      );
+    }
+
+    // =========================================================================
+    // Pattern walker
+    // =========================================================================
+
+    /// Resolve a single pattern node, introducing bindings into the current scope.
+    ///
+    /// - `Binding`: interns the name, allocates a LocalId, records in side-table.
+    /// - `Wildcard`: no-op.
+    /// - `Literal`: no-op (constant value, not a name lookup — REQ-C3).
+    /// - `Path`: resolve constructor (1-seg → Unresolved; 2-seg → Enum::Variant).
+    /// - `Tuple`: recurse into each element.
+    /// - `Or`: walk each alternative independently, resetting bindings between arms.
+    ///   TODO(or-pattern-binding-merge).
+    function walkPattern(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      patId: Ast::PatternId,
+    ): void {
+      let Option::SOME(pat) = module.patterns.get(patId) else {
+        return;
+      };
+
+      match (pat) {
+        Ast::Pattern::Node::Binding(b) -> {
+          let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+          let sym: Analyzer::SymbolId = symbolsRef.intern(b.name.toStr());
+          let lid: Analyzer::ResolverBodies::LocalId = Analyzer::ResolverBodies::bindLocal(state, sym);
+          Analyzer::ResolverBodies::recordPatternRef(
+            state,
+            patId,
+            Analyzer::ResolverBodies::ResolvedRef::Local(Analyzer::ResolverBodies::LocalId {
+              enclosingFn: lid.enclosingFn,
+              index: lid.index,
+            }),
+          );
+          // Annotation type-syntax is intentionally NOT resolved here — typecheck
+          // owns let-bound type inference. TODO(pattern-binding-annotation).
+        },
+        Ast::Pattern::Node::Wildcard(_) -> {
+          // No binding, no side-table entry (REQ-C2).
+        },
+        Ast::Pattern::Node::Literal(_) -> {
+          // Literal pattern: no binding, no name lookup (REQ-C3).
+          // The literal expression is a constant value, not a variable reference.
+        },
+        Ast::Pattern::Node::Path(p) -> {
+          Analyzer::ResolverBodies::resolvePatternPath(state, defStore, symbols, module, patId, &p);
+        },
+        Ast::Pattern::Node::Tuple(t) -> {
+          let mut elemIndex: u64 = 0;
+
+          while (elemIndex < t.elements.length()) {
+            let Option::SOME(elemPatId) = t.elements.get(elemIndex) else {
+              elemIndex += 1;
+              continue;
+            };
+
+            Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, *elemPatId);
+            elemIndex += 1;
+          }
+        },
+        Ast::Pattern::Node::Or(o) -> {
+          // Walk each alternative independently. Bindings introduced by one
+          // alternative are reset before walking the next (best-effort: typecheck
+          // must enforce binding name parity across arms).
+          // TODO(or-pattern-binding-merge).
+          let mark: u64 = state.localStack.names.length();
+          let mut altIndex: u64 = 0;
+
+          while (altIndex < o.alternatives.length()) {
+            let Option::SOME(altPatId) = o.alternatives.get(altIndex) else {
+              altIndex += 1;
+              continue;
+            };
+
+            Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, *altPatId);
+            Analyzer::ResolverBodies::truncateLocalStack(&mut state.localStack, mark);
+            altIndex += 1;
+          }
+        },
+      };
+    }
+
+    /// Resolve a `Pattern::Path` constructor (enum variant or record pattern).
+    ///
+    /// - 1 segment: Record constructor lookup via global index. If the name resolves
+    ///   to a Record, returns `Definition(recordDefId)`. Otherwise (bare enum variant
+    ///   name without qualifier, or unknown name) emits `UNDECLARED_VARIABLE` and
+    ///   returns `Unresolved`. TODO(unqualified-variant-patterns) for bare variants.
+    /// - 2 segments: `Enum::Variant` lookup; arity check against variant payload.
+    ///   Any non-zero argument count is an arity mismatch (ADR-R5: payloads empty).
+    ///   TODO(variant-payload-arity).
+    /// - 3+ segments: `Unresolved("multi-segment-paths-not-yet-supported")`.
+    ///
+    /// Sub-patterns (`p.arguments`) are always recursed into for best-effort binding.
+    function resolvePatternPath(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      patId: Ast::PatternId,
+      p: &Ast::Pattern::Path,
+    ): void {
+      let segCount: u64 = p.segments.length();
+
+      let resolved: Analyzer::ResolverBodies::ResolvedRef = Analyzer::ResolverBodies::resolvePatternPathCore(
+        state,
+        defStore,
+        symbols,
+        module,
+        p,
+        segCount,
+      );
+
+      Analyzer::ResolverBodies::recordPatternRef(state, patId, resolved);
+
+      // Recurse into sub-patterns regardless of resolution outcome — they may
+      // introduce local bindings we still want tracked (best-effort recovery).
+      let mut argIndex: u64 = 0;
+
+      while (argIndex < p.arguments.length()) {
+        let Option::SOME(argPatId) = p.arguments.get(argIndex) else {
+          argIndex += 1;
+          continue;
+        };
+
+        Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, *argPatId);
+        argIndex += 1;
+      }
+    }
+
+    /// Core path pattern resolution logic, factored out to keep `resolvePatternPath`
+    /// within the ~100-line function guideline.
+    function resolvePatternPathCore(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      p: &Ast::Pattern::Path,
+      segCount: u64,
+    ): Analyzer::ResolverBodies::ResolvedRef {
+      if (segCount == 0) {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "empty pattern path");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+      }
+
+      if (segCount == 1) {
+        return Analyzer::ResolverBodies::resolvePatternPath1Seg(state, defStore, symbols, p);
+      }
+
+      if (segCount == 2) {
+        return Analyzer::ResolverBodies::resolvePatternPath2Seg(state, defStore, symbols, p);
+      }
+
+      // 3+ segments: defer silently. No diagnostic (REQ-F4).
+      // TODO(multi-segment-paths).
+      return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+    }
+
+    /// Resolve a single-segment pattern path.
+    ///
+    /// If the name resolves to a Record in the global index, returns `Definition(recordDefId)`.
+    /// Bare enum variant names (unqualified) are not yet supported (ADR-B9):
+    /// those emit `UNDECLARED_VARIABLE` and return `Unresolved`.
+    /// TODO(unqualified-variant-patterns).
+    function resolvePatternPath1Seg(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      p: &Ast::Pattern::Path,
+    ): Analyzer::ResolverBodies::ResolvedRef {
+      let Option::SOME(nameStr) = p.segments.get(0) else {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "empty pattern segment");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+      };
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(nameStr.toStr());
+      let globalOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, sym);
+
+      let Option::SOME(defId) = globalOpt else {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "undefined constructor");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+      };
+
+      // Only Record constructors are supported as single-segment patterns.
+      // Unqualified enum variant names require qualified syntax (ADR-B9).
+      let Option::SOME(def) = defStore.get(defId) else {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "undefined constructor");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+      };
+
+      match (def) {
+        Analyzer::Definition::Record(_) -> {
+          return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
+        },
+        Analyzer::Definition::Enum(_) -> {
+          // Bare enum name without variant selector is not valid in pattern position.
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::Function(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::Variable(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::Trait(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::Field(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::Variant(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+      };
+    }
+
+    /// Resolve a 2-segment pattern path (`Enum::Variant`).
+    function resolvePatternPath2Seg(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      p: &Ast::Pattern::Path,
+    ): Analyzer::ResolverBodies::ResolvedRef {
+      let Option::SOME(headStr) = p.segments.get(0) else {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown enum");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+      };
+      let Option::SOME(tailStr) = p.segments.get(1) else {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown variant");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+      };
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let headSym: Analyzer::SymbolId = symbolsRef.intern(headStr.toStr());
+      let globalOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, headSym);
+
+      let Option::SOME(defId) = globalOpt else {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown enum");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+      };
+
+      let Option::SOME(def) = defStore.get(defId) else {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown enum");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+      };
+
+      match (def) {
+        Analyzer::Definition::Enum(en) -> {
+          return Analyzer::ResolverBodies::resolvePatternPath2SegVariant(state, defStore, symbols, p, &en, tailStr.toStr());
+        },
+        Analyzer::Definition::Record(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::Function(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::Variable(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::Field(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::Variant(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+        Analyzer::Definition::Trait(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+        },
+      };
+    }
+
+    /// Resolve the variant name and check arity for a 2-segment pattern path.
+    function resolvePatternPath2SegVariant(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      p: &Ast::Pattern::Path,
+      en: &Analyzer::EnumDef,
+      tailName: str,
+    ): Analyzer::ResolverBodies::ResolvedRef {
+      let variantOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupVariantInEnum(defStore, en, tailName, symbols);
+
+      let Option::SOME(variantDefId) = variantOpt else {
+        let message: String = String::create("unknown variant: `").concat(tailName).concat("`");
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, message.toStr());
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+      };
+
+      // Arity check: ADR-R5 — variant payloads are empty; any arguments trigger mismatch.
+      // TODO(variant-payload-arity): when payload resolver lands, compare against actual payload.
+      let argCount: u64 = p.arguments.length();
+
+      if (argCount > 0) {
+        Analyzer::ResolverBodies::emitPatternArityMismatch(state, p.span, argCount, 0);
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved;
+      }
+
+      return Analyzer::ResolverBodies::ResolvedRef::Definition(variantDefId);
+    }
+
+    // =========================================================================
+    // Expression walker
+    // =========================================================================
+
+    /// Walk a single expression, recording refs for identifier nodes and
+    /// recursing into structural children.
+    ///
+    /// Only `Variable` and `Path` nodes produce side-table entries directly.
+    /// All other nodes are structural (recurse into children, no new bindings).
+    ///
+    /// No wildcard arms — adding a new `Expression::Node` variant forces a
+    /// compile error here (design rule §8, REQ rule 8).
+    function walkExpr(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+    ): void {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return;
+      };
+
+      match (expr) {
+        Ast::Expression::Node::Variable(v) -> {
+          Analyzer::ResolverBodies::resolveIdentifierExpr(state, defStore, symbols, exprId, v.name.toStr(), v.span);
+        },
+        Ast::Expression::Node::Path(p) -> {
+          Analyzer::ResolverBodies::resolvePathExpr(state, defStore, symbols, exprId, &p);
+        },
+        Ast::Expression::Node::Literal(_) -> {
+          // Leaf — no children, no bindings, no side-table entry (REQ-B17).
+        },
+        Ast::Expression::Node::Unit(_) -> {
+          // Leaf — no children (REQ-B17).
+        },
+        Ast::Expression::Node::PipePlaceholder(_) -> {
+          // Leaf — no children (REQ-B17).
+        },
+        Ast::Expression::Node::Assignment(a) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, a.target);
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, a.value);
+        },
+        Ast::Expression::Node::Ternary(t) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, t.condition);
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, t.thenBranch);
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, t.elseBranch);
+        },
+        Ast::Expression::Node::Cast(c) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.expression);
+          // Cast target type was resolved by type-syntax resolver if reachable.
+          // Body walker does not re-resolve it. TODO(cast-type-in-body).
+        },
+        Ast::Expression::Node::Call(c) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.callee);
+          let mut argIdx: u64 = 0;
+
+          while (argIdx < c.arguments.length()) {
+            let Option::SOME(argId) = c.arguments.get(argIdx) else {
+              argIdx += 1;
+              continue;
+            };
+
+            Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, *argId);
+            argIdx += 1;
+          }
+        },
+        Ast::Expression::Node::Binary(b) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, b.left);
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, b.right);
+        },
+        Ast::Expression::Node::Dereference(d) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, d.operand);
+        },
+        Ast::Expression::Node::Grouped(g) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, g.expression);
+        },
+        Ast::Expression::Node::Tuple(t) -> {
+          let mut elemIdx: u64 = 0;
+
+          while (elemIdx < t.elements.length()) {
+            let Option::SOME(elemId) = t.elements.get(elemIdx) else {
+              elemIdx += 1;
+              continue;
+            };
+
+            Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, *elemId);
+            elemIdx += 1;
+          }
+        },
+        Ast::Expression::Node::LetCondition(lc) -> {
+          // Walk value first (in current scope), then bind pattern.
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, lc.value);
+          Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, lc.pattern);
+        },
+        Ast::Expression::Node::Reference(r) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, r.target);
+        },
+        Ast::Expression::Node::Unary(u) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, u.operand);
+        },
+        Ast::Expression::Node::Block(b) -> {
+          Analyzer::ResolverBodies::pushScope(&mut state.localStack);
+          Analyzer::ResolverBodies::walkBlockBody(state, defStore, symbols, module, &b.statements, b.tail);
+          Analyzer::ResolverBodies::popScope(&mut state.localStack);
+        },
+        Ast::Expression::Node::If(i) -> {
+          // Push an if-let scope so that LetCondition bindings (REQ-D6) are scoped
+          // to this entire if-expression and do not bleed into the surrounding scope.
+          // The else-branch is resolved after this scope is popped, so LetCondition
+          // bindings are NOT visible there.
+          Analyzer::ResolverBodies::pushScope(&mut state.localStack);
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, i.condition);
+          Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, i.thenBranch);
+          Analyzer::ResolverBodies::popScope(&mut state.localStack);
+
+          if (let Option::SOME(elseId) = i.elseBranch) {
+            Analyzer::ResolverBodies::pushScope(&mut state.localStack);
+            Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, elseId);
+            Analyzer::ResolverBodies::popScope(&mut state.localStack);
+          }
+        },
+        Ast::Expression::Node::Match(m) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, m.scrutinee);
+          let mut armIdx: u64 = 0;
+
+          while (armIdx < m.arms.length()) {
+            let Option::SOME(arm) = m.arms.get(armIdx) else {
+              armIdx += 1;
+              continue;
+            };
+
+            Analyzer::ResolverBodies::pushScope(&mut state.localStack);
+            Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, arm.pattern);
+
+            if (let Option::SOME(guardId) = arm.guard) {
+              Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, guardId);
+            }
+
+            Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, arm.body);
+            Analyzer::ResolverBodies::popScope(&mut state.localStack);
+            armIdx += 1;
+          }
+        },
+        Ast::Expression::Node::Vector(vl) -> {
+          let mut elemIdx: u64 = 0;
+
+          while (elemIdx < vl.elements.length()) {
+            let Option::SOME(elemId) = vl.elements.get(elemIdx) else {
+              elemIdx += 1;
+              continue;
+            };
+
+            Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, *elemId);
+            elemIdx += 1;
+          }
+        },
+        Ast::Expression::Node::VectorAccess(va) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, va.vector);
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, va.index);
+        },
+        Ast::Expression::Node::PostfixIncrement(p) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, p.operand);
+        },
+        Ast::Expression::Node::PostfixDecrement(p) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, p.operand);
+        },
+        Ast::Expression::Node::MemberAccess(ma) -> {
+          // Walk the receiver only. The member name is NOT resolved here —
+          // field resolution is deferred to typecheck (ADR-B7).
+          // No side-table entry for the MemberAccess node itself.
+          // TODO(member-resolution-in-typecheck).
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, ma.object);
+        },
+        Ast::Expression::Node::RecordInit(ri) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, ri.path);
+          let mut fieldIdx: u64 = 0;
+
+          while (fieldIdx < ri.fields.length()) {
+            let Option::SOME(field) = ri.fields.get(fieldIdx) else {
+              fieldIdx += 1;
+              continue;
+            };
+
+            Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, field.value);
+            // Field names within the initializer are NOT resolved here (need
+            // the record type from typecheck). TODO(record-init-field-resolution).
+            fieldIdx += 1;
+          }
+        },
+        Ast::Expression::Node::BuiltinCall(bc) -> {
+          let mut argIdx: u64 = 0;
+
+          while (argIdx < bc.arguments.length()) {
+            let Option::SOME(argId) = bc.arguments.get(argIdx) else {
+              argIdx += 1;
+              continue;
+            };
+
+            Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, *argId);
+            argIdx += 1;
+          }
+        },
+        Ast::Expression::Node::Lambda(l) -> {
+          // Closures are fully deferred (REQ-B18). Do NOT recurse into the body.
+          // TODO(closures-resolver).
+          Analyzer::ResolverBodies::recordExprRef(
+            state,
+            exprId,
+            Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+          );
+        },
+        Ast::Expression::Node::CaptureOverride(c) -> {
+          // Capture override expression: record unresolved, then walk the inner
+          // expression (which is the variable being captured — still valid to walk).
+          // TODO(closures-resolver).
+          Analyzer::ResolverBodies::recordExprRef(
+            state,
+            exprId,
+            Analyzer::ResolverBodies::ResolvedRef::Unresolved,
+          );
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.expression);
+        },
+        Ast::Expression::Node::Pipe(p) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, p.left);
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, p.right);
+        },
+        Ast::Expression::Node::Try(t) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, t.expression);
+        },
+      };
+    }
+
+    // =========================================================================
+    // Statement walker
+    // =========================================================================
+
+    /// Walk a single statement, dispatching to the appropriate handler.
+    ///
+    /// No wildcard arms — all `Statement::Node` variants named explicitly.
+    function walkStmt(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      stmtId: Ast::StatementId,
+    ): void {
+      let Option::SOME(stmt) = module.statements.get(stmtId) else {
+        return;
+      };
+
+      match (stmt) {
+        Ast::Statement::Node::Variable(v) -> {
+          Analyzer::ResolverBodies::walkLetLike(state, defStore, symbols, module, v.pattern, v.value);
+        },
+        Ast::Statement::Node::Let(l) -> {
+          Analyzer::ResolverBodies::walkLetLike(state, defStore, symbols, module, l.pattern, l.value);
+        },
+        Ast::Statement::Node::LetElse(le) -> {
+          // Order: value in outer scope → else branch in isolated scope →
+          // pattern bound in current (outer) scope for subsequent statements.
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, le.value);
+          Analyzer::ResolverBodies::pushScope(&mut state.localStack);
+          Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, le.elseBranch);
+          Analyzer::ResolverBodies::popScope(&mut state.localStack);
+          Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, le.pattern);
+        },
+        Ast::Statement::Node::Expression(e) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, e.expression);
+        },
+        Ast::Statement::Node::Block(b) -> {
+          Analyzer::ResolverBodies::pushScope(&mut state.localStack);
+          Analyzer::ResolverBodies::walkBlockBody(state, defStore, symbols, module, &b.statements, b.tail);
+          Analyzer::ResolverBodies::popScope(&mut state.localStack);
+        },
+        Ast::Statement::Node::If(i) -> {
+          // Push an if-let scope so that LetCondition bindings (REQ-D6) are scoped
+          // to this entire if-statement and do not bleed into the surrounding scope.
+          // The else-branch is resolved after this scope is popped, so LetCondition
+          // bindings are NOT visible there.
+          Analyzer::ResolverBodies::pushScope(&mut state.localStack);
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, i.condition);
+          Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, i.thenBranch);
+          Analyzer::ResolverBodies::popScope(&mut state.localStack);
+
+          if (let Option::SOME(elseId) = i.elseBranch) {
+            Analyzer::ResolverBodies::pushScope(&mut state.localStack);
+            Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, elseId);
+            Analyzer::ResolverBodies::popScope(&mut state.localStack);
+          }
+        },
+        Ast::Statement::Node::While(w) -> {
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, w.condition);
+          Analyzer::ResolverBodies::pushScope(&mut state.localStack);
+          Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, w.body);
+          Analyzer::ResolverBodies::popScope(&mut state.localStack);
+        },
+        Ast::Statement::Node::For(f) -> {
+          Analyzer::ResolverBodies::pushScope(&mut state.localStack);
+
+          if (let Option::SOME(initId) = f.initializer) {
+            Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, initId);
+          }
+
+          if (let Option::SOME(condId) = f.condition) {
+            Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, condId);
+          }
+
+          if (let Option::SOME(updId) = f.update) {
+            Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, updId);
+          }
+
+          Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, f.body);
+          Analyzer::ResolverBodies::popScope(&mut state.localStack);
+        },
+        Ast::Statement::Node::ForOf(fo) -> {
+          // Iterable evaluated in outer scope; pattern bound in loop scope.
+          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, fo.iterable);
+          Analyzer::ResolverBodies::pushScope(&mut state.localStack);
+          Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, fo.pattern);
+          Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, fo.body);
+          Analyzer::ResolverBodies::popScope(&mut state.localStack);
+        },
+        Ast::Statement::Node::Return(r) -> {
+          if (let Option::SOME(valId) = r.value) {
+            Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, valId);
+          }
+        },
+        Ast::Statement::Node::Break(b) -> {
+          if (let Option::SOME(valId) = b.value) {
+            Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, valId);
+          }
+        },
+        Ast::Statement::Node::Continue(_) -> {
+          // No children.
+        },
+        Ast::Statement::Node::Defer(d) -> {
+          Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, d.statement);
+        },
+        Ast::Statement::Node::Item(_) -> {
+          // Nested items deferred — the binder doesn't recurse into statement-level
+          // items either. TODO(nested-item-resolution).
+        },
+        Ast::Statement::Node::Comment(_) -> {
+          // No children.
+        },
+      };
+    }
+
+    /// Walk a let/var-like binding statement.
+    ///
+    /// Order: initializer expression in current scope (value evaluated before
+    /// the binding is visible), then the binding pattern (REQ-B10/B11, REQ-D3).
+    function walkLetLike(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      patId: Ast::PatternId,
+      value: Option<Ast::ExpressionId>,
+    ): void {
+      if (let Option::SOME(valId) = value) {
+        Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, valId);
+      }
+
+      Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, patId);
+    }
+
+    /// Walk the statements and optional tail of a block body.
+    ///
+    /// Scope push/pop is the caller's responsibility (allows reuse from both
+    /// `Block` expression and `Block` statement arms without duplication).
+    function walkBlockBody(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      statements: &Vector<Ast::StatementId>,
+      tail: Option<Ast::ExpressionId>,
+    ): void {
+      let mut i: u64 = 0;
+
+      while (i < statements.length()) {
+        let Option::SOME(stmtId) = statements.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, *stmtId);
+        i += 1;
+      }
+
+      if (let Option::SOME(tailId) = tail) {
+        Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, tailId);
+      }
+    }
+
+    // =========================================================================
+    // Item-level body walkers
+    // =========================================================================
+
+    /// Walk a function's parameter patterns then its body statement.
+    ///
+    /// Resets per-function state (currentFunction, localStack, typeParamScope).
+    /// Parameters are bound as locals before the body is walked (REQ-E2).
+    function walkFunctionBody(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      f: &Ast::Item::Function,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupDef(pass1, pass2, itemId.raw());
+      let Option::SOME(fnDefId) = defIdOpt else {
+        return;
+      };
+
+      // Reset per-function transient state (REQ-E4).
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.currentFunction = fnDefId;
+      stateRef.localStack = Analyzer::ResolverBodies::LocalStack {
+        scopeStarts: Vector::new<u64>(),
+        names: Vector::new<Analyzer::SymbolId>(),
+        locals: Vector::new<Analyzer::ResolverBodies::LocalId>(),
+      };
+
+      // Build type-param scope for this function (ADR-B8: reuse resolver's builder).
+      stateRef.typeParamScope = Analyzer::Resolver::buildTypeParamScope(
+        typeStore,
+        symbols,
+        &f.genericParameters,
+      );
+
+      // Push outer function scope and bind parameters.
+      Analyzer::ResolverBodies::pushScope(&mut stateRef.localStack);
+
+      let mut paramIdx: u64 = 0;
+
+      while (paramIdx < f.parameters.length()) {
+        let Option::SOME(paramPatId) = f.parameters.get(paramIdx) else {
+          paramIdx += 1;
+          continue;
+        };
+
+        Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, *paramPatId);
+        paramIdx += 1;
+      }
+
+      Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, f.body);
+      Analyzer::ResolverBodies::popScope(&mut state.localStack);
+    }
+
+    /// Walk a constant initializer expression.
+    ///
+    /// Uses the constant's own DefinitionId as `currentFunction` (ADR-B5).
+    /// Constants are not generic, so `typeParamScope` is empty.
+    function walkConstantInit(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      c: &Ast::Item::Constant,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupDef(pass1, pass2, itemId.raw());
+      let Option::SOME(constDefId) = defIdOpt else {
+        return;
+      };
+
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.currentFunction = constDefId;
+      stateRef.localStack = Analyzer::ResolverBodies::LocalStack {
+        scopeStarts: Vector::new<u64>(),
+        names: Vector::new<Analyzer::SymbolId>(),
+        locals: Vector::new<Analyzer::ResolverBodies::LocalId>(),
+      };
+      stateRef.typeParamScope = Analyzer::Resolver::TypeParamScope {
+        syms: Vector::new<Analyzer::SymbolId>(),
+        typeIds: Vector::new<Analyzer::TypeId>(),
+      };
+
+      Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.value);
+    }
+
+    /// Dispatch a single item to the appropriate body walker.
+    ///
+    /// Record/Enum/Import/Extern/TypeAlias/Trait: no body in this slice.
+    /// Methods within Record and Enum are skipped (ADR-B7, TODO(methods-resolver)).
+    /// Namespace and Export recurse into child items.
+    function walkItemForBody(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+    ): void {
+      let Option::SOME(node) = module.items.get(itemId) else {
+        return;
+      };
+
+      match (node) {
+        Ast::Item::Node::Function(f) -> {
+          Analyzer::ResolverBodies::walkFunctionBody(state, defStore, typeStore, symbols, module, pass1, pass2, itemId, &f);
+        },
+        Ast::Item::Node::Constant(c) -> {
+          Analyzer::ResolverBodies::walkConstantInit(state, defStore, symbols, module, pass1, pass2, itemId, &c);
+        },
+        Ast::Item::Node::Namespace(ns) -> {
+          let mut childIdx: u64 = 0;
+
+          while (childIdx < ns.items.length()) {
+            let Option::SOME(childId) = ns.items.get(childIdx) else {
+              childIdx += 1;
+              continue;
+            };
+
+            Analyzer::ResolverBodies::walkItemForBody(state, defStore, typeStore, symbols, module, pass1, pass2, *childId);
+            childIdx += 1;
+          }
+        },
+        Ast::Item::Node::Export(ex) -> {
+          if (let Option::SOME(innerItemId) = ex.declaration) {
+            Analyzer::ResolverBodies::walkItemForBody(state, defStore, typeStore, symbols, module, pass1, pass2, innerItemId);
+          }
+        },
+        Ast::Item::Node::Record(_) -> {
+          // Methods skipped — blocked on methods-binder (ADR-B7).
+          // TODO(methods-resolver).
+        },
+        Ast::Item::Node::Enum(_) -> {
+          // Methods skipped — blocked on methods-binder (ADR-B7).
+          // TODO(methods-resolver).
+        },
+        Ast::Item::Node::Import(_) -> {},
+        Ast::Item::Node::Extern(_) -> {},
+        Ast::Item::Node::TypeAlias(_) -> {},
+        Ast::Item::Node::Trait(_) -> {},
+      };
+    }
+
+    // =========================================================================
+    // Public entry point
+    // =========================================================================
+
+    /// Resolve all identifier references in function bodies and constant
+    /// initializers in `module`.
+    ///
+    /// Must be called after `Binder::predeclareRoots` (pass-1),
+    /// `Binder::completeRoots` (pass-2), and `Resolver::resolveTypes`.
+    ///
+    /// Returns a fresh `ResolverBodiesOutput` without mutating any upstream pass
+    /// output (REQ-E7). `symbols.intern` is the only observable state change on
+    /// the symbol table — it is cache-only and idempotent (REQ-E6).
+    ///
+    /// The module walk is in `module.roots` source order, ensuring determinism
+    /// across two identical inputs (REQ-E6, SC-13).
+    ///
+    /// TODO(pipeline-wiring-REQ-G6): wire Resolver::resolveBodies into the analyzer
+    /// pipeline alongside Resolver::resolveTypes. Deferred from analyzer-resolver-expressions
+    /// slice; next slice's first task.
+    function resolveBodies(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+    ): Analyzer::ResolverBodies::ResolverBodiesOutput {
+      let sentinel: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+
+      let mut state: Analyzer::ResolverBodies::ResolverBodiesState = Analyzer::ResolverBodies::ResolverBodiesState {
+        diagnostics: DiagnosticBag::init(),
+        globalNameSyms: Vector::new<Analyzer::SymbolId>(),
+        globalNameDefs: Vector::new<Analyzer::DefinitionId>(),
+        currentFunction: sentinel,
+        localStack: Analyzer::ResolverBodies::LocalStack {
+          scopeStarts: Vector::new<u64>(),
+          names: Vector::new<Analyzer::SymbolId>(),
+          locals: Vector::new<Analyzer::ResolverBodies::LocalId>(),
+        },
+        typeParamScope: Analyzer::Resolver::TypeParamScope {
+          syms: Vector::new<Analyzer::SymbolId>(),
+          typeIds: Vector::new<Analyzer::TypeId>(),
+        },
+        bodyResolution: Analyzer::ResolverBodies::BodyResolutionMap {
+          nodeIds: Vector::new<u32>(),
+          refs: Vector::new<Analyzer::ResolverBodies::ResolvedRef>(),
+        },
+      };
+
+      // Build global name index from both binder passes (REQ-E5).
+      Analyzer::ResolverBodies::buildBodyGlobalNameIndex(&mut state, defStore, pass1);
+      Analyzer::ResolverBodies::buildBodyGlobalNameIndex(&mut state, defStore, pass2);
+
+      // Walk all top-level items in source order (REQ-E2, REQ-E3, REQ-E6).
+      let mut i: u64 = 0;
+
+      while (i < module.roots.length()) {
+        let Option::SOME(itemId) = module.roots.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        Analyzer::ResolverBodies::walkItemForBody(&mut state, defStore, typeStore, symbols, module, pass1, pass2, *itemId);
+        i += 1;
+      }
+
+      return Analyzer::ResolverBodies::ResolverBodiesOutput {
+        diagnostics: state.diagnostics,
+        bodyResolution: state.bodyResolution,
+      };
+    }
+  }
+}

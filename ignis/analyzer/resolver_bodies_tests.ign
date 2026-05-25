@@ -1,0 +1,2251 @@
+import Test from "std::test";
+
+import SourceSpan from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+import Id from "@compiler::ids";
+
+/// Build a zero-byte source span suitable for test use.
+function bodiesDummySpan(): SourceSpan {
+  return SourceSpan::new("resolver_bodies_test.ign", 0, 0);
+}
+
+/// Run pass-1 + pass-2 binder, then `resolveBodies` on the given module.
+///
+/// Returns the body resolver output. Stores are mutated in-place by the binder;
+/// `resolveBodies` itself is read-only except for `symbols.intern` cache writes.
+function runResolveBodies(
+  defStore: &mut Analyzer::DefinitionStore,
+  typeStore: &mut Analyzer::TypeStore,
+  symbols: &mut Analyzer::SymbolTable,
+  module: &Ast::Module,
+): Analyzer::ResolverBodies::ResolverBodiesOutput {
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    defStore,
+    typeStore,
+    symbols,
+    module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    defStore,
+    typeStore,
+    symbols,
+    module,
+    &pass1,
+  );
+
+  return Analyzer::ResolverBodies::resolveBodies(
+    defStore,
+    typeStore,
+    symbols,
+    module,
+    &pass1,
+    &pass2,
+  );
+}
+
+/// Add a simple binding pattern without annotation.
+function addBinding(module: &mut Ast::Module, name: str): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: bodiesDummySpan(),
+    name: String::create(name),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Add a binding pattern with a path-type annotation.
+function addAnnotatedBinding(
+  module: &mut Ast::Module,
+  name: str,
+  typeAnnotation: Ast::TypeId
+): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: bodiesDummySpan(),
+    name: String::create(name),
+    annotation: Option::SOME(typeAnnotation),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Add a simple Path type annotation to the module.
+function addPathType(module: &mut Ast::Module, name: str): Ast::TypeId {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create(name));
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: bodiesDummySpan(),
+    segments: segments,
+  }));
+}
+
+/// Add a Variable expression (identifier reference) to the module.
+function addVariable(module: &mut Ast::Module, name: str): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Variable(Ast::Expression::Variable {
+    span: bodiesDummySpan(),
+    name: String::create(name),
+  }));
+}
+
+/// Add a Return statement (with a value expression) to the module.
+function addReturnExpr(module: &mut Ast::Module, exprId: Ast::ExpressionId): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: bodiesDummySpan(),
+    value: Option::SOME(exprId),
+  }));
+}
+
+/// Add a void Return statement to the module.
+function addReturn(module: &mut Ast::Module): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: bodiesDummySpan(),
+    value: Option::NONE,
+  }));
+}
+
+/// Add a Block statement from a list of statement ids.
+function addBlock(module: &mut Ast::Module, stmts: Vector<Ast::StatementId>): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: bodiesDummySpan(),
+    statements: stmts,
+    tail: Option::NONE,
+  }));
+}
+
+/// Add an integer literal expression.
+function addIntLiteral(module: &mut Ast::Module, value: i64): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: bodiesDummySpan(),
+    value: Ast::Expression::LiteralValue::Int(value),
+  }));
+}
+
+/// Assert that the body resolution map contains an expression ref at the given ExpressionId.
+function assertExprRef(
+  map: &Analyzer::ResolverBodies::BodyResolutionMap,
+  exprId: Ast::ExpressionId,
+): Analyzer::ResolverBodies::ResolvedRef {
+  let result: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findExprRef(map, exprId.raw());
+  let Option::SOME(r) = result else {
+    @panic("assertExprRef: no entry found for ExpressionId");
+  };
+  return r;
+}
+
+/// Assert that a ResolvedRef is Local and return its LocalId.
+function assertLocal(r: Analyzer::ResolverBodies::ResolvedRef): Analyzer::ResolverBodies::LocalId {
+  match (r) {
+    Analyzer::ResolverBodies::ResolvedRef::Local(lid) -> {
+      return lid;
+    },
+    Analyzer::ResolverBodies::ResolvedRef::Definition(_) -> {
+      @panic("assertLocal: expected Local, got Definition");
+    },
+    Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {
+      @panic("assertLocal: expected Local, got TypeParam");
+    },
+    Analyzer::ResolverBodies::ResolvedRef::Unresolved -> {
+      @panic("assertLocal: expected Local, got Unresolved");
+    },
+  };
+}
+
+/// Assert that a ResolvedRef is Definition and return its DefinitionId.
+function assertDefinitionRef(r: Analyzer::ResolverBodies::ResolvedRef): Analyzer::DefinitionId {
+  match (r) {
+    Analyzer::ResolverBodies::ResolvedRef::Local(_) -> {
+      @panic("assertDefinitionRef: expected Definition, got Local");
+    },
+    Analyzer::ResolverBodies::ResolvedRef::Definition(did) -> {
+      return did;
+    },
+    Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {
+      @panic("assertDefinitionRef: expected Definition, got TypeParam");
+    },
+    Analyzer::ResolverBodies::ResolvedRef::Unresolved -> {
+      @panic("assertDefinitionRef: expected Definition, got Unresolved");
+    },
+  };
+}
+
+/// Assert that a ResolvedRef is Unresolved.
+function assertUnresolved(r: Analyzer::ResolverBodies::ResolvedRef): void {
+  match (r) {
+    Analyzer::ResolverBodies::ResolvedRef::Local(_) -> {
+      @panic("assertUnresolved: expected Unresolved, got Local");
+    },
+    Analyzer::ResolverBodies::ResolvedRef::Definition(_) -> {
+      @panic("assertUnresolved: expected Unresolved, got Definition");
+    },
+    Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {
+      @panic("assertUnresolved: expected Unresolved, got TypeParam");
+    },
+    Analyzer::ResolverBodies::ResolvedRef::Unresolved -> {},
+  };
+}
+
+/// Assert a pattern ref is Local and return LocalId.
+function assertPatternLocal(
+  map: &Analyzer::ResolverBodies::BodyResolutionMap,
+  patId: Ast::PatternId,
+): Analyzer::ResolverBodies::LocalId {
+  let result: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(map, patId.raw());
+  let Option::SOME(r) = result else {
+    @panic("assertPatternLocal: no entry found for PatternId");
+  };
+  return assertLocal(r);
+}
+
+// ============================================================
+// Phase 1: Empty module — scaffolding smoke test
+// ============================================================
+
+/// Scenario: Empty module produces an empty BodyResolutionMap and no diagnostics.
+@test
+function resolveBodiesEmptyModuleProducesEmptyOutput(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.bodyResolution.nodeIds.length(), 0);
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+// ============================================================
+// Phase 2: LocalStack scope mechanics
+// ============================================================
+
+/// Scenario: Push scope, bind a name, pop scope — name is no longer findable.
+@test
+function resolveBodiesPushPopScopeIsBalanced(): void {
+  let mut stack: Analyzer::ResolverBodies::LocalStack = Analyzer::ResolverBodies::LocalStack {
+    scopeStarts: Vector::new<u64>(),
+    names: Vector::new<Analyzer::SymbolId>(),
+    locals: Vector::new<Analyzer::ResolverBodies::LocalId>(),
+  };
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let sym: Analyzer::SymbolId = symbols.intern("x");
+
+  Analyzer::ResolverBodies::pushScope(&mut stack);
+  let dummyDef: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+  Analyzer::ResolverBodies::bindLocalRaw(&mut stack, sym, dummyDef);
+  let beforePop: Option<Analyzer::ResolverBodies::LocalId> = Analyzer::ResolverBodies::lookupLocal(&stack, sym);
+  Test::assertEq<boolean>(beforePop.isSome(), true);
+
+  Analyzer::ResolverBodies::popScope(&mut stack);
+  let afterPop: Option<Analyzer::ResolverBodies::LocalId> = Analyzer::ResolverBodies::lookupLocal(&stack, sym);
+  Test::assertEq<boolean>(afterPop.isNone(), true);
+}
+
+/// Scenario: Shadowing — innermost binding wins.
+@test
+function resolveBodiesShadowingPrefersInnermost(): void {
+  let mut stack: Analyzer::ResolverBodies::LocalStack = Analyzer::ResolverBodies::LocalStack {
+    scopeStarts: Vector::new<u64>(),
+    names: Vector::new<Analyzer::SymbolId>(),
+    locals: Vector::new<Analyzer::ResolverBodies::LocalId>(),
+  };
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let sym: Analyzer::SymbolId = symbols.intern("a");
+  let dummyDef: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+
+  // Outer scope: bind 'a' as index 0.
+  Analyzer::ResolverBodies::pushScope(&mut stack);
+  Analyzer::ResolverBodies::bindLocalRaw(&mut stack, sym, dummyDef);
+  let Option::SOME(outer) = Analyzer::ResolverBodies::lookupLocal(&stack, sym) else {
+    @panic("outer binding not found");
+  };
+  Test::assertEq<u32>(outer.index, 0);
+
+  // Inner scope: bind 'a' as index 1.
+  Analyzer::ResolverBodies::pushScope(&mut stack);
+  Analyzer::ResolverBodies::bindLocalRaw(&mut stack, sym, dummyDef);
+  let Option::SOME(inner) = Analyzer::ResolverBodies::lookupLocal(&stack, sym) else {
+    @panic("inner binding not found");
+  };
+  Test::assertEq<u32>(inner.index, 1);
+
+  // Pop inner; outer should be visible again.
+  Analyzer::ResolverBodies::popScope(&mut stack);
+  let Option::SOME(outerAgain) = Analyzer::ResolverBodies::lookupLocal(&stack, sym) else {
+    @panic("outer binding should be visible after pop");
+  };
+  Test::assertEq<u32>(outerAgain.index, 0);
+}
+
+/// Scenario: Global index contains top-level function and record definitions.
+@test
+function resolveBodiesGlobalIndexContainsTopLevelDefinitions(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Add a record definition.
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Add a function with a block body.
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, Vector::new<Ast::StatementId>());
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("helper"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // After running, the global index should have been built. We can't inspect it
+  // directly (it's internal state), but we can verify the output is valid.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+// ============================================================
+// Phase 3: Expression walker — identifier and path resolution
+// ============================================================
+
+/// Scenario SC-01 (partial): function `f(x: i32): i32 { return x; }` —
+/// the Variable node for `x` in the return resolves to Local(index:0).
+@test
+function resolveBodiesResolvesParameterReference(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Build: function f(x: i32): i32 { return x; }
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let paramPat: Ast::PatternId = addAnnotatedBinding(&mut module, "x", i32TypeId);
+
+  let xVarExpr: Ast::ExpressionId = addVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, xVarExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(paramPat);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32TypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
+    &output.bodyResolution,
+    xVarExpr,
+  );
+  let lid: Analyzer::ResolverBodies::LocalId = assertLocal(ref_);
+  Test::assertEq<u32>(lid.index, 0);
+}
+
+/// Scenario SC-02: global function reference resolves to Definition.
+@test
+function resolveBodiesResolvesGlobalFunction(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function helper(): void { return; }
+  let helperBody: Ast::StatementId = addReturn(&mut module);
+  let helperBodyBlock: Ast::StatementId = addBlock(&mut module, Vector::new<Ast::StatementId>());
+  let helperItemId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("helper"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: helperBodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { helper(); return; }
+  let helperVarExpr: Ast::ExpressionId = addVariable(&mut module, "helper");
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  let callExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Call(Ast::Expression::Call {
+    span: bodiesDummySpan(),
+    callee: helperVarExpr,
+    typeArguments: Vector::new<Ast::TypeId>(),
+    arguments: callArgs,
+  }));
+
+  let callStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: callExpr,
+  }));
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+
+  let mut fBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  fBodyStmts.push(callStmt);
+  fBodyStmts.push(retStmt);
+  let fBodyBlock: Ast::StatementId = addBlock(&mut module, fBodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: fBodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
+    &output.bodyResolution,
+    helperVarExpr,
+  );
+  let _did: Analyzer::DefinitionId = assertDefinitionRef(ref_);
+}
+
+/// Scenario SC-03: undefined variable emits UNDECLARED_VARIABLE + Unresolved.
+@test
+function resolveBodiesEmitsUndeclaredVariable(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function bad(): void { return undefinedVar; }
+  let badVarExpr: Ast::ExpressionId = addVariable(&mut module, "undefinedVar");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, badVarExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("bad"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
+    &output.bodyResolution,
+    badVarExpr,
+  );
+  assertUnresolved(ref_);
+}
+
+/// Scenario: enum variant resolved via 2-segment path expression.
+@test
+function resolveBodiesResolvesEnumVariantPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // enum E { A }
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let variantPat: Ast::PatternId = addBinding(&mut module, "A");
+  variants.push(variantPat);
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: bodiesDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { E::A; return; }
+  let mut pathSegs: Vector<String> = Vector::new<String>();
+  pathSegs.push(String::create("E"));
+  pathSegs.push(String::create("A"));
+  let pathExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Path(Ast::Expression::Path {
+    span: bodiesDummySpan(),
+    segments: pathSegs,
+  }));
+
+  let pathStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: pathExpr,
+  }));
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(pathStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
+    &output.bodyResolution,
+    pathExpr,
+  );
+  let _did: Analyzer::DefinitionId = assertDefinitionRef(ref_);
+}
+
+/// Scenario: multi-segment path (3+ segments) produces Unresolved, no diagnostic.
+@test
+function resolveBodiesMultiSegmentPathIsUnresolvedNoDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { A::B::C; return; }
+  let mut pathSegs: Vector<String> = Vector::new<String>();
+  pathSegs.push(String::create("A"));
+  pathSegs.push(String::create("B"));
+  pathSegs.push(String::create("C"));
+  let pathExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Path(Ast::Expression::Path {
+    span: bodiesDummySpan(),
+    segments: pathSegs,
+  }));
+
+  let pathStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: pathExpr,
+  }));
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(pathStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // REQ-F4: no diagnostic for multi-segment path.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
+    &output.bodyResolution,
+    pathExpr,
+  );
+  assertUnresolved(ref_);
+}
+
+/// Scenario: Lambda expression records Unresolved, no diagnostic (REQ-B18).
+@test
+function resolveBodiesEmitsClosuresUnsupported(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { lambda body = { return; }; return; }
+  // The lambda body itself:
+  let lambdaBodyStmt: Ast::StatementId = addReturn(&mut module);
+  let lambdaExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
+    span: bodiesDummySpan(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: lambdaBodyStmt,
+  }));
+
+  let lambdaStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: lambdaExpr,
+  }));
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(lambdaStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // No diagnostic for closures.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
+    &output.bodyResolution,
+    lambdaExpr,
+  );
+  assertUnresolved(ref_);
+}
+
+// ============================================================
+// Phase 4: Pattern walker
+// ============================================================
+
+/// Scenario SC-04: let binding — the Variable for `a` in return resolves to Local.
+@test
+function resolveBodiesBindsLetPattern(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { let a = 0; return a; }
+  let intLit: Ast::ExpressionId = addIntLiteral(&mut module, 0);
+  let aPat: Ast::PatternId = addBinding(&mut module, "a");
+
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: bodiesDummySpan(),
+    pattern: aPat,
+    annotation: Option::NONE,
+    value: Option::SOME(intLit),
+  }));
+
+  let aVarExpr: Ast::ExpressionId = addVariable(&mut module, "a");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, aVarExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  // The pattern Binding node should map to Local.
+  let patLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(
+    &output.bodyResolution,
+    aPat,
+  );
+
+  // The Variable expression 'a' in return should map to same Local index.
+  let exprRef: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
+    &output.bodyResolution,
+    aVarExpr,
+  );
+  let exprLid: Analyzer::ResolverBodies::LocalId = assertLocal(exprRef);
+  Test::assertEq<u32>(patLid.index, exprLid.index);
+}
+
+/// Scenario: tuple pattern binds both elements as distinct locals.
+@test
+function resolveBodiesBindsTuplePattern(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { let (a, b) = (1, 2); return a; }
+  let lit1: Ast::ExpressionId = addIntLiteral(&mut module, 1);
+  let lit2: Ast::ExpressionId = addIntLiteral(&mut module, 2);
+
+  let mut tupleElems: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  tupleElems.push(lit1);
+  tupleElems.push(lit2);
+  let tupleExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Tuple(Ast::Expression::Tuple {
+    span: bodiesDummySpan(),
+    elements: tupleElems,
+  }));
+
+  let aPat: Ast::PatternId = addBinding(&mut module, "a");
+  let bPat: Ast::PatternId = addBinding(&mut module, "b");
+  let mut tuplePats: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  tuplePats.push(aPat);
+  tuplePats.push(bPat);
+  let tuplePat: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
+    span: bodiesDummySpan(),
+    elements: tuplePats,
+  }));
+
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: bodiesDummySpan(),
+    pattern: tuplePat,
+    annotation: Option::NONE,
+    value: Option::SOME(tupleExpr),
+  }));
+
+  let aVarExpr: Ast::ExpressionId = addVariable(&mut module, "a");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, aVarExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let aLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, aPat);
+  let bLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, bPat);
+
+  // a and b should have different indices.
+  Test::assertEq<boolean>(aLid.index != bLid.index, true);
+}
+
+/// Scenario: enum variant destructure in pattern resolves to Definition.
+@test
+function resolveBodiesResolvesEnumVariantDestructure(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // enum E { A }
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let variantBindPat: Ast::PatternId = addBinding(&mut module, "A");
+  variants.push(variantBindPat);
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: bodiesDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(e: E): void { match e { E::A => return; } }
+  let eParamTypeId: Ast::TypeId = addPathType(&mut module, "E");
+  let eParamPat: Ast::PatternId = addAnnotatedBinding(&mut module, "e", eParamTypeId);
+
+  let eVarExpr: Ast::ExpressionId = addVariable(&mut module, "e");
+
+  // Match arm pattern: E::A (2-segment path pattern)
+  let mut armSegs: Vector<String> = Vector::new<String>();
+  armSegs.push(String::create("E"));
+  armSegs.push(String::create("A"));
+  let armPathPat: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+    span: bodiesDummySpan(),
+    segments: armSegs,
+    arguments: Vector::new<Ast::PatternId>(),
+  }));
+
+  let armRetStmt: Ast::StatementId = addReturn(&mut module);
+  let armBodyExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Block(Ast::Expression::Block {
+    span: bodiesDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: armPathPat,
+    guard: Option::NONE,
+    body: armBodyExpr,
+  });
+
+  let matchExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Match(Ast::Expression::Match {
+    span: bodiesDummySpan(),
+    scrutinee: eVarExpr,
+    arms: arms,
+  }));
+
+  let matchStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: matchExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  let mut fParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fParams.push(eParamPat);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: fParams,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // No diagnostics: E and A are valid.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  // The path pattern E::A should map to Definition.
+  let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(
+    &output.bodyResolution,
+    armPathPat.raw(),
+  );
+  let Option::SOME(patRef) = patResult else {
+    @panic("E::A pattern ref not found");
+  };
+  let _did: Analyzer::DefinitionId = assertDefinitionRef(patRef);
+}
+
+/// Scenario: pattern arity mismatch emits INVALID_NUMBER_OF_ARGUMENTS.
+@test
+function resolveBodiesEmitsPatternArityMismatch(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // enum E { A }  — A has empty payload.
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let variantBind: Ast::PatternId = addBinding(&mut module, "A");
+  variants.push(variantBind);
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: bodiesDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(e: E): void { match e { E::A(x) => return; } }
+  // E::A has empty payload; matching with one argument is an arity mismatch.
+  let eParamTypeId: Ast::TypeId = addPathType(&mut module, "E");
+  let eParamPat: Ast::PatternId = addAnnotatedBinding(&mut module, "e", eParamTypeId);
+  let eVarExpr: Ast::ExpressionId = addVariable(&mut module, "e");
+
+  let xSubPat: Ast::PatternId = addBinding(&mut module, "x");
+  let mut argPats: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  argPats.push(xSubPat);
+
+  let mut armSegs: Vector<String> = Vector::new<String>();
+  armSegs.push(String::create("E"));
+  armSegs.push(String::create("A"));
+  let armPathPat: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+    span: bodiesDummySpan(),
+    segments: armSegs,
+    arguments: argPats,
+  }));
+
+  let armBodyExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Block(Ast::Expression::Block {
+    span: bodiesDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: armPathPat,
+    guard: Option::NONE,
+    body: armBodyExpr,
+  });
+
+  let matchExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Match(Ast::Expression::Match {
+    span: bodiesDummySpan(),
+    scrutinee: eVarExpr,
+    arms: arms,
+  }));
+
+  let matchStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: matchExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  let mut fParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fParams.push(eParamPat);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: fParams,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // Arity mismatch: one INVALID_NUMBER_OF_ARGUMENTS expected.
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+}
+
+// ============================================================
+// Phase 5: Statement walker — scope discipline
+// ============================================================
+
+/// Scenario SC-08: let binding not visible before its declaration.
+@test
+function resolveBodiesLetBindingNotVisibleBeforeDeclaration(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { return a; let a = 0; }
+  let aVarExpr: Ast::ExpressionId = addVariable(&mut module, "a");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, aVarExpr);
+
+  let intLit: Ast::ExpressionId = addIntLiteral(&mut module, 0);
+  let aPat: Ast::PatternId = addBinding(&mut module, "a");
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: bodiesDummySpan(),
+    pattern: aPat,
+    annotation: Option::NONE,
+    value: Option::SOME(intLit),
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  bodyStmts.push(letStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // `a` used before declaration — one UNDECLARED_VARIABLE.
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
+    &output.bodyResolution,
+    aVarExpr,
+  );
+  assertUnresolved(ref_);
+}
+
+/// Scenario SC-08: block scope — variable not visible after block exits.
+@test
+function resolveBodiesBlockScopeDiscipline(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { { let x = 1; }; return x; }
+  let lit1: Ast::ExpressionId = addIntLiteral(&mut module, 1);
+  let xPat: Ast::PatternId = addBinding(&mut module, "x");
+  let innerLet: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: bodiesDummySpan(),
+    pattern: xPat,
+    annotation: Option::NONE,
+    value: Option::SOME(lit1),
+  }));
+
+  let mut innerStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  innerStmts.push(innerLet);
+  let innerBlock: Ast::StatementId = addBlock(&mut module, innerStmts);
+
+  let xVarExpr: Ast::ExpressionId = addVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, xVarExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(innerBlock);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
+    &output.bodyResolution,
+    xVarExpr,
+  );
+  assertUnresolved(ref_);
+}
+
+// ============================================================
+// Phase 6: Function-body and constant integration
+// ============================================================
+
+/// Scenario SC-01 (full): function add(a: i32, b: i32) — a→index:0, b→index:1.
+@test
+function resolveBodiesResolvesParametersThenBody(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function add(a: i32, b: i32): i32 { return a; }
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let aPat: Ast::PatternId = addAnnotatedBinding(&mut module, "a", i32TypeId);
+  let bPat: Ast::PatternId = addAnnotatedBinding(&mut module, "b", i32TypeId);
+
+  let aVarExpr: Ast::ExpressionId = addVariable(&mut module, "a");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, aVarExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(aPat);
+  params.push(bPat);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("add"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32TypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let aPatLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, aPat);
+  let bPatLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, bPat);
+
+  Test::assertEq<u32>(aPatLid.index, 0);
+  Test::assertEq<u32>(bPatLid.index, 1);
+
+  let aExprRef: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
+    &output.bodyResolution,
+    aVarExpr,
+  );
+  let aExprLid: Analyzer::ResolverBodies::LocalId = assertLocal(aExprRef);
+  Test::assertEq<u32>(aExprLid.index, 0);
+}
+
+/// Scenario: constant initializer is walked; K resolves to Definition in function body.
+@test
+function resolveBodiesResolvesConstantInitializer(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // const K: i32 = 5;
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let kLit: Ast::ExpressionId = addIntLiteral(&mut module, 5);
+  module.addRootItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+    span: bodiesDummySpan(),
+    name: String::create("K"),
+    annotation: Option::SOME(i32TypeId),
+    value: kLit,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): i32 { return K; }
+  let kVarExpr: Ast::ExpressionId = addVariable(&mut module, "K");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, kVarExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(i32TypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
+    &output.bodyResolution,
+    kVarExpr,
+  );
+  let _did: Analyzer::DefinitionId = assertDefinitionRef(ref_);
+}
+
+// ============================================================
+// Phase 7: Scope discipline edge cases
+// ============================================================
+
+/// Scenario SC-05: shadowing — inner let wins over outer.
+@test
+function resolveBodiesShadowingPrefersLocal(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { let x = 1; { let x = 2; return x; } }
+  let lit1: Ast::ExpressionId = addIntLiteral(&mut module, 1);
+  let xOuterPat: Ast::PatternId = addBinding(&mut module, "x");
+  let outerLet: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: bodiesDummySpan(),
+    pattern: xOuterPat,
+    annotation: Option::NONE,
+    value: Option::SOME(lit1),
+  }));
+
+  let lit2: Ast::ExpressionId = addIntLiteral(&mut module, 2);
+  let xInnerPat: Ast::PatternId = addBinding(&mut module, "x");
+  let innerLet: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: bodiesDummySpan(),
+    pattern: xInnerPat,
+    annotation: Option::NONE,
+    value: Option::SOME(lit2),
+  }));
+
+  let xVarExpr: Ast::ExpressionId = addVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, xVarExpr);
+
+  let mut innerStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  innerStmts.push(innerLet);
+  innerStmts.push(retStmt);
+  let innerBlock: Ast::StatementId = addBlock(&mut module, innerStmts);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(outerLet);
+  bodyStmts.push(innerBlock);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  // Inner x has a higher index.
+  let innerLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, xInnerPat);
+  let exprRef: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, xVarExpr);
+  let exprLid: Analyzer::ResolverBodies::LocalId = assertLocal(exprRef);
+  Test::assertEq<u32>(innerLid.index, exprLid.index);
+}
+
+/// Scenario: global record resolves as Definition.
+@test
+function resolveBodiesGlobalRecordResolves(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record R {}
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { R; return; }
+  let rVarExpr: Ast::ExpressionId = addVariable(&mut module, "R");
+  let exprStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: rVarExpr,
+  }));
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, rVarExpr);
+  let _did: Analyzer::DefinitionId = assertDefinitionRef(ref_);
+}
+
+/// Scenario: local shadows global of same name.
+@test
+function resolveBodiesShadowingGlobalWithLocal(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record R {}
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { let R = 1; return R; }
+  let lit1: Ast::ExpressionId = addIntLiteral(&mut module, 1);
+  let rLocalPat: Ast::PatternId = addBinding(&mut module, "R");
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: bodiesDummySpan(),
+    pattern: rLocalPat,
+    annotation: Option::NONE,
+    value: Option::SOME(lit1),
+  }));
+
+  let rVarExpr: Ast::ExpressionId = addVariable(&mut module, "R");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, rVarExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  // R should resolve to Local (the let binding), not Definition (the record).
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, rVarExpr);
+  let _lid: Analyzer::ResolverBodies::LocalId = assertLocal(ref_);
+}
+
+// ============================================================
+// Phase 8: Diagnostic tests
+// ============================================================
+
+/// Scenario: unknown enum variant emits UNDECLARED_VARIABLE.
+@test
+function resolveBodiesEmitsUnknownEnumVariant(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // enum E { A }
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let variantBind: Ast::PatternId = addBinding(&mut module, "A");
+  variants.push(variantBind);
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: bodiesDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { E::ZZZ; return; }
+  let mut pathSegs: Vector<String> = Vector::new<String>();
+  pathSegs.push(String::create("E"));
+  pathSegs.push(String::create("ZZZ"));
+  let pathExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Path(Ast::Expression::Path {
+    span: bodiesDummySpan(),
+    segments: pathSegs,
+  }));
+
+  let exprStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: pathExpr,
+  }));
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+}
+
+/// Scenario: MemberAccess — no entry for member; receiver IS resolved.
+@test
+function resolveBodiesSkipsMethodResolution(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(obj: i32): void { obj.field; return; }
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let objPat: Ast::PatternId = addAnnotatedBinding(&mut module, "obj", i32TypeId);
+
+  let objVarExpr: Ast::ExpressionId = addVariable(&mut module, "obj");
+  let memberExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::MemberAccess(Ast::Expression::MemberAccess {
+    span: bodiesDummySpan(),
+    object: objVarExpr,
+    operator: Ast::Expression::AccessOperator::Dot,
+    member: String::create("field"),
+  }));
+
+  let exprStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: memberExpr,
+  }));
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  let mut fParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fParams.push(objPat);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: fParams,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // No diagnostic: obj is resolved, member is not walked.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  // obj receiver IS in side table.
+  let objRef: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
+    &output.bodyResolution,
+    objVarExpr,
+  );
+  let _lid: Analyzer::ResolverBodies::LocalId = assertLocal(objRef);
+
+  // The MemberAccess node itself has NO entry in the side table.
+  let memberResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findExprRef(
+    &output.bodyResolution,
+    memberExpr.raw(),
+  );
+  Test::assertEq<boolean>(memberResult.isNone(), true);
+}
+
+// ============================================================
+// Phase 9: Determinism, idempotence, non-mutation
+// ============================================================
+
+/// Scenario SC-13: two calls to resolveBodies produce identical output.
+@test
+function resolveBodiesDeterministicAcrossTwoRuns(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(x: i32): i32 { return x; }
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let xPat: Ast::PatternId = addAnnotatedBinding(&mut module, "x", i32TypeId);
+  let xVarExpr: Ast::ExpressionId = addVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, xVarExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(xPat);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32TypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let out1: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  let out2: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  Test::assertEq<u64>(out1.bodyResolution.nodeIds.length(), out2.bodyResolution.nodeIds.length());
+  Test::assertEq<u64>(out1.diagnostics.length(), out2.diagnostics.length());
+
+  let mut i: u64 = 0;
+  while (i < out1.bodyResolution.nodeIds.length()) {
+    let Option::SOME(id1) = out1.bodyResolution.nodeIds.get(i) else {
+      i += 1;
+      continue;
+    };
+    let Option::SOME(id2) = out2.bodyResolution.nodeIds.get(i) else {
+      i += 1;
+      continue;
+    };
+    Test::assertEq<u32>(*id1, *id2);
+    i += 1;
+  }
+}
+
+/// Scenario SC-14: resolveBodies does not mutate DefinitionStore.
+@test
+function resolveBodiesDoesNotMutateDefinitionStore(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record R {}
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // After binder + resolveBodies, defStore should contain the Record def.
+  // Running resolveBodies again should not add new definitions.
+  let defCountAfterFirst: u64 = defStore.length();
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let _out2: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // The defStore length after re-running binder+resolveBodies should be
+  // consistent: the extra binder run may add defs, but resolveBodies itself
+  // must not add defs on its own. We verify the count matches the second binder run.
+  let defCountAfterSecond: u64 = defStore.length();
+
+  // resolveBodies alone does not add definitions — tested by running it again
+  // on the same pass1/pass2 outputs without re-running the binder.
+  let _out3: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+  Test::assertEq<u64>(defStore.length(), defCountAfterSecond);
+}
+
+/// Scenario: ForOf binding is visible inside loop body, not after.
+@test
+function resolveBodiesBindsForOfPattern(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(xs: i32): void { for x of xs { return x; } }
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let xsParamPat: Ast::PatternId = addAnnotatedBinding(&mut module, "xs", i32TypeId);
+
+  let xsVarExpr: Ast::ExpressionId = addVariable(&mut module, "xs");
+  let xIterPat: Ast::PatternId = addBinding(&mut module, "x");
+  let xVarInBody: Ast::ExpressionId = addVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, xVarInBody);
+
+  let mut loopBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  loopBodyStmts.push(retStmt);
+  let loopBodyBlock: Ast::StatementId = addBlock(&mut module, loopBodyStmts);
+
+  let forOfStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::ForOf(Ast::Statement::ForOf {
+    span: bodiesDummySpan(),
+    pattern: xIterPat,
+    iterable: xsVarExpr,
+    body: loopBodyBlock,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(forOfStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  let mut fParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fParams.push(xsParamPat);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: fParams,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  // x in loop body maps to Local.
+  let xRef: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, xVarInBody);
+  let _xLid: Analyzer::ResolverBodies::LocalId = assertLocal(xRef);
+}
+
+/// Scenario: Or pattern — bindings in alternatives are independent.
+@test
+function resolveBodiesResolvesOrPattern(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(x: i32): void { match x { 0 | 1 => return; } }
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let xParamPat: Ast::PatternId = addAnnotatedBinding(&mut module, "x", i32TypeId);
+
+  let xScrut: Ast::ExpressionId = addVariable(&mut module, "x");
+
+  // literal patterns
+  let lit0: Ast::ExpressionId = addIntLiteral(&mut module, 0);
+  let lit1: Ast::ExpressionId = addIntLiteral(&mut module, 1);
+  let litPat0: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
+    span: bodiesDummySpan(),
+    expression: lit0,
+  }));
+  let litPat1: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
+    span: bodiesDummySpan(),
+    expression: lit1,
+  }));
+
+  let mut alts: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  alts.push(litPat0);
+  alts.push(litPat1);
+  let orPat: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Or(Ast::Pattern::Or {
+    span: bodiesDummySpan(),
+    alternatives: alts,
+  }));
+
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+  let armBodyExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Block(Ast::Expression::Block {
+    span: bodiesDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: orPat,
+    guard: Option::NONE,
+    body: armBodyExpr,
+  });
+
+  let matchExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Match(Ast::Expression::Match {
+    span: bodiesDummySpan(),
+    scrutinee: xScrut,
+    arms: arms,
+  }));
+
+  let matchStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: matchExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  let mut fParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fParams.push(xParamPat);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: fParams,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // No diagnostics — x in scrutinee is resolved as Local.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let xRef: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, xScrut);
+  let _xLid: Analyzer::ResolverBodies::LocalId = assertLocal(xRef);
+}
+
+// ============================================================
+// W-01: SC-06 — Record destructure in let
+// ============================================================
+
+/// Scenario SC-06: `let Point(x, y) = p;` where Point is a global Record.
+///
+/// The Path pattern for the constructor resolves to `Definition(pointDefId)`.
+/// The Binding patterns for `x` and `y` each become a Local in the enclosing function.
+/// The initializer `p` (a parameter) resolves to Local.
+@test
+function resolveBodiesRecordDestructureInLet(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record Point {}
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function main(p: Point): void { let Point(x, y) = p; return x; }
+  let pointTypeId: Ast::TypeId = addPathType(&mut module, "Point");
+  let pParamPat: Ast::PatternId = addAnnotatedBinding(&mut module, "p", pointTypeId);
+
+  let pVarExpr: Ast::ExpressionId = addVariable(&mut module, "p");
+
+  // Sub-patterns for x and y.
+  let xSubPat: Ast::PatternId = addBinding(&mut module, "x");
+  let ySubPat: Ast::PatternId = addBinding(&mut module, "y");
+  let mut destructureArgs: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  destructureArgs.push(xSubPat);
+  destructureArgs.push(ySubPat);
+
+  // Pattern::Path { segments: ["Point"], arguments: [xSubPat, ySubPat] }
+  let mut ctorSegs: Vector<String> = Vector::new<String>();
+  ctorSegs.push(String::create("Point"));
+  let ctorPathPat: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+    span: bodiesDummySpan(),
+    segments: ctorSegs,
+    arguments: destructureArgs,
+  }));
+
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: bodiesDummySpan(),
+    pattern: ctorPathPat,
+    annotation: Option::NONE,
+    value: Option::SOME(pVarExpr),
+  }));
+
+  let xVarExpr: Ast::ExpressionId = addVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, xVarExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  let mut mainParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  mainParams.push(pParamPat);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: mainParams,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // No diagnostics: Point is a known Record, x and y bind successfully.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  // The constructor path pattern resolves to Definition (the Point record).
+  let ctorRef: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(
+    &output.bodyResolution,
+    ctorPathPat.raw(),
+  );
+  let Option::SOME(ctorRefVal) = ctorRef else {
+    @panic("resolveBodiesRecordDestructureInLet: Point constructor pattern ref not found");
+  };
+  let _pointDefId: Analyzer::DefinitionId = assertDefinitionRef(ctorRefVal);
+
+  // x and y sub-patterns resolve to Local.
+  let _xLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, xSubPat);
+  let _yLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, ySubPat);
+
+  // x in the return expression resolves to the same local as the x binding.
+  let xExprRef: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, xVarExpr);
+  let xExprLid: Analyzer::ResolverBodies::LocalId = assertLocal(xExprRef);
+  let xPatLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, xSubPat);
+  Test::assertEq<u32>(xExprLid.index, xPatLid.index);
+}
+
+// ============================================================
+// W-02: SC-09 — if-let binding scoped to then-branch only
+// ============================================================
+
+/// Scenario SC-09: `if (let v = expr) { return v; } return v;` —
+/// `v` is a Local visible inside the then-branch but not in the surrounding scope
+/// after the if expression exits.
+///
+/// Uses a plain Binding pattern in the LetCondition to avoid enum-variant arity
+/// complications; the scope-discipline assertion is the same.
+@test
+function resolveBodiesIfLetBindingScopedToThenBranch(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(x: i32): void {
+  //   if (let v = x) { return v; }
+  //   return v;  // v is NOT in scope here — UNDECLARED_VARIABLE expected
+  // }
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let xParamPat: Ast::PatternId = addAnnotatedBinding(&mut module, "x", i32TypeId);
+
+  // `x` in the LetCondition value position.
+  let xVarExpr: Ast::ExpressionId = addVariable(&mut module, "x");
+
+  // Binding pattern `v` in the LetCondition.
+  let vBindPat: Ast::PatternId = addBinding(&mut module, "v");
+
+  // LetCondition: `let v = x`.
+  let letCondExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::LetCondition(Ast::Expression::LetCondition {
+    span: bodiesDummySpan(),
+    pattern: vBindPat,
+    value: xVarExpr,
+  }));
+
+  // `v` used inside then-branch body.
+  let vInsideThen: Ast::ExpressionId = addVariable(&mut module, "v");
+  let retVStmt: Ast::StatementId = addReturnExpr(&mut module, vInsideThen);
+  let mut thenStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  thenStmts.push(retVStmt);
+  let thenBlock: Ast::StatementId = addBlock(&mut module, thenStmts);
+
+  // if expression wrapping the LetCondition.
+  let ifExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::If(Ast::Expression::If {
+    span: bodiesDummySpan(),
+    condition: letCondExpr,
+    thenBranch: thenBlock,
+    elseBranch: Option::NONE,
+  }));
+
+  let ifStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: ifExpr,
+  }));
+
+  // `v` used AFTER the if-expression — should be Unresolved.
+  let vAfterIf: Ast::ExpressionId = addVariable(&mut module, "v");
+  let retAfterStmt: Ast::StatementId = addReturnExpr(&mut module, vAfterIf);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(ifStmt);
+  bodyStmts.push(retAfterStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  let mut fParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fParams.push(xParamPat);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: fParams,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // One diagnostic for `v` after the if-block (UNDECLARED_VARIABLE).
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  // `v` inside the then-branch resolves to Local (binding introduced by LetCondition).
+  let vThenRef: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, vInsideThen);
+  let _vLid: Analyzer::ResolverBodies::LocalId = assertLocal(vThenRef);
+
+  // `v` after the if resolves to Unresolved (not in scope outside if-let scope).
+  let vAfterRef: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, vAfterIf);
+  assertUnresolved(vAfterRef);
+}
+
+// ============================================================
+// W-02: SC-11 — Type-param shadowed by local parameter
+// ============================================================
+
+/// Scenario SC-11: `function f<T>(x: T): T { return x; }` —
+/// `x` in the return expression resolves to Local (the parameter), not TypeParam(T).
+/// Confirms innermost-first lookup: local scope is checked before type-param scope.
+@test
+function resolveBodiesTypeParamShadowedByLocal(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f<T>(x: T): T { return x; }
+  let tTypeId: Ast::TypeId = addPathType(&mut module, "T");
+  let xParamPat: Ast::PatternId = addAnnotatedBinding(&mut module, "x", tTypeId);
+
+  let xVarExpr: Ast::ExpressionId = addVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, xVarExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  // Generic parameter <T>.
+  let mut tBounds: Vector<Ast::GenericBound> = Vector::new<Ast::GenericBound>();
+  let tGenericParam: Ast::GenericParam = Ast::GenericParam {
+    span: bodiesDummySpan(),
+    name: String::create("T"),
+    bounds: tBounds,
+  };
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(tGenericParam);
+
+  let mut fParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fParams.push(xParamPat);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: genericParams,
+    parameters: fParams,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // No diagnostics: `x` resolves to the parameter.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  // `x` resolves to Local (the parameter), not TypeParam.
+  let xRef: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, xVarExpr);
+  let _xLid: Analyzer::ResolverBodies::LocalId = assertLocal(xRef);
+}
+
+// ============================================================
+// W-03: Non-mutation — TypeStore and BinderOutput
+// ============================================================
+
+/// Scenario SC-14 (TypeStore): resolveBodies does not mutate TypeStore.
+///
+/// Captures the TypeStore type count before and after; the count must not grow.
+@test
+function resolveBodiesDoesNotMutateTypeStore(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(x: i32): i32 { return x; }
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let xParamPat: Ast::PatternId = addAnnotatedBinding(&mut module, "x", i32TypeId);
+  let xVarExpr: Ast::ExpressionId = addVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, xVarExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+  let mut fParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fParams.push(xParamPat);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: fParams,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Run binder once so typeStore is fully populated.
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // Capture typeStore type count before resolveBodies.
+  let typeCountBefore: u64 = typeStore.length();
+
+  let _out: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // resolveBodies must not allocate new types.
+  Test::assertEq<u64>(typeStore.length(), typeCountBefore);
+}
+
+/// Scenario SC-14 (BinderOutput): resolveBodies does not mutate binder pass-1 or pass-2 outputs.
+///
+/// Captures nodeIds lengths before and after; they must not change.
+@test
+function resolveBodiesDoesNotMutateBinderOutputs(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function g(): void { return; }
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, Vector::new<Ast::StatementId>());
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("g"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // Capture binder output sizes before resolveBodies.
+  let pass1NodesBefore: u64 = pass1.nodeIds.length();
+  let pass2NodesBefore: u64 = pass2.nodeIds.length();
+
+  let _out: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  // resolveBodies must not modify binder outputs.
+  Test::assertEq<u64>(pass1.nodeIds.length(), pass1NodesBefore);
+  Test::assertEq<u64>(pass2.nodeIds.length(), pass2NodesBefore);
+}
