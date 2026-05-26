@@ -6383,19 +6383,11 @@ function main(): i32 {
 // than by a downstream selfhost slice.
 // Regression: an enum variant that carries a `String` (or any heap-owning) payload,
 // constructed and matched, triggers a runtime `free(): invalid pointer` double-free.
-// Reproduced in the selfhost resolver-expressions slice (commit TBD): swapping
+// Reproduced in the selfhost resolver-expressions slice: swapping
 // `enum ResolvedRef { ..., Unresolved }` to `enum ResolvedRef { ..., Unresolved(String) }`
-// per spec REQ-A1 made 5 selfhost tests crash with `free(): invalid pointer`. The slice
-// shipped with a unit-variant workaround documented as a deviation; this regression
-// test pins the failing shape so the dedicated codegen-fix slice has a reliable repro.
-//
-// This is a distinct shape from `e2e_option_record_with_vector_string_let_else_destructure`
-// — that test passes today because the prior `Vector<String>` repro turned out to be
-// either incidentally fixed or never reproducible. The `String`-payload-in-enum-variant
-// shape below is genuinely failing on current HEAD; this test is expected to be FAILING
-// (or marked `#[ignore]`) until the codegen-fix slice lands.
-//
-// Engram bugfix/codegen-vector-string-double-free (#5892) tracks the fix.
+// per spec REQ-A1 made 5 selfhost tests crash with `free(): invalid pointer`. Fixed by
+// per-arm pattern-binding ownership in `check_match` plus `borrowed_alias: true` on the
+// enum staging local in `lower_enum_variant`; this regression test pins the shape.
 #[test]
 fn e2e_enum_variant_string_payload_match_double_free_repro() {
   e2e_workspace_std_test(
