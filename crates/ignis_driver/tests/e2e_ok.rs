@@ -6397,7 +6397,6 @@ function main(): i32 {
 //
 // Engram bugfix/codegen-vector-string-double-free (#5892) tracks the fix.
 #[test]
-#[ignore = "captures the live codegen double-free repro; unignore once the codegen-fix slice lands"]
 fn e2e_enum_variant_string_payload_match_double_free_repro() {
   e2e_workspace_std_test(
     "enum_variant_string_payload_match_double_free_repro",
@@ -6517,4 +6516,3 @@ function main(): i32 {
 "#,
   );
 }
-

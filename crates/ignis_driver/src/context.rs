@@ -1407,29 +1407,13 @@ string = "string/mod.ign"
     )
     .expect("write main.ign");
 
-    fs::write(
-      mod_a.join("mod.ign"),
-      "export LayoutA from \"./layout\";\n",
-    )
-    .expect("write mod_a/mod.ign");
+    fs::write(mod_a.join("mod.ign"), "export LayoutA from \"./layout\";\n").expect("write mod_a/mod.ign");
 
-    fs::write(
-      mod_a.join("layout.ign"),
-      "export record LayoutA {\n  x: i32;\n}\n",
-    )
-    .expect("write mod_a/layout.ign");
+    fs::write(mod_a.join("layout.ign"), "export record LayoutA {\n  x: i32;\n}\n").expect("write mod_a/layout.ign");
 
-    fs::write(
-      mod_b.join("mod.ign"),
-      "export LayoutB from \"./layout\";\n",
-    )
-    .expect("write mod_b/mod.ign");
+    fs::write(mod_b.join("mod.ign"), "export LayoutB from \"./layout\";\n").expect("write mod_b/mod.ign");
 
-    fs::write(
-      mod_b.join("layout.ign"),
-      "export record LayoutB {\n  y: i32;\n}\n",
-    )
-    .expect("write mod_b/layout.ign");
+    fs::write(mod_b.join("layout.ign"), "export record LayoutB {\n  y: i32;\n}\n").expect("write mod_b/layout.ign");
 
     let mut config = IgnisConfig::default();
     config.std_path = String::new();
@@ -1585,8 +1569,13 @@ string = "string/mod.ign"
     );
 
     // Full compilation must succeed with no errors.
-    let (_, has_errors) = ctx.compile_collect_all(root_id, &config).expect("compile must not fail");
-    assert!(!has_errors, "compilation must produce no errors after per-module import path fix");
+    let (_, has_errors) = ctx
+      .compile_collect_all(root_id, &config)
+      .expect("compile must not fail");
+    assert!(
+      !has_errors,
+      "compilation must produce no errors after per-module import path fix"
+    );
   }
 }
 

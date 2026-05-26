@@ -2261,10 +2261,7 @@ impl<'a> LoweringContext<'a> {
   fn hir_aliases_external_storage(node: &ignis_hir::HIRNode) -> bool {
     matches!(
       node.kind,
-      HIRKind::FieldAccess { .. }
-        | HIRKind::Index { .. }
-        | HIRKind::Dereference(_)
-        | HIRKind::StaticAccess { .. }
+      HIRKind::FieldAccess { .. } | HIRKind::Index { .. } | HIRKind::Dereference(_) | HIRKind::StaticAccess { .. }
     )
   }
 
@@ -3547,13 +3544,17 @@ impl<'a> LoweringContext<'a> {
     enum_ty: TypeId,
     span: Span,
   ) -> Option<Operand> {
-    // Allocate local for the enum
+    // Allocate a synthetic local for staging the enum value. Using a synthetic
+    // local prevents it from appearing in the named droppable-locals set: the
+    // value is immediately loaded into a temp and then stored to the caller's
+    // variable (which owns it and manages the drop). A regular alloc_local would
+    // create a second drop chain on the same pointer bytes, causing a double-free.
     let local = self.fn_builder().alloc_local(LocalData {
       def_id: None,
       ty: enum_ty,
       mutable: true,
       name: None,
-      borrowed_alias: false,
+      borrowed_alias: true,
     });
 
     // Lower payload values

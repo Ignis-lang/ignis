@@ -207,11 +207,7 @@ impl<'a> Analyzer<'a> {
                 const_def.type_id = field_type;
               }
             } else if let DefinitionKind::Record(rd) = &self.defs.get(&record_def_id).kind {
-              let field_def_id = rd
-                .fields
-                .iter()
-                .find(|f| f.name == field.name)
-                .map(|f| f.def_id);
+              let field_def_id = rd.fields.iter().find(|f| f.name == field.name).map(|f| f.def_id);
 
               if let Some(field_def_id) = field_def_id
                 && let DefinitionKind::Field(field_def) = &mut self.defs.get_mut(&field_def_id).kind
@@ -234,7 +230,9 @@ impl<'a> Analyzer<'a> {
               };
               match entry {
                 Some(SymbolEntry::Single(id)) => Some(*id),
-                Some(SymbolEntry::Overload(group)) => group.iter().copied().find(|id| self.defs.get(id).span == method.span),
+                Some(SymbolEntry::Overload(group)) => {
+                  group.iter().copied().find(|id| self.defs.get(id).span == method.span)
+                },
                 None => None,
               }
             } else {
@@ -266,7 +264,9 @@ impl<'a> Analyzer<'a> {
               };
               match entry {
                 Some(SymbolEntry::Single(id)) => Some(*id),
-                Some(SymbolEntry::Overload(group)) => group.iter().copied().find(|id| self.defs.get(id).span == method.span),
+                Some(SymbolEntry::Overload(group)) => {
+                  group.iter().copied().find(|id| self.defs.get(id).span == method.span)
+                },
                 None => None,
               }
             } else {

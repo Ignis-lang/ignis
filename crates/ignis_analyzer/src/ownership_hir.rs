@@ -1185,12 +1185,50 @@ impl<'a> HirOwnershipChecker<'a> {
       self.states = pre_match_state.clone();
       self.reachable = pre_match_reachable;
 
+      // Collect pattern bindings that own heap values. These are declared as Valid
+      // so that uses inside the arm body (e.g. method calls) see them as live. After
+      // the arm body is checked, any that remain Valid are scheduled for a drop at the
+      // arm body's scope end. State is fully restored to pre_match_state at the top of
+      // each iteration, so these declarations do not leak across arms.
+      let arm_pattern_defs = self.collect_droppable_pattern_def_ids(&arm.pattern);
+
+      for &def in &arm_pattern_defs {
+        self.states.insert(def, OwnershipState::Valid);
+      }
+
       if let Some(guard_id) = arm.guard {
         self.check_node(guard_id);
       }
 
       if self.reachable {
         self.check_node(arm.body);
+      }
+
+      // Schedule drops for arm pattern bindings that are still valid at arm body end.
+      // These drops are appended to on_scope_end[arm.body] (after any body-local drops
+      // already written by check_block), so the arm body's own scope drops fire first.
+      let pattern_drops: Vec<_> = arm_pattern_defs
+        .iter()
+        .filter(|def| self.is_valid(def) && !self.drop_suppressed_vars.contains(def))
+        .rev()
+        .copied()
+        .collect();
+
+      if !pattern_drops.is_empty() {
+        self
+          .schedules
+          .on_scope_end
+          .entry(arm.body)
+          .or_default()
+          .extend(pattern_drops);
+      }
+
+      // Remove pattern bindings from the arm state snapshot before the cross-arm merge.
+      // Pattern bindings are arm-scoped and do not exist in other arms; leaving them in
+      // the snapshot would cause false "moved in one branch but not the other" diagnostics
+      // when merge_branch_states sees Valid in this arm but absent in others.
+      for def in &arm_pattern_defs {
+        self.states.remove(def);
       }
 
       arm_states.push(self.states.clone());
@@ -1547,6 +1585,52 @@ impl<'a> HirOwnershipChecker<'a> {
       ignis_hir::HIRPattern::Or { patterns } => {
         for pat in patterns {
           self.declare_owned_pattern_bindings(pat);
+        }
+      },
+      ignis_hir::HIRPattern::Wildcard
+      | ignis_hir::HIRPattern::Literal { .. }
+      | ignis_hir::HIRPattern::Constant { .. } => {},
+    }
+  }
+
+  /// Collect the `DefinitionId`s of all pattern bindings that own a heap value,
+  /// in declaration order (left-to-right, outermost-to-innermost).
+  ///
+  /// Used by `check_match` to track per-arm ownership without touching `scope_stack`.
+  fn collect_droppable_pattern_def_ids(
+    &self,
+    pattern: &ignis_hir::HIRPattern,
+  ) -> Vec<DefinitionId> {
+    let mut result = Vec::new();
+    self.collect_droppable_pattern_def_ids_into(pattern, &mut result);
+    result
+  }
+
+  fn collect_droppable_pattern_def_ids_into(
+    &self,
+    pattern: &ignis_hir::HIRPattern,
+    out: &mut Vec<DefinitionId>,
+  ) {
+    match pattern {
+      ignis_hir::HIRPattern::Binding { def_id } => {
+        let var_ty = self.defs.type_of(def_id);
+        if self.types.needs_drop_with_defs(var_ty, self.defs) {
+          out.push(*def_id);
+        }
+      },
+      ignis_hir::HIRPattern::Variant { args, .. } => {
+        for arg in args {
+          self.collect_droppable_pattern_def_ids_into(arg, out);
+        }
+      },
+      ignis_hir::HIRPattern::Tuple { elements } => {
+        for elem in elements {
+          self.collect_droppable_pattern_def_ids_into(elem, out);
+        }
+      },
+      ignis_hir::HIRPattern::Or { patterns } => {
+        for pat in patterns {
+          self.collect_droppable_pattern_def_ids_into(pat, out);
         }
       },
       ignis_hir::HIRPattern::Wildcard
