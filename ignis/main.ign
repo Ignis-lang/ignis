@@ -30,8 +30,6 @@ import Process from "std::process";
 
 import DiagnosticBag, DiagnosticRenderer, Severity, SourceFile from "@compiler::diagnostics";
 import ParseOutput, Parser from "@compiler::parser";
-import Analyzer from "@compiler::analyzer";
-import Ast from "@compiler::ast";
 
 /// Count diagnostics in `bag` whose severity equals `target`.
 function countBySeverity(bag: &DiagnosticBag, target: Severity): u64 {
@@ -81,11 +79,11 @@ function renderBagToStderr(bag: &DiagnosticBag, file: &SourceFile): void {
 
 /// Drive the selfhost compiler pipeline against a single source file.
 ///
-/// Runs lex → parse → bind (pass 1 + pass 2) → resolveTypes → resolveBodies,
-/// then renders diagnostics from all phases to stderr and prints per-phase
-/// status lines to stdout.
+/// Today this covers `lex -> parse` and renders diagnostics from both phases.
+/// The analyzer port is in progress (see ignis/analyzer/), so semantic checks
+/// are reported as `skipped` rather than silently passing.
 ///
-/// Returns 0 on success, 1 on any error (I/O, lex, parse, or analyzer).
+/// Returns 0 on success, 1 on any error (I/O, lex, or parse).
 function compileFile(path: &String): i32 {
   Io::println(String::create("ignis selfhost (partial pipeline)"));
   Io::println(String::create("  source: ").concat(path.toStr()));
@@ -112,40 +110,13 @@ function compileFile(path: &String): i32 {
 
   let rootCount: u64 = output.module.roots.length();
   Io::println(String::create("  roots: ").concat(rootCount));
-
-  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
-  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
-  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
-
-  let analyzerOutput: Analyzer::Pipeline::AnalyzerOutput = Analyzer::Pipeline::analyze(
-    &mut defStore,
-    &mut typeStore,
-    &mut symbols,
-    &output.module,
-  );
-
-  let bindErrors: u64 = countBySeverity(&analyzerOutput.binderPass1.diagnostics, Severity::ERROR) + countBySeverity(&analyzerOutput.binderPass2.diagnostics, Severity::ERROR);
-  let bindWarnings: u64 = countBySeverity(&analyzerOutput.binderPass1.diagnostics, Severity::WARNING) + countBySeverity(&analyzerOutput.binderPass2.diagnostics, Severity::WARNING);
-
-  let resolveErrors: u64 = countBySeverity(&analyzerOutput.resolverOutput.diagnostics, Severity::ERROR);
-  let resolveWarnings: u64 = countBySeverity(&analyzerOutput.resolverOutput.diagnostics, Severity::WARNING);
-
-  let bodiesErrors: u64 = countBySeverity(&analyzerOutput.bodiesOutput.diagnostics, Severity::ERROR);
-  let bodiesWarnings: u64 = countBySeverity(&analyzerOutput.bodiesOutput.diagnostics, Severity::WARNING);
-
-  Io::println(formatPhaseLine("bind ", bindErrors, bindWarnings));
-  Io::println(formatPhaseLine("resol", resolveErrors, resolveWarnings));
-  Io::println(formatPhaseLine("bodie", bodiesErrors, bodiesWarnings));
+  Io::println(String::create("  analyze: skipped (selfhost analyzer port in progress)"));
 
   renderBagToStderr(&output.lexDiagnostics, &file);
   renderBagToStderr(&output.parseDiagnostics, &file);
-  renderBagToStderr(&analyzerOutput.binderPass1.diagnostics, &file);
-  renderBagToStderr(&analyzerOutput.binderPass2.diagnostics, &file);
-  renderBagToStderr(&analyzerOutput.resolverOutput.diagnostics, &file);
-  renderBagToStderr(&analyzerOutput.bodiesOutput.diagnostics, &file);
 
-  let totalErrors: u64 = lexErrors + parseErrors + bindErrors + resolveErrors + bodiesErrors;
-  let totalWarnings: u64 = lexWarnings + parseWarnings + bindWarnings + resolveWarnings + bodiesWarnings;
+  let totalErrors: u64 = lexErrors + parseErrors;
+  let totalWarnings: u64 = lexWarnings + parseWarnings;
 
   Io::println(
     String::create("  summary: ")
