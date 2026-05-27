@@ -704,6 +704,16 @@ impl<'a> HirOwnershipChecker<'a> {
         self.check_node(else_block);
         self.reachable = saved_reachable;
 
+        // If the LetElse pattern moves an owned payload out of the scrutinee,
+        // consume the scrutinee variable so it is not double-dropped at scope end.
+        // Mirrors the check_match scrutinee-consumption logic.
+        let value_ty = self.hir.get(value).type_id;
+        if self.pattern_moves_owned_value(value_ty, &pattern) {
+          if let Some(source_def) = self.get_moved_var(value) {
+            self.try_consume(source_def, span.clone());
+          }
+        }
+
         self.declare_owned_pattern_bindings(&pattern);
       },
 
