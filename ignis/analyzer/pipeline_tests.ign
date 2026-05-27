@@ -1,0 +1,79 @@
+import Test from "std::test";
+
+import SourceSpan from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+
+/// Scenario: analyze() on an empty module produces no diagnostics and no definitions.
+///
+/// All four diagnostic bags must be empty and the definition store must remain
+/// length 0 after the pipeline runs with an empty root list.
+@test
+function analyzeEmptyModuleProducesNoDiagnostics(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let module: Ast::Module = Ast::Module::init();
+
+  let output: Analyzer::Pipeline::AnalyzerOutput = Analyzer::Pipeline::analyze(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.binderPass1.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.binderPass2.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.resolverOutput.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.bodiesOutput.diagnostics.length(), 0);
+  Test::assertEq<u64>(defStore.length(), 0);
+}
+
+/// Scenario: analyze() on a module with one top-level function.
+///
+/// Functions are a pass-2 construct: binder pass-1 must produce 0 entries;
+/// binder pass-2 must produce 1 entry. Resolver and body diagnostics must
+/// both be empty for a trivial void function with no references.
+@test
+function analyzeSimpleFunctionBindsAndResolves(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // Add a trivial void function with an empty body block.
+  let stmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  let bodyId: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: SourceSpan::new("pipeline_test.ign", 0, 0),
+    statements: stmts,
+    tail: Option::NONE,
+  }));
+
+  let _fnId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: SourceSpan::new("pipeline_test.ign", 0, 0),
+    name: String::create("doNothing"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Pipeline::AnalyzerOutput = Analyzer::Pipeline::analyze(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // Functions are NOT predeclared in pass-1.
+  Test::assertEq<u64>(Analyzer::Binder::nodeDefCount(&output.binderPass1), 0);
+
+  // Functions ARE declared in pass-2.
+  Test::assertEq<u64>(Analyzer::Binder::nodeDefCount(&output.binderPass2), 1);
+
+  Test::assertEq<u64>(output.binderPass1.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.binderPass2.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.resolverOutput.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.bodiesOutput.diagnostics.length(), 0);
+}
