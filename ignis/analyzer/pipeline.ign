@@ -1,0 +1,74 @@
+import Ast from "@compiler::ast";
+
+export namespace Analyzer {
+  namespace Pipeline {
+    /// Aggregate result of a single `analyze` invocation.
+    ///
+    /// Each field carries the raw output of one analyzer phase so callers
+    /// can query phase-level diagnostic bags independently.
+    record AnalyzerOutput {
+      public binderPass1: Analyzer::Binder::BinderOutput;
+      public binderPass2: Analyzer::Binder::BinderOutput;
+      public resolverOutput: Analyzer::Resolver::ResolverOutput;
+      public bodiesOutput: Analyzer::ResolverBodies::ResolverBodiesOutput;
+    }
+
+    /// Run the full analyzer pipeline on `module` in strict phase order:
+    ///
+    ///   1. predeclareRoots  — allocate DefinitionIds for types/namespaces (pass 1)
+    ///   2. completeRoots    — allocate DefinitionIds for functions/constants (pass 2)
+    ///   3. resolveTypes     — patch Definition type fields in defStore (must precede bodies)
+    ///   4. resolveBodies    — resolve expression and pattern positions
+    ///
+    /// Stores are caller-owned; `analyze` mutates them but does not own them,
+    /// keeping the pipeline composable for future multi-module use.
+    function analyze(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+    ): Analyzer::Pipeline::AnalyzerOutput {
+      let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+        &module.roots,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+      );
+
+      let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+        &module.roots,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        &pass1,
+      );
+
+      let resolverOutput: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        &pass1,
+        &pass2,
+      );
+
+      let bodiesOutput: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        &pass1,
+        &pass2,
+      );
+
+      return Analyzer::Pipeline::AnalyzerOutput {
+        binderPass1: pass1,
+        binderPass2: pass2,
+        resolverOutput: resolverOutput,
+        bodiesOutput: bodiesOutput,
+      };
+    }
+  }
+}
