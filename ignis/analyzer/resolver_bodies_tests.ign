@@ -10,10 +10,11 @@ function bodiesDummySpan(): SourceSpan {
   return SourceSpan::new("resolver_bodies_test.ign", 0, 0);
 }
 
-/// Run pass-1 + pass-2 binder, then `resolveBodies` on the given module.
+/// Run binder pass-1, binder pass-2, `resolveTypes`, then `resolveBodies`.
 ///
-/// Returns the body resolver output. Stores are mutated in-place by the binder;
-/// `resolveBodies` itself is read-only except for `symbols.intern` cache writes.
+/// Returns the body resolver output. Binder and `resolveTypes` mutate the stores
+/// in-place; `resolveBodies` itself is read-only except for `symbols.intern`
+/// cache writes.
 function runResolveBodies(
   defStore: &mut Analyzer::DefinitionStore,
   typeStore: &mut Analyzer::TypeStore,
@@ -35,6 +36,15 @@ function runResolveBodies(
     symbols,
     module,
     &pass1,
+  );
+
+  let _resolveOutput: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    defStore,
+    typeStore,
+    symbols,
+    module,
+    &pass1,
+    &pass2,
   );
 
   return Analyzer::ResolverBodies::resolveBodies(
@@ -1602,6 +1612,15 @@ function resolveBodiesDeterministicAcrossTwoRuns(): void {
     &pass1,
   );
 
+  let _resolveOutput: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
   let out1: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
     &mut defStore,
     &mut typeStore,
@@ -1681,6 +1700,15 @@ function resolveBodiesDoesNotMutateDefinitionStore(): void {
     &mut symbols,
     &module,
     &pass1,
+  );
+
+  let _resolveOutput: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
   );
 
   let _out2: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
@@ -2132,7 +2160,8 @@ function resolveBodiesTypeParamShadowedByLocal(): void {
 
 /// Scenario SC-14 (TypeStore): resolveBodies does not mutate TypeStore.
 ///
-/// Captures the TypeStore type count before and after; the count must not grow.
+/// Captures the TypeStore type count after `resolveTypes`; body resolution must
+/// not grow it, even for generic functions whose type-param scope is already interned.
 @test
 function resolveBodiesDoesNotMutateTypeStore(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
@@ -2140,27 +2169,36 @@ function resolveBodiesDoesNotMutateTypeStore(): void {
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
   let mut module: Ast::Module = Ast::Module::init();
 
-  // function f(x: i32): i32 { return x; }
-  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
-  let xParamPat: Ast::PatternId = addAnnotatedBinding(&mut module, "x", i32TypeId);
+  // function f<T>(x: T) { return x; }
+  let tTypeId: Ast::TypeId = addPathType(&mut module, "T");
+  let xParamPat: Ast::PatternId = addAnnotatedBinding(&mut module, "x", tTypeId);
   let xVarExpr: Ast::ExpressionId = addVariable(&mut module, "x");
   let retStmt: Ast::StatementId = addReturnExpr(&mut module, xVarExpr);
   let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
   bodyStmts.push(retStmt);
   let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  let mut tBounds: Vector<Ast::GenericBound> = Vector::new<Ast::GenericBound>();
+  let tGenericParam: Ast::GenericParam = Ast::GenericParam {
+    span: bodiesDummySpan(),
+    name: String::create("T"),
+    bounds: tBounds,
+  };
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(tGenericParam);
+
   let mut fParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
   fParams.push(xParamPat);
   module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
     span: bodiesDummySpan(),
     name: String::create("f"),
-    genericParameters: Vector::new<Ast::GenericParam>(),
+    genericParameters: genericParams,
     parameters: fParams,
     returnType: Option::NONE,
     body: bodyBlock,
     metadata: Ast::emptyMetadata(),
   }));
 
-  // Run binder once so typeStore is fully populated.
   let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
     &module.roots,
     &mut defStore,
@@ -2177,7 +2215,16 @@ function resolveBodiesDoesNotMutateTypeStore(): void {
     &pass1,
   );
 
-  // Capture typeStore type count before resolveBodies.
+  let resolveOutput: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+  Test::assertEq<u64>(resolveOutput.diagnostics.length(), 0);
+
   let typeCountBefore: u64 = typeStore.length();
 
   let _out: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
@@ -2188,8 +2235,16 @@ function resolveBodiesDoesNotMutateTypeStore(): void {
     &pass1,
     &pass2,
   );
+  Test::assertEq<u64>(typeStore.length(), typeCountBefore);
 
-  // resolveBodies must not allocate new types.
+  let _out2: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
   Test::assertEq<u64>(typeStore.length(), typeCountBefore);
 }
 
@@ -2230,6 +2285,15 @@ function resolveBodiesDoesNotMutateBinderOutputs(): void {
     &mut symbols,
     &module,
     &pass1,
+  );
+
+  let _resolveOutput: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
   );
 
   // Capture binder output sizes before resolveBodies.
