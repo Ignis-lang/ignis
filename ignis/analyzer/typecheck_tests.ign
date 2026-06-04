@@ -1,0 +1,658 @@
+import Test from "std::test";
+
+import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+
+function typecheckDummySpan(): SourceSpan {
+  return SourceSpan::new("typecheck_tests.ign", 0, 0);
+}
+
+function typecheckAddPathType(module: &mut Ast::Module, name: str): Ast::TypeId {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create(name));
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: typecheckDummySpan(),
+    segments: segments,
+  }));
+}
+
+function typecheckAddBinding(module: &mut Ast::Module, name: str): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function typecheckAddAnnotatedBinding(
+  module: &mut Ast::Module,
+  name: str,
+  annotation: Ast::TypeId,
+): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    annotation: Option::SOME(annotation),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function typecheckAddVariable(module: &mut Ast::Module, name: str): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Variable(Ast::Expression::Variable {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+  }));
+}
+
+function typecheckAddIntLiteral(module: &mut Ast::Module, value: i64): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::Int(value),
+  }));
+}
+
+function typecheckAddBoolLiteral(module: &mut Ast::Module, value: boolean): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::Boolean(value),
+  }));
+}
+
+function typecheckAddReturnExpr(module: &mut Ast::Module, exprId: Ast::ExpressionId): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: typecheckDummySpan(),
+    value: Option::SOME(exprId),
+  }));
+}
+
+function typecheckAddReturn(module: &mut Ast::Module): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: typecheckDummySpan(),
+    value: Option::NONE,
+  }));
+}
+
+function typecheckAddBlock(module: &mut Ast::Module, stmts: Vector<Ast::StatementId>): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: typecheckDummySpan(),
+    statements: stmts,
+    tail: Option::NONE,
+  }));
+}
+
+function typecheckAddExprStmt(module: &mut Ast::Module, exprId: Ast::ExpressionId): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: typecheckDummySpan(),
+    expression: exprId,
+  }));
+}
+
+function typecheckAddCall(
+  module: &mut Ast::Module,
+  callee: Ast::ExpressionId,
+  args: Vector<Ast::ExpressionId>,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Call(Ast::Expression::Call {
+    span: typecheckDummySpan(),
+    callee: callee,
+    typeArguments: Vector::new<Ast::TypeId>(),
+    arguments: args,
+  }));
+}
+
+function typecheckRunTypecheck(
+  defStore: &mut Analyzer::DefinitionStore,
+  typeStore: &mut Analyzer::TypeStore,
+  symbols: &mut Analyzer::SymbolTable,
+  module: &Ast::Module,
+): Analyzer::Typecheck::TypecheckOutput {
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    defStore,
+    typeStore,
+    symbols,
+    module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    defStore,
+    typeStore,
+    symbols,
+    module,
+    &pass1,
+  );
+
+  let resolveOutput: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    defStore,
+    typeStore,
+    symbols,
+    module,
+    &pass1,
+    &pass2,
+  );
+
+  let resolveBodiesOutput: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
+    defStore,
+    typeStore,
+    symbols,
+    module,
+    &pass1,
+    &pass2,
+  );
+
+  return Analyzer::Typecheck::checkModule(
+    defStore,
+    typeStore,
+    symbols,
+    module,
+    &pass1,
+    &pass2,
+    &resolveOutput,
+    &resolveBodiesOutput,
+  );
+}
+
+function findExprType(
+  output: &Analyzer::Typecheck::TypecheckOutput,
+  exprId: Ast::ExpressionId,
+): Option<Analyzer::TypeId> {
+  let mut index: u64 = 0;
+
+  while (index < output.exprTypes.nodeIds.length()) {
+    let Option::SOME(nodeId) = output.exprTypes.nodeIds.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (*nodeId == exprId.raw()) {
+      let Option::SOME(typeId) = output.exprTypes.typeIds.get(index) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(*typeId);
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+function assertExprType(
+  output: &Analyzer::Typecheck::TypecheckOutput,
+  exprId: Ast::ExpressionId,
+  expected: Analyzer::TypeId,
+): void {
+  let Option::SOME(actual) = findExprType(output, exprId) else {
+    @panic("assertExprType: expression type entry not found");
+  };
+
+  Test::assertEq<u32>(actual.raw(), expected.raw());
+}
+
+function assertSingleDiagnosticCode(
+  output: &Analyzer::Typecheck::TypecheckOutput,
+  code: str,
+): void {
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  let Option::SOME(diagnostic) = output.diagnostics.get(0) else {
+    @panic("assertSingleDiagnosticCode: missing diagnostic");
+  };
+  Test::assertEq<str>(diagnostic.code, code);
+}
+
+@test
+function typecheckConstantAnnotationHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let literalExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 7);
+
+  module.addRootItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+    span: typecheckDummySpan(),
+    name: String::create("K"),
+    annotation: Option::SOME(i32TypeId),
+    value: literalExpr,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, literalExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckSimpleTypedFunctionBodyHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: xPattern,
+    annotation: Option::SOME(i32TypeId),
+    value: Option::SOME(oneExpr),
+  }));
+  let xExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, xExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(i32TypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, oneExpr, typeStore.intern(Analyzer::Type::I32));
+  assertExprType(&output, xExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckWrongReturnTypeProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let boolExpr: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, boolExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("badReturn"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(i32TypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function typecheckWrongLetInitializerTypeProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let boolExpr: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: xPattern,
+    annotation: Option::SOME(i32TypeId),
+    value: Option::SOME(boolExpr),
+  }));
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("badLet"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function typecheckWrongDirectCallArityProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let helperParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", i32TypeId);
+  let helperExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let helperRet: Ast::StatementId = typecheckAddReturnExpr(&mut module, helperExpr);
+  let mut helperBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  helperBodyStmts.push(helperRet);
+  let helperBody: Ast::StatementId = typecheckAddBlock(&mut module, helperBodyStmts);
+  let mut helperParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  helperParams.push(helperParam);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("helper"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: helperParams,
+    returnType: Option::SOME(i32TypeId),
+    body: helperBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let helperCallee: Ast::ExpressionId = typecheckAddVariable(&mut module, "helper");
+  let badCall: Ast::ExpressionId = typecheckAddCall(&mut module, helperCallee, Vector::new<Ast::ExpressionId>());
+  let badReturn: Ast::StatementId = typecheckAddReturnExpr(&mut module, badCall);
+  let mut badBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  badBodyStmts.push(badReturn);
+  let badBody: Ast::StatementId = typecheckAddBlock(&mut module, badBodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("badArity"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(i32TypeId),
+    body: badBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+}
+
+@test
+function typecheckWrongDirectCallArgumentTypeProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let helperParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", i32TypeId);
+  let helperExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let helperRet: Ast::StatementId = typecheckAddReturnExpr(&mut module, helperExpr);
+  let mut helperBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  helperBodyStmts.push(helperRet);
+  let helperBody: Ast::StatementId = typecheckAddBlock(&mut module, helperBodyStmts);
+  let mut helperParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  helperParams.push(helperParam);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("helper"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: helperParams,
+    returnType: Option::SOME(i32TypeId),
+    body: helperBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let helperCallee: Ast::ExpressionId = typecheckAddVariable(&mut module, "helper");
+  let boolArg: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let mut args: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  args.push(boolArg);
+  let badCall: Ast::ExpressionId = typecheckAddCall(&mut module, helperCallee, args);
+  let badReturn: Ast::StatementId = typecheckAddReturnExpr(&mut module, badCall);
+  let mut badBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  badBodyStmts.push(badReturn);
+  let badBody: Ast::StatementId = typecheckAddBlock(&mut module, badBodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("badArgType"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(i32TypeId),
+    body: badBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_ARGUMENT_TYPE);
+}
+
+@test
+function typecheckConstantAnnotationMismatchProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let boolExpr: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+
+  module.addRootItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+    span: typecheckDummySpan(),
+    name: String::create("BAD"),
+    annotation: Option::SOME(i32TypeId),
+    value: boolExpr,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function typecheckSiblingBlockLocalReuseStaysDistinct(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let boolTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+
+  let firstPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let firstInit: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let firstLet: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: firstPattern,
+    annotation: Option::SOME(i32TypeId),
+    value: Option::SOME(firstInit),
+  }));
+  let firstUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let firstUseStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, firstUse);
+  let mut firstBlockStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  firstBlockStmts.push(firstLet);
+  firstBlockStmts.push(firstUseStmt);
+  let firstBlock: Ast::StatementId = typecheckAddBlock(&mut module, firstBlockStmts);
+
+  let secondPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let secondInit: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let secondLet: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: secondPattern,
+    annotation: Option::SOME(boolTypeId),
+    value: Option::SOME(secondInit),
+  }));
+  let secondUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let secondUseStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, secondUse);
+  let mut secondBlockStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  secondBlockStmts.push(secondLet);
+  secondBlockStmts.push(secondUseStmt);
+  let secondBlock: Ast::StatementId = typecheckAddBlock(&mut module, secondBlockStmts);
+
+  let finalReturn: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(firstBlock);
+  bodyStmts.push(secondBlock);
+  bodyStmts.push(finalReturn);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("reuse"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, firstUse, typeStore.intern(Analyzer::Type::I32));
+  assertExprType(&output, secondUse, typeStore.intern(Analyzer::Type::BOOLEAN));
+}
+
+@test
+function typecheckUnsupportedBinaryExpressionProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let leftExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let rightExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 2);
+  let binaryExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Binary(Ast::Expression::Binary {
+    span: typecheckDummySpan(),
+    operator: Ast::Expression::BinaryOperator::Add,
+    left: leftExpr,
+    right: rightExpr,
+  }));
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, binaryExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("unsupportedBinary"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(i32TypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<boolean>(output.diagnostics.length() > 0, true);
+}
+
+@test
+function typecheckUnsupportedWhileStatementProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let loopCondition: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let loopBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let whileStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::While(Ast::Statement::While {
+    span: typecheckDummySpan(),
+    condition: loopCondition,
+    body: loopBody,
+  }));
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(whileStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("unsupportedWhile"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<boolean>(output.diagnostics.length() > 0, true);
+}
