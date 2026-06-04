@@ -66,6 +66,14 @@ function typecheckAddBoolLiteral(module: &mut Ast::Module, value: boolean): Ast:
   }));
 }
 
+function typecheckAddNullLiteral(module: &mut Ast::Module): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::Null,
+  }));
+}
+
 function typecheckAddReturnExpr(module: &mut Ast::Module, exprId: Ast::ExpressionId): Ast::StatementId {
   let mut moduleRef: &mut Ast::Module = module;
   return moduleRef.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
@@ -213,6 +221,19 @@ function assertSingleDiagnosticCode(
     @panic("assertSingleDiagnosticCode: missing diagnostic");
   };
   Test::assertEq<str>(diagnostic.code, code);
+}
+
+function assertSingleDiagnostic(
+  output: &Analyzer::Typecheck::TypecheckOutput,
+  code: str,
+  message: str,
+): void {
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  let Option::SOME(diagnostic) = output.diagnostics.get(0) else {
+    @panic("assertSingleDiagnostic: missing diagnostic");
+  };
+  Test::assertEq<str>(diagnostic.code, code);
+  Test::assertEq<str>(diagnostic.message, message);
 }
 
 @test
@@ -576,6 +597,61 @@ function typecheckSiblingBlockLocalReuseStaysDistinct(): void {
 }
 
 @test
+function typecheckNullLiteralProducesExplicitUnsupportedDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let nullExpr: Ast::ExpressionId = typecheckAddNullLiteral(&mut module);
+
+  module.addRootItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+    span: typecheckDummySpan(),
+    name: String::create("NULL_VALUE"),
+    annotation: Option::SOME(i32TypeId),
+    value: nullExpr,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support null literals");
+}
+
+@test
+function typecheckConstantWithoutAnnotationProducesExplicitUnsupportedDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let literalExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 7);
+
+  module.addRootItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+    span: typecheckDummySpan(),
+    name: String::create("INFERRED"),
+    annotation: Option::NONE,
+    value: literalExpr,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support constants without explicit annotations");
+}
+
+@test
 function typecheckUnsupportedBinaryExpressionProducesDiagnostic(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
@@ -613,7 +689,7 @@ function typecheckUnsupportedBinaryExpressionProducesDiagnostic(): void {
     &module,
   );
 
-  Test::assertEq<boolean>(output.diagnostics.length() > 0, true);
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support binary expressions");
 }
 
 @test
@@ -654,5 +730,5 @@ function typecheckUnsupportedWhileStatementProducesDiagnostic(): void {
     &module,
   );
 
-  Test::assertEq<boolean>(output.diagnostics.length() > 0, true);
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support while statements");
 }
