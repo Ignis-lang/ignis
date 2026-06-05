@@ -291,6 +291,226 @@ export namespace Analyzer {
       return leftResolved.raw() == rightResolved.raw();
     }
 
+    function isSupportedNumericType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let resolved: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChain(defStore, typeStore, typeId);
+      let Option::SOME(type_) = typeStore.get(resolved) else {
+        return false;
+      };
+
+      return match (type_) {
+        Analyzer::Type::I8
+        | Analyzer::Type::I16
+        | Analyzer::Type::I32
+        | Analyzer::Type::I64
+        | Analyzer::Type::U8
+        | Analyzer::Type::U16
+        | Analyzer::Type::U32
+        | Analyzer::Type::U64
+        | Analyzer::Type::F32
+        | Analyzer::Type::F64 -> true,
+        _ -> false,
+      };
+    }
+
+    function isBooleanType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let resolved: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChain(defStore, typeStore, typeId);
+      let Option::SOME(type_) = typeStore.get(resolved) else {
+        return false;
+      };
+
+      return match (type_) {
+        Analyzer::Type::BOOLEAN -> true,
+        _ -> false,
+      };
+    }
+
+    function requireBooleanType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      actual: Analyzer::TypeId,
+    ): boolean {
+      if (Analyzer::Typecheck::isBooleanType(defStore, typeStore, actual)) {
+        return true;
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let booleanType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::BOOLEAN);
+      Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, booleanType, actual);
+      return false;
+    }
+
+    function binaryBooleanType(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      return typeStoreRef.intern(Analyzer::Type::BOOLEAN);
+    }
+
+    function isArithmeticBinaryOperator(operator: Ast::Expression::BinaryOperator): boolean {
+      return match (operator) {
+        Ast::Expression::BinaryOperator::Add
+        | Ast::Expression::BinaryOperator::Subtract
+        | Ast::Expression::BinaryOperator::Multiply
+        | Ast::Expression::BinaryOperator::Divide
+        | Ast::Expression::BinaryOperator::Modulo -> true,
+        _ -> false,
+      };
+    }
+
+    function isEqualityBinaryOperator(operator: Ast::Expression::BinaryOperator): boolean {
+      return match (operator) {
+        Ast::Expression::BinaryOperator::Equal
+        | Ast::Expression::BinaryOperator::NotEqual -> true,
+        _ -> false,
+      };
+    }
+
+    function isComparisonBinaryOperator(operator: Ast::Expression::BinaryOperator): boolean {
+      return match (operator) {
+        Ast::Expression::BinaryOperator::LessThan
+        | Ast::Expression::BinaryOperator::LessThanOrEqual
+        | Ast::Expression::BinaryOperator::GreaterThan
+        | Ast::Expression::BinaryOperator::GreaterThanOrEqual -> true,
+        _ -> false,
+      };
+    }
+
+    function isLogicalBinaryOperator(operator: Ast::Expression::BinaryOperator): boolean {
+      return match (operator) {
+        Ast::Expression::BinaryOperator::And
+        | Ast::Expression::BinaryOperator::Or -> true,
+        _ -> false,
+      };
+    }
+
+    function checkBinaryExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      b: &Ast::Expression::Binary,
+    ): Option<Analyzer::TypeId> {
+      let leftTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        b.left,
+      );
+      let rightTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        b.right,
+      );
+
+      match (b.operator) {
+        Ast::Expression::BinaryOperator::BitAnd -> {
+          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::BinaryOperator::BitOr -> {
+          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::BinaryOperator::BitXor -> {
+          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::BinaryOperator::ShiftLeft -> {
+          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::BinaryOperator::ShiftRight -> {
+          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
+          return Option::NONE;
+        },
+        _ -> {},
+      };
+
+      let Option::SOME(leftType) = leftTypeOpt else {
+        return Option::NONE;
+      };
+      let Option::SOME(rightType) = rightTypeOpt else {
+        return Option::NONE;
+      };
+
+      if (Analyzer::Typecheck::isArithmeticBinaryOperator(b.operator)) {
+        if (
+          Analyzer::Typecheck::typesEqual(defStore, typeStore, leftType, rightType)
+          && Analyzer::Typecheck::isSupportedNumericType(defStore, typeStore, leftType)
+        ) {
+          Analyzer::Typecheck::recordExprType(state, exprId, leftType);
+          return Option::SOME(leftType);
+        }
+
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
+        return Option::NONE;
+      }
+
+      if (Analyzer::Typecheck::isEqualityBinaryOperator(b.operator)) {
+        if (
+          Analyzer::Typecheck::typesEqual(defStore, typeStore, leftType, rightType)
+          && (
+            Analyzer::Typecheck::isSupportedNumericType(defStore, typeStore, leftType)
+            || Analyzer::Typecheck::isBooleanType(defStore, typeStore, leftType)
+          )
+        ) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
+        return Option::NONE;
+      }
+
+      if (Analyzer::Typecheck::isComparisonBinaryOperator(b.operator)) {
+        if (
+          Analyzer::Typecheck::typesEqual(defStore, typeStore, leftType, rightType)
+          && Analyzer::Typecheck::isSupportedNumericType(defStore, typeStore, leftType)
+        ) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
+        return Option::NONE;
+      }
+
+      if (Analyzer::Typecheck::isLogicalBinaryOperator(b.operator)) {
+        let leftValid: boolean = Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, b.span, leftType);
+        let rightValid: boolean = Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, b.span, rightType);
+        if (leftValid && rightValid) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
+        return Option::NONE;
+      }
+
+      Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
+      return Option::NONE;
+    }
+
     function lookupItemDef(
       pass1: &Analyzer::Binder::BinderOutput,
       pass2: &Analyzer::Binder::BinderOutput,
@@ -963,26 +1183,16 @@ export namespace Analyzer {
           );
         },
         Ast::Expression::Node::Binary(b) -> {
-          let _leftType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+          return Analyzer::Typecheck::checkBinaryExpr(
             state,
             defStore,
             typeStore,
             symbols,
             module,
             resolvedBodies,
-            b.left,
+            exprId,
+            &b,
           );
-          let _rightType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
-            state,
-            defStore,
-            typeStore,
-            symbols,
-            module,
-            resolvedBodies,
-            b.right,
-          );
-          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
-          return Option::NONE;
         },
         Ast::Expression::Node::Assignment(value) -> {
           let _targetType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
@@ -1309,12 +1519,21 @@ export namespace Analyzer {
           Analyzer::Typecheck::emitUnsupported(state, value.span, "let-else statements");
         },
         Ast::Statement::Node::If(value) -> {
-          let _conditionType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "if statements");
+          let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
+          if (let Option::SOME(conditionType) = conditionTypeOpt) {
+            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+          }
+          Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.thenBranch);
+          if (let Option::SOME(elseId) = value.elseBranch) {
+            Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, elseId);
+          }
         },
         Ast::Statement::Node::While(value) -> {
-          let _conditionType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "while statements");
+          let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
+          if (let Option::SOME(conditionType) = conditionTypeOpt) {
+            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+          }
+          Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.body);
         },
         Ast::Statement::Node::For(value) -> {
           Analyzer::Typecheck::emitUnsupported(state, value.span, "for statements");
