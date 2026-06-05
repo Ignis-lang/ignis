@@ -107,6 +107,37 @@ function typecheckAddExprStmt(module: &mut Ast::Module, exprId: Ast::ExpressionI
   }));
 }
 
+function typecheckAddMutableVariableStmt(
+  module: &mut Ast::Module,
+  pattern: Ast::PatternId,
+  annotation: Ast::TypeId,
+  value: Ast::ExpressionId,
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Variable(Ast::Statement::Variable {
+    span: typecheckDummySpan(),
+    mutable: true,
+    pattern: pattern,
+    annotation: Option::SOME(annotation),
+    value: Option::SOME(value),
+  }));
+}
+
+function typecheckAddAssignment(
+  module: &mut Ast::Module,
+  operator: Ast::Expression::AssignmentOperator,
+  target: Ast::ExpressionId,
+  value: Ast::ExpressionId,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Assignment(Ast::Expression::Assignment {
+    span: typecheckDummySpan(),
+    target: target,
+    value: value,
+    operator: operator,
+  }));
+}
+
 function typecheckAddCall(
   module: &mut Ast::Module,
   callee: Ast::ExpressionId,
@@ -571,6 +602,261 @@ function typecheckConstantAnnotationMismatchProducesDiagnostic(): void {
 }
 
 @test
+function typecheckAssignmentToMutableLocalUsesTargetType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let letStmt: Ast::StatementId = typecheckAddMutableVariableStmt(
+    &mut module,
+    xPattern,
+    i32TypeId,
+    typecheckAddIntLiteral(&mut module, 1),
+  );
+  let assignmentExpr: Ast::ExpressionId = typecheckAddAssignment(
+    &mut module,
+    Ast::Expression::AssignmentOperator::Assign,
+    typecheckAddVariable(&mut module, "x"),
+    typecheckAddIntLiteral(&mut module, 2),
+  );
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, assignmentExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("assignMutableLocal"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(i32TypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, assignmentExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckAssignmentToImmutableLocalProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: xPattern,
+    annotation: Option::SOME(i32TypeId),
+    value: Option::SOME(typecheckAddIntLiteral(&mut module, 1)),
+  }));
+  let assignmentExpr: Ast::ExpressionId = typecheckAddAssignment(
+    &mut module,
+    Ast::Expression::AssignmentOperator::Assign,
+    typecheckAddVariable(&mut module, "x"),
+    typecheckAddIntLiteral(&mut module, 2),
+  );
+  let assignmentStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, assignmentExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(assignmentStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("assignImmutableLocal"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "cannot assign to immutable local");
+}
+
+@test
+function typecheckAssignmentRhsTypeMismatchProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let letStmt: Ast::StatementId = typecheckAddMutableVariableStmt(
+    &mut module,
+    xPattern,
+    i32TypeId,
+    typecheckAddIntLiteral(&mut module, 1),
+  );
+  let assignmentExpr: Ast::ExpressionId = typecheckAddAssignment(
+    &mut module,
+    Ast::Expression::AssignmentOperator::Assign,
+    typecheckAddVariable(&mut module, "x"),
+    typecheckAddBoolLiteral(&mut module, true),
+  );
+  let assignmentStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, assignmentExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(assignmentStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("assignWrongType"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `i32`, found `boolean`");
+}
+
+@test
+function typecheckAssignmentToNonLocalTargetProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let helperRet: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddIntLiteral(&mut module, 1));
+  let mut helperBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  helperBodyStmts.push(helperRet);
+  let helperBody: Ast::StatementId = typecheckAddBlock(&mut module, helperBodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("helper"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(i32TypeId),
+    body: helperBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let assignmentExpr: Ast::ExpressionId = typecheckAddAssignment(
+    &mut module,
+    Ast::Expression::AssignmentOperator::Assign,
+    typecheckAddVariable(&mut module, "helper"),
+    typecheckAddIntLiteral(&mut module, 2),
+  );
+  let assignmentStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, assignmentExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(assignmentStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("assignDefinition"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnostic(&output, DiagnosticCode::INVALID_ASSIGNMENT_TARGET, "assignment target must resolve to a local binding");
+}
+
+@test
+function typecheckNonAssignOperatorProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let letStmt: Ast::StatementId = typecheckAddMutableVariableStmt(
+    &mut module,
+    xPattern,
+    i32TypeId,
+    typecheckAddIntLiteral(&mut module, 1),
+  );
+  let assignmentExpr: Ast::ExpressionId = typecheckAddAssignment(
+    &mut module,
+    Ast::Expression::AssignmentOperator::AddAssign,
+    typecheckAddVariable(&mut module, "x"),
+    typecheckAddIntLiteral(&mut module, 2),
+  );
+  let assignmentStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, assignmentExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(assignmentStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("assignAdd"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnostic(&output, DiagnosticCode::INVALID_ASSIGNMENT_TARGET, "typecheck only supports plain `=` assignment expressions");
+}
+
+@test
 function typecheckSiblingBlockLocalReuseStaysDistinct(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
@@ -580,33 +866,47 @@ function typecheckSiblingBlockLocalReuseStaysDistinct(): void {
   let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
   let boolTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
 
-  let firstPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
-  let firstInit: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
-  let firstLet: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
-    span: typecheckDummySpan(),
-    pattern: firstPattern,
-    annotation: Option::SOME(i32TypeId),
-    value: Option::SOME(firstInit),
-  }));
+  let firstPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let firstLet: Ast::StatementId = typecheckAddMutableVariableStmt(
+    &mut module,
+    firstPattern,
+    i32TypeId,
+    typecheckAddIntLiteral(&mut module, 1),
+  );
+  let firstAssignment: Ast::ExpressionId = typecheckAddAssignment(
+    &mut module,
+    Ast::Expression::AssignmentOperator::Assign,
+    typecheckAddVariable(&mut module, "x"),
+    typecheckAddIntLiteral(&mut module, 2),
+  );
+  let firstAssignmentStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, firstAssignment);
   let firstUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
   let firstUseStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, firstUse);
   let mut firstBlockStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
   firstBlockStmts.push(firstLet);
+  firstBlockStmts.push(firstAssignmentStmt);
   firstBlockStmts.push(firstUseStmt);
   let firstBlock: Ast::StatementId = typecheckAddBlock(&mut module, firstBlockStmts);
 
-  let secondPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
-  let secondInit: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let secondPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", boolTypeId);
   let secondLet: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
     span: typecheckDummySpan(),
     pattern: secondPattern,
     annotation: Option::SOME(boolTypeId),
-    value: Option::SOME(secondInit),
+    value: Option::SOME(typecheckAddBoolLiteral(&mut module, true)),
   }));
+  let secondAssignment: Ast::ExpressionId = typecheckAddAssignment(
+    &mut module,
+    Ast::Expression::AssignmentOperator::Assign,
+    typecheckAddVariable(&mut module, "x"),
+    typecheckAddBoolLiteral(&mut module, false),
+  );
+  let secondAssignmentStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, secondAssignment);
   let secondUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
   let secondUseStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, secondUse);
   let mut secondBlockStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
   secondBlockStmts.push(secondLet);
+  secondBlockStmts.push(secondAssignmentStmt);
   secondBlockStmts.push(secondUseStmt);
   let secondBlock: Ast::StatementId = typecheckAddBlock(&mut module, secondBlockStmts);
 
@@ -634,7 +934,8 @@ function typecheckSiblingBlockLocalReuseStaysDistinct(): void {
     &module,
   );
 
-  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "cannot assign to immutable local");
+  assertExprType(&output, firstAssignment, typeStore.intern(Analyzer::Type::I32));
   assertExprType(&output, firstUse, typeStore.intern(Analyzer::Type::I32));
   assertExprType(&output, secondUse, typeStore.intern(Analyzer::Type::BOOLEAN));
 }

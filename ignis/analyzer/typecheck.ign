@@ -33,6 +33,12 @@ export namespace Analyzer {
       public localFunctionIds: Vector<Analyzer::DefinitionId>;
       public localIndexes: Vector<u32>;
       public localTypeIds: Vector<Analyzer::TypeId>;
+      public localMutableFlags: Vector<boolean>;
+    }
+
+    record LocalBindingInfo {
+      public typeId: Analyzer::TypeId;
+      public mutable: boolean;
     }
 
     function emitDiagnostic(
@@ -131,6 +137,7 @@ export namespace Analyzer {
         stateRef.localFunctionIds.pop();
         stateRef.localIndexes.pop();
         stateRef.localTypeIds.pop();
+        stateRef.localMutableFlags.pop();
       }
     }
 
@@ -560,10 +567,10 @@ export namespace Analyzer {
       return Analyzer::ResolverBodies::findExprRef(&resolvedBodies.bodyResolution, exprId.raw());
     }
 
-    function lookupLocalType(
+    function lookupLocalBinding(
       state: &mut Analyzer::Typecheck::TypecheckState,
       localId: Analyzer::ResolverBodies::LocalId,
-    ): Option<Analyzer::TypeId> {
+    ): Option<Analyzer::Typecheck::LocalBindingInfo> {
       let count: u64 = state.localTypeIds.length();
 
       if (count == 0) {
@@ -583,9 +590,15 @@ export namespace Analyzer {
         let Option::SOME(typeId) = state.localTypeIds.get(index) else {
           continue;
         };
+        let Option::SOME(mutable) = state.localMutableFlags.get(index) else {
+          continue;
+        };
 
         if (functionId.raw() == localId.enclosingFn.raw() && *localIndex == localId.index) {
-          return Option::SOME(*typeId);
+          return Option::SOME(Analyzer::Typecheck::LocalBindingInfo {
+            typeId: *typeId,
+            mutable: *mutable,
+          });
         }
       }
 
@@ -598,6 +611,7 @@ export namespace Analyzer {
       module: &Ast::Module,
       patternId: Ast::PatternId,
       typeId: Analyzer::TypeId,
+      mutable: boolean,
       span: SourceSpan,
     ): void {
       let Option::SOME(pattern) = module.patterns.get(patternId) else {
@@ -639,6 +653,7 @@ export namespace Analyzer {
       stateRef.localFunctionIds.push(localId.enclosingFn);
       stateRef.localIndexes.push(localId.index);
       stateRef.localTypeIds.push(typeId);
+      stateRef.localMutableFlags.push(mutable);
     }
 
     function definitionType(
@@ -931,14 +946,14 @@ export namespace Analyzer {
 
       match (resolved) {
         Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> {
-          let localTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::lookupLocalType(state, localId);
-          let Option::SOME(typeId) = localTypeOpt else {
+          let localBindingOpt: Option<Analyzer::Typecheck::LocalBindingInfo> = Analyzer::Typecheck::lookupLocalBinding(state, localId);
+          let Option::SOME(localBinding) = localBindingOpt else {
             Analyzer::Typecheck::emitUnsupported(state, span, "unknown local binding type");
             return Option::NONE;
           };
 
-          Analyzer::Typecheck::recordExprType(state, exprId, typeId);
-          return Option::SOME(typeId);
+          Analyzer::Typecheck::recordExprType(state, exprId, localBinding.typeId);
+          return Option::SOME(localBinding.typeId);
         },
         Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> {
           let defTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::definitionType(defStore, typeStore, defId);
@@ -959,6 +974,106 @@ export namespace Analyzer {
           return Option::NONE;
         },
       };
+    }
+
+    function checkAssignmentExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::Assignment,
+    ): Option<Analyzer::TypeId> {
+      if (value.operator != Ast::Expression::AssignmentOperator::Assign) {
+        Analyzer::Typecheck::emitDiagnostic(
+          state,
+          value.span,
+          DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+          "typecheck only supports plain `=` assignment expressions",
+        );
+        return Option::NONE;
+      }
+
+      let resolvedOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, value.target);
+      let Option::SOME(resolved) = resolvedOpt else {
+        Analyzer::Typecheck::emitDiagnostic(
+          state,
+          value.span,
+          DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+          "assignment target must resolve to a local binding",
+        );
+        return Option::NONE;
+      };
+
+      let localId: Analyzer::ResolverBodies::LocalId = match (resolved) {
+        Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> localId,
+        Analyzer::ResolverBodies::ResolvedRef::Definition(_) -> {
+          Analyzer::Typecheck::emitDiagnostic(
+            state,
+            value.span,
+            DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+            "assignment target must resolve to a local binding",
+          );
+          return Option::NONE;
+        },
+        Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {
+          Analyzer::Typecheck::emitDiagnostic(
+            state,
+            value.span,
+            DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+            "assignment target must resolve to a local binding",
+          );
+          return Option::NONE;
+        },
+        Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> {
+          Analyzer::Typecheck::emitDiagnostic(
+            state,
+            value.span,
+            DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+            "assignment target must resolve to a local binding",
+          );
+          return Option::NONE;
+        },
+      };
+
+      let localBindingOpt: Option<Analyzer::Typecheck::LocalBindingInfo> = Analyzer::Typecheck::lookupLocalBinding(state, localId);
+      let Option::SOME(localBinding) = localBindingOpt else {
+        Analyzer::Typecheck::emitDiagnostic(
+          state,
+          value.span,
+          DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+          "assignment target must resolve to a local binding",
+        );
+        return Option::NONE;
+      };
+
+      if (!localBinding.mutable) {
+        Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::TYPE_MISMATCH, "cannot assign to immutable local");
+        return Option::NONE;
+      }
+
+      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        value.value,
+      );
+      let Option::SOME(actualType) = actualTypeOpt else {
+        return Option::NONE;
+      };
+
+      if (!Analyzer::Typecheck::typesEqual(defStore, typeStore, localBinding.typeId, actualType)) {
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, localBinding.typeId, actualType);
+        return Option::NONE;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, exprId, localBinding.typeId);
+      return Option::SOME(localBinding.typeId);
     }
 
     function checkCallExpr(
@@ -1195,26 +1310,16 @@ export namespace Analyzer {
           );
         },
         Ast::Expression::Node::Assignment(value) -> {
-          let _targetType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+          return Analyzer::Typecheck::checkAssignmentExpr(
             state,
             defStore,
             typeStore,
             symbols,
             module,
             resolvedBodies,
-            value.target,
+            exprId,
+            &value,
           );
-          let _valueType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
-            state,
-            defStore,
-            typeStore,
-            symbols,
-            module,
-            resolvedBodies,
-            value.value,
-          );
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "assignment expressions");
-          return Option::NONE;
         },
         Ast::Expression::Node::Ternary(value) -> {
           let _conditionType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
@@ -1377,6 +1482,7 @@ export namespace Analyzer {
       patternId: Ast::PatternId,
       annotation: Option<Ast::TypeId>,
       value: Option<Ast::ExpressionId>,
+      mutable: boolean,
       span: SourceSpan,
     ): void {
       let Option::SOME(annotationId) = annotation else {
@@ -1417,7 +1523,7 @@ export namespace Analyzer {
         }
       }
 
-      Analyzer::Typecheck::bindPatternType(state, resolvedBodies, module, patternId, expectedType, span);
+      Analyzer::Typecheck::bindPatternType(state, resolvedBodies, module, patternId, expectedType, mutable, span);
     }
 
     function checkStmt(
@@ -1445,6 +1551,7 @@ export namespace Analyzer {
             letStmt.pattern,
             letStmt.annotation,
             letStmt.value,
+            false,
             letStmt.span,
           );
         },
@@ -1459,6 +1566,7 @@ export namespace Analyzer {
             variableStmt.pattern,
             variableStmt.annotation,
             variableStmt.value,
+            variableStmt.mutable,
             variableStmt.span,
           );
         },
@@ -1588,6 +1696,7 @@ export namespace Analyzer {
               module,
               *patternId,
               parameter.declaredType,
+              false,
               function_.span,
             );
           },
@@ -1647,6 +1756,7 @@ export namespace Analyzer {
       stateRef.localFunctionIds = Vector::new<Analyzer::DefinitionId>();
       stateRef.localIndexes = Vector::new<u32>();
       stateRef.localTypeIds = Vector::new<Analyzer::TypeId>();
+      stateRef.localMutableFlags = Vector::new<boolean>();
 
       Analyzer::Typecheck::pushScope(state);
       Analyzer::Typecheck::bindFunctionParameters(state, defStore, resolvedBodies, module, function_, &signature.params);
@@ -1709,6 +1819,7 @@ export namespace Analyzer {
       stateRef.localFunctionIds = Vector::new<Analyzer::DefinitionId>();
       stateRef.localIndexes = Vector::new<u32>();
       stateRef.localTypeIds = Vector::new<Analyzer::TypeId>();
+      stateRef.localMutableFlags = Vector::new<boolean>();
 
       let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
         state,
@@ -1814,6 +1925,7 @@ export namespace Analyzer {
         localFunctionIds: Vector::new<Analyzer::DefinitionId>(),
         localIndexes: Vector::new<u32>(),
         localTypeIds: Vector::new<Analyzer::TypeId>(),
+        localMutableFlags: Vector::new<boolean>(),
       };
 
       let mut index: u64 = 0;
