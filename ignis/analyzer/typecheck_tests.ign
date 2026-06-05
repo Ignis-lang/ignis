@@ -66,6 +66,96 @@ function typecheckAddBoolLiteral(module: &mut Ast::Module, value: boolean): Ast:
   }));
 }
 
+function typecheckGenericParam(name: str): Ast::GenericParam {
+  return Ast::GenericParam {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    bounds: Vector::new<Ast::GenericBound>(),
+  };
+}
+
+function typecheckAddAnnotatedField(
+  module: &mut Ast::Module,
+  name: str,
+  annotation: Ast::TypeId,
+): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    annotation: Option::SOME(annotation),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function typecheckAddRecordItem(
+  module: &mut Ast::Module,
+  name: str,
+  genericParameters: Vector<Ast::GenericParam>,
+  fields: Vector<Ast::PatternId>,
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    genericParameters: genericParameters,
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function typecheckAddTypeAliasItem(
+  module: &mut Ast::Module,
+  name: str,
+  value: Ast::TypeId,
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::TypeAlias(Ast::Item::TypeAlias {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    value: value,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function typecheckRecordInitField(name: str, value: Ast::ExpressionId): Ast::Expression::RecordInitField {
+  return Ast::Expression::RecordInitField {
+    name: String::create(name),
+    value: value,
+  };
+}
+
+function typecheckAddRecordInit(
+  module: &mut Ast::Module,
+  path: Ast::ExpressionId,
+  typeArguments: Vector<Ast::TypeId>,
+  fields: Vector<Ast::Expression::RecordInitField>,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::RecordInit(Ast::Expression::RecordInit {
+    span: typecheckDummySpan(),
+    path: path,
+    typeArguments: typeArguments,
+    fields: fields,
+  }));
+}
+
+function typecheckAddMemberAccess(
+  module: &mut Ast::Module,
+  object: Ast::ExpressionId,
+  member: str,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::MemberAccess(Ast::Expression::MemberAccess {
+    span: typecheckDummySpan(),
+    object: object,
+    operator: Ast::Expression::AccessOperator::Dot,
+    member: String::create(member),
+  }));
+}
+
 function typecheckAddNullLiteral(module: &mut Ast::Module): Ast::ExpressionId {
   let mut moduleRef: &mut Ast::Module = module;
   return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
@@ -1315,4 +1405,466 @@ function typecheckIfAndWhileStatementsCheckBooleanConditionsAndBodies(): void {
   Test::assertEq<u64>(output.diagnostics.length(), 2);
   assertExprType(&output, whileUse, typeStore.intern(Analyzer::Type::I32));
   assertExprType(&output, ifUse, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckRecordInitAndMemberAccessHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let boolTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let xField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "x", i32TypeId);
+  let yField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "y", boolTypeId);
+  let mut pointFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  pointFields.push(xField);
+  pointFields.push(yField);
+  let _pointId: Ast::ItemId = typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), pointFields);
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let trueExpr: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", oneExpr));
+  initFields.push(typecheckRecordInitField("y", trueExpr));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, pointPath, Vector::new<Ast::TypeId>(), initFields);
+
+  let pointPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "point", typecheckAddPathType(&mut module, "Point"));
+  let pointStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: pointPattern,
+    annotation: Option::SOME(typecheckAddPathType(&mut module, "Point")),
+    value: Option::SOME(initExpr),
+  }));
+  let pointExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "point");
+  let accessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, pointExpr, "x");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, accessExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(pointStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("buildPoint"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(i32TypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  let Option::SOME(initType) = findExprType(&output, initExpr) else {
+    @panic("typecheckRecordInitAndMemberAccessHappyPath: missing init type");
+  };
+  let Option::SOME(pointType) = findExprType(&output, pointExpr) else {
+    @panic("typecheckRecordInitAndMemberAccessHappyPath: missing point type");
+  };
+  Test::assertEq<u32>(initType.raw(), pointType.raw());
+  assertExprType(&output, accessExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckAliasRecordInitAndMemberAccessHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let boolTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let xField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "x", i32TypeId);
+  let yField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "y", boolTypeId);
+  let mut pointFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  pointFields.push(xField);
+  pointFields.push(yField);
+  let _pointId: Ast::ItemId = typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), pointFields);
+  let _aliasId: Ast::ItemId = typecheckAddTypeAliasItem(&mut module, "AliasPoint", typecheckAddPathType(&mut module, "Point"));
+
+  let aliasPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "AliasPoint");
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let trueExpr: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", oneExpr));
+  initFields.push(typecheckRecordInitField("y", trueExpr));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, aliasPath, Vector::new<Ast::TypeId>(), initFields);
+
+  let aliasPointTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "AliasPoint");
+  let pointPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "point", aliasPointTypeId);
+  let pointStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: pointPattern,
+    annotation: Option::SOME(aliasPointTypeId),
+    value: Option::SOME(initExpr),
+  }));
+  let pointExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "point");
+  let accessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, pointExpr, "y");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, accessExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(pointStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("buildAliasPoint"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(boolTypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, accessExpr, typeStore.intern(Analyzer::Type::BOOLEAN));
+}
+
+@test
+function typecheckRecordInitRejectsUnknownField(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let boolTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let xField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "x", i32TypeId);
+  let yField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "y", boolTypeId);
+  let mut pointFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  pointFields.push(xField);
+  pointFields.push(yField);
+  let _pointId: Ast::ItemId = typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), pointFields);
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", typecheckAddIntLiteral(&mut module, 1)));
+  initFields.push(typecheckRecordInitField("z", typecheckAddBoolLiteral(&mut module, true)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, pointPath, Vector::new<Ast::TypeId>(), initFields);
+  let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, initExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("badUnknownField"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "unknown record field `z`");
+}
+
+@test
+function typecheckRecordInitRejectsMissingField(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let boolTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let xField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "x", i32TypeId);
+  let yField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "y", boolTypeId);
+  let mut pointFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  pointFields.push(xField);
+  pointFields.push(yField);
+  let _pointId: Ast::ItemId = typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), pointFields);
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", typecheckAddIntLiteral(&mut module, 1)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, pointPath, Vector::new<Ast::TypeId>(), initFields);
+  let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, initExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("badMissingField"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "missing record field `y`");
+}
+
+@test
+function typecheckRecordInitRejectsDuplicateField(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "x", i32TypeId);
+  let mut pointFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  pointFields.push(xField);
+  let _pointId: Ast::ItemId = typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), pointFields);
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", typecheckAddIntLiteral(&mut module, 1)));
+  initFields.push(typecheckRecordInitField("x", typecheckAddIntLiteral(&mut module, 2)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, pointPath, Vector::new<Ast::TypeId>(), initFields);
+  let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, initExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("badDuplicateField"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "duplicate record field `x`");
+}
+
+@test
+function typecheckRecordInitRejectsMismatchedFieldType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let boolTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let xField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "x", i32TypeId);
+  let yField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "y", boolTypeId);
+  let mut pointFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  pointFields.push(xField);
+  pointFields.push(yField);
+  let _pointId: Ast::ItemId = typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), pointFields);
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", typecheckAddIntLiteral(&mut module, 1)));
+  initFields.push(typecheckRecordInitField("y", typecheckAddIntLiteral(&mut module, 2)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, pointPath, Vector::new<Ast::TypeId>(), initFields);
+  let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, initExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("badFieldType"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `boolean`, found `i32`");
+}
+
+@test
+function typecheckRecordInitRejectsExplicitTypeArguments(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "value", tTypeId);
+  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  boxFields.push(valueField);
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(typecheckGenericParam("T"));
+  let _boxId: Ast::ItemId = typecheckAddRecordItem(&mut module, "Box", genericParams, boxFields);
+
+  let boxPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Box");
+  let mut typeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  typeArguments.push(typecheckAddPathType(&mut module, "i32"));
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("value", typecheckAddIntLiteral(&mut module, 1)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, boxPath, typeArguments, initFields);
+  let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, initExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("genericInit"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support generic record initializers");
+}
+
+@test
+function typecheckRecordInitRejectsGenericRecordWithoutTypeArguments(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "value", tTypeId);
+  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  boxFields.push(valueField);
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(typecheckGenericParam("T"));
+  let _boxId: Ast::ItemId = typecheckAddRecordItem(&mut module, "Box", genericParams, boxFields);
+
+  let boxPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Box");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("value", typecheckAddIntLiteral(&mut module, 1)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, boxPath, Vector::new<Ast::TypeId>(), initFields);
+  let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, initExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("genericInitNoTypeArgs"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support generic record initializers");
+}
+
+@test
+function typecheckMemberAccessRejectsNonRecord(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let valuePattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", i32TypeId);
+  let valueStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: valuePattern,
+    annotation: Option::SOME(i32TypeId),
+    value: Option::SOME(typecheckAddIntLiteral(&mut module, 1)),
+  }));
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let accessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, valueExpr, "x");
+  let accessStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, accessExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(valueStmt);
+  bodyStmts.push(accessStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("badMemberTarget"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "member access target must be a non-generic record");
+}
+
+@test
+function typecheckMemberAccessRejectsUnknownField(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "x", i32TypeId);
+  let mut pointFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  pointFields.push(xField);
+  let _pointId: Ast::ItemId = typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), pointFields);
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", typecheckAddIntLiteral(&mut module, 1)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, pointPath, Vector::new<Ast::TypeId>(), initFields);
+  let pointPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "point", typecheckAddPathType(&mut module, "Point"));
+  let pointStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: pointPattern,
+    annotation: Option::SOME(typecheckAddPathType(&mut module, "Point")),
+    value: Option::SOME(initExpr),
+  }));
+  let pointExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "point");
+  let accessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, pointExpr, "z");
+  let accessStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, accessExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(pointStmt);
+  bodyStmts.push(accessStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("badMemberField"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "unknown record field `z`");
 }

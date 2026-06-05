@@ -1220,6 +1220,330 @@ export namespace Analyzer {
       return Option::SOME(signature.returnType);
     }
 
+    record RequiredRecordDef {
+      public defId: Analyzer::DefinitionId;
+      public typeId: Analyzer::TypeId;
+      public fields: Vector<Analyzer::DefinitionId>;
+    }
+
+    function requireNonGenericRecord(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+      nonRecordMessage: str,
+      genericMessage: str,
+    ): Option<Analyzer::Typecheck::RequiredRecordDef> {
+      let resolvedTypeId: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChain(defStore, typeStore, typeId);
+      let Option::SOME(resolvedType) = typeStore.get(resolvedTypeId) else {
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
+        return Option::NONE;
+      };
+
+      match (resolvedType) {
+        Analyzer::Type::Record(defId) -> {
+          let Option::SOME(def) = defStore.get(defId) else {
+            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
+            return Option::NONE;
+          };
+
+          match (def) {
+            Analyzer::Definition::Record(record_) -> {
+              if (record_.typeParams.length() > 0) {
+                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+                return Option::NONE;
+              }
+
+              let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+              let mut index: u64 = 0;
+              while (index < record_.fields.length()) {
+                let Option::SOME(fieldDefId) = record_.fields.get(index) else {
+                  index += 1;
+                  continue;
+                };
+
+                fields.push(*fieldDefId);
+                index += 1;
+              }
+
+              return Option::SOME(Analyzer::Typecheck::RequiredRecordDef {
+                defId: defId,
+                typeId: record_.typeId,
+                fields: fields,
+              });
+            },
+            _ -> {
+              Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
+              return Option::NONE;
+            },
+          };
+        },
+        Analyzer::Type::Instance(_) -> {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+          return Option::NONE;
+        },
+        _ -> {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
+          return Option::NONE;
+        },
+      };
+    }
+
+    function findRecordFieldDef(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      recordDef: &Analyzer::Typecheck::RequiredRecordDef,
+      name: str,
+    ): Option<Analyzer::FieldDef> {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let fieldSymbol: Analyzer::SymbolId = symbolsRef.intern(name);
+      let mut index: u64 = 0;
+
+      while (index < recordDef.fields.length()) {
+        let Option::SOME(fieldDefId) = recordDef.fields.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(def) = defStore.get(*fieldDefId) else {
+          index += 1;
+          continue;
+        };
+
+        match (def) {
+          Analyzer::Definition::Field(fieldDef) -> {
+            if (fieldDef.name.raw() == fieldSymbol.raw()) {
+              return Option::SOME(Analyzer::FieldDef {
+                name: fieldDef.name,
+                fieldType: fieldDef.fieldType,
+                owner: fieldDef.owner,
+                index: fieldDef.index,
+              });
+            }
+          },
+          _ -> {},
+        };
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    function emitNamedRecordFieldDiagnostic(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+      prefix: str,
+      name: str,
+    ): void {
+      let message: String = String::create(prefix).concat(" `").concat(name).concat("`");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+    }
+
+    function checkMemberAccessExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::MemberAccess,
+    ): Option<Analyzer::TypeId> {
+      if (value.operator != Ast::Expression::AccessOperator::Dot) {
+        Analyzer::Typecheck::emitUnsupported(state, value.span, "member access");
+        return Option::NONE;
+      }
+
+      let objectTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        value.object,
+      );
+      let Option::SOME(objectType) = objectTypeOpt else {
+        return Option::NONE;
+      };
+
+      let recordDefOpt: Option<Analyzer::Typecheck::RequiredRecordDef> = Analyzer::Typecheck::requireNonGenericRecord(
+        state,
+        defStore,
+        typeStore,
+        value.span,
+        objectType,
+        "member access target must be a non-generic record",
+        "member access target must be a non-generic record",
+      );
+      let Option::SOME(recordDef) = recordDefOpt else {
+        return Option::NONE;
+      };
+
+      let fieldDefOpt: Option<Analyzer::FieldDef> = Analyzer::Typecheck::findRecordFieldDef(
+        defStore,
+        symbols,
+        &recordDef,
+        value.member.toStr(),
+      );
+      let Option::SOME(fieldDef) = fieldDefOpt else {
+        Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, "unknown record field", value.member.toStr());
+        return Option::NONE;
+      };
+
+      Analyzer::Typecheck::recordExprType(state, exprId, fieldDef.fieldType);
+      return Option::SOME(fieldDef.fieldType);
+    }
+
+    function checkRecordInitExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::RecordInit,
+    ): Option<Analyzer::TypeId> {
+      if (value.typeArguments.length() > 0) {
+        Analyzer::Typecheck::emitUnsupported(state, value.span, "generic record initializers");
+        return Option::NONE;
+      }
+
+      let pathTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        value.path,
+      );
+      let Option::SOME(pathType) = pathTypeOpt else {
+        return Option::NONE;
+      };
+
+      let recordDefOpt: Option<Analyzer::Typecheck::RequiredRecordDef> = Analyzer::Typecheck::requireNonGenericRecord(
+        state,
+        defStore,
+        typeStore,
+        value.span,
+        pathType,
+        "record initializer target must be a non-generic record",
+        "typecheck does not support generic record initializers",
+      );
+      let Option::SOME(recordDef) = recordDefOpt else {
+        return Option::NONE;
+      };
+
+      let mut seenFieldNames: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut fieldIndex: u64 = 0;
+      while (fieldIndex < value.fields.length()) {
+        let Option::SOME(field) = value.fields.get(fieldIndex) else {
+          fieldIndex += 1;
+          continue;
+        };
+
+        let fieldDefOpt: Option<Analyzer::FieldDef> = Analyzer::Typecheck::findRecordFieldDef(
+          defStore,
+          symbols,
+          &recordDef,
+          field.name.toStr(),
+        );
+        let Option::SOME(fieldDef) = fieldDefOpt else {
+          Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, "unknown record field", field.name.toStr());
+          return Option::NONE;
+        };
+
+        let mut seenIndex: u64 = 0;
+        while (seenIndex < seenFieldNames.length()) {
+          let Option::SOME(seenFieldName) = seenFieldNames.get(seenIndex) else {
+            seenIndex += 1;
+            continue;
+          };
+
+          if (seenFieldName.raw() == fieldDef.name.raw()) {
+            Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, "duplicate record field", field.name.toStr());
+            return Option::NONE;
+          }
+
+          seenIndex += 1;
+        }
+
+        seenFieldNames.push(fieldDef.name);
+
+        let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          field.value,
+        );
+        let Option::SOME(actualType) = actualTypeOpt else {
+          return Option::NONE;
+        };
+
+        if (!Analyzer::Typecheck::typesEqual(defStore, typeStore, fieldDef.fieldType, actualType)) {
+          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, fieldDef.fieldType, actualType);
+          return Option::NONE;
+        }
+
+        fieldIndex += 1;
+      }
+
+      let mut declaredFieldIndex: u64 = 0;
+      while (declaredFieldIndex < recordDef.fields.length()) {
+        let Option::SOME(fieldDefId) = recordDef.fields.get(declaredFieldIndex) else {
+          declaredFieldIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(def) = defStore.get(*fieldDefId) else {
+          declaredFieldIndex += 1;
+          continue;
+        };
+
+        match (def) {
+          Analyzer::Definition::Field(fieldDef) -> {
+            let mut found: boolean = false;
+            let mut seenIndex: u64 = 0;
+            while (seenIndex < seenFieldNames.length()) {
+              let Option::SOME(seenFieldName) = seenFieldNames.get(seenIndex) else {
+                seenIndex += 1;
+                continue;
+              };
+
+              if (seenFieldName.raw() == fieldDef.name.raw()) {
+                found = true;
+                break;
+              }
+
+              seenIndex += 1;
+            }
+
+            if (!found) {
+              let missingName: String = match (symbols.resolve(fieldDef.name)) {
+                Option::SOME(name) -> String::create(name),
+                Option::NONE -> String::create("<unknown>"),
+              };
+              Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, "missing record field", missingName.toStr());
+              return Option::NONE;
+            }
+          },
+          _ -> {},
+        };
+
+        declaredFieldIndex += 1;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, exprId, recordDef.typeId);
+      return Option::SOME(recordDef.typeId);
+    }
+
     function checkExpr(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1432,14 +1756,28 @@ export namespace Analyzer {
           return Option::NONE;
         },
         Ast::Expression::Node::MemberAccess(value) -> {
-          let _objectType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.object);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "member access");
-          return Option::NONE;
+          return Analyzer::Typecheck::checkMemberAccessExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            &value,
+          );
         },
         Ast::Expression::Node::RecordInit(value) -> {
-          let _pathType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.path);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "record initializers");
-          return Option::NONE;
+          return Analyzer::Typecheck::checkRecordInitExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            &value,
+          );
         },
         Ast::Expression::Node::BuiltinCall(value) -> {
           Analyzer::Typecheck::emitUnsupported(state, value.span, "builtin calls");
