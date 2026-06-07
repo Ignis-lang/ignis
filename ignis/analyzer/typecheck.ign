@@ -28,12 +28,18 @@ export namespace Analyzer {
       public exprTypes: Analyzer::Typecheck::ExprTypeMap;
       public currentFunction: Analyzer::DefinitionId;
       public currentReturnType: Analyzer::TypeId;
+      public loopDepth: u64;
       public scopeMarks: Vector<u64>;
       public localPatternIds: Vector<Ast::PatternId>;
       public localFunctionIds: Vector<Analyzer::DefinitionId>;
       public localIndexes: Vector<u32>;
       public localTypeIds: Vector<Analyzer::TypeId>;
       public localMutableFlags: Vector<boolean>;
+    }
+
+    record AliasResolutionResult {
+      public typeId: Analyzer::TypeId;
+      public cycleAlias: Option<Analyzer::DefinitionId>;
     }
 
     record LocalBindingInfo {
@@ -141,17 +147,73 @@ export namespace Analyzer {
       }
     }
 
-    function resolveAliasChain(
+    function enterLoop(state: &mut Analyzer::Typecheck::TypecheckState): void {
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.loopDepth += 1;
+    }
+
+    function exitLoop(state: &mut Analyzer::Typecheck::TypecheckState): void {
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      if (stateRef.loopDepth > 0) {
+        stateRef.loopDepth -= 1;
+      }
+    }
+
+    function checkBlockBody(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      statements: &Vector<Ast::StatementId>,
+      tail: Option<Ast::ExpressionId>,
+    ): Option<Analyzer::TypeId> {
+      Analyzer::Typecheck::pushScope(state);
+
+      let mut index: u64 = 0;
+      while (index < statements.length()) {
+        let Option::SOME(stmtId) = statements.get(index) else {
+          index += 1;
+          continue;
+        };
+        Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, *stmtId);
+        index += 1;
+      }
+
+      if (let Option::SOME(tailId) = tail) {
+        let tailTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          tailId,
+        );
+        Analyzer::Typecheck::popScope(state);
+        return tailTypeOpt;
+      }
+
+      Analyzer::Typecheck::popScope(state);
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      return Option::SOME(typeStoreRef.intern(Analyzer::Type::VOID));
+    }
+
+    function resolveAliasChainChecked(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
       typeId: Analyzer::TypeId,
-    ): Analyzer::TypeId {
+    ): Analyzer::Typecheck::AliasResolutionResult {
       let mut current: Analyzer::TypeId = typeId;
       let mut visited: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
 
       while (true) {
         let Option::SOME(type_) = typeStore.get(current) else {
-          return current;
+          return Analyzer::Typecheck::AliasResolutionResult {
+            typeId: current,
+            cycleAlias: Option::NONE,
+          };
         };
 
         match (type_) {
@@ -164,7 +226,10 @@ export namespace Analyzer {
               };
 
               if (seen.raw() == aliasDefId.raw()) {
-                return current;
+                return Analyzer::Typecheck::AliasResolutionResult {
+                  typeId: current,
+                  cycleAlias: Option::SOME(aliasDefId),
+                };
               }
 
               seenIndex += 1;
@@ -173,138 +238,90 @@ export namespace Analyzer {
             visited.push(aliasDefId);
 
             let Option::SOME(def) = defStore.get(aliasDefId) else {
-              return current;
+              return Analyzer::Typecheck::AliasResolutionResult {
+                typeId: current,
+                cycleAlias: Option::NONE,
+              };
             };
 
             match (def) {
               Analyzer::Definition::TypeAlias(aliasDef) -> {
                 current = aliasDef.aliasedType;
               },
-              Analyzer::Definition::Function(_) -> {
-                return current;
-              },
-              Analyzer::Definition::Record(_) -> {
-                return current;
-              },
-              Analyzer::Definition::Enum(_) -> {
-                return current;
-              },
-              Analyzer::Definition::Variable(_) -> {
-                return current;
-              },
-              Analyzer::Definition::Field(_) -> {
-                return current;
-              },
-              Analyzer::Definition::Variant(_) -> {
-                return current;
-              },
-              Analyzer::Definition::TypeParam(_) -> {
-                return current;
-              },
-              Analyzer::Definition::Trait(_) -> {
-                return current;
+              _ -> {
+                return Analyzer::Typecheck::AliasResolutionResult {
+                  typeId: current,
+                  cycleAlias: Option::NONE,
+                };
               },
             };
           },
-          Analyzer::Type::I8 -> {
-            return current;
-          },
-          Analyzer::Type::I16 -> {
-            return current;
-          },
-          Analyzer::Type::I32 -> {
-            return current;
-          },
-          Analyzer::Type::I64 -> {
-            return current;
-          },
-          Analyzer::Type::U8 -> {
-            return current;
-          },
-          Analyzer::Type::U16 -> {
-            return current;
-          },
-          Analyzer::Type::U32 -> {
-            return current;
-          },
-          Analyzer::Type::U64 -> {
-            return current;
-          },
-          Analyzer::Type::F32 -> {
-            return current;
-          },
-          Analyzer::Type::F64 -> {
-            return current;
-          },
-          Analyzer::Type::BOOLEAN -> {
-            return current;
-          },
-          Analyzer::Type::CHAR -> {
-            return current;
-          },
-          Analyzer::Type::STR -> {
-            return current;
-          },
-          Analyzer::Type::VOID -> {
-            return current;
-          },
-          Analyzer::Type::NEVER -> {
-            return current;
-          },
-          Analyzer::Type::Pointer(_) -> {
-            return current;
-          },
-          Analyzer::Type::Reference(_) -> {
-            return current;
-          },
-          Analyzer::Type::Slice(_) -> {
-            return current;
-          },
-          Analyzer::Type::FixedArray(_, _) -> {
-            return current;
-          },
-          Analyzer::Type::Tuple(_) -> {
-            return current;
-          },
-          Analyzer::Type::Function(_) -> {
-            return current;
-          },
-          Analyzer::Type::Record(_) -> {
-            return current;
-          },
-          Analyzer::Type::Enum(_) -> {
-            return current;
-          },
-          Analyzer::Type::Param(_) -> {
-            return current;
-          },
-          Analyzer::Type::Instance(_) -> {
-            return current;
+          _ -> {
+            return Analyzer::Typecheck::AliasResolutionResult {
+              typeId: current,
+              cycleAlias: Option::NONE,
+            };
           },
         };
       }
 
-      return current;
+      return Analyzer::Typecheck::AliasResolutionResult {
+        typeId: current,
+        cycleAlias: Option::NONE,
+      };
+    }
+
+    function emitCyclicTypeAlias(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      aliasDefId: Analyzer::DefinitionId,
+    ): void {
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let aliasTypeId: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::Alias(aliasDefId));
+      let message: String = String::create("cyclic type alias `")
+        .concat(typeStore.nameOf(aliasTypeId).toStr())
+        .concat("`");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
     }
 
     function typesEqual(
+      state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
       left: Analyzer::TypeId,
       right: Analyzer::TypeId,
     ): boolean {
-      let leftResolved: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChain(defStore, typeStore, left);
-      let rightResolved: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChain(defStore, typeStore, right);
-      return leftResolved.raw() == rightResolved.raw();
+      let leftResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, left);
+      if (let Option::SOME(aliasDefId) = leftResolved.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return true;
+      }
+
+      let rightResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, right);
+      if (let Option::SOME(aliasDefId) = rightResolved.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return true;
+      }
+
+      return leftResolved.typeId.raw() == rightResolved.typeId.raw();
     }
 
     function isSupportedNumericType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
       typeId: Analyzer::TypeId,
     ): boolean {
-      let resolved: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChain(defStore, typeStore, typeId);
-      let Option::SOME(type_) = typeStore.get(resolved) else {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (let Option::SOME(aliasDefId) = resolved.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return false;
+      }
+
+      let Option::SOME(type_) = typeStore.get(resolved.typeId) else {
         return false;
       };
 
@@ -324,12 +341,19 @@ export namespace Analyzer {
     }
 
     function isBooleanType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
       typeId: Analyzer::TypeId,
     ): boolean {
-      let resolved: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChain(defStore, typeStore, typeId);
-      let Option::SOME(type_) = typeStore.get(resolved) else {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (let Option::SOME(aliasDefId) = resolved.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return false;
+      }
+
+      let Option::SOME(type_) = typeStore.get(resolved.typeId) else {
         return false;
       };
 
@@ -346,13 +370,15 @@ export namespace Analyzer {
       span: SourceSpan,
       actual: Analyzer::TypeId,
     ): boolean {
-      if (Analyzer::Typecheck::isBooleanType(defStore, typeStore, actual)) {
+      if (Analyzer::Typecheck::isBooleanType(state, defStore, typeStore, span, actual)) {
         return true;
       }
 
       let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
       let booleanType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::BOOLEAN);
-      Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, booleanType, actual);
+      if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, booleanType, actual)) {
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, booleanType, actual);
+      }
       return false;
     }
 
@@ -460,8 +486,8 @@ export namespace Analyzer {
 
       if (Analyzer::Typecheck::isArithmeticBinaryOperator(b.operator)) {
         if (
-          Analyzer::Typecheck::typesEqual(defStore, typeStore, leftType, rightType)
-          && Analyzer::Typecheck::isSupportedNumericType(defStore, typeStore, leftType)
+          Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType)
+          && Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, b.span, leftType)
         ) {
           Analyzer::Typecheck::recordExprType(state, exprId, leftType);
           return Option::SOME(leftType);
@@ -473,10 +499,10 @@ export namespace Analyzer {
 
       if (Analyzer::Typecheck::isEqualityBinaryOperator(b.operator)) {
         if (
-          Analyzer::Typecheck::typesEqual(defStore, typeStore, leftType, rightType)
+          Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType)
           && (
-            Analyzer::Typecheck::isSupportedNumericType(defStore, typeStore, leftType)
-            || Analyzer::Typecheck::isBooleanType(defStore, typeStore, leftType)
+            Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, b.span, leftType)
+            || Analyzer::Typecheck::isBooleanType(state, defStore, typeStore, b.span, leftType)
           )
         ) {
           let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
@@ -490,8 +516,8 @@ export namespace Analyzer {
 
       if (Analyzer::Typecheck::isComparisonBinaryOperator(b.operator)) {
         if (
-          Analyzer::Typecheck::typesEqual(defStore, typeStore, leftType, rightType)
-          && Analyzer::Typecheck::isSupportedNumericType(defStore, typeStore, leftType)
+          Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType)
+          && Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, b.span, leftType)
         ) {
           let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
           Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
@@ -1067,7 +1093,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      if (!Analyzer::Typecheck::typesEqual(defStore, typeStore, localBinding.typeId, actualType)) {
+      if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, localBinding.typeId, actualType)) {
         Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, localBinding.typeId, actualType);
         return Option::NONE;
       }
@@ -1173,7 +1199,7 @@ export namespace Analyzer {
 
         match (paramDef) {
           Analyzer::Definition::Variable(parameter) -> {
-            if (!Analyzer::Typecheck::typesEqual(defStore, typeStore, parameter.declaredType, argumentType)) {
+            if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, call.span, parameter.declaredType, argumentType)) {
               Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, parameter.declaredType, argumentType);
               Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
               return Option::SOME(signature.returnType);
@@ -1235,13 +1261,18 @@ export namespace Analyzer {
       nonRecordMessage: str,
       genericMessage: str,
     ): Option<Analyzer::Typecheck::RequiredRecordDef> {
-      let resolvedTypeId: Analyzer::TypeId = Analyzer::Typecheck::resolveAliasChain(defStore, typeStore, typeId);
-      let Option::SOME(resolvedType) = typeStore.get(resolvedTypeId) else {
+      let resolvedType: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (let Option::SOME(aliasDefId) = resolvedType.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return Option::NONE;
+      }
+
+      let Option::SOME(resolvedTypeNode) = typeStore.get(resolvedType.typeId) else {
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
         return Option::NONE;
       };
 
-      match (resolvedType) {
+      match (resolvedTypeNode) {
         Analyzer::Type::Record(defId) -> {
           let Option::SOME(def) = defStore.get(defId) else {
             Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
@@ -1487,7 +1518,7 @@ export namespace Analyzer {
           return Option::NONE;
         };
 
-        if (!Analyzer::Typecheck::typesEqual(defStore, typeStore, fieldDef.fieldType, actualType)) {
+        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, fieldDef.fieldType, actualType)) {
           Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, fieldDef.fieldType, actualType);
           return Option::NONE;
         }
@@ -1695,22 +1726,27 @@ export namespace Analyzer {
           return Option::NONE;
         },
         Ast::Expression::Node::Block(value) -> {
-          let mut index: u64 = 0;
-          Analyzer::Typecheck::pushScope(state);
-          while (index < value.statements.length()) {
-            let Option::SOME(stmtId) = value.statements.get(index) else {
-              index += 1;
-              continue;
-            };
-            Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, *stmtId);
-            index += 1;
+          let blockTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkBlockBody(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            &value.statements,
+            value.tail,
+          );
+          let Option::SOME(blockType) = blockTypeOpt else {
+            return Option::NONE;
+          };
+
+          if (value.tail.isSome()) {
+            Analyzer::Typecheck::emitUnsupported(state, value.span, "block expressions with tail values");
+            return Option::NONE;
           }
-          if (let Option::SOME(tailId) = value.tail) {
-            let _tailType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, tailId);
-          }
-          Analyzer::Typecheck::popScope(state);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "block expressions");
-          return Option::NONE;
+
+          Analyzer::Typecheck::recordExprType(state, exprId, blockType);
+          return Option::SOME(blockType);
         },
         Ast::Expression::Node::If(value) -> {
           let _conditionType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
@@ -1856,7 +1892,7 @@ export namespace Analyzer {
       );
 
       if (let Option::SOME(actualType) = actualTypeOpt) {
-        if (!Analyzer::Typecheck::typesEqual(defStore, typeStore, expectedType, actualType)) {
+        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, expectedType, actualType)) {
           Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, expectedType, actualType);
         }
       }
@@ -1920,20 +1956,16 @@ export namespace Analyzer {
           );
         },
         Ast::Statement::Node::Block(blockStmt) -> {
-          Analyzer::Typecheck::pushScope(state);
-          let mut index: u64 = 0;
-          while (index < blockStmt.statements.length()) {
-            let Option::SOME(childStmtId) = blockStmt.statements.get(index) else {
-              index += 1;
-              continue;
-            };
-            Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, *childStmtId);
-            index += 1;
-          }
-          if (let Option::SOME(tailId) = blockStmt.tail) {
-            let _tailType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, tailId);
-          }
-          Analyzer::Typecheck::popScope(state);
+          let _blockType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkBlockBody(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            &blockStmt.statements,
+            blockStmt.tail,
+          );
         },
         Ast::Statement::Node::Return(returnStmt) -> {
           if (let Option::SOME(valueExprId) = returnStmt.value) {
@@ -1948,14 +1980,14 @@ export namespace Analyzer {
             );
 
             if (let Option::SOME(actualType) = actualTypeOpt) {
-              if (!Analyzer::Typecheck::typesEqual(defStore, typeStore, state.currentReturnType, actualType)) {
+              if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, returnStmt.span, state.currentReturnType, actualType)) {
                 Analyzer::Typecheck::emitTypeMismatch(state, typeStore, returnStmt.span, state.currentReturnType, actualType);
               }
             }
           } else {
             let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
             let voidType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::VOID);
-            if (!Analyzer::Typecheck::typesEqual(defStore, typeStore, state.currentReturnType, voidType)) {
+            if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, returnStmt.span, state.currentReturnType, voidType)) {
               Analyzer::Typecheck::emitTypeMismatch(state, typeStore, returnStmt.span, state.currentReturnType, voidType);
             }
           }
@@ -1979,20 +2011,52 @@ export namespace Analyzer {
           if (let Option::SOME(conditionType) = conditionTypeOpt) {
             Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
           }
+          Analyzer::Typecheck::enterLoop(state);
           Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.body);
+          Analyzer::Typecheck::exitLoop(state);
         },
         Ast::Statement::Node::For(value) -> {
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "for statements");
+          Analyzer::Typecheck::pushScope(state);
+
+          if (let Option::SOME(initializerId) = value.initializer) {
+            Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, initializerId);
+          }
+
+          if (let Option::SOME(conditionId) = value.condition) {
+            let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, conditionId);
+            if (let Option::SOME(conditionType) = conditionTypeOpt) {
+              Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+            }
+          }
+
+          if (let Option::SOME(updateId) = value.update) {
+            let _updateType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, updateId);
+          }
+
+          Analyzer::Typecheck::enterLoop(state);
+          Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.body);
+          Analyzer::Typecheck::exitLoop(state);
+          Analyzer::Typecheck::popScope(state);
         },
         Ast::Statement::Node::ForOf(value) -> {
           let _iterableType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.iterable);
           Analyzer::Typecheck::emitUnsupported(state, value.span, "for-of statements");
         },
         Ast::Statement::Node::Break(value) -> {
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "break statements");
+          if (state.loopDepth == 0) {
+            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::TYPE_MISMATCH, "`break` used outside of loop");
+            return;
+          }
+
+          if (value.value.isSome()) {
+            Analyzer::Typecheck::emitUnsupported(state, value.span, "break values");
+            return;
+          }
         },
         Ast::Statement::Node::Continue(value) -> {
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "continue statements");
+          if (state.loopDepth == 0) {
+            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::TYPE_MISMATCH, "`continue` used outside of loop");
+          }
         },
         Ast::Statement::Node::Defer(value) -> {
           Analyzer::Typecheck::emitUnsupported(state, value.span, "defer statements");
@@ -2089,6 +2153,7 @@ export namespace Analyzer {
       let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
       stateRef.currentFunction = functionDefId;
       stateRef.currentReturnType = signature.returnType;
+      stateRef.loopDepth = 0;
       stateRef.scopeMarks = Vector::new<u64>();
       stateRef.localPatternIds = Vector::new<Ast::PatternId>();
       stateRef.localFunctionIds = Vector::new<Analyzer::DefinitionId>();
@@ -2152,6 +2217,7 @@ export namespace Analyzer {
       let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
       stateRef.currentFunction = constantDefId;
       stateRef.currentReturnType = variableDef.declaredType;
+      stateRef.loopDepth = 0;
       stateRef.scopeMarks = Vector::new<u64>();
       stateRef.localPatternIds = Vector::new<Ast::PatternId>();
       stateRef.localFunctionIds = Vector::new<Analyzer::DefinitionId>();
@@ -2170,7 +2236,7 @@ export namespace Analyzer {
       );
 
       if (let Option::SOME(actualType) = actualTypeOpt) {
-        if (!Analyzer::Typecheck::typesEqual(defStore, typeStore, variableDef.declaredType, actualType)) {
+        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, constant.span, variableDef.declaredType, actualType)) {
           Analyzer::Typecheck::emitTypeMismatch(state, typeStore, constant.span, variableDef.declaredType, actualType);
         }
       }
@@ -2258,6 +2324,7 @@ export namespace Analyzer {
         },
         currentFunction: Id::fromRaw<Analyzer::DefinitionTag>(0),
         currentReturnType: voidType,
+        loopDepth: 0,
         scopeMarks: Vector::new<u64>(),
         localPatternIds: Vector::new<Ast::PatternId>(),
         localFunctionIds: Vector::new<Analyzer::DefinitionId>(),
