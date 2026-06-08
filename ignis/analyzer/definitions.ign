@@ -182,16 +182,10 @@ export namespace Analyzer {
     ///
     /// Caller is responsible for preserving the variant tag — patching a Record with an
     /// Enum is permitted by the type system but breaks every downstream invariant.
-    /// Uses `IndexVec::getMut` for in-place mutation (avoids move-in-one-branch
-    /// ownership errors that affect `IndexVec::set` on non-Copy types).
+    /// Delegates to `IndexVec::set` so production builds only need the setter
+    /// specialization instead of a separate public mutable-reference accessor.
     public replace(&mut self, id: Analyzer::DefinitionId, def: Analyzer::Definition): boolean {
-      let Option::SOME(slot) = self.definitions.getMut(id) else {
-        return false;
-      };
-
-      *slot = def;
-
-      return true;
+      return self.definitions.set(id, def);
     }
   }
 }

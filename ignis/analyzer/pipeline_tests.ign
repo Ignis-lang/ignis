@@ -1,0 +1,233 @@
+import Test from "std::test";
+
+import DiagnosticBag, DiagnosticCode, SourceSpan from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+
+function pipelineDummySpan(): SourceSpan {
+  return SourceSpan::new("pipeline_tests.ign", 0, 0);
+}
+
+function pipelineAddPathType(module: &mut Ast::Module, name: str): Ast::TypeId {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create(name));
+
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: pipelineDummySpan(),
+    segments: segments,
+  }));
+}
+
+function pipelineAddBinding(module: &mut Ast::Module, name: str): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: pipelineDummySpan(),
+    name: String::create(name),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function pipelineAddAnnotatedBinding(
+  module: &mut Ast::Module,
+  name: str,
+  annotation: Ast::TypeId,
+): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: pipelineDummySpan(),
+    name: String::create(name),
+    annotation: Option::SOME(annotation),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function pipelineAddBoolLiteral(module: &mut Ast::Module, value: boolean): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: pipelineDummySpan(),
+    value: Ast::Expression::LiteralValue::Boolean(value),
+  }));
+}
+
+function pipelineAddVariable(module: &mut Ast::Module, name: str): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Variable(Ast::Expression::Variable {
+    span: pipelineDummySpan(),
+    name: String::create(name),
+  }));
+}
+
+function pipelineAddReturnExpr(module: &mut Ast::Module, exprId: Ast::ExpressionId): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: pipelineDummySpan(),
+    value: Option::SOME(exprId),
+  }));
+}
+
+function pipelineAddBlock(module: &mut Ast::Module, stmts: Vector<Ast::StatementId>): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: pipelineDummySpan(),
+    statements: stmts,
+    tail: Option::NONE,
+  }));
+}
+
+function pipelineAddRecord(
+  module: &mut Ast::Module,
+  name: str,
+  fields: Vector<Ast::PatternId>,
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: pipelineDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function pipelineAddTypeAlias(module: &mut Ast::Module, name: str, value: Ast::TypeId): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::TypeAlias(Ast::Item::TypeAlias {
+    span: pipelineDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    value: value,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function pipelineAddFunction(
+  module: &mut Ast::Module,
+  name: str,
+  returnType: Option<Ast::TypeId>,
+  body: Ast::StatementId,
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: pipelineDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: returnType,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function assertDiagnosticCode(bag: &DiagnosticBag, index: u64, expected: str): void {
+  let Option::SOME(diagnostic) = bag.get(index) else {
+    @panic("assertDiagnosticCode: missing diagnostic");
+  };
+
+  Test::assertEq<str>(diagnostic.code, expected);
+}
+
+@test
+function analyzeModuleEmptyModuleSucceeds(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let module: Ast::Module = Ast::Module::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.pass1.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.pass2.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.resolvedTypes.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.resolvedBodies.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+@test
+function analyzeModuleMergesDiagnosticsInPipelineOrder(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = pipelineAddPathType(&mut module, "i32");
+  let missingType: Ast::TypeId = pipelineAddPathType(&mut module, "MissingType");
+
+  let fieldA: Ast::PatternId = pipelineAddAnnotatedBinding(&mut module, "x", i32Type);
+  let fieldB: Ast::PatternId = pipelineAddAnnotatedBinding(&mut module, "x", i32Type);
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldA);
+  fields.push(fieldB);
+
+  pipelineAddRecord(&mut module, "Foo", Vector::new<Ast::PatternId>());
+  pipelineAddTypeAlias(&mut module, "Foo", i32Type);
+  pipelineAddRecord(&mut module, "Bar", fields);
+
+  let unresolvedExpr: Ast::ExpressionId = pipelineAddVariable(&mut module, "missingValue");
+  let returnStmt: Ast::StatementId = pipelineAddReturnExpr(&mut module, unresolvedExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(returnStmt);
+  let body: Ast::StatementId = pipelineAddBlock(&mut module, bodyStmts);
+
+  pipelineAddFunction(&mut module, "main", Option::SOME(missingType), body);
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.pass1.diagnostics.length(), 1);
+  Test::assertEq<u64>(output.pass2.diagnostics.length(), 1);
+  Test::assertEq<u64>(output.resolvedTypes.diagnostics.length(), 1);
+  Test::assertEq<u64>(output.resolvedBodies.diagnostics.length(), 1);
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  Test::assertEq<u64>(output.diagnostics.length(), 5);
+
+  assertDiagnosticCode(&output.diagnostics, 0, DiagnosticCode::TYPE_ALREADY_DEFINED);
+  assertDiagnosticCode(&output.diagnostics, 1, DiagnosticCode::TYPE_ALREADY_DEFINED);
+  assertDiagnosticCode(&output.diagnostics, 2, DiagnosticCode::UNDEFINED_TYPE);
+  assertDiagnosticCode(&output.diagnostics, 3, DiagnosticCode::UNDECLARED_VARIABLE);
+  assertDiagnosticCode(&output.diagnostics, 4, DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function analyzeModuleMakesTypecheckOutputAvailable(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = pipelineAddPathType(&mut module, "i32");
+  let booleanExpr: Ast::ExpressionId = pipelineAddBoolLiteral(&mut module, true);
+  let returnStmt: Ast::StatementId = pipelineAddReturnExpr(&mut module, booleanExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(returnStmt);
+  let body: Ast::StatementId = pipelineAddBlock(&mut module, bodyStmts);
+
+  pipelineAddFunction(&mut module, "main", Option::SOME(i32Type), body);
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.pass1.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.pass2.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.resolvedTypes.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.resolvedBodies.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  assertDiagnosticCode(&output.diagnostics, 0, DiagnosticCode::TYPE_MISMATCH);
+}

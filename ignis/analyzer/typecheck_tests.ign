@@ -333,73 +333,29 @@ function typecheckAddBlockExpr(
   }));
 }
 
-function typecheckRunTypecheck(
+function typecheckAnalyzeModule(
   defStore: &mut Analyzer::DefinitionStore,
   typeStore: &mut Analyzer::TypeStore,
   symbols: &mut Analyzer::SymbolTable,
   module: &Ast::Module,
-): Analyzer::Typecheck::TypecheckOutput {
-  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
-    &module.roots,
-    defStore,
-    typeStore,
-    symbols,
-    module,
-  );
-
-  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
-    &module.roots,
-    defStore,
-    typeStore,
-    symbols,
-    module,
-    &pass1,
-  );
-
-  let resolveOutput: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
-    defStore,
-    typeStore,
-    symbols,
-    module,
-    &pass1,
-    &pass2,
-  );
-
-  let resolveBodiesOutput: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
-    defStore,
-    typeStore,
-    symbols,
-    module,
-    &pass1,
-    &pass2,
-  );
-
-  return Analyzer::Typecheck::checkModule(
-    defStore,
-    typeStore,
-    symbols,
-    module,
-    &pass1,
-    &pass2,
-    &resolveOutput,
-    &resolveBodiesOutput,
-  );
+): Analyzer::AnalyzerOutput {
+  return Analyzer::analyzeModule(defStore, typeStore, symbols, module);
 }
 
 function findExprType(
-  output: &Analyzer::Typecheck::TypecheckOutput,
+  output: &Analyzer::AnalyzerOutput,
   exprId: Ast::ExpressionId,
 ): Option<Analyzer::TypeId> {
   let mut index: u64 = 0;
 
-  while (index < output.exprTypes.nodeIds.length()) {
-    let Option::SOME(nodeId) = output.exprTypes.nodeIds.get(index) else {
+  while (index < output.typecheck.exprTypes.nodeIds.length()) {
+    let Option::SOME(nodeId) = output.typecheck.exprTypes.nodeIds.get(index) else {
       index += 1;
       continue;
     };
 
     if (*nodeId == exprId.raw()) {
-      let Option::SOME(typeId) = output.exprTypes.typeIds.get(index) else {
+      let Option::SOME(typeId) = output.typecheck.exprTypes.typeIds.get(index) else {
         return Option::NONE;
       };
 
@@ -413,7 +369,7 @@ function findExprType(
 }
 
 function assertExprType(
-  output: &Analyzer::Typecheck::TypecheckOutput,
+  output: &Analyzer::AnalyzerOutput,
   exprId: Ast::ExpressionId,
   expected: Analyzer::TypeId,
 ): void {
@@ -425,23 +381,23 @@ function assertExprType(
 }
 
 function assertSingleDiagnosticCode(
-  output: &Analyzer::Typecheck::TypecheckOutput,
+  output: &Analyzer::AnalyzerOutput,
   code: str,
 ): void {
-  Test::assertEq<u64>(output.diagnostics.length(), 1);
-  let Option::SOME(diagnostic) = output.diagnostics.get(0) else {
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(diagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("assertSingleDiagnosticCode: missing diagnostic");
   };
   Test::assertEq<str>(diagnostic.code, code);
 }
 
 function assertSingleDiagnostic(
-  output: &Analyzer::Typecheck::TypecheckOutput,
+  output: &Analyzer::AnalyzerOutput,
   code: str,
   message: str,
 ): void {
-  Test::assertEq<u64>(output.diagnostics.length(), 1);
-  let Option::SOME(diagnostic) = output.diagnostics.get(0) else {
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(diagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("assertSingleDiagnostic: missing diagnostic");
   };
   Test::assertEq<str>(diagnostic.code, code);
@@ -466,7 +422,7 @@ function typecheckConstantAnnotationHappyPath(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -511,7 +467,7 @@ function typecheckSimpleTypedFunctionBodyHappyPath(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -547,7 +503,7 @@ function typecheckWrongReturnTypeProducesDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -590,7 +546,7 @@ function typecheckWrongLetInitializerTypeProducesDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -644,7 +600,7 @@ function typecheckWrongDirectCallArityProducesDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -701,7 +657,7 @@ function typecheckWrongDirectCallArgumentTypeProducesDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -729,7 +685,7 @@ function typecheckConstantAnnotationMismatchProducesDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -777,7 +733,7 @@ function typecheckAssignmentToMutableLocalUsesTargetType(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -828,7 +784,7 @@ function typecheckAssignmentToImmutableLocalProducesDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -878,7 +834,7 @@ function typecheckAssignmentRhsTypeMismatchProducesDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -934,7 +890,7 @@ function typecheckAssignmentToNonLocalTargetProducesDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -984,7 +940,7 @@ function typecheckNonAssignOperatorProducesDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -1065,7 +1021,7 @@ function typecheckSiblingBlockLocalReuseStaysDistinct(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -1096,7 +1052,7 @@ function typecheckNullLiteralProducesExplicitUnsupportedDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -1123,7 +1079,7 @@ function typecheckConstantWithoutAnnotationProducesExplicitUnsupportedDiagnostic
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -1164,7 +1120,7 @@ function typecheckUnsupportedBinaryExpressionProducesDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -1203,7 +1159,7 @@ function typecheckBinaryArithmeticUsesOperandType(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -1251,7 +1207,7 @@ function typecheckBinaryComparisonAndEqualityReturnBoolean(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -1303,7 +1259,7 @@ function typecheckMixedPrimitiveBinaryOperandsProduceDiagnostics(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -1350,7 +1306,7 @@ function typecheckLogicalOperatorsRequireBooleanOperands(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -1443,7 +1399,7 @@ function typecheckIfAndWhileStatementsCheckBooleanConditionsAndBodies(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -1488,7 +1444,7 @@ function typecheckAliasCycleProducesDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
 }
@@ -1528,7 +1484,7 @@ function typecheckMutualAliasCycleProducesDiagnostic(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
 }
@@ -1570,7 +1526,7 @@ function typecheckAcyclicAliasChainStaysValid(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
 }
@@ -1635,7 +1591,7 @@ function typecheckForStatementUsesLoopLocalAcrossSurface(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
   assertExprType(&output, conditionExpr, typeStore.intern(Analyzer::Type::BOOLEAN));
@@ -1685,7 +1641,7 @@ function typecheckForLoopLocalDoesNotEscape(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support unresolved expression reference");
 }
@@ -1728,7 +1684,7 @@ function typecheckLoopControlDiagnosticsRespectLoopDepth(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   Test::assertEq<u64>(output.diagnostics.length(), 2);
   let Option::SOME(firstDiagnostic) = output.diagnostics.get(0) else {
@@ -1775,7 +1731,7 @@ function typecheckRejectsNonBooleanForConditionAndBreakValues(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   Test::assertEq<u64>(output.diagnostics.length(), 2);
   let Option::SOME(secondDiagnostic) = output.diagnostics.get(1) else {
@@ -1819,7 +1775,7 @@ function typecheckBlockExpressionWithoutTailYieldsVoid(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
   assertExprType(&output, blockExpr, typeStore.intern(Analyzer::Type::VOID));
@@ -1854,7 +1810,7 @@ function typecheckBlockExpressionWithTailStaysUnsupported(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support block expressions with tail values");
 }
@@ -1909,7 +1865,7 @@ function typecheckRecordInitAndMemberAccessHappyPath(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
   let Option::SOME(initType) = findExprType(&output, initExpr) else {
@@ -1974,7 +1930,7 @@ function typecheckAliasRecordInitAndMemberAccessHappyPath(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
   assertExprType(&output, accessExpr, typeStore.intern(Analyzer::Type::BOOLEAN));
@@ -2018,7 +1974,7 @@ function typecheckRecordInitRejectsUnknownField(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "unknown record field `z`");
 }
@@ -2060,7 +2016,7 @@ function typecheckRecordInitRejectsMissingField(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "missing record field `y`");
 }
@@ -2100,7 +2056,7 @@ function typecheckRecordInitRejectsDuplicateField(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "duplicate record field `x`");
 }
@@ -2143,7 +2099,7 @@ function typecheckRecordInitRejectsMismatchedFieldType(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `boolean`, found `i32`");
 }
@@ -2186,7 +2142,7 @@ function typecheckRecordInitRejectsExplicitTypeArguments(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support generic record initializers");
 }
@@ -2227,7 +2183,7 @@ function typecheckRecordInitRejectsGenericRecordWithoutTypeArguments(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support generic record initializers");
 }
@@ -2267,7 +2223,7 @@ function typecheckMemberAccessRejectsNonRecord(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "member access target must be a non-generic record");
 }
@@ -2316,7 +2272,7 @@ function typecheckMemberAccessRejectsUnknownField(): void {
     metadata: Ast::emptyMetadata(),
   }));
 
-  let output: Analyzer::Typecheck::TypecheckOutput = typecheckRunTypecheck(&mut defStore, &mut typeStore, &mut symbols, &module);
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "unknown record field `z`");
 }

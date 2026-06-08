@@ -7,4 +7,141 @@ import _ from "./resolver";
 import _ from "./resolver_bodies";
 import _ from "./typecheck";
 
-export namespace Analyzer {}
+import Diagnostic, DiagnosticBag, NoteKind from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+
+export namespace Analyzer {
+  record AnalyzerOutput {
+    public pass1: Analyzer::Binder::BinderOutput;
+    public pass2: Analyzer::Binder::BinderOutput;
+    public resolvedTypes: Analyzer::Resolver::ResolverOutput;
+    public resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput;
+    public typecheck: Analyzer::Typecheck::TypecheckOutput;
+    public diagnostics: DiagnosticBag;
+  }
+
+  function copyDiagnostic(source: &Diagnostic): Diagnostic {
+    let mut copy: Diagnostic = Diagnostic::new(
+      source.severity,
+      source.code,
+      source.message,
+      source.primarySpan,
+    );
+
+    let mut labelIndex: u64 = 0;
+    while (labelIndex < source.labels.length()) {
+      let Option::SOME(label) = source.labels.get(labelIndex) else {
+        labelIndex += 1;
+        continue;
+      };
+
+      copy.addLabel(label.kind, label.span, label.message);
+      labelIndex += 1;
+    }
+
+    let mut noteIndex: u64 = 0;
+    while (noteIndex < source.notes.length()) {
+      let Option::SOME(note) = source.notes.get(noteIndex) else {
+        noteIndex += 1;
+        continue;
+      };
+
+      match (note.kind) {
+        NoteKind::NOTE -> copy.addNote(note.message),
+        NoteKind::HELP -> copy.setHelp(note.message),
+      };
+
+      noteIndex += 1;
+    }
+
+    if (let Option::SOME(help) = source.help) {
+      copy.setHelp(help);
+    }
+
+    return copy;
+  }
+
+  function appendDiagnostics(target: &mut DiagnosticBag, source: &DiagnosticBag): void {
+    let mut index: u64 = 0;
+    let mut targetRef: &mut DiagnosticBag = target;
+
+    while (index < source.length()) {
+      let Option::SOME(diagnostic) = source.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      targetRef.push(Analyzer::copyDiagnostic(diagnostic));
+      index += 1;
+    }
+  }
+
+  function analyzeModule(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+  ): Analyzer::AnalyzerOutput {
+    let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+      &module.roots,
+      defStore,
+      typeStore,
+      symbols,
+      module,
+    );
+
+    let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+      &module.roots,
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      &pass1,
+    );
+
+    let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      &pass1,
+      &pass2,
+    );
+
+    let resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      &pass1,
+      &pass2,
+    );
+
+    let typecheck: Analyzer::Typecheck::TypecheckOutput = Analyzer::Typecheck::checkModule(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      &pass1,
+      &pass2,
+      &resolvedTypes,
+      &resolvedBodies,
+    );
+
+    let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+    Analyzer::appendDiagnostics(&mut diagnostics, &pass1.diagnostics);
+    Analyzer::appendDiagnostics(&mut diagnostics, &pass2.diagnostics);
+    Analyzer::appendDiagnostics(&mut diagnostics, &resolvedTypes.diagnostics);
+    Analyzer::appendDiagnostics(&mut diagnostics, &resolvedBodies.diagnostics);
+    Analyzer::appendDiagnostics(&mut diagnostics, &typecheck.diagnostics);
+
+    return Analyzer::AnalyzerOutput {
+      pass1: pass1,
+      pass2: pass2,
+      resolvedTypes: resolvedTypes,
+      resolvedBodies: resolvedBodies,
+      typecheck: typecheck,
+      diagnostics: diagnostics,
+    };
+  }
+}
