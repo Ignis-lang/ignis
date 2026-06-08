@@ -28,6 +28,39 @@ function typecheckAddBinding(module: &mut Ast::Module, name: str): Ast::PatternI
   }));
 }
 
+function typecheckAddWildcardPattern(module: &mut Ast::Module): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
+    span: typecheckDummySpan(),
+  }));
+}
+
+function typecheckAddPathPattern(
+  module: &mut Ast::Module,
+  name: str,
+  arguments: Vector<Ast::PatternId>,
+): Ast::PatternId {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create(name));
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+    span: typecheckDummySpan(),
+    segments: segments,
+    arguments: arguments,
+  }));
+}
+
+function typecheckAddTuplePattern(
+  module: &mut Ast::Module,
+  elements: Vector<Ast::PatternId>
+): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
+    span: typecheckDummySpan(),
+    elements: elements,
+  }));
+}
+
 function typecheckAddAnnotatedBinding(
   module: &mut Ast::Module,
   name: str,
@@ -105,6 +138,24 @@ function typecheckAddRecordItem(
   }));
 }
 
+function typecheckAddFunctionItem(
+  module: &mut Ast::Module,
+  name: str,
+  returnType: Option<Ast::TypeId>,
+  body: Ast::StatementId,
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: returnType,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
 function typecheckAddTypeAliasItem(
   module: &mut Ast::Module,
   name: str,
@@ -120,7 +171,10 @@ function typecheckAddTypeAliasItem(
   }));
 }
 
-function typecheckRecordInitField(name: str, value: Ast::ExpressionId): Ast::Expression::RecordInitField {
+function typecheckRecordInitField(
+  name: str,
+  value: Ast::ExpressionId
+): Ast::Expression::RecordInitField {
   return Ast::Expression::RecordInitField {
     name: String::create(name),
     value: value,
@@ -164,7 +218,10 @@ function typecheckAddNullLiteral(module: &mut Ast::Module): Ast::ExpressionId {
   }));
 }
 
-function typecheckAddReturnExpr(module: &mut Ast::Module, exprId: Ast::ExpressionId): Ast::StatementId {
+function typecheckAddReturnExpr(
+  module: &mut Ast::Module,
+  exprId: Ast::ExpressionId
+): Ast::StatementId {
   let mut moduleRef: &mut Ast::Module = module;
   return moduleRef.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
     span: typecheckDummySpan(),
@@ -180,7 +237,10 @@ function typecheckAddReturn(module: &mut Ast::Module): Ast::StatementId {
   }));
 }
 
-function typecheckAddBlock(module: &mut Ast::Module, stmts: Vector<Ast::StatementId>): Ast::StatementId {
+function typecheckAddBlock(
+  module: &mut Ast::Module,
+  stmts: Vector<Ast::StatementId>
+): Ast::StatementId {
   let mut moduleRef: &mut Ast::Module = module;
   return moduleRef.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
     span: typecheckDummySpan(),
@@ -189,11 +249,29 @@ function typecheckAddBlock(module: &mut Ast::Module, stmts: Vector<Ast::Statemen
   }));
 }
 
-function typecheckAddExprStmt(module: &mut Ast::Module, exprId: Ast::ExpressionId): Ast::StatementId {
+function typecheckAddExprStmt(
+  module: &mut Ast::Module,
+  exprId: Ast::ExpressionId
+): Ast::StatementId {
   let mut moduleRef: &mut Ast::Module = module;
   return moduleRef.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
     span: typecheckDummySpan(),
     expression: exprId,
+  }));
+}
+
+function typecheckAddLetStmt(
+  module: &mut Ast::Module,
+  pattern: Ast::PatternId,
+  annotation: Ast::TypeId,
+  value: Ast::ExpressionId,
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: pattern,
+    annotation: Option::SOME(annotation),
+    value: Option::SOME(value),
   }));
 }
 
@@ -380,10 +458,7 @@ function assertExprType(
   Test::assertEq<u32>(actual.raw(), expected.raw());
 }
 
-function assertSingleDiagnosticCode(
-  output: &Analyzer::AnalyzerOutput,
-  code: str,
-): void {
+function assertSingleDiagnosticCode(output: &Analyzer::AnalyzerOutput, code: str): void {
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
   let Option::SOME(diagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("assertSingleDiagnosticCode: missing diagnostic");
@@ -391,11 +466,7 @@ function assertSingleDiagnosticCode(
   Test::assertEq<str>(diagnostic.code, code);
 }
 
-function assertSingleDiagnostic(
-  output: &Analyzer::AnalyzerOutput,
-  code: str,
-  message: str,
-): void {
+function assertSingleDiagnostic(output: &Analyzer::AnalyzerOutput, code: str, message: str): void {
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
   let Option::SOME(diagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("assertSingleDiagnostic: missing diagnostic");
@@ -2275,4 +2346,189 @@ function typecheckMemberAccessRejectsUnknownField(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "unknown record field `z`");
+}
+
+@test
+function typecheckRecordDestructureAnnotatedLetBindsFieldTypes(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let pointType: Ast::TypeId = typecheckAddPathType(&mut module, "Point");
+  let boolType: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(typecheckAddAnnotatedField(&mut module, "x", i32Type));
+  fields.push(typecheckAddAnnotatedField(&mut module, "flag", boolType));
+  typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), fields);
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", typecheckAddIntLiteral(&mut module, 1)));
+  initFields.push(typecheckRecordInitField("flag", typecheckAddBoolLiteral(&mut module, true)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, pointPath, Vector::new<Ast::TypeId>(), initFields);
+
+  let aPattern: Ast::PatternId = typecheckAddBinding(&mut module, "a");
+  let bPattern: Ast::PatternId = typecheckAddBinding(&mut module, "b");
+  let mut args: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  args.push(aPattern);
+  args.push(bPattern);
+  let destructurePattern: Ast::PatternId = typecheckAddPathPattern(&mut module, "Point", args);
+  let destructureStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, destructurePattern, pointType, initExpr);
+
+  let bExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "b");
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(destructureStmt);
+  bodyStmts.push(typecheckAddExprStmt(&mut module, bExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+@test
+function typecheckRecordDestructureAnnotatedVarPropagatesMutabilityToBindings(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let pointType: Ast::TypeId = typecheckAddPathType(&mut module, "Point");
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(typecheckAddAnnotatedField(&mut module, "x", i32Type));
+  typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), fields);
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", typecheckAddIntLiteral(&mut module, 1)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, pointPath, Vector::new<Ast::TypeId>(), initFields);
+
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let mut args: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  args.push(xPattern);
+  let destructurePattern: Ast::PatternId = typecheckAddPathPattern(&mut module, "Point", args);
+  let destructureStmt: Ast::StatementId = typecheckAddMutableVariableStmt(&mut module, destructurePattern, pointType, initExpr);
+
+  let xExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let assignExpr: Ast::ExpressionId = typecheckAddAssignment(
+    &mut module,
+    Ast::Expression::AssignmentOperator::Assign,
+    xExpr,
+    typecheckAddIntLiteral(&mut module, 2),
+  );
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(destructureStmt);
+  bodyStmts.push(typecheckAddExprStmt(&mut module, assignExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+@test
+function typecheckRecordDestructureThroughAliasBindsFieldTypes(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let pointType: Ast::TypeId = typecheckAddPathType(&mut module, "Point");
+  let aliasType: Ast::TypeId = typecheckAddPathType(&mut module, "AliasPoint");
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(typecheckAddAnnotatedField(&mut module, "x", i32Type));
+  typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), fields);
+  typecheckAddTypeAliasItem(&mut module, "AliasPoint", pointType);
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", typecheckAddIntLiteral(&mut module, 1)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, pointPath, Vector::new<Ast::TypeId>(), initFields);
+
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let mut args: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  args.push(xPattern);
+  let destructurePattern: Ast::PatternId = typecheckAddPathPattern(&mut module, "Point", args);
+  let destructureStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, destructurePattern, aliasType, initExpr);
+  let xExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(destructureStmt);
+  bodyStmts.push(typecheckAddExprStmt(&mut module, xExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, xExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckRecordDestructureRejectsFieldArityMismatch(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let pointType: Ast::TypeId = typecheckAddPathType(&mut module, "Point");
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(typecheckAddAnnotatedField(&mut module, "x", i32Type));
+  typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), fields);
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", typecheckAddIntLiteral(&mut module, 1)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, pointPath, Vector::new<Ast::TypeId>(), initFields);
+
+  let mut args: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  args.push(typecheckAddBinding(&mut module, "x"));
+  args.push(typecheckAddBinding(&mut module, "y"));
+  let destructurePattern: Ast::PatternId = typecheckAddPathPattern(&mut module, "Point", args);
+  let destructureStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, destructurePattern, pointType, initExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(destructureStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function typecheckTuplePatternStaysExplicitlyUnsupported(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let mut elements: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  elements.push(typecheckAddBinding(&mut module, "x"));
+  let pattern: Ast::PatternId = typecheckAddTuplePattern(&mut module, elements);
+  let stmt: Ast::StatementId = typecheckAddLetStmt(&mut module, pattern, i32Type, typecheckAddIntLiteral(&mut module, 1));
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(stmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support tuple patterns");
 }
