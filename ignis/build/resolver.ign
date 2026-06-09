@@ -40,6 +40,7 @@ record ResolverAlias {
 
 record ResolverProject {
   public root: Path::PathBuf;
+  public sourceRoot: Path::PathBuf;
   public entry: Path::PathBuf;
   public stdRoot: Path::PathBuf;
   public stdManifestPath: Path::PathBuf;
@@ -338,6 +339,7 @@ function resolverLoadProject(startPath: &Path::PathBuf): Result<ResolverProject,
 
   return Result::OK(ResolverProject {
     root: root,
+    sourceRoot: sourceRoot,
     entry: entryPath,
     stdRoot: stdRoot,
     stdManifestPath: stdManifestPath,
@@ -817,6 +819,167 @@ function resolverRelativePathText(path: &Path::PathBuf, root: &Path::PathBuf): S
   return pathText.substringBytes(start, pathText.length());
 }
 
+function resolverStringEndsWith(value: &String, suffix: str): boolean {
+  let suffixText: String = String::create(suffix);
+  if (value.length() < suffixText.length()) {
+    return false;
+  }
+
+  let actualSuffix: String = value.substringBytes(value.length() - suffixText.length(), value.length());
+  return actualSuffix.equals(&suffixText);
+}
+
+function resolverIsProjectTestFileName(fileName: &String): boolean {
+  return fileName.equals("tests.ign") || resolverStringEndsWith(fileName, ".test.ign") || resolverStringEndsWith(fileName, ".tests.ign") || resolverStringEndsWith(fileName, "-test.ign") || resolverStringEndsWith(fileName, "-tests.ign") || resolverStringEndsWith(fileName, "_test.ign") || resolverStringEndsWith(fileName, "_tests.ign");
+}
+
+function resolverSortStrings(values: &mut Vector<String>): void {
+  let len: u64 = values.length();
+  let mut i: u64 = 0;
+
+  while (i < len) {
+    let mut minIndex: u64 = i;
+    let Option::SOME(initialMin) = values.get(i) else {
+      break;
+    };
+    let mut minValue: String = initialMin.clone();
+
+    let mut j: u64 = i + 1;
+    while (j < len) {
+      let Option::SOME(candidate) = values.get(j) else {
+        break;
+      };
+
+      if (candidate.compare(&minValue) < 0) {
+        minIndex = j;
+        minValue = candidate.clone();
+      }
+
+      j += 1;
+    }
+
+    if (minIndex != i) {
+      let Option::SOME(iValue) = values.get(i) else {
+        break;
+      };
+      let iCopy: String = iValue.clone();
+      let mut swapped: Vector<String> = Vector::new<String>();
+      let mut k: u64 = 0;
+
+      while (k < len) {
+        let Option::SOME(value) = values.get(k) else {
+          break;
+        };
+
+        if (k == i) {
+          swapped.push(minValue.clone());
+        } else {
+          if (k == minIndex) {
+            swapped.push(iCopy.clone());
+          } else {
+            swapped.push(value.clone());
+          }
+        }
+
+        k += 1;
+      }
+
+      let mut valuesRef: &mut Vector<String> = values;
+      valuesRef.clear();
+      let mut copyIndex: u64 = 0;
+      while (copyIndex < swapped.length()) {
+        let Option::SOME(value) = swapped.get(copyIndex) else {
+          break;
+        };
+        valuesRef.push(value.clone());
+        copyIndex += 1;
+      }
+    }
+
+    i += 1;
+  }
+}
+
+function resolverCollectProjectTestSources(
+  sourceRoot: &Path::PathBuf,
+  entryPath: &Path::PathBuf,
+): Result<Vector<Path::PathBuf>, DiagnosticBag> {
+  let sourceRootText: String = sourceRoot.toString();
+  let entries: Vector<String> = match (Fs::collectWalk(sourceRootText.toStr())) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      return Result::ERROR(resolverSimpleDiagnostic(sourceRoot, MISSING_MODULE, "project test sources could not be discovered"));
+    },
+  };
+
+  let entryText: String = entryPath.toString();
+  let mut matched: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < entries.length()) {
+    let Option::SOME(entry) = entries.get(index) else {
+      break;
+    };
+
+    if (!entry.equals(&entryText)) {
+      let path: Path::PathBuf = Path::PathBuf::fromString(entry).normalize();
+      if (let Option::SOME(fileName) = path.fileName() && resolverIsProjectTestFileName(&fileName)) {
+        matched.push(entry.clone());
+      }
+    }
+
+    index += 1;
+  }
+
+  resolverSortStrings(&mut matched);
+
+  let mut discovered: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut matchedIndex: u64 = 0;
+  while (matchedIndex < matched.length()) {
+    let Option::SOME(pathText) = matched.get(matchedIndex) else {
+      break;
+    };
+
+    discovered.push(Path::PathBuf::fromString(pathText).normalize());
+    matchedIndex += 1;
+  }
+
+  return Result::OK(discovered);
+}
+
+function resolverDiscoverProjectRoots(
+  project: &ResolverProject,
+  manifest: &StdManifest,
+  includeTestSources: boolean,
+): Result<DiscoveryResult, DiagnosticBag> {
+  let mut graph: BuildGraph = BuildGraph::init();
+  let mut stack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let rootIndex: u64 = resolverDiscoverModule(project, manifest, &mut graph, &project.entry, BuildModuleKind::PROJECT, &mut stack)!;
+  ModuleGraph::setRoot(&mut graph, rootIndex);
+
+  if (includeTestSources) {
+    let testSources: Vector<Path::PathBuf> = resolverCollectProjectTestSources(&project.sourceRoot, &project.entry)!;
+    let mut testIndex: u64 = 0;
+
+    while (testIndex < testSources.length()) {
+      let Option::SOME(testSource) = testSources.get(testIndex) else {
+        break;
+      };
+
+      let mut testStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+      resolverDiscoverModule(project, manifest, &mut graph, testSource, BuildModuleKind::PROJECT, &mut testStack)!;
+      testIndex += 1;
+    }
+  }
+
+  let order: Vector<u64> = includeTestSources ? ModuleGraph::allModulesTopologicalOrder(&graph) : ModuleGraph::topologicalOrder(&graph);
+
+  return Result::OK(DiscoveryResult {
+    graph: graph,
+    order: order,
+  });
+}
+
 function resolverDiagnosticSummary(bag: &DiagnosticBag): String {
   let Option::SOME(diagnostic) = bag.get(0) else {
     Test::fail();
@@ -832,16 +995,15 @@ export namespace Resolver {
     let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
     let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
 
-    let mut graph: BuildGraph = BuildGraph::init();
-    let mut stack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-    let rootIndex: u64 = resolverDiscoverModule(&project, &manifest, &mut graph, &project.entry, BuildModuleKind::PROJECT, &mut stack)!;
-    ModuleGraph::setRoot(&mut graph, rootIndex);
-    let order: Vector<u64> = ModuleGraph::topologicalOrder(&graph);
+    return resolverDiscoverProjectRoots(&project, &manifest, false);
+  }
 
-    return Result::OK(DiscoveryResult {
-      graph: graph,
-      order: order,
-    });
+  function discoverProjectTests(startPath: &Path::PathBuf): Result<DiscoveryResult, DiagnosticBag> {
+    let project: ResolverProject = resolverLoadProject(startPath)!;
+    let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
+    let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
+
+    return resolverDiscoverProjectRoots(&project, &manifest, true);
   }
 
   function orderSummaryRelativeTo(discovery: &DiscoveryResult, root: &Path::PathBuf): String {
@@ -885,6 +1047,38 @@ function resolverDiscoversAcyclicFixtureInDependencyOrder(): void {
   let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
   let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+  let actual: String = Resolver::orderSummaryRelativeTo(&discovery, &fixtureRoot).trimAsciiWhitespace();
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function resolverDiscoversProjectTestFilesOnlyInTestMode(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/test_discovery");
+  let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
+  let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+  let actual: String = Resolver::orderSummaryRelativeTo(&discovery, &fixtureRoot).trimAsciiWhitespace();
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function resolverDiscoversProjectTestFilesInDependencyOrder(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/test_discovery");
+  let expectedPath: Path::PathBuf = fixtureRoot.join("expected_test_order.txt");
+  let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
+  let discovery: DiscoveryResult = match (Resolver::discoverProjectTests(&fixtureRoot)) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
