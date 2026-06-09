@@ -1364,6 +1364,72 @@ fn resolve_test_std_path(std_path_override: Option<&Path>) -> String {
     .unwrap_or_default()
 }
 
+fn is_project_test_file_name(file_name: &str) -> bool {
+  file_name == "tests.ign"
+    || file_name.ends_with(".test.ign")
+    || file_name.ends_with(".tests.ign")
+    || file_name.ends_with("-test.ign")
+    || file_name.ends_with("-tests.ign")
+    || file_name.ends_with("_test.ign")
+    || file_name.ends_with("_tests.ign")
+}
+
+fn collect_project_test_sources(
+  current_dir: &Path,
+  discovered: &mut Vec<PathBuf>,
+) {
+  let Ok(entries) = std::fs::read_dir(current_dir) else {
+    return;
+  };
+
+  let mut entry_paths: Vec<PathBuf> = entries
+    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+    .collect();
+  entry_paths.sort();
+
+  for entry_path in entry_paths {
+    if entry_path.is_dir() {
+      collect_project_test_sources(&entry_path, discovered);
+      continue;
+    }
+
+    let Some(file_name) = entry_path.file_name().and_then(|file_name| file_name.to_str()) else {
+      continue;
+    };
+
+    if is_project_test_file_name(file_name) {
+      discovered.push(entry_path);
+    }
+  }
+}
+
+fn discover_project_test_sources(
+  source_dir: &Path,
+  entry_path: &Path,
+) -> Vec<PathBuf> {
+  let mut discovered = Vec::new();
+  collect_project_test_sources(source_dir, &mut discovered);
+  discovered.retain(|path| path != entry_path);
+  discovered.sort();
+  discovered.dedup();
+  discovered
+}
+
+fn discover_project_test_modules(
+  ctx: &mut CompilationContext,
+  entry_path: &Path,
+  source_dir: &Path,
+  config: &IgnisConfig,
+) -> Result<ModuleId, ()> {
+  let root_id = ctx.discover_modules(entry_path.to_string_lossy().as_ref(), config)?;
+
+  for test_source in discover_project_test_sources(source_dir, entry_path) {
+    ctx.discover_modules(test_source.to_string_lossy().as_ref(), config)?;
+  }
+
+  Ok(root_id)
+}
+
 fn build_single_file_test_driver_input(
   file_path: &Path,
   std_path_override: Option<&Path>,
@@ -1719,7 +1785,7 @@ fn plan_project_tests_for_snapshot(
 ) -> Result<crate::backend::TestHarnessPlan, ()> {
   let (config, project) = build_test_driver_config(project_root)?;
   let mut ctx = CompilationContext::new(&config);
-  let root_id = ctx.discover_modules(project.entry.to_string_lossy().as_ref(), &config)?;
+  let root_id = discover_project_test_modules(&mut ctx, &project.entry, &project.source_dir, &config)?;
 
   if config.std && config.auto_load_std {
     ctx.discover_prelude_modules_for_all(&config);
@@ -1892,9 +1958,8 @@ pub fn run_project_tests(
   section!(&config, "Scanning & parsing");
 
   let mut ctx = CompilationContext::new(&config);
-  let root_id = ctx
-    .discover_modules(project.entry.to_string_lossy().as_ref(), &config)
-    .map_err(|()| {
+  let root_id =
+    discover_project_test_modules(&mut ctx, &project.entry, &project.source_dir, &config).map_err(|()| {
       cmd_fail!(&config, "Test setup failed", start.elapsed());
     })?;
 
@@ -1931,7 +1996,7 @@ pub fn run_project_tests(
 
   section!(&config, "Codegen & linking");
 
-  let used_modules = ctx.module_graph.topological_sort();
+  let used_modules = ctx.module_graph.all_modules_topological();
   let mut test_module_ids = HashSet::new();
   for test in &plan.tests {
     let owner_module = output.defs.get(&test.def_id).owner_module;
@@ -4268,9 +4333,9 @@ mod tests {
   use ignis_type::types::TypeStore;
 
   use super::{
-    build_test_harness_plan, discover_std_test_companions, discover_test_cases, execute_test_harness_binary,
-    format_test_plan_snapshot, format_failed_test_details, format_test_summary_snapshot,
-    plan_project_tests_for_snapshot, validate_std_test_layout,
+    build_test_harness_plan, discover_project_test_sources, discover_std_test_companions, discover_test_cases,
+    execute_test_harness_binary, format_test_plan_snapshot, format_failed_test_details, format_test_summary_snapshot,
+    is_project_test_file_name, plan_project_tests_for_snapshot, validate_std_test_layout,
   };
   use crate::backend::{TestCase, TestHarnessPlan};
 
@@ -4413,6 +4478,96 @@ function middle(): void {}
 
     assert_eq!(first_names, vec!["main::alpha", "main::middle", "main::zebra"]);
     assert_eq!(first_names, second_names);
+  }
+
+  #[test]
+  fn project_test_file_name_matcher_accepts_supported_suffixes_only() {
+    for file_name in [
+      "tests.ign",
+      "math.test.ign",
+      "math.tests.ign",
+      "math-test.ign",
+      "math-tests.ign",
+      "math_test.ign",
+      "math_tests.ign",
+    ] {
+      assert!(is_project_test_file_name(file_name), "expected '{file_name}' to be discovered");
+    }
+
+    for file_name in ["test.ign", "tests.rs", "contest.ign", "math.ign"] {
+      assert!(!is_project_test_file_name(file_name), "expected '{file_name}' to be ignored");
+    }
+  }
+
+  #[test]
+  fn discover_project_test_sources_recurses_sorts_and_skips_entry() {
+    let project = write_test_project("function main(): i32 { return 0; }\n");
+
+    fs::create_dir_all(project.path().join("src/a/deep")).expect("create nested test dir");
+    fs::create_dir_all(project.path().join("src/z")).expect("create z dir");
+    fs::write(project.path().join("src/z/late_tests.ign"), "@test\nfunction late(): void {}\n")
+      .expect("write late tests");
+    fs::write(project.path().join("src/a/deep/tests.ign"), "@test\nfunction deep(): void {}\n")
+      .expect("write deep tests");
+    fs::write(
+      project.path().join("src/a/alpha_test.ign"),
+      "@test\nfunction alpha(): void {}\n",
+    )
+    .expect("write alpha tests");
+    fs::write(
+      project.path().join("src/main_tests.ign"),
+      "@test\nfunction mainTests(): void {}\n",
+    )
+    .expect("write main-adjacent tests");
+    fs::write(project.path().join("src/not_a_test.ignx"), "").expect("write ignored file");
+
+    let discovered = discover_project_test_sources(&project.path().join("src"), &project.path().join("src/main.ign"));
+
+    assert_eq!(
+      discovered,
+      vec![
+        project.path().join("src/a/alpha_test.ign"),
+        project.path().join("src/a/deep/tests.ign"),
+        project.path().join("src/main_tests.ign"),
+        project.path().join("src/z/late_tests.ign"),
+      ]
+    );
+  }
+
+  #[test]
+  fn plan_project_tests_discovers_recursive_test_roots_without_duplicate_entries() {
+    let project = write_test_project(
+      r#"
+import _ from "./nested/helpers_test";
+
+function main(): i32 {
+    return 0;
+}
+"#,
+    );
+
+    fs::create_dir_all(project.path().join("src/nested/deeper")).expect("create nested dirs");
+    fs::write(
+      project.path().join("src/nested/helpers_test.ign"),
+      "@test\nfunction helperSmoke(): void {}\n",
+    )
+    .expect("write imported helper tests");
+    fs::write(
+      project.path().join("src/nested/deeper/tests.ign"),
+      "@test\nfunction deeperSmoke(): void {}\n",
+    )
+    .expect("write recursive tests");
+
+    let plan = plan_project_tests_for_snapshot(project.path(), None).expect("project test plan");
+    let names: Vec<&str> = plan.tests.iter().map(|test| test.fq_name.as_str()).collect();
+
+    assert_eq!(
+      names,
+      vec![
+        "nested::deeper::tests::deeperSmoke",
+        "nested::helpers_test::helperSmoke",
+      ]
+    );
   }
 
   #[test]

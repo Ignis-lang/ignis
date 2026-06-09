@@ -909,7 +909,7 @@ impl CompilationContext {
 
     self.module_graph.root = Some(root_id);
 
-    let order = if root_is_std {
+    let order = if root_is_std || config.test {
       self.module_graph.all_modules_topological()
     } else {
       self.module_graph.topological_sort()

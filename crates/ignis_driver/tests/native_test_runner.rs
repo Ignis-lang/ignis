@@ -250,6 +250,53 @@ function smoke(): void {
 }
 
 #[test]
+fn run_project_tests_discovers_recursive_project_test_files_without_main_imports() {
+  let project = write_test_project(
+    r#"
+function main(): i32 {
+    return 0;
+}
+"#,
+  );
+
+  write_project_module(
+    project.path(),
+    "nested/helpers_test.ign",
+    r#"
+import Test from "std::test";
+
+@test
+function helperSmoke(): void {
+    Test::assert(true);
+}
+"#,
+  );
+  write_project_module(
+    project.path(),
+    "nested/deeper/tests.ign",
+    r#"
+import Test from "std::test";
+
+@test
+function deeperSmoke(): void {
+    Test::assert(true);
+}
+"#,
+  );
+
+  let result = run_project_tests(project.path(), None, false);
+
+  assert!(
+    result.is_ok(),
+    "expected recursive autodiscovery to compile and run nested test files"
+  );
+  assert!(
+    harness_binary_path(project.path()).exists(),
+    "expected test harness binary to be built"
+  );
+}
+
+#[test]
 fn run_single_file_tests_returns_ok_when_generic_equality_assertions_pass() {
   let (_temp_dir, file_path) = write_single_test_file(
     r#"
