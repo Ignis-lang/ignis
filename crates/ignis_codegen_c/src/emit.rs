@@ -12,6 +12,7 @@ use ignis_type::{
     DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, FunctionDefinition, InlineMode, RecordDefinition,
     Visibility,
   },
+  file::{FileId, SourceMap},
   module::{ModuleId, ModulePath},
   namespace::NamespaceStore,
   symbol::SymbolTable,
@@ -22,6 +23,7 @@ use crate::classify::{DefKind, EmitTarget};
 use crate::EmitInput;
 
 const USER_MAIN_SYMBOL: &str = "__ignis_user_main";
+const GENERATED_C_LINE_FILE: &str = "<generated-c>";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestHarnessEntry {
@@ -62,6 +64,7 @@ pub struct CEmitter<'a> {
   symbols: &'a SymbolTable,
   headers: &'a [CHeader],
   output: String,
+  source_map: Option<&'a SourceMap>,
   current_fn_id: Option<DefinitionId>,
   /// Emit target for filtering definitions (None = emit all, legacy mode)
   target: Option<EmitTarget>,
@@ -104,6 +107,7 @@ impl<'a> CEmitter<'a> {
       symbols,
       headers,
       output: String::new(),
+      source_map: None,
       current_fn_id: None,
       target: None,
       module_paths: None,
@@ -136,6 +140,7 @@ impl<'a> CEmitter<'a> {
       symbols,
       headers,
       output: String::new(),
+      source_map: None,
       current_fn_id: None,
       target: Some(target),
       module_paths: Some(module_paths),
@@ -170,6 +175,7 @@ impl<'a> CEmitter<'a> {
       symbols,
       headers,
       output: String::new(),
+      source_map: None,
       current_fn_id: None,
       target: Some(EmitTarget::UserModule(module_id)),
       module_paths: Some(module_paths),
@@ -203,6 +209,7 @@ impl<'a> CEmitter<'a> {
       symbols,
       headers,
       output: String::new(),
+      source_map: None,
       current_fn_id: None,
       target: Some(target),
       module_paths: Some(module_paths),
@@ -234,6 +241,7 @@ impl<'a> CEmitter<'a> {
       symbols,
       headers,
       output: String::new(),
+      source_map: None,
       current_fn_id: None,
       target: None,
       module_paths: None,
@@ -244,6 +252,14 @@ impl<'a> CEmitter<'a> {
       closure_env_names: HashMap::new(),
       test_harness: Some(test_harness),
     }
+  }
+
+  pub fn with_source_map(
+    mut self,
+    source_map: Option<&'a SourceMap>,
+  ) -> Self {
+    self.source_map = source_map;
+    self
   }
 
   pub fn emit(mut self) -> String {
@@ -2126,12 +2142,48 @@ impl<'a> CEmitter<'a> {
     write!(self.output, "{} {}({})", ret_ty, name, params_str).unwrap();
   }
 
+  fn current_output_line(&self) -> usize {
+    self.output.bytes().filter(|byte| *byte == b'\n').count() + 1
+  }
+
+  fn format_line_filename(path: &std::path::Path) -> String {
+    path.display().to_string().replace('\\', "\\\\").replace('"', "\\\"")
+  }
+
+  fn emit_line_directive_for_span(
+    &mut self,
+    span: &ignis_type::span::Span,
+  ) -> bool {
+    let Some(source_map) = self.source_map else {
+      return false;
+    };
+
+    if span.file == FileId::SYNTHETIC {
+      return false;
+    }
+
+    let file = source_map.get(&span.file);
+    let (line, _) = source_map.line_col(&span.file, span.start);
+    writeln!(self.output, "#line {} \"{}\"", line, Self::format_line_filename(&file.path)).unwrap();
+    true
+  }
+
+  fn emit_generated_line_reset(&mut self) {
+    let next_generated_line = self.current_output_line() + 2;
+    writeln!(self.output, "#line {} \"{}\"", next_generated_line, GENERATED_C_LINE_FILE).unwrap();
+  }
+
   fn emit_function(
     &mut self,
     def_id: DefinitionId,
     func: &FunctionLir,
   ) {
     self.current_fn_id = Some(def_id);
+    let emitted_source_mapping = if self.classify(def_id).is_user() {
+      self.emit_line_directive_for_span(&func.span)
+    } else {
+      false
+    };
     self.emit_function_signature(def_id, func);
     writeln!(self.output, " {{").unwrap();
 
@@ -2146,6 +2198,10 @@ impl<'a> CEmitter<'a> {
     }
 
     writeln!(self.output, "}}\n").unwrap();
+    if emitted_source_mapping {
+      self.emit_generated_line_reset();
+      writeln!(self.output).unwrap();
+    }
     self.current_fn_id = None;
   }
 
@@ -4157,7 +4213,9 @@ pub fn emit_c_from_input(
   symbols: &SymbolTable,
   headers: &[CHeader],
 ) -> String {
-  CEmitter::new(input.program, input.types, input.defs, namespaces, symbols, headers).emit()
+  CEmitter::new(input.program, input.types, input.defs, namespaces, symbols, headers)
+    .with_source_map(input.source_map)
+    .emit()
 }
 
 /// Emit C for user definitions only (excludes std and runtime).
@@ -4190,6 +4248,7 @@ pub fn emit_user_c_from_input(
     EmitTarget::User,
     module_paths,
   )
+  .with_source_map(input.source_map)
   .emit()
 }
 
@@ -4211,6 +4270,7 @@ pub fn emit_user_test_harness_from_input(
     module_paths,
     test_harness,
   )
+  .with_source_map(input.source_map)
   .emit_test_harness_only(test_harness)
 }
 
@@ -4263,6 +4323,7 @@ pub fn emit_std_module_c_from_input(
     module_paths,
     std_path,
   )
+  .with_source_map(input.source_map)
   .emit()
 }
 
@@ -4366,6 +4427,7 @@ pub fn emit_user_module_c_from_input(
     std_path,
     std_defined_symbols,
   )
+  .with_source_map(input.source_map)
   .emit()
 }
 

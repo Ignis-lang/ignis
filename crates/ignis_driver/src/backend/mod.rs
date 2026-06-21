@@ -133,8 +133,11 @@ pub fn select_backend(target: TargetBackend) -> Result<SelectedBackend, StageErr
 
 #[cfg(test)]
 mod tests {
+  use std::sync::OnceLock;
+
   use ignis_lir::LirProgram;
   use ignis_type::definition::{Definition, DefinitionKind, DefinitionStore, Visibility};
+  use ignis_type::file::SourceMap;
   use ignis_type::module::ModuleId;
   use ignis_type::namespace::NamespaceStore;
   use ignis_type::span::Span;
@@ -148,6 +151,11 @@ mod tests {
 
   struct RecordingBackend;
 
+  fn empty_source_map() -> &'static SourceMap {
+    static EMPTY_SOURCE_MAP: OnceLock<SourceMap> = OnceLock::new();
+    EMPTY_SOURCE_MAP.get_or_init(SourceMap::new)
+  }
+
   fn lowered_input_fixture<'a>(
     types: &'a TypeStore,
     defs: &'a DefinitionStore,
@@ -160,6 +168,7 @@ mod tests {
       types,
       defs,
       program,
+      source_map: empty_source_map(),
     }
   }
 

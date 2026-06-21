@@ -3,6 +3,7 @@ mod emit;
 
 use ignis_lir::LirProgram;
 use ignis_type::definition::DefinitionStore;
+use ignis_type::file::SourceMap;
 use ignis_type::types::TypeStore;
 
 /// Bump this when the C output format changes in a way that requires rebuild.
@@ -13,6 +14,7 @@ pub struct EmitInput<'a> {
   pub program: &'a LirProgram,
   pub types: &'a TypeStore,
   pub defs: &'a DefinitionStore,
+  pub source_map: Option<&'a SourceMap>,
 }
 
 impl<'a> EmitInput<'a> {
@@ -21,7 +23,20 @@ impl<'a> EmitInput<'a> {
     types: &'a TypeStore,
     defs: &'a DefinitionStore,
   ) -> Self {
-    Self { program, types, defs }
+    Self {
+      program,
+      types,
+      defs,
+      source_map: None,
+    }
+  }
+
+  pub fn with_source_map(
+    mut self,
+    source_map: &'a SourceMap,
+  ) -> Self {
+    self.source_map = Some(source_map);
+    self
   }
 }
 

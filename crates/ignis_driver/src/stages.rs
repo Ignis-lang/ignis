@@ -7,6 +7,7 @@ use ignis_hir::{DropSchedules, HIR};
 use ignis_lir::verify::VerifyResult;
 use ignis_lir::LirProgram;
 use ignis_type::definition::{DefinitionId, DefinitionStore};
+use ignis_type::file::SourceMap;
 use ignis_type::module::ModuleId;
 use ignis_type::types::TypeStore;
 
@@ -289,6 +290,7 @@ pub enum BackendInput<'a> {
     types: &'a TypeStore,
     defs: &'a DefinitionStore,
     program: &'a LirProgram,
+    source_map: &'a SourceMap,
   },
 }
 
@@ -299,6 +301,7 @@ impl<'a> BackendInput<'a> {
       types: &stage.types,
       defs: &stage.mono_output.defs,
       program: &stage.program,
+      source_map: &stage.ctx.source_map,
     }
   }
 
@@ -310,6 +313,7 @@ impl<'a> BackendInput<'a> {
         types,
         defs,
         program,
+        source_map: _,
       } => {
         Self::verify_header_artifacts(types, defs)?;
         Self::verify_lowered_root_module(defs, *root_id)?;
@@ -331,6 +335,7 @@ impl<'a> BackendInput<'a> {
           types,
           defs,
           program,
+          source_map: _,
         },
         BackendRequest::Lowered(LoweredBackendRequest::EmitStdModule { .. }),
       ) => {
@@ -343,6 +348,7 @@ impl<'a> BackendInput<'a> {
           types,
           defs,
           program,
+          source_map: _,
         },
         BackendRequest::Lowered(_),
       ) => {
@@ -410,6 +416,7 @@ fn has_definition(
 mod tests {
   use std::collections::HashMap;
   use std::rc::Rc;
+  use std::sync::OnceLock;
 
   use super::*;
 
@@ -486,6 +493,11 @@ mod tests {
     .expect("analyzed stage fixture should succeed")
   }
 
+  fn empty_source_map() -> &'static SourceMap {
+    static EMPTY_SOURCE_MAP: OnceLock<SourceMap> = OnceLock::new();
+    EMPTY_SOURCE_MAP.get_or_init(SourceMap::new)
+  }
+
   fn backend_header_input_fixture<'a>(
     types: &'a TypeStore,
     defs: &'a DefinitionStore,
@@ -504,6 +516,7 @@ mod tests {
       types,
       defs,
       program,
+      source_map: empty_source_map(),
     }
   }
 

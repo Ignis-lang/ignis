@@ -1,0 +1,178 @@
+import Ast from "@compiler::ast";
+import Vector from "std::vector";
+
+
+export namespace Analyzer {
+  namespace Typecheck {
+    function checkFunctionItem(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      functionDefId: Analyzer::DefinitionId,
+      function_: &Ast::Item::Function,
+    ): void {
+      let signatureOpt: Option<Analyzer::Typecheck::FunctionSignature> = Analyzer::Typecheck::extractFunctionSignature(
+        defStore,
+        functionDefId,
+      );
+      let Option::SOME(signature) = signatureOpt else {
+        return;
+      };
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.currentFunction = functionDefId;
+      stateRef.currentReturnType = signature.returnType;
+      stateRef.loopDepth = 0;
+      stateRef.scopeMarks = Vector::new<u64>();
+      stateRef.localPatternIds = Vector::new<Ast::PatternId>();
+      stateRef.localFunctionIds = Vector::new<Analyzer::DefinitionId>();
+      stateRef.localIndexes = Vector::new<u32>();
+      stateRef.localTypeIds = Vector::new<Analyzer::TypeId>();
+      stateRef.localMutableFlags = Vector::new<boolean>();
+
+      Analyzer::Typecheck::pushScope(state);
+      Analyzer::Typecheck::bindFunctionParameters(state, defStore, typeStore, symbols, resolvedBodies, module, function_, &signature.params);
+      Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, function_.body);
+      Analyzer::Typecheck::popScope(state);
+    }
+
+    function checkConstantItem(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      constantDefId: Analyzer::DefinitionId,
+      constant: &Ast::Item::Constant,
+    ): void {
+      let Option::SOME(def) = defStore.get(constantDefId) else {
+        return;
+      };
+
+      let variableDef: Analyzer::VariableDef = match (def) {
+        Analyzer::Definition::Variable(value) -> value,
+        Analyzer::Definition::Function(_) -> {
+          return;
+        },
+        Analyzer::Definition::Record(_) -> {
+          return;
+        },
+        Analyzer::Definition::Enum(_) -> {
+          return;
+        },
+        Analyzer::Definition::Field(_) -> {
+          return;
+        },
+        Analyzer::Definition::Variant(_) -> {
+          return;
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          return;
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          return;
+        },
+        Analyzer::Definition::Trait(_) -> {
+          return;
+        },
+      };
+
+      if (constant.annotation.isNone()) {
+        Analyzer::Typecheck::emitUnsupported(state, constant.span, "constants without explicit annotations");
+        return;
+      }
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.currentFunction = constantDefId;
+      stateRef.currentReturnType = variableDef.declaredType;
+      stateRef.loopDepth = 0;
+      stateRef.scopeMarks = Vector::new<u64>();
+      stateRef.localPatternIds = Vector::new<Ast::PatternId>();
+      stateRef.localFunctionIds = Vector::new<Analyzer::DefinitionId>();
+      stateRef.localIndexes = Vector::new<u32>();
+      stateRef.localTypeIds = Vector::new<Analyzer::TypeId>();
+      stateRef.localMutableFlags = Vector::new<boolean>();
+
+      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        constant.value,
+      );
+
+      if (let Option::SOME(actualType) = actualTypeOpt) {
+        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, constant.span, variableDef.declaredType, actualType)) {
+          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, constant.span, variableDef.declaredType, actualType);
+        }
+      }
+    }
+
+    function checkItem(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      itemId: Ast::ItemId,
+    ): void {
+      let Option::SOME(item) = module.items.get(itemId) else {
+        return;
+      };
+
+      match (item) {
+        Ast::Item::Node::Function(function_) -> {
+          let defOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::lookupItemDef(pass1, pass2, itemId);
+          let Option::SOME(defId) = defOpt else {
+            return;
+          };
+
+          Analyzer::Typecheck::checkFunctionItem(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            defId,
+            &function_,
+          );
+        },
+        Ast::Item::Node::Constant(constant) -> {
+          let defOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::lookupItemDef(pass1, pass2, itemId);
+          let Option::SOME(defId) = defOpt else {
+            return;
+          };
+
+          Analyzer::Typecheck::checkConstantItem(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            defId,
+            &constant,
+          );
+        },
+        Ast::Item::Node::Record(_) -> {},
+        Ast::Item::Node::Enum(_) -> {},
+        Ast::Item::Node::Namespace(_) -> {},
+        Ast::Item::Node::Import(_) -> {},
+        Ast::Item::Node::Extern(_) -> {},
+        Ast::Item::Node::Export(_) -> {},
+        Ast::Item::Node::TypeAlias(_) -> {},
+        Ast::Item::Node::Trait(_) -> {},
+      };
+    }
+  }
+}

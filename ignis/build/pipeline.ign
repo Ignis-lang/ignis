@@ -3,6 +3,7 @@ import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnost
 import Env from "std::env";
 import Fs from "std::fs";
 import Path from "std::path";
+import Sort from "std::sort";
 import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
@@ -78,80 +79,6 @@ function pipelineManifestHash(manifest: &StdManifest): String {
   return fingerprintHashFile(&manifest.path);
 }
 
-/// Sort a `Vector<String>` in-place using selection sort.
-///
-/// Selection sort is used because `String` values in the backing array cannot
-/// be moved piecemeal by `Vector::sort` (which triggers ICEs for non-Copy types
-/// in the current Ignis codegen).  Module counts are small (tens, not thousands).
-function pipelineSortStrings(paths: &mut Vector<String>): void {
-  let len: u64 = paths.length();
-
-  let mut i: u64 = 0;
-  while (i < len) {
-    // Find the minimum path in paths[i..len].
-    let mut minIdx: u64 = i;
-    let Option::SOME(initialMin) = paths.get(i) else {
-      break;
-    };
-    let mut minPath: String = initialMin.clone();
-
-    let mut j: u64 = i + 1;
-    while (j < len) {
-      let Option::SOME(candidate) = paths.get(j) else {
-        break;
-      };
-      if (candidate.compare(&minPath) < 0) {
-        minIdx = j;
-        minPath = candidate.clone();
-      }
-      j += 1;
-    }
-
-    // Swap paths[i] and paths[minIdx] if needed.
-    if (minIdx != i) {
-      let Option::SOME(iVal) = paths.get(i) else {
-        break;
-      };
-      let iCopy: String = iVal.clone();
-
-      // Remove paths[minIdx] and paths[i], then re-insert in swapped order.
-      // Since Vector has no set/swap, we rebuild by evicting and re-inserting.
-      // Simpler: build a new vector with the swap applied.
-      let mut swapped: Vector<String> = Vector::new<String>();
-      let mut k: u64 = 0;
-      while (k < len) {
-        let Option::SOME(val) = paths.get(k) else {
-          break;
-        };
-        if (k == i) {
-          swapped.push(minPath.clone());
-        } else {
-          if (k == minIdx) {
-            swapped.push(iCopy.clone());
-          } else {
-            swapped.push(val.clone());
-          }
-        }
-        k += 1;
-      }
-
-      // Replace paths content.
-      let mut pathsRef: &mut Vector<String> = paths;
-      pathsRef.clear();
-      let mut li: u64 = 0;
-      while (li < swapped.length()) {
-        let Option::SOME(sv) = swapped.get(li) else {
-          break;
-        };
-        pathsRef.push(sv.clone());
-        li += 1;
-      }
-    }
-
-    i += 1;
-  }
-}
-
 /// Collect per-source hashes for each module in the manifest, sorted alphabetically by path.
 ///
 /// For each module, hashes the `.ign` source file at `stdRoot/module.path`.
@@ -174,7 +101,7 @@ function pipelineCollectSourceHashes(
     index += 1;
   }
 
-  pipelineSortStrings(&mut absPaths);
+  Sort::stableLexicalStrings(&mut absPaths);
 
   // Now hash each path in sorted order.
   let mut entries: Vector<SourceHash> = Vector::new<SourceHash>();

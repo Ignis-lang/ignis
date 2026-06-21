@@ -1,0 +1,78 @@
+import Ast from "@compiler::ast";
+import Vector from "std::vector";
+
+
+export namespace Analyzer {
+  namespace Typecheck {
+    function bindFunctionParameters(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      module: &Ast::Module,
+      function_: &Ast::Item::Function,
+      paramDefIds: &Vector<Analyzer::DefinitionId>,
+    ): void {
+      let mut index: u64 = 0;
+      while (index < function_.parameters.length()) {
+        let Option::SOME(patternId) = function_.parameters.get(index) else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(paramDefId) = paramDefIds.get(index) else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(paramDef) = defStore.get(*paramDefId) else {
+          index += 1;
+          continue;
+        };
+
+        match (paramDef) {
+          Analyzer::Definition::Variable(parameter) -> {
+            Analyzer::Typecheck::bindPatternType(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              resolvedBodies,
+              module,
+              *patternId,
+              parameter.declaredType,
+              false,
+              function_.span,
+            );
+          },
+          Analyzer::Definition::Function(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, function_.span, "non-variable parameters");
+          },
+          Analyzer::Definition::Record(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, function_.span, "non-variable parameters");
+          },
+          Analyzer::Definition::Enum(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, function_.span, "non-variable parameters");
+          },
+          Analyzer::Definition::Field(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, function_.span, "non-variable parameters");
+          },
+          Analyzer::Definition::Variant(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, function_.span, "non-variable parameters");
+          },
+          Analyzer::Definition::TypeParam(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, function_.span, "non-variable parameters");
+          },
+          Analyzer::Definition::TypeAlias(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, function_.span, "non-variable parameters");
+          },
+          Analyzer::Definition::Trait(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, function_.span, "non-variable parameters");
+          },
+        };
+
+        index += 1;
+      }
+    }
+
+  }
+}

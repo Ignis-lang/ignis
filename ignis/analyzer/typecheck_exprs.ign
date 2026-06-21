@@ -1,0 +1,1227 @@
+import
+  SourceSpan,
+  DiagnosticCode,
+from "@compiler::diagnostics";
+
+import Ast from "@compiler::ast";
+import Vector from "std::vector";
+
+
+export namespace Analyzer {
+  namespace Typecheck {
+    function checkBlockBody(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      statements: &Vector<Ast::StatementId>,
+      tail: Option<Ast::ExpressionId>,
+    ): Option<Analyzer::TypeId> {
+      Analyzer::Typecheck::pushScope(state);
+
+      let mut index: u64 = 0;
+      while (index < statements.length()) {
+        let Option::SOME(stmtId) = statements.get(index) else {
+          index += 1;
+          continue;
+        };
+        Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, *stmtId);
+        index += 1;
+      }
+
+      if (let Option::SOME(tailId) = tail) {
+        let tailTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          tailId,
+        );
+        Analyzer::Typecheck::popScope(state);
+        return tailTypeOpt;
+      }
+
+      Analyzer::Typecheck::popScope(state);
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      return Option::SOME(typeStoreRef.intern(Analyzer::Type::VOID));
+    }
+
+    function checkBinaryExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      b: &Ast::Expression::Binary,
+    ): Option<Analyzer::TypeId> {
+      let leftTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        b.left,
+      );
+      let rightTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        b.right,
+      );
+
+      match (b.operator) {
+        Ast::Expression::BinaryOperator::BitAnd -> {
+          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::BinaryOperator::BitOr -> {
+          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::BinaryOperator::BitXor -> {
+          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::BinaryOperator::ShiftLeft -> {
+          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::BinaryOperator::ShiftRight -> {
+          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
+          return Option::NONE;
+        },
+        _ -> {},
+      };
+
+      let Option::SOME(leftType) = leftTypeOpt else {
+        return Option::NONE;
+      };
+      let Option::SOME(rightType) = rightTypeOpt else {
+        return Option::NONE;
+      };
+
+      if (Analyzer::Typecheck::isArithmeticBinaryOperator(b.operator)) {
+        if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType) && Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, b.span, leftType)) {
+          Analyzer::Typecheck::recordExprType(state, exprId, leftType);
+          return Option::SOME(leftType);
+        }
+
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
+        return Option::NONE;
+      }
+
+      if (Analyzer::Typecheck::isEqualityBinaryOperator(b.operator)) {
+        if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType) && (Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, b.span, leftType) || Analyzer::Typecheck::isBooleanType(state, defStore, typeStore, b.span, leftType))) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
+        return Option::NONE;
+      }
+
+      if (Analyzer::Typecheck::isComparisonBinaryOperator(b.operator)) {
+        if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType) && Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, b.span, leftType)) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
+        return Option::NONE;
+      }
+
+      if (Analyzer::Typecheck::isLogicalBinaryOperator(b.operator)) {
+        let leftValid: boolean = Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, b.span, leftType);
+        let rightValid: boolean = Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, b.span, rightType);
+        if (leftValid && rightValid) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
+        return Option::NONE;
+      }
+
+      Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
+      return Option::NONE;
+    }
+
+    function checkAssignmentExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::Assignment,
+    ): Option<Analyzer::TypeId> {
+      if (value.operator != Ast::Expression::AssignmentOperator::Assign) {
+        Analyzer::Typecheck::emitDiagnostic(
+          state,
+          value.span,
+          DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+          "typecheck only supports plain `=` assignment expressions",
+        );
+        return Option::NONE;
+      }
+
+      let resolvedOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, value.target);
+      let Option::SOME(resolved) = resolvedOpt else {
+        Analyzer::Typecheck::emitDiagnostic(
+          state,
+          value.span,
+          DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+          "assignment target must resolve to a local binding",
+        );
+        return Option::NONE;
+      };
+
+      let localId: Analyzer::ResolverBodies::LocalId = match (resolved) {
+        Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> localId,
+        Analyzer::ResolverBodies::ResolvedRef::Definition(_) -> {
+          Analyzer::Typecheck::emitDiagnostic(
+            state,
+            value.span,
+            DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+            "assignment target must resolve to a local binding",
+          );
+          return Option::NONE;
+        },
+        Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {
+          Analyzer::Typecheck::emitDiagnostic(
+            state,
+            value.span,
+            DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+            "assignment target must resolve to a local binding",
+          );
+          return Option::NONE;
+        },
+        Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> {
+          Analyzer::Typecheck::emitDiagnostic(
+            state,
+            value.span,
+            DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+            "assignment target must resolve to a local binding",
+          );
+          return Option::NONE;
+        },
+      };
+
+      let localBindingOpt: Option<Analyzer::Typecheck::LocalBindingInfo> = Analyzer::Typecheck::lookupLocalBinding(state, localId);
+      let Option::SOME(localBinding) = localBindingOpt else {
+        Analyzer::Typecheck::emitDiagnostic(
+          state,
+          value.span,
+          DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+          "assignment target must resolve to a local binding",
+        );
+        return Option::NONE;
+      };
+
+      if (!localBinding.mutable) {
+        Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::TYPE_MISMATCH, "cannot assign to immutable local");
+        return Option::NONE;
+      }
+
+      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        value.value,
+      );
+      let Option::SOME(actualType) = actualTypeOpt else {
+        return Option::NONE;
+      };
+
+      if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, localBinding.typeId, actualType)) {
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, localBinding.typeId, actualType);
+        return Option::NONE;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, exprId, localBinding.typeId);
+      return Option::SOME(localBinding.typeId);
+    }
+
+    function checkCallExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+    ): Option<Analyzer::TypeId> {
+      if (call.typeArguments.length() > 0) {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "generic call type arguments");
+        return Option::NONE;
+      }
+
+      let _calleeType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        call.callee,
+      );
+
+      let resolvedOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, call.callee);
+      let Option::SOME(resolved) = resolvedOpt else {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "direct calls without resolved callee");
+        return Option::NONE;
+      };
+
+      let functionDefId: Analyzer::DefinitionId = match (resolved) {
+        Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> defId,
+        Analyzer::ResolverBodies::ResolvedRef::Local(_) -> {
+          Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through local values");
+          return Option::NONE;
+        },
+        Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {
+          Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through type parameters");
+          return Option::NONE;
+        },
+        Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> {
+          Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through unresolved callee");
+          return Option::NONE;
+        },
+      };
+
+      let signatureOpt: Option<Analyzer::Typecheck::FunctionSignature> = Analyzer::Typecheck::extractFunctionSignature(
+        defStore,
+        functionDefId,
+      );
+      let Option::SOME(signature) = signatureOpt else {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through non-function definitions");
+        return Option::NONE;
+      };
+
+      let expectedArity: u64 = signature.params.length();
+      let actualArity: u64 = call.arguments.length();
+
+      if (actualArity != expectedArity) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, actualArity, expectedArity);
+        Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
+        return Option::SOME(signature.returnType);
+      }
+
+      let mut index: u64 = 0;
+      while (index < expectedArity) {
+        let Option::SOME(argumentId) = call.arguments.get(index) else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(paramDefId) = signature.params.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let argumentTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          *argumentId,
+        );
+        let Option::SOME(argumentType) = argumentTypeOpt else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(paramDef) = defStore.get(*paramDefId) else {
+          index += 1;
+          continue;
+        };
+
+        match (paramDef) {
+          Analyzer::Definition::Variable(parameter) -> {
+            if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, call.span, parameter.declaredType, argumentType)) {
+              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, parameter.declaredType, argumentType);
+              Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
+              return Option::SOME(signature.returnType);
+            }
+          },
+          Analyzer::Definition::Function(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, call.span, "non-variable function parameters");
+            return Option::NONE;
+          },
+          Analyzer::Definition::Record(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, call.span, "non-variable function parameters");
+            return Option::NONE;
+          },
+          Analyzer::Definition::Enum(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, call.span, "non-variable function parameters");
+            return Option::NONE;
+          },
+          Analyzer::Definition::Field(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, call.span, "non-variable function parameters");
+            return Option::NONE;
+          },
+          Analyzer::Definition::Variant(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, call.span, "non-variable function parameters");
+            return Option::NONE;
+          },
+          Analyzer::Definition::TypeParam(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, call.span, "non-variable function parameters");
+            return Option::NONE;
+          },
+          Analyzer::Definition::TypeAlias(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, call.span, "non-variable function parameters");
+            return Option::NONE;
+          },
+          Analyzer::Definition::Trait(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, call.span, "non-variable function parameters");
+            return Option::NONE;
+          },
+        };
+
+        index += 1;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
+      return Option::SOME(signature.returnType);
+    }
+
+    record RequiredRecordDef {
+      public defId: Analyzer::DefinitionId;
+      public typeId: Analyzer::TypeId;
+      public fields: Vector<Analyzer::DefinitionId>;
+    }
+
+    function requireNonGenericRecord(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+      nonRecordMessage: str,
+      genericMessage: str,
+    ): Option<Analyzer::Typecheck::RequiredRecordDef> {
+      let resolvedType: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (let Option::SOME(aliasDefId) = resolvedType.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return Option::NONE;
+      }
+
+      let Option::SOME(resolvedTypeNode) = typeStore.get(resolvedType.typeId) else {
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
+        return Option::NONE;
+      };
+
+      match (resolvedTypeNode) {
+        Analyzer::Type::Record(defId) -> {
+          let Option::SOME(def) = defStore.get(defId) else {
+            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
+            return Option::NONE;
+          };
+
+          match (def) {
+            Analyzer::Definition::Record(record_) -> {
+              if (record_.typeParams.length() > 0) {
+                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+                return Option::NONE;
+              }
+
+              let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+              let mut index: u64 = 0;
+              while (index < record_.fields.length()) {
+                let Option::SOME(fieldDefId) = record_.fields.get(index) else {
+                  index += 1;
+                  continue;
+                };
+
+                fields.push(*fieldDefId);
+                index += 1;
+              }
+
+              return Option::SOME(Analyzer::Typecheck::RequiredRecordDef {
+                defId: defId,
+                typeId: record_.typeId,
+                fields: fields,
+              });
+            },
+            _ -> {
+              Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
+              return Option::NONE;
+            },
+          };
+        },
+        Analyzer::Type::Instance(_) -> {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+          return Option::NONE;
+        },
+        _ -> {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
+          return Option::NONE;
+        },
+      };
+    }
+
+    function findRecordFieldDef(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      recordDef: &Analyzer::Typecheck::RequiredRecordDef,
+      name: str,
+    ): Option<Analyzer::FieldDef> {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let fieldSymbol: Analyzer::SymbolId = symbolsRef.intern(name);
+      let mut index: u64 = 0;
+
+      while (index < recordDef.fields.length()) {
+        let Option::SOME(fieldDefId) = recordDef.fields.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(def) = defStore.get(*fieldDefId) else {
+          index += 1;
+          continue;
+        };
+
+        match (def) {
+          Analyzer::Definition::Field(fieldDef) -> {
+            if (fieldDef.name.raw() == fieldSymbol.raw()) {
+              return Option::SOME(Analyzer::FieldDef {
+                name: fieldDef.name,
+                fieldType: fieldDef.fieldType,
+                owner: fieldDef.owner,
+                index: fieldDef.index,
+              });
+            }
+          },
+          _ -> {},
+        };
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    function emitNamedRecordFieldDiagnostic(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+      prefix: str,
+      name: str,
+    ): void {
+      let message: String = String::create(prefix).concat(" `").concat(name).concat("`");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+    }
+
+    function checkMemberAccessExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::MemberAccess,
+    ): Option<Analyzer::TypeId> {
+      if (value.operator != Ast::Expression::AccessOperator::Dot) {
+        Analyzer::Typecheck::emitUnsupported(state, value.span, "member access");
+        return Option::NONE;
+      }
+
+      let objectTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        value.object,
+      );
+      let Option::SOME(objectType) = objectTypeOpt else {
+        return Option::NONE;
+      };
+
+      let recordDefOpt: Option<Analyzer::Typecheck::RequiredRecordDef> = Analyzer::Typecheck::requireNonGenericRecord(
+        state,
+        defStore,
+        typeStore,
+        value.span,
+        objectType,
+        "member access target must be a non-generic record",
+        "member access target must be a non-generic record",
+      );
+      let Option::SOME(recordDef) = recordDefOpt else {
+        return Option::NONE;
+      };
+
+      let fieldDefOpt: Option<Analyzer::FieldDef> = Analyzer::Typecheck::findRecordFieldDef(
+        defStore,
+        symbols,
+        &recordDef,
+        value.member.toStr(),
+      );
+      let Option::SOME(fieldDef) = fieldDefOpt else {
+        Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, "unknown record field", value.member.toStr());
+        return Option::NONE;
+      };
+
+      Analyzer::Typecheck::recordExprType(state, exprId, fieldDef.fieldType);
+      return Option::SOME(fieldDef.fieldType);
+    }
+
+    function checkRecordInitExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::RecordInit,
+    ): Option<Analyzer::TypeId> {
+      if (value.typeArguments.length() > 0) {
+        Analyzer::Typecheck::emitUnsupported(state, value.span, "generic record initializers");
+        return Option::NONE;
+      }
+
+      let pathTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        value.path,
+      );
+      let Option::SOME(pathType) = pathTypeOpt else {
+        return Option::NONE;
+      };
+
+      let recordDefOpt: Option<Analyzer::Typecheck::RequiredRecordDef> = Analyzer::Typecheck::requireNonGenericRecord(
+        state,
+        defStore,
+        typeStore,
+        value.span,
+        pathType,
+        "record initializer target must be a non-generic record",
+        "typecheck does not support generic record initializers",
+      );
+      let Option::SOME(recordDef) = recordDefOpt else {
+        return Option::NONE;
+      };
+
+      let mut seenFieldNames: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut fieldIndex: u64 = 0;
+      while (fieldIndex < value.fields.length()) {
+        let Option::SOME(field) = value.fields.get(fieldIndex) else {
+          fieldIndex += 1;
+          continue;
+        };
+
+        let fieldDefOpt: Option<Analyzer::FieldDef> = Analyzer::Typecheck::findRecordFieldDef(
+          defStore,
+          symbols,
+          &recordDef,
+          field.name.toStr(),
+        );
+        let Option::SOME(fieldDef) = fieldDefOpt else {
+          Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, "unknown record field", field.name.toStr());
+          return Option::NONE;
+        };
+
+        let mut seenIndex: u64 = 0;
+        while (seenIndex < seenFieldNames.length()) {
+          let Option::SOME(seenFieldName) = seenFieldNames.get(seenIndex) else {
+            seenIndex += 1;
+            continue;
+          };
+
+          if (seenFieldName.raw() == fieldDef.name.raw()) {
+            Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, "duplicate record field", field.name.toStr());
+            return Option::NONE;
+          }
+
+          seenIndex += 1;
+        }
+
+        seenFieldNames.push(fieldDef.name);
+
+        let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          field.value,
+        );
+        let Option::SOME(actualType) = actualTypeOpt else {
+          return Option::NONE;
+        };
+
+        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, fieldDef.fieldType, actualType)) {
+          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, fieldDef.fieldType, actualType);
+          return Option::NONE;
+        }
+
+        fieldIndex += 1;
+      }
+
+      let mut declaredFieldIndex: u64 = 0;
+      while (declaredFieldIndex < recordDef.fields.length()) {
+        let Option::SOME(fieldDefId) = recordDef.fields.get(declaredFieldIndex) else {
+          declaredFieldIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(def) = defStore.get(*fieldDefId) else {
+          declaredFieldIndex += 1;
+          continue;
+        };
+
+        match (def) {
+          Analyzer::Definition::Field(fieldDef) -> {
+            let mut found: boolean = false;
+            let mut seenIndex: u64 = 0;
+            while (seenIndex < seenFieldNames.length()) {
+              let Option::SOME(seenFieldName) = seenFieldNames.get(seenIndex) else {
+                seenIndex += 1;
+                continue;
+              };
+
+              if (seenFieldName.raw() == fieldDef.name.raw()) {
+                found = true;
+                break;
+              }
+
+              seenIndex += 1;
+            }
+
+            if (!found) {
+              let missingName: String = match (symbols.resolve(fieldDef.name)) {
+                Option::SOME(name) -> String::create(name),
+                Option::NONE -> String::create("<unknown>"),
+              };
+              Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, "missing record field", missingName.toStr());
+              return Option::NONE;
+            }
+          },
+          _ -> {},
+        };
+
+        declaredFieldIndex += 1;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, exprId, recordDef.typeId);
+      return Option::SOME(recordDef.typeId);
+    }
+
+    function checkExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return Option::NONE;
+      };
+
+      match (expr) {
+        Ast::Expression::Node::Literal(literal) -> {
+          match (&literal.value) {
+            Ast::Expression::LiteralValue::Null -> {
+              Analyzer::Typecheck::emitUnsupported(state, literal.span, "null literals");
+              return Option::NONE;
+            },
+            _ -> {},
+          };
+
+          let typeId: Analyzer::TypeId = Analyzer::Typecheck::literalType(typeStore, &literal);
+          Analyzer::Typecheck::recordExprType(state, exprId, typeId);
+          return Option::SOME(typeId);
+        },
+        Ast::Expression::Node::Variable(variable) -> {
+          return Analyzer::Typecheck::checkResolvedValueExpr(
+            state,
+            defStore,
+            typeStore,
+            resolvedBodies,
+            exprId,
+            variable.span,
+          );
+        },
+        Ast::Expression::Node::Path(path) -> {
+          return Analyzer::Typecheck::checkResolvedValueExpr(
+            state,
+            defStore,
+            typeStore,
+            resolvedBodies,
+            exprId,
+            path.span,
+          );
+        },
+        Ast::Expression::Node::Grouped(grouped) -> {
+          let innerTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            grouped.expression,
+          );
+
+          let Option::SOME(innerType) = innerTypeOpt else {
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, innerType);
+          return Option::SOME(innerType);
+        },
+        Ast::Expression::Node::Call(call) -> {
+          return Analyzer::Typecheck::checkCallExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            &call,
+          );
+        },
+        Ast::Expression::Node::Binary(b) -> {
+          return Analyzer::Typecheck::checkBinaryExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            &b,
+          );
+        },
+        Ast::Expression::Node::Assignment(value) -> {
+          return Analyzer::Typecheck::checkAssignmentExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            &value,
+          );
+        },
+        Ast::Expression::Node::Ternary(value) -> {
+          let _conditionType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
+          let _thenType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.thenBranch);
+          let _elseType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.elseBranch);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "ternary expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Cast(value) -> {
+          let _innerType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "cast expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Dereference(value) -> {
+          let _innerType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "dereference expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Tuple(value) -> {
+          let mut index: u64 = 0;
+          while (index < value.elements.length()) {
+            let Option::SOME(elementId) = value.elements.get(index) else {
+              index += 1;
+              continue;
+            };
+            let _elementType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *elementId);
+            index += 1;
+          }
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "tuple expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Unit(value) -> {
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "unit expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::LetCondition(value) -> {
+          let _valueType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.value);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "let conditions");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Reference(value) -> {
+          let _targetType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.target);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "reference expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Unary(value) -> {
+          let _operandType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "unary expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Block(value) -> {
+          let blockTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkBlockBody(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            &value.statements,
+            value.tail,
+          );
+          let Option::SOME(blockType) = blockTypeOpt else {
+            return Option::NONE;
+          };
+
+          if (value.tail.isSome()) {
+            Analyzer::Typecheck::emitUnsupported(state, value.span, "block expressions with tail values");
+            return Option::NONE;
+          }
+
+          Analyzer::Typecheck::recordExprType(state, exprId, blockType);
+          return Option::SOME(blockType);
+        },
+        Ast::Expression::Node::If(value) -> {
+          let _conditionType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
+          Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.thenBranch);
+          if (let Option::SOME(elseId) = value.elseBranch) {
+            Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, elseId);
+          }
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "if expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Match(value) -> {
+          let _scrutineeType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.scrutinee);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "match expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Vector(value) -> {
+          let mut index: u64 = 0;
+          while (index < value.elements.length()) {
+            let Option::SOME(elementId) = value.elements.get(index) else {
+              index += 1;
+              continue;
+            };
+            let _elementType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *elementId);
+            index += 1;
+          }
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "vector literals");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::VectorAccess(value) -> {
+          let _vectorType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.vector);
+          let _indexType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.index);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "vector access");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::PostfixIncrement(value) -> {
+          let _operandType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "postfix increment");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::PostfixDecrement(value) -> {
+          let _operandType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "postfix decrement");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::MemberAccess(value) -> {
+          return Analyzer::Typecheck::checkMemberAccessExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            &value,
+          );
+        },
+        Ast::Expression::Node::RecordInit(value) -> {
+          return Analyzer::Typecheck::checkRecordInitExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            &value,
+          );
+        },
+        Ast::Expression::Node::BuiltinCall(value) -> {
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "builtin calls");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Lambda(value) -> {
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "lambda expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::CaptureOverride(value) -> {
+          let _innerType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "capture overrides");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Pipe(value) -> {
+          let _leftType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.left);
+          let _rightType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.right);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "pipe expressions");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::PipePlaceholder(value) -> {
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "pipe placeholders");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Try(value) -> {
+          let _innerType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "try expressions");
+          return Option::NONE;
+        },
+      };
+    }
+
+    function checkLetLike(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      patternId: Ast::PatternId,
+      annotation: Option<Ast::TypeId>,
+      value: Option<Ast::ExpressionId>,
+      mutable: boolean,
+      span: SourceSpan,
+    ): void {
+      let Option::SOME(annotationId) = annotation else {
+        Analyzer::Typecheck::emitUnsupported(state, span, "locals without explicit annotations");
+        return;
+      };
+
+      let expectedTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::resolveLocalAnnotation(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        annotationId,
+      );
+      let Option::SOME(expectedType) = expectedTypeOpt else {
+        Analyzer::Typecheck::emitUnsupported(state, span, "unsupported local annotation type");
+        return;
+      };
+
+      let Option::SOME(valueExprId) = value else {
+        Analyzer::Typecheck::emitUnsupported(state, span, "locals without initializers");
+        return;
+      };
+
+      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        valueExprId,
+      );
+
+      if (let Option::SOME(actualType) = actualTypeOpt) {
+        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, expectedType, actualType)) {
+          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, expectedType, actualType);
+        }
+      }
+
+      Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, patternId, expectedType, mutable, span);
+    }
+
+    function checkStmt(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      stmtId: Ast::StatementId,
+    ): void {
+      let Option::SOME(stmt) = module.statements.get(stmtId) else {
+        return;
+      };
+
+      match (stmt) {
+        Ast::Statement::Node::Let(letStmt) -> {
+          Analyzer::Typecheck::checkLetLike(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            letStmt.pattern,
+            letStmt.annotation,
+            letStmt.value,
+            false,
+            letStmt.span,
+          );
+        },
+        Ast::Statement::Node::Variable(variableStmt) -> {
+          Analyzer::Typecheck::checkLetLike(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            variableStmt.pattern,
+            variableStmt.annotation,
+            variableStmt.value,
+            variableStmt.mutable,
+            variableStmt.span,
+          );
+        },
+        Ast::Statement::Node::Expression(expressionStmt) -> {
+          let _expressionType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            expressionStmt.expression,
+          );
+        },
+        Ast::Statement::Node::Block(blockStmt) -> {
+          let _blockType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkBlockBody(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            &blockStmt.statements,
+            blockStmt.tail,
+          );
+        },
+        Ast::Statement::Node::Return(returnStmt) -> {
+          if (let Option::SOME(valueExprId) = returnStmt.value) {
+            let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              resolvedBodies,
+              valueExprId,
+            );
+
+            if (let Option::SOME(actualType) = actualTypeOpt) {
+              if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, returnStmt.span, state.currentReturnType, actualType)) {
+                Analyzer::Typecheck::emitTypeMismatch(state, typeStore, returnStmt.span, state.currentReturnType, actualType);
+              }
+            }
+          } else {
+            let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+            let voidType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::VOID);
+            if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, returnStmt.span, state.currentReturnType, voidType)) {
+              Analyzer::Typecheck::emitTypeMismatch(state, typeStore, returnStmt.span, state.currentReturnType, voidType);
+            }
+          }
+        },
+        Ast::Statement::Node::Comment(_) -> {},
+        Ast::Statement::Node::LetElse(value) -> {
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "let-else statements");
+        },
+        Ast::Statement::Node::If(value) -> {
+          let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
+          if (let Option::SOME(conditionType) = conditionTypeOpt) {
+            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+          }
+          Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.thenBranch);
+          if (let Option::SOME(elseId) = value.elseBranch) {
+            Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, elseId);
+          }
+        },
+        Ast::Statement::Node::While(value) -> {
+          let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
+          if (let Option::SOME(conditionType) = conditionTypeOpt) {
+            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+          }
+          Analyzer::Typecheck::enterLoop(state);
+          Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.body);
+          Analyzer::Typecheck::exitLoop(state);
+        },
+        Ast::Statement::Node::For(value) -> {
+          Analyzer::Typecheck::pushScope(state);
+
+          if (let Option::SOME(initializerId) = value.initializer) {
+            Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, initializerId);
+          }
+
+          if (let Option::SOME(conditionId) = value.condition) {
+            let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, conditionId);
+            if (let Option::SOME(conditionType) = conditionTypeOpt) {
+              Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+            }
+          }
+
+          if (let Option::SOME(updateId) = value.update) {
+            let _updateType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, updateId);
+          }
+
+          Analyzer::Typecheck::enterLoop(state);
+          Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.body);
+          Analyzer::Typecheck::exitLoop(state);
+          Analyzer::Typecheck::popScope(state);
+        },
+        Ast::Statement::Node::ForOf(value) -> {
+          let _iterableType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.iterable);
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "for-of statements");
+        },
+        Ast::Statement::Node::Break(value) -> {
+          if (state.loopDepth == 0) {
+            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::TYPE_MISMATCH, "`break` used outside of loop");
+            return;
+          }
+
+          if (value.value.isSome()) {
+            Analyzer::Typecheck::emitUnsupported(state, value.span, "break values");
+            return;
+          }
+        },
+        Ast::Statement::Node::Continue(value) -> {
+          if (state.loopDepth == 0) {
+            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::TYPE_MISMATCH, "`continue` used outside of loop");
+          }
+        },
+        Ast::Statement::Node::Defer(value) -> {
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "defer statements");
+        },
+        Ast::Statement::Node::Item(value) -> {
+          Analyzer::Typecheck::emitUnsupported(state, value.span, "nested item statements");
+        },
+      };
+    }
+
+  }
+}

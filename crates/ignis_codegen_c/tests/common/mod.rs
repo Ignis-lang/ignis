@@ -72,10 +72,8 @@ pub fn compile_to_c(source: &str) -> String {
     quoted: true,
   }];
 
-  ignis_codegen_c::emit_c(
-    &lir_program,
-    &types,
-    &mono_output.defs,
+  ignis_codegen_c::emit_c_from_input(
+    ignis_codegen_c::EmitInput::new(&lir_program, &types, &mono_output.defs).with_source_map(&sm),
     &result.namespaces,
     &sym_table,
     &headers,

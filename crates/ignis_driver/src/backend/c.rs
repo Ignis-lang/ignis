@@ -63,13 +63,17 @@ impl Backend for CBackend {
       },
       BackendRequest::Lowered(request) => {
         let BackendInput::Lowered {
-          types, defs, program, ..
+          types,
+          defs,
+          program,
+          source_map,
+          ..
         } = input
         else {
           return Err(StageError::BackendRequestRequiresLoweredInput);
         };
 
-        let emit_input = EmitInput::new(program, types, defs);
+        let emit_input = EmitInput::new(program, types, defs).with_source_map(source_map);
 
         match request {
           LoweredBackendRequest::EmitCombined {
@@ -154,10 +158,12 @@ impl Backend for CBackend {
 mod tests {
   use std::collections::HashMap;
   use std::path::Path;
+  use std::sync::OnceLock;
 
   use ignis_lir::LirProgram;
   use ignis_codegen_c::{emit_c, emit_std_module_c, emit_user_module_h};
   use ignis_type::definition::{Definition, DefinitionKind, DefinitionStore, Visibility};
+  use ignis_type::file::SourceMap;
   use ignis_type::module::{ModuleId, ModulePath};
   use ignis_type::namespace::NamespaceStore;
   use ignis_type::span::Span;
@@ -166,6 +172,11 @@ mod tests {
 
   use super::*;
   use crate::backend::{emit_text, BackendRequest, HeaderBackendRequest, LoweredBackendRequest};
+
+  fn empty_source_map() -> &'static SourceMap {
+    static EMPTY_SOURCE_MAP: OnceLock<SourceMap> = OnceLock::new();
+    EMPTY_SOURCE_MAP.get_or_init(SourceMap::new)
+  }
 
   fn alloc_placeholder_definition(
     defs: &mut DefinitionStore,
@@ -202,6 +213,7 @@ mod tests {
       types: &types,
       defs: &defs,
       program: &program,
+      source_map: empty_source_map(),
     };
 
     let emitted = emit_text(
@@ -275,6 +287,7 @@ mod tests {
       types: &types,
       defs: &defs,
       program: &program,
+      source_map: empty_source_map(),
     };
 
     let emitted = emit_text(

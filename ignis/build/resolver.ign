@@ -12,6 +12,7 @@ import Parser from "@compiler::parser";
 import Env from "std::env";
 import Fs from "std::fs";
 import Path from "std::path";
+import Sort from "std::sort";
 import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
@@ -833,73 +834,6 @@ function resolverIsProjectTestFileName(fileName: &String): boolean {
   return fileName.equals("tests.ign") || resolverStringEndsWith(fileName, ".test.ign") || resolverStringEndsWith(fileName, ".tests.ign") || resolverStringEndsWith(fileName, "-test.ign") || resolverStringEndsWith(fileName, "-tests.ign") || resolverStringEndsWith(fileName, "_test.ign") || resolverStringEndsWith(fileName, "_tests.ign");
 }
 
-function resolverSortStrings(values: &mut Vector<String>): void {
-  let len: u64 = values.length();
-  let mut i: u64 = 0;
-
-  while (i < len) {
-    let mut minIndex: u64 = i;
-    let Option::SOME(initialMin) = values.get(i) else {
-      break;
-    };
-    let mut minValue: String = initialMin.clone();
-
-    let mut j: u64 = i + 1;
-    while (j < len) {
-      let Option::SOME(candidate) = values.get(j) else {
-        break;
-      };
-
-      if (candidate.compare(&minValue) < 0) {
-        minIndex = j;
-        minValue = candidate.clone();
-      }
-
-      j += 1;
-    }
-
-    if (minIndex != i) {
-      let Option::SOME(iValue) = values.get(i) else {
-        break;
-      };
-      let iCopy: String = iValue.clone();
-      let mut swapped: Vector<String> = Vector::new<String>();
-      let mut k: u64 = 0;
-
-      while (k < len) {
-        let Option::SOME(value) = values.get(k) else {
-          break;
-        };
-
-        if (k == i) {
-          swapped.push(minValue.clone());
-        } else {
-          if (k == minIndex) {
-            swapped.push(iCopy.clone());
-          } else {
-            swapped.push(value.clone());
-          }
-        }
-
-        k += 1;
-      }
-
-      let mut valuesRef: &mut Vector<String> = values;
-      valuesRef.clear();
-      let mut copyIndex: u64 = 0;
-      while (copyIndex < swapped.length()) {
-        let Option::SOME(value) = swapped.get(copyIndex) else {
-          break;
-        };
-        valuesRef.push(value.clone());
-        copyIndex += 1;
-      }
-    }
-
-    i += 1;
-  }
-}
-
 function resolverCollectProjectTestSources(
   sourceRoot: &Path::PathBuf,
   entryPath: &Path::PathBuf,
@@ -931,7 +865,7 @@ function resolverCollectProjectTestSources(
     index += 1;
   }
 
-  resolverSortStrings(&mut matched);
+  Sort::stableLexicalStrings(&mut matched);
 
   let mut discovered: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   let mut matchedIndex: u64 = 0;

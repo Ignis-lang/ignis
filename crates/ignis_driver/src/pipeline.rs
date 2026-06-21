@@ -949,6 +949,7 @@ pub fn compile_project(
                 types: &types,
                 defs: &mono_output.defs,
                 program: &lir_program,
+                source_map: &ctx.source_map,
               },
               BackendRequest::Header(HeaderBackendRequest::EmitUserModuleHeader {
                 module_id: **module_id,
@@ -1071,6 +1072,7 @@ pub fn compile_project(
                 types: &types,
                 defs: &mono_output.defs,
                 program: &lir_program,
+                source_map: &ctx.source_map,
               },
               BackendRequest::Lowered(LoweredBackendRequest::EmitUserModule {
                 module_id: **module_id,
@@ -1166,6 +1168,7 @@ pub fn compile_project(
                 types: &types,
                 defs: &mono_output.defs,
                 program: &lir_program,
+                source_map: &ctx.source_map,
               },
               BackendRequest::Lowered(LoweredBackendRequest::EmitUserCombined {
                 namespaces: &semantic.namespaces,
@@ -1189,6 +1192,7 @@ pub fn compile_project(
                 types: &types,
                 defs: &mono_output.defs,
                 program: &lir_program,
+                source_map: &ctx.source_map,
               },
               BackendRequest::Lowered(LoweredBackendRequest::EmitCombined {
                 namespaces: &semantic.namespaces,
@@ -2156,6 +2160,7 @@ pub fn run_project_tests(
         types: &types,
         defs: &mono_output.defs,
         program: &lir_program,
+        source_map: &ctx.source_map,
       },
       BackendRequest::Header(HeaderBackendRequest::EmitUserModuleHeader {
         module_id: **module_id,
@@ -2229,6 +2234,7 @@ pub fn run_project_tests(
         types: &types,
         defs: &mono_output.defs,
         program: &lir_program,
+        source_map: &ctx.source_map,
       },
       BackendRequest::Lowered(LoweredBackendRequest::EmitUserModule {
         module_id: **module_id,
@@ -2283,6 +2289,7 @@ pub fn run_project_tests(
       types: &types,
       defs: &mono_output.defs,
       program: &lir_program,
+      source_map: &ctx.source_map,
     },
     BackendRequest::Lowered(LoweredBackendRequest::EmitUserTestHarness {
       namespaces: &output.namespaces,
@@ -2598,6 +2605,7 @@ pub fn run_single_file_tests(
         types: &types,
         defs: &mono_output.defs,
         program: &lir_program,
+        source_map: &ctx.source_map,
       },
       BackendRequest::Header(HeaderBackendRequest::EmitUserModuleHeader {
         module_id: **module_id,
@@ -2671,6 +2679,7 @@ pub fn run_single_file_tests(
         types: &types,
         defs: &mono_output.defs,
         program: &lir_program,
+        source_map: &ctx.source_map,
       },
       BackendRequest::Lowered(LoweredBackendRequest::EmitUserModule {
         module_id: **module_id,
@@ -2725,6 +2734,7 @@ pub fn run_single_file_tests(
       types: &types,
       defs: &mono_output.defs,
       program: &lir_program,
+      source_map: &ctx.source_map,
     },
     BackendRequest::Lowered(LoweredBackendRequest::EmitUserTestHarness {
       namespaces: &output.namespaces,
@@ -3091,6 +3101,7 @@ pub fn run_std_tests(
         types: &types,
         defs: &mono_output.defs,
         program: &lir_program,
+        source_map: &ctx.source_map,
       },
       BackendRequest::Header(HeaderBackendRequest::EmitUserModuleHeader {
         module_id,
@@ -3141,6 +3152,7 @@ pub fn run_std_tests(
         types: &types,
         defs: &mono_output.defs,
         program: &lir_program,
+        source_map: &ctx.source_map,
       },
       BackendRequest::Lowered(LoweredBackendRequest::EmitUserModule {
         module_id,
@@ -3205,6 +3217,7 @@ pub fn run_std_tests(
       types: &types,
       defs: &mono_output.defs,
       program: &lir_program,
+      source_map: &ctx.source_map,
     },
     BackendRequest::Lowered(LoweredBackendRequest::EmitUserTestHarness {
       namespaces: &output.namespaces,
@@ -3477,6 +3490,7 @@ pub fn build_std(
         types: &types,
         defs: &mono_output.defs,
         program: &lir_program,
+        source_map: &ctx.source_map,
       },
       BackendRequest::Header(HeaderBackendRequest::EmitStdModuleHeader {
         module_name: &module_name,
@@ -3661,6 +3675,7 @@ pub fn build_std(
         types: &types,
         defs: &mono_output.defs,
         program: &lir_program,
+        source_map: &ctx.source_map,
       },
       BackendRequest::Lowered(LoweredBackendRequest::EmitStdModule {
         module_name: &module_name,
@@ -3941,6 +3956,7 @@ pub fn check_std(
         types: &types,
         defs: &mono_output.defs,
         program: &lir_program,
+        source_map: &ctx.source_map,
       },
       BackendRequest::Lowered(LoweredBackendRequest::EmitStdModule {
         module_name: &module_name,

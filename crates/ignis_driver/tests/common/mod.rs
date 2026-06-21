@@ -371,10 +371,8 @@ fn compile_to_c(source: &str) -> Result<String, String> {
     quoted: true,
   }];
 
-  Ok(ignis_codegen_c::emit_c(
-    &lir,
-    &types,
-    &mono_output.defs,
+  Ok(ignis_codegen_c::emit_c_from_input(
+    ignis_codegen_c::EmitInput::new(&lir, &types, &mono_output.defs).with_source_map(&sm),
     &result.namespaces,
     &sym_table,
     &headers,
@@ -696,10 +694,8 @@ fn compile_to_c_with_ctx(
     quoted: true,
   }];
 
-  Ok(ignis_codegen_c::emit_c(
-    &lir,
-    &types,
-    &mono_output.defs,
+  Ok(ignis_codegen_c::emit_c_from_input(
+    ignis_codegen_c::EmitInput::new(&lir, &types, &mono_output.defs).with_source_map(&sm),
     &result.namespaces,
     &sym_table,
     &headers,

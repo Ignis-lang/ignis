@@ -1,0 +1,65 @@
+import String from "std::string";
+import Vector from "std::vector";
+
+function lexicalStringCompare(left: &String, right: &String): i32 {
+  return left.compare(right);
+}
+
+export record Sort {
+  /// Sorts a vector in-place using the vector's generic stable sorter.
+  ///
+  /// This is the general comparator-based entry point for element types that
+  /// can be safely moved by the current `Vector::sort` implementation. Use
+  /// `stableStrings` for owned `String` values until generic non-Copy moves are
+  /// supported by the compiler/runtime stack.
+  public static stableVector<T>(values: &mut Vector<T>, @noescape compare: (&T, &T) -> i32): void {
+    let mut valuesRef: &mut Vector<T> = values;
+    valuesRef.sort(compare);
+  }
+
+  /// Sorts owned strings in-place using a stable insertion sort.
+  ///
+  /// This implementation uses `Vector::get` + `Vector::set` with cloned values
+  /// instead of raw indexed moves, so it is safe for the selfhost build paths
+  /// that sort non-Copy `String` values today.
+  public static stableStrings(
+    values: &mut Vector<String>,
+    @noescape compare: (&String, &String) -> i32,
+  ): void {
+    let mut valuesRef: &mut Vector<String> = values;
+    let mut index: u64 = 1;
+
+    while (index < valuesRef.length()) {
+      let Option::SOME(currentRef) = valuesRef.get(index) else {
+        break;
+      };
+      let current: String = currentRef.clone();
+      let mut scan: i64 = index as i64 - 1;
+
+      while (scan >= 0) {
+        let Option::SOME(existing) = valuesRef.get(scan as u64) else {
+          break;
+        };
+
+        if (compare(existing, &current) <= 0) {
+          break;
+        }
+
+        let shifted: String = existing.clone();
+        if (!valuesRef.set((scan + 1) as u64, shifted)) {
+          break;
+        }
+        scan -= 1;
+      }
+
+      let _inserted: boolean = valuesRef.set((scan + 1) as u64, current);
+      index += 1;
+    }
+  }
+
+  public static stableLexicalStrings(values: &mut Vector<String>): void {
+    Sort::stableStrings(values, (left: &String, right: &String): i32 -> {
+      return lexicalStringCompare(left, right);
+    });
+  }
+}

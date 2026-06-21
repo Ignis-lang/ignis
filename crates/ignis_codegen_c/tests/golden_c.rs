@@ -208,6 +208,36 @@ function main(): void {
 }
 
 #[test]
+fn c_line_directives_wrap_user_function_boundaries() {
+  let c_code = common::compile_to_c(
+    r#"
+function add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+function main(): i32 {
+    return add(1, 2);
+}
+"#,
+  );
+
+  assert!(
+    c_code.contains("#line 2 \"test.ign\""),
+    "expected first function #line directive"
+  );
+  assert!(
+    c_code.contains("#line 6 \"test.ign\""),
+    "expected second function #line directive"
+  );
+  assert!(
+    c_code.contains("#line ") && c_code.contains("\"<generated-c>\""),
+    "expected reset back to generated C between user-mapped regions"
+  );
+
+  assert_snapshot!("c_line_directives_wrap_user_function_boundaries", c_code);
+}
+
+#[test]
 fn c_unicode_scalar_char_literal() {
   let c_code = common::compile_to_c(
     r#"

@@ -1,0 +1,104 @@
+import Sort from "std::sort";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+function lexicalCompare(left: &String, right: &String): i32 {
+  return left.compare(right);
+}
+
+function groupCompare(left: &String, right: &String): i32 {
+  let leftGroup: String = left.substringBytes(0, 1);
+  let rightGroup: String = right.substringBytes(0, 1);
+  return leftGroup.compare(&rightGroup);
+}
+
+function compareI32(left: &i32, right: &i32): i32 {
+  return *left - *right;
+}
+
+function joinStrings(values: &Vector<String>): String {
+  let mut joined: String = String::new();
+  let separator: String = String::create("|");
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    let Option::SOME(value) = values.get(index) else {
+      break;
+    };
+
+    if (index > 0) {
+      joined.push(&separator);
+    }
+
+    joined.push(value);
+    index += 1;
+  }
+
+  return joined;
+}
+
+@test
+function stableVectorSortsCopyValuesWithComparator(): void {
+  let mut values: Vector<i32> = Vector::new<i32>();
+  values.push(30);
+  values.push(10);
+  values.push(20);
+  values.push(10);
+
+  Sort::stableVector<i32>(&mut values, (left: &i32, right: &i32): i32 -> {
+    return compareI32(left, right);
+  });
+
+  let Option::SOME(first) = values.get(0) else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(second) = values.get(1) else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(third) = values.get(2) else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(fourth) = values.get(3) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<i32>(*first, 10);
+  Test::assertEq<i32>(*second, 10);
+  Test::assertEq<i32>(*third, 20);
+  Test::assertEq<i32>(*fourth, 30);
+}
+
+@test
+function stableLexicalSortOrdersStringsAndKeepsDuplicates(): void {
+  let mut values: Vector<String> = Vector::new<String>();
+  values.push(String::create("delta"));
+  values.push(String::create("alpha"));
+  values.push(String::create("charlie"));
+  values.push(String::create("alpha"));
+
+  Sort::stableStrings(&mut values, (left: &String, right: &String): i32 -> {
+    return lexicalCompare(left, right);
+  });
+
+  Test::assertEq<str>(joinStrings(&values).toStr(), "alpha|alpha|charlie|delta");
+}
+
+@test
+function stableSortPreservesRelativeOrderForEqualComparatorKeys(): void {
+  let mut values: Vector<String> = Vector::new<String>();
+  values.push(String::create("b:third"));
+  values.push(String::create("a:first"));
+  values.push(String::create("a:second"));
+  values.push(String::create("b:fourth"));
+
+  Sort::stableStrings(&mut values, (left: &String, right: &String): i32 -> {
+    return groupCompare(left, right);
+  });
+
+  Test::assertEq<str>(joinStrings(&values).toStr(), "a:first|a:second|b:third|b:fourth");
+}
