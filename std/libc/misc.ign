@@ -83,11 +83,15 @@ extern __ctype {
 
 extern __time_h {
   const CLOCKS_PER_SEC: CType::ClockT;
+  const CLOCK_REALTIME: CType::ClockIdT;
+  const CLOCK_MONOTONIC: CType::ClockIdT;
 
   /// C `time`; returns seconds since the epoch and optionally stores them.
   function time(tloc: *mut CType::TimeT): CType::TimeT;
   /// C `clock`; returns processor time used by the process.
   function clock(): CType::ClockT;
+  /// C `clock_gettime`; fills a `timespec` with the selected clock value.
+  function clock_gettime(clockId: CType::ClockIdT, tp: *mut CType::Timespec): CType::CInt;
 }
 
 /// Conversion (stdlib.h)
@@ -194,6 +198,12 @@ namespace LibC::Time {
   /// `clock()` ticks per second (POSIX: 1,000,000).
   const CLOCKS_PER_SEC: CType::ClockT = __time_h::CLOCKS_PER_SEC;
 
+  /// `clock_gettime` selector for wall-clock time.
+  const CLOCK_REALTIME: CType::ClockIdT = __time_h::CLOCK_REALTIME;
+
+  /// `clock_gettime` selector for monotonic time.
+  const CLOCK_MONOTONIC: CType::ClockIdT = __time_h::CLOCK_MONOTONIC;
+
   /// Returns the current calendar time (seconds since epoch).
   ///
   /// If `tloc` is non-null, the result is also stored there.
@@ -206,5 +216,10 @@ namespace LibC::Time {
   /// Divide by `CLOCKS_PER_SEC` to get seconds.
   function clock(): CType::ClockT {
     return __time_h::clock();
+  }
+
+  /// Reads the selected clock into `tp`.
+  function clock_gettime(clockId: CType::ClockIdT, tp: *mut CType::Timespec): CType::CInt {
+    return __time_h::clock_gettime(clockId, tp);
   }
 }

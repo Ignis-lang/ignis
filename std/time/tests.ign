@@ -1,0 +1,197 @@
+import Test from "std::test";
+import Time from "std::time";
+
+function assertDuration(duration: Time::Duration, secs: u64, nanos: u32): void {
+  Test::assertEq<u64>(duration.secs, secs);
+  Test::assertEq<u32>(duration.nanos, nanos);
+}
+
+function assertTimeErrorKind(error: Time::TimeError, expected: Time::TimeErrorKind): void {
+  Test::assert(error.errorKind() == expected);
+  Test::assertEq<boolean>(error.ioError().isNone(), true);
+}
+
+@test
+function durationConstructionNormalizesWholeUnitsAndRemainder(): void {
+  let fromMillis: Time::Duration = Time::Duration::fromMillis(1500);
+  let fromMicros: Time::Duration = Time::Duration::fromMicros(2000001);
+  let fromNanos: Time::Duration = Time::Duration::fromNanos(2000000001);
+
+  assertDuration(fromMillis, 1, 500000000 as u32);
+  assertDuration(fromMicros, 2, 1000 as u32);
+  assertDuration(fromNanos, 2, 1);
+
+  Test::assertEq<u64>(fromMillis.wholeMillis(), 1500);
+  Test::assertEq<u64>(fromMicros.wholeMicros(), 2000001);
+  Test::assertEq<u64>(fromNanos.wholeNanos(), 2000000001);
+}
+
+@test
+function durationCheckedArithmeticHandlesCarryBorrowAndOverflow(): void {
+  let left: Time::Duration = Time::Duration { secs: 1, nanos: 900000000 as u32 };
+  let right: Time::Duration = Time::Duration { secs: 2, nanos: 300000000 as u32 };
+  let overflowBase: Time::Duration = Time::Duration {
+    secs: maxOf<u64>(),
+    nanos: 999999999 as u32,
+  };
+
+  match (left.checkedAdd(right)) {
+    Option::SOME(sum) -> assertDuration(sum, 4, 200000000 as u32),
+    Option::NONE -> @panic("expected duration sum"),
+  };
+
+  match (right.checkedSub(Time::Duration { secs: 1, nanos: 500000000 as u32 })) {
+    Option::SOME(diff) -> assertDuration(diff, 0, 800000000 as u32),
+    Option::NONE -> @panic("expected duration difference"),
+  };
+
+  Test::assertEq<boolean>(left.checkedSub(right).isNone(), true);
+  Test::assertEq<boolean>(overflowBase.checkedAdd(Time::Duration::fromNanos(1)).isNone(), true);
+}
+
+@test
+function durationWholeUnitBoundariesIncludeNanosRemainders(): void {
+  let max: u64 = maxOf<u64>();
+  let maxMillis: Time::Duration = Time::Duration {
+    secs: max / 1000,
+    nanos: ((max % 1000) * 1000000) as u32,
+  };
+  let maxMicros: Time::Duration = Time::Duration {
+    secs: max / 1000000,
+    nanos: ((max % 1000000) * 1000) as u32,
+  };
+  let maxNanos: Time::Duration = Time::Duration {
+    secs: max / 1000000000,
+    nanos: (max % 1000000000) as u32,
+  };
+
+  Test::assertEq<u64>(maxMillis.wholeMillis(), max);
+  Test::assertEq<u64>(maxMicros.wholeMicros(), max);
+  Test::assertEq<u64>(maxNanos.wholeNanos(), max);
+}
+
+@test
+function durationComparisonAndBoundaryRoundTripsStayOrdered(): void {
+  let justBeforeSecond: Time::Duration = Time::Duration::fromNanos(999999999);
+  let exactSecond: Time::Duration = Time::Duration::fromNanos(1000000000);
+  let fromSeconds: Time::Duration = Time::Duration::fromSeconds(1);
+  let borrowed: Time::Duration = match (exactSecond.checkedSub(Time::Duration::fromNanos(1))) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("expected exact-second borrow"),
+  };
+
+  Test::assertEq<i32>(justBeforeSecond.compare(&exactSecond), -1);
+  Test::assertEq<i32>(exactSecond.compare(&fromSeconds), 0);
+  Test::assertEq<u64>(exactSecond.wholeSeconds(), 1);
+  assertDuration(borrowed, 0, 999999999 as u32);
+}
+
+@test
+function monotonicNowElapsedAndOrderingStayNonNegative(): void {
+  let earlier: Time::MonotonicInstant = match (Time::MonotonicInstant::now()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("expected monotonic now success"),
+  };
+  let later: Time::MonotonicInstant = match (Time::MonotonicInstant::now()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("expected second monotonic now success"),
+  };
+  let elapsed: Time::Duration = match (earlier.elapsed()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("expected monotonic elapsed success"),
+  };
+
+  Test::assertEq<boolean>(elapsed.secs >= 0, true);
+  Test::assertEq<boolean>(elapsed.nanos < 1000000000 as u32, true);
+
+  match (later.checkedDurationSince(earlier)) {
+    Option::SOME(delta) -> Test::assertEq<boolean>(delta.nanos < 1000000000 as u32, true),
+    Option::NONE -> @panic("expected monotonic ordering to be preserved"),
+  };
+
+  Test::assertEq<boolean>(earlier.checkedDurationSince(later).isNone(), true);
+}
+
+@test
+function monotonicClockReadsStayNonDecreasingAcrossRepeatedSamples(): void {
+  let mut previous: Time::MonotonicInstant = match (Time::MonotonicInstant::now()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("expected initial monotonic sample"),
+  };
+  let mut index: u64 = 0;
+  while (index < 4) {
+    let current: Time::MonotonicInstant = match (Time::MonotonicInstant::now()) {
+      Result::OK(value) -> value,
+      Result::ERROR(_) -> @panic("expected repeated monotonic sample"),
+    };
+
+    Test::assertEq<boolean>(current.compare(&previous) >= 0, true);
+    match (current.checkedDurationSince(previous)) {
+      Option::SOME(delta) -> Test::assertEq<boolean>(delta.nanos < 1000000000 as u32, true),
+      Option::NONE -> @panic("expected repeated monotonic ordering"),
+    };
+
+    previous = current;
+    index += 1;
+  }
+}
+
+@test
+function systemTimeNowAndRelativeOrderingExposeExplicitFailures(): void {
+  let now: Time::SystemTime = match (Time::SystemTime::now()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("expected system time now success"),
+  };
+  let sinceEpoch: Time::Duration = match (now.durationSinceUnixEpoch()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("expected post-epoch duration"),
+  };
+  let later: Time::SystemTime = match (now.checkedAddDuration(Time::Duration::fromSeconds(1))) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("expected add duration success"),
+  };
+
+  Test::assertEq<boolean>(sinceEpoch.nanos < 1000000000 as u32, true);
+  Test::assertEq<i32>(now.compare(&later), -1);
+
+  match (later.checkedDurationSince(now)) {
+    Option::SOME(delta) -> assertDuration(delta, 1, 0),
+    Option::NONE -> @panic("expected positive wall-clock difference"),
+  };
+
+  Test::assertEq<boolean>(now.checkedDurationSince(later).isNone(), true);
+}
+
+@test
+function systemTimeRoundTripsEpochAndSyntheticPreEpochFailures(): void {
+  let now: Time::SystemTime = match (Time::SystemTime::now()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("expected system time now success"),
+  };
+  let sinceEpoch: Time::Duration = match (now.durationSinceUnixEpoch()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("expected post-epoch duration"),
+  };
+  let epoch: Time::SystemTime = match (now.checkedSubDuration(sinceEpoch)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("expected epoch round trip"),
+  };
+  let beforeEpochOffset: Time::Duration = match (sinceEpoch.checkedAdd(Time::Duration::fromNanos(1))) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("expected synthetic pre-epoch offset"),
+  };
+  let beforeEpoch: Time::SystemTime = match (now.checkedSubDuration(beforeEpochOffset)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("expected synthetic pre-epoch time"),
+  };
+
+  match (epoch.durationSinceUnixEpoch()) {
+    Result::OK(duration) -> assertDuration(duration, 0, 0),
+    Result::ERROR(_) -> @panic("expected epoch duration success"),
+  };
+
+  match (beforeEpoch.durationSinceUnixEpoch()) {
+    Result::OK(_) -> @panic("expected synthetic pre-epoch failure"),
+    Result::ERROR(error) -> assertTimeErrorKind(error, Time::TimeErrorKind::BEFORE_EPOCH),
+  };
+}

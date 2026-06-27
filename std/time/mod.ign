@@ -1,0 +1,447 @@
+import Io from "std::io";
+import LibC, CType from "std::libc";
+
+const NANOS_PER_SECOND_U32: u32 = 1000000000 as u32;
+const NANOS_PER_SECOND_U64: u64 = 1000000000;
+const MILLIS_PER_SECOND: u64 = 1000;
+const MICROS_PER_SECOND: u64 = 1000000;
+const NANOS_PER_MILLI: u64 = 1000000;
+const NANOS_PER_MICRO: u64 = 1000;
+
+function compareUnsignedParts(leftSecs: u64, leftNanos: u32, rightSecs: u64, rightNanos: u32): i32 {
+  if (leftSecs < rightSecs) {
+    return -1;
+  }
+  if (leftSecs > rightSecs) {
+    return 1;
+  }
+  if (leftNanos < rightNanos) {
+    return -1;
+  }
+  if (leftNanos > rightNanos) {
+    return 1;
+  }
+  return 0;
+}
+
+function checkedUnsignedDurationBetween(
+  leftSecs: u64,
+  leftNanos: u32,
+  rightSecs: u64,
+  rightNanos: u32,
+): Option<Time::Duration> {
+  if (compareUnsignedParts(leftSecs, leftNanos, rightSecs, rightNanos) < 0) {
+    return Option::NONE;
+  }
+
+  let mut secs: u64 = leftSecs - rightSecs;
+  let mut nanos: u32 = leftNanos;
+  if (nanos < rightNanos) {
+    secs = secs - 1;
+    nanos = (nanos + NANOS_PER_SECOND_U32) - rightNanos;
+  } else {
+    nanos = nanos - rightNanos;
+  }
+
+  return Option::SOME(Time::Duration {
+    secs: secs,
+    nanos: nanos,
+  });
+}
+
+function readClock(clockId: CType::ClockIdT): Result<CType::Timespec, Io::IoError> {
+  let mut raw: CType::Timespec = CType::Timespec {
+    tvSec: 0,
+    tvNsec: 0,
+  };
+  let status: CType::CInt = LibC::Time::clock_gettime(clockId, (&mut raw) as *mut CType::Timespec);
+  if (status == 0) {
+    return Result::OK(raw);
+  }
+  return Result::ERROR(Io::IoError::lastError());
+}
+
+function negativeMagnitude(value: i64): u64 {
+  if (value == minOf<i64>()) {
+    return (maxOf<i64>() as u64) + 1;
+  }
+  return (0 - value) as u64;
+}
+
+function checkedAddI64U64(base: i64, delta: u64): Option<i64> {
+  if (delta == 0) {
+    return Option::SOME(base);
+  }
+
+  if (base >= 0) {
+    let baseUnsigned: u64 = base as u64;
+    if (delta > (maxOf<i64>() as u64) - baseUnsigned) {
+      return Option::NONE;
+    }
+    return Option::SOME((baseUnsigned + delta) as i64);
+  }
+
+  let magnitude: u64 = negativeMagnitude(base);
+  if (delta < magnitude) {
+    return Option::SOME(base + (delta as i64));
+  }
+  if (delta == magnitude) {
+    return Option::SOME(0);
+  }
+
+  let remainder: u64 = delta - magnitude;
+  if (remainder > (maxOf<i64>() as u64)) {
+    return Option::NONE;
+  }
+  return Option::SOME(remainder as i64);
+}
+
+function checkedSubI64U64(base: i64, delta: u64): Option<i64> {
+  if (delta == 0) {
+    return Option::SOME(base);
+  }
+
+  if (base >= 0) {
+    let baseUnsigned: u64 = base as u64;
+    if (delta <= baseUnsigned) {
+      return Option::SOME((baseUnsigned - delta) as i64);
+    }
+
+    let remainder: u64 = delta - baseUnsigned;
+    if (remainder > ((maxOf<i64>() as u64) + 1)) {
+      return Option::NONE;
+    }
+    if (remainder == ((maxOf<i64>() as u64) + 1)) {
+      return Option::SOME(minOf<i64>());
+    }
+    return Option::SOME(0 - (remainder as i64));
+  }
+
+  let magnitude: u64 = negativeMagnitude(base);
+  if (delta > (((maxOf<i64>() as u64) + 1) - magnitude)) {
+    return Option::NONE;
+  }
+
+  let nextMagnitude: u64 = magnitude + delta;
+  if (nextMagnitude == ((maxOf<i64>() as u64) + 1)) {
+    return Option::SOME(minOf<i64>());
+  }
+  return Option::SOME(0 - (nextMagnitude as i64));
+}
+
+function signedDifferenceToUnsigned(left: i64, right: i64): u64 {
+  if (left >= right) {
+    if (right >= 0) {
+      return (left - right) as u64;
+    }
+    if (left < 0) {
+      return (left - right) as u64;
+    }
+
+    let magnitude: u64 = negativeMagnitude(right);
+    return (left as u64) + magnitude;
+  }
+
+  return 0;
+}
+
+export namespace Time {
+  enum TimeErrorKind {
+    OVERFLOW,
+    NEGATIVE_DIFFERENCE,
+    BEFORE_EPOCH,
+  }
+
+  record TimeError {
+    public kind: TimeErrorKind;
+    public io: Option<Io::IoError>;
+
+    public errorKind(&self): TimeErrorKind {
+      return self.kind;
+    }
+
+    public ioError(&self): Option<Io::IoError> {
+      return match (self.io) {
+        Option::SOME(value) -> Option::SOME(value),
+        Option::NONE -> Option::NONE,
+      };
+    }
+
+    public static overflow(): TimeError {
+      return TimeError {
+        kind: TimeErrorKind::OVERFLOW,
+        io: Option::NONE,
+      };
+    }
+
+    public static negativeDifference(): TimeError {
+      return TimeError {
+        kind: TimeErrorKind::NEGATIVE_DIFFERENCE,
+        io: Option::NONE,
+      };
+    }
+
+    public static beforeEpoch(): TimeError {
+      return TimeError {
+        kind: TimeErrorKind::BEFORE_EPOCH,
+        io: Option::NONE,
+      };
+    }
+  }
+
+  record Duration {
+    public secs: u64;
+    public nanos: u32;
+
+    public static fromSeconds(secs: u64): Duration {
+      return Duration {
+        secs: secs,
+        nanos: 0,
+      };
+    }
+
+    public static fromMillis(millis: u64): Duration {
+      return Duration {
+        secs: millis / MILLIS_PER_SECOND,
+        nanos: ((millis % MILLIS_PER_SECOND) * NANOS_PER_MILLI) as u32,
+      };
+    }
+
+    public static fromMicros(micros: u64): Duration {
+      return Duration {
+        secs: micros / MICROS_PER_SECOND,
+        nanos: ((micros % MICROS_PER_SECOND) * NANOS_PER_MICRO) as u32,
+      };
+    }
+
+    public static fromNanos(nanos: u64): Duration {
+      return Duration {
+        secs: nanos / NANOS_PER_SECOND_U64,
+        nanos: (nanos % NANOS_PER_SECOND_U64) as u32,
+      };
+    }
+
+    public wholeSeconds(&self): u64 {
+      return self.secs;
+    }
+
+    public wholeMillis(&self): u64 {
+      if (self.secs > (maxOf<u64>() / MILLIS_PER_SECOND)) {
+        @panic("Duration wholeMillis overflow");
+      }
+      let base: u64 = self.secs * MILLIS_PER_SECOND;
+      let remainder: u64 = (self.nanos as u64) / NANOS_PER_MILLI;
+      if (base > maxOf<u64>() - remainder) {
+        @panic("Duration wholeMillis overflow");
+      }
+      return base + remainder;
+    }
+
+    public wholeMicros(&self): u64 {
+      if (self.secs > (maxOf<u64>() / MICROS_PER_SECOND)) {
+        @panic("Duration wholeMicros overflow");
+      }
+      let base: u64 = self.secs * MICROS_PER_SECOND;
+      let remainder: u64 = (self.nanos as u64) / NANOS_PER_MICRO;
+      if (base > maxOf<u64>() - remainder) {
+        @panic("Duration wholeMicros overflow");
+      }
+      return base + remainder;
+    }
+
+    public wholeNanos(&self): u64 {
+      if (self.secs > (maxOf<u64>() / NANOS_PER_SECOND_U64)) {
+        @panic("Duration wholeNanos overflow");
+      }
+      let base: u64 = self.secs * NANOS_PER_SECOND_U64;
+      let remainder: u64 = self.nanos as u64;
+      if (base > maxOf<u64>() - remainder) {
+        @panic("Duration wholeNanos overflow");
+      }
+      return base + remainder;
+    }
+
+    public checkedAdd(&self, other: Duration): Option<Duration> {
+      let mut secs: u64 = self.secs + other.secs;
+      let mut nanos: u64 = (self.nanos as u64) + (other.nanos as u64);
+      let mut carry: u64 = 0;
+      if (secs < self.secs) {
+        return Option::NONE;
+      }
+      if (nanos >= NANOS_PER_SECOND_U64) {
+        nanos = nanos - NANOS_PER_SECOND_U64;
+        carry = 1;
+      }
+      if (carry == 1) {
+        let nextSecs: u64 = secs + 1;
+        if (nextSecs <= secs) {
+          return Option::NONE;
+        }
+        secs = nextSecs;
+      }
+      return Option::SOME(Duration {
+        secs: secs,
+        nanos: nanos as u32,
+      });
+    }
+
+    public checkedSub(&self, other: Duration): Option<Duration> {
+      if (self.compare(&other) < 0) {
+        return Option::NONE;
+      }
+
+      let mut secs: u64 = self.secs - other.secs;
+      let mut nanos: u32 = self.nanos;
+      if (nanos < other.nanos) {
+        secs = secs - 1;
+        nanos = (nanos + NANOS_PER_SECOND_U32) - other.nanos;
+      } else {
+        nanos = nanos - other.nanos;
+      }
+
+      return Option::SOME(Duration {
+        secs: secs,
+        nanos: nanos,
+      });
+    }
+
+    public compare(&self, other: &Duration): i32 {
+      return compareUnsignedParts(self.secs, self.nanos, other.secs, other.nanos);
+    }
+  }
+
+  record MonotonicInstant {
+    secs: u64;
+    nanos: u32;
+
+    public static now(): Result<MonotonicInstant, Io::IoError> {
+      return match (readClock(LibC::Time::CLOCK_MONOTONIC)) {
+        Result::OK(raw) -> Result::OK(MonotonicInstant {
+          secs: raw.tvSec as u64,
+          nanos: raw.tvNsec as u32,
+        }),
+        Result::ERROR(error) -> Result::ERROR(error),
+      };
+    }
+
+    public elapsed(&self): Result<Duration, Io::IoError> {
+      return match (MonotonicInstant::now()) {
+        Result::OK(now) -> match (now.checkedDurationSince(*self)) {
+          Option::SOME(duration) -> Result::OK(duration),
+          Option::NONE -> Result::ERROR(Io::IoError::fromErrno(LibC::Errno::EINVAL)),
+        },
+        Result::ERROR(error) -> Result::ERROR(error),
+      };
+    }
+
+    public checkedDurationSince(&self, other: MonotonicInstant): Option<Duration> {
+      return checkedUnsignedDurationBetween(self.secs, self.nanos, other.secs, other.nanos);
+    }
+
+    public compare(&self, other: &MonotonicInstant): i32 {
+      return compareUnsignedParts(self.secs, self.nanos, other.secs, other.nanos);
+    }
+  }
+
+  record SystemTime {
+    secs: i64;
+    nanos: u32;
+
+    public static now(): Result<SystemTime, Io::IoError> {
+      return match (readClock(LibC::Time::CLOCK_REALTIME)) {
+        Result::OK(raw) -> Result::OK(SystemTime {
+          secs: raw.tvSec,
+          nanos: raw.tvNsec as u32,
+        }),
+        Result::ERROR(error) -> Result::ERROR(error),
+      };
+    }
+
+    public durationSinceUnixEpoch(&self): Result<Duration, TimeError> {
+      if (self.secs < 0) {
+        return Result::ERROR(TimeError::beforeEpoch());
+      }
+      return Result::OK(Duration {
+        secs: self.secs as u64,
+        nanos: self.nanos,
+      });
+    }
+
+    public checkedAddDuration(&self, duration: Duration): Option<SystemTime> {
+      let Option::SOME(baseSecs) = checkedAddI64U64(self.secs, duration.secs) else {
+        return Option::NONE;
+      };
+      let mut secs: i64 = baseSecs;
+      let mut nanos: u64 = (self.nanos as u64) + (duration.nanos as u64);
+      if (nanos >= NANOS_PER_SECOND_U64) {
+        nanos = nanos - NANOS_PER_SECOND_U64;
+        let Option::SOME(carriedSecs) = checkedAddI64U64(secs, 1) else {
+          return Option::NONE;
+        };
+        secs = carriedSecs;
+      }
+      return Option::SOME(SystemTime {
+        secs: secs,
+        nanos: nanos as u32,
+      });
+    }
+
+    public checkedSubDuration(&self, duration: Duration): Option<SystemTime> {
+      let mut secsToSubtract: u64 = duration.secs;
+      let mut nanos: u32 = self.nanos;
+      if (nanos < duration.nanos) {
+        if (secsToSubtract == maxOf<u64>()) {
+          return Option::NONE;
+        }
+        secsToSubtract = secsToSubtract + 1;
+        nanos = (nanos + NANOS_PER_SECOND_U32) - duration.nanos;
+      } else {
+        nanos = nanos - duration.nanos;
+      }
+
+      let Option::SOME(secs) = checkedSubI64U64(self.secs, secsToSubtract) else {
+        return Option::NONE;
+      };
+      return Option::SOME(SystemTime {
+        secs: secs,
+        nanos: nanos,
+      });
+    }
+
+    public checkedDurationSince(&self, other: SystemTime): Option<Duration> {
+      if (self.compare(&other) < 0) {
+        return Option::NONE;
+      }
+
+      let mut secs: u64 = signedDifferenceToUnsigned(self.secs, other.secs);
+      let mut nanos: u32 = self.nanos;
+      if (nanos < other.nanos) {
+        secs = secs - 1;
+        nanos = (nanos + NANOS_PER_SECOND_U32) - other.nanos;
+      } else {
+        nanos = nanos - other.nanos;
+      }
+
+      return Option::SOME(Duration {
+        secs: secs,
+        nanos: nanos,
+      });
+    }
+
+    public compare(&self, other: &SystemTime): i32 {
+      if (self.secs < other.secs) {
+        return -1;
+      }
+      if (self.secs > other.secs) {
+        return 1;
+      }
+      if (self.nanos < other.nanos) {
+        return -1;
+      }
+      if (self.nanos > other.nanos) {
+        return 1;
+      }
+      return 0;
+    }
+  }
+}

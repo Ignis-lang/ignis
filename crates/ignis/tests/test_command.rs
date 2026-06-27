@@ -277,6 +277,48 @@ fn ignis_test_std_executes_workspace_std_tests_via_cli_from_outside_project_root
 }
 
 #[test]
+fn ignis_test_std_executes_workspace_time_tests_via_cli() {
+  let project_dir = make_temp_project_dir("test-std-time-module");
+  let output_dir = project_dir.join("std-build");
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .current_dir(&project_dir)
+    .arg("test-std")
+    .arg("time::tests")
+    .arg("--std-path")
+    .arg(workspace_std_path())
+    .arg("--output-dir")
+    .arg(&output_dir)
+    .output()
+    .expect("run ignis test-std time::tests");
+
+  assert!(
+    output.status.success(),
+    "expected ignis test-std time::tests to succeed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+
+  assert!(
+    stdout.contains("time::tests::") || stderr.contains("time::tests::"),
+    "expected std cli test output to mention time::tests entries\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    stdout.contains("Tests passed") || stderr.contains("Tests passed"),
+    "expected successful std cli test summary\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    std_harness_binary_path(&output_dir).exists(),
+    "expected std cli time test run to build the harness binary"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
 fn ignis_test_std_updates_workspace_snapshots_via_cli() {
   let project_dir = make_temp_project_dir("test-std-update-snapshots");
   let output_dir = project_dir.join("std-build");
