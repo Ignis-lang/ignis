@@ -100,6 +100,19 @@ impl LineIndex {
     (line, utf16_col)
   }
 
+  /// Convert the whole document to an LSP Range.
+  pub fn full_range(&self) -> Range {
+    let (end_line, end_col) = self.line_col_utf16(BytePosition(self.text.len() as u32));
+
+    Range {
+      start: Position { line: 0, character: 0 },
+      end: Position {
+        line: end_line,
+        character: end_col,
+      },
+    }
+  }
+
   /// Convert an Ignis Span to an LSP Range.
   pub fn span_to_range(
     &self,
@@ -290,5 +303,44 @@ mod tests {
     let (line, col) = idx.line_col_utf16(BytePosition(2)); // inside '─'
     assert_eq!(line, 0);
     assert_eq!(col, 1); // 'a' = 1, then we're at start of '─'
+  }
+
+  #[test]
+  fn test_full_range_ascii_document() {
+    let idx = LineIndex::new("function main(): void {}".to_string());
+
+    assert_eq!(
+      idx.full_range(),
+      Range {
+        start: Position { line: 0, character: 0 },
+        end: Position { line: 0, character: 24 },
+      }
+    );
+  }
+
+  #[test]
+  fn test_full_range_trailing_newline_ends_at_next_line_start() {
+    let idx = LineIndex::new("function main(): void {}\n".to_string());
+
+    assert_eq!(
+      idx.full_range(),
+      Range {
+        start: Position { line: 0, character: 0 },
+        end: Position { line: 1, character: 0 },
+      }
+    );
+  }
+
+  #[test]
+  fn test_full_range_uses_utf16_columns_for_non_bmp_text() {
+    let idx = LineIndex::new("let face = '😀';".to_string());
+
+    assert_eq!(
+      idx.full_range(),
+      Range {
+        start: Position { line: 0, character: 0 },
+        end: Position { line: 0, character: 16 },
+      }
+    );
   }
 }

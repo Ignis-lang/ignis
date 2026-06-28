@@ -6,8 +6,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ignis_config::{IgnisConfig, IgnisSTDManifest};
-use ignis_driver::project::Project;
+use ignis_driver::project::{Project, find_project_root};
 use ignis_driver::{AnalysisOptions, AnalyzeProjectOutput};
+use ignis_formatter::{
+  FormatOptions, FormatterCliOverrides, FormatterConfig, FormatterConfigError, FormatterConfigPaths, format_text,
+  load_formatter_config,
+};
 use ignis_type::file::FileId;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -21,6 +25,13 @@ use crate::completion::{
 use crate::convert::{convert_diagnostic, LineIndex};
 use crate::project::ProjectContext;
 use crate::state::LspState;
+
+#[derive(Clone)]
+struct LspFormatDocument {
+  text: String,
+  path: PathBuf,
+  line_index: LineIndex,
+}
 
 /// The Ignis Language Server.
 pub struct Server {
@@ -392,6 +403,118 @@ impl Server {
   }
 }
 
+fn lsp_server_capabilities() -> ServerCapabilities {
+  ServerCapabilities {
+    // Full text sync - client sends entire document on change
+    text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+
+    // Go to definition
+    definition_provider: Some(OneOf::Left(true)),
+
+    // Hover (type info)
+    hover_provider: Some(HoverProviderCapability::Simple(true)),
+
+    // Full-document formatting only. Range formatting remains unsupported.
+    document_formatting_provider: Some(OneOf::Left(true)),
+
+    // Semantic tokens (semantic highlighting)
+    semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+      legend: crate::semantic::build_legend(),
+      full: Some(SemanticTokensFullOptions::Bool(true)),
+      range: None,
+      work_done_progress_options: WorkDoneProgressOptions::default(),
+    })),
+
+    // Inlay hints
+    inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(InlayHintOptions {
+      work_done_progress_options: WorkDoneProgressOptions::default(),
+      resolve_provider: Some(false),
+    }))),
+
+    // Workspace symbol search (Ctrl+T / Cmd+T)
+    workspace_symbol_provider: Some(OneOf::Left(true)),
+
+    // Document symbols (outline view, breadcrumbs)
+    document_symbol_provider: Some(OneOf::Right(DocumentSymbolOptions {
+      label: Some("Ignis Outline".to_string()),
+      work_done_progress_options: WorkDoneProgressOptions {
+        work_done_progress: Some(false),
+      },
+    })),
+
+    // Find all references
+    references_provider: Some(OneOf::Left(true)),
+
+    // Autocompletion
+    completion_provider: Some(CompletionOptions {
+      trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
+      resolve_provider: Some(false),
+      work_done_progress_options: WorkDoneProgressOptions::default(),
+      all_commit_characters: None,
+      completion_item: None,
+    }),
+
+    ..Default::default()
+  }
+}
+
+fn resolve_formatter_config_for_lsp_file(path: &Path) -> std::result::Result<FormatterConfig, FormatterConfigError> {
+  let parent = path.parent().unwrap_or_else(|| Path::new("."));
+  let project_root = find_project_root(parent).unwrap_or_else(|| parent.to_path_buf());
+  let ignis_toml = project_root.join("ignis.toml");
+  let dedicated_config = project_root.join("ignisfmt.toml");
+
+  let paths = FormatterConfigPaths {
+    project_root,
+    ignis_toml: ignis_toml.is_file().then_some(ignis_toml),
+    dedicated_config: dedicated_config.is_file().then_some(dedicated_config),
+    explicit_config: None,
+  };
+
+  load_formatter_config(&paths, &FormatterCliOverrides::default())
+}
+
+fn formatting_edits_for_open_document(document: Option<LspFormatDocument>) -> Option<Vec<TextEdit>> {
+  let Some(document) = document else {
+    return Some(vec![]);
+  };
+
+  let result: std::result::Result<std::result::Result<Vec<TextEdit>, String>, _> =
+    catch_unwind(AssertUnwindSafe(|| {
+      let config = resolve_formatter_config_for_lsp_file(&document.path).map_err(|error| error.to_string())?;
+      let formatted =
+        format_text(&document.text, &FormatOptions { check: false, config }).map_err(|error| error.to_string())?;
+
+      if formatted == document.text {
+        return Ok(vec![]);
+      }
+
+      Ok(vec![TextEdit {
+        range: document.line_index.full_range(),
+        new_text: formatted,
+      }])
+    }));
+
+  match result {
+    Ok(Ok(edits)) => Some(edits),
+    Ok(Err(error)) => {
+      log(&format!("[formatting] {}", error));
+      Some(vec![])
+    },
+    Err(panic_info) => {
+      let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+        s.to_string()
+      } else if let Some(s) = panic_info.downcast_ref::<String>() {
+        s.clone()
+      } else {
+        "unknown panic".to_string()
+      };
+      log(&format!("[formatting] PANIC: {}", panic_msg));
+      Some(vec![])
+    },
+  }
+}
+
 fn is_file_inside_std_path(
   file_path: &Path,
   std_path: &str,
@@ -523,9 +646,16 @@ fn load_std_manifest(std_path: &str) -> IgnisSTDManifest {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-  use super::{infer_std_path_from_file, std_module_entry_path};
+  use super::{
+    LspFormatDocument, formatting_edits_for_open_document, infer_std_path_from_file, lsp_server_capabilities,
+    std_module_entry_path,
+  };
   use std::path::PathBuf;
   use std::time::{SystemTime, UNIX_EPOCH};
+
+  use tower_lsp::lsp_types::{OneOf, Position, Range};
+
+  use crate::convert::LineIndex;
 
   fn unique_temp_dir(name: &str) -> PathBuf {
     let timestamp = SystemTime::now()
@@ -574,6 +704,109 @@ mod tests {
 
     let _ = std::fs::remove_dir_all(root);
   }
+
+  #[test]
+  fn test_lsp_capabilities_enable_full_document_formatting_only() {
+    let capabilities = lsp_server_capabilities();
+
+    assert_eq!(capabilities.document_formatting_provider, Some(OneOf::Left(true)));
+    assert_eq!(capabilities.document_range_formatting_provider, None);
+  }
+
+  #[test]
+  fn test_formatting_changed_text_returns_one_full_document_edit() {
+    let root = unique_temp_dir("format_changed");
+    let file_path = root.join("main.ign");
+    std::fs::create_dir_all(&root).expect("root directory should be created");
+    std::fs::write(&file_path, "function main(): void {\n  return;\n}\n")
+      .expect("disk file should not affect open-buffer formatting");
+
+    let open_buffer_text = "function main(): void { return; }\n".to_string();
+    let edits = formatting_edits_for_open_document(Some(LspFormatDocument {
+      line_index: LineIndex::new(open_buffer_text.clone()),
+      path: file_path,
+      text: open_buffer_text,
+    }))
+    .expect("formatting should return an edit list");
+
+    assert_eq!(edits.len(), 1);
+    assert_eq!(
+      edits[0].range,
+      Range {
+        start: Position { line: 0, character: 0 },
+        end: Position { line: 1, character: 0 },
+      }
+    );
+    assert_eq!(edits[0].new_text, "function main(): void {\n  return;\n}\n");
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_formatting_unchanged_text_returns_empty_edits() {
+    let root = unique_temp_dir("format_unchanged");
+    let file_path = root.join("main.ign");
+    std::fs::create_dir_all(&root).expect("root directory should be created");
+
+    let open_buffer_text = "function main(): void {\n  return;\n}\n".to_string();
+    let edits = formatting_edits_for_open_document(Some(LspFormatDocument {
+      line_index: LineIndex::new(open_buffer_text.clone()),
+      path: file_path,
+      text: open_buffer_text,
+    }))
+    .expect("formatting should return an edit list");
+
+    assert!(edits.is_empty(), "unchanged formatted text should not produce edits");
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_formatting_missing_open_document_returns_empty_edits() {
+    let edits = formatting_edits_for_open_document(None).expect("missing documents should be successful no-ops");
+
+    assert!(edits.is_empty(), "missing open documents should not produce edits");
+  }
+
+  #[test]
+  fn test_formatting_invalid_input_returns_empty_edits() {
+    let root = unique_temp_dir("format_invalid_input");
+    let file_path = root.join("main.ign");
+    std::fs::create_dir_all(&root).expect("root directory should be created");
+
+    let open_buffer_text = "function main(: void {\n".to_string();
+    let edits = formatting_edits_for_open_document(Some(LspFormatDocument {
+      line_index: LineIndex::new(open_buffer_text.clone()),
+      path: file_path,
+      text: open_buffer_text,
+    }))
+    .expect("formatter errors should be successful no-ops");
+
+    assert!(edits.is_empty(), "invalid formatter input should not interrupt the editor");
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_formatting_config_failure_returns_empty_edits() {
+    let root = unique_temp_dir("format_config_error");
+    let file_path = root.join("main.ign");
+    std::fs::create_dir_all(&root).expect("root directory should be created");
+    std::fs::write(root.join("ignisfmt.toml"), "unknown_key = true\n")
+      .expect("invalid formatter config should be written");
+
+    let open_buffer_text = "function main(): void { return; }\n".to_string();
+    let edits = formatting_edits_for_open_document(Some(LspFormatDocument {
+      line_index: LineIndex::new(open_buffer_text.clone()),
+      path: file_path,
+      text: open_buffer_text,
+    }))
+    .expect("config errors should be successful no-ops");
+
+    assert!(edits.is_empty(), "formatter config errors should not interrupt the editor");
+
+    let _ = std::fs::remove_dir_all(root);
+  }
 }
 
 #[tower_lsp::async_trait]
@@ -596,57 +829,7 @@ impl LanguageServer for Server {
     }
 
     Ok(InitializeResult {
-      capabilities: ServerCapabilities {
-        // Full text sync - client sends entire document on change
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
-
-        // Go to definition
-        definition_provider: Some(OneOf::Left(true)),
-
-        // Hover (type info)
-        hover_provider: Some(HoverProviderCapability::Simple(true)),
-
-        // Semantic tokens (semantic highlighting)
-        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
-          SemanticTokensOptions {
-            legend: crate::semantic::build_legend(),
-            full: Some(SemanticTokensFullOptions::Bool(true)),
-            range: None,
-            work_done_progress_options: WorkDoneProgressOptions::default(),
-          },
-        )),
-
-        // Inlay hints
-        inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(InlayHintOptions {
-          work_done_progress_options: WorkDoneProgressOptions::default(),
-          resolve_provider: Some(false),
-        }))),
-
-        // Workspace symbol search (Ctrl+T / Cmd+T)
-        workspace_symbol_provider: Some(OneOf::Left(true)),
-
-        // Document symbols (outline view, breadcrumbs)
-        document_symbol_provider: Some(OneOf::Right(DocumentSymbolOptions {
-          label: Some("Ignis Outline".to_string()),
-          work_done_progress_options: WorkDoneProgressOptions {
-            work_done_progress: Some(false),
-          },
-        })),
-
-        // Find all references
-        references_provider: Some(OneOf::Left(true)),
-
-        // Autocompletion
-        completion_provider: Some(CompletionOptions {
-          trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
-          resolve_provider: Some(false),
-          work_done_progress_options: WorkDoneProgressOptions::default(),
-          all_commit_characters: None,
-          completion_item: None,
-        }),
-
-        ..Default::default()
-      },
+      capabilities: lsp_server_capabilities(),
       server_info: Some(ServerInfo {
         name: "ignis-lsp".to_string(),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -693,6 +876,22 @@ impl LanguageServer for Server {
 
   async fn shutdown(&self) -> Result<()> {
     Ok(())
+  }
+
+  async fn formatting(
+    &self,
+    params: DocumentFormattingParams,
+  ) -> Result<Option<Vec<TextEdit>>> {
+    let document = {
+      let guard = self.state.open_files.read().await;
+      guard.get(&params.text_document.uri).map(|doc| LspFormatDocument {
+        text: doc.text.clone(),
+        path: doc.path.clone(),
+        line_index: doc.line_index.clone(),
+      })
+    };
+
+    Ok(formatting_edits_for_open_document(document))
   }
 
   async fn did_open(
