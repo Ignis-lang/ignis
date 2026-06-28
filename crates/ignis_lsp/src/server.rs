@@ -12,7 +12,10 @@ use ignis_formatter::{
   FormatOptions, FormatterCliOverrides, FormatterConfig, FormatterConfigError, FormatterConfigPaths, format_text,
   load_formatter_config,
 };
+use ignis_token::token_types::TokenType;
+use ignis_type::definition::{DefinitionId, DefinitionKind, Visibility};
 use ignis_type::file::FileId;
+use ignis_type::span::Span;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -445,6 +448,9 @@ fn lsp_server_capabilities() -> ServerCapabilities {
     // Find all references
     references_provider: Some(OneOf::Left(true)),
 
+    // Conservative rename for locals and parameters
+    rename_provider: Some(OneOf::Left(true)),
+
     // Autocompletion
     completion_provider: Some(CompletionOptions {
       trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
@@ -643,17 +649,396 @@ fn load_std_manifest(std_path: &str) -> IgnisSTDManifest {
     .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SymbolOccurrence {
+  def_id: DefinitionId,
+  span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReferenceOccurrence {
+  def_id: DefinitionId,
+  span: Span,
+  is_declaration: bool,
+}
+
+fn span_contains_offset(
+  span: &Span,
+  byte_offset: u32,
+) -> bool {
+  span.start.0 <= byte_offset && byte_offset <= span.end.0
+}
+
+fn same_span_range(
+  left: &Span,
+  right: &Span,
+) -> bool {
+  left.file == right.file && left.start == right.start && left.end == right.end
+}
+
+fn is_identifier_boundary(byte: Option<u8>) -> bool {
+  !matches!(byte, Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'))
+}
+
+fn identifier_span_in_candidate(
+  output: &AnalyzeProjectOutput,
+  candidate: &Span,
+  name: &str,
+) -> Span {
+  if name.is_empty() || candidate.is_empty() {
+    return candidate.clone();
+  }
+
+  let file = output.source_map.get(&candidate.file);
+  let bytes = file.text.as_bytes();
+  let start = candidate.start.0 as usize;
+  let end = candidate.end.0 as usize;
+
+  if start > end || end > bytes.len() {
+    return candidate.clone();
+  }
+
+  let name_bytes = name.as_bytes();
+  let mut cursor = start;
+
+  while cursor + name_bytes.len() <= end {
+    if &bytes[cursor..cursor + name_bytes.len()] == name_bytes {
+      let before = cursor.checked_sub(1).and_then(|index| bytes.get(index).copied());
+      let after = bytes.get(cursor + name_bytes.len()).copied();
+
+      if is_identifier_boundary(before) && is_identifier_boundary(after) {
+        return Span {
+          file: candidate.file,
+          start: ignis_type::BytePosition(cursor as u32),
+          end: ignis_type::BytePosition((cursor + name_bytes.len()) as u32),
+        };
+      }
+    }
+
+    cursor += 1;
+  }
+
+  candidate.clone()
+}
+
+fn exact_reference_span(
+  output: &AnalyzeProjectOutput,
+  target: DefinitionId,
+  candidate: &Span,
+) -> Span {
+  let def = output.defs.get(&target);
+
+  if same_span_range(candidate, &def.name_span) {
+    return candidate.clone();
+  }
+
+  let Some(name) = output.symbol_names.get(&def.name) else {
+    return candidate.clone();
+  };
+
+  identifier_span_in_candidate(output, candidate, name)
+}
+
+fn symbol_at_position(
+  output: &AnalyzeProjectOutput,
+  file_analysis: &ignis_driver::PerFileAnalysis,
+  byte_offset: u32,
+) -> Option<SymbolOccurrence> {
+  let mut declaration_match = None;
+  let mut declaration_size = u32::MAX;
+
+  for (def_id, def) in output.defs.iter() {
+    if span_contains_offset(&def.name_span, byte_offset) {
+      let size = def.name_span.end.0 - def.name_span.start.0;
+      if size < declaration_size {
+        declaration_size = size;
+        declaration_match = Some(SymbolOccurrence {
+          def_id,
+          span: def.name_span.clone(),
+        });
+      }
+    }
+  }
+
+  if declaration_match.is_some() {
+    return declaration_match;
+  }
+
+  let mut import_match = None;
+  let mut import_size = u32::MAX;
+
+  for (span, def_id) in &file_analysis.import_item_defs {
+    if span_contains_offset(span, byte_offset) {
+      let size = span.end.0 - span.start.0;
+      if size < import_size {
+        import_size = size;
+        import_match = Some(SymbolOccurrence {
+          def_id: *def_id,
+          span: span.clone(),
+        });
+      }
+    }
+  }
+
+  if import_match.is_some() {
+    return import_match;
+  }
+
+  let mut node_match = None;
+  let mut node_size = u32::MAX;
+
+  for (node_id, span) in &file_analysis.node_spans {
+    if span_contains_offset(span, byte_offset) {
+      let size = span.end.0 - span.start.0;
+      if size < node_size {
+        let def_id = file_analysis
+          .node_defs
+          .get(node_id)
+          .or_else(|| file_analysis.resolved_calls.get(node_id))
+          .copied();
+
+        if let Some(def_id) = def_id {
+          node_size = size;
+          node_match = Some(SymbolOccurrence {
+            def_id,
+            span: exact_reference_span(output, def_id, span),
+          });
+        }
+      }
+    }
+  }
+
+  node_match
+}
+
+fn collect_reference_spans(
+  output: &AnalyzeProjectOutput,
+  target: DefinitionId,
+  include_declaration: bool,
+) -> Vec<ReferenceOccurrence> {
+  let def = output.defs.get(&target);
+  let mut occurrences = Vec::new();
+
+  if include_declaration {
+    occurrences.push(ReferenceOccurrence {
+      def_id: target,
+      span: def.name_span.clone(),
+      is_declaration: true,
+    });
+  }
+
+  for file_analysis in output.files.values() {
+    for (span, def_id) in &file_analysis.import_item_defs {
+      if *def_id != target {
+        continue;
+      }
+
+      let exact_span = exact_reference_span(output, target, span);
+      let is_declaration = same_span_range(&exact_span, &def.name_span);
+      if !include_declaration && is_declaration {
+        continue;
+      }
+
+      occurrences.push(ReferenceOccurrence {
+        def_id: target,
+        span: exact_span,
+        is_declaration,
+      });
+    }
+
+    for (node_id, def_id) in file_analysis
+      .node_defs
+      .iter()
+      .chain(file_analysis.resolved_calls.iter())
+    {
+      if *def_id != target {
+        continue;
+      }
+
+      let Some(span) = file_analysis.node_spans.get(node_id) else {
+        continue;
+      };
+
+      let exact_span = exact_reference_span(output, target, span);
+      let is_declaration = same_span_range(&exact_span, &def.name_span);
+      if !include_declaration && is_declaration {
+        continue;
+      }
+
+      occurrences.push(ReferenceOccurrence {
+        def_id: target,
+        span: exact_span,
+        is_declaration,
+      });
+    }
+  }
+
+  occurrences.sort_by(|left, right| {
+    let left_path = output.source_map.get(&left.span.file).path.clone();
+    let right_path = output.source_map.get(&right.span.file).path.clone();
+
+    left_path
+      .cmp(&right_path)
+      .then_with(|| left.span.start.0.cmp(&right.span.start.0))
+      .then_with(|| left.span.end.0.cmp(&right.span.end.0))
+  });
+  occurrences.dedup_by(|left, right| same_span_range(&left.span, &right.span));
+
+  occurrences
+}
+
+fn location_for_span(
+  output: &AnalyzeProjectOutput,
+  span: &Span,
+  line_indexes: &mut HashMap<FileId, LineIndex>,
+) -> Option<Location> {
+  let file = output.source_map.get(&span.file);
+  let uri = Url::from_file_path(&file.path).ok()?;
+  let line_index = line_indexes
+    .entry(span.file)
+    .or_insert_with(|| LineIndex::new(file.text.clone()));
+
+  Some(Location {
+    uri,
+    range: line_index.span_to_range(span),
+  })
+}
+
+fn collect_reference_locations(
+  output: &AnalyzeProjectOutput,
+  target: DefinitionId,
+  include_declaration: bool,
+) -> Vec<Location> {
+  let mut line_indexes = HashMap::new();
+
+  collect_reference_spans(output, target, include_declaration)
+    .into_iter()
+    .filter_map(|occurrence| location_for_span(output, &occurrence.span, &mut line_indexes))
+    .collect()
+}
+
+fn is_real_file_span(span: &Span) -> bool {
+  span.file != FileId::SYNTHETIC
+}
+
+fn is_std_or_virtual_file_path(path: &Path) -> bool {
+  if path.to_string_lossy().starts_with('<') {
+    return true;
+  }
+
+  path.components().any(|component| component.as_os_str() == "std")
+}
+
+fn can_rename_definition(
+  output: &AnalyzeProjectOutput,
+  def_id: DefinitionId,
+) -> bool {
+  let def = output.defs.get(&def_id);
+
+  if def.visibility != Visibility::Private || !is_real_file_span(&def.name_span) || def.name_span.is_empty() {
+    return false;
+  }
+
+  if !matches!(def.kind, DefinitionKind::Variable(_) | DefinitionKind::Parameter(_)) {
+    return false;
+  }
+
+  let file = output.source_map.get(&def.name_span.file);
+  !is_std_or_virtual_file_path(&file.path)
+}
+
+fn validate_rename_name(name: &str) -> bool {
+  let mut chars = name.chars();
+
+  let Some(first) = chars.next() else {
+    return false;
+  };
+
+  if !(first == '_' || first.is_ascii_alphabetic()) {
+    return false;
+  }
+
+  if !chars.all(|character| character == '_' || character.is_ascii_alphanumeric()) {
+    return false;
+  }
+
+  TokenType::get_keyword_from_string(name).is_none()
+}
+
+fn span_text_matches_name(
+  file_text: &str,
+  span: &Span,
+  name: &str,
+) -> bool {
+  let start = span.start.0 as usize;
+  let end = span.end.0 as usize;
+
+  start <= end && end <= file_text.len() && file_text.get(start..end) == Some(name)
+}
+
+fn rename_workspace_edit(
+  output: &AnalyzeProjectOutput,
+  target: DefinitionId,
+  new_name: &str,
+) -> Option<WorkspaceEdit> {
+  if !validate_rename_name(new_name) || !can_rename_definition(output, target) {
+    return None;
+  }
+
+  let def = output.defs.get(&target);
+  let current_name = output.symbol_names.get(&def.name)?;
+  let mut line_indexes = HashMap::new();
+  let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+
+  for occurrence in collect_reference_spans(output, target, true) {
+    if !is_real_file_span(&occurrence.span) {
+      return None;
+    }
+
+    let file = output.source_map.get(&occurrence.span.file);
+    if is_std_or_virtual_file_path(&file.path) || !span_text_matches_name(&file.text, &occurrence.span, current_name) {
+      return None;
+    }
+
+    let uri = Url::from_file_path(&file.path).ok()?;
+    let line_index = line_indexes
+      .entry(occurrence.span.file)
+      .or_insert_with(|| LineIndex::new(file.text.clone()));
+
+    changes.entry(uri).or_default().push(TextEdit {
+      range: line_index.span_to_range(&occurrence.span),
+      new_text: new_name.to_string(),
+    });
+  }
+
+  if changes.is_empty() {
+    return None;
+  }
+
+  Some(WorkspaceEdit {
+    changes: Some(changes),
+    document_changes: None,
+    change_annotations: None,
+  })
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
   use super::{
-    LspFormatDocument, formatting_edits_for_open_document, infer_std_path_from_file, lsp_server_capabilities,
-    std_module_entry_path,
+    LspFormatDocument, can_rename_definition, collect_reference_locations, collect_reference_spans,
+    formatting_edits_for_open_document, infer_std_path_from_file, load_std_manifest, lsp_server_capabilities,
+    rename_workspace_edit, std_module_entry_path, symbol_at_position, validate_rename_name,
   };
+  use std::collections::{HashMap, HashSet};
   use std::path::PathBuf;
   use std::time::{SystemTime, UNIX_EPOCH};
 
-  use tower_lsp::lsp_types::{OneOf, Position, Range};
+  use ignis_config::IgnisConfig;
+  use ignis_driver::{AnalysisOptions, AnalyzeProjectOutput};
+  use ignis_type::file::FileId;
+  use tower_lsp::lsp_types::{Location, OneOf, Position, Range, TextEdit, WorkspaceEdit};
+  use url::Url;
 
   use crate::convert::LineIndex;
 
@@ -664,6 +1049,430 @@ mod tests {
       .as_nanos();
 
     std::env::temp_dir().join(format!("ignis_lsp_{}_{}_{}", name, std::process::id(), timestamp))
+  }
+
+  fn analyze_temp_source(
+    name: &str,
+    source: &str,
+  ) -> (PathBuf, PathBuf, AnalyzeProjectOutput, FileId) {
+    let root = unique_temp_dir(name);
+    let file_path = root.join("main.ign");
+    std::fs::create_dir_all(&root).expect("test root should be created");
+    std::fs::write(&file_path, source).expect("test source should be written");
+
+    let config = IgnisConfig::default();
+    let output =
+      ignis_driver::analyze_project_with_options(&config, &file_path.to_string_lossy(), AnalysisOptions::default());
+    assert!(output.diagnostics.is_empty(), "test source should analyze cleanly");
+
+    let file_id = output
+      .source_map
+      .lookup_by_path(&file_path)
+      .expect("analyzed file should be in source map");
+
+    (root, file_path, output, file_id)
+  }
+
+  fn analyze_temp_sources(
+    name: &str,
+    files: &[(&str, &str)],
+    entry: &str,
+  ) -> (PathBuf, HashMap<String, PathBuf>, AnalyzeProjectOutput) {
+    let root = unique_temp_dir(name);
+    std::fs::create_dir_all(&root).expect("test root should be created");
+
+    let mut paths = HashMap::new();
+    for (relative, source) in files {
+      let file_path = root.join(relative);
+      if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent).expect("test file parent should be created");
+      }
+      std::fs::write(&file_path, source).expect("test source should be written");
+      paths.insert((*relative).to_string(), file_path);
+    }
+
+    let entry_path = root.join(entry);
+    let config = IgnisConfig::default();
+    let output =
+      ignis_driver::analyze_project_with_options(&config, &entry_path.to_string_lossy(), AnalysisOptions::default());
+    assert!(output.diagnostics.is_empty(), "test sources should analyze cleanly");
+
+    (root, paths, output)
+  }
+
+  fn repo_std_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .parent()
+      .and_then(|crates_dir| crates_dir.parent())
+      .expect("ignis_lsp should live under crates/ignis_lsp")
+      .join("std")
+  }
+
+  fn analyze_temp_source_with_std(
+    name: &str,
+    source: &str,
+  ) -> (PathBuf, PathBuf, AnalyzeProjectOutput, FileId) {
+    let root = unique_temp_dir(name);
+    let file_path = root.join("main.ign");
+    std::fs::create_dir_all(&root).expect("test root should be created");
+    std::fs::write(&file_path, source).expect("test source should be written");
+
+    let std_path = repo_std_path();
+    let mut config = IgnisConfig {
+      std_path: std_path.to_string_lossy().to_string(),
+      std: true,
+      auto_load_std: true,
+      ..IgnisConfig::default()
+    };
+    config.manifest = load_std_manifest(&config.std_path);
+
+    let output =
+      ignis_driver::analyze_project_with_options(&config, &file_path.to_string_lossy(), AnalysisOptions::default());
+    assert!(output.diagnostics.is_empty(), "std import source should analyze cleanly");
+
+    let file_id = output
+      .source_map
+      .lookup_by_path(&file_path)
+      .expect("analyzed file should be in source map");
+
+    (root, file_path, output, file_id)
+  }
+
+  fn analyze_temp_source_with_override(
+    name: &str,
+    disk_source: &str,
+    override_source: &str,
+  ) -> (PathBuf, PathBuf, AnalyzeProjectOutput, FileId) {
+    let root = unique_temp_dir(name);
+    let file_path = root.join("main.ign");
+    std::fs::create_dir_all(&root).expect("test root should be created");
+    std::fs::write(&file_path, disk_source).expect("disk source should be written");
+
+    let mut file_overrides = HashMap::new();
+    file_overrides.insert(file_path.clone(), override_source.to_string());
+
+    let config = IgnisConfig::default();
+    let output = ignis_driver::analyze_project_with_options(
+      &config,
+      &file_path.to_string_lossy(),
+      AnalysisOptions {
+        file_overrides,
+        project: None,
+      },
+    );
+    assert!(output.diagnostics.is_empty(), "override source should analyze cleanly");
+
+    let file_id = output
+      .source_map
+      .lookup_by_path(&file_path)
+      .expect("analyzed override file should be in source map");
+
+    (root, file_path, output, file_id)
+  }
+
+  fn references_at_marker(
+    output: &AnalyzeProjectOutput,
+    file_id: FileId,
+    marker_source: &str,
+    marker: &str,
+    include_declaration: bool,
+  ) -> Vec<Location> {
+    let byte_offset = marker_source
+      .find(marker)
+      .unwrap_or_else(|| panic!("marker {marker:?} should exist")) as u32;
+    let file_analysis = output.file_analysis(&file_id).expect("file analysis should exist");
+    let symbol = symbol_at_position(output, file_analysis, byte_offset).expect("symbol should resolve at marker");
+    collect_reference_locations(output, symbol.def_id, include_declaration)
+  }
+
+  fn reference_texts(
+    output: &AnalyzeProjectOutput,
+    file_id: FileId,
+    marker_source: &str,
+    marker: &str,
+    include_declaration: bool,
+  ) -> Vec<String> {
+    let byte_offset = marker_source
+      .find(marker)
+      .unwrap_or_else(|| panic!("marker {marker:?} should exist")) as u32;
+    let file_analysis = output.file_analysis(&file_id).expect("file analysis should exist");
+    let symbol = symbol_at_position(output, file_analysis, byte_offset).expect("symbol should resolve at marker");
+
+    collect_reference_spans(output, symbol.def_id, include_declaration)
+      .into_iter()
+      .map(|occurrence| {
+        let file = output.source_map.get(&occurrence.span.file);
+        file.text[occurrence.span.start.0 as usize..occurrence.span.end.0 as usize].to_string()
+      })
+      .collect()
+  }
+
+  fn assert_unique_locations(locations: &[Location]) {
+    let mut seen = HashSet::new();
+
+    for location in locations {
+      let key = (
+        location.uri.clone(),
+        location.range.start.line,
+        location.range.start.character,
+        location.range.end.line,
+        location.range.end.character,
+      );
+      assert!(seen.insert(key), "reference locations should be deduped");
+    }
+  }
+
+  fn rename_edit_at_marker(
+    output: &AnalyzeProjectOutput,
+    file_id: FileId,
+    marker_source: &str,
+    marker: &str,
+    new_name: &str,
+  ) -> Option<WorkspaceEdit> {
+    let byte_offset = marker_source
+      .find(marker)
+      .unwrap_or_else(|| panic!("marker {marker:?} should exist")) as u32;
+    let file_analysis = output.file_analysis(&file_id).expect("file analysis should exist");
+    let symbol = symbol_at_position(output, file_analysis, byte_offset)?;
+    rename_workspace_edit(output, symbol.def_id, new_name)
+  }
+
+  fn edits_for_file(
+    edit: &WorkspaceEdit,
+    file_path: &PathBuf,
+  ) -> Vec<TextEdit> {
+    let uri = Url::from_file_path(file_path).expect("test path should convert to URI");
+    edit
+      .changes
+      .as_ref()
+      .and_then(|changes| changes.get(&uri))
+      .cloned()
+      .unwrap_or_default()
+  }
+
+  #[test]
+  fn test_references_helpers_honor_include_declaration_for_local_variables_and_parameters() {
+    let source = "function add(value: i32): i32 {\n  let total: i32 = value + value;\n  return total;\n}\n";
+    let (root, _, output, file_id) = analyze_temp_source("references_include_declaration", source);
+
+    let local_without_declaration = reference_texts(&output, file_id, source, "total;", false);
+    assert_eq!(local_without_declaration, vec!["total"]);
+
+    let local_with_declaration = reference_texts(&output, file_id, source, "total;", true);
+    assert_eq!(local_with_declaration, vec!["total", "total"]);
+
+    let parameter_without_declaration = reference_texts(&output, file_id, source, "value +", false);
+    assert_eq!(parameter_without_declaration, vec!["value", "value"]);
+
+    let parameter_with_declaration = reference_texts(&output, file_id, source, "value +", true);
+    assert_eq!(parameter_with_declaration, vec!["value", "value", "value"]);
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_references_helpers_dedupe_and_return_exact_identifier_locations() {
+    let source = "function echo(value: i32): i32 {\n  let valueCopy: i32 = value;\n  return echo(valueCopy);\n}\n";
+    let (root, file_path, output, file_id) = analyze_temp_source("references_exact_ranges", source);
+
+    let locations = references_at_marker(&output, file_id, source, "valueCopy);", true);
+    assert_eq!(
+      locations.len(),
+      2,
+      "declaration and call argument should be returned exactly once"
+    );
+    assert_unique_locations(&locations);
+
+    let uri = Url::from_file_path(&file_path).expect("test path should convert to URI");
+    assert_eq!(locations[0].uri, uri);
+    assert_eq!(locations[0].range, Range::new(Position::new(1, 6), Position::new(1, 15)));
+    assert_eq!(locations[1].range, Range::new(Position::new(2, 14), Position::new(2, 23)));
+
+    let function_locations = references_at_marker(&output, file_id, source, "echo(valueCopy", false);
+    assert_eq!(
+      function_locations.len(),
+      1,
+      "call reference should be returned without declaration"
+    );
+    assert_eq!(
+      function_locations[0].range,
+      Range::new(Position::new(2, 9), Position::new(2, 13))
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_references_helpers_use_open_buffer_file_overrides() {
+    let disk_source = "function main(): i32 {\n  let value: i32 = 1;\n  return value;\n}\n";
+    let override_source = "function main(): i32 {\n  let value: i32 = 1;\n  return value + value;\n}\n";
+    let (root, _, output, file_id) =
+      analyze_temp_source_with_override("references_open_buffer_override", disk_source, override_source);
+
+    let texts = reference_texts(&output, file_id, override_source, "value +", true);
+    assert_eq!(texts, vec!["value", "value", "value"]);
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_references_helpers_collect_multi_file_workspace_references() {
+    let helper_source = "export function helper(value: i32): i32 {\n  return value;\n}\n";
+    let main_source =
+      "import helper from \"./helper\";\n\nfunction main(): i32 {\n  return helper(1) + helper(2);\n}\n";
+    let (root, paths, output) = analyze_temp_sources(
+      "references_multi_file",
+      &[("helper.ign", helper_source), ("main.ign", main_source)],
+      "main.ign",
+    );
+    let main_path = paths.get("main.ign").expect("main path should exist");
+    let helper_path = paths.get("helper.ign").expect("helper path should exist");
+    let main_file_id = output
+      .source_map
+      .lookup_by_path(main_path)
+      .expect("main file should be in source map");
+
+    let locations = references_at_marker(&output, main_file_id, main_source, "helper(1)", true);
+    assert_eq!(locations.len(), 4, "declaration, import, and two calls should be returned");
+    assert_unique_locations(&locations);
+
+    let helper_uri = Url::from_file_path(helper_path).expect("helper path should convert to URI");
+    let main_uri = Url::from_file_path(main_path).expect("main path should convert to URI");
+    assert_eq!(locations[0].uri, helper_uri);
+    assert_eq!(locations[0].range, Range::new(Position::new(0, 16), Position::new(0, 22)));
+    assert_eq!(locations[1].uri, main_uri);
+    assert_eq!(locations[1].range, Range::new(Position::new(0, 7), Position::new(0, 13)));
+    assert_eq!(locations[2].range, Range::new(Position::new(3, 9), Position::new(3, 15)));
+    assert_eq!(locations[3].range, Range::new(Position::new(3, 21), Position::new(3, 27)));
+
+    let without_declaration = references_at_marker(&output, main_file_id, main_source, "helper(1)", false);
+    assert_eq!(
+      without_declaration.len(),
+      3,
+      "import and two calls should remain without declaration"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_rename_helpers_return_exact_edits_for_local_variables_and_parameters() {
+    let source = "function add(value: i32): i32 {\n  let total: i32 = value + value;\n  return total;\n}\n";
+    let (root, file_path, output, file_id) = analyze_temp_source("rename_locals_parameters", source);
+
+    let local_edit = rename_edit_at_marker(&output, file_id, source, "total;", "sum")
+      .expect("local variable rename should produce an edit");
+    let local_edits = edits_for_file(&local_edit, &file_path);
+    assert_eq!(local_edits.len(), 2, "local declaration and reference should be edited");
+    assert_eq!(local_edits[0].range, Range::new(Position::new(1, 6), Position::new(1, 11)));
+    assert_eq!(local_edits[1].range, Range::new(Position::new(2, 9), Position::new(2, 14)));
+    assert!(local_edits.iter().all(|edit| edit.new_text == "sum"));
+
+    let parameter_edit = rename_edit_at_marker(&output, file_id, source, "value +", "input")
+      .expect("parameter rename should produce an edit");
+    let parameter_edits = edits_for_file(&parameter_edit, &file_path);
+    assert_eq!(
+      parameter_edits.len(),
+      3,
+      "parameter declaration and both references should be edited"
+    );
+    assert_eq!(parameter_edits[0].range, Range::new(Position::new(0, 13), Position::new(0, 18)));
+    assert_eq!(parameter_edits[1].range, Range::new(Position::new(1, 19), Position::new(1, 24)));
+    assert_eq!(parameter_edits[2].range, Range::new(Position::new(1, 27), Position::new(1, 32)));
+    assert!(parameter_edits.iter().all(|edit| edit.new_text == "input"));
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_rename_helpers_reject_unsupported_targets_without_edits() {
+    let source = "record User {\n  public name: i32;\n}\n\nenum Status {\n  READY,\n}\n\nexport function identity(value: i32): i32 {\n  return value;\n}\n";
+    let (root, _, output, file_id) = analyze_temp_source("rename_reject_unsupported", source);
+    let file_analysis = output.file_analysis(&file_id).expect("file analysis should exist");
+
+    for marker in ["User", "name", "READY", "identity"] {
+      let byte_offset = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("marker {marker:?} should exist")) as u32;
+      let symbol = symbol_at_position(&output, file_analysis, byte_offset).expect("unsupported symbol should resolve");
+      assert!(
+        !can_rename_definition(&output, symbol.def_id),
+        "{marker:?} should be rejected by conservative rename policy"
+      );
+      assert_eq!(rename_workspace_edit(&output, symbol.def_id, "renamed"), None);
+    }
+
+    assert_eq!(rename_edit_at_marker(&output, file_id, source, "record", "renamed"), None);
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_rename_helpers_reject_imports_and_std_symbols_without_edits() {
+    let helper_source = "export function helper(value: i32): i32 {\n  return value;\n}\n";
+    let main_source = "import helper from \"./helper\";\n\nfunction main(): i32 {\n  return helper(1);\n}\n";
+    let (root, paths, output) = analyze_temp_sources(
+      "rename_reject_imports",
+      &[("helper.ign", helper_source), ("main.ign", main_source)],
+      "main.ign",
+    );
+    let main_path = paths.get("main.ign").expect("main path should exist");
+    let main_file_id = output
+      .source_map
+      .lookup_by_path(main_path)
+      .expect("main file should be in source map");
+
+    assert_eq!(
+      rename_edit_at_marker(&output, main_file_id, main_source, "helper from", "renamed"),
+      None,
+      "import items should not be renamed by the conservative rename policy"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+
+    let std_source = "import Io from \"std::io\";\n\nfunction main(): void {\n  Io::println(\"hello\");\n}\n";
+    let (std_root, _, std_output, std_file_id) = analyze_temp_source_with_std("rename_reject_std", std_source);
+    assert_eq!(
+      rename_edit_at_marker(&std_output, std_file_id, std_source, "Io from", "Output"),
+      None,
+      "std import symbols should not be renamed"
+    );
+    assert_eq!(
+      rename_edit_at_marker(&std_output, std_file_id, std_source, "println", "printLine"),
+      None,
+      "std member references should not be renamed"
+    );
+
+    let _ = std::fs::remove_dir_all(std_root);
+  }
+
+  #[test]
+  fn test_rename_helpers_reject_invalid_names_and_leave_same_spelling_symbols_unrelated() {
+    assert!(validate_rename_name("renamed_value"));
+    for invalid in ["", "1value", "value-name", "function"] {
+      assert!(
+        !validate_rename_name(invalid),
+        "{invalid:?} should not be a valid rename target"
+      );
+    }
+
+    let source = "function first(value: i32): i32 {\n  return value;\n}\n\nfunction second(value: i32): i32 {\n  return value;\n}\n";
+    let (root, file_path, output, file_id) = analyze_temp_source("rename_same_spelling", source);
+
+    let edit = rename_edit_at_marker(&output, file_id, source, "value;\n}\n\nfunction", "left")
+      .expect("parameter rename should produce an edit");
+    let edits = edits_for_file(&edit, &file_path);
+    assert_eq!(edits.len(), 2, "only the first parameter declaration and use should be edited");
+    assert_eq!(edits[0].range, Range::new(Position::new(0, 15), Position::new(0, 20)));
+    assert_eq!(edits[1].range, Range::new(Position::new(1, 9), Position::new(1, 14)));
+    assert!(edits.iter().all(|edit| edit.new_text == "left"));
+
+    assert_eq!(
+      rename_edit_at_marker(&output, file_id, source, "value;\n}\n\nfunction", "1value"),
+      None
+    );
+
+    let _ = std::fs::remove_dir_all(root);
   }
 
   #[test]
@@ -711,6 +1520,7 @@ mod tests {
 
     assert_eq!(capabilities.document_formatting_provider, Some(OneOf::Left(true)));
     assert_eq!(capabilities.document_range_formatting_provider, None);
+    assert_eq!(capabilities.rename_provider, Some(OneOf::Left(true)));
   }
 
   #[test]
@@ -1713,132 +2523,49 @@ impl LanguageServer for Server {
 
     let byte_offset = line_index.offset(position);
 
-    // Find the definition at cursor position
-    // First check import_item_defs
-    let target_def_id = {
-      let mut found = None;
-      let mut smallest_size = u32::MAX;
-
-      for (span, def_id) in &file_analysis.import_item_defs {
-        if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
-          let size = span.end.0 - span.start.0;
-          if size < smallest_size {
-            smallest_size = size;
-            found = Some(*def_id);
-          }
-        }
-      }
-
-      found
-    };
-
-    // If not found in imports, check node_defs
-    let target_def_id = target_def_id.or_else(|| {
-      let mut found_node = None;
-      let mut smallest_span_size = u32::MAX;
-
-      for (node_id, span) in &file_analysis.node_spans {
-        if span.start.0 <= byte_offset && byte_offset <= span.end.0 {
-          let span_size = span.end.0 - span.start.0;
-          if span_size < smallest_span_size {
-            smallest_span_size = span_size;
-            found_node = Some(*node_id);
-          }
-        }
-      }
-
-      found_node.and_then(|node_id| {
-        file_analysis
-          .node_defs
-          .get(&node_id)
-          .or_else(|| file_analysis.resolved_calls.get(&node_id))
-          .cloned()
-      })
-    });
-
-    let Some(target_def_id) = target_def_id else {
+    let Some(symbol) = symbol_at_position(&output, file_analysis, byte_offset) else {
       return Ok(None);
     };
 
-    // Collect all references to this definition
-    let mut locations: Vec<Location> = Vec::new();
+    Ok(Some(collect_reference_locations(&output, symbol.def_id, include_declaration)))
+  }
 
-    // Cache LineIndex per FileId
-    let mut line_indexes: HashMap<ignis_type::file::FileId, LineIndex> = HashMap::new();
+  async fn rename(
+    &self,
+    params: RenameParams,
+  ) -> Result<Option<WorkspaceEdit>> {
+    let uri = &params.text_document_position.text_document.uri;
+    let position = params.text_document_position.position;
 
-    // Include the declaration itself if requested
-    if include_declaration {
-      let def = output.defs.get(&target_def_id);
-      let file = output.source_map.get(&def.span.file);
+    let Some((output, path_str, _)) = self.get_analysis(uri).await else {
+      return Ok(None);
+    };
 
-      if let Ok(def_uri) = Url::from_file_path(&file.path) {
-        let li = line_indexes
-          .entry(def.span.file)
-          .or_insert_with(|| LineIndex::new(file.text.clone()));
-        let range = li.span_to_range(&def.name_span);
-        locations.push(Location { uri: def_uri, range });
-      }
-    }
+    let line_index = {
+      let guard = self.state.open_files.read().await;
 
-    for file_analysis in output.files.values() {
-      for (node_id, def_id) in &file_analysis.node_defs {
-        if *def_id != target_def_id {
-          continue;
-        }
+      let Some(doc) = guard.get(uri) else {
+        return Ok(None);
+      };
 
-        if let Some(span) = file_analysis.node_spans.get(node_id) {
-          let file = output.source_map.get(&span.file);
+      doc.line_index.clone()
+    };
 
-          if let Ok(ref_uri) = Url::from_file_path(&file.path) {
-            let li = line_indexes
-              .entry(span.file)
-              .or_insert_with(|| LineIndex::new(file.text.clone()));
-            let range = li.span_to_range(span);
-            locations.push(Location { uri: ref_uri, range });
-          }
-        }
-      }
+    let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
+      return Ok(None);
+    };
 
-      for (node_id, def_id) in &file_analysis.resolved_calls {
-        if *def_id != target_def_id {
-          continue;
-        }
+    let Some(file_analysis) = output.file_analysis(&file_id) else {
+      return Ok(None);
+    };
 
-        if let Some(span) = file_analysis.node_spans.get(node_id) {
-          let file = output.source_map.get(&span.file);
+    let byte_offset = line_index.offset(position);
 
-          if let Ok(ref_uri) = Url::from_file_path(&file.path) {
-            let li = line_indexes
-              .entry(span.file)
-              .or_insert_with(|| LineIndex::new(file.text.clone()));
-            let range = li.span_to_range(span);
-            locations.push(Location { uri: ref_uri, range });
-          }
-        }
-      }
+    let Some(symbol) = symbol_at_position(&output, file_analysis, byte_offset) else {
+      return Ok(None);
+    };
 
-      for (span, def_id) in &file_analysis.import_item_defs {
-        if *def_id != target_def_id {
-          continue;
-        }
-
-        let file = output.source_map.get(&span.file);
-
-        if let Ok(ref_uri) = Url::from_file_path(&file.path) {
-          let li = line_indexes
-            .entry(span.file)
-            .or_insert_with(|| LineIndex::new(file.text.clone()));
-          let range = li.span_to_range(span);
-          locations.push(Location { uri: ref_uri, range });
-        }
-      }
-    }
-
-    if locations.is_empty() {
-      Ok(None)
-    } else {
-      Ok(Some(locations))
-    }
+    Ok(rename_workspace_edit(&output, symbol.def_id, &params.new_name))
   }
 
   async fn completion(
