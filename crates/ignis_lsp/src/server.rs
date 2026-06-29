@@ -16,6 +16,7 @@ use ignis_token::token_types::TokenType;
 use ignis_type::definition::{DefinitionId, DefinitionKind, Visibility};
 use ignis_type::file::FileId;
 use ignis_type::span::Span;
+use ignis_type::BytePosition;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -33,6 +34,12 @@ use crate::state::LspState;
 struct LspFormatDocument {
   text: String,
   path: PathBuf,
+  line_index: LineIndex,
+}
+
+#[derive(Clone)]
+struct LspCodeActionDocument {
+  text: String,
   line_index: LineIndex,
 }
 
@@ -420,6 +427,13 @@ fn lsp_server_capabilities() -> ServerCapabilities {
     // Full-document formatting only. Range formatting remains unsupported.
     document_formatting_provider: Some(OneOf::Left(true)),
 
+    // QuickFix-only code actions. Currently limited to safe unused single-item import removal.
+    code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
+      code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+      resolve_provider: Some(false),
+      work_done_progress_options: WorkDoneProgressOptions::default(),
+    })),
+
     // Semantic tokens (semantic highlighting)
     semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
       legend: crate::semantic::build_legend(),
@@ -519,6 +533,138 @@ fn formatting_edits_for_open_document(document: Option<LspFormatDocument>) -> Op
       Some(vec![])
     },
   }
+}
+
+fn code_actions_for_open_document(
+  uri: &Url,
+  document: Option<LspCodeActionDocument>,
+  diagnostics: &[Diagnostic],
+) -> Vec<CodeActionOrCommand> {
+  if uri
+    .to_file_path()
+    .ok()
+    .and_then(|path| path.extension().map(|extension| extension == "ign"))
+    .unwrap_or(false)
+    == false
+  {
+    return vec![];
+  }
+
+  let Some(document) = document else {
+    return vec![];
+  };
+
+  diagnostics
+    .iter()
+    .filter_map(|diagnostic| remove_unused_import_action(uri, &document, diagnostic))
+    .collect()
+}
+
+fn remove_unused_import_action(
+  uri: &Url,
+  document: &LspCodeActionDocument,
+  diagnostic: &Diagnostic,
+) -> Option<CodeActionOrCommand> {
+  if diagnostic.code.as_ref()? != &NumberOrString::String("A0123".to_string()) {
+    return None;
+  }
+
+  let diagnostic_start = document.line_index.offset(diagnostic.range.start) as usize;
+  let diagnostic_end = document.line_index.offset(diagnostic.range.end) as usize;
+  if diagnostic_start >= diagnostic_end || diagnostic_end > document.text.len() {
+    return None;
+  }
+
+  let (line_start, line_end_without_newline, line_end_with_newline) =
+    containing_line_bounds(&document.text, diagnostic_start)?;
+  if diagnostic_end > line_end_with_newline {
+    return None;
+  }
+
+  let line = &document.text[line_start..line_end_without_newline];
+  let leading_whitespace = line.len() - line.trim_start().len();
+  let trimmed = line.trim();
+  let trimmed_start = line_start + leading_whitespace;
+  if !trimmed.starts_with("import ") || !trimmed.ends_with(';') {
+    return None;
+  }
+
+  let from_matches: Vec<_> = trimmed.match_indices(" from ").collect();
+  if from_matches.len() != 1 {
+    return None;
+  }
+
+  let from_index = from_matches[0].0;
+  let imported_item = trimmed["import ".len()..from_index].trim();
+  if imported_item.is_empty()
+    || imported_item.contains(',')
+    || imported_item.contains('{')
+    || imported_item.contains('}')
+    || imported_item.split_whitespace().count() != 1
+  {
+    return None;
+  }
+
+  let statement_start = trimmed_start;
+  let statement_end = statement_start + trimmed.len();
+  if diagnostic_start < statement_start || diagnostic_end > statement_end {
+    return None;
+  }
+
+  let (start_line, start_character) = document.line_index.line_col_utf16(BytePosition(line_start as u32));
+  let (end_line, end_character) = document
+    .line_index
+    .line_col_utf16(BytePosition(line_end_with_newline as u32));
+  let delete_range = Range {
+    start: Position {
+      line: start_line,
+      character: start_character,
+    },
+    end: Position {
+      line: end_line,
+      character: end_character,
+    },
+  };
+
+  let mut changes = HashMap::new();
+  changes.insert(
+    uri.clone(),
+    vec![TextEdit {
+      range: delete_range,
+      new_text: String::new(),
+    }],
+  );
+
+  Some(CodeActionOrCommand::CodeAction(CodeAction {
+    title: "Remove unused import".to_string(),
+    kind: Some(CodeActionKind::QUICKFIX),
+    diagnostics: Some(vec![diagnostic.clone()]),
+    edit: Some(WorkspaceEdit {
+      changes: Some(changes),
+      document_changes: None,
+      change_annotations: None,
+    }),
+    is_preferred: None,
+    disabled: None,
+    command: None,
+    data: None,
+  }))
+}
+
+fn containing_line_bounds(
+  text: &str,
+  byte_offset: usize,
+) -> Option<(usize, usize, usize)> {
+  if byte_offset > text.len() || !text.is_char_boundary(byte_offset) {
+    return None;
+  }
+
+  let line_start = text[..byte_offset].rfind('\n').map_or(0, |index| index + 1);
+  let relative_line_end = text[byte_offset..].find('\n');
+  let line_end_without_newline = relative_line_end.map_or(text.len(), |index| byte_offset + index);
+  let line_end_with_newline = relative_line_end.map_or(line_end_without_newline, |index| byte_offset + index + 1);
+
+  Some((line_start, line_end_without_newline, line_end_with_newline))
 }
 
 fn is_file_inside_std_path(
@@ -1026,9 +1172,10 @@ fn rename_workspace_edit(
 #[allow(clippy::items_after_test_module)]
 mod tests {
   use super::{
-    LspFormatDocument, can_rename_definition, collect_reference_locations, collect_reference_spans,
-    document_symbols_for_analysis, formatting_edits_for_open_document, infer_std_path_from_file, load_std_manifest,
-    lsp_server_capabilities, rename_workspace_edit, std_module_entry_path, symbol_at_position, validate_rename_name,
+    LspCodeActionDocument, LspFormatDocument, can_rename_definition, code_actions_for_open_document,
+    collect_reference_locations, collect_reference_spans, document_symbols_for_analysis,
+    formatting_edits_for_open_document, infer_std_path_from_file, load_std_manifest, lsp_server_capabilities,
+    rename_workspace_edit, std_module_entry_path, symbol_at_position, validate_rename_name,
     workspace_symbols_for_analysis,
   };
   use std::collections::{HashMap, HashSet};
@@ -1038,7 +1185,10 @@ mod tests {
   use ignis_config::IgnisConfig;
   use ignis_driver::{AnalysisOptions, AnalyzeProjectOutput};
   use ignis_type::file::FileId;
-  use tower_lsp::lsp_types::{Location, OneOf, Position, Range, SymbolKind, TextEdit, WorkspaceEdit};
+  use tower_lsp::lsp_types::{
+    CodeActionOrCommand, CodeActionProviderCapability, Diagnostic, Location, NumberOrString, OneOf, Position, Range,
+    SymbolKind, TextEdit, WorkspaceEdit,
+  };
   use url::Url;
 
   use crate::convert::LineIndex;
@@ -1524,6 +1674,148 @@ mod tests {
     assert_eq!(capabilities.rename_provider, Some(OneOf::Left(true)));
     assert!(capabilities.document_symbol_provider.is_some());
     assert_eq!(capabilities.workspace_symbol_provider, Some(OneOf::Left(true)));
+
+    let code_action_options = match capabilities.code_action_provider {
+      Some(CodeActionProviderCapability::Options(options)) => options,
+      other => panic!("expected quickfix code action options, got {other:?}"),
+    };
+    assert_eq!(code_action_options.resolve_provider, Some(false));
+    assert_eq!(
+      code_action_options.code_action_kinds,
+      Some(vec![tower_lsp::lsp_types::CodeActionKind::QUICKFIX])
+    );
+  }
+
+  fn diagnostic_with_code(
+    code: &str,
+    range: Range,
+  ) -> Diagnostic {
+    Diagnostic {
+      range,
+      code: Some(NumberOrString::String(code.to_string())),
+      message: "unused import".to_string(),
+      ..Diagnostic::default()
+    }
+  }
+
+  fn code_action_document(text: &str) -> LspCodeActionDocument {
+    LspCodeActionDocument {
+      text: text.to_string(),
+      line_index: LineIndex::new(text.to_string()),
+    }
+  }
+
+  fn extract_single_code_action(actions: Vec<CodeActionOrCommand>) -> tower_lsp::lsp_types::CodeAction {
+    assert_eq!(actions.len(), 1, "expected exactly one code action");
+    match actions.into_iter().next().expect("action should exist") {
+      CodeActionOrCommand::CodeAction(action) => action,
+      CodeActionOrCommand::Command(command) => panic!("expected code action, got command {command:?}"),
+    }
+  }
+
+  #[test]
+  fn test_code_action_removes_safe_single_item_unused_import() {
+    let uri = Url::parse("file:///tmp/main.ign").expect("test URI should parse");
+    let text = "import Foo from \"./foo\";\nfunction main(): void {\n  return;\n}\n";
+    let diagnostics = vec![diagnostic_with_code(
+      "A0123",
+      Range {
+        start: Position { line: 0, character: 7 },
+        end: Position { line: 0, character: 10 },
+      },
+    )];
+
+    let action = extract_single_code_action(code_actions_for_open_document(
+      &uri,
+      Some(code_action_document(text)),
+      &diagnostics,
+    ));
+
+    assert_eq!(action.title, "Remove unused import");
+    assert_eq!(action.kind, Some(tower_lsp::lsp_types::CodeActionKind::QUICKFIX));
+    assert_eq!(action.diagnostics, Some(diagnostics));
+    let changes = action
+      .edit
+      .expect("quickfix should include an edit")
+      .changes
+      .expect("quickfix should use workspace changes");
+    assert_eq!(changes.len(), 1);
+    let edits = changes.get(&uri).expect("edit should target requested URI");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(
+      edits[0].range,
+      Range {
+        start: Position { line: 0, character: 0 },
+        end: Position { line: 1, character: 0 },
+      }
+    );
+    assert_eq!(edits[0].new_text, "");
+  }
+
+  #[test]
+  fn test_code_action_returns_no_action_for_unsafe_cases() {
+    let uri = Url::parse("file:///tmp/main.ign").expect("test URI should parse");
+    let single_item_text = "import Foo from \"./foo\";\nfunction main(): void {}\n";
+    let multi_item_text = "import Foo, Bar from \"./foo\";\nfunction main(): void {}\n";
+    let matching_a0123 = diagnostic_with_code(
+      "A0123",
+      Range {
+        start: Position { line: 0, character: 7 },
+        end: Position { line: 0, character: 10 },
+      },
+    );
+
+    let unsafe_cases = vec![
+      (
+        "multi-item imports are ambiguous",
+        Some(code_action_document(multi_item_text)),
+        vec![matching_a0123.clone()],
+      ),
+      (
+        "stale ranges outside the import are ignored",
+        Some(code_action_document(single_item_text)),
+        vec![diagnostic_with_code(
+          "A0123",
+          Range {
+            start: Position { line: 1, character: 9 },
+            end: Position { line: 1, character: 13 },
+          },
+        )],
+      ),
+      ("missing open document is ignored", None, vec![matching_a0123.clone()]),
+      (
+        "missing request diagnostics are ignored",
+        Some(code_action_document(single_item_text)),
+        vec![],
+      ),
+      (
+        "non-A0123 diagnostics are ignored",
+        Some(code_action_document(single_item_text)),
+        vec![diagnostic_with_code(
+          "A0456",
+          Range {
+            start: Position { line: 0, character: 7 },
+            end: Position { line: 0, character: 10 },
+          },
+        )],
+      ),
+    ];
+
+    for (name, document, diagnostics) in unsafe_cases {
+      let actions = code_actions_for_open_document(&uri, document, &diagnostics);
+      assert!(actions.is_empty(), "{name} should not produce code actions");
+    }
+
+    let unsupported_uri = Url::parse("file:///tmp/main.txt").expect("test URI should parse");
+    let unsupported_actions = code_actions_for_open_document(
+      &unsupported_uri,
+      Some(code_action_document(single_item_text)),
+      &[matching_a0123],
+    );
+    assert!(
+      unsupported_actions.is_empty(),
+      "unsupported file extensions should not produce code actions"
+    );
   }
 
   #[test]
@@ -1820,6 +2112,26 @@ impl LanguageServer for Server {
     };
 
     Ok(formatting_edits_for_open_document(document))
+  }
+
+  async fn code_action(
+    &self,
+    params: CodeActionParams,
+  ) -> Result<Option<CodeActionResponse>> {
+    let uri = params.text_document.uri;
+    let document = {
+      let guard = self.state.open_files.read().await;
+      guard.get(&uri).map(|doc| LspCodeActionDocument {
+        text: doc.text.clone(),
+        line_index: doc.line_index.clone(),
+      })
+    };
+
+    Ok(Some(code_actions_for_open_document(
+      &uri,
+      document,
+      &params.context.diagnostics,
+    )))
   }
 
   async fn did_open(
