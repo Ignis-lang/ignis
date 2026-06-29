@@ -1027,8 +1027,9 @@ fn rename_workspace_edit(
 mod tests {
   use super::{
     LspFormatDocument, can_rename_definition, collect_reference_locations, collect_reference_spans,
-    formatting_edits_for_open_document, infer_std_path_from_file, load_std_manifest, lsp_server_capabilities,
-    rename_workspace_edit, std_module_entry_path, symbol_at_position, validate_rename_name,
+    document_symbols_for_analysis, formatting_edits_for_open_document, infer_std_path_from_file, load_std_manifest,
+    lsp_server_capabilities, rename_workspace_edit, std_module_entry_path, symbol_at_position, validate_rename_name,
+    workspace_symbols_for_analysis,
   };
   use std::collections::{HashMap, HashSet};
   use std::path::PathBuf;
@@ -1037,7 +1038,7 @@ mod tests {
   use ignis_config::IgnisConfig;
   use ignis_driver::{AnalysisOptions, AnalyzeProjectOutput};
   use ignis_type::file::FileId;
-  use tower_lsp::lsp_types::{Location, OneOf, Position, Range, TextEdit, WorkspaceEdit};
+  use tower_lsp::lsp_types::{Location, OneOf, Position, Range, SymbolKind, TextEdit, WorkspaceEdit};
   use url::Url;
 
   use crate::convert::LineIndex;
@@ -1521,6 +1522,123 @@ mod tests {
     assert_eq!(capabilities.document_formatting_provider, Some(OneOf::Left(true)));
     assert_eq!(capabilities.document_range_formatting_provider, None);
     assert_eq!(capabilities.rename_provider, Some(OneOf::Left(true)));
+    assert!(capabilities.document_symbol_provider.is_some());
+    assert_eq!(capabilities.workspace_symbol_provider, Some(OneOf::Left(true)));
+  }
+
+  #[test]
+  fn test_document_symbols_return_nested_symbols_in_source_order() {
+    let source = "namespace Tools {\n  record Point {\n    public x: i32;\n    public y: i32;\n  }\n\n  enum Mode {\n    FAST,\n    SLOW,\n  }\n\n  function make(): i32 {\n    return 1;\n  }\n}\n\nfunction main(): i32 {\n  return Tools::make();\n}\n";
+    let (root, file_path, output, _) = analyze_temp_source("document_symbols_nested", source);
+    let line_index = LineIndex::new(source.to_string());
+
+    let symbols = document_symbols_for_analysis(&output, &file_path.to_string_lossy(), &line_index)
+      .expect("analyzed document should produce symbols");
+
+    let top_level: Vec<_> = symbols
+      .iter()
+      .map(|symbol| (symbol.name.as_str(), symbol.kind))
+      .collect();
+    assert_eq!(
+      top_level,
+      vec![("Tools", SymbolKind::NAMESPACE), ("main", SymbolKind::FUNCTION)]
+    );
+
+    let tools_children = symbols[0]
+      .children
+      .as_ref()
+      .expect("namespace should expose nested declarations");
+    let child_names: Vec<_> = tools_children
+      .iter()
+      .map(|symbol| (symbol.name.as_str(), symbol.kind))
+      .collect();
+    assert_eq!(
+      child_names,
+      vec![
+        ("Point", SymbolKind::STRUCT),
+        ("Mode", SymbolKind::ENUM),
+        ("make", SymbolKind::FUNCTION),
+      ]
+    );
+
+    let point_children = tools_children[0]
+      .children
+      .as_ref()
+      .expect("record fields should be nested under the record");
+    let point_child_names: Vec<_> = point_children
+      .iter()
+      .map(|symbol| (symbol.name.as_str(), symbol.kind))
+      .collect();
+    assert_eq!(point_child_names, vec![("x", SymbolKind::FIELD), ("y", SymbolKind::FIELD)]);
+
+    let mode_children = tools_children[1]
+      .children
+      .as_ref()
+      .expect("enum variants should be nested under the enum");
+    let mode_child_names: Vec<_> = mode_children
+      .iter()
+      .map(|symbol| (symbol.name.as_str(), symbol.kind))
+      .collect();
+    assert_eq!(
+      mode_child_names,
+      vec![("FAST", SymbolKind::ENUM_MEMBER), ("SLOW", SymbolKind::ENUM_MEMBER)]
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_document_symbols_are_deterministic_across_repeated_calls() {
+    let source = "namespace Outer {\n  namespace Inner {\n    function beta(): i32 { return 2; }\n    function alpha(): i32 { return 1; }\n  }\n}\n\nfunction main(): i32 {\n  return Outer::Inner::alpha();\n}\n";
+    let (root, file_path, output, _) = analyze_temp_source("document_symbols_stable", source);
+    let line_index = LineIndex::new(source.to_string());
+
+    let first = document_symbols_for_analysis(&output, &file_path.to_string_lossy(), &line_index)
+      .expect("first symbol request should succeed");
+    let second = document_symbols_for_analysis(&output, &file_path.to_string_lossy(), &line_index)
+      .expect("second symbol request should succeed");
+
+    assert_eq!(first, second);
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_workspace_symbols_filter_queries_and_empty_states_safely() {
+    let source = "namespace Math {\n  function add(a: i32, b: i32): i32 { return a + b; }\n  function subtract(a: i32, b: i32): i32 { return a - b; }\n}\n\nfunction main(): i32 {\n  return Math::add(1, 2);\n}\n";
+    let (root, _, output, _) = analyze_temp_source("workspace_symbols_filter", source);
+
+    let add_symbols = workspace_symbols_for_analysis(Some(&output), "ADD");
+    let add_names: Vec<_> = add_symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+    assert_eq!(add_names, vec!["add"]);
+    assert_eq!(add_symbols[0].kind, SymbolKind::FUNCTION);
+
+    let math_symbols = workspace_symbols_for_analysis(Some(&output), "math");
+    let math_names: Vec<_> = math_symbols.iter().map(|symbol| symbol.name.as_str()).collect();
+    assert_eq!(math_names, vec!["Math"]);
+
+    assert!(workspace_symbols_for_analysis(Some(&output), "missing").is_empty());
+    assert!(workspace_symbols_for_analysis(Some(&output), "").is_empty());
+    assert!(workspace_symbols_for_analysis(None, "add").is_empty());
+
+    let _ = std::fs::remove_dir_all(root);
+  }
+
+  #[test]
+  fn test_workspace_symbols_are_deterministic_and_tie_break_by_location() {
+    let source =
+      "function alpha(): i32 { return 1; }\nfunction alpine(): i32 { return 2; }\nfunction beta(): i32 { return 3; }\n";
+    let (root, _, output, _) = analyze_temp_source("workspace_symbols_stable", source);
+
+    let first = workspace_symbols_for_analysis(Some(&output), "alp");
+    let second = workspace_symbols_for_analysis(Some(&output), "alp");
+
+    let first_names: Vec<_> = first.iter().map(|symbol| symbol.name.as_str()).collect();
+    assert_eq!(first_names, vec!["alpha", "alpine"]);
+    assert_eq!(first, second);
+    assert!(first[0].location.range.start.line < first[1].location.range.start.line);
+
+    let _ = std::fs::remove_dir_all(root);
   }
 
   #[test]
@@ -2302,14 +2420,7 @@ impl LanguageServer for Server {
     &self,
     params: WorkspaceSymbolParams,
   ) -> Result<Option<Vec<SymbolInformation>>> {
-    use ignis_type::definition::DefinitionKind;
-
     let query = &params.query;
-
-    // Empty query = no results (avoids freezing on Ctrl+T with thousands of symbols)
-    if query.is_empty() {
-      return Ok(Some(vec![]));
-    }
 
     // Get analysis from any open document (all share the same project defs)
     let output = {
@@ -2325,80 +2436,13 @@ impl LanguageServer for Server {
       cached
     };
 
-    let Some(output) = output else {
-      return Ok(Some(vec![]));
-    };
-
-    // Build namespace_id -> name map for container_name
-    let namespace_names: HashMap<ignis_type::namespace::NamespaceId, String> = output
-      .defs
-      .iter()
-      .filter_map(|(_, def)| {
-        if let DefinitionKind::Namespace(ns_def) = &def.kind {
-          let name = output.symbol_names.get(&def.name)?.clone();
-          Some((ns_def.namespace_id, name))
-        } else {
-          None
-        }
-      })
-      .collect();
-
-    // Cache LineIndex per FileId to avoid recreating for each definition
-    let mut line_indexes: HashMap<FileId, LineIndex> = HashMap::new();
-
-    // Collect matching symbols with their scores
-    let mut matches: Vec<(u8, SymbolInformation)> = output
-      .defs
-      .iter()
-      .filter_map(|(_, def)| {
-        let kind = definition_to_symbol_kind(&def.kind)?;
-        let name = output.symbol_names.get(&def.name)?;
-        let score = match_score(name, query)?;
-
-        // Get file path and build location
-        let file = output.source_map.get(&def.span.file);
-        let uri = Url::from_file_path(&file.path).ok()?;
-
-        let line_index = line_indexes
-          .entry(def.span.file)
-          .or_insert_with(|| LineIndex::new(file.text.clone()));
-        let range = line_index.span_to_range(&def.span);
-
-        let container_name = def
-          .owner_namespace
-          .and_then(|ns_id| namespace_names.get(&ns_id).cloned());
-
-        #[allow(deprecated)]
-        let symbol = SymbolInformation {
-          name: name.clone(),
-          kind,
-          tags: None,
-          deprecated: None,
-          location: Location { uri, range },
-          container_name,
-        };
-
-        Some((score, symbol))
-      })
-      .collect();
-
-    // Sort by score (lower = better match), then by name
-    matches
-      .sort_by(|(score_a, sym_a), (score_b, sym_b)| score_a.cmp(score_b).then_with(|| sym_a.name.cmp(&sym_b.name)));
-
-    // Take top 200 results
-    let symbols: Vec<SymbolInformation> = matches.into_iter().take(200).map(|(_, s)| s).collect();
-
-    Ok(Some(symbols))
+    Ok(Some(workspace_symbols_for_analysis(output.as_deref(), query)))
   }
 
   async fn document_symbol(
     &self,
     params: DocumentSymbolParams,
   ) -> Result<Option<DocumentSymbolResponse>> {
-    use ignis_type::definition::DefinitionKind;
-    use ignis_type::namespace::NamespaceId;
-
     let uri = &params.text_document.uri;
     log(&format!("[document_symbol] Request for URI: {}", uri));
 
@@ -2418,74 +2462,10 @@ impl LanguageServer for Server {
       doc.line_index.clone()
     };
 
-    let Some(file_id) = output.source_map.lookup_by_path(&path_str) else {
+    let Some(symbols) = document_symbols_for_analysis(&output, &path_str, &line_index) else {
       log(&format!("[document_symbol] Could not resolve path to FileId: {}", path_str));
       return Ok(None);
     };
-
-    log(&format!("[document_symbol] FileId: {:?}", file_id));
-
-    // Build mapping: NamespaceId -> DefinitionId (for namespace definitions in this file)
-    let mut ns_to_def: HashMap<NamespaceId, ignis_type::definition::DefinitionId> = HashMap::new();
-
-    for (def_id, def) in output.defs.iter() {
-      if def.span.file != file_id {
-        continue;
-      }
-
-      if let DefinitionKind::Namespace(ns_def) = &def.kind {
-        ns_to_def.insert(ns_def.namespace_id, def_id);
-      }
-    }
-
-    // Group definitions by their owner namespace (only for defs in this file)
-    let mut defs_by_namespace: HashMap<Option<NamespaceId>, Vec<ignis_type::definition::DefinitionId>> = HashMap::new();
-
-    for (def_id, def) in output.defs.iter() {
-      if def.span.file != file_id {
-        continue;
-      }
-
-      // Skip internal definitions that shouldn't appear in outline
-      match &def.kind {
-        DefinitionKind::Variable(_)
-        | DefinitionKind::Parameter(_)
-        | DefinitionKind::TypeParam(_)
-        | DefinitionKind::Placeholder => {
-          continue;
-        },
-        // Fields and variants are handled as children of their parent type
-        DefinitionKind::Field(_) | DefinitionKind::Variant(_) => continue,
-        // Methods are handled as children of their owner type
-        DefinitionKind::Method(_) => continue,
-        _ => {},
-      }
-
-      defs_by_namespace.entry(def.owner_namespace).or_default().push(def_id);
-    }
-
-    // Build document symbols recursively
-    let top_level_defs = defs_by_namespace.remove(&None).unwrap_or_default();
-    log(&format!(
-      "[document_symbol] Found {} top-level definitions",
-      top_level_defs.len()
-    ));
-    let mut visited_namespaces = HashSet::new();
-
-    let symbols: Vec<DocumentSymbol> = top_level_defs
-      .into_iter()
-      .filter_map(|def_id| {
-        build_document_symbol(
-          &def_id,
-          &output,
-          &file_id,
-          &line_index,
-          &defs_by_namespace,
-          &ns_to_def,
-          &mut visited_namespaces,
-        )
-      })
-      .collect();
 
     log(&format!("[document_symbol] Returning {} top-level symbols", symbols.len()));
     Ok(Some(DocumentSymbolResponse::Nested(symbols)))
@@ -2733,6 +2713,271 @@ impl LanguageServer for Server {
       },
     }
   }
+}
+
+fn document_symbols_for_analysis(
+  output: &AnalyzeProjectOutput,
+  path_str: &str,
+  line_index: &LineIndex,
+) -> Option<Vec<DocumentSymbol>> {
+  use ignis_type::definition::DefinitionKind;
+  use ignis_type::namespace::NamespaceId;
+
+  let file_id = output.source_map.lookup_by_path(path_str)?;
+
+  // Build mapping: NamespaceId -> DefinitionId (for namespace definitions in this file)
+  let mut ns_to_def: HashMap<NamespaceId, ignis_type::definition::DefinitionId> = HashMap::new();
+
+  for (def_id, def) in output.defs.iter() {
+    if def.span.file != file_id {
+      continue;
+    }
+
+    if let DefinitionKind::Namespace(ns_def) = &def.kind {
+      ns_to_def.insert(ns_def.namespace_id, def_id);
+    }
+  }
+
+  // Group definitions by their owner namespace (only for defs in this file)
+  let mut defs_by_namespace: HashMap<Option<NamespaceId>, Vec<ignis_type::definition::DefinitionId>> = HashMap::new();
+
+  for (def_id, def) in output.defs.iter() {
+    if def.span.file != file_id {
+      continue;
+    }
+
+    // Skip internal definitions that shouldn't appear in outline
+    match &def.kind {
+      DefinitionKind::Variable(_)
+      | DefinitionKind::Parameter(_)
+      | DefinitionKind::TypeParam(_)
+      | DefinitionKind::Placeholder => {
+        continue;
+      },
+      // Fields and variants are handled as children of their parent type
+      DefinitionKind::Field(_) | DefinitionKind::Variant(_) => continue,
+      // Methods are handled as children of their owner type
+      DefinitionKind::Method(_) => continue,
+      _ => {},
+    }
+
+    defs_by_namespace.entry(def.owner_namespace).or_default().push(def_id);
+  }
+
+  for defs in defs_by_namespace.values_mut() {
+    sort_def_ids_by_source(output, defs);
+  }
+
+  // Build document symbols recursively
+  let top_level_defs = defs_by_namespace.remove(&None).unwrap_or_default();
+  let mut visited_namespaces = HashSet::new();
+
+  let mut symbols: Vec<DocumentSymbol> = top_level_defs
+    .into_iter()
+    .filter_map(|def_id| {
+      build_document_symbol(
+        &def_id,
+        output,
+        &file_id,
+        line_index,
+        &defs_by_namespace,
+        &ns_to_def,
+        &mut visited_namespaces,
+      )
+    })
+    .collect();
+
+  sort_document_symbols_recursive(&mut symbols);
+  Some(symbols)
+}
+
+fn workspace_symbols_for_analysis(
+  output: Option<&AnalyzeProjectOutput>,
+  query: &str,
+) -> Vec<SymbolInformation> {
+  use ignis_type::definition::DefinitionKind;
+
+  // Empty query = no results (avoids freezing on Ctrl+T with thousands of symbols)
+  if query.is_empty() {
+    return vec![];
+  }
+
+  let Some(output) = output else {
+    return vec![];
+  };
+
+  // Build namespace_id -> name map for container_name
+  let namespace_names: HashMap<ignis_type::namespace::NamespaceId, String> = output
+    .defs
+    .iter()
+    .filter_map(|(_, def)| {
+      if let DefinitionKind::Namespace(ns_def) = &def.kind {
+        let name = output.symbol_names.get(&def.name)?.clone();
+        Some((ns_def.namespace_id, name))
+      } else {
+        None
+      }
+    })
+    .collect();
+
+  // Cache LineIndex per FileId to avoid recreating for each definition
+  let mut line_indexes: HashMap<FileId, LineIndex> = HashMap::new();
+
+  // Collect matching symbols with their scores
+  let mut matches: Vec<(u8, SymbolInformation)> = output
+    .defs
+    .iter()
+    .filter_map(|(_, def)| {
+      let kind = definition_to_symbol_kind(&def.kind)?;
+      let name = output.symbol_names.get(&def.name)?;
+      let score = match_score(name, query)?;
+
+      // Get file path and build location
+      let file = output.source_map.get(&def.span.file);
+      let uri = Url::from_file_path(&file.path).ok()?;
+
+      let line_index = line_indexes
+        .entry(def.span.file)
+        .or_insert_with(|| LineIndex::new(file.text.clone()));
+      let range = line_index.span_to_range(&def.span);
+
+      let container_name = def
+        .owner_namespace
+        .and_then(|ns_id| namespace_names.get(&ns_id).cloned());
+
+      #[allow(deprecated)]
+      let symbol = SymbolInformation {
+        name: name.clone(),
+        kind,
+        tags: None,
+        deprecated: None,
+        location: Location { uri, range },
+        container_name,
+      };
+
+      Some((score, symbol))
+    })
+    .collect();
+
+  matches.sort_by(|(score_a, sym_a), (score_b, sym_b)| {
+    score_a
+      .cmp(score_b)
+      .then_with(|| sym_a.name.to_lowercase().cmp(&sym_b.name.to_lowercase()))
+      .then_with(|| sym_a.name.cmp(&sym_b.name))
+      .then_with(|| sym_a.location.uri.as_str().cmp(sym_b.location.uri.as_str()))
+      .then_with(|| compare_ranges(&sym_a.location.range, &sym_b.location.range))
+      .then_with(|| symbol_kind_rank(sym_a.kind).cmp(&symbol_kind_rank(sym_b.kind)))
+      .then_with(|| sym_a.container_name.cmp(&sym_b.container_name))
+  });
+
+  matches.into_iter().take(200).map(|(_, symbol)| symbol).collect()
+}
+
+fn sort_def_ids_by_source(
+  output: &AnalyzeProjectOutput,
+  def_ids: &mut [DefinitionId],
+) {
+  def_ids.sort_by(|left, right| {
+    let left_def = output.defs.get(left);
+    let right_def = output.defs.get(right);
+    left_def
+      .span
+      .start
+      .cmp(&right_def.span.start)
+      .then_with(|| left_def.span.end.cmp(&right_def.span.end))
+      .then_with(|| {
+        output
+          .symbol_names
+          .get(&left_def.name)
+          .cmp(&output.symbol_names.get(&right_def.name))
+      })
+      .then_with(|| format!("{:?}", left).cmp(&format!("{:?}", right)))
+  });
+}
+
+fn sort_document_symbols_recursive(symbols: &mut [DocumentSymbol]) {
+  for symbol in symbols.iter_mut() {
+    if let Some(children) = &mut symbol.children {
+      sort_document_symbols_recursive(children);
+    }
+  }
+
+  symbols.sort_by(|left, right| {
+    compare_ranges(&left.range, &right.range)
+      .then_with(|| left.name.cmp(&right.name))
+      .then_with(|| symbol_kind_rank(left.kind).cmp(&symbol_kind_rank(right.kind)))
+  });
+}
+
+fn symbol_kind_rank(kind: SymbolKind) -> u32 {
+  if kind == SymbolKind::FILE {
+    1
+  } else if kind == SymbolKind::MODULE {
+    2
+  } else if kind == SymbolKind::NAMESPACE {
+    3
+  } else if kind == SymbolKind::PACKAGE {
+    4
+  } else if kind == SymbolKind::CLASS {
+    5
+  } else if kind == SymbolKind::METHOD {
+    6
+  } else if kind == SymbolKind::PROPERTY {
+    7
+  } else if kind == SymbolKind::FIELD {
+    8
+  } else if kind == SymbolKind::CONSTRUCTOR {
+    9
+  } else if kind == SymbolKind::ENUM {
+    10
+  } else if kind == SymbolKind::INTERFACE {
+    11
+  } else if kind == SymbolKind::FUNCTION {
+    12
+  } else if kind == SymbolKind::VARIABLE {
+    13
+  } else if kind == SymbolKind::CONSTANT {
+    14
+  } else if kind == SymbolKind::STRING {
+    15
+  } else if kind == SymbolKind::NUMBER {
+    16
+  } else if kind == SymbolKind::BOOLEAN {
+    17
+  } else if kind == SymbolKind::ARRAY {
+    18
+  } else if kind == SymbolKind::OBJECT {
+    19
+  } else if kind == SymbolKind::KEY {
+    20
+  } else if kind == SymbolKind::NULL {
+    21
+  } else if kind == SymbolKind::ENUM_MEMBER {
+    22
+  } else if kind == SymbolKind::STRUCT {
+    23
+  } else if kind == SymbolKind::EVENT {
+    24
+  } else if kind == SymbolKind::OPERATOR {
+    25
+  } else if kind == SymbolKind::TYPE_PARAMETER {
+    26
+  } else {
+    0
+  }
+}
+
+fn compare_ranges(
+  left: &Range,
+  right: &Range,
+) -> std::cmp::Ordering {
+  left
+    .start
+    .line
+    .cmp(&right.start.line)
+    .then_with(|| left.start.character.cmp(&right.start.character))
+    .then_with(|| left.end.line.cmp(&right.end.line))
+    .then_with(|| left.end.character.cmp(&right.end.character))
 }
 
 /// Build a DocumentSymbol for a definition, including children recursively.
