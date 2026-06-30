@@ -3150,7 +3150,6 @@ function resolverResolvesGenericTypeAliasWithTypeParam(): void {
   Test::assertEq<u64>(output.diagnostics.length(), 0);
 }
 
-
 function resolverMethodSelfParam(module: &mut Ast::Module): Ast::PatternId {
   let mut moduleRef: &mut Ast::Module = module;
   let selfPath: Ast::TypeId = addPathType(module, "Self");
@@ -3253,4 +3252,135 @@ function resolverResolvesRecordMethodSignatureSelf(): void {
     Analyzer::Definition::TypeAlias(_) -> @panic("expected Method"),
     Analyzer::Definition::Trait(_) -> @panic("expected Method"),
   };
+}
+
+@test
+function resolverResolvesGenericRecordMethodSignatureSelf(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let body: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: resolverDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(resolverMethodSelfParam(&mut module));
+
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: resolverDummySpan(),
+    name: String::create("cloneSelf"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(addPathType(&mut module, "Self")),
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(Ast::GenericParam {
+    span: resolverDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Box"),
+    genericParameters: genericParams,
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module);
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module, &pass1);
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(&mut defStore, &mut typeStore, &mut symbols, &module, &pass1, &pass2);
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let Option::SOME(recordDefId) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("record not found");
+  };
+  let tSym: Analyzer::SymbolId = symbols.intern("T");
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(typeStore.param(tSym));
+  let expectedSelf: Analyzer::TypeId = typeStore.instance(recordDefId, args);
+
+  let Option::SOME(methodDefId) = Analyzer::Binder::findDef(&pass2, methodId.raw()) else {
+    @panic("method not found");
+  };
+  let Option::SOME(def) = defStore.get(methodDefId) else {
+    @panic("method def missing");
+  };
+
+  match (def) {
+    Analyzer::Definition::Method(method) -> {
+      Test::assertEq<u32>(method.returnType.raw(), expectedSelf.raw());
+      let Option::SOME(paramId) = method.params.get(0) else {
+        @panic("self param missing");
+      };
+      let Option::SOME(paramDef) = defStore.get(*paramId) else {
+        @panic("self param def missing");
+      };
+      match (paramDef) {
+        Analyzer::Definition::Variable(param) -> {
+          let expectedRef: Analyzer::TypeId = typeStore.reference(expectedSelf);
+          Test::assertEq<u32>(param.declaredType.raw(), expectedRef.raw());
+        },
+        Analyzer::Definition::Method(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Record(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Enum(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Function(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Field(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
+        Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+        Analyzer::Definition::TypeAlias(_) -> @panic("expected Variable"),
+        Analyzer::Definition::Trait(_) -> @panic("expected Variable"),
+      };
+    },
+    Analyzer::Definition::Record(_) -> @panic("expected Method"),
+    Analyzer::Definition::Enum(_) -> @panic("expected Method"),
+    Analyzer::Definition::Function(_) -> @panic("expected Method"),
+    Analyzer::Definition::Variable(_) -> @panic("expected Method"),
+    Analyzer::Definition::Field(_) -> @panic("expected Method"),
+    Analyzer::Definition::Variant(_) -> @panic("expected Method"),
+    Analyzer::Definition::TypeParam(_) -> @panic("expected Method"),
+    Analyzer::Definition::TypeAlias(_) -> @panic("expected Method"),
+    Analyzer::Definition::Trait(_) -> @panic("expected Method"),
+  };
+}
+
+@test
+function resolverRejectsSelfOutsideMethodSignature(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let body: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: resolverDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: resolverDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(addPathType(&mut module, "Self")),
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Resolver::ResolverOutput = runResolver(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  let Option::SOME(diag) = output.diagnostics.get(0) else {
+    @panic("expected diagnostic at index 0");
+  };
+  Test::assertEq<str>(diag.code, DiagnosticCode::UNDEFINED_TYPE);
 }

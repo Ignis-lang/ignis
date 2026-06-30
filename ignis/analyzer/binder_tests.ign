@@ -2735,3 +2735,56 @@ function binderDiagnosesTraitMethodMissingSelf(): void {
 
   Test::assertEq<u64>(pass2.diagnostics.length(), 1);
 }
+
+@test
+function binderClassifiesRecordNoSelfMethodAsStatic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("create"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: emptyBlock(&mut module),
+    metadata: Ast::emptyMetadata(),
+  }));
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Box"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module);
+  let _pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module, &pass1);
+  let Option::SOME(recordDefId) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("record not found");
+  };
+
+  match (defStore.get(recordDefId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(rec) -> {
+        Test::assertEq<u64>(rec.instanceMethods.length(), 0);
+        Test::assertEq<u64>(rec.staticMethods.length(), 1);
+      },
+      Analyzer::Definition::Method(_) -> @panic("expected Record"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Record"),
+      Analyzer::Definition::Function(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Record"),
+      Analyzer::Definition::Field(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Record"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Record"),
+    },
+    Option::NONE -> @panic("record definition missing"),
+  };
+}
