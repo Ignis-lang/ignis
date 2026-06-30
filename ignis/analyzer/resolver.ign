@@ -17,8 +17,11 @@ import Ast from "@compiler::ast";
 /// `TypeStore` helpers. Definitions are patched in-place via
 /// `DefinitionStore::replace` (ADR-R4).
 ///
-/// Supported items: Record (fields), Enum (type params only; variant payloads
-/// deferred ADR-R5), Function (params + return type), Constant (annotation).
+/// Supported items: Record (fields + method signatures), Enum (type params +
+/// method signatures; variant payloads deferred ADR-R5), Function
+/// (params + return type), Constant (annotation), Trait (method signatures).
+/// Method signatures resolve with an owner-local `Self` entry mapped to the
+/// owner nominal type (or VOID for traits); see `resolveOwnerMethodSignatures`.
 ///
 /// Supported type nodes: Path (primitives, type params, nominals), Pointer,
 /// Reference, Tuple, Slice, FixedArray, Function, Generic.
@@ -539,6 +542,43 @@ export namespace Analyzer {
       };
     }
 
+    /// Patch `MethodDef.returnType` at `methodDefId` via `DefinitionStore::replace`.
+    function patchMethodReturnType(
+      defStore: &mut Analyzer::DefinitionStore,
+      methodDefId: Analyzer::DefinitionId,
+      typeId: Analyzer::TypeId,
+    ): void {
+      let Option::SOME(existing) = defStore.get(methodDefId) else {
+        return;
+      };
+
+      match (existing) {
+        Analyzer::Definition::Method(method) -> {
+          let updated: Analyzer::MethodDef = Analyzer::MethodDef {
+            name: method.name,
+            visibility: method.visibility,
+            owner: method.owner,
+            typeParams: method.typeParams,
+            params: method.params,
+            returnType: typeId,
+            isStatic: method.isStatic,
+            selfMutable: method.selfMutable,
+          };
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.replace(methodDefId, Analyzer::Definition::Method(updated));
+        },
+        Analyzer::Definition::Record(_) -> {},
+        Analyzer::Definition::Enum(_) -> {},
+        Analyzer::Definition::Function(_) -> {},
+        Analyzer::Definition::Variable(_) -> {},
+        Analyzer::Definition::Field(_) -> {},
+        Analyzer::Definition::Variant(_) -> {},
+        Analyzer::Definition::TypeParam(_) -> {},
+        Analyzer::Definition::TypeAlias(_) -> {},
+        Analyzer::Definition::Trait(_) -> {},
+      };
+    }
+
     // =========================================================================
     // Extract helpers — copy sub-vecs to release borrows before mutable ops.
     // =========================================================================
@@ -626,6 +666,62 @@ export namespace Analyzer {
           return Vector::new<Analyzer::DefinitionId>();
         },
         Analyzer::Definition::Enum(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Variable(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Field(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Variant(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Trait(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+      };
+    }
+
+    /// Extract a copy of MethodDef.params, releasing the immutable borrow.
+    function extractMethodParams(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      match (def) {
+        Analyzer::Definition::Method(method) -> {
+          let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+          let mut index: u64 = 0;
+
+          while (index < method.params.length()) {
+            let Option::SOME(paramId) = method.params.get(index) else {
+              index += 1;
+              continue;
+            };
+
+            out.push(*paramId);
+            index += 1;
+          }
+
+          return out;
+        },
+        Analyzer::Definition::Record(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Enum(_) -> {
+          return Vector::new<Analyzer::DefinitionId>();
+        },
+        Analyzer::Definition::Function(_) -> {
           return Vector::new<Analyzer::DefinitionId>();
         },
         Analyzer::Definition::Variable(_) -> {
@@ -924,6 +1020,151 @@ export namespace Analyzer {
     // Item-level resolution — calls resolveTypeNode.
     // =========================================================================
 
+    /// Compute the owner `Self` `TypeId` for a method-signature scope.
+    ///
+    /// For a generic owner the receiver maps to `Instance(ownerDefId, ownerParams)`;
+    /// for a non-generic owner it maps to the nominal `Record(defId)` or `Enum(defId)`.
+    /// The `isEnum` flag selects the nominal base record/enum variant.
+    function selfTypeFor(
+      typeStore: &mut Analyzer::TypeStore,
+      ownerDefId: Analyzer::DefinitionId,
+      ownerScope: &Analyzer::Resolver::TypeParamScope,
+      isEnum: boolean,
+    ): Analyzer::TypeId {
+      if (ownerScope.typeIds.length() > 0) {
+        let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+        let mut index: u64 = 0;
+
+        while (index < ownerScope.typeIds.length()) {
+          let Option::SOME(tid) = ownerScope.typeIds.get(index) else {
+            index += 1;
+            continue;
+          };
+
+          args.push(*tid);
+          index += 1;
+        }
+
+        let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+        return tsRef.instance(ownerDefId, args);
+      }
+
+      let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+      if (isEnum) {
+        return tsRef.enumType(ownerDefId);
+      }
+      return tsRef.recordType(ownerDefId);
+    }
+
+    /// Resolve parameter and return-type annotations for owner-local methods.
+    ///
+    /// Walks `methodItemIds` (AST function items) positionally against each
+    /// `Definition::Method`'s params. A per-method `TypeParamScope` is built from
+    /// the method's own type parameters, the owner's type-parameter scope, and a
+    /// `Self` entry mapping to the owner nominal type (or VOID for traits).
+    /// Parameters (including the `self` receiver) and the return type are
+    /// resolved and patched in-place. Signature-only methods whose return-type
+    /// annotation is absent patch only their parameters.
+    function resolveOwnerMethodSignatures(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      methodItemIds: &Vector<Ast::ItemId>,
+      ownerScope: &Analyzer::Resolver::TypeParamScope,
+      selfTypeId: Analyzer::TypeId,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < methodItemIds.length()) {
+        let Option::SOME(methodItemId) = methodItemIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let methodDefIdOpt: Option<Analyzer::DefinitionId> = lookupDef(pass1, pass2, methodItemId.raw());
+        let Option::SOME(methodDefId) = methodDefIdOpt else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(item) = module.items.get(*methodItemId) else {
+          index += 1;
+          continue;
+        };
+
+        match (item) {
+          Ast::Item::Node::Function(fn_) -> {
+            // Method's own type params (innermost) then owner scope, then Self.
+            let mut scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(
+              typeStore,
+              symbols,
+              &fn_.genericParameters,
+            );
+
+            let mut ownerIndex: u64 = 0;
+            while (ownerIndex < ownerScope.syms.length()) {
+              let Option::SOME(ownerSym) = ownerScope.syms.get(ownerIndex) else {
+                ownerIndex += 1;
+                continue;
+              };
+              let Option::SOME(ownerTid) = ownerScope.typeIds.get(ownerIndex) else {
+                ownerIndex += 1;
+                continue;
+              };
+              scope.syms.push(*ownerSym);
+              scope.typeIds.push(*ownerTid);
+              ownerIndex += 1;
+            }
+
+            let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+            let selfSym: Analyzer::SymbolId = symbolsRef.intern("Self");
+            scope.syms.push(selfSym);
+            scope.typeIds.push(selfTypeId);
+
+            let paramDefIds: Vector<Analyzer::DefinitionId> = extractMethodParams(defStore, methodDefId);
+            let mut paramIndex: u64 = 0;
+            while (paramIndex < paramDefIds.length()) {
+              let Option::SOME(paramDefId) = paramDefIds.get(paramIndex) else {
+                paramIndex += 1;
+                continue;
+              };
+              let Option::SOME(paramPatId) = fn_.parameters.get(paramIndex) else {
+                paramIndex += 1;
+                continue;
+              };
+
+              let annotationOpt: Option<Ast::TypeId> = patternAnnotation(module, *paramPatId);
+              if (let Option::SOME(annotationTypeId) = annotationOpt) {
+                let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId);
+                patchVariableType(defStore, *paramDefId, resolved);
+              }
+              paramIndex += 1;
+            }
+
+            if (let Option::SOME(retTypeId) = fn_.returnType) {
+              let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, retTypeId);
+              patchMethodReturnType(defStore, methodDefId, resolved);
+            }
+          },
+          Ast::Item::Node::Record(_) -> {},
+          Ast::Item::Node::Enum(_) -> {},
+          Ast::Item::Node::Namespace(_) -> {},
+          Ast::Item::Node::Import(_) -> {},
+          Ast::Item::Node::Extern(_) -> {},
+          Ast::Item::Node::Constant(_) -> {},
+          Ast::Item::Node::Export(_) -> {},
+          Ast::Item::Node::TypeAlias(_) -> {},
+          Ast::Item::Node::Trait(_) -> {},
+        };
+
+        index += 1;
+      }
+    }
+
     /// Resolve the declared type annotation on a module-level constant.
     function resolveConstant(
       state: &mut Analyzer::Resolver::ResolverState,
@@ -955,7 +1196,9 @@ export namespace Analyzer {
     /// Resolve an Enum item.
     ///
     /// Builds a TypeParamScope but does not resolve variant payload types —
-    /// selfhost AST has no payload type-annotation slot (ADR-R5).
+    /// selfhost AST has no payload type-annotation slot (ADR-R5). Instance and
+    /// static method signatures (with owner `Self`) are resolved via
+    /// `resolveOwnerMethodSignatures`.
     function resolveEnum(
       state: &mut Analyzer::Resolver::ResolverState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -968,11 +1211,13 @@ export namespace Analyzer {
       e: &Ast::Item::Enum,
     ): void {
       let defIdOpt: Option<Analyzer::DefinitionId> = lookupDef(pass1, pass2, itemId.raw());
-      let Option::SOME(_defId) = defIdOpt else {
+      let Option::SOME(defId) = defIdOpt else {
         return;
       };
 
-      let _scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &e.genericParameters);
+      let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &e.genericParameters);
+      let selfTypeId: Analyzer::TypeId = selfTypeFor(typeStore, defId, &scope, true);
+      resolveOwnerMethodSignatures(state, defStore, typeStore, symbols, module, pass1, pass2, &e.methods, &scope, selfTypeId);
     }
 
     /// Resolve all field type annotations in a Record item.
@@ -1020,6 +1265,9 @@ export namespace Analyzer {
 
         fieldIndex += 1;
       }
+
+      let selfTypeId: Analyzer::TypeId = selfTypeFor(typeStore, defId, &scope, false);
+      resolveOwnerMethodSignatures(state, defStore, typeStore, symbols, module, pass1, pass2, &r.methods, &scope, selfTypeId);
     }
 
     /// Resolve function parameter declared types and return type.
@@ -1141,6 +1389,35 @@ export namespace Analyzer {
       };
     }
 
+    /// Resolve a Trait item's method signatures.
+    ///
+    /// Trait method signatures resolve with the trait's own type parameters and a
+    /// `Self` entry mapped to VOID (no `Type::Trait` in this slice per ADR-C6).
+    /// Required (body-less in source) trait methods resolve only their parameter
+    /// and return-type annotations; default-method bodies are deferred to
+    /// the body-resolution phase (PR5).
+    function resolveTrait(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+      t: &Ast::Item::Trait,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = lookupDef(pass1, pass2, itemId.raw());
+      let Option::SOME(_defId) = defIdOpt else {
+        return;
+      };
+
+      let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &t.genericParameters);
+      let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+      let selfTypeId: Analyzer::TypeId = tsRef.intern(Analyzer::Type::VOID);
+      resolveOwnerMethodSignatures(state, defStore, typeStore, symbols, module, pass1, pass2, &t.methods, &scope, selfTypeId);
+    }
+
     // =========================================================================
     // Top-level walk — buildGlobalNameIndex, resolveItem, resolveTypes.
     // =========================================================================
@@ -1252,7 +1529,9 @@ export namespace Analyzer {
         Ast::Item::Node::TypeAlias(a) -> {
           resolveTypeAliasBody(state, defStore, typeStore, symbols, module, pass1, pass2, itemId, &a);
         },
-        Ast::Item::Node::Trait(_) -> {},
+        Ast::Item::Node::Trait(t) -> {
+          resolveTrait(state, defStore, typeStore, symbols, module, pass1, pass2, itemId, &t);
+        },
         Ast::Item::Node::Import(_) -> {},
         Ast::Item::Node::Extern(_) -> {},
       };
