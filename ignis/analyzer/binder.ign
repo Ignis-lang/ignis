@@ -417,6 +417,24 @@ export namespace Analyzer {
       stateRef.diagnostics.push(diag);
     }
 
+    /// Emit a diagnostic for trait methods that do not declare a `self` receiver.
+    function emitMissingTraitSelfDiagnostic(
+      state: &mut Analyzer::Binder::BinderState,
+      name: str,
+      span: SourceSpan,
+    ): void {
+      let message: String = String::create("trait method requires self receiver: ").concat(name);
+      let mut diag: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        DiagnosticCode::EXPECTED_PATTERN,
+        message.toStr(),
+        span,
+      );
+      diag.addLabel(LabelKind::PRIMARY, span, "trait method must declare self as the first parameter");
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
     /// Allocate `Definition::TypeParam` sub-defs for each generic parameter in source order.
     ///
     /// Bounds are intentionally ignored in this slice — only name and positional index are
@@ -1003,6 +1021,31 @@ export namespace Analyzer {
       methodIds: &Vector<Ast::ItemId>,
       owner: Analyzer::DefinitionId,
     ): Vector<Analyzer::DefinitionId> {
+      let mut validateIndex: u64 = 0;
+      while (validateIndex < methodIds.length()) {
+        if (let Option::SOME(methodItemId) = methodIds.get(validateIndex)) {
+          if (let Option::SOME(item) = ast.items.get(*methodItemId)) {
+            match (item) {
+              Ast::Item::Node::Function(fn_) -> {
+                if (!functionHasSelfReceiver(ast, &fn_)) {
+                  emitMissingTraitSelfDiagnostic(state, fn_.name.toStr(), fn_.span);
+                }
+              },
+              Ast::Item::Node::Record(_) -> {},
+              Ast::Item::Node::Enum(_) -> {},
+              Ast::Item::Node::Namespace(_) -> {},
+              Ast::Item::Node::Import(_) -> {},
+              Ast::Item::Node::Extern(_) -> {},
+              Ast::Item::Node::Constant(_) -> {},
+              Ast::Item::Node::Export(_) -> {},
+              Ast::Item::Node::TypeAlias(_) -> {},
+              Ast::Item::Node::Trait(_) -> {},
+            };
+          }
+        }
+        validateIndex += 1;
+      }
+
       let tables: Analyzer::Binder::OwnerMethodTables = bindOwnerMethods(
         state,
         defStore,
