@@ -1695,11 +1695,150 @@ export namespace Analyzer {
       Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.value);
     }
 
+    /// Iterate an owner's method ItemIds and walk each method body.
+    ///
+    /// Owners pass their own `genericParameters` so method bodies inherit the
+    /// owner type-parameter scope (design: "Bodies inherit the same type-param
+    /// scope"). Non-Function items in the methods vector are skipped defensively.
+    function walkOwnerMethodsForBody(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      methodItemIds: &Vector<Ast::ItemId>,
+      ownerGenericParameters: &Vector<Ast::GenericParam>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < methodItemIds.length()) {
+        let Option::SOME(methodItemId) = methodItemIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(item) = module.items.get(*methodItemId) else {
+          index += 1;
+          continue;
+        };
+
+        match (item) {
+          Ast::Item::Node::Function(fn_) -> {
+            Analyzer::ResolverBodies::walkMethodBody(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              pass1,
+              pass2,
+              *methodItemId,
+              &fn_,
+              ownerGenericParameters,
+            );
+          },
+          Ast::Item::Node::Record(_) -> {},
+          Ast::Item::Node::Enum(_) -> {},
+          Ast::Item::Node::Namespace(_) -> {},
+          Ast::Item::Node::Import(_) -> {},
+          Ast::Item::Node::Extern(_) -> {},
+          Ast::Item::Node::Constant(_) -> {},
+          Ast::Item::Node::Export(_) -> {},
+          Ast::Item::Node::TypeAlias(_) -> {},
+          Ast::Item::Node::Trait(_) -> {},
+        };
+
+        index += 1;
+      }
+    }
+
+    /// Walk an owner-local method's parameter patterns then its body statement.
+    ///
+    /// Mirrors `walkFunctionBody` but for `Definition::Method`: the method's
+    /// `DefinitionId` is used as `currentFunction`, and the type-parameter scope
+    /// is built from the owner's generics plus the method's own generics.
+    /// `Self` is intentionally NOT added to the body scope — `Self` is a type,
+    /// not a value, and the body walker does not resolve type annotations;
+    /// instance methods expose `self` (the value) via the parameter binding
+    /// walked here. Signature-only trait methods reach this with an empty block
+    /// body, so traversal is safe without requiring a body.
+    function walkMethodBody(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      methodItemId: Ast::ItemId,
+      f: &Ast::Item::Function,
+      ownerGenericParameters: &Vector<Ast::GenericParam>,
+    ): void {
+      let defIdOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupDef(pass1, pass2, methodItemId.raw());
+      let Option::SOME(methodDefId) = defIdOpt else {
+        return;
+      };
+
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      stateRef.currentFunction = methodDefId;
+      stateRef.localStack = Analyzer::ResolverBodies::LocalStack {
+        scopeStarts: Vector::new<u64>(),
+        names: Vector::new<Analyzer::SymbolId>(),
+        locals: Vector::new<Analyzer::ResolverBodies::LocalId>(),
+      };
+
+      // Owner type-param scope first, then the method's own (innermost) params.
+      let ownerScope: Analyzer::Resolver::TypeParamScope = Analyzer::Resolver::buildTypeParamScope(
+        typeStore,
+        symbols,
+        ownerGenericParameters,
+      );
+      let mut scope: Analyzer::Resolver::TypeParamScope = Analyzer::Resolver::buildTypeParamScope(
+        typeStore,
+        symbols,
+        &f.genericParameters,
+      );
+
+      let mut ownerIndex: u64 = 0;
+      while (ownerIndex < ownerScope.syms.length()) {
+        let Option::SOME(ownerSym) = ownerScope.syms.get(ownerIndex) else {
+          ownerIndex += 1;
+          continue;
+        };
+        let Option::SOME(ownerTid) = ownerScope.typeIds.get(ownerIndex) else {
+          ownerIndex += 1;
+          continue;
+        };
+        scope.syms.push(*ownerSym);
+        scope.typeIds.push(*ownerTid);
+        ownerIndex += 1;
+      }
+
+      stateRef.typeParamScope = scope;
+      Analyzer::ResolverBodies::pushScope(&mut stateRef.localStack);
+
+      let mut paramIdx: u64 = 0;
+      while (paramIdx < f.parameters.length()) {
+        let Option::SOME(paramPatId) = f.parameters.get(paramIdx) else {
+          paramIdx += 1;
+          continue;
+        };
+
+        Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, *paramPatId);
+        paramIdx += 1;
+      }
+
+      Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, f.body);
+      Analyzer::ResolverBodies::popScope(&mut state.localStack);
+    }
+
     /// Dispatch a single item to the appropriate body walker.
     ///
-    /// Record/Enum/Import/Extern/TypeAlias/Trait: no body in this slice.
-    /// Methods within Record and Enum are skipped (ADR-B7, TODO(methods-resolver)).
-    /// Namespace and Export recurse into child items.
+    /// Record/Enum/Trait: recurse into owner-local method bodies. Import/
+    /// Extern/TypeAlias: no body in this slice. Namespace and Export recurse
+    /// into child items.
     function walkItemForBody(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1739,18 +1878,48 @@ export namespace Analyzer {
             Analyzer::ResolverBodies::walkItemForBody(state, defStore, typeStore, symbols, module, pass1, pass2, innerItemId);
           }
         },
-        Ast::Item::Node::Record(_) -> {
-          // Methods skipped — blocked on methods-binder (ADR-B7).
-          // TODO(methods-resolver).
+        Ast::Item::Node::Record(r) -> {
+          Analyzer::ResolverBodies::walkOwnerMethodsForBody(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            pass1,
+            pass2,
+            &r.methods,
+            &r.genericParameters,
+          );
         },
-        Ast::Item::Node::Enum(_) -> {
-          // Methods skipped — blocked on methods-binder (ADR-B7).
-          // TODO(methods-resolver).
+        Ast::Item::Node::Enum(e) -> {
+          Analyzer::ResolverBodies::walkOwnerMethodsForBody(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            pass1,
+            pass2,
+            &e.methods,
+            &e.genericParameters,
+          );
         },
         Ast::Item::Node::Import(_) -> {},
         Ast::Item::Node::Extern(_) -> {},
         Ast::Item::Node::TypeAlias(_) -> {},
-        Ast::Item::Node::Trait(_) -> {},
+        Ast::Item::Node::Trait(t) -> {
+          Analyzer::ResolverBodies::walkOwnerMethodsForBody(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            pass1,
+            pass2,
+            &t.methods,
+            &t.genericParameters,
+          );
+        },
       };
     }
 

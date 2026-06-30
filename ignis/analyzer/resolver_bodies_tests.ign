@@ -2313,3 +2313,120 @@ function resolveBodiesDoesNotMutateBinderOutputs(): void {
   Test::assertEq<u64>(pass1.nodeIds.length(), pass1NodesBefore);
   Test::assertEq<u64>(pass2.nodeIds.length(), pass2NodesBefore);
 }
+
+// ============================================================
+// Phase 8: Method body traversal (selfhost-methods-binder PR5)
+// ============================================================
+
+/// Scenario: record instance method body is walked — the `self` parameter
+/// binds as Local index 0, and a `self` reference inside the body resolves to
+/// that same Local. Without method-body traversal this entry is absent.
+/// Spec: selfhost-method-body-checking — Method body traversal.
+@test
+function resolveBodiesWalksRecordMethodBodyBindsSelf(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record R { m(self): void { return self; } }
+  let selfPat: Ast::PatternId = addBinding(&mut module, "self");
+  let selfExpr: Ast::ExpressionId = addVariable(&mut module, "self");
+  let retStmt: Ast::StatementId = addReturnExpr(&mut module, selfExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let methodBody: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(selfPat);
+
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("m"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: methodBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let selfPatLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, selfPat);
+  Test::assertEq<u32>(selfPatLid.index, 0);
+
+  let selfRef: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, selfExpr);
+  let selfExprLid: Analyzer::ResolverBodies::LocalId = assertLocal(selfRef);
+  Test::assertEq<u32>(selfExprLid.index, 0);
+}
+
+/// Scenario: trait signature-only method is traversed — the `self` parameter
+/// binds as Local even though the method body is an empty block. Without
+/// traversal the entry is absent.
+/// Spec: selfhost-method-body-checking — signature-only trait methods traversed.
+@test
+function resolveBodiesWalksTraitMethodBodyBindsSelf(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // trait T { m(self): void; }  — signature-only, empty block body.
+  let selfPat: Ast::PatternId = addBinding(&mut module, "self");
+  let methodBody: Ast::StatementId = addBlock(&mut module, Vector::new<Ast::StatementId>());
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(selfPat);
+
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("m"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: methodBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  module.addRootItem(Ast::Item::Node::Trait(Ast::Item::Trait {
+    span: bodiesDummySpan(),
+    name: String::create("T"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let selfPatLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, selfPat);
+  Test::assertEq<u32>(selfPatLid.index, 0);
+}
