@@ -59,6 +59,12 @@ export namespace Analyzer {
       public diagnostics: DiagnosticBag;
     }
 
+    /// Owner-local method tables produced while completing a record or enum.
+    record OwnerMethodTables {
+      public instanceMethods: Vector<Analyzer::DefinitionId>;
+      public staticMethods: Vector<Analyzer::DefinitionId>;
+    }
+
     /// Returns the count of predeclared definitions (number of mapped items).
     function nodeDefCount(output: &Analyzer::Binder::BinderOutput): u64 {
       return output.nodeIds.length();
@@ -747,6 +753,246 @@ export namespace Analyzer {
       return out;
     }
 
+    /// Return true when metadata contains the `static` modifier.
+    function metadataIsStatic(metadata: &Ast::Metadata): boolean {
+      let mut index: u64 = 0;
+
+      while (index < metadata.modifiers.length()) {
+        let Option::SOME(modifier) = metadata.modifiers.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        match (modifier) {
+          Ast::Modifier::Static -> {
+            return true;
+          },
+          Ast::Modifier::Public -> {},
+          Ast::Modifier::Private -> {},
+          Ast::Modifier::Inline -> {},
+          Ast::Modifier::Meta -> {},
+          Ast::Modifier::Declare -> {},
+        };
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Return true when `patternId` names the receiver binding `self`.
+    function isSelfBinding(ast: &Ast::Module, patternId: Ast::PatternId): boolean {
+      let Option::SOME(pattern) = ast.patterns.get(patternId) else {
+        return false;
+      };
+
+      match (pattern) {
+        Ast::Pattern::Node::Binding(binding) -> {
+          return binding.name.equals("self");
+        },
+        Ast::Pattern::Node::Wildcard(_) -> {},
+        Ast::Pattern::Node::Literal(_) -> {},
+        Ast::Pattern::Node::Path(_) -> {},
+        Ast::Pattern::Node::Tuple(_) -> {},
+        Ast::Pattern::Node::Or(_) -> {},
+      };
+
+      return false;
+    }
+
+    /// Return true when the first parameter is named `self`.
+    function functionHasSelfReceiver(ast: &Ast::Module, fn_: &Ast::Item::Function): boolean {
+      let Option::SOME(firstParam) = fn_.parameters.get(0) else {
+        return false;
+      };
+
+      return isSelfBinding(ast, *firstParam);
+    }
+
+    /// Return true for `self: &mut Self` / `self: *mut Self` style receiver annotations.
+    function functionSelfMutable(ast: &Ast::Module, fn_: &Ast::Item::Function): boolean {
+      let Option::SOME(firstParam) = fn_.parameters.get(0) else {
+        return false;
+      };
+
+      let Option::SOME(pattern) = ast.patterns.get(*firstParam) else {
+        return false;
+      };
+
+      match (pattern) {
+        Ast::Pattern::Node::Binding(binding) -> {
+          if (!binding.name.equals("self")) {
+            return false;
+          }
+
+          let Option::SOME(annotationId) = binding.annotation else {
+            return false;
+          };
+
+          let Option::SOME(typeNode) = ast.types.get(annotationId) else {
+            return false;
+          };
+
+          match (typeNode) {
+            Ast::Type::Node::Reference(reference) -> {
+              return reference.mutable;
+            },
+            Ast::Type::Node::Pointer(pointer) -> {
+              return pointer.mutable;
+            },
+            Ast::Type::Node::Path(_) -> {},
+            Ast::Type::Node::Tuple(_) -> {},
+            Ast::Type::Node::Function(_) -> {},
+            Ast::Type::Node::Slice(_) -> {},
+            Ast::Type::Node::FixedArray(_) -> {},
+            Ast::Type::Node::Generic(_) -> {},
+          };
+        },
+        Ast::Pattern::Node::Wildcard(_) -> {},
+        Ast::Pattern::Node::Literal(_) -> {},
+        Ast::Pattern::Node::Path(_) -> {},
+        Ast::Pattern::Node::Tuple(_) -> {},
+        Ast::Pattern::Node::Or(_) -> {},
+      };
+
+      return false;
+    }
+
+    /// Allocate a `Definition::Method` for an owner-local function item.
+    function bindMethod(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+      itemId: Ast::ItemId,
+      fn_: &Ast::Item::Function,
+      owner: Analyzer::DefinitionId,
+      isStatic: boolean,
+    ): Analyzer::DefinitionId {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(fn_.name.toStr());
+
+      let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+      let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
+
+      let placeholder: Analyzer::MethodDef = Analyzer::MethodDef {
+        name: sym,
+        visibility: Analyzer::Visibility::PUBLIC,
+        owner: owner,
+        typeParams: Vector::new<Analyzer::DefinitionId>(),
+        params: Vector::new<Analyzer::DefinitionId>(),
+        returnType: sentinelId,
+        isStatic: isStatic,
+        selfMutable: false,
+      };
+
+      let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+      let defId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Method(placeholder));
+
+      let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &fn_.genericParameters, defId);
+      let params: Vector<Analyzer::DefinitionId> = bindParameters(state, defStore, typeStore, symbols, ast, &fn_.parameters);
+      let selfMutable: boolean = !isStatic && functionSelfMutable(ast, fn_);
+
+      let updated: Analyzer::MethodDef = Analyzer::MethodDef {
+        name: sym,
+        visibility: Analyzer::Visibility::PUBLIC,
+        owner: owner,
+        typeParams: typeParams,
+        params: params,
+        returnType: sentinelId,
+        isStatic: isStatic,
+        selfMutable: selfMutable,
+      };
+
+      let mut patchRef: &mut Analyzer::DefinitionStore = defStore;
+      patchRef.replace(defId, Analyzer::Definition::Method(updated));
+
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.nodeIds.push(itemId.raw());
+      stateRef.defIds.push(defId);
+
+      return defId;
+    }
+
+    /// Bind owner-local record/enum methods and split them into instance/static tables.
+    function bindOwnerMethods(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+      methodIds: &Vector<Ast::ItemId>,
+      owner: Analyzer::DefinitionId,
+      noSelfMeansStatic: boolean,
+    ): Analyzer::Binder::OwnerMethodTables {
+      let mut instanceMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut staticMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let scopeKey: u64 = (owner.raw() as u64) + 1000000;
+      let mut index: u64 = 0;
+
+      while (index < methodIds.length()) {
+        let Option::SOME(methodId) = methodIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(item) = ast.items.get(*methodId) else {
+          index += 1;
+          continue;
+        };
+
+        match (item) {
+          Ast::Item::Node::Function(fn_) -> {
+            let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+            let sym: Analyzer::SymbolId = symbolsRef.intern(fn_.name.toStr());
+            let duplicateOpt: Option<SourceSpan> = findDuplicateSpan(state, scopeKey, sym);
+
+            if (let Option::SOME(_) = duplicateOpt) {
+              emitDuplicateNameDiagnostic(state, "method name", fn_.name.toStr(), fn_.span);
+            } else {
+              recordScopeEntry(state, scopeKey, sym, fn_.span);
+              let hasSelf: boolean = functionHasSelfReceiver(ast, &fn_);
+              let isStatic: boolean = metadataIsStatic(&fn_.metadata) || (noSelfMeansStatic && !hasSelf);
+              let methodDefId: Analyzer::DefinitionId = bindMethod(
+                state,
+                defStore,
+                typeStore,
+                symbols,
+                ast,
+                *methodId,
+                &fn_,
+                owner,
+                isStatic,
+              );
+
+              if (isStatic) {
+                staticMethods.push(methodDefId);
+              } else {
+                instanceMethods.push(methodDefId);
+              }
+            }
+          },
+          Ast::Item::Node::Record(_) -> {},
+          Ast::Item::Node::Enum(_) -> {},
+          Ast::Item::Node::Namespace(_) -> {},
+          Ast::Item::Node::Import(_) -> {},
+          Ast::Item::Node::Extern(_) -> {},
+          Ast::Item::Node::Constant(_) -> {},
+          Ast::Item::Node::Export(_) -> {},
+          Ast::Item::Node::TypeAlias(_) -> {},
+          Ast::Item::Node::Trait(_) -> {},
+        };
+
+        index += 1;
+      }
+
+      return Analyzer::Binder::OwnerMethodTables {
+        instanceMethods: instanceMethods,
+        staticMethods: staticMethods,
+      };
+    }
+
     /// Complete a Record placeholder installed by pass-1: allocate TypeParam and Field
     /// sub-defs, intern `Type::Record(defId)`, and back-patch the placeholder via replace.
     ///
@@ -794,6 +1040,16 @@ export namespace Analyzer {
       // Immutable borrow of defStore is released here. Now allocate sub-defs.
       let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &rec.genericParameters, defId);
       let fields: Vector<Analyzer::DefinitionId> = bindFields(state, defStore, typeStore, symbols, ast, &rec.fields, defId);
+      let methods: Analyzer::Binder::OwnerMethodTables = bindOwnerMethods(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        ast,
+        &rec.methods,
+        defId,
+        false,
+      );
 
       let mut typesRef: &mut Analyzer::TypeStore = typeStore;
       let realTypeId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::Record(defId));
@@ -803,14 +1059,12 @@ export namespace Analyzer {
         visibility: Analyzer::Visibility::PUBLIC,
         typeParams: typeParams,
         fields: fields,
-        instanceMethods: Vector::new<Analyzer::DefinitionId>(),
-        staticMethods: Vector::new<Analyzer::DefinitionId>(),
+        instanceMethods: methods.instanceMethods,
+        staticMethods: methods.staticMethods,
         typeId: realTypeId,
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       defsRef.replace(defId, Analyzer::Definition::Record(newRec));
-
-      // TODO(methods-binder): walk rec.methods to bind method functions. Deferred ADR-5.
     }
 
     /// Complete an Enum placeholder installed by pass-1: allocate TypeParam and Variant
@@ -872,8 +1126,6 @@ export namespace Analyzer {
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       defsRef.replace(defId, Analyzer::Definition::Enum(newEnum));
-
-      // TODO(methods-binder): walk en.methods to bind method functions. Deferred ADR-5.
     }
 
     /// Complete a TypeAlias placeholder (pass-1 Record stand-in).
@@ -1012,7 +1264,6 @@ export namespace Analyzer {
         },
       };
 
-      // TODO(methods-binder): walk trait_.methods to bind trait method stubs. Deferred ADR-5.
     }
 
     /// Bind a new `Definition::Function` for a top-level or namespace-scoped function.

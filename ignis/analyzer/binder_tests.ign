@@ -2407,3 +2407,132 @@ function binderPass2ProducesIdenticalOutputsAcrossTwoRuns(): void {
     pass1Index += 1;
   }
 }
+
+function emptyBlock(module: &mut Ast::Module): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: dummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+}
+
+function selfParam(module: &mut Ast::Module, mutable: boolean): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create("Self"));
+  let selfType: Ast::TypeId = moduleRef.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: dummySpan(),
+    segments: segments,
+  }));
+  let receiverType: Ast::TypeId = moduleRef.addType(Ast::Type::Node::Reference(Ast::Type::Reference {
+    span: dummySpan(),
+    mutable: mutable,
+    target: selfType,
+  }));
+
+  return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("self"),
+    annotation: Option::SOME(receiverType),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function staticMetadata(): Ast::Metadata {
+  let mut modifiers: Vector<Ast::Modifier> = Vector::new<Ast::Modifier>();
+  modifiers.push(Ast::Modifier::Static);
+  return Ast::Metadata {
+    attributes: Vector::new<Ast::Attribute>(),
+    modifiers: modifiers,
+  };
+}
+
+/// Methods-binder PR2: record methods become owner-local Method definitions.
+@test
+function binderBindsRecordInstanceMethod(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let bodyId: Ast::StatementId = emptyBlock(&mut module);
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(selfParam(&mut module, true));
+
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("get"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Box"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module);
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module, &pass1);
+
+  let Option::SOME(recordDefId) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("record not found");
+  };
+  let Option::SOME(methodDefId) = Analyzer::Binder::findDef(&pass2, methodId.raw()) else {
+    @panic("method not found");
+  };
+
+  match (defStore.get(recordDefId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(rec) -> {
+        Test::assertEq<u64>(rec.instanceMethods.length(), 1);
+        Test::assertEq<u64>(rec.staticMethods.length(), 0);
+        let Option::SOME(storedMethodId) = rec.instanceMethods.get(0) else {
+          @panic("missing instance method id");
+        };
+        Test::assertEq<u32>(storedMethodId.raw(), methodDefId.raw());
+      },
+      Analyzer::Definition::Method(_) -> @panic("expected Record"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Record"),
+      Analyzer::Definition::Function(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Record"),
+      Analyzer::Definition::Field(_) -> @panic("expected Record"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Record"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Record"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Record"),
+    },
+    Option::NONE -> @panic("record definition missing"),
+  };
+
+  match (defStore.get(methodDefId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Method(method) -> {
+        Test::assertEq<u32>(method.owner.raw(), recordDefId.raw());
+        Test::assertEq<boolean>(method.isStatic, false);
+        Test::assertEq<boolean>(method.selfMutable, true);
+        Test::assertEq<u64>(method.params.length(), 1);
+      },
+      Analyzer::Definition::Record(_) -> @panic("expected Method"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Method"),
+      Analyzer::Definition::Function(_) -> @panic("expected Method"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Method"),
+      Analyzer::Definition::Field(_) -> @panic("expected Method"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Method"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Method"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Method"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Method"),
+    },
+    Option::NONE -> @panic("method definition missing"),
+  };
+}
+
