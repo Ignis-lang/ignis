@@ -993,6 +993,47 @@ export namespace Analyzer {
       };
     }
 
+    /// Bind trait-local method stubs.
+    function bindTraitMethods(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
+      methodIds: &Vector<Ast::ItemId>,
+      owner: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let tables: Analyzer::Binder::OwnerMethodTables = bindOwnerMethods(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        ast,
+        methodIds,
+        owner,
+        false,
+      );
+
+      let mut methods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+      while (index < tables.instanceMethods.length()) {
+        if (let Option::SOME(methodId) = tables.instanceMethods.get(index)) {
+          methods.push(*methodId);
+        }
+        index += 1;
+      }
+
+      index = 0;
+      while (index < tables.staticMethods.length()) {
+        if (let Option::SOME(methodId) = tables.staticMethods.get(index)) {
+          methods.push(*methodId);
+        }
+        index += 1;
+      }
+
+      return methods;
+    }
+
     /// Complete a Record placeholder installed by pass-1: allocate TypeParam and Field
     /// sub-defs, intern `Type::Record(defId)`, and back-patch the placeholder via replace.
     ///
@@ -1111,6 +1152,16 @@ export namespace Analyzer {
 
       let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &en.genericParameters, defId);
       let variants: Vector<Analyzer::DefinitionId> = bindVariants(state, defStore, typeStore, symbols, ast, &en.variants, defId);
+      let methods: Analyzer::Binder::OwnerMethodTables = bindOwnerMethods(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        ast,
+        &en.methods,
+        defId,
+        true,
+      );
 
       let mut typesRef: &mut Analyzer::TypeStore = typeStore;
       let realTypeId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::Enum(defId));
@@ -1120,8 +1171,8 @@ export namespace Analyzer {
         visibility: Analyzer::Visibility::PUBLIC,
         typeParams: typeParams,
         variants: variants,
-        instanceMethods: Vector::new<Analyzer::DefinitionId>(),
-        staticMethods: Vector::new<Analyzer::DefinitionId>(),
+        instanceMethods: methods.instanceMethods,
+        staticMethods: methods.staticMethods,
         typeId: realTypeId,
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
@@ -1209,6 +1260,7 @@ export namespace Analyzer {
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
       symbols: &mut Analyzer::SymbolTable,
+      ast: &Ast::Module,
       itemId: Ast::ItemId,
       trait_: &Ast::Item::Trait,
       pass1: &Analyzer::Binder::BinderOutput,
@@ -1226,12 +1278,21 @@ export namespace Analyzer {
       match (existing) {
         Analyzer::Definition::Trait(old) -> {
           let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &trait_.genericParameters, defId);
+          let methods: Vector<Analyzer::DefinitionId> = bindTraitMethods(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            ast,
+            &trait_.methods,
+            defId,
+          );
 
           let updated: Analyzer::TraitDef = Analyzer::TraitDef {
             name: old.name,
             visibility: old.visibility,
             typeParams: typeParams,
-            methods: Vector::new<Analyzer::DefinitionId>(),
+            methods: methods,
             assocTypes: Vector::new<Analyzer::DefinitionId>(),
             typeId: old.typeId,
           };
@@ -1397,7 +1458,7 @@ export namespace Analyzer {
             completeTypeAlias(state, defStore, typeStore, symbols, itemId, &a, pass1);
           },
           Ast::Item::Node::Trait(t) -> {
-            completeTrait(state, defStore, typeStore, symbols, itemId, &t, pass1);
+            completeTrait(state, defStore, typeStore, symbols, ast, itemId, &t, pass1);
           },
           Ast::Item::Node::Function(f) -> {
             bindFunction(state, defStore, typeStore, symbols, ast, itemId, &f, scopeKey);

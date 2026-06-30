@@ -2536,3 +2536,128 @@ function binderBindsRecordInstanceMethod(): void {
   };
 }
 
+/// Methods-binder PR2: enum methods without `self` are classified as static.
+@test
+function binderBindsEnumNoSelfMethodAsStatic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("none"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: emptyBlock(&mut module),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+  let enumId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: dummySpan(),
+    name: String::create("Maybe"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module);
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module, &pass1);
+
+  let Option::SOME(enumDefId) = Analyzer::Binder::findDef(&pass1, enumId.raw()) else {
+    @panic("enum not found");
+  };
+  let Option::SOME(methodDefId) = Analyzer::Binder::findDef(&pass2, methodId.raw()) else {
+    @panic("method not found");
+  };
+
+  match (defStore.get(enumDefId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Enum(en) -> {
+        Test::assertEq<u64>(en.instanceMethods.length(), 0);
+        Test::assertEq<u64>(en.staticMethods.length(), 1);
+        let Option::SOME(storedMethodId) = en.staticMethods.get(0) else {
+          @panic("missing static method id");
+        };
+        Test::assertEq<u32>(storedMethodId.raw(), methodDefId.raw());
+      },
+      Analyzer::Definition::Method(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Record(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Function(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Field(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Enum"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Enum"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Enum"),
+      Analyzer::Definition::Trait(_) -> @panic("expected Enum"),
+    },
+    Option::NONE -> @panic("enum definition missing"),
+  };
+}
+
+/// Methods-binder PR2: trait method stubs are stored in TraitDef.methods.
+@test
+function binderBindsTraitMethod(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(selfParam(&mut module, false));
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: dummySpan(),
+    name: String::create("display"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: emptyBlock(&mut module),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+  let traitId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Trait(Ast::Item::Trait {
+    span: dummySpan(),
+    name: String::create("Display"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module);
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module, &pass1);
+
+  let Option::SOME(traitDefId) = Analyzer::Binder::findDef(&pass1, traitId.raw()) else {
+    @panic("trait not found");
+  };
+  let Option::SOME(methodDefId) = Analyzer::Binder::findDef(&pass2, methodId.raw()) else {
+    @panic("method not found");
+  };
+
+  match (defStore.get(traitDefId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Trait(trait_) -> {
+        Test::assertEq<u64>(trait_.methods.length(), 1);
+        let Option::SOME(storedMethodId) = trait_.methods.get(0) else {
+          @panic("missing trait method id");
+        };
+        Test::assertEq<u32>(storedMethodId.raw(), methodDefId.raw());
+      },
+      Analyzer::Definition::Method(_) -> @panic("expected Trait"),
+      Analyzer::Definition::Record(_) -> @panic("expected Trait"),
+      Analyzer::Definition::Enum(_) -> @panic("expected Trait"),
+      Analyzer::Definition::Function(_) -> @panic("expected Trait"),
+      Analyzer::Definition::Variable(_) -> @panic("expected Trait"),
+      Analyzer::Definition::Field(_) -> @panic("expected Trait"),
+      Analyzer::Definition::Variant(_) -> @panic("expected Trait"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected Trait"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected Trait"),
+    },
+    Option::NONE -> @panic("trait definition missing"),
+  };
+}
