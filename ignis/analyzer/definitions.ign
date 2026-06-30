@@ -75,6 +75,24 @@ export namespace Analyzer {
     public returnType: Analyzer::TypeId;
   }
 
+  /// Payload wrapper for the `Definition::Method` variant.
+  /// Models a method declared inside a record, enum, or trait body. Method
+  /// parameters remain existing `Variable` sub-definitions referenced by `params`;
+  /// this slice introduces the owner-aware model without method-call resolution.
+  /// `owner` is the owning record/enum/trait `DefinitionId`. `isStatic` separates
+  /// receiver (`self`) methods from owner-local static methods. `selfMutable`
+  /// records whether the receiver is bound mutably; static methods keep it `false`.
+  record MethodDef {
+    public name: Analyzer::SymbolId;
+    public visibility: Analyzer::Visibility;
+    public owner: Analyzer::DefinitionId;
+    public typeParams: Vector<Analyzer::DefinitionId>;
+    public params: Vector<Analyzer::DefinitionId>;
+    public returnType: Analyzer::TypeId;
+    public isStatic: boolean;
+    public selfMutable: boolean;
+  }
+
   /// Payload wrapper for the `Definition::Record` variant.
   /// `fields` is a vector of `DefinitionId`s referencing `Field` sub-defs.
   /// `typeId` is the interned `Type::Record(defId)` for this definition.
@@ -84,6 +102,10 @@ export namespace Analyzer {
     public visibility: Analyzer::Visibility;
     public typeParams: Vector<Analyzer::DefinitionId>;
     public fields: Vector<Analyzer::DefinitionId>;
+    /// Owner-local instance method ids (`self` receivers), populated by the binder.
+    public instanceMethods: Vector<Analyzer::DefinitionId>;
+    /// Owner-local static method ids (no `self`), populated by the binder.
+    public staticMethods: Vector<Analyzer::DefinitionId>;
     public typeId: Analyzer::TypeId;
   }
 
@@ -96,6 +118,10 @@ export namespace Analyzer {
     public visibility: Analyzer::Visibility;
     public typeParams: Vector<Analyzer::DefinitionId>;
     public variants: Vector<Analyzer::DefinitionId>;
+    /// Owner-local instance method ids (`self` receivers), populated by the binder.
+    public instanceMethods: Vector<Analyzer::DefinitionId>;
+    /// Owner-local static method ids (no `self`), populated by the binder.
+    public staticMethods: Vector<Analyzer::DefinitionId>;
     public typeId: Analyzer::TypeId;
   }
 
@@ -128,6 +154,7 @@ export namespace Analyzer {
   /// variant forces a compile error at every call site.
   enum Definition {
     Function(Analyzer::FunctionDef),
+    Method(Analyzer::MethodDef),
     Record(Analyzer::RecordDef),
     Enum(Analyzer::EnumDef),
     Variable(Analyzer::VariableDef),
@@ -138,10 +165,11 @@ export namespace Analyzer {
     Trait(Analyzer::TraitDef),
 
     /// Returns the interned symbol for this definition's declared name.
-    /// Exhaustive across all nine variants — no wildcard arm.
+    /// Exhaustive across all ten variants — no wildcard arm.
     public name(&self): Analyzer::SymbolId {
       return match (self) {
         Analyzer::Definition::Function(wrapper)   -> wrapper.name,
+        Analyzer::Definition::Method(wrapper)     -> wrapper.name,
         Analyzer::Definition::Record(wrapper)     -> wrapper.name,
         Analyzer::Definition::Enum(wrapper)       -> wrapper.name,
         Analyzer::Definition::Variable(wrapper)   -> wrapper.name,

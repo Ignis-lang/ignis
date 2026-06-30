@@ -43,6 +43,8 @@ function definitionStorePushAssignsDeterministicInsertionOrderIds(): void {
     visibility: Analyzer::Visibility::PUBLIC,
     typeParams: Vector::new<Analyzer::DefinitionId>(),
     fields: Vector::new<Analyzer::DefinitionId>(),
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
     typeId: stubTypeId,
   }));
   let id2: Analyzer::DefinitionId = store.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
@@ -50,6 +52,8 @@ function definitionStorePushAssignsDeterministicInsertionOrderIds(): void {
     visibility: Analyzer::Visibility::PUBLIC,
     typeParams: Vector::new<Analyzer::DefinitionId>(),
     variants: Vector::new<Analyzer::DefinitionId>(),
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
     typeId: stubTypeId,
   }));
   let id3: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
@@ -93,6 +97,8 @@ function definitionStoreGetRoundTripsEachVariant(): void {
     visibility: Analyzer::Visibility::PRIVATE,
     typeParams: Vector::new<Analyzer::DefinitionId>(),
     fields: Vector::new<Analyzer::DefinitionId>(),
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
     typeId: stubTypeId,
   }));
   let id2: Analyzer::DefinitionId = store.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
@@ -100,6 +106,8 @@ function definitionStoreGetRoundTripsEachVariant(): void {
     visibility: Analyzer::Visibility::PUBLIC,
     typeParams: Vector::new<Analyzer::DefinitionId>(),
     variants: Vector::new<Analyzer::DefinitionId>(),
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
     typeId: stubTypeId,
   }));
   let id3: Analyzer::DefinitionId = store.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
@@ -220,6 +228,8 @@ function definitionNameReturnsEmbeddedSymbolIdForEachVariant(): void {
     visibility: Analyzer::Visibility::PUBLIC,
     typeParams: Vector::new<Analyzer::DefinitionId>(),
     fields: Vector::new<Analyzer::DefinitionId>(),
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
     typeId: stubTypeId,
   });
   let enumDef: Analyzer::Definition = Analyzer::Definition::Enum(Analyzer::EnumDef {
@@ -227,6 +237,8 @@ function definitionNameReturnsEmbeddedSymbolIdForEachVariant(): void {
     visibility: Analyzer::Visibility::PUBLIC,
     typeParams: Vector::new<Analyzer::DefinitionId>(),
     variants: Vector::new<Analyzer::DefinitionId>(),
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
     typeId: stubTypeId,
   });
   let varDef: Analyzer::Definition = Analyzer::Definition::Variable(Analyzer::VariableDef {
@@ -580,6 +592,8 @@ function definitionRecordDefRoundTrip(): void {
     visibility: Analyzer::Visibility::PRIVATE,
     typeParams: Vector::new<Analyzer::DefinitionId>(),
     fields: fields,
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
     typeId: stubTypeId,
   }));
 
@@ -650,6 +664,8 @@ function definitionEnumDefRoundTrip(): void {
     visibility: Analyzer::Visibility::PUBLIC,
     typeParams: Vector::new<Analyzer::DefinitionId>(),
     variants: variants,
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
     typeId: stubTypeId,
   }));
 
@@ -716,6 +732,8 @@ function definitionSubDefFromParentRetrieval(): void {
     visibility: Analyzer::Visibility::PUBLIC,
     typeParams: Vector::new<Analyzer::DefinitionId>(),
     fields: fields,
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
     typeId: stubTypeId,
   }));
 
@@ -931,4 +949,302 @@ function definitionNameCoversTrait(): void {
   };
 
   Test::assertEq<u32>(def.name().raw(), nameSym.raw());
+}
+
+@test
+function methodDefRoundTrip(): void {
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let i32Id: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+  let nameSym: Analyzer::SymbolId = syms.intern("area");
+  let ownerSym: Analyzer::SymbolId = syms.intern("Rect");
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  // Owner record placeholder so the method has a real owner id to reference.
+  let ownerId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: ownerSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
+    typeId: voidId,
+  }));
+
+  let defId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Method(Analyzer::MethodDef {
+    name: nameSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    owner: ownerId,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: i32Id,
+    isStatic: false,
+    selfMutable: false,
+  }));
+
+  match (store.get(defId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Method(method) -> {
+        Test::assertEq<u32>(method.name.raw(), nameSym.raw());
+        Test::assertEq<boolean>(method.visibility.equals(&Analyzer::Visibility::PUBLIC), true);
+        Test::assertEq<u32>(method.owner.raw(), ownerId.raw());
+        Test::assertEq<u64>(method.typeParams.length(), 0);
+        Test::assertEq<u64>(method.params.length(), 0);
+        Test::assertEq<u32>(method.returnType.raw(), i32Id.raw());
+        Test::assertEq<boolean>(method.isStatic, false);
+        Test::assertEq<boolean>(method.selfMutable, false);
+      },
+      Analyzer::Definition::Function(_)    -> @panic("expected Method variant"),
+      Analyzer::Definition::Record(_)       -> @panic("expected Method variant"),
+      Analyzer::Definition::Enum(_)         -> @panic("expected Method variant"),
+      Analyzer::Definition::Variable(_)     -> @panic("expected Method variant"),
+      Analyzer::Definition::Field(_)        -> @panic("expected Method variant"),
+      Analyzer::Definition::Variant(_)      -> @panic("expected Method variant"),
+      Analyzer::Definition::TypeParam(_)    -> @panic("expected Method variant"),
+      Analyzer::Definition::TypeAlias(_)    -> @panic("expected Method variant"),
+      Analyzer::Definition::Trait(_)        -> @panic("expected Method variant"),
+    },
+    Option::NONE -> @panic("expected Some after push"),
+  };
+}
+
+@test
+function methodDefStaticFlagDistinguishesInstanceFromStatic(): void {
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let i32Id: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+  let instanceName: Analyzer::SymbolId = syms.intern("getX");
+  let staticName: Analyzer::SymbolId = syms.intern("origin");
+  let ownerSym: Analyzer::SymbolId = syms.intern("Point");
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let ownerId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: ownerSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    instanceMethods: Vector::new<Analyzer::DefinitionId>(),
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
+    typeId: voidId,
+  }));
+
+  let instanceId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Method(Analyzer::MethodDef {
+    name: instanceName,
+    visibility: Analyzer::Visibility::PUBLIC,
+    owner: ownerId,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: i32Id,
+    isStatic: false,
+    selfMutable: true,
+  }));
+  let staticId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Method(Analyzer::MethodDef {
+    name: staticName,
+    visibility: Analyzer::Visibility::PUBLIC,
+    owner: ownerId,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidId,
+    isStatic: true,
+    selfMutable: false,
+  }));
+
+  let Option::SOME(instanceDef) = store.get(instanceId) else {
+    @panic("expected instance method");
+  };
+  let Option::SOME(staticDef) = store.get(staticId) else {
+    @panic("expected static method");
+  };
+  match (instanceDef) {
+    Analyzer::Definition::Method(instanceMethod) -> {
+      Test::assertEq<boolean>(instanceMethod.isStatic, false);
+      Test::assertEq<boolean>(instanceMethod.selfMutable, true);
+    },
+    Analyzer::Definition::Function(_)    -> @panic("expected Method variant for instance"),
+    Analyzer::Definition::Record(_)       -> @panic("expected Method variant for instance"),
+    Analyzer::Definition::Enum(_)         -> @panic("expected Method variant for instance"),
+    Analyzer::Definition::Variable(_)     -> @panic("expected Method variant for instance"),
+    Analyzer::Definition::Field(_)        -> @panic("expected Method variant for instance"),
+    Analyzer::Definition::Variant(_)      -> @panic("expected Method variant for instance"),
+    Analyzer::Definition::TypeParam(_)    -> @panic("expected Method variant for instance"),
+    Analyzer::Definition::TypeAlias(_)    -> @panic("expected Method variant for instance"),
+    Analyzer::Definition::Trait(_)        -> @panic("expected Method variant for instance"),
+  };
+  match (staticDef) {
+    Analyzer::Definition::Method(staticMethod) -> {
+      Test::assertEq<boolean>(staticMethod.isStatic, true);
+      Test::assertEq<boolean>(staticMethod.selfMutable, false);
+      Test::assertEq<u32>(staticMethod.returnType.raw(), voidId.raw());
+    },
+    Analyzer::Definition::Function(_)    -> @panic("expected Method variant for static"),
+    Analyzer::Definition::Record(_)       -> @panic("expected Method variant for static"),
+    Analyzer::Definition::Enum(_)         -> @panic("expected Method variant for static"),
+    Analyzer::Definition::Variable(_)     -> @panic("expected Method variant for static"),
+    Analyzer::Definition::Field(_)        -> @panic("expected Method variant for static"),
+    Analyzer::Definition::Variant(_)      -> @panic("expected Method variant for static"),
+    Analyzer::Definition::TypeParam(_)    -> @panic("expected Method variant for static"),
+    Analyzer::Definition::TypeAlias(_)    -> @panic("expected Method variant for static"),
+    Analyzer::Definition::Trait(_)        -> @panic("expected Method variant for static"),
+  };
+}
+
+@test
+function definitionNameCoversMethod(): void {
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let nameSym: Analyzer::SymbolId = syms.intern("draw");
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let ownerStub: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+  let defId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Method(Analyzer::MethodDef {
+    name: nameSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    owner: ownerStub,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidId,
+    isStatic: false,
+    selfMutable: false,
+  }));
+
+  let Option::SOME(def) = store.get(defId) else {
+    @panic("expected def");
+  };
+  Test::assertEq<u32>(def.name().raw(), nameSym.raw());
+}
+
+@test
+function recordDefHoldsOwnerMethodTables(): void {
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let recSym: Analyzer::SymbolId = syms.intern("Shape");
+  let methodName: Analyzer::SymbolId = syms.intern("area");
+  let staticName: Analyzer::SymbolId = syms.intern("unit");
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let instanceMethodId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Method(Analyzer::MethodDef {
+    name: methodName,
+    visibility: Analyzer::Visibility::PUBLIC,
+    owner: Id::fromRaw<Analyzer::DefinitionTag>(0),
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidId,
+    isStatic: false,
+    selfMutable: false,
+  }));
+  let staticMethodId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Method(Analyzer::MethodDef {
+    name: staticName,
+    visibility: Analyzer::Visibility::PUBLIC,
+    owner: Id::fromRaw<Analyzer::DefinitionTag>(0),
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidId,
+    isStatic: true,
+    selfMutable: false,
+  }));
+
+  let mut instanceMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  instanceMethods.push(instanceMethodId);
+  let mut staticMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  staticMethods.push(staticMethodId);
+
+  let recId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Record(Analyzer::RecordDef {
+    name: recSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    fields: Vector::new<Analyzer::DefinitionId>(),
+    instanceMethods: instanceMethods,
+    staticMethods: staticMethods,
+    typeId: voidId,
+  }));
+
+  match (store.get(recId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(recDef) -> {
+        Test::assertEq<u64>(recDef.instanceMethods.length(), 1);
+        Test::assertEq<u64>(recDef.staticMethods.length(), 1);
+        let Option::SOME(instanceId) = recDef.instanceMethods.get(0) else {
+          @panic("expected instance method id");
+        };
+        Test::assertEq<u32>(instanceId.raw(), instanceMethodId.raw());
+        let Option::SOME(staticId) = recDef.staticMethods.get(0) else {
+          @panic("expected static method id");
+        };
+        Test::assertEq<u32>(staticId.raw(), staticMethodId.raw());
+      },
+      Analyzer::Definition::Function(_)   -> @panic("expected Record variant"),
+      Analyzer::Definition::Enum(_)       -> @panic("expected Record variant"),
+      Analyzer::Definition::Variable(_)   -> @panic("expected Record variant"),
+      Analyzer::Definition::Field(_)      -> @panic("expected Record variant"),
+      Analyzer::Definition::Variant(_)    -> @panic("expected Record variant"),
+      Analyzer::Definition::TypeParam(_)  -> @panic("expected Record variant"),
+      Analyzer::Definition::TypeAlias(_)  -> @panic("expected Record variant"),
+      Analyzer::Definition::Trait(_)      -> @panic("expected Record variant"),
+      Analyzer::Definition::Method(_)     -> @panic("expected Record variant"),
+    },
+    Option::NONE -> @panic("expected Some after push"),
+  };
+}
+
+@test
+function enumDefHoldsOwnerMethodTables(): void {
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let voidId: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let enumSym: Analyzer::SymbolId = syms.intern("Color");
+  let methodName: Analyzer::SymbolId = syms.intern("toHex");
+
+  let mut store: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let instanceMethodId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Method(Analyzer::MethodDef {
+    name: methodName,
+    visibility: Analyzer::Visibility::PUBLIC,
+    owner: Id::fromRaw<Analyzer::DefinitionTag>(0),
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: Vector::new<Analyzer::DefinitionId>(),
+    returnType: voidId,
+    isStatic: false,
+    selfMutable: false,
+  }));
+
+  let mut instanceMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  instanceMethods.push(instanceMethodId);
+
+  let enumId: Analyzer::DefinitionId = store.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
+    name: enumSym,
+    visibility: Analyzer::Visibility::PUBLIC,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    variants: Vector::new<Analyzer::DefinitionId>(),
+    instanceMethods: instanceMethods,
+    staticMethods: Vector::new<Analyzer::DefinitionId>(),
+    typeId: voidId,
+  }));
+
+  match (store.get(enumId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Enum(enum_) -> {
+        Test::assertEq<u64>(enum_.instanceMethods.length(), 1);
+        Test::assertEq<u64>(enum_.staticMethods.length(), 0);
+        let Option::SOME(instanceId) = enum_.instanceMethods.get(0) else {
+          @panic("expected instance method id");
+        };
+        Test::assertEq<u32>(instanceId.raw(), instanceMethodId.raw());
+      },
+      Analyzer::Definition::Function(_)   -> @panic("expected Enum variant"),
+      Analyzer::Definition::Record(_)     -> @panic("expected Enum variant"),
+      Analyzer::Definition::Variable(_)   -> @panic("expected Enum variant"),
+      Analyzer::Definition::Field(_)      -> @panic("expected Enum variant"),
+      Analyzer::Definition::Variant(_)    -> @panic("expected Enum variant"),
+      Analyzer::Definition::TypeParam(_)  -> @panic("expected Enum variant"),
+      Analyzer::Definition::TypeAlias(_)  -> @panic("expected Enum variant"),
+      Analyzer::Definition::Trait(_)      -> @panic("expected Enum variant"),
+      Analyzer::Definition::Method(_)     -> @panic("expected Enum variant"),
+    },
+    Option::NONE -> @panic("expected Some after push"),
+  };
 }
