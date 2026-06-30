@@ -11,7 +11,6 @@ import Ast from "@compiler::ast";
 import Id from "@compiler::ids";
 import Vector from "std::vector";
 
-
 export namespace Analyzer {
   namespace Typecheck {
     record ExprTypeMap {
@@ -383,7 +382,6 @@ export namespace Analyzer {
         _ -> false,
       };
     }
-
 
     function lookupItemDef(
       pass1: &Analyzer::Binder::BinderOutput,
@@ -845,6 +843,46 @@ export namespace Analyzer {
           let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
           return Option::SOME(typeStoreRef.functionType(params, function_.returnType));
         },
+        Analyzer::Definition::Method(method) -> {
+          // A method's callable type mirrors a function: parameter types from
+          // its `Variable` sub-definitions plus the resolved return type. Method
+          // call resolution is out of scope for this slice, but exposing the
+          // type here keeps `definitionType` total over `Definition::Method`.
+          let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut index: u64 = 0;
+
+          while (index < method.params.length()) {
+            let Option::SOME(paramDefId) = method.params.get(index) else {
+              index += 1;
+              continue;
+            };
+
+            let Option::SOME(paramDef) = defStore.get(*paramDefId) else {
+              index += 1;
+              continue;
+            };
+
+            match (paramDef) {
+              Analyzer::Definition::Variable(parameter) -> {
+                params.push(parameter.declaredType);
+              },
+              Analyzer::Definition::Function(_) -> {},
+              Analyzer::Definition::Record(_) -> {},
+              Analyzer::Definition::Enum(_) -> {},
+              Analyzer::Definition::Field(_) -> {},
+              Analyzer::Definition::Variant(_) -> {},
+              Analyzer::Definition::TypeParam(_) -> {},
+              Analyzer::Definition::TypeAlias(_) -> {},
+              Analyzer::Definition::Trait(_) -> {},
+              Analyzer::Definition::Method(_) -> {},
+            };
+
+            index += 1;
+          }
+
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          return Option::SOME(typeStoreRef.functionType(params, method.returnType));
+        },
         Analyzer::Definition::Record(record_) -> {
           return Option::SOME(record_.typeId);
         },
@@ -900,6 +938,29 @@ export namespace Analyzer {
           return Option::SOME(Analyzer::Typecheck::FunctionSignature {
             params: params,
             returnType: function_.returnType,
+          });
+        },
+        Analyzer::Definition::Method(method) -> {
+          // Methods reuse the function-signature shape: `MethodDef.params` are
+          // `Variable` sub-definitions in source order, and `returnType` is the
+          // resolver-patched method return type. This lets `checkFunctionItem`
+          // typecheck method bodies exactly like function bodies.
+          let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+          let mut index: u64 = 0;
+
+          while (index < method.params.length()) {
+            let Option::SOME(paramDefId) = method.params.get(index) else {
+              index += 1;
+              continue;
+            };
+
+            params.push(*paramDefId);
+            index += 1;
+          }
+
+          return Option::SOME(Analyzer::Typecheck::FunctionSignature {
+            params: params,
+            returnType: method.returnType,
           });
         },
         Analyzer::Definition::Variable(_) -> {
@@ -1116,6 +1177,5 @@ export namespace Analyzer {
         },
       };
     }
-
   }
 }

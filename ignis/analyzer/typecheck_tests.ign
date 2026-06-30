@@ -2532,3 +2532,104 @@ function typecheckTuplePatternStaysExplicitlyUnsupported(): void {
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support tuple patterns");
 }
+
+// Phase 9: Method body typecheck traversal (selfhost-methods-binder PR6)
+// ============================================================
+
+/// Scenario: a record instance method body is typechecked — `m(self): i32`
+/// returning a boolean literal produces a TYPE_MISMATCH diagnostic against the
+/// resolved method return type. Without method-body typecheck traversal the body
+/// is never visited and no diagnostic is emitted.
+/// Spec: selfhost-method-body-checking — Method body typecheck.
+@test
+function typecheckWalksRecordMethodBodyReturnMismatch(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record R { m(self): i32 { return true; } }
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let selfPat: Ast::PatternId = typecheckAddBinding(&mut module, "self");
+  let boolExpr: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, boolExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let methodBody: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(selfPat);
+
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("m"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32Type),
+    body: methodBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
+}
+
+/// Scenario: a signature-only trait method with an empty block body is traversed
+/// but produces no diagnostics — the declared `i32` return type is never checked
+/// against a missing return because the body has no return statement. This
+/// preserves signature-only/empty trait method safety under method-body
+/// typecheck traversal.
+/// Spec: selfhost-method-body-checking — signature-only trait methods traversed.
+@test
+function typecheckWalksTraitMethodSignatureOnlyIsSafe(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // trait T { m(self): i32; }  — signature-only, empty block body.
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let selfPat: Ast::PatternId = typecheckAddBinding(&mut module, "self");
+  let methodBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(selfPat);
+
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("m"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32Type),
+    body: methodBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  module.addRootItem(Ast::Item::Node::Trait(Ast::Item::Trait {
+    span: typecheckDummySpan(),
+    name: String::create("T"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}

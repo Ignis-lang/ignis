@@ -1,7 +1,6 @@
 import Ast from "@compiler::ast";
 import Vector from "std::vector";
 
-
 export namespace Analyzer {
   namespace Typecheck {
     function checkFunctionItem(
@@ -114,6 +113,99 @@ export namespace Analyzer {
       }
     }
 
+    /// Resolve the `DefinitionId` for an owner-local method item and reuse
+    /// `checkFunctionItem` to typecheck its body. `extractFunctionSignature`
+    /// handles `Definition::Method`, so method bodies are checked exactly like
+    /// function bodies: parameters are bound as locals and the return statement
+    /// is validated against the resolved method return type. Signature-only
+    /// methods with empty block bodies reach `checkStmt` with no return statement
+    /// and therefore emit no diagnostic.
+    function checkMethodItem(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      methodItemId: Ast::ItemId,
+      function_: &Ast::Item::Function,
+    ): void {
+      let defOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::lookupItemDef(pass1, pass2, methodItemId);
+      let Option::SOME(defId) = defOpt else {
+        return;
+      };
+
+      Analyzer::Typecheck::checkFunctionItem(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        defId,
+        function_,
+      );
+    }
+
+    /// Iterate an owner's method `ItemId`s and typecheck each method body.
+    /// Non-Function items in the methods vector are skipped defensively. Mirrors
+    /// `ResolverBodies::walkOwnerMethodsForBody` but for typecheck traversal.
+    function checkOwnerMethods(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      methodItemIds: &Vector<Ast::ItemId>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < methodItemIds.length()) {
+        let Option::SOME(methodItemId) = methodItemIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(item) = module.items.get(*methodItemId) else {
+          index += 1;
+          continue;
+        };
+
+        match (item) {
+          Ast::Item::Node::Function(function_) -> {
+            Analyzer::Typecheck::checkMethodItem(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              pass1,
+              pass2,
+              resolvedBodies,
+              *methodItemId,
+              &function_,
+            );
+          },
+          Ast::Item::Node::Record(_) -> {},
+          Ast::Item::Node::Enum(_) -> {},
+          Ast::Item::Node::Namespace(_) -> {},
+          Ast::Item::Node::Import(_) -> {},
+          Ast::Item::Node::Extern(_) -> {},
+          Ast::Item::Node::Constant(_) -> {},
+          Ast::Item::Node::Export(_) -> {},
+          Ast::Item::Node::TypeAlias(_) -> {},
+          Ast::Item::Node::Trait(_) -> {},
+        };
+
+        index += 1;
+      }
+    }
+
     function checkItem(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -164,14 +256,50 @@ export namespace Analyzer {
             &constant,
           );
         },
-        Ast::Item::Node::Record(_) -> {},
-        Ast::Item::Node::Enum(_) -> {},
+        Ast::Item::Node::Record(record_) -> {
+          Analyzer::Typecheck::checkOwnerMethods(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            pass1,
+            pass2,
+            resolvedBodies,
+            &record_.methods,
+          );
+        },
+        Ast::Item::Node::Enum(enum_) -> {
+          Analyzer::Typecheck::checkOwnerMethods(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            pass1,
+            pass2,
+            resolvedBodies,
+            &enum_.methods,
+          );
+        },
         Ast::Item::Node::Namespace(_) -> {},
         Ast::Item::Node::Import(_) -> {},
         Ast::Item::Node::Extern(_) -> {},
         Ast::Item::Node::Export(_) -> {},
         Ast::Item::Node::TypeAlias(_) -> {},
-        Ast::Item::Node::Trait(_) -> {},
+        Ast::Item::Node::Trait(trait_) -> {
+          Analyzer::Typecheck::checkOwnerMethods(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            pass1,
+            pass2,
+            resolvedBodies,
+            &trait_.methods,
+          );
+        },
       };
     }
   }
