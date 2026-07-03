@@ -411,6 +411,67 @@ function typecheckAddBlockExpr(
   }));
 }
 
+function typecheckAddMethodItem(
+  module: &mut Ast::Module,
+  name: str,
+  params: Vector<Ast::PatternId>,
+  returnType: Option<Ast::TypeId>,
+  body: Ast::StatementId,
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: returnType,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Build a `self` receiver pattern that mirrors what the self-hosted parser
+/// actually produces for `&self`/`&mut self` (`ParserDeclarations::createSelfReceiverPattern`
+/// in `ignis/parser/declarations.ign`): a `Binding` pattern named `self` with
+/// an explicit `Reference(mutable, Path("Self"))` annotation. Test fixtures
+/// that build `self` via a bare unannotated `typecheckAddBinding` do not
+/// exercise this real shape.
+function typecheckAddSelfReceiverPattern(module: &mut Ast::Module, mutable: boolean): Ast::PatternId {
+  let mut selfSegments: Vector<String> = Vector::new<String>();
+  selfSegments.push(String::create("Self"));
+  let mut moduleRef: &mut Ast::Module = module;
+  let selfPathType: Ast::TypeId = moduleRef.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: typecheckDummySpan(),
+    segments: selfSegments,
+  }));
+
+  let mut moduleRef2: &mut Ast::Module = module;
+  let selfRefType: Ast::TypeId = moduleRef2.addType(Ast::Type::Node::Reference(Ast::Type::Reference {
+    span: typecheckDummySpan(),
+    mutable: mutable,
+    target: selfPathType,
+  }));
+
+  let mut moduleRef3: &mut Ast::Module = module;
+  return moduleRef3.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: typecheckDummySpan(),
+    name: String::create("self"),
+    annotation: Option::SOME(selfRefType),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function typecheckAddPathExpr2(module: &mut Ast::Module, seg0: str, seg1: str): Ast::ExpressionId {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create(seg0));
+  segments.push(String::create(seg1));
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Path(Ast::Expression::Path {
+    span: typecheckDummySpan(),
+    segments: segments,
+  }));
+}
+
 function typecheckAnalyzeModule(
   defStore: &mut Analyzer::DefinitionStore,
   typeStore: &mut Analyzer::TypeStore,
@@ -2679,4 +2740,757 @@ function typecheckWalksEnumMethodBodyReturnMismatch(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
+}
+
+// Phase 10: Instance method call typecheck (selfhost-method-resolution WU2)
+// ============================================================
+
+/// Scenario (T07 — open verification item, design section 6): pins the
+/// resolved shape of a real `&self` receiver. The self-hosted parser always
+/// attaches an implicit `&Self` reference annotation to `self`
+/// (`ParserDeclarations::createSelfReceiverPattern`), so the resolver patches
+/// its declared type through `Ast::Type::Node::Reference` to
+/// `Analyzer::Type::Reference(...)` — never the plain owner `Record`/`Enum`
+/// type. Finding: self is reference-typed, not plain-owner-typed.
+/// Spec: selfhost-method-call-resolution — self receiver inside a method body.
+@test
+function typecheckSelfReceiverAnnotationResolvesToReferenceType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let selfPat: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, false);
+  let selfExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "self");
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, selfExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let methodBody: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(selfPat);
+  let methodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "m", params, Option::NONE, methodBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let Option::SOME(selfTypeId) = findExprType(&output, selfExpr) else {
+    @panic("typecheckSelfReceiverAnnotationResolvesToReferenceType: missing self expr type");
+  };
+  let Option::SOME(selfTypeNode) = typeStore.get(selfTypeId) else {
+    @panic("typecheckSelfReceiverAnnotationResolvesToReferenceType: unknown self TypeId");
+  };
+
+  match (selfTypeNode) {
+    Analyzer::Type::Reference(r) -> {
+      Test::assertEq<boolean>(r.mutable, false);
+    },
+    _ -> {
+      @panic("typecheckSelfReceiverAnnotationResolvesToReferenceType: expected self to resolve to Type::Reference");
+    },
+  };
+}
+
+/// Triangulates the T07 finding with a `&mut self` receiver: the `mutable`
+/// flag on the resolved `Type::Reference` must reflect the annotation.
+@test
+function typecheckMutSelfReceiverAnnotationResolvesToMutableReferenceType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let selfPat: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, true);
+  let selfExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "self");
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, selfExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let methodBody: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(selfPat);
+  let methodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "m", params, Option::NONE, methodBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let Option::SOME(selfTypeId) = findExprType(&output, selfExpr) else {
+    @panic("typecheckMutSelfReceiverAnnotationResolvesToMutableReferenceType: missing self expr type");
+  };
+  let Option::SOME(selfTypeNode) = typeStore.get(selfTypeId) else {
+    @panic("typecheckMutSelfReceiverAnnotationResolvesToMutableReferenceType: unknown self TypeId");
+  };
+
+  match (selfTypeNode) {
+    Analyzer::Type::Reference(r) -> {
+      Test::assertEq<boolean>(r.mutable, true);
+    },
+    _ -> {
+      @panic("typecheckMutSelfReceiverAnnotationResolvesToMutableReferenceType: expected self to resolve to Type::Reference");
+    },
+  };
+}
+
+/// Scenario: `value.method(args)` on a non-generic Record receiver resolves
+/// through `instanceMethods`, typechecks the (self-excluded) argument, and
+/// the call expression's type equals the method's return type.
+/// Spec: selfhost-method-call-resolution — Record instance call happy path.
+@test
+function typecheckInstanceMethodCallRecordHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let selfPat: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, false);
+  let xParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32Type);
+  let xExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let addRetStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, xExpr);
+  let mut addBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  addBodyStmts.push(addRetStmt);
+  let addBody: Ast::StatementId = typecheckAddBlock(&mut module, addBodyStmts);
+  let mut addParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  addParams.push(selfPat);
+  addParams.push(xParam);
+  let addMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "add", addParams, Option::SOME(i32Type), addBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(addMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "R");
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, rPath, Vector::new<Ast::TypeId>(), Vector::new<Ast::Expression::RecordInitField>());
+  let valuePattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", recordType);
+  let valueStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: valuePattern,
+    annotation: Option::SOME(recordType),
+    value: Option::SOME(initExpr),
+  }));
+
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(typecheckAddIntLiteral(&mut module, 1));
+  let methodAccessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, valueExpr, "add");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, methodAccessExpr, callArgs);
+  let mainRetStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, callExpr);
+
+  let mut mainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  mainBodyStmts.push(valueStmt);
+  mainBodyStmts.push(mainRetStmt);
+  let mainBody: Ast::StatementId = typecheckAddBlock(&mut module, mainBodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::SOME(i32Type), mainBody);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, callExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: `value.method(args)` on a non-generic Enum receiver resolves
+/// through `instanceMethods` exactly like the Record case.
+/// Spec: selfhost-method-call-resolution — Enum instance call happy path.
+@test
+function typecheckInstanceMethodCallEnumHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "A"));
+
+  let selfPat: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, false);
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let valueRetStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, oneExpr);
+  let mut valueBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  valueBodyStmts.push(valueRetStmt);
+  let valueBody: Ast::StatementId = typecheckAddBlock(&mut module, valueBodyStmts);
+  let mut valueParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  valueParams.push(selfPat);
+  let valueMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "value", valueParams, Option::SOME(i32Type), valueBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(valueMethodId);
+
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let enumType: Ast::TypeId = typecheckAddPathType(&mut module, "E");
+  let eParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "e", enumType);
+  let eExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "e");
+  let accessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, eExpr, "value");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, accessExpr, Vector::new<Ast::ExpressionId>());
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, callExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(eParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useEnum"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32Type),
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, callExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario (T07 downgrade): `self.other()` inside a method body hits the
+/// reference-receiver limitation pinned above — `self`'s resolved type is
+/// `Type::Reference(Record(R))`, which `requireNonGenericMethodOwner` rejects
+/// (no deref support in this slice, `TODO(receiver-place-mutability)`-adjacent
+/// documented limitation, not a regression).
+/// Spec: selfhost-method-call-resolution — self receiver inside a method body.
+@test
+function typecheckSelfMethodCallHitsReferenceReceiverLimitation(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+
+  let selfPatM1: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, false);
+  let selfExprForCall: Ast::ExpressionId = typecheckAddVariable(&mut module, "self");
+  let m2AccessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, selfExprForCall, "m2");
+  let m2CallExpr: Ast::ExpressionId = typecheckAddCall(&mut module, m2AccessExpr, Vector::new<Ast::ExpressionId>());
+  let m1ExprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, m2CallExpr);
+  let m1RetStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut m1BodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  m1BodyStmts.push(m1ExprStmt);
+  m1BodyStmts.push(m1RetStmt);
+  let m1Body: Ast::StatementId = typecheckAddBlock(&mut module, m1BodyStmts);
+  let mut m1Params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  m1Params.push(selfPatM1);
+  let m1Id: Ast::ItemId = typecheckAddMethodItem(&mut module, "m1", m1Params, Option::NONE, m1Body);
+
+  let selfPatM2: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, false);
+  let m2RetStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddIntLiteral(&mut module, 1));
+  let mut m2BodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  m2BodyStmts.push(m2RetStmt);
+  let m2Body: Ast::StatementId = typecheckAddBlock(&mut module, m2BodyStmts);
+  let mut m2Params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  m2Params.push(selfPatM2);
+  let m2Id: Ast::ItemId = typecheckAddMethodItem(&mut module, "m2", m2Params, Option::SOME(i32Type), m2Body);
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(m1Id);
+  methods.push(m2Id);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "method call target must be a non-generic record or enum");
+}
+
+/// Scenario: calling an instance method with the wrong number of arguments
+/// (`self` excluded from arity) produces the same `INVALID_NUMBER_OF_ARGUMENTS`
+/// diagnostic as a direct call — `checkCallArgumentsAgainstSignature` is
+/// behavior-preserving across `firstParamIndex`.
+/// Spec: selfhost-method-call-resolution — arity mismatch.
+@test
+function typecheckInstanceMethodCallWrongArityProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let selfPat: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, false);
+  let xParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32Type);
+  let addRetStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddVariable(&mut module, "x"));
+  let mut addBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  addBodyStmts.push(addRetStmt);
+  let addBody: Ast::StatementId = typecheckAddBlock(&mut module, addBodyStmts);
+  let mut addParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  addParams.push(selfPat);
+  addParams.push(xParam);
+  let addMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "add", addParams, Option::SOME(i32Type), addBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(addMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "R");
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, rPath, Vector::new<Ast::TypeId>(), Vector::new<Ast::Expression::RecordInitField>());
+  let valuePattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", recordType);
+  let valueStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: valuePattern,
+    annotation: Option::SOME(recordType),
+    value: Option::SOME(initExpr),
+  }));
+
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let methodAccessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, valueExpr, "add");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, methodAccessExpr, Vector::new<Ast::ExpressionId>());
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut mainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  mainBodyStmts.push(valueStmt);
+  mainBodyStmts.push(callStmt);
+  mainBodyStmts.push(retStmt);
+  let mainBody: Ast::StatementId = typecheckAddBlock(&mut module, mainBodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, mainBody);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+}
+
+/// Scenario: calling an instance method with a wrong argument type produces
+/// `INVALID_ARGUMENT_TYPE`, mirroring the direct-call case.
+/// Spec: selfhost-method-call-resolution — argument type mismatch.
+@test
+function typecheckInstanceMethodCallWrongArgumentTypeProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let selfPat: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, false);
+  let xParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32Type);
+  let addRetStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddVariable(&mut module, "x"));
+  let mut addBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  addBodyStmts.push(addRetStmt);
+  let addBody: Ast::StatementId = typecheckAddBlock(&mut module, addBodyStmts);
+  let mut addParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  addParams.push(selfPat);
+  addParams.push(xParam);
+  let addMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "add", addParams, Option::SOME(i32Type), addBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(addMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "R");
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, rPath, Vector::new<Ast::TypeId>(), Vector::new<Ast::Expression::RecordInitField>());
+  let valuePattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", recordType);
+  let valueStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: valuePattern,
+    annotation: Option::SOME(recordType),
+    value: Option::SOME(initExpr),
+  }));
+
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(typecheckAddBoolLiteral(&mut module, true));
+  let methodAccessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, valueExpr, "add");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, methodAccessExpr, callArgs);
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut mainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  mainBodyStmts.push(valueStmt);
+  mainBodyStmts.push(callStmt);
+  mainBodyStmts.push(retStmt);
+  let mainBody: Ast::StatementId = typecheckAddBlock(&mut module, mainBodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, mainBody);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_ARGUMENT_TYPE);
+}
+
+/// Scenario: calling a name absent from `instanceMethods` (and not a static
+/// method either) produces a `TYPE_MISMATCH` diagnostic — no silent success.
+/// Spec: selfhost-method-call-resolution — unknown method.
+@test
+function typecheckInstanceMethodCallUnknownMethodProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "R");
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, rPath, Vector::new<Ast::TypeId>(), Vector::new<Ast::Expression::RecordInitField>());
+  let valuePattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", recordType);
+  let valueStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: valuePattern,
+    annotation: Option::SOME(recordType),
+    value: Option::SOME(initExpr),
+  }));
+
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let methodAccessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, valueExpr, "unknown");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, methodAccessExpr, Vector::new<Ast::ExpressionId>());
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut mainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  mainBodyStmts.push(valueStmt);
+  mainBodyStmts.push(callStmt);
+  mainBodyStmts.push(retStmt);
+  let mainBody: Ast::StatementId = typecheckAddBlock(&mut module, mainBodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, mainBody);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "unknown method `unknown`");
+}
+
+/// Scenario (ADR D10): calling a name that exists in `staticMethods` (but not
+/// `instanceMethods`) through an instance receiver is rejected — static
+/// methods are not callable through `.` on a value.
+/// Spec: selfhost-method-call-resolution — Requirement: Instance method calls.
+@test
+function typecheckInstanceMethodCallStaticThroughInstanceProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let createRetStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddIntLiteral(&mut module, 1));
+  let mut createBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  createBodyStmts.push(createRetStmt);
+  let createBody: Ast::StatementId = typecheckAddBlock(&mut module, createBodyStmts);
+  let createMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "create", Vector::new<Ast::PatternId>(), Option::SOME(i32Type), createBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(createMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "R");
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, rPath, Vector::new<Ast::TypeId>(), Vector::new<Ast::Expression::RecordInitField>());
+  let valuePattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", recordType);
+  let valueStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: valuePattern,
+    annotation: Option::SOME(recordType),
+    value: Option::SOME(initExpr),
+  }));
+
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let methodAccessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, valueExpr, "create");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, methodAccessExpr, Vector::new<Ast::ExpressionId>());
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut mainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  mainBodyStmts.push(valueStmt);
+  mainBodyStmts.push(callStmt);
+  mainBodyStmts.push(retStmt);
+  let mainBody: Ast::StatementId = typecheckAddBlock(&mut module, mainBodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, mainBody);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "static method `create` cannot be called through an instance");
+}
+
+/// Scenario (ADR D7, Local-only enforcement): calling a `&mut self` method
+/// through an immutable local receiver is rejected.
+/// Spec: selfhost-method-call-resolution — Requirement: Instance method calls.
+@test
+function typecheckInstanceMethodCallMutSelfOnImmutableLocalProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let selfPat: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, true);
+  let mutateBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let mut mutateParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  mutateParams.push(selfPat);
+  let mutateMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "mutate", mutateParams, Option::NONE, mutateBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(mutateMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "R");
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, rPath, Vector::new<Ast::TypeId>(), Vector::new<Ast::Expression::RecordInitField>());
+  let valuePattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", recordType);
+  let valueStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: valuePattern,
+    annotation: Option::SOME(recordType),
+    value: Option::SOME(initExpr),
+  }));
+
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let methodAccessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, valueExpr, "mutate");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, methodAccessExpr, Vector::new<Ast::ExpressionId>());
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut mainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  mainBodyStmts.push(valueStmt);
+  mainBodyStmts.push(callStmt);
+  mainBodyStmts.push(retStmt);
+  let mainBody: Ast::StatementId = typecheckAddBlock(&mut module, mainBodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, mainBody);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "cannot call mutable method on immutable receiver");
+}
+
+/// Triangulates the mut-self check: the same `&mut self` method call succeeds
+/// with no diagnostic when the receiver local is declared mutable.
+@test
+function typecheckInstanceMethodCallMutSelfOnMutableLocalSucceeds(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let selfPat: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, true);
+  let mutateBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let mut mutateParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  mutateParams.push(selfPat);
+  let mutateMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "mutate", mutateParams, Option::NONE, mutateBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(mutateMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "R");
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, rPath, Vector::new<Ast::TypeId>(), Vector::new<Ast::Expression::RecordInitField>());
+  let valuePattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", recordType);
+  let valueStmt: Ast::StatementId = typecheckAddMutableVariableStmt(&mut module, valuePattern, recordType, initExpr);
+
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let methodAccessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, valueExpr, "mutate");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, methodAccessExpr, Vector::new<Ast::ExpressionId>());
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut mainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  mainBodyStmts.push(valueStmt);
+  mainBodyStmts.push(callStmt);
+  mainBodyStmts.push(retStmt);
+  let mainBody: Ast::StatementId = typecheckAddBlock(&mut module, mainBodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, mainBody);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario (REQ-M4): a receiver whose owner record has type parameters is
+/// rejected — `requireNonGenericMethodOwner` is not widened to accept
+/// `Type::Instance`/generic owners, mirroring `requireNonGenericRecord`.
+/// Spec: selfhost-method-call-resolution — Requirement: requireNonGenericMethodOwner helper.
+@test
+function typecheckInstanceMethodCallGenericReceiverRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "value", tTypeId);
+  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  boxFields.push(valueField);
+
+  let selfPat: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, false);
+  let noopBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let mut noopParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  noopParams.push(selfPat);
+  let noopMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "noop", noopParams, Option::NONE, noopBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(noopMethodId);
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(typecheckGenericParam("T"));
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("Box"),
+    genericParameters: genericParams,
+    fields: boxFields,
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let boxType: Ast::TypeId = typecheckAddPathType(&mut module, "Box");
+  let bParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "b", boxType);
+  let bExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "b");
+  let methodAccessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, bExpr, "noop");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, methodAccessExpr, Vector::new<Ast::ExpressionId>());
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(callStmt);
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(bParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useBox"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support generic method receivers");
+}
+
+/// Scenario: `Tipo::staticMethod(args)` end-to-end (resolve, arity, args,
+/// return type) — a regression pin, not new behavior. WU1 already resolves
+/// the 2-segment path to `Definition::Method` and `definitionType`/
+/// `extractFunctionSignature` already handle `Method`, so this may already be
+/// green independent of WU2's `checkCallExpr` restructure.
+/// Spec: selfhost-method-call-resolution — Requirement: Static/qualified calls.
+@test
+function typecheckStaticMethodCallEndToEndHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32Type);
+  let createRetStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddVariable(&mut module, "x"));
+  let mut createBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  createBodyStmts.push(createRetStmt);
+  let createBody: Ast::StatementId = typecheckAddBlock(&mut module, createBodyStmts);
+  let mut createParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  createParams.push(xParam);
+  let createMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "create", createParams, Option::SOME(i32Type), createBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(createMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let staticCallee: Ast::ExpressionId = typecheckAddPathExpr2(&mut module, "R", "create");
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(typecheckAddIntLiteral(&mut module, 5));
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, staticCallee, callArgs);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, callExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::SOME(i32Type), body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, callExpr, typeStore.intern(Analyzer::Type::I32));
 }

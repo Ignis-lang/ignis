@@ -273,6 +273,74 @@ export namespace Analyzer {
         return Option::NONE;
       }
 
+      // Branch 1: `expr.method(args)` — dispatches on the callee's AST shape
+      // alone (MemberAccess nodes never carry a resolver ref, ADR-B7), so this
+      // never falls through to `checkExpr(callee)`/`checkMemberAccessExpr`.
+      if (let Option::SOME(calleeExpr) = module.expressions.get(call.callee)) {
+        if (let Ast::Expression::Node::MemberAccess(ma) = calleeExpr) {
+          if (ma.operator == Ast::Expression::AccessOperator::Dot) {
+            return Analyzer::Typecheck::checkInstanceMethodCallExpr(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              resolvedBodies,
+              callExprId,
+              call,
+              call.callee,
+              &ma,
+            );
+          }
+        }
+      }
+
+      // Branch 2: a path callee that resolved (at resolver time) directly to a
+      // static `Definition::Method` — e.g. `Tipo::staticMethod(args)`. Bypasses
+      // `checkExpr(callee)` (and therefore the bare method-reference guard,
+      // WU3) since this is a legitimate call, not a value use.
+      let staticResolvedOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, call.callee);
+      if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(staticDefId)) = staticResolvedOpt) {
+        let methodInfoOpt: Option<Analyzer::Typecheck::MethodCallInfo> = Analyzer::Typecheck::lookupMethodDefInfo(defStore, staticDefId);
+
+        if (let Option::SOME(methodInfo) = methodInfoOpt) {
+          let calleeTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::definitionType(defStore, typeStore, staticDefId);
+          let Option::SOME(calleeType) = calleeTypeOpt else {
+            Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through non-function definitions");
+            return Option::NONE;
+          };
+          Analyzer::Typecheck::recordExprType(state, call.callee, calleeType);
+
+          if (!methodInfo.isStatic) {
+            Analyzer::Typecheck::emitDiagnostic(state, call.span, DiagnosticCode::TYPE_MISMATCH, "instance method calls require a receiver");
+            return Option::NONE;
+          }
+
+          let staticSignatureOpt: Option<Analyzer::Typecheck::FunctionSignature> = Analyzer::Typecheck::extractFunctionSignature(
+            defStore,
+            staticDefId,
+          );
+          let Option::SOME(staticSignature) = staticSignatureOpt else {
+            Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through non-function definitions");
+            return Option::NONE;
+          };
+
+          return Analyzer::Typecheck::checkCallArgumentsAgainstSignature(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            callExprId,
+            call,
+            &staticSignature,
+            0,
+          );
+        }
+      }
+
+      // Branch 3: existing flow, byte-for-byte.
       let _calleeType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
         state,
         defStore,
@@ -314,7 +382,38 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      let expectedArity: u64 = signature.params.length();
+      return Analyzer::Typecheck::checkCallArgumentsAgainstSignature(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        callExprId,
+        call,
+        &signature,
+        0,
+      );
+    }
+
+    /// Typechecks `call.arguments` against `signature.params[firstParamIndex..]`
+    /// and records `callExprId`'s type as `signature.returnType`. `firstParamIndex`
+    /// skips the receiver (`self`) for instance-method calls (1) and is a no-op
+    /// for direct/static calls (0) — behavior-preserving at `firstParamIndex = 0`
+    /// relative to the original inline `checkCallExpr` arg loop.
+    function checkCallArgumentsAgainstSignature(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+      signature: &Analyzer::Typecheck::FunctionSignature,
+      firstParamIndex: u64,
+    ): Option<Analyzer::TypeId> {
+      let expectedArity: u64 = signature.params.length() - firstParamIndex;
       let actualArity: u64 = call.arguments.length();
 
       if (actualArity != expectedArity) {
@@ -329,7 +428,7 @@ export namespace Analyzer {
           index += 1;
           continue;
         };
-        let Option::SOME(paramDefId) = signature.params.get(index) else {
+        let Option::SOME(paramDefId) = signature.params.get(index + firstParamIndex) else {
           index += 1;
           continue;
         };
@@ -393,6 +492,10 @@ export namespace Analyzer {
             Analyzer::Typecheck::emitUnsupported(state, call.span, "non-variable function parameters");
             return Option::NONE;
           },
+          Analyzer::Definition::Method(_) -> {
+            Analyzer::Typecheck::emitUnsupported(state, call.span, "non-variable function parameters");
+            return Option::NONE;
+          },
         };
 
         index += 1;
@@ -400,6 +503,167 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
       return Option::SOME(signature.returnType);
+    }
+
+    /// Typechecks `expr.method(args)` where `call.callee` is a `MemberAccess`
+    /// with `Dot`. Resolves the receiver's owner via `requireNonGenericMethodOwner`,
+    /// looks the member up in `instanceMethods` (falling back to `staticMethods`
+    /// for the static-through-instance diagnostic, ADR D10), enforces the
+    /// mut-self check (ADR D7, Local-only), then typechecks the call arguments
+    /// against the method signature with `self` excluded (`firstParamIndex = 1`).
+    /// The `MemberAccess` node itself records a receiver-less function type
+    /// (ADR D9) — never reaches `checkMemberAccessExpr`.
+    function checkInstanceMethodCallExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+      memberExprId: Ast::ExpressionId,
+      ma: &Ast::Expression::MemberAccess,
+    ): Option<Analyzer::TypeId> {
+      let objectTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        ma.object,
+      );
+      let Option::SOME(objectType) = objectTypeOpt else {
+        return Option::NONE;
+      };
+
+      let ownerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = Analyzer::Typecheck::requireNonGenericMethodOwner(
+        state,
+        defStore,
+        typeStore,
+        ma.span,
+        objectType,
+        "method call target must be a non-generic record or enum",
+        "typecheck does not support generic method receivers",
+      );
+      let Option::SOME(owner) = ownerOpt else {
+        return Option::NONE;
+      };
+
+      let memberName: str = ma.member.toStr();
+
+      let instanceOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
+        defStore,
+        &owner.instanceMethods,
+        memberName,
+        symbols,
+      );
+
+      let Option::SOME(methodDefId) = instanceOpt else {
+        let staticOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
+          defStore,
+          &owner.staticMethods,
+          memberName,
+          symbols,
+        );
+
+        if (staticOpt.isSome()) {
+          let message: String = String::create("static method `").concat(memberName).concat("` cannot be called through an instance");
+          Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+          return Option::NONE;
+        }
+
+        Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, ma.span, "unknown method", memberName);
+        return Option::NONE;
+      };
+
+      let infoOpt: Option<Analyzer::Typecheck::MethodCallInfo> = Analyzer::Typecheck::lookupMethodDefInfo(defStore, methodDefId);
+      let Option::SOME(info) = infoOpt else {
+        Analyzer::Typecheck::emitUnsupported(state, ma.span, "method call through non-method definition");
+        return Option::NONE;
+      };
+
+      if (info.selfMutable) {
+        let receiverRefOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, ma.object);
+
+        if (let Option::SOME(receiverRef) = receiverRefOpt) {
+          match (receiverRef) {
+            Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> {
+              let bindingOpt: Option<Analyzer::Typecheck::LocalBindingInfo> = Analyzer::Typecheck::lookupLocalBinding(state, localId);
+
+              if (let Option::SOME(binding) = bindingOpt) {
+                if (!binding.mutable) {
+                  Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::TYPE_MISMATCH, "cannot call mutable method on immutable receiver");
+                  return Option::NONE;
+                }
+              }
+            },
+            // TODO(receiver-place-mutability): non-Local receiver places (record
+            // fields, call results, etc.) are not checked for mutability here —
+            // accepted debt for this slice (ADR D7).
+            Analyzer::ResolverBodies::ResolvedRef::Definition(_) -> {},
+            Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {},
+            Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> {},
+          };
+        }
+      }
+
+      let signatureOpt: Option<Analyzer::Typecheck::FunctionSignature> = Analyzer::Typecheck::extractFunctionSignature(
+        defStore,
+        methodDefId,
+      );
+      let Option::SOME(signature) = signatureOpt else {
+        Analyzer::Typecheck::emitUnsupported(state, ma.span, "calls through non-function definitions");
+        return Option::NONE;
+      };
+
+      let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut paramIndex: u64 = 1;
+      while (paramIndex < signature.params.length()) {
+        let Option::SOME(paramDefId) = signature.params.get(paramIndex) else {
+          paramIndex += 1;
+          continue;
+        };
+        let Option::SOME(paramDef) = defStore.get(*paramDefId) else {
+          paramIndex += 1;
+          continue;
+        };
+
+        match (paramDef) {
+          Analyzer::Definition::Variable(parameter) -> {
+            paramTypes.push(parameter.declaredType);
+          },
+          Analyzer::Definition::Function(_) -> {},
+          Analyzer::Definition::Record(_) -> {},
+          Analyzer::Definition::Enum(_) -> {},
+          Analyzer::Definition::Field(_) -> {},
+          Analyzer::Definition::Variant(_) -> {},
+          Analyzer::Definition::TypeParam(_) -> {},
+          Analyzer::Definition::TypeAlias(_) -> {},
+          Analyzer::Definition::Trait(_) -> {},
+          Analyzer::Definition::Method(_) -> {},
+        };
+
+        paramIndex += 1;
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let memberAccessType: Analyzer::TypeId = typeStoreRef.functionType(paramTypes, signature.returnType);
+      Analyzer::Typecheck::recordExprType(state, memberExprId, memberAccessType);
+
+      return Analyzer::Typecheck::checkCallArgumentsAgainstSignature(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        callExprId,
+        call,
+        &signature,
+        1,
+      );
     }
 
     record RequiredRecordDef {

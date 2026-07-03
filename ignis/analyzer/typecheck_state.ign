@@ -567,6 +567,122 @@ export namespace Analyzer {
       };
     }
 
+    record RequiredMethodOwner {
+      public defId: Analyzer::DefinitionId;
+      public typeId: Analyzer::TypeId;
+      public instanceMethods: Vector<Analyzer::DefinitionId>;
+      public staticMethods: Vector<Analyzer::DefinitionId>;
+    }
+
+    /// Copies a `Vector<DefinitionId>` element-by-element. `Vector` has no
+    /// `clone()`, and matching a `&Definition` binds its payload by reference,
+    /// so owner method tables must be copied out one id at a time (mirrors how
+    /// `requireNonGenericRecord` collects `RequiredRecordDef.fields`).
+    function copyDefinitionIdVector(source: &Vector<Analyzer::DefinitionId>): Vector<Analyzer::DefinitionId> {
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+
+      while (index < source.length()) {
+        let Option::SOME(defId) = source.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        out.push(*defId);
+        index += 1;
+      }
+
+      return out;
+    }
+
+    /// Parallel to `requireNonGenericRecord` (ADR A4 — that helper is NOT
+    /// modified, its record-init/destructuring callers rely on its record-only
+    /// rejection). Accepts non-generic Record OR Enum owners for method-call
+    /// resolution, copying their `instanceMethods`/`staticMethods` tables.
+    function requireNonGenericMethodOwner(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+      nonOwnerMessage: str,
+      genericMessage: str,
+    ): Option<Analyzer::Typecheck::RequiredMethodOwner> {
+      let resolvedType: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (let Option::SOME(aliasDefId) = resolvedType.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return Option::NONE;
+      }
+
+      let Option::SOME(resolvedTypeNode) = typeStore.get(resolvedType.typeId) else {
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
+        return Option::NONE;
+      };
+
+      match (resolvedTypeNode) {
+        Analyzer::Type::Record(defId) -> {
+          let Option::SOME(def) = defStore.get(defId) else {
+            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
+            return Option::NONE;
+          };
+
+          match (def) {
+            Analyzer::Definition::Record(record_) -> {
+              if (record_.typeParams.length() > 0) {
+                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+                return Option::NONE;
+              }
+
+              return Option::SOME(Analyzer::Typecheck::RequiredMethodOwner {
+                defId: defId,
+                typeId: record_.typeId,
+                instanceMethods: Analyzer::Typecheck::copyDefinitionIdVector(&record_.instanceMethods),
+                staticMethods: Analyzer::Typecheck::copyDefinitionIdVector(&record_.staticMethods),
+              });
+            },
+            _ -> {
+              Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
+              return Option::NONE;
+            },
+          };
+        },
+        Analyzer::Type::Enum(defId) -> {
+          let Option::SOME(def) = defStore.get(defId) else {
+            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
+            return Option::NONE;
+          };
+
+          match (def) {
+            Analyzer::Definition::Enum(enum_) -> {
+              if (enum_.typeParams.length() > 0) {
+                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+                return Option::NONE;
+              }
+
+              return Option::SOME(Analyzer::Typecheck::RequiredMethodOwner {
+                defId: defId,
+                typeId: enum_.typeId,
+                instanceMethods: Analyzer::Typecheck::copyDefinitionIdVector(&enum_.instanceMethods),
+                staticMethods: Analyzer::Typecheck::copyDefinitionIdVector(&enum_.staticMethods),
+              });
+            },
+            _ -> {
+              Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
+              return Option::NONE;
+            },
+          };
+        },
+        Analyzer::Type::Instance(_) -> {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+          return Option::NONE;
+        },
+        _ -> {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
+          return Option::NONE;
+        },
+      };
+    }
+
     function recordFieldCount(
       defStore: &mut Analyzer::DefinitionStore,
       recordDefId: Analyzer::DefinitionId
@@ -970,6 +1086,62 @@ export namespace Analyzer {
           return Option::NONE;
         },
         Analyzer::Definition::Enum(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::Field(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::Variant(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::Trait(_) -> {
+          return Option::NONE;
+        },
+      };
+    }
+
+    record MethodCallInfo {
+      public isStatic: boolean;
+      public selfMutable: boolean;
+      public returnType: Analyzer::TypeId;
+    }
+
+    /// Centralizes `Definition::Method` detection so only one new `Definition`
+    /// match is introduced here — consumed by `checkCallExpr`'s static-path
+    /// branch, the instance-call mut-self check, and (WU3) the bare
+    /// method-reference guard.
+    function lookupMethodDefInfo(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Option<Analyzer::Typecheck::MethodCallInfo> {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return Option::NONE;
+      };
+
+      match (def) {
+        Analyzer::Definition::Method(method) -> {
+          return Option::SOME(Analyzer::Typecheck::MethodCallInfo {
+            isStatic: method.isStatic,
+            selfMutable: method.selfMutable,
+            returnType: method.returnType,
+          });
+        },
+        Analyzer::Definition::Function(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::Record(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::Enum(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::Variable(_) -> {
           return Option::NONE;
         },
         Analyzer::Definition::Field(_) -> {
