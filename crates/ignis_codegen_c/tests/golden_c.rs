@@ -961,3 +961,93 @@ function main(): void {
     "expected nested droppable field to start marked as already dropped"
   );
 }
+
+// =============================================================================
+// Determinism
+// =============================================================================
+
+/// Compiling the same source twice must produce byte-identical C.
+///
+/// Every HashMap gets its own RandomState seed, so a second in-process run
+/// exercises different map iteration orders. Any order-dependent step in mono
+/// root collection, instantiation processing, or emission shows up here as a
+/// mismatch.
+#[test]
+fn c_emission_is_deterministic() {
+  let source = r#"
+record Point {
+    public x: i32;
+    public y: i32;
+
+    sum(&self): i32 {
+        return self.x + self.y;
+    }
+
+    scaled(&self, k: i32): i32 {
+        return self.x * k + self.y * k;
+    }
+}
+
+record Size {
+    public w: i32;
+    public h: i32;
+
+    area(&self): i32 {
+        return self.w * self.h;
+    }
+
+    perimeter(&self): i32 {
+        return (self.w + self.h) * 2;
+    }
+}
+
+record Pair<T> {
+    public first: T;
+    public second: T;
+}
+
+record Box<T> {
+    public value: T;
+
+    isSet(&self): boolean {
+        return true;
+    }
+
+    firstOfPair(&self): T {
+        let pair: Pair<T> = Pair { first: self.value, second: self.value };
+        return pair.first;
+    }
+}
+
+function main(): i32 {
+    let p: Box<Point> = Box { value: Point { x: 1, y: 2 } };
+    let s: Box<Size> = Box { value: Size { w: 3, h: 4 } };
+    let a: Box<i32> = Box { value: 5 };
+    let b: Box<u32> = Box { value: 6 };
+    let c: Box<i64> = Box { value: 7 };
+    let d: Box<u64> = Box { value: 8 };
+
+    let mut total: i32 = 0;
+
+    if (p.isSet()) {
+        total = total + p.value.sum();
+    }
+
+    if (s.isSet()) {
+        total = total + s.value.area() + s.value.perimeter();
+    }
+
+    total = total + a.firstOfPair();
+    total = total + (b.firstOfPair() as i32);
+    total = total + (c.firstOfPair() as i32);
+    total = total + (d.firstOfPair() as i32);
+
+    return total + p.value.scaled(2) + s.value.area();
+}
+"#;
+
+  let first = common::compile_to_c(source);
+  let second = common::compile_to_c(source);
+
+  assert_eq!(first, second, "generated C differs between identical compilations");
+}

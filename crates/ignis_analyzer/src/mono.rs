@@ -177,12 +177,7 @@ impl<'a> Monomorphizer<'a> {
     // === PASS 2: Substitute bodies + fixpoint for nested instantiations ===
     loop {
       // Collect keys pending body substitution
-      let pending: Vec<_> = self
-        .cache
-        .keys()
-        .filter(|k| !self.processed.contains(*k))
-        .cloned()
-        .collect();
+      let pending = self.collect_pending_keys();
 
       if pending.is_empty() && self.worklist.is_empty() {
         break;
@@ -212,12 +207,7 @@ impl<'a> Monomorphizer<'a> {
     // Process any new instantiations discovered during copying
     // This handles generic calls found in non-generic function bodies
     loop {
-      let pending: Vec<_> = self
-        .cache
-        .keys()
-        .filter(|k| !self.processed.contains(*k))
-        .cloned()
-        .collect();
+      let pending = self.collect_pending_keys();
 
       if pending.is_empty() && self.worklist.is_empty() {
         break;
@@ -263,14 +253,28 @@ impl<'a> Monomorphizer<'a> {
     }
   }
 
+  /// Collect instantiation keys whose bodies still need substitution, ordered by
+  /// their concrete DefinitionId.
+  ///
+  /// The cache is a HashMap, so raw key iteration order varies between runs.
+  /// Body substitution order determines how nested instantiations are discovered
+  /// and therefore which DefinitionIds new specializations receive; it must be
+  /// deterministic for the generated C to be reproducible.
+  fn collect_pending_keys(&self) -> Vec<InstanceKey> {
+    let mut pending: Vec<_> = self
+      .cache
+      .iter()
+      .filter(|(key, _)| !self.processed.contains(*key))
+      .map(|(key, concrete_id)| (key.clone(), *concrete_id))
+      .collect();
+
+    pending.sort_by_key(|(_, concrete_id)| concrete_id.index());
+    pending.into_iter().map(|(key, _)| key).collect()
+  }
+
   fn process_pending_instantiations(&mut self) {
     loop {
-      let pending: Vec<_> = self
-        .cache
-        .keys()
-        .filter(|key| !self.processed.contains(*key))
-        .cloned()
-        .collect();
+      let pending = self.collect_pending_keys();
 
       if pending.is_empty() && self.worklist.is_empty() {
         break;
@@ -416,7 +420,9 @@ impl<'a> Monomorphizer<'a> {
 
     // Copy variable/constant init expressions (e.g. module-level const bindings
     // whose values aren't compile-time evaluable, such as closures).
-    let inits: Vec<_> = self.input_hir.variables_inits.iter().map(|(&k, &v)| (k, v)).collect();
+    let mut inits: Vec<_> = self.input_hir.variables_inits.iter().map(|(&k, &v)| (k, v)).collect();
+    inits.sort_by_key(|(def_id, _)| def_id.index());
+
     for (def_id, init_hir_id) in inits {
       let new_init = self.clone_hir_tree(init_hir_id);
       self.output_hir.variables_inits.insert(def_id, new_init);

@@ -4188,34 +4188,12 @@ fn collect_mono_roots(
 
       // Include non-generic records and their methods
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
-        for entry in rd.instance_methods.values() {
-          match entry {
-            SymbolEntry::Single(id) => roots.push(*id),
-            SymbolEntry::Overload(ids) => roots.extend(ids),
-          }
-        }
-        for entry in rd.static_methods.values() {
-          match entry {
-            SymbolEntry::Single(id) => roots.push(*id),
-            SymbolEntry::Overload(ids) => roots.extend(ids),
-          }
-        }
+        roots.extend(collect_sorted_method_roots(&rd.instance_methods, &rd.static_methods));
       },
 
       // Include non-generic enums and their methods
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
-        for entry in ed.instance_methods.values() {
-          match entry {
-            SymbolEntry::Single(id) => roots.push(*id),
-            SymbolEntry::Overload(ids) => roots.extend(ids),
-          }
-        }
-        for entry in ed.static_methods.values() {
-          match entry {
-            SymbolEntry::Single(id) => roots.push(*id),
-            SymbolEntry::Overload(ids) => roots.extend(ids),
-          }
-        }
+        roots.extend(collect_sorted_method_roots(&ed.instance_methods, &ed.static_methods));
       },
 
       _ => {},
@@ -4223,6 +4201,29 @@ fn collect_mono_roots(
   }
 
   roots
+}
+
+/// Collect method roots from a type's method maps in a deterministic order.
+///
+/// The method maps are HashMaps, so raw `.values()` iteration order varies
+/// between runs. Root order drives monomorphization discovery order, which in
+/// turn drives DefinitionId assignment for specializations, so it must be
+/// stable for the generated C to be reproducible.
+fn collect_sorted_method_roots(
+  instance_methods: &HashMap<ignis_type::symbol::SymbolId, SymbolEntry>,
+  static_methods: &HashMap<ignis_type::symbol::SymbolId, SymbolEntry>,
+) -> Vec<DefinitionId> {
+  let mut method_roots = Vec::new();
+
+  for entry in instance_methods.values().chain(static_methods.values()) {
+    match entry {
+      SymbolEntry::Single(id) => method_roots.push(*id),
+      SymbolEntry::Overload(ids) => method_roots.extend(ids),
+    }
+  }
+
+  method_roots.sort_by_key(|id| id.index());
+  method_roots
 }
 
 /// Collect monomorphization roots for std builds.
@@ -4239,32 +4240,10 @@ fn collect_mono_roots_for_std(defs: &DefinitionStore) -> Vec<DefinitionId> {
         roots.push(def_id);
       },
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
-        for entry in rd.instance_methods.values() {
-          match entry {
-            SymbolEntry::Single(id) => roots.push(*id),
-            SymbolEntry::Overload(ids) => roots.extend(ids),
-          }
-        }
-        for entry in rd.static_methods.values() {
-          match entry {
-            SymbolEntry::Single(id) => roots.push(*id),
-            SymbolEntry::Overload(ids) => roots.extend(ids),
-          }
-        }
+        roots.extend(collect_sorted_method_roots(&rd.instance_methods, &rd.static_methods));
       },
       DefinitionKind::Enum(ed) if ed.type_params.is_empty() => {
-        for entry in ed.instance_methods.values() {
-          match entry {
-            SymbolEntry::Single(id) => roots.push(*id),
-            SymbolEntry::Overload(ids) => roots.extend(ids),
-          }
-        }
-        for entry in ed.static_methods.values() {
-          match entry {
-            SymbolEntry::Single(id) => roots.push(*id),
-            SymbolEntry::Overload(ids) => roots.extend(ids),
-          }
-        }
+        roots.extend(collect_sorted_method_roots(&ed.instance_methods, &ed.static_methods));
       },
       _ => {},
     }

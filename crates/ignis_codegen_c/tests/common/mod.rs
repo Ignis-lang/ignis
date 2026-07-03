@@ -99,20 +99,22 @@ fn collect_mono_roots(
         roots.push(def_id);
       },
 
-      // Include non-generic records and their methods
+      // Include non-generic records and their methods.
+      // Sorted like the driver pipeline does: the method maps are HashMaps and
+      // root order drives mono DefinitionId assignment, so unsorted iteration
+      // would make the emitted C nondeterministic.
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
-        for entry in rd.instance_methods.values() {
+        let mut method_roots = Vec::new();
+
+        for entry in rd.instance_methods.values().chain(rd.static_methods.values()) {
           match entry {
-            SymbolEntry::Single(id) => roots.push(*id),
-            SymbolEntry::Overload(ids) => roots.extend(ids),
+            SymbolEntry::Single(id) => method_roots.push(*id),
+            SymbolEntry::Overload(ids) => method_roots.extend(ids),
           }
         }
-        for entry in rd.static_methods.values() {
-          match entry {
-            SymbolEntry::Single(id) => roots.push(*id),
-            SymbolEntry::Overload(ids) => roots.extend(ids),
-          }
-        }
+
+        method_roots.sort_by_key(|id| id.index());
+        roots.extend(method_roots);
       },
 
       _ => {},

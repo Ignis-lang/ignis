@@ -994,6 +994,8 @@ impl<'a> CEmitter<'a> {
 
     referenced_struct_names.retain(|name| name.contains("__"));
 
+    self.collect_forced_function_struct_names(&mut referenced_struct_names);
+
     let external_definition_ids = collect_external_type_definition_ids(
       self.defs,
       self.types,
@@ -1044,6 +1046,44 @@ impl<'a> CEmitter<'a> {
     }
 
     writeln!(self.output).unwrap();
+  }
+
+  /// Collect struct names that force-emitted function bodies require as complete types.
+  ///
+  /// Force-emitted defs live in a translation unit whose module header knows
+  /// nothing about them, so every record/enum their signatures, locals, or
+  /// temps mention — including behind pointers, since bodies index, copy, and
+  /// access fields through them — must get a full definition in this TU. In
+  /// particular a specialization like `Vector<T>::get` over a user record `T`
+  /// does pointer arithmetic on `T*` even though `T`'s mangled name carries no
+  /// generic marker, so the name-based `"__"` filter alone would drop it.
+  fn collect_forced_function_struct_names(
+    &self,
+    out: &mut std::collections::HashSet<String>,
+  ) {
+    for def_id in &self.forced_emit_defs {
+      let Some(function) = self.program.functions.get(def_id) else {
+        continue;
+      };
+
+      let mut referenced_types: Vec<TypeId> = vec![function.return_type];
+
+      for param_id in &function.params {
+        referenced_types.push(*self.defs.type_of(param_id));
+      }
+
+      for local in function.locals.get_all() {
+        referenced_types.push(local.ty);
+      }
+
+      for temp in function.temps.get_all() {
+        referenced_types.push(temp.ty);
+      }
+
+      for type_id in referenced_types {
+        collect_struct_types_from_type(&type_id, self.types, self.defs, self.symbols, self.namespaces, out);
+      }
+    }
   }
 
   /// Check if an extern declaration should be emitted for a definition.
@@ -1212,7 +1252,10 @@ impl<'a> CEmitter<'a> {
       }
     }
 
-    for func in self.program.functions.values() {
+    let mut sorted_functions: Vec<_> = self.program.functions.iter().collect();
+    sorted_functions.sort_by_key(|(def_id, _)| def_id.index());
+
+    for (_, func) in sorted_functions {
       // Scan MakeClosure instructions for thunk env types and closure signatures
       for block in func.blocks.get_all() {
         for instr in &block.instructions {
@@ -1289,7 +1332,10 @@ impl<'a> CEmitter<'a> {
       self.closure_env_names.insert(*thunk_id, env_name);
     }
 
-    for &sig_type_id in &seen_sigs {
+    let mut sorted_sigs: Vec<TypeId> = seen_sigs.into_iter().collect();
+    sorted_sigs.sort_by_key(|type_id| type_id.index());
+
+    for sig_type_id in sorted_sigs {
       if let Type::Function { params, ret, .. } = self.types.get(&sig_type_id) {
         let struct_name = self.closure_struct_name(sig_type_id);
 
