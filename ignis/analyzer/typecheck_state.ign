@@ -1162,6 +1162,60 @@ export namespace Analyzer {
       };
     }
 
+    /// Names resolved by `resolveLocalAnnotation`'s 1-segment branch as
+    /// primitives via literal comparison. Shared with the N>=2 branch so a
+    /// qualified path ending in a primitive name (e.g. `Ns::i32`) is skipped
+    /// rather than incorrectly resolved.
+    function isPrimitiveAnnotationName(name: str): boolean {
+      if (name.equals("i8")) {
+        return true;
+      }
+      if (name.equals("i16")) {
+        return true;
+      }
+      if (name.equals("i32")) {
+        return true;
+      }
+      if (name.equals("i64")) {
+        return true;
+      }
+      if (name.equals("u8")) {
+        return true;
+      }
+      if (name.equals("u16")) {
+        return true;
+      }
+      if (name.equals("u32")) {
+        return true;
+      }
+      if (name.equals("u64")) {
+        return true;
+      }
+      if (name.equals("f32")) {
+        return true;
+      }
+      if (name.equals("f64")) {
+        return true;
+      }
+      if (name.equals("boolean")) {
+        return true;
+      }
+      if (name.equals("char")) {
+        return true;
+      }
+      if (name.equals("str")) {
+        return true;
+      }
+      if (name.equals("void")) {
+        return true;
+      }
+      if (name.equals("never")) {
+        return true;
+      }
+
+      return false;
+    }
+
     function resolveLocalAnnotation(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
@@ -1175,7 +1229,63 @@ export namespace Analyzer {
 
       match (typeNode) {
         Ast::Type::Node::Path(path) -> {
-          if (path.segments.length() != 1) {
+          if (path.segments.length() == 0) {
+            return Option::NONE;
+          }
+
+          // N >= 2 segments (ADR D11): the leading segments form an
+          // unvalidated namespace-qualifier prefix — TODO(namespace-path-validation),
+          // the same debt tracked at `resolvePathTail` in resolver_bodies.ign.
+          // Only the last segment is resolved, and only against
+          // Record/Enum/TypeAlias names — deliberately narrower than the
+          // 1-segment scan below, which also matches functions/variables/etc.
+          if (path.segments.length() >= 2) {
+            let Option::SOME(lastSegment) = path.segments.get(path.segments.length() - 1) else {
+              return Option::NONE;
+            };
+
+            let lastName: String = lastSegment.clone();
+            if (Analyzer::Typecheck::isPrimitiveAnnotationName(lastName.toStr())) {
+              return Option::NONE;
+            }
+
+            let mut qualifiedSymbolsRef: &mut Analyzer::SymbolTable = symbols;
+            let lastSymbol: Analyzer::SymbolId = qualifiedSymbolsRef.intern(lastName.toStr());
+            let mut qualifiedIndex: u64 = 0;
+            while (qualifiedIndex < defStore.length()) {
+              let qualifiedDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(qualifiedIndex as u32);
+              let Option::SOME(qualifiedDef) = defStore.get(qualifiedDefId) else {
+                qualifiedIndex += 1;
+                continue;
+              };
+
+              if (qualifiedDef.name().raw() != lastSymbol.raw()) {
+                qualifiedIndex += 1;
+                continue;
+              }
+
+              match (qualifiedDef) {
+                Analyzer::Definition::Record(record_) -> {
+                  return Option::SOME(record_.typeId);
+                },
+                Analyzer::Definition::Enum(enum_) -> {
+                  return Option::SOME(enum_.typeId);
+                },
+                Analyzer::Definition::TypeAlias(alias_) -> {
+                  return Option::SOME(alias_.typeId);
+                },
+                Analyzer::Definition::Function(_) -> {},
+                Analyzer::Definition::Variable(_) -> {},
+                Analyzer::Definition::Field(_) -> {},
+                Analyzer::Definition::Variant(_) -> {},
+                Analyzer::Definition::TypeParam(_) -> {},
+                Analyzer::Definition::Trait(_) -> {},
+                Analyzer::Definition::Method(_) -> {},
+              };
+
+              qualifiedIndex += 1;
+            }
+
             return Option::NONE;
           }
 
@@ -1330,6 +1440,12 @@ export namespace Analyzer {
           return Option::SOME(localBinding.typeId);
         },
         Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> {
+          let methodInfoOpt: Option<Analyzer::Typecheck::MethodCallInfo> = Analyzer::Typecheck::lookupMethodDefInfo(defStore, defId);
+          if (methodInfoOpt.isSome()) {
+            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "method references are not values; call the method instead");
+            return Option::NONE;
+          }
+
           let defTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::definitionType(defStore, typeStore, defId);
           let Option::SOME(typeId) = defTypeOpt else {
             Analyzer::Typecheck::emitUnsupported(state, span, "definition kind in expression position");

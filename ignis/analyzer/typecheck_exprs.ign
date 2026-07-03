@@ -840,12 +840,63 @@ export namespace Analyzer {
         value.member.toStr(),
       );
       let Option::SOME(fieldDef) = fieldDefOpt else {
-        Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, "unknown record field", value.member.toStr());
+        Analyzer::Typecheck::emitBareMethodReferenceOrUnknownField(state, defStore, symbols, value.span, &recordDef, value.member.toStr());
         return Option::NONE;
       };
 
       Analyzer::Typecheck::recordExprType(state, exprId, fieldDef.fieldType);
       return Option::SOME(fieldDef.fieldType);
+    }
+
+    /// Called after a record field-lookup miss (`checkMemberAccessExpr`).
+    /// Scans the owner's `instanceMethods`/`staticMethods` tables (record-only,
+    /// mirrors `requireNonGenericRecord`'s record-only blast radius, ADR D11's
+    /// sibling restriction): a hit means the caller wrote a bare method
+    /// reference (`obj.method` without a call) — diagnose that specifically
+    /// instead of the generic "unknown record field" message. A miss on both
+    /// tables falls back to the existing "unknown record field" diagnostic,
+    /// unchanged.
+    function emitBareMethodReferenceOrUnknownField(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      span: SourceSpan,
+      recordDef: &Analyzer::Typecheck::RequiredRecordDef,
+      memberName: str,
+    ): void {
+      let mut instanceMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut staticMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(ownerDef) = defStore.get(recordDef.defId)) {
+        match (ownerDef) {
+          Analyzer::Definition::Record(record_) -> {
+            instanceMethods = Analyzer::Typecheck::copyDefinitionIdVector(&record_.instanceMethods);
+            staticMethods = Analyzer::Typecheck::copyDefinitionIdVector(&record_.staticMethods);
+          },
+          Analyzer::Definition::Enum(_) -> {},
+          Analyzer::Definition::Function(_) -> {},
+          Analyzer::Definition::Variable(_) -> {},
+          Analyzer::Definition::Field(_) -> {},
+          Analyzer::Definition::Variant(_) -> {},
+          Analyzer::Definition::TypeParam(_) -> {},
+          Analyzer::Definition::TypeAlias(_) -> {},
+          Analyzer::Definition::Trait(_) -> {},
+          Analyzer::Definition::Method(_) -> {},
+        };
+      }
+
+      let mut methodHit: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(defStore, &instanceMethods, memberName, symbols);
+      if (!methodHit.isSome()) {
+        methodHit = Analyzer::ResolverBodies::lookupMethodInTable(defStore, &staticMethods, memberName, symbols);
+      }
+
+      if (methodHit.isSome()) {
+        let message: String = String::create("method `").concat(memberName).concat("` requires a call");
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+        return;
+      }
+
+      Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, span, "unknown record field", memberName);
     }
 
     function checkRecordInitExpr(

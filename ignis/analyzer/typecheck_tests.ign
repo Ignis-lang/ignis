@@ -472,6 +472,17 @@ function typecheckAddPathExpr2(module: &mut Ast::Module, seg0: str, seg1: str): 
   }));
 }
 
+function typecheckAddPathType2(module: &mut Ast::Module, seg0: str, seg1: str): Ast::TypeId {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create(seg0));
+  segments.push(String::create(seg1));
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: typecheckDummySpan(),
+    segments: segments,
+  }));
+}
+
 function typecheckAnalyzeModule(
   defStore: &mut Analyzer::DefinitionStore,
   typeStore: &mut Analyzer::TypeStore,
@@ -3493,4 +3504,270 @@ function typecheckStaticMethodCallEndToEndHappyPath(): void {
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
   assertExprType(&output, callExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: a bare static method reference used as a value (`R::create`
+/// without a call) must not silently type as a callable — resolving the
+/// `Path` expression through `checkResolvedValueExpr` hits the WU3 guard
+/// before `definitionType` would otherwise expose the method's function type.
+/// Spec: selfhost-method-call-resolution — bare method-reference rejection.
+@test
+function typecheckBareStaticMethodReferenceProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32Type);
+  let createRetStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddVariable(&mut module, "x"));
+  let mut createBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  createBodyStmts.push(createRetStmt);
+  let createBody: Ast::StatementId = typecheckAddBlock(&mut module, createBodyStmts);
+  let mut createParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  createParams.push(xParam);
+  let createMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "create", createParams, Option::SOME(i32Type), createBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(createMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let bareReference: Ast::ExpressionId = typecheckAddPathExpr2(&mut module, "R", "create");
+  let fPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "f", i32Type);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, fPattern, i32Type, bareReference);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "method references are not values; call the method instead");
+}
+
+/// Scenario: a bare instance method reference used as a value (`value.add`
+/// without a call) must not silently type as the record field it is not —
+/// `checkMemberAccessExpr`'s field-lookup miss scans the owner's method
+/// tables and reports the more specific "requires a call" diagnostic instead
+/// of "unknown record field".
+/// Spec: selfhost-method-call-resolution — bare method-reference rejection.
+@test
+function typecheckBareInstanceMethodReferenceProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let selfPat: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, false);
+  let xParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32Type);
+  let addRetStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddVariable(&mut module, "x"));
+  let mut addBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  addBodyStmts.push(addRetStmt);
+  let addBody: Ast::StatementId = typecheckAddBlock(&mut module, addBodyStmts);
+  let mut addParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  addParams.push(selfPat);
+  addParams.push(xParam);
+  let addMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "add", addParams, Option::SOME(i32Type), addBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(addMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "R");
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, rPath, Vector::new<Ast::TypeId>(), Vector::new<Ast::Expression::RecordInitField>());
+  let valuePattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", recordType);
+  let valueStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, valuePattern, recordType, initExpr);
+
+  let bareAccessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, typecheckAddVariable(&mut module, "value"), "add");
+  let fPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "f", i32Type);
+  let fStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, fPattern, i32Type, bareAccessExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(valueStmt);
+  bodyStmts.push(fStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "method `add` requires a call");
+}
+
+/// Regression pair for the WU3 guards above: a real static-method call
+/// (`R::create(5)`) must stay green — `checkCallExpr`'s branch 2 bypasses
+/// `checkExpr(callee)` (and therefore `checkResolvedValueExpr`'s bare
+/// method-reference guard) for legitimate static path calls.
+/// Spec: selfhost-method-call-resolution — bare method-reference rejection
+/// must not regress static/qualified calls.
+@test
+function typecheckStaticMethodCallStaysGreenWithBareReferenceGuardActive(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32Type);
+  let createRetStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddVariable(&mut module, "x"));
+  let mut createBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  createBodyStmts.push(createRetStmt);
+  let createBody: Ast::StatementId = typecheckAddBlock(&mut module, createBodyStmts);
+  let mut createParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  createParams.push(xParam);
+  let createMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "create", createParams, Option::SOME(i32Type), createBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(createMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let staticCallee: Ast::ExpressionId = typecheckAddPathExpr2(&mut module, "R", "create");
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(typecheckAddIntLiteral(&mut module, 5));
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, staticCallee, callArgs);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, callExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::SOME(i32Type), body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, callExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: a qualified type annotation (`Ns::Rec`, 2 segments) resolves
+/// through the restricted N>=2 branch of `resolveLocalAnnotation` — the
+/// leading `Ns` segment is unvalidated (`TODO(namespace-path-validation)`),
+/// only the last segment (`Rec`) is resolved, and it hits the `Record` arm.
+/// Spec: selfhost-method-call-resolution — qualified type annotations.
+@test
+function typecheckQualifiedAnnotationAcceptsRecordType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "x", i32Type);
+  let mut recFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  recFields.push(xField);
+  typecheckAddRecordItem(&mut module, "Rec", Vector::new<Ast::GenericParam>(), recFields);
+
+  let recPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Rec");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", typecheckAddIntLiteral(&mut module, 1)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, recPath, Vector::new<Ast::TypeId>(), initFields);
+
+  let qualifiedAnnotation: Ast::TypeId = typecheckAddPathType2(&mut module, "Ns", "Rec");
+  let rPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "r", qualifiedAnnotation);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, rPattern, qualifiedAnnotation, initExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: a qualified annotation whose last segment names a `Method`
+/// (`Ns::make`) is rejected — ADR D11 restricts the N>=2 scan to
+/// `Record`/`Enum`/`TypeAlias`, so `resolveLocalAnnotation` returns `NONE`
+/// even though a definition named `make` exists, falling back to the
+/// existing "unsupported local annotation type" caller diagnostic.
+/// Spec: selfhost-method-call-resolution — qualified type annotations.
+@test
+function typecheckQualifiedMethodAnnotationRejectedAsUnsupported(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let makeRetStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddIntLiteral(&mut module, 0));
+  let mut makeBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  makeBodyStmts.push(makeRetStmt);
+  let makeBody: Ast::StatementId = typecheckAddBlock(&mut module, makeBodyStmts);
+  let makeMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "make", Vector::new<Ast::PatternId>(), Option::SOME(i32Type), makeBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(makeMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let qualifiedAnnotation: Ast::TypeId = typecheckAddPathType2(&mut module, "Ns", "make");
+  let fPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "f", qualifiedAnnotation);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, fPattern, qualifiedAnnotation, typecheckAddIntLiteral(&mut module, 0));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support unsupported local annotation type");
+}
+
+/// Scenario: a qualified annotation whose last segment matches no definition
+/// at all (`Ns::Missing`) falls back to the same "unsupported local
+/// annotation type" diagnostic as the method case above, via the N>=2 scan
+/// simply exhausting `defStore` without a hit.
+/// Spec: selfhost-method-call-resolution — qualified type annotations.
+@test
+function typecheckUnknownQualifiedAnnotationProducesUnsupportedDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let qualifiedAnnotation: Ast::TypeId = typecheckAddPathType2(&mut module, "Ns", "Missing");
+  let fPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "f", qualifiedAnnotation);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, fPattern, qualifiedAnnotation, typecheckAddIntLiteral(&mut module, 0));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support unsupported local annotation type");
 }
