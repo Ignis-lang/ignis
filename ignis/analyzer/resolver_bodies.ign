@@ -73,6 +73,29 @@ export namespace Analyzer {
       Unresolved(String),
     }
 
+    /// Outcome of resolving the last two segments of a multi-segment path
+    /// (`owner::member`) via `resolvePathTail`. Pure lookup result — carries
+    /// no diagnostics; callers (expression- and pattern-position resolvers)
+    /// map each variant to a `ResolvedRef` and, where appropriate, a diagnostic.
+    ///
+    /// `Variant`/`StaticMethod`/`InstanceMethod` — member resolved against the
+    /// owner's variant/method tables. `TypeFallback` — the owner segment did
+    /// not resolve to a usable qualifier, but the member segment alone names
+    /// a top-level Record/Enum (namespace-prefix parity, ADR D3). `OwnerIsTrait`,
+    /// `OwnerInvalid`, `OwnerNotFound` — the owner segment is unusable.
+    /// `MemberNotFoundOnEnum`/`MemberNotFoundOnRecord` — owner resolved, member did not.
+    enum PathTailLookup {
+      Variant(Analyzer::DefinitionId),
+      StaticMethod(Analyzer::DefinitionId),
+      InstanceMethod(Analyzer::DefinitionId),
+      TypeFallback(Analyzer::DefinitionId),
+      OwnerIsTrait,
+      OwnerInvalid,
+      OwnerNotFound,
+      MemberNotFoundOnEnum,
+      MemberNotFoundOnRecord,
+    }
+
     /// NodeId → ResolvedRef side-table. Parallel co-indexed vectors per binder ADR-1.
     ///
     /// Keys are raw `u32`; expression ids stored plain, pattern ids stored with
@@ -134,7 +157,12 @@ export namespace Analyzer {
     /// High-bit flag used to store pattern NodeIds in the shared side-table key
     /// space. Expression ids are stored with no flag; pattern ids are OR'd with
     /// this constant (ADR-B4). Future: TODO(node-id-31bit-limit).
-    const PATTERN_KEY_BIT: u32 = 2147483648;
+    ///
+    /// Expressed as a shift because the plain literal `2147483648` const-folds
+    /// to 0 (u32 literals >= 2^31 overflow the bootstrap compiler's const
+    /// evaluator), which silently drops the flag and lets pattern keys collide
+    /// with expression keys. TODO(bootstrap-const-eval-u32-overflow).
+    const PATTERN_KEY_BIT: u32 = (1 as u32) << 31;
 
     // =========================================================================
     // Side-table helpers
@@ -489,6 +517,11 @@ export namespace Analyzer {
           Analyzer::Definition::Field(_) -> {},
           Analyzer::Definition::Variant(_) -> {},
           Analyzer::Definition::TypeParam(_) -> {},
+          // Methods are owner-table-only (RecordDef/EnumDef instanceMethods/
+          // staticMethods) and are never registered in the flat global index —
+          // a bare method name is never resolvable as a top-level identifier,
+          // only via `resolvePathTail`'s owner-qualified lookup.
+          Analyzer::Definition::Method(_) -> {},
         };
 
         index += 1;
@@ -577,6 +610,9 @@ export namespace Analyzer {
         Analyzer::Definition::TypeAlias(_) -> {
           return false;
         },
+        Analyzer::Definition::Method(_) -> {
+          return false;
+        },
       };
     }
 
@@ -619,12 +655,258 @@ export namespace Analyzer {
           Analyzer::Definition::TypeParam(_) -> {},
           Analyzer::Definition::TypeAlias(_) -> {},
           Analyzer::Definition::Trait(_) -> {},
+          Analyzer::Definition::Method(_) -> {},
         };
 
         i += 1;
       }
 
       return Option::NONE;
+    }
+
+    /// Linear scan of a method table (`RecordDef`/`EnumDef` `staticMethods` or
+    /// `instanceMethods`) for a matching name. Mirrors `lookupVariantInEnum`:
+    /// only `Method(m)` compares names, every other `Definition` variant is
+    /// covered explicitly even though method tables are expected to contain
+    /// only `Method` defs.
+    function lookupMethodInTable(
+      defStore: &mut Analyzer::DefinitionStore,
+      table: &Vector<Analyzer::DefinitionId>,
+      name: str,
+      symbols: &mut Analyzer::SymbolTable,
+    ): Option<Analyzer::DefinitionId> {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let targetSym: Analyzer::SymbolId = symbolsRef.intern(name);
+      let mut i: u64 = 0;
+
+      while (i < table.length()) {
+        let Option::SOME(methodDefId) = table.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        let Option::SOME(def) = defStore.get(*methodDefId) else {
+          i += 1;
+          continue;
+        };
+
+        match (def) {
+          Analyzer::Definition::Method(m) -> {
+            if (m.name.raw() == targetSym.raw()) {
+              return Option::SOME(*methodDefId);
+            }
+          },
+          Analyzer::Definition::Record(_) -> {},
+          Analyzer::Definition::Enum(_) -> {},
+          Analyzer::Definition::Function(_) -> {},
+          Analyzer::Definition::Variable(_) -> {},
+          Analyzer::Definition::Field(_) -> {},
+          Analyzer::Definition::Variant(_) -> {},
+          Analyzer::Definition::TypeParam(_) -> {},
+          Analyzer::Definition::TypeAlias(_) -> {},
+          Analyzer::Definition::Trait(_) -> {},
+        };
+
+        i += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Fallback lookup for `resolvePathTail`: resolve `memberName` alone as a
+    /// top-level Record/Enum type name. Used both when the owner segment does
+    /// not resolve to anything, and when the owner resolves to a Record with
+    /// no matching method (namespace placeholder records — ADR D3 — always
+    /// fall in this second case, since they carry empty method tables).
+    ///
+    /// TODO(namespace-path-validation): segments preceding the owner are never
+    /// checked; a bogus qualifier resolves as long as `memberName` alone is a
+    /// globally unique Record/Enum name.
+    function resolvePathTailTypeFallback(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      memberName: str,
+    ): Option<Analyzer::DefinitionId> {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let memberSym: Analyzer::SymbolId = symbolsRef.intern(memberName);
+      let memberOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, memberSym);
+
+      let Option::SOME(memberDefId) = memberOpt else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(def) = defStore.get(memberDefId) else {
+        return Option::NONE;
+      };
+
+      match (def) {
+        Analyzer::Definition::Record(_) -> {
+          return Option::SOME(memberDefId);
+        },
+        Analyzer::Definition::Enum(_) -> {
+          return Option::SOME(memberDefId);
+        },
+        Analyzer::Definition::Function(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::Method(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::Variable(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::Field(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::Variant(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          return Option::NONE;
+        },
+        Analyzer::Definition::Trait(_) -> {
+          return Option::NONE;
+        },
+      };
+    }
+
+    /// Resolve the last two segments of a multi-segment path (`owner::member`;
+    /// for N>=3 segments, `owner`/`member` are the last two — everything
+    /// before them is intentionally unvalidated, `TODO(namespace-path-validation)`,
+    /// accepted debt per ADR A2).
+    ///
+    /// Pure lookup: no diagnostics, no side-table writes. Callers (expression-
+    /// and pattern-position path resolvers) map the result to a `ResolvedRef`
+    /// and emit whatever diagnostic fits their syntactic position.
+    function resolvePathTail(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ownerName: str,
+      memberName: str,
+    ): Analyzer::ResolverBodies::PathTailLookup {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let ownerSym: Analyzer::SymbolId = symbolsRef.intern(ownerName);
+      let ownerOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, ownerSym);
+
+      let Option::SOME(ownerDefId) = ownerOpt else {
+        let fallback: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::resolvePathTailTypeFallback(
+          state,
+          defStore,
+          symbols,
+          memberName,
+        );
+
+        return match (fallback) {
+          Option::SOME(defId) -> Analyzer::ResolverBodies::PathTailLookup::TypeFallback(defId),
+          Option::NONE -> Analyzer::ResolverBodies::PathTailLookup::OwnerNotFound,
+        };
+      };
+
+      let Option::SOME(ownerDef) = defStore.get(ownerDefId) else {
+        return Analyzer::ResolverBodies::PathTailLookup::OwnerNotFound;
+      };
+
+      match (ownerDef) {
+        Analyzer::Definition::Enum(en) -> {
+          let variantOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupVariantInEnum(defStore, &en, memberName, symbols);
+
+          if (let Option::SOME(variantDefId) = variantOpt) {
+            return Analyzer::ResolverBodies::PathTailLookup::Variant(variantDefId);
+          }
+
+          let staticOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
+            defStore,
+            &en.staticMethods,
+            memberName,
+            symbols,
+          );
+
+          if (let Option::SOME(methodDefId) = staticOpt) {
+            return Analyzer::ResolverBodies::PathTailLookup::StaticMethod(methodDefId);
+          }
+
+          let instanceOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
+            defStore,
+            &en.instanceMethods,
+            memberName,
+            symbols,
+          );
+
+          if (let Option::SOME(methodDefId) = instanceOpt) {
+            return Analyzer::ResolverBodies::PathTailLookup::InstanceMethod(methodDefId);
+          }
+
+          return Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnEnum;
+        },
+        Analyzer::Definition::Record(rec) -> {
+          let staticOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
+            defStore,
+            &rec.staticMethods,
+            memberName,
+            symbols,
+          );
+
+          if (let Option::SOME(methodDefId) = staticOpt) {
+            return Analyzer::ResolverBodies::PathTailLookup::StaticMethod(methodDefId);
+          }
+
+          let instanceOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
+            defStore,
+            &rec.instanceMethods,
+            memberName,
+            symbols,
+          );
+
+          if (let Option::SOME(methodDefId) = instanceOpt) {
+            return Analyzer::ResolverBodies::PathTailLookup::InstanceMethod(methodDefId);
+          }
+
+          let fallback: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::resolvePathTailTypeFallback(
+            state,
+            defStore,
+            symbols,
+            memberName,
+          );
+
+          match (fallback) {
+            Option::SOME(defId) -> {
+              return Analyzer::ResolverBodies::PathTailLookup::TypeFallback(defId);
+            },
+            Option::NONE -> {
+              return Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnRecord;
+            },
+          };
+        },
+        Analyzer::Definition::Trait(_) -> {
+          return Analyzer::ResolverBodies::PathTailLookup::OwnerIsTrait;
+        },
+        Analyzer::Definition::Function(_) -> {
+          return Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid;
+        },
+        Analyzer::Definition::Method(_) -> {
+          return Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid;
+        },
+        Analyzer::Definition::Variable(_) -> {
+          return Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid;
+        },
+        Analyzer::Definition::Field(_) -> {
+          return Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid;
+        },
+        Analyzer::Definition::Variant(_) -> {
+          return Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid;
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          return Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid;
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          return Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid;
+        },
+      };
     }
 
     // =========================================================================
@@ -696,13 +978,65 @@ export namespace Analyzer {
       );
     }
 
+    /// Map a `PathTailLookup` outcome to a `ResolvedRef` for expression position,
+    /// emitting a diagnostic for every non-resolving outcome. Shared message
+    /// table with the pattern-position mapper (`resolvePatternPathTailMapped`).
+    function mapPathTailLookupToExprRef(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      span: SourceSpan,
+      ownerName: str,
+      memberName: str,
+      lookup: Analyzer::ResolverBodies::PathTailLookup,
+    ): Analyzer::ResolverBodies::ResolvedRef {
+      match (lookup) {
+        Analyzer::ResolverBodies::PathTailLookup::Variant(defId) -> {
+          return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
+        },
+        Analyzer::ResolverBodies::PathTailLookup::StaticMethod(defId) -> {
+          return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
+        },
+        Analyzer::ResolverBodies::PathTailLookup::TypeFallback(defId) -> {
+          return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
+        },
+        Analyzer::ResolverBodies::PathTailLookup::InstanceMethod(_) -> {
+          let message: String = String::create("instance method `").concat(memberName).concat("` requires a receiver");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::ResolverBodies::PathTailLookup::OwnerIsTrait -> {
+          let message: String = String::create("trait `").concat(ownerName).concat("` cannot be used as a path qualifier");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, "left of '::' must be a record or enum");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::ResolverBodies::PathTailLookup::OwnerNotFound -> {
+          let message: String = String::create("undeclared name in path: `").concat(ownerName).concat("`");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnEnum -> {
+          let message: String = String::create("unknown variant or static method: `").concat(memberName).concat("`");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnRecord -> {
+          let message: String = String::create("unknown method or type in path: `").concat(memberName).concat("`");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+      };
+    }
+
     /// Resolve a `Path` expression (single- or multi-segment).
     ///
     /// - 0 segments → error.
     /// - 1 segment → delegate to `resolveIdentifierExpr`.
-    /// - 2 segments → try `Enum::Variant` lookup.
-    /// - 3+ segments → `Unresolved("multi-segment-paths-not-yet-supported")`, no diagnostic
-    ///   (REQ-F4, REQ-B3). TODO(multi-segment-paths).
+    /// - 2+ segments → last-two-segment lookup via `resolvePathTail`
+    ///   (`owner` = `segments[N-2]`, `member` = `segments[N-1]`); segments
+    ///   before `owner` are unvalidated, `TODO(namespace-path-validation)`.
     function resolvePathExpr(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -731,146 +1065,30 @@ export namespace Analyzer {
         return;
       }
 
-      if (segCount == 2) {
-        let Option::SOME(headStr) = p.segments.get(0) else {
-          return;
-        };
-        let Option::SOME(tailStr) = p.segments.get(1) else {
-          return;
-        };
-
-        let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
-        let headSym: Analyzer::SymbolId = symbolsRef.intern(headStr.toStr());
-        let globalOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, headSym);
-
-        if (let Option::SOME(defId) = globalOpt) {
-          let Option::SOME(def) = defStore.get(defId) else {
-            Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown enum");
-            Analyzer::ResolverBodies::recordExprRef(
-              state,
-              exprId,
-              Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-            );
-            return;
-          };
-
-          match (def) {
-            Analyzer::Definition::Enum(en) -> {
-              let variantOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupVariantInEnum(
-                defStore,
-                &en,
-                tailStr.toStr(),
-                symbols,
-              );
-
-              if (let Option::SOME(variantDefId) = variantOpt) {
-                Analyzer::ResolverBodies::recordExprRef(
-                  state,
-                  exprId,
-                  Analyzer::ResolverBodies::ResolvedRef::Definition(variantDefId),
-                );
-                return;
-              }
-
-              let message: String = String::create("unknown enum variant: `").concat(tailStr.toStr()).concat("`");
-              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, message.toStr());
-              Analyzer::ResolverBodies::recordExprRef(
-                state,
-                exprId,
-                Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-              );
-              return;
-            },
-            Analyzer::Definition::Record(_) -> {
-              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-              Analyzer::ResolverBodies::recordExprRef(
-                state,
-                exprId,
-                Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-              );
-              return;
-            },
-            Analyzer::Definition::Function(_) -> {
-              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-              Analyzer::ResolverBodies::recordExprRef(
-                state,
-                exprId,
-                Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-              );
-              return;
-            },
-            Analyzer::Definition::Variable(_) -> {
-              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-              Analyzer::ResolverBodies::recordExprRef(
-                state,
-                exprId,
-                Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-              );
-              return;
-            },
-            Analyzer::Definition::Field(_) -> {
-              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-              Analyzer::ResolverBodies::recordExprRef(
-                state,
-                exprId,
-                Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-              );
-              return;
-            },
-            Analyzer::Definition::Variant(_) -> {
-              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-              Analyzer::ResolverBodies::recordExprRef(
-                state,
-                exprId,
-                Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-              );
-              return;
-            },
-            Analyzer::Definition::TypeParam(_) -> {
-              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-              Analyzer::ResolverBodies::recordExprRef(
-                state,
-                exprId,
-                Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-              );
-              return;
-            },
-            Analyzer::Definition::TypeAlias(_) -> {
-              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-              Analyzer::ResolverBodies::recordExprRef(
-                state,
-                exprId,
-                Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-              );
-              return;
-            },
-            Analyzer::Definition::Trait(_) -> {
-              Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-              Analyzer::ResolverBodies::recordExprRef(
-                state,
-                exprId,
-                Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-              );
-              return;
-            },
-          };
-        }
-
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown enum");
-        Analyzer::ResolverBodies::recordExprRef(
-          state,
-          exprId,
-          Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-        );
+      let Option::SOME(ownerStr) = p.segments.get(segCount - 2) else {
         return;
-      }
+      };
+      let Option::SOME(memberStr) = p.segments.get(segCount - 1) else {
+        return;
+      };
 
-      // 3+ segments: defer silently (REQ-F4). TODO(multi-segment-paths).
-      Analyzer::ResolverBodies::recordExprRef(
+      let lookup: Analyzer::ResolverBodies::PathTailLookup = Analyzer::ResolverBodies::resolvePathTail(
         state,
-        exprId,
-        Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
+        defStore,
+        symbols,
+        ownerStr.toStr(),
+        memberStr.toStr(),
       );
+
+      let resolved: Analyzer::ResolverBodies::ResolvedRef = Analyzer::ResolverBodies::mapPathTailLookupToExprRef(
+        state,
+        p.span,
+        ownerStr.toStr(),
+        memberStr.toStr(),
+        lookup,
+      );
+
+      Analyzer::ResolverBodies::recordExprRef(state, exprId, resolved);
     }
 
     // =========================================================================
@@ -964,10 +1182,10 @@ export namespace Analyzer {
     ///   to a Record, returns `Definition(recordDefId)`. Otherwise (bare enum variant
     ///   name without qualifier, or unknown name) emits `UNDECLARED_VARIABLE` and
     ///   returns `Unresolved`. TODO(unqualified-variant-patterns) for bare variants.
-    /// - 2 segments: `Enum::Variant` lookup; arity check against variant payload.
-    ///   Any non-zero argument count is an arity mismatch (ADR-R5: payloads empty).
-    ///   TODO(variant-payload-arity).
-    /// - 3+ segments: `Unresolved("multi-segment-paths-not-yet-supported")`.
+    /// - 2+ segments: last-two-segment lookup via `resolvePathTail` (`owner` =
+    ///   `segments[N-2]`, `member` = `segments[N-1]`), mirroring expression
+    ///   position. Variant hits still enforce arity (ADR-R5: payloads empty,
+    ///   TODO(variant-payload-arity)); methods are rejected in pattern position.
     ///
     /// Sub-patterns (`p.arguments`) are always recursed into for best-effort binding.
     function resolvePatternPath(
@@ -1025,13 +1243,34 @@ export namespace Analyzer {
         return Analyzer::ResolverBodies::resolvePatternPath1Seg(state, defStore, symbols, p);
       }
 
-      if (segCount == 2) {
-        return Analyzer::ResolverBodies::resolvePatternPath2Seg(state, defStore, symbols, p);
-      }
+      // 2+ segments: last-two-segment lookup via `resolvePathTail`, mirroring
+      // expression position. Segments before `owner` are unvalidated,
+      // TODO(namespace-path-validation).
+      let Option::SOME(ownerStr) = p.segments.get(segCount - 2) else {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown enum");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+      };
+      let Option::SOME(memberStr) = p.segments.get(segCount - 1) else {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown variant");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+      };
 
-      // 3+ segments: defer silently. No diagnostic (REQ-F4).
-      // TODO(multi-segment-paths).
-      return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+      let lookup: Analyzer::ResolverBodies::PathTailLookup = Analyzer::ResolverBodies::resolvePathTail(
+        state,
+        defStore,
+        symbols,
+        ownerStr.toStr(),
+        memberStr.toStr(),
+      );
+
+      return Analyzer::ResolverBodies::resolvePatternPathTailMapped(
+        state,
+        defStore,
+        p,
+        ownerStr.toStr(),
+        memberStr.toStr(),
+        lookup,
+      );
     }
 
     /// Resolve a single-segment pattern path.
@@ -1104,97 +1343,22 @@ export namespace Analyzer {
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
-      };
-    }
-
-    /// Resolve a 2-segment pattern path (`Enum::Variant`).
-    function resolvePatternPath2Seg(
-      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
-      defStore: &mut Analyzer::DefinitionStore,
-      symbols: &mut Analyzer::SymbolTable,
-      p: &Ast::Pattern::Path,
-    ): Analyzer::ResolverBodies::ResolvedRef {
-      let Option::SOME(headStr) = p.segments.get(0) else {
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown enum");
-        return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-      };
-      let Option::SOME(tailStr) = p.segments.get(1) else {
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown variant");
-        return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-      };
-
-      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
-      let headSym: Analyzer::SymbolId = symbolsRef.intern(headStr.toStr());
-      let globalOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, headSym);
-
-      let Option::SOME(defId) = globalOpt else {
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown enum");
-        return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-      };
-
-      let Option::SOME(def) = defStore.get(defId) else {
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown enum");
-        return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-      };
-
-      match (def) {
-        Analyzer::Definition::Enum(en) -> {
-          return Analyzer::ResolverBodies::resolvePatternPath2SegVariant(state, defStore, symbols, p, &en, tailStr.toStr());
-        },
-        Analyzer::Definition::Record(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-        },
-        Analyzer::Definition::Function(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-        },
-        Analyzer::Definition::Variable(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-        },
-        Analyzer::Definition::Field(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-        },
-        Analyzer::Definition::Variant(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-        },
-        Analyzer::Definition::TypeParam(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-        },
-        Analyzer::Definition::TypeAlias(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
-          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-        },
-        Analyzer::Definition::Trait(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' is not an enum");
+        Analyzer::Definition::Method(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "methods are not valid in pattern position");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
       };
     }
 
-    /// Resolve the variant name and check arity for a 2-segment pattern path.
-    function resolvePatternPath2SegVariant(
+    /// Check pattern arity against an already-resolved enum variant.
+    /// ADR-R5: variant payloads are currently always empty, so any arguments
+    /// trigger a mismatch. TODO(variant-payload-arity): compare against the
+    /// actual payload once the payload resolver lands.
+    function resolvePatternPathVariantArity(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
-      defStore: &mut Analyzer::DefinitionStore,
-      symbols: &mut Analyzer::SymbolTable,
       p: &Ast::Pattern::Path,
-      en: &Analyzer::EnumDef,
-      tailName: str,
+      variantDefId: Analyzer::DefinitionId,
     ): Analyzer::ResolverBodies::ResolvedRef {
-      let variantOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupVariantInEnum(defStore, en, tailName, symbols);
-
-      let Option::SOME(variantDefId) = variantOpt else {
-        let message: String = String::create("unknown variant: `").concat(tailName).concat("`");
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, message.toStr());
-        return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-      };
-
-      // Arity check: ADR-R5 — variant payloads are empty; any arguments trigger mismatch.
-      // TODO(variant-payload-arity): when payload resolver lands, compare against actual payload.
       let argCount: u64 = p.arguments.length();
 
       if (argCount > 0) {
@@ -1203,6 +1367,113 @@ export namespace Analyzer {
       }
 
       return Analyzer::ResolverBodies::ResolvedRef::Definition(variantDefId);
+    }
+
+    /// Map a `PathTailLookup::TypeFallback` hit to a pattern `ResolvedRef`.
+    /// Record → qualified record-constructor pattern (parity with
+    /// `resolvePatternPath1Seg`). Enum → bare-variant pattern, not yet
+    /// supported in pattern position (parity with the 1-seg enum arm).
+    /// Every other `Definition` variant is unreachable here — `resolvePathTail`
+    /// only ever produces `TypeFallback` for a Record or Enum defId — but is
+    /// still matched explicitly (no wildcard arm).
+    function resolvePatternPathTypeFallback(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      p: &Ast::Pattern::Path,
+      defId: Analyzer::DefinitionId,
+    ): Analyzer::ResolverBodies::ResolvedRef {
+      let Option::SOME(def) = defStore.get(defId) else {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "undefined constructor");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+      };
+
+      match (def) {
+        Analyzer::Definition::Record(_) -> {
+          return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
+        },
+        Analyzer::Definition::Enum(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::Definition::Function(_) -> {
+          @panic("resolvePatternPathTypeFallback: TypeFallback invariant broken — expected Record or Enum");
+        },
+        Analyzer::Definition::Method(_) -> {
+          @panic("resolvePatternPathTypeFallback: TypeFallback invariant broken — expected Record or Enum");
+        },
+        Analyzer::Definition::Variable(_) -> {
+          @panic("resolvePatternPathTypeFallback: TypeFallback invariant broken — expected Record or Enum");
+        },
+        Analyzer::Definition::Field(_) -> {
+          @panic("resolvePatternPathTypeFallback: TypeFallback invariant broken — expected Record or Enum");
+        },
+        Analyzer::Definition::Variant(_) -> {
+          @panic("resolvePatternPathTypeFallback: TypeFallback invariant broken — expected Record or Enum");
+        },
+        Analyzer::Definition::TypeParam(_) -> {
+          @panic("resolvePatternPathTypeFallback: TypeFallback invariant broken — expected Record or Enum");
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          @panic("resolvePatternPathTypeFallback: TypeFallback invariant broken — expected Record or Enum");
+        },
+        Analyzer::Definition::Trait(_) -> {
+          @panic("resolvePatternPathTypeFallback: TypeFallback invariant broken — expected Record or Enum");
+        },
+      };
+    }
+
+    /// Map a `PathTailLookup` outcome to a `ResolvedRef` for pattern position.
+    /// Owner-failure messages mirror expression position (`mapPathTailLookupToExprRef`);
+    /// `StaticMethod`/`InstanceMethod` are rejected outright — methods are not
+    /// constructors.
+    function resolvePatternPathTailMapped(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      p: &Ast::Pattern::Path,
+      ownerName: str,
+      memberName: str,
+      lookup: Analyzer::ResolverBodies::PathTailLookup,
+    ): Analyzer::ResolverBodies::ResolvedRef {
+      match (lookup) {
+        Analyzer::ResolverBodies::PathTailLookup::Variant(variantDefId) -> {
+          return Analyzer::ResolverBodies::resolvePatternPathVariantArity(state, p, variantDefId);
+        },
+        Analyzer::ResolverBodies::PathTailLookup::TypeFallback(defId) -> {
+          return Analyzer::ResolverBodies::resolvePatternPathTypeFallback(state, defStore, p, defId);
+        },
+        Analyzer::ResolverBodies::PathTailLookup::StaticMethod(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "methods are not valid in pattern position");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::ResolverBodies::PathTailLookup::InstanceMethod(_) -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "methods are not valid in pattern position");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::ResolverBodies::PathTailLookup::OwnerIsTrait -> {
+          let message: String = String::create("trait `").concat(ownerName).concat("` cannot be used as a path qualifier");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, message.toStr());
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid -> {
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' must be a record or enum");
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::ResolverBodies::PathTailLookup::OwnerNotFound -> {
+          let message: String = String::create("undeclared name in path: `").concat(ownerName).concat("`");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, message.toStr());
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnEnum -> {
+          let message: String = String::create("unknown variant or static method: `").concat(memberName).concat("`");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, message.toStr());
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnRecord -> {
+          let message: String = String::create("unknown method or type in path: `").concat(memberName).concat("`");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, message.toStr());
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+      };
     }
 
     // =========================================================================

@@ -216,6 +216,243 @@ function assertPatternLocal(
   return assertLocal(r);
 }
 
+/// Assert a ResolvedRef is Definition(Method) and return its DefinitionId.
+function assertResolvesToMethod(
+  defStore: &mut Analyzer::DefinitionStore,
+  r: Analyzer::ResolverBodies::ResolvedRef,
+): Analyzer::DefinitionId {
+  let defId: Analyzer::DefinitionId = assertDefinitionRef(r);
+  let Option::SOME(def) = defStore.get(defId) else {
+    @panic("assertResolvesToMethod: defId not found in defStore");
+  };
+
+  match (def) {
+    Analyzer::Definition::Method(_) -> {
+      return defId;
+    },
+    Analyzer::Definition::Function(_) -> {
+      @panic("assertResolvesToMethod: expected Method, got Function");
+    },
+    Analyzer::Definition::Record(_) -> {
+      @panic("assertResolvesToMethod: expected Method, got Record");
+    },
+    Analyzer::Definition::Enum(_) -> {
+      @panic("assertResolvesToMethod: expected Method, got Enum");
+    },
+    Analyzer::Definition::Variable(_) -> {
+      @panic("assertResolvesToMethod: expected Method, got Variable");
+    },
+    Analyzer::Definition::Field(_) -> {
+      @panic("assertResolvesToMethod: expected Method, got Field");
+    },
+    Analyzer::Definition::Variant(_) -> {
+      @panic("assertResolvesToMethod: expected Method, got Variant");
+    },
+    Analyzer::Definition::TypeParam(_) -> {
+      @panic("assertResolvesToMethod: expected Method, got TypeParam");
+    },
+    Analyzer::Definition::TypeAlias(_) -> {
+      @panic("assertResolvesToMethod: expected Method, got TypeAlias");
+    },
+    Analyzer::Definition::Trait(_) -> {
+      @panic("assertResolvesToMethod: expected Method, got Trait");
+    },
+  };
+}
+
+/// Assert a ResolvedRef is Definition(Variant) and return its DefinitionId.
+function assertResolvesToVariant(
+  defStore: &mut Analyzer::DefinitionStore,
+  r: Analyzer::ResolverBodies::ResolvedRef,
+): Analyzer::DefinitionId {
+  let defId: Analyzer::DefinitionId = assertDefinitionRef(r);
+  let Option::SOME(def) = defStore.get(defId) else {
+    @panic("assertResolvesToVariant: defId not found in defStore");
+  };
+
+  match (def) {
+    Analyzer::Definition::Variant(_) -> {
+      return defId;
+    },
+    Analyzer::Definition::Function(_) -> {
+      @panic("assertResolvesToVariant: expected Variant, got Function");
+    },
+    Analyzer::Definition::Method(_) -> {
+      @panic("assertResolvesToVariant: expected Variant, got Method");
+    },
+    Analyzer::Definition::Record(_) -> {
+      @panic("assertResolvesToVariant: expected Variant, got Record");
+    },
+    Analyzer::Definition::Enum(_) -> {
+      @panic("assertResolvesToVariant: expected Variant, got Enum");
+    },
+    Analyzer::Definition::Variable(_) -> {
+      @panic("assertResolvesToVariant: expected Variant, got Variable");
+    },
+    Analyzer::Definition::Field(_) -> {
+      @panic("assertResolvesToVariant: expected Variant, got Field");
+    },
+    Analyzer::Definition::TypeParam(_) -> {
+      @panic("assertResolvesToVariant: expected Variant, got TypeParam");
+    },
+    Analyzer::Definition::TypeAlias(_) -> {
+      @panic("assertResolvesToVariant: expected Variant, got TypeAlias");
+    },
+    Analyzer::Definition::Trait(_) -> {
+      @panic("assertResolvesToVariant: expected Variant, got Trait");
+    },
+  };
+}
+
+/// Add a 2-segment Path expression.
+function addPathExpr2(module: &mut Ast::Module, seg0: str, seg1: str): Ast::ExpressionId {
+  let mut segs: Vector<String> = Vector::new<String>();
+  segs.push(String::create(seg0));
+  segs.push(String::create(seg1));
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Path(Ast::Expression::Path {
+    span: bodiesDummySpan(),
+    segments: segs,
+  }));
+}
+
+/// Add a 3-segment Path expression.
+function addPathExpr3(module: &mut Ast::Module, seg0: str, seg1: str, seg2: str): Ast::ExpressionId {
+  let mut segs: Vector<String> = Vector::new<String>();
+  segs.push(String::create(seg0));
+  segs.push(String::create(seg1));
+  segs.push(String::create(seg2));
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Path(Ast::Expression::Path {
+    span: bodiesDummySpan(),
+    segments: segs,
+  }));
+}
+
+/// Add a 2-segment Path pattern with the given sub-pattern arguments.
+function addPathPattern2(module: &mut Ast::Module, seg0: str, seg1: str, args: Vector<Ast::PatternId>): Ast::PatternId {
+  let mut segs: Vector<String> = Vector::new<String>();
+  segs.push(String::create(seg0));
+  segs.push(String::create(seg1));
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+    span: bodiesDummySpan(),
+    segments: segs,
+    arguments: args,
+  }));
+}
+
+/// Add a 3-segment Path pattern with the given sub-pattern arguments.
+function addPathPattern3(module: &mut Ast::Module, seg0: str, seg1: str, seg2: str, args: Vector<Ast::PatternId>): Ast::PatternId {
+  let mut segs: Vector<String> = Vector::new<String>();
+  segs.push(String::create(seg0));
+  segs.push(String::create(seg1));
+  segs.push(String::create(seg2));
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+    span: bodiesDummySpan(),
+    segments: segs,
+    arguments: args,
+  }));
+}
+
+/// Add a Function item usable as a record/enum method (static: empty/no-self
+/// `params`; instance: first entry in `params` bound to the name `self`).
+function addMethodItem(
+  module: &mut Ast::Module,
+  name: str,
+  params: Vector<Ast::PatternId>,
+  bodyStmts: Vector<Ast::StatementId>,
+): Ast::ItemId {
+  let body: Ast::StatementId = addBlock(module, bodyStmts);
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Add a top-level function with the given body statements, wrapping a Path
+/// expression statement followed by a `return;`. Used by the WU1 static-method
+/// and multi-segment-path fixtures to keep each `@test` focused on setup.
+function addPathExprStmtFunction(module: &mut Ast::Module, fnName: str, pathExpr: Ast::ExpressionId): void {
+  let mut moduleRef: &mut Ast::Module = module;
+  let exprStmt: Ast::StatementId = moduleRef.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: pathExpr,
+  }));
+  let retStmt: Ast::StatementId = addReturn(module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(module, bodyStmts);
+
+  let mut rootRef: &mut Ast::Module = module;
+  rootRef.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create(fnName),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Add a top-level function `fnName` with a single-arm match over a dummy
+/// int-literal scrutinee, using `armPat` as the (already-added) arm pattern.
+/// Used by WU1 pattern-position fixtures — only the pattern's resolution is
+/// under test, not the scrutinee's type.
+function addMatchArmFunction(module: &mut Ast::Module, fnName: str, armPat: Ast::PatternId): void {
+  let scrutinee: Ast::ExpressionId = addIntLiteral(module, 0);
+  let mut armBodyRef: &mut Ast::Module = module;
+  let armBodyExpr: Ast::ExpressionId = armBodyRef.addExpression(Ast::Expression::Node::Block(Ast::Expression::Block {
+    span: bodiesDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: armPat,
+    guard: Option::NONE,
+    body: armBodyExpr,
+  });
+
+  let mut matchExprRef: &mut Ast::Module = module;
+  let matchExpr: Ast::ExpressionId = matchExprRef.addExpression(Ast::Expression::Node::Match(Ast::Expression::Match {
+    span: bodiesDummySpan(),
+    scrutinee: scrutinee,
+    arms: arms,
+  }));
+
+  let mut matchStmtRef: &mut Ast::Module = module;
+  let matchStmt: Ast::StatementId = matchStmtRef.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: matchExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  let bodyBlock: Ast::StatementId = addBlock(module, bodyStmts);
+
+  let mut moduleRef: &mut Ast::Module = module;
+  moduleRef.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create(fnName),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
 // ============================================================
 // Phase 1: Empty module — scaffolding smoke test
 // ============================================================
@@ -576,7 +813,11 @@ function resolveBodiesResolvesEnumVariantPath(): void {
   let _did: Analyzer::DefinitionId = assertDefinitionRef(ref_);
 }
 
-/// Scenario: multi-segment path (3+ segments) produces Unresolved, no diagnostic.
+/// Scenario: multi-segment path (3+ segments) with an unresolvable owner
+/// segment now emits one UNDECLARED_VARIABLE diagnostic (REQ-M2 "unknown
+/// static target" — superseded the pre-WU1 REQ-F4 silent-Unresolved behavior;
+/// `resolvePathTail` resolves the LAST TWO segments, `B::C` here, and neither
+/// resolves as an owner nor as a member-as-type fallback).
 @test
 function resolveBodiesMultiSegmentPathIsUnresolvedNoDiagnostic(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
@@ -585,35 +826,8 @@ function resolveBodiesMultiSegmentPathIsUnresolvedNoDiagnostic(): void {
   let mut module: Ast::Module = Ast::Module::init();
 
   // function f(): void { A::B::C; return; }
-  let mut pathSegs: Vector<String> = Vector::new<String>();
-  pathSegs.push(String::create("A"));
-  pathSegs.push(String::create("B"));
-  pathSegs.push(String::create("C"));
-  let pathExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Path(Ast::Expression::Path {
-    span: bodiesDummySpan(),
-    segments: pathSegs,
-  }));
-
-  let pathStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
-    span: bodiesDummySpan(),
-    expression: pathExpr,
-  }));
-  let retStmt: Ast::StatementId = addReturn(&mut module);
-
-  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
-  bodyStmts.push(pathStmt);
-  bodyStmts.push(retStmt);
-  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
-
-  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
-    span: bodiesDummySpan(),
-    name: String::create("f"),
-    genericParameters: Vector::new<Ast::GenericParam>(),
-    parameters: Vector::new<Ast::PatternId>(),
-    returnType: Option::NONE,
-    body: bodyBlock,
-    metadata: Ast::emptyMetadata(),
-  }));
+  let pathExpr: Ast::ExpressionId = addPathExpr3(&mut module, "A", "B", "C");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
 
   let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
     &mut defStore,
@@ -622,8 +836,7 @@ function resolveBodiesMultiSegmentPathIsUnresolvedNoDiagnostic(): void {
     &module,
   );
 
-  // REQ-F4: no diagnostic for multi-segment path.
-  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
     &output.bodyResolution,
@@ -2487,4 +2700,646 @@ function resolveBodiesWalksEnumMethodBodyBindsSelf(): void {
   let selfRef: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, selfExpr);
   let selfExprLid: Analyzer::ResolverBodies::LocalId = assertLocal(selfRef);
   Test::assertEq<u32>(selfExprLid.index, 0);
+}
+
+// ============================================================
+// WU1: resolvePathTail — static methods + multi-segment paths
+// ============================================================
+
+/// Scenario: `Record::staticMethod` resolves to Definition(Method) (fixes the
+/// pre-WU1 "left of '::' is not an enum" misdiagnosis). REQ-M2.
+@test
+function resolveBodiesRecordStaticMethodResolves(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record R { staticMethod(): void { return; } }
+  let mut staticBody: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  staticBody.push(addReturn(&mut module));
+  let staticMethodId: Ast::ItemId = addMethodItem(&mut module, "staticMethod", Vector::new<Ast::PatternId>(), staticBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(staticMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { R::staticMethod; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "R", "staticMethod");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  let _methodDefId: Analyzer::DefinitionId = assertResolvesToMethod(&mut defStore, ref_);
+}
+
+/// Scenario: `Namespace::Type::staticMethod` (3 segments) resolves via
+/// last-two-segments lookup; the leading `Namespace` segment is unvalidated
+/// (TODO(namespace-path-validation)). REQ-M2 "namespaced static call".
+@test
+function resolveBodiesNamespacedStaticMethodResolves(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record Owner { staticMethod(): void { return; } }
+  let mut staticBody: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  staticBody.push(addReturn(&mut module));
+  let staticMethodId: Ast::ItemId = addMethodItem(&mut module, "staticMethod", Vector::new<Ast::PatternId>(), staticBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(staticMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("Owner"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { Namespace::Owner::staticMethod; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr3(&mut module, "Namespace", "Owner", "staticMethod");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  let _methodDefId: Analyzer::DefinitionId = assertResolvesToMethod(&mut defStore, ref_);
+}
+
+/// Scenario: `Enum::staticMethod` resolves to Definition(Method). REQ-M2.
+@test
+function resolveBodiesEnumStaticMethodResolves(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // enum E { A; staticMethod(): void { return; } }
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(addBinding(&mut module, "A"));
+
+  let mut staticBody: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  staticBody.push(addReturn(&mut module));
+  let staticMethodId: Ast::ItemId = addMethodItem(&mut module, "staticMethod", Vector::new<Ast::PatternId>(), staticBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(staticMethodId);
+
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: bodiesDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { E::staticMethod; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "E", "staticMethod");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  let _methodDefId: Analyzer::DefinitionId = assertResolvesToMethod(&mut defStore, ref_);
+}
+
+/// Scenario: an enum variant shadows a same-named static method — the variant
+/// wins (design ADR D12). REQ-M2, regression guard for `Enum::VARIANT`.
+@test
+function resolveBodiesEnumVariantShadowsSameNamedStaticMethod(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // enum E { dup; dup(): void { return; } }
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(addBinding(&mut module, "dup"));
+
+  let mut staticBody: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  staticBody.push(addReturn(&mut module));
+  let staticMethodId: Ast::ItemId = addMethodItem(&mut module, "dup", Vector::new<Ast::PatternId>(), staticBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(staticMethodId);
+
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: bodiesDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { E::dup; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "E", "dup");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  let _variantDefId: Analyzer::DefinitionId = assertResolvesToVariant(&mut defStore, ref_);
+}
+
+/// Scenario: `Tipo::instanceMethod` (no receiver) emits a "requires a
+/// receiver" diagnostic and records Unresolved. REQ-M1 resolver-side rejection
+/// (design ADR D4).
+@test
+function resolveBodiesInstanceMethodPathRequiresReceiver(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record Tipo { instanceMethod(self): void { return; } }
+  let selfPat: Ast::PatternId = addBinding(&mut module, "self");
+  let mut instanceParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  instanceParams.push(selfPat);
+  let mut instanceBody: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  instanceBody.push(addReturn(&mut module));
+  let instanceMethodId: Ast::ItemId = addMethodItem(&mut module, "instanceMethod", instanceParams, instanceBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(instanceMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("Tipo"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { Tipo::instanceMethod; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "Tipo", "instanceMethod");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  assertUnresolved(ref_);
+}
+
+/// Scenario: a Trait used as a path qualifier (`Trt::m`) always emits a
+/// diagnostic, never silently resolves. REQ-NG "Trait static calls".
+@test
+function resolveBodiesTraitPathQualifierEmitsDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // trait Trt { m(self): void; }
+  let selfPat: Ast::PatternId = addBinding(&mut module, "self");
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(selfPat);
+  let methodId: Ast::ItemId = addMethodItem(&mut module, "m", params, Vector::new<Ast::StatementId>());
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  module.addRootItem(Ast::Item::Node::Trait(Ast::Item::Trait {
+    span: bodiesDummySpan(),
+    name: String::create("Trt"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { Trt::m; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "Trt", "m");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  assertUnresolved(ref_);
+}
+
+/// Scenario: an unresolvable owner segment (`Zzz::member`, neither segment
+/// resolves) emits one UNDECLARED_VARIABLE diagnostic. REQ-M2 "unknown static
+/// target".
+@test
+function resolveBodiesUnknownOwnerInPathEmitsUndeclaredVariable(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { Zzz::member; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "Zzz", "member");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  assertUnresolved(ref_);
+}
+
+/// Scenario: an unknown member on a Record owner (`R::zzz`, `zzz` absent from
+/// both method tables and the global type index) emits one UNDECLARED_VARIABLE
+/// diagnostic. REQ-M2 "unknown static target".
+@test
+function resolveBodiesUnknownMemberOnRecordEmitsDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record R {}
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { R::zzz; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "R", "zzz");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  assertUnresolved(ref_);
+}
+
+/// Scenario: an unknown member on an Enum owner (`E::zzz`, `zzz` is neither a
+/// variant nor a method) emits one UNDECLARED_VARIABLE diagnostic. REQ-M2.
+@test
+function resolveBodiesUnknownMemberOnEnumEmitsDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // enum E { A }
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(addBinding(&mut module, "A"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: bodiesDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { E::zzz; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "E", "zzz");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  assertUnresolved(ref_);
+}
+
+/// Scenario: `Ns::Rec` (owner `Ns` unresolvable, member `Rec` is a top-level
+/// Record) resolves via the TypeFallback branch in expression position.
+/// REQ-P1/REQ-P2 groundwork (record-init/pattern parity, design ADR D3).
+@test
+function resolveBodiesQualifiedRecordTypeFallbackExpression(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record Rec {}
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("Rec"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { Ns::Rec; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "Ns", "Rec");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  let _did: Analyzer::DefinitionId = assertDefinitionRef(ref_);
+}
+
+/// Scenario: `Ns::Rec` resolves via the TypeFallback branch in pattern
+/// position too (qualified record-constructor pattern parity). REQ-P1/REQ-P2.
+@test
+function resolveBodiesQualifiedRecordTypeFallbackPattern(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record Rec {}
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("Rec"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { match 0 { Ns::Rec => {} } }
+  let armPat: Ast::PatternId = addPathPattern2(&mut module, "Ns", "Rec", Vector::new<Ast::PatternId>());
+  addMatchArmFunction(&mut module, "f", armPat);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
+  let Option::SOME(patRef) = patResult else {
+    @panic("resolveBodiesQualifiedRecordTypeFallbackPattern: Ns::Rec pattern ref not found");
+  };
+  let _did: Analyzer::DefinitionId = assertDefinitionRef(patRef);
+}
+
+/// Scenario: a 3-segment variant pattern (`Ns::E::A`) resolves via
+/// last-two-segments lookup. REQ-P2 "qualified variant pattern".
+@test
+function resolveBodiesThreeSegmentVariantPatternResolves(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // enum E { A }
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(addBinding(&mut module, "A"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: bodiesDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { match 0 { Ns::E::A => {} } }
+  let armPat: Ast::PatternId = addPathPattern3(&mut module, "Ns", "E", "A", Vector::new<Ast::PatternId>());
+  addMatchArmFunction(&mut module, "f", armPat);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
+  let Option::SOME(patRef) = patResult else {
+    @panic("resolveBodiesThreeSegmentVariantPatternResolves: Ns::E::A pattern ref not found");
+  };
+  let _variantDefId: Analyzer::DefinitionId = assertResolvesToVariant(&mut defStore, patRef);
+}
+
+/// Scenario: a 3-segment variant pattern with a mismatched payload arity
+/// (`Ns::E::A(x)` against a 0-payload variant) still enforces arity. REQ-P2.
+@test
+function resolveBodiesThreeSegmentVariantPatternArityMismatch(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // enum E { A }
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(addBinding(&mut module, "A"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: bodiesDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { match 0 { Ns::E::A(x) => {} } }
+  let xSubPat: Ast::PatternId = addBinding(&mut module, "x");
+  let mut argPats: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  argPats.push(xSubPat);
+  let armPat: Ast::PatternId = addPathPattern3(&mut module, "Ns", "E", "A", argPats);
+  addMatchArmFunction(&mut module, "f", armPat);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+}
+
+/// Scenario: a method reached via a path in pattern position
+/// (`R::staticMethod` as a match-arm pattern) emits "methods are not valid in
+/// pattern position". REQ-P2 boundary.
+@test
+function resolveBodiesMethodsInPatternPositionEmitDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record R { staticMethod(): void { return; } }
+  let mut staticBody: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  staticBody.push(addReturn(&mut module));
+  let staticMethodId: Ast::ItemId = addMethodItem(&mut module, "staticMethod", Vector::new<Ast::PatternId>(), staticBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(staticMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { match 0 { R::staticMethod => {} } }
+  let armPat: Ast::PatternId = addPathPattern2(&mut module, "R", "staticMethod", Vector::new<Ast::PatternId>());
+  addMatchArmFunction(&mut module, "f", armPat);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
+  let Option::SOME(patRef) = patResult else {
+    @panic("resolveBodiesMethodsInPatternPositionEmitDiagnostic: pattern ref not found");
+  };
+  assertUnresolved(patRef);
+}
+
+/// Scenario: an unresolvable owner segment in pattern position (`Zzz::member`)
+/// emits one UNDECLARED_VARIABLE diagnostic. REQ-P2 "pattern unknown owner".
+@test
+function resolveBodiesPatternUnknownOwnerEmitsUndeclaredVariable(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { match 0 { Zzz::member => {} } }
+  let armPat: Ast::PatternId = addPathPattern2(&mut module, "Zzz", "member", Vector::new<Ast::PatternId>());
+  addMatchArmFunction(&mut module, "f", armPat);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
+  let Option::SOME(patRef) = patResult else {
+    @panic("resolveBodiesPatternUnknownOwnerEmitsUndeclaredVariable: pattern ref not found");
+  };
+  assertUnresolved(patRef);
+}
+
+/// Scenario: a bare single-segment identifier matching only a method name
+/// (present in a Record's `staticMethods`, never in the flat global index)
+/// still resolves as UNDECLARED_VARIABLE — regression guard for
+/// `buildBodyGlobalNameIndex`'s Method exclusion (design section 5). REQ-NG.
+@test
+function resolveBodiesBareMethodNameNotInGlobalIndex(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record R { staticMethod(): void { return; } }
+  let mut staticBody: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  staticBody.push(addReturn(&mut module));
+  let staticMethodId: Ast::ItemId = addMethodItem(&mut module, "staticMethod", Vector::new<Ast::PatternId>(), staticBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(staticMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { staticMethod; return; }
+  let bareExpr: Ast::ExpressionId = addVariable(&mut module, "staticMethod");
+  addPathExprStmtFunction(&mut module, "f", bareExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, bareExpr);
+  assertUnresolved(ref_);
 }
