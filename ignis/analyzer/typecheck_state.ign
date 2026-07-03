@@ -578,7 +578,9 @@ export namespace Analyzer {
     /// `clone()`, and matching a `&Definition` binds its payload by reference,
     /// so owner method tables must be copied out one id at a time (mirrors how
     /// `requireNonGenericRecord` collects `RequiredRecordDef.fields`).
-    function copyDefinitionIdVector(source: &Vector<Analyzer::DefinitionId>): Vector<Analyzer::DefinitionId> {
+    function copyDefinitionIdVector(
+      source: &Vector<Analyzer::DefinitionId>
+    ): Vector<Analyzer::DefinitionId> {
       let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
       let mut index: u64 = 0;
 
@@ -961,9 +963,10 @@ export namespace Analyzer {
         },
         Analyzer::Definition::Method(method) -> {
           // A method's callable type mirrors a function: parameter types from
-          // its `Variable` sub-definitions plus the resolved return type. Method
-          // call resolution is out of scope for this slice, but exposing the
-          // type here keeps `definitionType` total over `Definition::Method`.
+          // its `Variable` sub-definitions (including `self` for instance
+          // methods) plus the resolved return type. `checkCallExpr` and
+          // `checkInstanceMethodCallExpr` are the actual call-resolution
+          // consumers; this keeps `definitionType` total over `Definition::Method`.
           let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
           let mut index: u64 = 0;
 

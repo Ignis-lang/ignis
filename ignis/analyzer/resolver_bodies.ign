@@ -64,8 +64,7 @@ export namespace Analyzer {
     /// `Definition(DefinitionId)` — resolves to a module-global declaration.
     /// `TypeParam(SymbolId)` — resolves to a type parameter in the enclosing scope.
     /// `Unresolved(String)` — could not be resolved; the payload is a short machine-readable
-    /// reason tag (e.g. `"unknown"`, `"multi-segment-paths-not-yet-supported"`) used
-    /// for diagnostics and grepping.
+    /// reason tag (e.g. `"unresolved"`) used for diagnostics and grepping.
     enum ResolvedRef {
       Local(Analyzer::ResolverBodies::LocalId),
       Definition(Analyzer::DefinitionId),
@@ -1644,10 +1643,10 @@ export namespace Analyzer {
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, p.operand);
         },
         Ast::Expression::Node::MemberAccess(ma) -> {
-          // Walk the receiver only. The member name is NOT resolved here —
-          // field resolution is deferred to typecheck (ADR-B7).
-          // No side-table entry for the MemberAccess node itself.
-          // TODO(member-resolution-in-typecheck).
+          // Walk the receiver only. The member name is resolved in typecheck
+          // (ADR-B7), which owns both field lookup and method-call resolution
+          // against the receiver's Record/Enum definition. No side-table entry
+          // is recorded for the MemberAccess node itself.
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, ma.object);
         },
         Ast::Expression::Node::RecordInit(ri) -> {

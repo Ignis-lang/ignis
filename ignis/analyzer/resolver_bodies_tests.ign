@@ -204,6 +204,18 @@ function assertUnresolved(r: Analyzer::ResolverBodies::ResolvedRef): void {
   };
 }
 
+/// Assert the single diagnostic in `output` has the given exact message text.
+function assertSingleDiagnosticMessage(
+  output: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+  message: str,
+): void {
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  let Option::SOME(diagnostic) = output.diagnostics.get(0) else {
+    @panic("assertSingleDiagnosticMessage: missing diagnostic");
+  };
+  Test::assertEq<str>(diagnostic.message, message);
+}
+
 /// Assert a pattern ref is Local and return LocalId.
 function assertPatternLocal(
   map: &Analyzer::ResolverBodies::BodyResolutionMap,
@@ -317,7 +329,12 @@ function addPathExpr2(module: &mut Ast::Module, seg0: str, seg1: str): Ast::Expr
 }
 
 /// Add a 3-segment Path expression.
-function addPathExpr3(module: &mut Ast::Module, seg0: str, seg1: str, seg2: str): Ast::ExpressionId {
+function addPathExpr3(
+  module: &mut Ast::Module,
+  seg0: str,
+  seg1: str,
+  seg2: str
+): Ast::ExpressionId {
   let mut segs: Vector<String> = Vector::new<String>();
   segs.push(String::create(seg0));
   segs.push(String::create(seg1));
@@ -330,7 +347,12 @@ function addPathExpr3(module: &mut Ast::Module, seg0: str, seg1: str, seg2: str)
 }
 
 /// Add a 2-segment Path pattern with the given sub-pattern arguments.
-function addPathPattern2(module: &mut Ast::Module, seg0: str, seg1: str, args: Vector<Ast::PatternId>): Ast::PatternId {
+function addPathPattern2(
+  module: &mut Ast::Module,
+  seg0: str,
+  seg1: str,
+  args: Vector<Ast::PatternId>
+): Ast::PatternId {
   let mut segs: Vector<String> = Vector::new<String>();
   segs.push(String::create(seg0));
   segs.push(String::create(seg1));
@@ -343,7 +365,13 @@ function addPathPattern2(module: &mut Ast::Module, seg0: str, seg1: str, args: V
 }
 
 /// Add a 3-segment Path pattern with the given sub-pattern arguments.
-function addPathPattern3(module: &mut Ast::Module, seg0: str, seg1: str, seg2: str, args: Vector<Ast::PatternId>): Ast::PatternId {
+function addPathPattern3(
+  module: &mut Ast::Module,
+  seg0: str,
+  seg1: str,
+  seg2: str,
+  args: Vector<Ast::PatternId>
+): Ast::PatternId {
   let mut segs: Vector<String> = Vector::new<String>();
   segs.push(String::create(seg0));
   segs.push(String::create(seg1));
@@ -380,7 +408,11 @@ function addMethodItem(
 /// Add a top-level function with the given body statements, wrapping a Path
 /// expression statement followed by a `return;`. Used by the WU1 static-method
 /// and multi-segment-path fixtures to keep each `@test` focused on setup.
-function addPathExprStmtFunction(module: &mut Ast::Module, fnName: str, pathExpr: Ast::ExpressionId): void {
+function addPathExprStmtFunction(
+  module: &mut Ast::Module,
+  fnName: str,
+  pathExpr: Ast::ExpressionId
+): void {
   let mut moduleRef: &mut Ast::Module = module;
   let exprStmt: Ast::StatementId = moduleRef.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
     span: bodiesDummySpan(),
@@ -2920,7 +2952,7 @@ function resolveBodiesInstanceMethodPathRequiresReceiver(): void {
     &module,
   );
 
-  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  assertSingleDiagnosticMessage(&output, "instance method `instanceMethod` requires a receiver");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -2962,7 +2994,7 @@ function resolveBodiesTraitPathQualifierEmitsDiagnostic(): void {
     &module,
   );
 
-  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  assertSingleDiagnosticMessage(&output, "trait `Trt` cannot be used as a path qualifier");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -2989,7 +3021,7 @@ function resolveBodiesUnknownOwnerInPathEmitsUndeclaredVariable(): void {
     &module,
   );
 
-  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  assertSingleDiagnosticMessage(&output, "undeclared name in path: `Zzz`");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -3026,7 +3058,7 @@ function resolveBodiesUnknownMemberOnRecordEmitsDiagnostic(): void {
     &module,
   );
 
-  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  assertSingleDiagnosticMessage(&output, "unknown method or type in path: `zzz`");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -3064,7 +3096,7 @@ function resolveBodiesUnknownMemberOnEnumEmitsDiagnostic(): void {
     &module,
   );
 
-  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  assertSingleDiagnosticMessage(&output, "unknown variant or static method: `zzz`");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -3262,7 +3294,7 @@ function resolveBodiesMethodsInPatternPositionEmitDiagnostic(): void {
     &module,
   );
 
-  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  assertSingleDiagnosticMessage(&output, "methods are not valid in pattern position");
 
   let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
   let Option::SOME(patRef) = patResult else {
@@ -3291,7 +3323,7 @@ function resolveBodiesPatternUnknownOwnerEmitsUndeclaredVariable(): void {
     &module,
   );
 
-  Test::assertEq<u64>(output.diagnostics.length(), 1);
+  assertSingleDiagnosticMessage(&output, "undeclared name in path: `Zzz`");
 
   let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
   let Option::SOME(patRef) = patResult else {
@@ -3342,4 +3374,102 @@ function resolveBodiesBareMethodNameNotInGlobalIndex(): void {
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, bareExpr);
   assertUnresolved(ref_);
+}
+
+/// Scenario: a Function used as a path owner (`helper::member`) is an invalid
+/// qualifier (`PathTailLookup::OwnerInvalid`), untested until now. REQ-M2
+/// regression guard: pre-WU1 code emitted the wrong "left of '::' is not an
+/// enum" message for exactly this case (any non-Enum owner, including a
+/// Function); the corrected message is "left of '::' must be a record or
+/// enum" (design section 1).
+@test
+function resolveBodiesFunctionAsPathOwnerEmitsInvalidQualifierDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function helper(): void { return; }
+  let mut helperBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  helperBodyStmts.push(addReturn(&mut module));
+  let helperBodyBlock: Ast::StatementId = addBlock(&mut module, helperBodyStmts);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("helper"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: helperBodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { helper::member; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "helper", "member");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticMessage(&output, "left of '::' must be a record or enum");
+
+  let Option::SOME(diagnostic) = output.diagnostics.get(0) else {
+    @panic("resolveBodiesFunctionAsPathOwnerEmitsInvalidQualifierDiagnostic: missing diagnostic");
+  };
+  Test::assertNe<str>(diagnostic.message, "left of '::' is not an enum");
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  assertUnresolved(ref_);
+}
+
+/// Scenario: same invalid-qualifier check as above, in pattern position
+/// (`match 0 { helper::member => {} }`). Owner-failure messages mirror
+/// expression position (design section 1) — same negative regression pin.
+@test
+function resolveBodiesFunctionAsPatternPathOwnerEmitsInvalidQualifierDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function helper(): void { return; }
+  let mut helperBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  helperBodyStmts.push(addReturn(&mut module));
+  let helperBodyBlock: Ast::StatementId = addBlock(&mut module, helperBodyStmts);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("helper"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: helperBodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { match 0 { helper::member => {} } }
+  let armPat: Ast::PatternId = addPathPattern2(&mut module, "helper", "member", Vector::new<Ast::PatternId>());
+  addMatchArmFunction(&mut module, "f", armPat);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticMessage(&output, "left of '::' must be a record or enum");
+
+  let Option::SOME(diagnostic) = output.diagnostics.get(0) else {
+    @panic("resolveBodiesFunctionAsPatternPathOwnerEmitsInvalidQualifierDiagnostic: missing diagnostic");
+  };
+  Test::assertNe<str>(diagnostic.message, "left of '::' is not an enum");
+
+  let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
+  let Option::SOME(patRef) = patResult else {
+    @panic("resolveBodiesFunctionAsPatternPathOwnerEmitsInvalidQualifierDiagnostic: pattern ref not found");
+  };
+  assertUnresolved(patRef);
 }
