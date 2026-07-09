@@ -6,8 +6,10 @@ import _ from "./binder";
 import _ from "./resolver";
 import _ from "./resolver_bodies";
 import _ from "./typecheck";
+import _ from "./imports";
 
-import Diagnostic, DiagnosticBag, NoteKind from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, NoteKind, SourceSpan from "@compiler::diagnostics";
+import Id from "@compiler::ids";
 import Ast from "@compiler::ast";
 
 export namespace Analyzer {
@@ -18,6 +20,15 @@ export namespace Analyzer {
     public resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput;
     public typecheck: Analyzer::Typecheck::TypecheckOutput;
     public diagnostics: DiagnosticBag;
+  }
+
+  record ModuleAnalysisRecord {
+    public info: Analyzer::Imports::ModuleInfo;
+    public pass1: Analyzer::Binder::BinderOutput;
+    public pass2: Analyzer::Binder::BinderOutput;
+    public direct: Analyzer::Imports::DirectDeclarationIndex;
+    public imports: Analyzer::Imports::ImportOverlay;
+    public output: Analyzer::AnalyzerOutput;
   }
 
   function copyDiagnostic(source: &Diagnostic): Diagnostic {
@@ -76,11 +87,109 @@ export namespace Analyzer {
     }
   }
 
-  function analyzeModule(
+  function moduleHasRootItemRaw(module: &Ast::Module, rawId: u32): boolean {
+    let mut index: u64 = 0;
+
+    while (index < module.roots.length()) {
+      let Option::SOME(rootId) = module.roots.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (rootId.raw() == rawId) {
+        return true;
+      }
+
+      if (let Option::SOME(rootItem) = module.items.get(*rootId)) {
+        if (let Ast::Item::Node::Export(exported) = rootItem) {
+          if (let Option::SOME(innerItemId) = exported.declaration) {
+            if (innerItemId.raw() == rawId) {
+              return true;
+            }
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function itemSpanOrEmpty(module: &Ast::Module, rawId: u32): SourceSpan {
+    let itemId: Ast::ItemId = Id::fromRaw<Ast::ItemTag>(rawId);
+    let Option::SOME(item) = module.items.get(itemId) else {
+      return SourceSpan::new("", 0, 0);
+    };
+
+    return match (item) {
+      Ast::Item::Node::Function(f) -> f.span,
+      Ast::Item::Node::Record(r) -> r.span,
+      Ast::Item::Node::Enum(e) -> e.span,
+      Ast::Item::Node::Namespace(n) -> n.span,
+      Ast::Item::Node::Import(i) -> i.span,
+      Ast::Item::Node::Extern(e) -> e.span,
+      Ast::Item::Node::Constant(c) -> c.span,
+      Ast::Item::Node::Export(e) -> e.span,
+      Ast::Item::Node::TypeAlias(a) -> a.span,
+      Ast::Item::Node::Trait(t) -> t.span,
+    };
+  }
+
+  function directIndexAppendOutput(
+    direct: &mut Analyzer::Imports::DirectDeclarationIndex,
+    defStore: &mut Analyzer::DefinitionStore,
+    module: &Ast::Module,
+    output: &Analyzer::Binder::BinderOutput,
+  ): void {
+    let mut index: u64 = 0;
+    let mut directRef: &mut Analyzer::Imports::DirectDeclarationIndex = direct;
+
+    while (index < output.defIds.length()) {
+      let Option::SOME(rawId) = output.nodeIds.get(index) else {
+        index += 1;
+        continue;
+      };
+      if (!Analyzer::moduleHasRootItemRaw(module, *rawId)) {
+        index += 1;
+        continue;
+      }
+
+      let Option::SOME(defId) = output.defIds.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(definition) = defStore.get(*defId) else {
+        index += 1;
+        continue;
+      };
+
+      directRef.syms.push(definition.name());
+      directRef.defs.push(*defId);
+      directRef.spans.push(Analyzer::itemSpanOrEmpty(module, *rawId));
+      index += 1;
+    }
+  }
+
+  function buildDirectDeclarationIndex(
+    defStore: &mut Analyzer::DefinitionStore,
+    module: &Ast::Module,
+    pass1: &Analyzer::Binder::BinderOutput,
+    pass2: &Analyzer::Binder::BinderOutput,
+  ): Analyzer::Imports::DirectDeclarationIndex {
+    let mut direct: Analyzer::Imports::DirectDeclarationIndex = Analyzer::Imports::emptyDirectDeclarationIndex();
+    Analyzer::directIndexAppendOutput(&mut direct, defStore, module, pass1);
+    Analyzer::directIndexAppendOutput(&mut direct, defStore, module, pass2);
+    return direct;
+  }
+
+  function analyzeModuleWithImports(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
     module: &Ast::Module,
+    overlay: &Analyzer::Imports::ImportOverlay,
   ): Analyzer::AnalyzerOutput {
     let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
       &module.roots,
@@ -143,5 +252,86 @@ export namespace Analyzer {
       typecheck: typecheck,
       diagnostics: diagnostics,
     };
+  }
+
+  function analyzeModule(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+  ): Analyzer::AnalyzerOutput {
+    let overlay: Analyzer::Imports::ImportOverlay = Analyzer::Imports::emptyOverlay();
+    return Analyzer::analyzeModuleWithImports(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      &overlay,
+    );
+  }
+
+  function moduleInfoAt(
+    infos: &Vector<Analyzer::Imports::ModuleInfo>,
+    index: u64,
+  ): Analyzer::Imports::ModuleInfo {
+    if (let Option::SOME(info) = infos.get(index)) {
+      return Analyzer::Imports::ModuleInfo {
+        index: info.index,
+        pathText: info.pathText.clone(),
+        kind: info.kind,
+      };
+    }
+
+    return Analyzer::Imports::ModuleInfo {
+      index: index,
+      pathText: String::create(""),
+      kind: Analyzer::Imports::ModuleKind::PROJECT,
+    };
+  }
+
+  function analyzeProgram(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    modules: &Vector<Ast::Module>,
+    infos: &Vector<Analyzer::Imports::ModuleInfo>,
+  ): Vector<Analyzer::ModuleAnalysisRecord> {
+    let mut records: Vector<Analyzer::ModuleAnalysisRecord> = Vector::new<Analyzer::ModuleAnalysisRecord>();
+    let mut index: u64 = 0;
+
+    while (index < modules.length()) {
+      let Option::SOME(module) = modules.get(index) else {
+        index += 1;
+        continue;
+      };
+      let info: Analyzer::Imports::ModuleInfo = Analyzer::moduleInfoAt(infos, index);
+
+      let overlay: Analyzer::Imports::ImportOverlay = Analyzer::Imports::emptyOverlay();
+      let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModuleWithImports(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        &overlay,
+      );
+      let direct: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
+        defStore,
+        module,
+        &output.pass1,
+        &output.pass2,
+      );
+
+      records.push(Analyzer::ModuleAnalysisRecord {
+        info: info,
+        pass1: output.pass1,
+        pass2: output.pass2,
+        direct: direct,
+        imports: overlay,
+        output: output,
+      });
+      index += 1;
+    }
+
+    return records;
   }
 }

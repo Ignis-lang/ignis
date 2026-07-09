@@ -1,0 +1,311 @@
+import Test from "std::test";
+
+import SourceSpan from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+
+function importsDummySpan(): SourceSpan {
+  return SourceSpan::new("imports_tests.ign", 0, 0);
+}
+
+function importsEmptyOverlay(): Analyzer::Imports::ImportOverlay {
+  return Analyzer::Imports::ImportOverlay {
+    syms: Vector::new<Analyzer::SymbolId>(),
+    defs: Vector::new<Analyzer::DefinitionId>(),
+    spans: Vector::new<SourceSpan>(),
+    targets: Vector::new<u64>(),
+  };
+}
+
+function importsModuleInfo(index: u64, path: str): Analyzer::Imports::ModuleInfo {
+  return Analyzer::Imports::ModuleInfo {
+    index: index,
+    pathText: String::create(path),
+    kind: Analyzer::Imports::ModuleKind::PROJECT,
+  };
+}
+
+function importsAddBoolLiteral(module: &mut Ast::Module, value: boolean): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: importsDummySpan(),
+    value: Ast::Expression::LiteralValue::Boolean(value),
+  }));
+}
+
+function importsAddReturn(module: &mut Ast::Module): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: importsDummySpan(),
+    value: Option::NONE,
+  }));
+}
+
+function importsAddBlock(
+  module: &mut Ast::Module,
+  stmts: Vector<Ast::StatementId>
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: importsDummySpan(),
+    statements: stmts,
+    tail: Option::NONE,
+  }));
+}
+
+function importsFunctionItem(name: str, body: Ast::StatementId): Ast::Item::Function {
+  return Ast::Item::Function {
+    span: importsDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  };
+}
+
+function importsAddFunction(
+  module: &mut Ast::Module,
+  name: str,
+  body: Ast::StatementId,
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Function(importsFunctionItem(name, body)));
+}
+
+function importsAddNestedFunction(
+  module: &mut Ast::Module,
+  name: str,
+  body: Ast::StatementId,
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addItem(Ast::Item::Node::Function(importsFunctionItem(name, body)));
+}
+
+function importsNamespaceWithNestedFunction(): Ast::Module {
+  let mut module: Ast::Module = Ast::Module::init();
+  let ret: Ast::StatementId = importsAddReturn(&mut module);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(ret);
+  let body: Ast::StatementId = importsAddBlock(&mut module, statements);
+  let nested: Ast::ItemId = importsAddNestedFunction(&mut module, "inner", body);
+
+  let mut namespaceItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  namespaceItems.push(nested);
+
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: importsDummySpan(),
+    name: String::create("Outer"),
+    items: namespaceItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  return module;
+}
+
+function importsExportedFunctionModule(name: str): Ast::Module {
+  let mut module: Ast::Module = Ast::Module::init();
+  let ret: Ast::StatementId = importsAddReturn(&mut module);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(ret);
+  let body: Ast::StatementId = importsAddBlock(&mut module, statements);
+  let mut moduleRef: &mut Ast::Module = &mut module;
+  let inner: Ast::ItemId = moduleRef.addItem(Ast::Item::Node::Function(importsFunctionItem(name, body)));
+
+  moduleRef.addRootItem(Ast::Item::Node::Export(Ast::Item::Export {
+    span: importsDummySpan(),
+    declaration: Option::SOME(inner),
+    items: Vector::new<Ast::ImportBinding>(),
+    source: Option::NONE,
+    sourceSpan: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  return module;
+}
+
+function importsFunctionModule(name: str): Ast::Module {
+  let mut module: Ast::Module = Ast::Module::init();
+  let ret: Ast::StatementId = importsAddReturn(&mut module);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(ret);
+  let body: Ast::StatementId = importsAddBlock(&mut module, statements);
+  importsAddFunction(&mut module, name, body);
+  return module;
+}
+
+@test
+function analyzeProgramRetainsModuleOrder(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(importsFunctionModule("first"));
+  modules.push(importsFunctionModule("second"));
+
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  infos.push(importsModuleInfo(7, "a.ign"));
+  infos.push(importsModuleInfo(3, "b.ign"));
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+  );
+
+  Test::assertEq<u64>(records.length(), 2);
+
+  let Option::SOME(first) = records.get(0) else {
+    @panic("missing first analysis record");
+  };
+  let Option::SOME(second) = records.get(1) else {
+    @panic("missing second analysis record");
+  };
+
+  Test::assertEq<u64>(first.info.index, 7);
+  Test::assertEq<str>(first.info.pathText.toStr(), "a.ign");
+  Test::assertEq<u64>(second.info.index, 3);
+  Test::assertEq<str>(second.info.pathText.toStr(), "b.ign");
+  Test::assertEq<u64>(first.output.diagnostics.length(), 0);
+  Test::assertEq<u64>(second.output.diagnostics.length(), 0);
+}
+
+@test
+function analyzeProgramPreservesModulesWhenInfosAreShort(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(importsFunctionModule("only"));
+
+  let infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+  );
+
+  Test::assertEq<u64>(records.length(), 1);
+  let Option::SOME(analysisRecord) = records.get(0) else {
+    @panic("missing fallback analysis record");
+  };
+
+  Test::assertEq<u64>(analysisRecord.info.index, 0);
+  Test::assertEq<str>(analysisRecord.info.pathText.toStr(), "");
+  Test::assertEq<u64>(analysisRecord.output.diagnostics.length(), 0);
+}
+
+@test
+function directIndexKeepsOnlyRootDeclarationsWithRealSpans(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(importsNamespaceWithNestedFunction());
+
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  infos.push(importsModuleInfo(0, "namespace.ign"));
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+  );
+
+  let Option::SOME(analysisRecord) = records.get(0) else {
+    @panic("missing namespace analysis record");
+  };
+
+  Test::assertEq<u64>(analysisRecord.direct.defs.length(), 1);
+  let Option::SOME(directSym) = analysisRecord.direct.syms.get(0) else {
+    @panic("missing direct declaration symbol");
+  };
+  let Option::SOME(directName) = symbols.resolve(*directSym) else {
+    @panic("missing direct declaration symbol name");
+  };
+  let Option::SOME(declarationSpan) = analysisRecord.direct.spans.get(0) else {
+    @panic("missing direct declaration span");
+  };
+
+  Test::assertEq<str>(directName, "Outer");
+  Test::assertEq<str>(declarationSpan.filePath, "imports_tests.ign");
+}
+
+@test
+function directIndexIncludesExportWrappedDeclarations(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(importsExportedFunctionModule("exportedFn"));
+
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  infos.push(importsModuleInfo(0, "exported.ign"));
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+  );
+
+  let Option::SOME(analysisRecord) = records.get(0) else {
+    @panic("missing exported analysis record");
+  };
+
+  Test::assertEq<u64>(analysisRecord.direct.defs.length(), 1);
+  let Option::SOME(directSym) = analysisRecord.direct.syms.get(0) else {
+    @panic("missing exported direct declaration symbol");
+  };
+  let Option::SOME(directName) = symbols.resolve(*directSym) else {
+    @panic("missing exported direct declaration symbol name");
+  };
+
+  Test::assertEq<str>(directName, "exportedFn");
+}
+
+@test
+function analyzeModuleWithEmptyOverlayMatchesAnalyzeModuleDiagnostics(): void {
+  let module: Ast::Module = importsFunctionModule("main");
+
+  let mut singleDefs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut singleTypes: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut singleSymbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let single: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut singleDefs,
+    &mut singleTypes,
+    &mut singleSymbols,
+    &module,
+  );
+
+  let mut overlayDefs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut overlayTypes: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut overlaySymbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let emptyOverlay: Analyzer::Imports::ImportOverlay = importsEmptyOverlay();
+  let overlay: Analyzer::AnalyzerOutput = Analyzer::analyzeModuleWithImports(
+    &mut overlayDefs,
+    &mut overlayTypes,
+    &mut overlaySymbols,
+    &module,
+    &emptyOverlay,
+  );
+
+  Test::assertEq<u64>(overlay.pass1.diagnostics.length(), single.pass1.diagnostics.length());
+  Test::assertEq<u64>(overlay.pass2.diagnostics.length(), single.pass2.diagnostics.length());
+  Test::assertEq<u64>(overlay.resolvedTypes.diagnostics.length(), single.resolvedTypes.diagnostics.length());
+  Test::assertEq<u64>(overlay.resolvedBodies.diagnostics.length(), single.resolvedBodies.diagnostics.length());
+  Test::assertEq<u64>(overlay.typecheck.diagnostics.length(), single.typecheck.diagnostics.length());
+  Test::assertEq<u64>(overlay.diagnostics.length(), single.diagnostics.length());
+}
