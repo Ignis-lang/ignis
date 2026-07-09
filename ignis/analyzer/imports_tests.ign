@@ -1,11 +1,15 @@
 import Test from "std::test";
 
-import SourceSpan from "@compiler::diagnostics";
+import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 
 function importsDummySpan(): SourceSpan {
   return SourceSpan::new("imports_tests.ign", 0, 0);
+}
+
+function importsSpan(start: u64, end: u64): SourceSpan {
+  return SourceSpan::new("imports_tests.ign", start, end);
 }
 
 function importsEmptyOverlay(): Analyzer::Imports::ImportOverlay {
@@ -133,6 +137,106 @@ function importsFunctionModule(name: str): Ast::Module {
   let body: Ast::StatementId = importsAddBlock(&mut module, statements);
   importsAddFunction(&mut module, name, body);
   return module;
+}
+
+function importsNamedBinding(name: str): Ast::ImportBinding {
+  return importsNamedBindingAt(name, 0, 0);
+}
+
+function importsNamedBindingAt(name: str, start: u64, end: u64): Ast::ImportBinding {
+  return Ast::ImportBinding {
+    span: importsSpan(start, end),
+    kind: Ast::ImportBindingKind::Named,
+    name: Option::SOME(String::create(name)),
+    alias: Option::NONE,
+  };
+}
+
+function importsAliasedBinding(name: str, alias: str): Ast::ImportBinding {
+  return importsAliasedBindingAt(name, alias, 0, 0);
+}
+
+function importsAliasedBindingAt(name: str, alias: str, start: u64, end: u64): Ast::ImportBinding {
+  return Ast::ImportBinding {
+    span: importsSpan(start, end),
+    kind: Ast::ImportBindingKind::Named,
+    name: Option::SOME(String::create(name)),
+    alias: Option::SOME(String::create(alias)),
+  };
+}
+
+function importsDiscardBinding(): Ast::ImportBinding {
+  return Ast::ImportBinding {
+    span: importsDummySpan(),
+    kind: Ast::ImportBindingKind::Discard,
+    name: Option::NONE,
+    alias: Option::NONE,
+  };
+}
+
+function importsImportItem(source: str, bindings: Vector<Ast::ImportBinding>): Ast::Item::Import {
+  return importsImportItemAt(source, bindings, 0, 0);
+}
+
+function importsImportItemAt(
+  source: str,
+  bindings: Vector<Ast::ImportBinding>,
+  sourceStart: u64,
+  sourceEnd: u64,
+): Ast::Item::Import {
+  return Ast::Item::Import {
+    span: importsDummySpan(),
+    items: bindings,
+    source: String::create(source),
+    sourceSpan: importsSpan(sourceStart, sourceEnd),
+    metadata: Ast::emptyMetadata(),
+  };
+}
+
+function importsModuleWithImport(source: str, bindings: Vector<Ast::ImportBinding>): Ast::Module {
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut moduleRef: &mut Ast::Module = &mut module;
+  moduleRef.addRootItem(Ast::Item::Node::Import(importsImportItem(source, bindings)));
+  return module;
+}
+
+function importsModuleWithImportAndFunction(
+  source: str,
+  bindings: Vector<Ast::ImportBinding>,
+  functionName: str,
+): Ast::Module {
+  let mut module: Ast::Module = importsModuleWithImport(source, bindings);
+  let ret: Ast::StatementId = importsAddReturn(&mut module);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(ret);
+  let body: Ast::StatementId = importsAddBlock(&mut module, statements);
+  importsAddFunction(&mut module, functionName, body);
+  return module;
+}
+
+function importsAnalyzeTwoModules(
+  first: Ast::Module,
+  second: Ast::Module,
+): Vector<Analyzer::ModuleAnalysisRecord> {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(first);
+  modules.push(second);
+
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  infos.push(importsModuleInfo(0, "a.ign"));
+  infos.push(importsModuleInfo(1, "b.ign"));
+
+  return Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+  );
 }
 
 @test
@@ -308,4 +412,143 @@ function analyzeModuleWithEmptyOverlayMatchesAnalyzeModuleDiagnostics(): void {
   Test::assertEq<u64>(overlay.resolvedBodies.diagnostics.length(), single.resolvedBodies.diagnostics.length());
   Test::assertEq<u64>(overlay.typecheck.diagnostics.length(), single.typecheck.diagnostics.length());
   Test::assertEq<u64>(overlay.diagnostics.length(), single.diagnostics.length());
+}
+
+@test
+function importOverlayAddsResolvedDirectBinding(): void {
+  let first: Ast::Module = importsFunctionModule("Exported");
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(importsNamedBinding("Exported"));
+  let second: Ast::Module = importsModuleWithImport("a.ign", bindings);
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(targetRecord) = records.get(0) else {
+    @panic("missing target record");
+  };
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 1);
+  Test::assertEq<u64>(importingRecord.imports.defs.length(), 1);
+  let Option::SOME(importedDef) = importingRecord.imports.defs.get(0) else {
+    @panic("missing imported definition");
+  };
+  let Option::SOME(targetDef) = targetRecord.direct.defs.get(0) else {
+    @panic("missing target direct definition");
+  };
+
+  Test::assertEq<u32>(importedDef.raw(), targetDef.raw());
+  Test::assertEq<u64>(importingRecord.output.diagnostics.length(), 0);
+}
+
+@test
+function importOverlayDiagnosesMissingDirectBinding(): void {
+  let first: Ast::Module = importsFunctionModule("Exported");
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(importsNamedBinding("Missing"));
+  let second: Ast::Module = importsModuleWithImport("a.ign", bindings);
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+  let Option::SOME(diagnostic) = importingRecord.output.diagnostics.get(0) else {
+    @panic("missing import diagnostic");
+  };
+
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 0);
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::UNDECLARED_VARIABLE);
+}
+
+@test
+function importOverlayDiagnosesUnknownImportSource(): void {
+  let first: Ast::Module = importsFunctionModule("Exported");
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(importsNamedBinding("Exported"));
+
+  let mut second: Ast::Module = Ast::Module::init();
+  let mut moduleRef: &mut Ast::Module = &mut second;
+  moduleRef.addRootItem(Ast::Item::Node::Import(importsImportItemAt("missing.ign", bindings, 50, 60)));
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+  let Option::SOME(diagnostic) = importingRecord.output.diagnostics.get(0) else {
+    @panic("missing source diagnostic");
+  };
+
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 0);
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::UNDECLARED_VARIABLE);
+  Test::assertEq<u64>(diagnostic.primarySpan.start, 50);
+}
+
+@test
+function importOverlayDiagnosesDuplicateLocalImportName(): void {
+  let mut first: Ast::Module = importsFunctionModule("Exported");
+  let ret: Ast::StatementId = importsAddReturn(&mut first);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(ret);
+  let body: Ast::StatementId = importsAddBlock(&mut first, statements);
+  importsAddFunction(&mut first, "Other", body);
+
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(importsNamedBindingAt("Exported", 10, 20));
+  bindings.push(importsAliasedBindingAt("Other", "Exported", 30, 40));
+  let second: Ast::Module = importsModuleWithImport("a.ign", bindings);
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+  let Option::SOME(diagnostic) = importingRecord.output.diagnostics.get(0) else {
+    @panic("missing duplicate diagnostic");
+  };
+  let Option::SOME(primaryLabel) = diagnostic.labels.get(0) else {
+    @panic("missing duplicate primary label");
+  };
+  let Option::SOME(secondaryLabel) = diagnostic.labels.get(1) else {
+    @panic("missing duplicate secondary label");
+  };
+
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 1);
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::TYPE_ALREADY_DEFINED);
+  Test::assertEq<u64>(primaryLabel.span.start, 30);
+  Test::assertEq<u64>(secondaryLabel.span.start, 10);
+}
+
+@test
+function importOverlayDiagnosesLocalDeclarationConflict(): void {
+  let first: Ast::Module = importsFunctionModule("Exported");
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(importsNamedBinding("Exported"));
+  let second: Ast::Module = importsModuleWithImportAndFunction("a.ign", bindings, "Exported");
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+  let Option::SOME(diagnostic) = importingRecord.output.diagnostics.get(0) else {
+    @panic("missing conflict diagnostic");
+  };
+
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 0);
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::TYPE_ALREADY_DEFINED);
+}
+
+@test
+function importOverlaySkipsDiscardBinding(): void {
+  let first: Ast::Module = importsFunctionModule("Exported");
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(importsDiscardBinding());
+  let second: Ast::Module = importsModuleWithImport("a.ign", bindings);
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 0);
+  Test::assertEq<u64>(importingRecord.output.diagnostics.length(), 0);
 }

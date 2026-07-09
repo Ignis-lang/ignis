@@ -31,6 +31,141 @@ export namespace Analyzer {
     public output: Analyzer::AnalyzerOutput;
   }
 
+  function importRecordIndexForSource(
+    records: &Vector<Analyzer::ModuleAnalysisRecord>,
+    source: &String,
+  ): Option<u64> {
+    let mut index: u64 = 0;
+
+    while (index < records.length()) {
+      let Option::SOME(analysisRecord) = records.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (analysisRecord.info.pathText.equals(source.toStr())) {
+        return Option::SOME(index);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function buildImportOverlay(
+    module: &Ast::Module,
+    currentDirect: &Analyzer::Imports::DirectDeclarationIndex,
+    records: &Vector<Analyzer::ModuleAnalysisRecord>,
+    symbols: &mut Analyzer::SymbolTable,
+    diagnostics: &mut DiagnosticBag,
+  ): Analyzer::Imports::ImportOverlay {
+    let mut overlay: Analyzer::Imports::ImportOverlay = Analyzer::Imports::emptyOverlay();
+    let mut rootIndex: u64 = 0;
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+
+    while (rootIndex < module.roots.length()) {
+      let Option::SOME(rootId) = module.roots.get(rootIndex) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(item) = module.items.get(*rootId) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Ast::Item::Node::Import(importItem) = item else {
+        rootIndex += 1;
+        continue;
+      };
+
+      let Option::SOME(recordIndex) = Analyzer::importRecordIndexForSource(records, &importItem.source) else {
+        Analyzer::Imports::appendImportSourceDiagnostic(
+          diagnostics,
+          importItem.source.toStr(),
+          importItem.sourceSpan,
+        );
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(targetRecord) = records.get(recordIndex) else {
+        rootIndex += 1;
+        continue;
+      };
+
+      let mut bindingIndex: u64 = 0;
+      while (bindingIndex < importItem.items.length()) {
+        let Option::SOME(binding) = importItem.items.get(bindingIndex) else {
+          bindingIndex += 1;
+          continue;
+        };
+
+        if (binding.kind == Ast::ImportBindingKind::Discard) {
+          bindingIndex += 1;
+          continue;
+        }
+
+        let Option::SOME(sourceNameText) = Ast::copyOptionalString(binding.name) else {
+          bindingIndex += 1;
+          continue;
+        };
+        let localNameText: String = match (Ast::copyOptionalString(binding.alias)) {
+          Option::SOME(alias) -> alias,
+          Option::NONE -> sourceNameText.clone(),
+        };
+        let sourceName: Analyzer::SymbolId = symbolsRef.intern(sourceNameText.toStr());
+        let localName: Analyzer::SymbolId = symbolsRef.intern(localNameText.toStr());
+
+        if (let Option::SOME(localSpan) = Analyzer::Imports::directIndexSpan(currentDirect, localName)) {
+          Analyzer::Imports::appendImportConflictDiagnostic(
+            diagnostics,
+            localNameText.toStr(),
+            binding.span,
+            localSpan,
+            "import conflicts with local declaration",
+          );
+          bindingIndex += 1;
+          continue;
+        }
+
+        if (let Option::SOME(firstImportSpan) = Analyzer::Imports::overlaySpan(&overlay, localName)) {
+          Analyzer::Imports::appendImportConflictDiagnostic(
+            diagnostics,
+            localNameText.toStr(),
+            binding.span,
+            firstImportSpan,
+            "duplicate import binding here",
+          );
+          bindingIndex += 1;
+          continue;
+        }
+
+        let Option::SOME(targetDef) = Analyzer::Imports::directIndexFind(&targetRecord.direct, sourceName) else {
+          Analyzer::Imports::appendImportMissingDiagnostic(
+            diagnostics,
+            sourceNameText.toStr(),
+            importItem.source.toStr(),
+            binding.span,
+          );
+          bindingIndex += 1;
+          continue;
+        };
+
+        Analyzer::Imports::appendOverlayEntry(
+          &mut overlay,
+          localName,
+          targetDef,
+          binding.span,
+          targetRecord.info.index,
+        );
+        bindingIndex += 1;
+      }
+
+      rootIndex += 1;
+    }
+
+    return overlay;
+  }
+
   function copyDiagnostic(source: &Diagnostic): Diagnostic {
     let mut copy: Diagnostic = Diagnostic::new(
       source.severity,
@@ -143,7 +278,6 @@ export namespace Analyzer {
     output: &Analyzer::Binder::BinderOutput,
   ): void {
     let mut index: u64 = 0;
-    let mut directRef: &mut Analyzer::Imports::DirectDeclarationIndex = direct;
 
     while (index < output.defIds.length()) {
       let Option::SOME(rawId) = output.nodeIds.get(index) else {
@@ -165,9 +299,12 @@ export namespace Analyzer {
         continue;
       };
 
-      directRef.syms.push(definition.name());
-      directRef.defs.push(*defId);
-      directRef.spans.push(Analyzer::itemSpanOrEmpty(module, *rawId));
+      Analyzer::Imports::appendDirectIndexEntryIfMissing(
+        direct,
+        definition.name(),
+        *defId,
+        Analyzer::itemSpanOrEmpty(module, *rawId),
+      );
       index += 1;
     }
   }
@@ -306,19 +443,26 @@ export namespace Analyzer {
       };
       let info: Analyzer::Imports::ModuleInfo = Analyzer::moduleInfoAt(infos, index);
 
-      let overlay: Analyzer::Imports::ImportOverlay = Analyzer::Imports::emptyOverlay();
-      let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModuleWithImports(
+      let emptyOverlay: Analyzer::Imports::ImportOverlay = Analyzer::Imports::emptyOverlay();
+      let mut output: Analyzer::AnalyzerOutput = Analyzer::analyzeModuleWithImports(
         defStore,
         typeStore,
         symbols,
         module,
-        &overlay,
+        &emptyOverlay,
       );
       let direct: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
         defStore,
         module,
         &output.pass1,
         &output.pass2,
+      );
+      let overlay: Analyzer::Imports::ImportOverlay = Analyzer::buildImportOverlay(
+        module,
+        &direct,
+        &records,
+        symbols,
+        &mut output.diagnostics,
       );
 
       records.push(Analyzer::ModuleAnalysisRecord {

@@ -1,4 +1,4 @@
-import SourceSpan from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, DiagnosticCode, LabelKind, Severity, SourceSpan from "@compiler::diagnostics";
 
 export namespace Analyzer {
   namespace Imports {
@@ -58,6 +58,187 @@ export namespace Analyzer {
         defs: Vector::new<Analyzer::DefinitionId>(),
         spans: Vector::new<SourceSpan>(),
       };
+    }
+
+    function directIndexFind(
+      direct: &Analyzer::Imports::DirectDeclarationIndex,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::DefinitionId> {
+      let mut index: u64 = 0;
+
+      while (index < direct.syms.length()) {
+        let Option::SOME(existing) = direct.syms.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (existing.raw() == sym.raw()) {
+          let Option::SOME(defId) = direct.defs.get(index) else {
+            return Option::NONE;
+          };
+          return Option::SOME(*defId);
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    function directIndexSpan(
+      direct: &Analyzer::Imports::DirectDeclarationIndex,
+      sym: Analyzer::SymbolId,
+    ): Option<SourceSpan> {
+      let mut index: u64 = 0;
+
+      while (index < direct.syms.length()) {
+        let Option::SOME(existing) = direct.syms.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (existing.raw() == sym.raw()) {
+          let Option::SOME(span) = direct.spans.get(index) else {
+            return Option::NONE;
+          };
+          return Option::SOME(*span);
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    function overlayContains(
+      overlay: &Analyzer::Imports::ImportOverlay,
+      sym: Analyzer::SymbolId,
+    ): boolean {
+      return Analyzer::Imports::overlaySpan(overlay, sym).isSome();
+    }
+
+    function overlaySpan(
+      overlay: &Analyzer::Imports::ImportOverlay,
+      sym: Analyzer::SymbolId,
+    ): Option<SourceSpan> {
+      let mut index: u64 = 0;
+
+      while (index < overlay.syms.length()) {
+        let Option::SOME(existing) = overlay.syms.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (existing.raw() == sym.raw()) {
+          let Option::SOME(span) = overlay.spans.get(index) else {
+            return Option::NONE;
+          };
+          return Option::SOME(*span);
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    function appendOverlayEntry(
+      overlay: &mut Analyzer::Imports::ImportOverlay,
+      localName: Analyzer::SymbolId,
+      targetDef: Analyzer::DefinitionId,
+      importSpan: SourceSpan,
+      targetModule: u64,
+    ): void {
+      let mut overlayRef: &mut Analyzer::Imports::ImportOverlay = overlay;
+      overlayRef.syms.push(localName);
+      overlayRef.defs.push(targetDef);
+      overlayRef.spans.push(importSpan);
+      overlayRef.targets.push(targetModule);
+    }
+
+    function appendDirectIndexEntryIfMissing(
+      direct: &mut Analyzer::Imports::DirectDeclarationIndex,
+      sym: Analyzer::SymbolId,
+      def: Analyzer::DefinitionId,
+      span: SourceSpan,
+    ): void {
+      let mut index: u64 = 0;
+      while (index < direct.syms.length()) {
+        let Option::SOME(existing) = direct.syms.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (existing.raw() == sym.raw()) {
+          return;
+        }
+
+        index += 1;
+      }
+
+      let mut directRef: &mut Analyzer::Imports::DirectDeclarationIndex = direct;
+      directRef.syms.push(sym);
+      directRef.defs.push(def);
+      directRef.spans.push(span);
+    }
+
+    function appendImportMissingDiagnostic(
+      diagnostics: &mut DiagnosticBag,
+      name: str,
+      modulePath: str,
+      span: SourceSpan,
+    ): void {
+      let message: String = String::create("imported name not found: ").concat(name);
+      let mut diagnostic: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        DiagnosticCode::UNDECLARED_VARIABLE,
+        message.toStr(),
+        span,
+      );
+      diagnostic.addLabel(LabelKind::PRIMARY, span, "import binding not found in target module");
+      diagnostic.addNote(String::create("target module: ").concat(modulePath).toStr());
+
+      let mut diagnosticsRef: &mut DiagnosticBag = diagnostics;
+      diagnosticsRef.push(diagnostic);
+    }
+
+    function appendImportSourceDiagnostic(
+      diagnostics: &mut DiagnosticBag,
+      modulePath: str,
+      span: SourceSpan,
+    ): void {
+      let message: String = String::create("import source not found: ").concat(modulePath);
+      let mut diagnostic: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        DiagnosticCode::UNDECLARED_VARIABLE,
+        message.toStr(),
+        span,
+      );
+      diagnostic.addLabel(LabelKind::PRIMARY, span, "import source did not resolve to a prior module");
+
+      let mut diagnosticsRef: &mut DiagnosticBag = diagnostics;
+      diagnosticsRef.push(diagnostic);
+    }
+
+    function appendImportConflictDiagnostic(
+      diagnostics: &mut DiagnosticBag,
+      name: str,
+      span: SourceSpan,
+      previousSpan: SourceSpan,
+      label: str,
+    ): void {
+      let message: String = String::create("duplicate import name: ").concat(name);
+      let mut diagnostic: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        DiagnosticCode::TYPE_ALREADY_DEFINED,
+        message.toStr(),
+        span,
+      );
+      diagnostic.addLabel(LabelKind::PRIMARY, span, label);
+      diagnostic.addLabel(LabelKind::SECONDARY, previousSpan, "first binding here");
+
+      let mut diagnosticsRef: &mut DiagnosticBag = diagnostics;
+      diagnosticsRef.push(diagnostic);
     }
   }
 }
