@@ -139,6 +139,90 @@ function importsFunctionModule(name: str): Ast::Module {
   return module;
 }
 
+function importsAddPathType(module: &mut Ast::Module, name: str): Ast::TypeId {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create(name));
+
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: importsDummySpan(),
+    segments: segments,
+  }));
+}
+
+function importsAddGenericPathType(
+  module: &mut Ast::Module,
+  baseName: str,
+  argumentName: str,
+): Ast::TypeId {
+  let base: Ast::TypeId = importsAddPathType(module, baseName);
+  let argument: Ast::TypeId = importsAddPathType(module, argumentName);
+  let mut arguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  arguments.push(argument);
+
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+    span: importsDummySpan(),
+    base: base,
+    arguments: arguments,
+  }));
+}
+
+function importsAddAnnotatedField(
+  module: &mut Ast::Module,
+  name: str,
+  typeAnnotation: Ast::TypeId,
+): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: importsDummySpan(),
+    name: String::create(name),
+    annotation: Option::SOME(typeAnnotation),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function importsAddRecord(
+  module: &mut Ast::Module,
+  name: str,
+  fields: Vector<Ast::PatternId>,
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: importsDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function importsRecordModule(name: str): Ast::Module {
+  let mut module: Ast::Module = Ast::Module::init();
+  let fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  importsAddRecord(&mut module, name, fields);
+  return module;
+}
+
+function importsGenericTraitModule(name: str): Ast::Module {
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut genericParameters: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParameters.push(Ast::GenericParam {
+    span: importsDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+  module.addRootItem(Ast::Item::Node::Trait(Ast::Item::Trait {
+    span: importsDummySpan(),
+    name: String::create(name),
+    genericParameters: genericParameters,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+  return module;
+}
+
 function importsNamedBinding(name: str): Ast::ImportBinding {
   return importsNamedBindingAt(name, 0, 0);
 }
@@ -200,6 +284,21 @@ function importsModuleWithImport(source: str, bindings: Vector<Ast::ImportBindin
   return module;
 }
 
+function importsModuleWithImportAndTypedRecord(
+  source: str,
+  bindings: Vector<Ast::ImportBinding>,
+  recordName: str,
+  fieldTypeName: str,
+): Ast::Module {
+  let mut module: Ast::Module = importsModuleWithImport(source, bindings);
+  let fieldType: Ast::TypeId = importsAddPathType(&mut module, fieldTypeName);
+  let field: Ast::PatternId = importsAddAnnotatedField(&mut module, "field", fieldType);
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(field);
+  importsAddRecord(&mut module, recordName, fields);
+  return module;
+}
+
 function importsModuleWithImportAndFunction(
   source: str,
   bindings: Vector<Ast::ImportBinding>,
@@ -237,6 +336,89 @@ function importsAnalyzeTwoModules(
     &modules,
     &infos,
   );
+}
+
+function importsBinderOutputContainsDef(
+  output: &Analyzer::Binder::BinderOutput,
+  defId: Analyzer::DefinitionId,
+): boolean {
+  let mut index: u64 = 0;
+
+  while (index < output.defIds.length()) {
+    let Option::SOME(stored) = output.defIds.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (stored.raw() == defId.raw()) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+function importsOverlayWithOne(
+  sym: Analyzer::SymbolId,
+  defId: Analyzer::DefinitionId,
+): Analyzer::Imports::ImportOverlay {
+  let mut overlay: Analyzer::Imports::ImportOverlay = importsEmptyOverlay();
+  overlay.syms.push(sym);
+  overlay.defs.push(defId);
+  overlay.spans.push(importsDummySpan());
+  overlay.targets.push(0);
+  return overlay;
+}
+
+function importsRecordFieldType(
+  defStore: &mut Analyzer::DefinitionStore,
+  recordItemId: Ast::ItemId,
+  pass1: &Analyzer::Binder::BinderOutput,
+  fieldIndex: u64,
+): Analyzer::TypeId {
+  let Option::SOME(recordDefId) = Analyzer::Binder::findDef(pass1, recordItemId.raw()) else {
+    @panic("missing record definition");
+  };
+
+  match (defStore.get(recordDefId)) {
+    Option::SOME(definition) -> match (definition) {
+      Analyzer::Definition::Record(recordDef) -> {
+        let Option::SOME(fieldDefId) = recordDef.fields.get(fieldIndex) else {
+          @panic("missing record field definition");
+        };
+
+        match (defStore.get(*fieldDefId)) {
+          Option::SOME(fieldDefinition) -> match (fieldDefinition) {
+            Analyzer::Definition::Field(field) -> {
+              return field.fieldType;
+            },
+            Analyzer::Definition::Record(_) -> @panic("expected field definition"),
+            Analyzer::Definition::Enum(_) -> @panic("expected field definition"),
+            Analyzer::Definition::Function(_) -> @panic("expected field definition"),
+            Analyzer::Definition::Variable(_) -> @panic("expected field definition"),
+            Analyzer::Definition::Variant(_) -> @panic("expected field definition"),
+            Analyzer::Definition::TypeParam(_) -> @panic("expected field definition"),
+            Analyzer::Definition::TypeAlias(_) -> @panic("expected field definition"),
+            Analyzer::Definition::Trait(_) -> @panic("expected field definition"),
+          },
+          Option::NONE -> @panic("missing field definition"),
+        };
+      },
+      Analyzer::Definition::Enum(_) -> @panic("expected record definition"),
+      Analyzer::Definition::Function(_) -> @panic("expected record definition"),
+      Analyzer::Definition::Variable(_) -> @panic("expected record definition"),
+      Analyzer::Definition::Field(_) -> @panic("expected record definition"),
+      Analyzer::Definition::Variant(_) -> @panic("expected record definition"),
+      Analyzer::Definition::TypeParam(_) -> @panic("expected record definition"),
+      Analyzer::Definition::TypeAlias(_) -> @panic("expected record definition"),
+      Analyzer::Definition::Trait(_) -> @panic("expected record definition"),
+    },
+    Option::NONE -> @panic("missing record definition"),
+  };
+
+  @panic("unreachable record field lookup");
 }
 
 @test
@@ -551,4 +733,138 @@ function importOverlaySkipsDiscardBinding(): void {
 
   Test::assertEq<u64>(importingRecord.imports.syms.length(), 0);
   Test::assertEq<u64>(importingRecord.output.diagnostics.length(), 0);
+}
+
+@test
+function analyzeProgramResolvesImportedTypeAnnotations(): void {
+  let first: Ast::Module = importsRecordModule("ImportedType");
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(importsNamedBinding("ImportedType"));
+  let second: Ast::Module = importsModuleWithImportAndTypedRecord("a.ign", bindings, "UsesImported", "ImportedType");
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(targetRecord) = records.get(0) else {
+    @panic("missing target record");
+  };
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+  let Option::SOME(importedDef) = targetRecord.direct.defs.get(0) else {
+    @panic("missing imported definition");
+  };
+
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 1);
+  Test::assertEq<boolean>(importsBinderOutputContainsDef(&importingRecord.pass1, *importedDef), false);
+  Test::assertEq<boolean>(importsBinderOutputContainsDef(&importingRecord.pass2, *importedDef), false);
+  Test::assertEq<u64>(importingRecord.output.resolvedTypes.diagnostics.length(), 0);
+  Test::assertEq<u64>(importingRecord.output.diagnostics.length(), 0);
+}
+
+@test
+function analyzeProgramRejectsImportedGenericTraitInTypePosition(): void {
+  let first: Ast::Module = importsGenericTraitModule("ImportedTrait");
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(importsNamedBinding("ImportedTrait"));
+  let mut second: Ast::Module = importsModuleWithImport("a.ign", bindings);
+  let fieldType: Ast::TypeId = importsAddGenericPathType(&mut second, "ImportedTrait", "i32");
+  let field: Ast::PatternId = importsAddAnnotatedField(&mut second, "field", fieldType);
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(field);
+  importsAddRecord(&mut second, "UsesTrait", fields);
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+  let Option::SOME(diagnostic) = importingRecord.output.resolvedTypes.diagnostics.get(0) else {
+    @panic("missing trait-in-type-position diagnostic");
+  };
+
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 1);
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::UNDEFINED_TYPE);
+}
+
+@test
+function analyzeProgramDoesNotLeakUnimportedTypes(): void {
+  let first: Ast::Module = importsRecordModule("UnimportedType");
+  let bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  let second: Ast::Module = importsModuleWithImportAndTypedRecord("missing.ign", bindings, "UsesMissing", "UnimportedType");
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+  let Option::SOME(diagnostic) = importingRecord.output.resolvedTypes.diagnostics.get(0) else {
+    @panic("missing type-resolution diagnostic");
+  };
+
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 0);
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::UNDEFINED_TYPE);
+}
+
+@test
+function analyzeProgramSkipsImportOverlayWhenLocalDeclarationConflicts(): void {
+  let first: Ast::Module = importsRecordModule("SharedType");
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(importsNamedBinding("SharedType"));
+  let mut second: Ast::Module = importsModuleWithImportAndTypedRecord("a.ign", bindings, "UsesLocal", "SharedType");
+  let localFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  importsAddRecord(&mut second, "SharedType", localFields);
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 0);
+  Test::assertEq<u64>(importingRecord.output.resolvedTypes.diagnostics.length(), 0);
+  Test::assertEq<u64>(importingRecord.output.diagnostics.length(), 1);
+}
+
+@test
+function resolveTypesPrefersLocalTypeOverImportOverlay(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let first: Ast::Module = importsRecordModule("SharedType");
+  let firstOutput: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(&mut defStore, &mut typeStore, &mut symbols, &first);
+  let firstDirect: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
+    &mut defStore,
+    &first,
+    &firstOutput.pass1,
+    &firstOutput.pass2,
+  );
+  let Option::SOME(importedSym) = firstDirect.syms.get(0) else {
+    @panic("missing imported symbol");
+  };
+  let Option::SOME(importedDef) = firstDirect.defs.get(0) else {
+    @panic("missing imported definition");
+  };
+
+  let mut second: Ast::Module = Ast::Module::init();
+  let fieldType: Ast::TypeId = importsAddPathType(&mut second, "SharedType");
+  let field: Ast::PatternId = importsAddAnnotatedField(&mut second, "field", fieldType);
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(field);
+  let usesLocalId: Ast::ItemId = importsAddRecord(&mut second, "UsesLocal", fields);
+  let localFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let localItemId: Ast::ItemId = importsAddRecord(&mut second, "SharedType", localFields);
+  let overlay: Analyzer::Imports::ImportOverlay = importsOverlayWithOne(*importedSym, *importedDef);
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModuleWithImports(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &second,
+    &overlay,
+  );
+  let Option::SOME(localDefId) = Analyzer::Binder::findDef(&output.pass1, localItemId.raw()) else {
+    @panic("missing local definition");
+  };
+  let expectedLocalType: Analyzer::TypeId = typeStore.intern(Analyzer::Type::Record(localDefId));
+  let actualFieldType: Analyzer::TypeId = importsRecordFieldType(&mut defStore, usesLocalId, &output.pass1, 0);
+
+  Test::assertEq<u32>(actualFieldType.raw(), expectedLocalType.raw());
+  Test::assertEq<u64>(output.resolvedTypes.diagnostics.length(), 0);
 }

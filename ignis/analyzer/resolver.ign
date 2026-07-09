@@ -1,3 +1,5 @@
+import _ from "./imports";
+
 import
   SourceSpan,
   Diagnostic,
@@ -44,6 +46,8 @@ export namespace Analyzer {
       public diagnostics: DiagnosticBag;
       public globalNameSyms: Vector<Analyzer::SymbolId>;
       public globalNameDefs: Vector<Analyzer::DefinitionId>;
+      public importNameSyms: Vector<Analyzer::SymbolId>;
+      public importNameDefs: Vector<Analyzer::DefinitionId>;
     }
 
     /// Type-parameter scope for one item walk (Record, Enum, or Function).
@@ -131,6 +135,33 @@ export namespace Analyzer {
 
         if (stored.raw() == sym.raw()) {
           let Option::SOME(defId) = state.globalNameDefs.get(index) else {
+            index += 1;
+            continue;
+          };
+
+          return Option::SOME(*defId);
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    function importLookup(
+      state: &mut Analyzer::Resolver::ResolverState,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::DefinitionId> {
+      let mut index: u64 = 0;
+
+      while (index < state.importNameSyms.length()) {
+        let Option::SOME(stored) = state.importNameSyms.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (stored.raw() == sym.raw()) {
+          let Option::SOME(defId) = state.importNameDefs.get(index) else {
             index += 1;
             continue;
           };
@@ -287,6 +318,45 @@ export namespace Analyzer {
           return false;
         },
         Analyzer::Definition::TypeAlias(_) -> {
+          return false;
+        },
+      };
+    }
+
+    function isTypeNameDef(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): boolean {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return false;
+      };
+
+      match (def) {
+        Analyzer::Definition::Record(_) -> {
+          return true;
+        },
+        Analyzer::Definition::Enum(_) -> {
+          return true;
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          return true;
+        },
+        Analyzer::Definition::Trait(_) -> {
+          return true;
+        },
+        Analyzer::Definition::Function(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Variable(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Field(_) -> {
+          return false;
+        },
+        Analyzer::Definition::Variant(_) -> {
+          return false;
+        },
+        Analyzer::Definition::TypeParam(_) -> {
           return false;
         },
       };
@@ -756,7 +826,8 @@ export namespace Analyzer {
     ///   1. Primitive names (15 `String::create().equals()` compares).
     ///   2. Type-param scope (innermost-first linear scan).
     ///   3. Global type-name index (linear scan).
-    ///   4. Unknown: emit UNDEFINED_TYPE + return VOID.
+    ///   4. Import overlay (linear scan).
+    ///   5. Unknown: emit UNDEFINED_TYPE + return VOID.
     ///
     /// Multi-segment paths emit UNDEFINED_TYPE — not yet supported.
     function resolvePath(
@@ -812,6 +883,26 @@ export namespace Analyzer {
         // Trait names are not valid in type position.
         if (isTraitDef(defStore, defId)) {
           let message: String = String::create("trait `").concat(nameStr.toStr()).concat("` cannot be used in type position");
+          emitUndefinedType(state, p.span, message.toStr());
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.intern(Analyzer::Type::VOID);
+        }
+
+        return nominalTypeFor(defStore, typeStore, defId);
+      }
+
+      let importOpt: Option<Analyzer::DefinitionId> = importLookup(state, sym);
+
+      if (let Option::SOME(defId) = importOpt) {
+        if (isTraitDef(defStore, defId)) {
+          let message: String = String::create("trait `").concat(nameStr.toStr()).concat("` cannot be used in type position");
+          emitUndefinedType(state, p.span, message.toStr());
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.intern(Analyzer::Type::VOID);
+        }
+
+        if (!isTypeNameDef(defStore, defId)) {
+          let message: String = String::create("unknown type name: `").concat(nameStr.toStr()).concat("`");
           emitUndefinedType(state, p.span, message.toStr());
           let mut tsRef: &mut Analyzer::TypeStore = typeStore;
           return tsRef.intern(Analyzer::Type::VOID);
@@ -983,9 +1074,13 @@ export namespace Analyzer {
           }
 
           // Global lookup.
-          let globalOpt: Option<Analyzer::DefinitionId> = globalLookup(state, sym);
+          let mut defIdOpt: Option<Analyzer::DefinitionId> = globalLookup(state, sym);
 
-          let Option::SOME(defId) = globalOpt else {
+          if (defIdOpt.isNone()) {
+            defIdOpt = importLookup(state, sym);
+          }
+
+          let Option::SOME(defId) = defIdOpt else {
             let message: String = String::create("unknown generic type: `")
               .concat(baseNameStr.toStr())
               .concat("`");
@@ -993,6 +1088,22 @@ export namespace Analyzer {
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           };
+
+          if (isTraitDef(defStore, defId)) {
+            let message: String = String::create("trait `").concat(baseNameStr.toStr()).concat("` cannot be used in type position");
+            emitUndefinedType(state, basePathSpan, message.toStr());
+            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+            return tsRef.intern(Analyzer::Type::VOID);
+          }
+
+          if (!isTypeNameDef(defStore, defId)) {
+            let message: String = String::create("unknown generic type: `")
+              .concat(baseNameStr.toStr())
+              .concat("`");
+            emitUndefinedType(state, basePathSpan, message.toStr());
+            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+            return tsRef.intern(Analyzer::Type::VOID);
+          }
 
           // Arity check.
           let expectedArity: u64 = arityOf(defStore, defId);
@@ -1540,27 +1651,54 @@ export namespace Analyzer {
       };
     }
 
+    function appendImportOverlayToState(
+      state: &mut Analyzer::Resolver::ResolverState,
+      overlay: &Analyzer::Imports::ImportOverlay,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < overlay.syms.length()) {
+        let Option::SOME(sym) = overlay.syms.get(index) else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(defId) = overlay.defs.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+        stateRef.importNameSyms.push(*sym);
+        stateRef.importNameDefs.push(*defId);
+        index += 1;
+      }
+    }
+
     /// Resolve all type-syntax annotations in `module` against `defStore` and
     /// `typeStore`, patching Definitions in-place.
     ///
     /// Must be called after both `predeclareRoots` (pass-1) and `completeRoots`
     /// (pass-2). Returns a `ResolverOutput` with resolver-only diagnostics.
-    function resolveTypes(
+    function resolveTypesWithImports(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
       symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
       pass1: &Analyzer::Binder::BinderOutput,
       pass2: &Analyzer::Binder::BinderOutput,
+      overlay: &Analyzer::Imports::ImportOverlay,
     ): Analyzer::Resolver::ResolverOutput {
       let mut state: Analyzer::Resolver::ResolverState = Analyzer::Resolver::ResolverState {
         diagnostics: DiagnosticBag::init(),
         globalNameSyms: Vector::new<Analyzer::SymbolId>(),
         globalNameDefs: Vector::new<Analyzer::DefinitionId>(),
+        importNameSyms: Vector::new<Analyzer::SymbolId>(),
+        importNameDefs: Vector::new<Analyzer::DefinitionId>(),
       };
 
       buildGlobalNameIndex(&mut state, defStore, pass1);
       buildGlobalNameIndex(&mut state, defStore, pass2);
+      appendImportOverlayToState(&mut state, overlay);
 
       let mut index: u64 = 0;
 
@@ -1575,6 +1713,26 @@ export namespace Analyzer {
       }
 
       return Analyzer::Resolver::ResolverOutput { diagnostics: state.diagnostics };
+    }
+
+    function resolveTypes(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+    ): Analyzer::Resolver::ResolverOutput {
+      let overlay: Analyzer::Imports::ImportOverlay = Analyzer::Imports::emptyOverlay();
+      return Analyzer::Resolver::resolveTypesWithImports(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        pass1,
+        pass2,
+        &overlay,
+      );
     }
   }
 }

@@ -345,13 +345,14 @@ export namespace Analyzer {
       &pass1,
     );
 
-    let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypesWithImports(
       defStore,
       typeStore,
       symbols,
       module,
       &pass1,
       &pass2,
+      overlay,
     );
 
     let resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
@@ -443,27 +444,84 @@ export namespace Analyzer {
       };
       let info: Analyzer::Imports::ModuleInfo = Analyzer::moduleInfoAt(infos, index);
 
-      let emptyOverlay: Analyzer::Imports::ImportOverlay = Analyzer::Imports::emptyOverlay();
-      let mut output: Analyzer::AnalyzerOutput = Analyzer::analyzeModuleWithImports(
+      let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+        &module.roots,
         defStore,
         typeStore,
         symbols,
         module,
-        &emptyOverlay,
       );
+
+      let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+        &module.roots,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        &pass1,
+      );
+
       let direct: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
         defStore,
         module,
-        &output.pass1,
-        &output.pass2,
+        &pass1,
+        &pass2,
       );
+      let mut importDiagnostics: DiagnosticBag = DiagnosticBag::init();
       let overlay: Analyzer::Imports::ImportOverlay = Analyzer::buildImportOverlay(
         module,
         &direct,
         &records,
         symbols,
-        &mut output.diagnostics,
+        &mut importDiagnostics,
       );
+
+      let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypesWithImports(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        &pass1,
+        &pass2,
+        &overlay,
+      );
+
+      let resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodies(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        &pass1,
+        &pass2,
+      );
+
+      let typecheck: Analyzer::Typecheck::TypecheckOutput = Analyzer::Typecheck::checkModule(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        &pass1,
+        &pass2,
+        &resolvedTypes,
+        &resolvedBodies,
+      );
+
+      let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+      Analyzer::appendDiagnostics(&mut diagnostics, &pass1.diagnostics);
+      Analyzer::appendDiagnostics(&mut diagnostics, &pass2.diagnostics);
+      Analyzer::appendDiagnostics(&mut diagnostics, &importDiagnostics);
+      Analyzer::appendDiagnostics(&mut diagnostics, &resolvedTypes.diagnostics);
+      Analyzer::appendDiagnostics(&mut diagnostics, &resolvedBodies.diagnostics);
+      Analyzer::appendDiagnostics(&mut diagnostics, &typecheck.diagnostics);
+
+      let output: Analyzer::AnalyzerOutput = Analyzer::AnalyzerOutput {
+        pass1: pass1,
+        pass2: pass2,
+        resolvedTypes: resolvedTypes,
+        resolvedBodies: resolvedBodies,
+        typecheck: typecheck,
+        diagnostics: diagnostics,
+      };
 
       records.push(Analyzer::ModuleAnalysisRecord {
         info: info,
