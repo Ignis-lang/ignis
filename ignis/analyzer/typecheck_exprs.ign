@@ -1225,9 +1225,15 @@ export namespace Analyzer {
           return Option::NONE;
         },
         Ast::Expression::Node::Match(value) -> {
-          let _scrutineeType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.scrutinee);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "match expressions");
-          return Option::NONE;
+          return Analyzer::Typecheck::checkMatchExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            &value,
+          );
         },
         Ast::Expression::Node::Vector(value) -> {
           let mut index: u64 = 0;
@@ -1311,6 +1317,86 @@ export namespace Analyzer {
           return Option::NONE;
         },
       };
+    }
+
+    function checkMatchExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      value: &Ast::Expression::Match,
+    ): Option<Analyzer::TypeId> {
+      let scrutineeTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.scrutinee);
+
+      let mut index: u64 = 0;
+      while (index < value.arms.length()) {
+        let Option::SOME(arm) = value.arms.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        Analyzer::Typecheck::pushScope(state);
+        if (let Option::SOME(scrutineeType) = scrutineeTypeOpt) {
+          Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, arm.pattern, scrutineeType, false, value.span);
+        }
+
+        if (let Option::SOME(guardId) = arm.guard) {
+          let guardTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, guardId);
+          if (let Option::SOME(guardType) = guardTypeOpt) {
+            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, guardType);
+          }
+        }
+
+        let _bodyType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, arm.body);
+        Analyzer::Typecheck::popScope(state);
+        index += 1;
+      }
+
+      Analyzer::Typecheck::emitUnsupported(state, value.span, "match expressions");
+      return Option::NONE;
+    }
+
+    function checkLetElse(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      value: &Ast::Statement::LetElse,
+    ): void {
+      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        value.value,
+      );
+
+      let mut expectedTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
+      if (let Option::SOME(annotationId) = value.annotation) {
+        expectedTypeOpt = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, annotationId);
+      } else {
+        expectedTypeOpt = actualTypeOpt;
+      }
+
+      if (let Option::SOME(expectedType) = expectedTypeOpt) {
+        if (let Option::SOME(actualType) = actualTypeOpt) {
+          if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, expectedType, actualType)) {
+            Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, expectedType, actualType);
+          }
+        }
+
+        Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, value.pattern, expectedType, false, value.span);
+      } else if (value.annotation.isSome()) {
+        Analyzer::Typecheck::emitUnsupported(state, value.span, "unsupported local annotation type");
+      }
+
+      Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.elseBranch);
     }
 
     function checkLetLike(
@@ -1461,7 +1547,7 @@ export namespace Analyzer {
         },
         Ast::Statement::Node::Comment(_) -> {},
         Ast::Statement::Node::LetElse(value) -> {
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "let-else statements");
+          Analyzer::Typecheck::checkLetElse(state, defStore, typeStore, symbols, module, resolvedBodies, &value);
         },
         Ast::Statement::Node::If(value) -> {
           let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);

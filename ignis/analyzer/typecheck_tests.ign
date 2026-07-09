@@ -260,6 +260,36 @@ function typecheckAddExprStmt(
   }));
 }
 
+function typecheckAddLetElseStmt(
+  module: &mut Ast::Module,
+  pattern: Ast::PatternId,
+  annotation: Option<Ast::TypeId>,
+  value: Ast::ExpressionId,
+  elseBranch: Ast::StatementId,
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::LetElse(Ast::Statement::LetElse {
+    span: typecheckDummySpan(),
+    pattern: pattern,
+    annotation: annotation,
+    value: value,
+    elseBranch: elseBranch,
+  }));
+}
+
+function typecheckAddMatchExpr(
+  module: &mut Ast::Module,
+  scrutinee: Ast::ExpressionId,
+  arms: Vector<Ast::Expression::MatchArm>,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Match(Ast::Expression::Match {
+    span: typecheckDummySpan(),
+    scrutinee: scrutinee,
+    arms: arms,
+  }));
+}
+
 function typecheckAddLetStmt(
   module: &mut Ast::Module,
   pattern: Ast::PatternId,
@@ -3773,4 +3803,225 @@ function typecheckUnknownQualifiedAnnotationProducesUnsupportedDiagnostic(): voi
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support unsupported local annotation type");
+}
+
+@test
+function typecheckLetElseAnnotatedBindingChecksElseAndBindsPattern(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let pattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32Type);
+  let elseReturn: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddIntLiteral(&mut module, 0));
+  let mut elseStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  elseStmts.push(elseReturn);
+  let elseBlock: Ast::StatementId = typecheckAddBlock(&mut module, elseStmts);
+  let letElseStmt: Ast::StatementId = typecheckAddLetElseStmt(
+    &mut module,
+    pattern,
+    Option::SOME(i32Type),
+    typecheckAddIntLiteral(&mut module, 1),
+    elseBlock,
+  );
+  let xUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, xUse);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letElseStmt);
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::SOME(i32Type), body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, xUse, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckLetElseChecksElseBranchDiagnostics(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let pattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32Type);
+  let elseReturn: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddBoolLiteral(&mut module, true));
+  let mut elseStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  elseStmts.push(elseReturn);
+  let elseBlock: Ast::StatementId = typecheckAddBlock(&mut module, elseStmts);
+  let letElseStmt: Ast::StatementId = typecheckAddLetElseStmt(
+    &mut module,
+    pattern,
+    Option::SOME(i32Type),
+    typecheckAddIntLiteral(&mut module, 1),
+    elseBlock,
+  );
+  let xUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, xUse);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letElseStmt);
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::SOME(i32Type), body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `i32`, found `boolean`");
+}
+
+@test
+function typecheckLetElseUnannotatedBindingUsesValueType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let pattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let elseReturn: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddIntLiteral(&mut module, 0));
+  let mut elseStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  elseStmts.push(elseReturn);
+  let elseBlock: Ast::StatementId = typecheckAddBlock(&mut module, elseStmts);
+  let letElseStmt: Ast::StatementId = typecheckAddLetElseStmt(
+    &mut module,
+    pattern,
+    Option::NONE,
+    typecheckAddIntLiteral(&mut module, 1),
+    elseBlock,
+  );
+  let xUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, xUse);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letElseStmt);
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::SOME(i32Type), body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, xUse, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckLetElseAnnotatedBindingReportsValueMismatch(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let boolType: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let pattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", boolType);
+  let elseBlock: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let letElseStmt: Ast::StatementId = typecheckAddLetElseStmt(
+    &mut module,
+    pattern,
+    Option::SOME(boolType),
+    typecheckAddIntLiteral(&mut module, 1),
+    elseBlock,
+  );
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letElseStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `boolean`, found `i32`");
+}
+
+@test
+function typecheckMatchStatementChecksPatternGuardAndArmBody(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let pattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let guardExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let bodyExpr: Ast::ExpressionId = typecheckAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Add,
+    typecheckAddVariable(&mut module, "x"),
+    typecheckAddBoolLiteral(&mut module, true),
+  );
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: pattern,
+    guard: Option::SOME(guardExpr),
+    body: bodyExpr,
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, typecheckAddIntLiteral(&mut module, 1), arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 3);
+  assertExprType(&output, guardExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckMatchStatementDoesNotSkipArmBodyDiagnostics(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let pattern: Ast::PatternId = typecheckAddWildcardPattern(&mut module);
+  let missingExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "missing");
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: pattern,
+    guard: Option::NONE,
+    body: missingExpr,
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, typecheckAddIntLiteral(&mut module, 1), arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
+}
+
+@test
+function typecheckMatchWithUnresolvedScrutineeStillChecksArmBody(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let pattern: Ast::PatternId = typecheckAddWildcardPattern(&mut module);
+  let scrutineeExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "missingScrutinee");
+  let missingBodyExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "missingBody");
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: pattern,
+    guard: Option::NONE,
+    body: missingBodyExpr,
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, scrutineeExpr, arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
 }
