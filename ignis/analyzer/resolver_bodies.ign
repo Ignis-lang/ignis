@@ -17,6 +17,7 @@ import Id from "@compiler::ids";
 ///   1. Lexical local scope (parameters and let-bound names, innermost first).
 ///   2. Type-parameter scope for the enclosing function item.
 ///   3. Module-global definition name index (built from binder pass-1 + pass-2).
+///   4. Direct-import overlay for the current module.
 ///
 /// Output is a `BodyResolutionMap` — a parallel-vector side-table mapping
 /// AST NodeIds to `ResolvedRef` values. Expression NodeIds use the raw u32
@@ -139,6 +140,9 @@ export namespace Analyzer {
       /// Variant and Field names are resolved via structured path or member-access.
       public globalNameSyms: Vector<Analyzer::SymbolId>;
       public globalNameDefs: Vector<Analyzer::DefinitionId>;
+
+      public importSyms: Vector<Analyzer::SymbolId>;
+      public importDefs: Vector<Analyzer::DefinitionId>;
 
       /// Per-function transient state (reset at each function/constant entry).
       public currentFunction: Analyzer::DefinitionId;
@@ -557,6 +561,55 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
+    function bodyImportLookup(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::DefinitionId> {
+      let mut i: u64 = 0;
+
+      while (i < state.importSyms.length()) {
+        let Option::SOME(stored) = state.importSyms.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (stored.raw() == sym.raw()) {
+          let Option::SOME(defId) = state.importDefs.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          return Option::SOME(*defId);
+        }
+
+        i += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    function copyBodyImportOverlay(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      overlay: &Analyzer::Imports::ImportOverlay,
+    ): void {
+      let mut i: u64 = 0;
+
+      while (i < overlay.syms.length()) {
+        let Option::SOME(sym) = overlay.syms.get(i) else {
+          i += 1;
+          continue;
+        };
+        let Option::SOME(defId) = overlay.defs.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        state.importSyms.push(*sym);
+        state.importDefs.push(*defId);
+        i += 1;
+      }
+    }
+
     /// Look up the DefinitionId for a given raw ItemId, searching pass-1 then pass-2.
     function lookupDef(
       pass1: &Analyzer::Binder::BinderOutput,
@@ -729,7 +782,11 @@ export namespace Analyzer {
     ): Option<Analyzer::DefinitionId> {
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let memberSym: Analyzer::SymbolId = symbolsRef.intern(memberName);
-      let memberOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, memberSym);
+      let globalMemberOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, memberSym);
+      let memberOpt: Option<Analyzer::DefinitionId> = match (globalMemberOpt) {
+        Option::SOME(defId) -> Option::SOME(defId),
+        Option::NONE -> Analyzer::ResolverBodies::bodyImportLookup(state, memberSym),
+      };
 
       let Option::SOME(memberDefId) = memberOpt else {
         return Option::NONE;
@@ -790,7 +847,11 @@ export namespace Analyzer {
     ): Analyzer::ResolverBodies::PathTailLookup {
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let ownerSym: Analyzer::SymbolId = symbolsRef.intern(ownerName);
-      let ownerOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, ownerSym);
+      let globalOwnerOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, ownerSym);
+      let ownerOpt: Option<Analyzer::DefinitionId> = match (globalOwnerOpt) {
+        Option::SOME(defId) -> Option::SOME(defId),
+        Option::NONE -> Analyzer::ResolverBodies::bodyImportLookup(state, ownerSym),
+      };
 
       let Option::SOME(ownerDefId) = ownerOpt else {
         let fallback: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::resolvePathTailTypeFallback(
@@ -918,7 +979,8 @@ export namespace Analyzer {
     ///   1. Local scope stack (innermost first).
     ///   2. Type-parameter scope for the enclosing item.
     ///   3. Global name index (emits diagnostic for Traits — ADR-B3).
-    ///   4. Unknown — emit UNDECLARED_VARIABLE, record Unresolved("unknown").
+    ///   4. Direct-import overlay.
+    ///   5. Unknown — emit UNDECLARED_VARIABLE, record Unresolved("unknown").
     function resolveIdentifierExpr(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -967,7 +1029,27 @@ export namespace Analyzer {
         return;
       }
 
-      // 4. Unknown.
+      let importOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyImportLookup(state, sym);
+
+      if (let Option::SOME(defId) = importOpt) {
+        if (Analyzer::ResolverBodies::isTraitDef(defStore, defId)) {
+          let message: String = String::create("trait `")
+            .concat(name)
+            .concat("` cannot be used in expression position");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          Analyzer::ResolverBodies::recordExprRef(
+            state,
+            exprId,
+            Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
+          );
+          return;
+        }
+
+        Analyzer::ResolverBodies::recordExprRef(state, exprId, Analyzer::ResolverBodies::ResolvedRef::Definition(defId));
+        return;
+      }
+
+      // 5. Unknown.
       let message: String = String::create("undeclared variable: `").concat(name).concat("`");
       Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
       Analyzer::ResolverBodies::recordExprRef(
@@ -2221,12 +2303,35 @@ export namespace Analyzer {
       pass1: &Analyzer::Binder::BinderOutput,
       pass2: &Analyzer::Binder::BinderOutput,
     ): Analyzer::ResolverBodies::ResolverBodiesOutput {
+      let overlay: Analyzer::Imports::ImportOverlay = Analyzer::Imports::emptyOverlay();
+      return Analyzer::ResolverBodies::resolveBodiesWithImports(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        pass1,
+        pass2,
+        &overlay,
+      );
+    }
+
+    function resolveBodiesWithImports(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      overlay: &Analyzer::Imports::ImportOverlay,
+    ): Analyzer::ResolverBodies::ResolverBodiesOutput {
       let sentinel: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
 
       let mut state: Analyzer::ResolverBodies::ResolverBodiesState = Analyzer::ResolverBodies::ResolverBodiesState {
         diagnostics: DiagnosticBag::init(),
         globalNameSyms: Vector::new<Analyzer::SymbolId>(),
         globalNameDefs: Vector::new<Analyzer::DefinitionId>(),
+        importSyms: Vector::new<Analyzer::SymbolId>(),
+        importDefs: Vector::new<Analyzer::DefinitionId>(),
         currentFunction: sentinel,
         localStack: Analyzer::ResolverBodies::LocalStack {
           scopeStarts: Vector::new<u64>(),
@@ -2246,6 +2351,7 @@ export namespace Analyzer {
       // Build global name index from both binder passes (REQ-E5).
       Analyzer::ResolverBodies::buildBodyGlobalNameIndex(&mut state, defStore, pass1);
       Analyzer::ResolverBodies::buildBodyGlobalNameIndex(&mut state, defStore, pass2);
+      Analyzer::ResolverBodies::copyBodyImportOverlay(&mut state, overlay);
 
       // Walk all top-level items in source order (REQ-E2, REQ-E3, REQ-E6).
       let mut i: u64 = 0;

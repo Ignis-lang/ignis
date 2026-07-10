@@ -372,6 +372,84 @@ function importsOverlayWithOne(
   return overlay;
 }
 
+function importsAddVariable(module: &mut Ast::Module, name: str): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Variable(Ast::Expression::Variable {
+    span: importsDummySpan(),
+    name: String::create(name),
+  }));
+}
+
+function importsAddBinding(module: &mut Ast::Module, name: str): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: importsDummySpan(),
+    name: String::create(name),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function importsAddPathExpr2(module: &mut Ast::Module, owner: str, member: str): Ast::ExpressionId {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create(owner));
+  segments.push(String::create(member));
+
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Path(Ast::Expression::Path {
+    span: importsDummySpan(),
+    segments: segments,
+  }));
+}
+
+function importsAddFunctionReturningExpr(
+  module: &mut Ast::Module,
+  name: str,
+  parameters: Vector<Ast::PatternId>,
+  value: Ast::ExpressionId,
+): Ast::ItemId {
+  let ret: Ast::StatementId = importsAddReturnExpr(module, value);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(ret);
+  let body: Ast::StatementId = importsAddBlock(module, statements);
+
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: importsDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: parameters,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function importsAddReturnExpr(module: &mut Ast::Module, value: Ast::ExpressionId): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: importsDummySpan(),
+    value: Option::SOME(value),
+  }));
+}
+
+function importsEnumModule(name: str, variantName: str): Ast::Module {
+  let mut module: Ast::Module = Ast::Module::init();
+  let variantType: Ast::TypeId = importsAddPathType(&mut module, "i32");
+  let variant: Ast::PatternId = importsAddAnnotatedField(&mut module, variantName, variantType);
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(variant);
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: importsDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+  return module;
+}
+
 function importsRecordFieldType(
   defStore: &mut Analyzer::DefinitionStore,
   recordItemId: Ast::ItemId,
@@ -867,4 +945,188 @@ function resolveTypesPrefersLocalTypeOverImportOverlay(): void {
 
   Test::assertEq<u32>(actualFieldType.raw(), expectedLocalType.raw());
   Test::assertEq<u64>(output.resolvedTypes.diagnostics.length(), 0);
+}
+
+@test
+function analyzeProgramResolvesImportedBodyIdentifier(): void {
+  let first: Ast::Module = importsFunctionModule("ImportedFunction");
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(importsNamedBinding("ImportedFunction"));
+  let mut second: Ast::Module = importsModuleWithImport("a.ign", bindings);
+  let reference: Ast::ExpressionId = importsAddVariable(&mut second, "ImportedFunction");
+  importsAddFunctionReturningExpr(&mut second, "useImported", Vector::new<Ast::PatternId>(), reference);
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(targetRecord) = records.get(0) else {
+    @panic("missing target record");
+  };
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+  let Option::SOME(expectedDef) = targetRecord.direct.defs.get(0) else {
+    @panic("missing imported definition");
+  };
+  let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(&importingRecord.output.resolvedBodies.bodyResolution, reference.raw()) else {
+    @panic("missing imported body reference");
+  };
+
+  let Analyzer::ResolverBodies::ResolvedRef::Definition(actualDef) = resolved else {
+    @panic("expected imported body reference to resolve to a definition");
+  };
+
+  Test::assertEq<u32>(actualDef.raw(), expectedDef.raw());
+  Test::assertEq<u64>(importingRecord.output.resolvedBodies.diagnostics.length(), 0);
+}
+
+@test
+function analyzeProgramResolvesImportedBodyPathTail(): void {
+  let first: Ast::Module = importsEnumModule("ImportedEnum", "VALUE");
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(importsNamedBinding("ImportedEnum"));
+  let mut second: Ast::Module = importsModuleWithImport("a.ign", bindings);
+  let reference: Ast::ExpressionId = importsAddPathExpr2(&mut second, "ImportedEnum", "VALUE");
+  importsAddFunctionReturningExpr(&mut second, "useImportedVariant", Vector::new<Ast::PatternId>(), reference);
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+  let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(&importingRecord.output.resolvedBodies.bodyResolution, reference.raw()) else {
+    @panic("missing imported path reference");
+  };
+
+  let Analyzer::ResolverBodies::ResolvedRef::Definition(_) = resolved else {
+    @panic("expected imported path tail to resolve to a definition");
+  };
+
+  Test::assertEq<u64>(importingRecord.output.resolvedBodies.diagnostics.length(), 0);
+}
+
+@test
+function analyzeProgramDoesNotLeakUnimportedBodyIdentifier(): void {
+  let first: Ast::Module = importsFunctionModule("UnimportedFunction");
+  let mut second: Ast::Module = Ast::Module::init();
+  let reference: Ast::ExpressionId = importsAddVariable(&mut second, "UnimportedFunction");
+  importsAddFunctionReturningExpr(&mut second, "useMissing", Vector::new<Ast::PatternId>(), reference);
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+  let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(&importingRecord.output.resolvedBodies.bodyResolution, reference.raw()) else {
+    @panic("missing unimported body reference");
+  };
+
+  let Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) = resolved else {
+    @panic("unimported body reference must not resolve");
+  };
+
+  Test::assertEq<u64>(importingRecord.output.resolvedBodies.diagnostics.length(), 1);
+}
+
+@test
+function resolveBodiesPrefersLocalOverImportOverlay(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let first: Ast::Module = importsFunctionModule("SharedName");
+  let firstOutput: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(&mut defStore, &mut typeStore, &mut symbols, &first);
+  let firstDirect: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
+    &mut defStore,
+    &first,
+    &firstOutput.pass1,
+    &firstOutput.pass2,
+  );
+  let Option::SOME(importedSym) = firstDirect.syms.get(0) else {
+    @panic("missing imported symbol");
+  };
+  let Option::SOME(importedDef) = firstDirect.defs.get(0) else {
+    @panic("missing imported definition");
+  };
+  let overlay: Analyzer::Imports::ImportOverlay = importsOverlayWithOne(*importedSym, *importedDef);
+
+  let mut second: Ast::Module = Ast::Module::init();
+  let parameter: Ast::PatternId = importsAddBinding(&mut second, "SharedName");
+  let reference: Ast::ExpressionId = importsAddVariable(&mut second, "SharedName");
+  let mut parameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  parameters.push(parameter);
+  importsAddFunctionReturningExpr(&mut second, "useLocal", parameters, reference);
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModuleWithImports(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &second,
+    &overlay,
+  );
+  let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(&output.resolvedBodies.bodyResolution, reference.raw()) else {
+    @panic("missing local body reference");
+  };
+
+  let Analyzer::ResolverBodies::ResolvedRef::Local(local) = resolved else {
+    @panic("local body reference must resolve before import overlay");
+  };
+
+  Test::assertEq<u32>(local.index, 0);
+  Test::assertEq<u64>(output.resolvedBodies.diagnostics.length(), 0);
+}
+
+@test
+function resolveBodiesPrefersCurrentModuleGlobalOverImportOverlay(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let first: Ast::Module = importsFunctionModule("SharedGlobal");
+  let firstOutput: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(&mut defStore, &mut typeStore, &mut symbols, &first);
+  let firstDirect: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
+    &mut defStore,
+    &first,
+    &firstOutput.pass1,
+    &firstOutput.pass2,
+  );
+  let Option::SOME(importedSym) = firstDirect.syms.get(0) else {
+    @panic("missing imported symbol");
+  };
+  let Option::SOME(importedDef) = firstDirect.defs.get(0) else {
+    @panic("missing imported definition");
+  };
+  let overlay: Analyzer::Imports::ImportOverlay = importsOverlayWithOne(*importedSym, *importedDef);
+
+  let mut second: Ast::Module = Ast::Module::init();
+  let reference: Ast::ExpressionId = importsAddVariable(&mut second, "SharedGlobal");
+  let localValue: Ast::ExpressionId = importsAddBoolLiteral(&mut second, true);
+  let localItemId: Ast::ItemId = importsAddFunctionReturningExpr(
+    &mut second,
+    "SharedGlobal",
+    Vector::new<Ast::PatternId>(),
+    localValue,
+  );
+  importsAddFunctionReturningExpr(&mut second, "useLocalGlobal", Vector::new<Ast::PatternId>(), reference);
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModuleWithImports(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &second,
+    &overlay,
+  );
+  let localDef: Analyzer::DefinitionId = match (Analyzer::Binder::findDef(&output.pass1, localItemId.raw())) {
+    Option::SOME(defId) -> defId,
+    Option::NONE -> match (Analyzer::Binder::findDef(&output.pass2, localItemId.raw())) {
+      Option::SOME(defId) -> defId,
+      Option::NONE -> @panic("missing current-module definition"),
+    },
+  };
+  let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(&output.resolvedBodies.bodyResolution, reference.raw()) else {
+    @panic("missing current-module body reference");
+  };
+
+  let Analyzer::ResolverBodies::ResolvedRef::Definition(actualDef) = resolved else {
+    @panic("current-module global must resolve before import overlay");
+  };
+
+  Test::assertEq<u32>(actualDef.raw(), localDef.raw());
+  Test::assertEq<u64>(output.resolvedBodies.diagnostics.length(), 0);
 }
