@@ -1,10 +1,15 @@
 import Fs from "std::fs";
 import Io from "std::io";
+import Path from "std::path";
 import Process from "std::process";
 
 import DiagnosticBag, DiagnosticRenderer, Severity, SourceFile from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
+import Ast from "@compiler::ast";
 import ParseOutput, Parser from "@compiler::parser";
+
+import BuildGraph, BuildModuleKind from "./build/module_graph";
+import DiscoveryResult, Resolver from "./build/resolver";
 
 /// Count diagnostics in `bag` whose severity equals `target`.
 function countBySeverity(bag: &DiagnosticBag, target: Severity): u64 {
@@ -52,10 +57,96 @@ function renderBagToStderr(bag: &DiagnosticBag, file: &SourceFile): void {
   Io::eprintln(rendered);
 }
 
-/// Drive the selfhost compiler pipeline against a single source file.
-///
-/// Today this covers `lex -> parse -> analyze` for one module and renders
-/// diagnostics from each completed phase.
+function analyzerModuleKind(kind: BuildModuleKind): Analyzer::Imports::ModuleKind {
+  return match (kind) {
+    BuildModuleKind::PROJECT -> Analyzer::Imports::ModuleKind::PROJECT,
+    BuildModuleKind::STD -> Analyzer::Imports::ModuleKind::STD,
+  };
+}
+
+function copyImportBindings(bindings: &Vector<Ast::ImportBinding>): Option<Vector<Ast::ImportBinding>> {
+  let mut copied: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  let mut index: u64 = 0;
+
+  while (index < bindings.length()) {
+    let Option::SOME(binding) = bindings.get(index) else {
+      return Option::NONE;
+    };
+
+    copied.push(Ast::ImportBinding {
+      span: binding.span,
+      kind: binding.kind,
+      name: Ast::copyOptionalString(binding.name),
+      alias: Ast::copyOptionalString(binding.alias),
+    });
+    index += 1;
+  }
+
+  return Option::SOME(copied);
+}
+
+function mapImportSourcesToDiscoveryTargets(
+  module: &mut Ast::Module,
+  graph: &BuildGraph,
+  nodeIndex: u64,
+): boolean {
+  let Option::SOME(node) = graph.nodes.get(nodeIndex) else {
+    return false;
+  };
+  let mut rootIndex: u64 = 0;
+
+  while (rootIndex < module.roots.length()) {
+    let Option::SOME(rootId) = module.roots.get(rootIndex) else {
+      return false;
+    };
+    let Option::SOME(item) = module.items.getMut(*rootId) else {
+      return false;
+    };
+    let Ast::Item::Node::Import(importItem) = item else {
+      rootIndex += 1;
+      continue;
+    };
+    let mut edgeIndex: u64 = 0;
+    let mut matched: boolean = false;
+
+    while (edgeIndex < node.edges.length()) {
+      let Option::SOME(edge) = node.edges.get(edgeIndex) else {
+        return false;
+      };
+
+      if (edge.source.equals(importItem.source.toStr())) {
+        let Option::SOME(target) = graph.nodes.get(edge.targetIndex) else {
+          return false;
+        };
+
+        let Option::SOME(items) = copyImportBindings(&importItem.items) else {
+          return false;
+        };
+        *item = Ast::Item::Node::Import(Ast::Item::Import {
+          span: importItem.span,
+          items: items,
+          source: target.path.toString(),
+          sourceSpan: importItem.sourceSpan,
+          metadata: Ast::emptyMetadata(),
+        });
+        matched = true;
+        break;
+      }
+
+      edgeIndex += 1;
+    }
+
+    if (!matched) {
+      return false;
+    }
+
+    rootIndex += 1;
+  }
+
+  return true;
+}
+
+/// Drive the selfhost compiler pipeline against the project containing a source file.
 ///
 /// Returns 0 on success, 1 on any error (I/O, lex, parse, or analyze).
 function compileFile(path: &String): i32 {
@@ -72,21 +163,80 @@ function compileFile(path: &String): i32 {
 
   let file: SourceFile = SourceFile::create(path.toStr(), text.toStr());
 
-  let output: ParseOutput = Parser::parseFile(&file);
+  let entryPath: Path::PathBuf = Path::PathBuf::fromString(path);
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&entryPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(diagnostics) -> {
+      let discoveryErrors: u64 = countBySeverity(&diagnostics, Severity::ERROR);
+      let discoveryWarnings: u64 = countBySeverity(&diagnostics, Severity::WARNING);
+      Io::println(formatPhaseLine("discover", discoveryErrors, discoveryWarnings));
+      renderBagToStderr(&diagnostics, &file);
+      Io::println(
+        String::create("  summary: ")
+          .concat(discoveryErrors)
+          .concat(" errors, ")
+          .concat(discoveryWarnings)
+          .concat(" warnings")
+      );
+      return 1;
+    },
+  };
 
-  let lexErrors: u64 = countBySeverity(&output.lexDiagnostics, Severity::ERROR);
-  let lexWarnings: u64 = countBySeverity(&output.lexDiagnostics, Severity::WARNING);
-  let parseErrors: u64 = countBySeverity(&output.parseDiagnostics, Severity::ERROR);
-  let parseWarnings: u64 = countBySeverity(&output.parseDiagnostics, Severity::WARNING);
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  let mut lexErrors: u64 = 0;
+  let mut lexWarnings: u64 = 0;
+  let mut parseErrors: u64 = 0;
+  let mut parseWarnings: u64 = 0;
+  let mut rootCount: u64 = 0;
+  let mut orderIndex: u64 = 0;
+
+  while (orderIndex < discovery.order.length()) {
+    let Option::SOME(nodeIndex) = discovery.order.get(orderIndex) else {
+      Io::eprintln("error: discovery order is incomplete");
+      return 1;
+    };
+    let Option::SOME(node) = discovery.graph.nodes.get(*nodeIndex) else {
+      Io::eprintln("error: discovery order references a missing module");
+      return 1;
+    };
+    let Result::OK(moduleText) = Fs::readToString(&node.path) else {
+      Io::eprintln(String::create("error: cannot read source file: ").concat(node.path.toString().toStr()));
+      return 1;
+    };
+
+    let modulePath: String = node.path.toString();
+    let moduleFile: SourceFile = SourceFile::create(modulePath.toStr(), moduleText.toStr());
+    let mut output: ParseOutput = Parser::parseFile(&moduleFile);
+
+    lexErrors += countBySeverity(&output.lexDiagnostics, Severity::ERROR);
+    lexWarnings += countBySeverity(&output.lexDiagnostics, Severity::WARNING);
+    parseErrors += countBySeverity(&output.parseDiagnostics, Severity::ERROR);
+    parseWarnings += countBySeverity(&output.parseDiagnostics, Severity::WARNING);
+    rootCount += output.module.roots.length();
+
+    renderBagToStderr(&output.lexDiagnostics, &moduleFile);
+    renderBagToStderr(&output.parseDiagnostics, &moduleFile);
+
+    if (!mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, *nodeIndex)) {
+      Io::eprintln(String::create("error: discovery graph import mapping is incomplete for ").concat(modulePath.toStr()));
+      return 1;
+    }
+
+    modules.push(output.module);
+    files.push(moduleFile);
+    infos.push(Analyzer::Imports::ModuleInfo {
+      index: *nodeIndex,
+      pathText: modulePath,
+      kind: analyzerModuleKind(node.kind),
+    });
+    orderIndex += 1;
+  }
 
   Io::println(formatPhaseLine("lex  ", lexErrors, lexWarnings));
   Io::println(formatPhaseLine("parse", parseErrors, parseWarnings));
-
-  let rootCount: u64 = output.module.roots.length();
   Io::println(String::create("  roots: ").concat(rootCount));
-
-  renderBagToStderr(&output.lexDiagnostics, &file);
-  renderBagToStderr(&output.parseDiagnostics, &file);
 
   let frontendErrors: u64 = lexErrors + parseErrors;
   let frontendWarnings: u64 = lexWarnings + parseWarnings;
@@ -106,18 +256,35 @@ function compileFile(path: &String): i32 {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
-  let analyzerOutput: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
-    &output.module,
+    &modules,
+    &infos,
   );
 
-  let analyzeErrors: u64 = countBySeverity(&analyzerOutput.diagnostics, Severity::ERROR);
-  let analyzeWarnings: u64 = countBySeverity(&analyzerOutput.diagnostics, Severity::WARNING);
-  Io::println(formatPhaseLine("analyze", analyzeErrors, analyzeWarnings));
+  let mut analyzeErrors: u64 = 0;
+  let mut analyzeWarnings: u64 = 0;
+  let mut recordIndex: u64 = 0;
 
-  renderBagToStderr(&analyzerOutput.diagnostics, &file);
+  while (recordIndex < records.length()) {
+    let Option::SOME(analysisRecord) = records.get(recordIndex) else {
+      Io::eprintln("error: analysis records are incomplete");
+      return 1;
+    };
+    let Option::SOME(moduleFile) = files.get(recordIndex) else {
+      Io::eprintln("error: analysis records do not align with parsed modules");
+      return 1;
+    };
+
+    analyzeErrors += countBySeverity(&analysisRecord.output.diagnostics, Severity::ERROR);
+    analyzeWarnings += countBySeverity(&analysisRecord.output.diagnostics, Severity::WARNING);
+    renderBagToStderr(&analysisRecord.output.diagnostics, moduleFile);
+    recordIndex += 1;
+  }
+
+  Io::println(formatPhaseLine("analyze", analyzeErrors, analyzeWarnings));
 
   let totalErrors: u64 = frontendErrors + analyzeErrors;
   let totalWarnings: u64 = frontendWarnings + analyzeWarnings;

@@ -8,6 +8,13 @@ fn workspace_std_path() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../std")
 }
 
+fn workspace_root() -> PathBuf {
+  PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    .join("../..")
+    .canonicalize()
+    .expect("canonicalize workspace root")
+}
+
 fn make_temp_project_dir(label: &str) -> PathBuf {
   let unique = SystemTime::now()
     .duration_since(UNIX_EPOCH)
@@ -182,6 +189,248 @@ function genericAssertionsPass(): void {
   );
 
   cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_build_recompiles_all_user_modules_when_importer_reaches_new_callee() {
+  let project_dir = make_temp_project_dir("incremental-whole-program-reachability");
+  write_test_project(
+    &project_dir,
+    r#"
+import firstHelper from "./helpers";
+
+function main(): i32 {
+    return firstHelper();
+}
+"#,
+  );
+  write_project_file(
+    &project_dir,
+    "src/helpers.ign",
+    r#"
+export function firstHelper(): i32 {
+    return 1;
+}
+
+export function secondHelper(): i32 {
+    return 2;
+}
+"#,
+  );
+
+  let first_build = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("build")
+    .arg("--project")
+    .arg(&project_dir)
+    .output()
+    .expect("build project with first helper");
+
+  let first_stdout = String::from_utf8_lossy(&first_build.stdout);
+  let first_stderr = String::from_utf8_lossy(&first_build.stderr);
+  assert!(
+    first_build.status.success(),
+    "expected first project build to succeed\nstdout:\n{first_stdout}\nstderr:\n{first_stderr}"
+  );
+
+  write_project_file(
+    &project_dir,
+    "src/main.ign",
+    r#"
+import secondHelper from "./helpers";
+
+function main(): i32 {
+    return secondHelper();
+}
+"#,
+  );
+
+  let second_build = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("build")
+    .arg("--project")
+    .arg(&project_dir)
+    .output()
+    .expect("rebuild project with second helper");
+
+  let second_stdout = String::from_utf8_lossy(&second_build.stdout).into_owned();
+  let second_stderr = String::from_utf8_lossy(&second_build.stderr).into_owned();
+  cleanup_project_dir(&project_dir);
+
+  assert!(
+    second_build.status.success(),
+    "expected importer change to rebuild reachable helper definitions\nstdout:\n{second_stdout}\nstderr:\n{second_stderr}"
+  );
+}
+
+#[test]
+fn selfhost_adapter_resolves_relative_direct_imports_from_discovery_edges() {
+  let project_dir = make_temp_project_dir("selfhost-relative-direct-import");
+  write_test_project(
+    &project_dir,
+    r#"
+import increment from "./shared";
+
+function main(): i32 {
+    return increment();
+}
+"#,
+  );
+  write_project_file(
+    &project_dir,
+    "src/shared.ign",
+    r#"
+export function increment(): i32 {
+    return 42;
+}
+"#,
+  );
+
+  let workspace_root = workspace_root();
+  let selfhost_build = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .current_dir(&workspace_root)
+    .arg("build")
+    .arg("--project")
+    .arg(".")
+    .arg("ignis/main.ign")
+    .output()
+    .expect("build selfhost compiler");
+
+  let selfhost_build_stdout = String::from_utf8_lossy(&selfhost_build.stdout);
+  let selfhost_build_stderr = String::from_utf8_lossy(&selfhost_build.stderr);
+  assert!(
+    selfhost_build.status.success(),
+    "expected selfhost build to succeed\nstdout:\n{selfhost_build_stdout}\nstderr:\n{selfhost_build_stderr}"
+  );
+
+  let selfhost_binary = workspace_root.join("build/selfhost/bin/ignis");
+  let selfhost_output = Command::new(&selfhost_binary)
+    .arg(project_dir.join("src/main.ign"))
+    .output()
+    .expect("execute selfhost compiler");
+
+  let selfhost_stdout = String::from_utf8_lossy(&selfhost_output.stdout).into_owned();
+  let selfhost_stderr = String::from_utf8_lossy(&selfhost_output.stderr).into_owned();
+  cleanup_project_dir(&project_dir);
+
+  assert!(
+    selfhost_output.status.success(),
+    "expected selfhost adapter to resolve a relative direct import through discovery edges\nstdout:\n{selfhost_stdout}\nstderr:\n{selfhost_stderr}"
+  );
+}
+
+#[test]
+fn selfhost_adapter_preserves_duplicate_target_import_source_spellings() {
+  let project_dir = make_temp_project_dir("selfhost-duplicate-import-source-spellings");
+  write_test_project(
+    &project_dir,
+    r#"
+import increment from "./shared";
+import doubleIncrement from "./shared.ign";
+
+function main(): i32 {
+    return increment() + doubleIncrement();
+}
+"#,
+  );
+  write_project_file(
+    &project_dir,
+    "src/shared.ign",
+    r#"
+export function increment(): i32 {
+    return 1;
+}
+
+export function doubleIncrement(): i32 {
+    return 2;
+}
+"#,
+  );
+
+  let workspace_root = workspace_root();
+  let selfhost_build = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .current_dir(&workspace_root)
+    .arg("build")
+    .arg("--project")
+    .arg(".")
+    .arg("ignis/main.ign")
+    .output()
+    .expect("build selfhost compiler");
+
+  assert!(
+    selfhost_build.status.success(),
+    "expected selfhost build to succeed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&selfhost_build.stdout),
+    String::from_utf8_lossy(&selfhost_build.stderr)
+  );
+
+  let selfhost_binary = workspace_root.join("build/selfhost/bin/ignis");
+  let selfhost_output = Command::new(&selfhost_binary)
+    .arg(project_dir.join("src/main.ign"))
+    .output()
+    .expect("execute selfhost compiler");
+
+  let selfhost_stdout = String::from_utf8_lossy(&selfhost_output.stdout).into_owned();
+  let selfhost_stderr = String::from_utf8_lossy(&selfhost_output.stderr).into_owned();
+  cleanup_project_dir(&project_dir);
+
+  assert!(
+    selfhost_output.status.success(),
+    "expected selfhost adapter to retain every source spelling for one discovery target\nstdout:\n{selfhost_stdout}\nstderr:\n{selfhost_stderr}"
+  );
+}
+
+#[test]
+fn selfhost_adapter_stops_before_analysis_when_discovery_fails() {
+  let project_dir = make_temp_project_dir("selfhost-discovery-failure");
+  write_test_project(
+    &project_dir,
+    r#"
+import missing from "./missing";
+
+function main(): i32 {
+    return 0;
+}
+"#,
+  );
+
+  let workspace_root = workspace_root();
+  let selfhost_build = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .current_dir(&workspace_root)
+    .arg("build")
+    .arg("--project")
+    .arg(".")
+    .arg("ignis/main.ign")
+    .output()
+    .expect("build selfhost compiler");
+
+  assert!(
+    selfhost_build.status.success(),
+    "expected selfhost build to succeed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&selfhost_build.stdout),
+    String::from_utf8_lossy(&selfhost_build.stderr)
+  );
+
+  let selfhost_binary = workspace_root.join("build/selfhost/bin/ignis");
+  let selfhost_output = Command::new(&selfhost_binary)
+    .arg(project_dir.join("src/main.ign"))
+    .output()
+    .expect("execute selfhost compiler");
+
+  let selfhost_stdout = String::from_utf8_lossy(&selfhost_output.stdout).into_owned();
+  let selfhost_stderr = String::from_utf8_lossy(&selfhost_output.stderr).into_owned();
+  cleanup_project_dir(&project_dir);
+
+  assert!(
+    !selfhost_output.status.success(),
+    "expected unresolved discovery import to fail\nstdout:\n{selfhost_stdout}\nstderr:\n{selfhost_stderr}"
+  );
+  assert!(
+    selfhost_stdout.contains("discover: fail"),
+    "expected deterministic discovery failure status\nstdout:\n{selfhost_stdout}\nstderr:\n{selfhost_stderr}"
+  );
+  assert!(
+    !selfhost_stdout.contains("analyze:"),
+    "expected analysis to remain skipped after discovery failure\nstdout:\n{selfhost_stdout}\nstderr:\n{selfhost_stderr}"
+  );
 }
 
 #[test]

@@ -1007,31 +1007,24 @@ pub fn compile_project(
             let obj_path = layout.user_module_obj(&source_path);
             object_files.push(obj_path.clone());
 
-            // Compute current module hash and dependency hashes
+            // Compute the current module hash and whole-program reachability inputs.
             let self_hash = module_hashes.get(&source_path).cloned().unwrap_or_default();
-
-            // Get transitive dependencies (only user modules)
             let dep_ids = ctx.module_graph.transitive_deps(**module_id);
-            let current_deps: Vec<FileEntry> = dep_ids
+
+            let current_stamp_sources: Vec<FileEntry> = source_paths
               .iter()
-              .filter_map(|dep_id| {
-                let dep_module = ctx.module_graph.modules.get(dep_id);
-                match &dep_module.path {
-                  ModulePath::Project(dep_path) => {
-                    let hash = module_hashes.get(dep_path).cloned().unwrap_or_default();
-                    Some(FileEntry {
-                      path: dep_path.clone(),
-                      hash,
-                    })
-                  },
-                  _ => None, // Skip std modules for now (they have their own stamp)
-                }
+              .filter(|path| *path != &source_path)
+              .filter_map(|path| {
+                module_hashes.get(path).cloned().map(|hash| FileEntry {
+                  path: path.clone(),
+                  hash,
+                })
               })
               .collect();
 
             // Check if this module's stamp is still valid
             let stamp_path = layout.user_module_stamp_path(&source_path);
-            let stamp_valid = is_module_stamp_valid(&stamp_path, &fingerprint, &self_hash, &current_deps);
+            let stamp_valid = is_module_stamp_valid(&stamp_path, &fingerprint, &self_hash, &current_stamp_sources);
             let obj_exists = obj_path.exists();
 
             if stamp_valid && obj_exists {
@@ -1109,7 +1102,7 @@ pub fn compile_project(
             }
 
             // Write per-module stamp after successful compilation
-            let stamp = ModuleStamp::new(fingerprint.clone(), source_path.clone(), self_hash, current_deps);
+            let stamp = ModuleStamp::new(fingerprint.clone(), source_path.clone(), self_hash, current_stamp_sources);
             if let Err(e) = write_module_stamp(&stamp_path, &stamp) {
               // Non-fatal: warn but don't fail the build
               eprintln!("{} Failed to write module stamp: {}", "Warning:".yellow().bold(), e);
