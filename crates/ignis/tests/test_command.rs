@@ -428,8 +428,69 @@ function main(): i32 {
     "expected deterministic discovery failure status\nstdout:\n{selfhost_stdout}\nstderr:\n{selfhost_stderr}"
   );
   assert!(
+    selfhost_stderr.contains("module './missing' could not be resolved"),
+    "expected the discovery diagnostic message to render\nstdout:\n{selfhost_stdout}\nstderr:\n{selfhost_stderr}"
+  );
+  assert!(
+    selfhost_stderr.contains("unresolved import"),
+    "expected the discovery diagnostic label to render\nstdout:\n{selfhost_stdout}\nstderr:\n{selfhost_stderr}"
+  );
+  assert!(
     !selfhost_stdout.contains("analyze:"),
     "expected analysis to remain skipped after discovery failure\nstdout:\n{selfhost_stdout}\nstderr:\n{selfhost_stderr}"
+  );
+}
+
+#[test]
+fn selfhost_adapter_preserves_single_module_analysis() {
+  let project_dir = make_temp_project_dir("selfhost-single-module");
+  write_test_project(
+    &project_dir,
+    r#"
+function main(): void {
+    return;
+}
+"#,
+  );
+
+  let workspace_root = workspace_root();
+  let selfhost_build = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .current_dir(&workspace_root)
+    .arg("build")
+    .arg("--project")
+    .arg(".")
+    .arg("ignis/main.ign")
+    .output()
+    .expect("build selfhost compiler");
+
+  assert!(
+    selfhost_build.status.success(),
+    "expected selfhost build to succeed\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&selfhost_build.stdout),
+    String::from_utf8_lossy(&selfhost_build.stderr)
+  );
+
+  let selfhost_binary = workspace_root.join("build/selfhost/bin/ignis");
+  let selfhost_output = Command::new(&selfhost_binary)
+    .arg(project_dir.join("src/main.ign"))
+    .output()
+    .expect("execute selfhost compiler");
+
+  let selfhost_stdout = String::from_utf8_lossy(&selfhost_output.stdout).into_owned();
+  let selfhost_stderr = String::from_utf8_lossy(&selfhost_output.stderr).into_owned();
+  cleanup_project_dir(&project_dir);
+
+  assert!(
+    selfhost_output.status.success(),
+    "expected a single module to remain analyzable\nstdout:\n{selfhost_stdout}\nstderr:\n{selfhost_stderr}"
+  );
+  assert!(
+    selfhost_stdout.contains("analyze: ok (0 errors, 0 warnings)"),
+    "expected single-module analysis to complete without import diagnostics\nstdout:\n{selfhost_stdout}\nstderr:\n{selfhost_stderr}"
+  );
+  assert!(
+    selfhost_stderr.is_empty(),
+    "expected no diagnostics for a valid single module\nstdout:\n{selfhost_stdout}\nstderr:\n{selfhost_stderr}"
   );
 }
 
