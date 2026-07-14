@@ -47,6 +47,7 @@
 //!  │ size: i64        │                         │    │
 //!  │ is_free: bool    │   [    N bytes    ]     │    │
 //!  │ next: *mut Block │                         │    │
+//!  │ allocationSize   │                         │    │
 //!  └──────────────────┴─────────────────────────┘    │
 //!     │                  ▲                           │
 //!     │                  │                           │
@@ -90,7 +91,7 @@
 //!        ▼
 //!   ┌────┬───────────────────┬───────────────────────────────────────┐
 //!   │pad │   Block Header    │           User Data                   │
-//!   │    │   (24 bytes on    │           (aligned to                 │
+//!   │    │   (32 bytes on    │           (aligned to                 │
 //!   │    │    64-bit)        │            requested alignment)       │
 //!   └────┴───────────────────┴───────────────────────────────────────┘
 //!        │                   │
@@ -132,6 +133,7 @@
 //!   │  (*block).is_free = false                               │
 //!   │  (*block).size = user_size                              │
 //!   │  (*block).next = null                                   │
+//!   │  (*block).allocationSize = size_for_sbrk                 │
 //!   └─────────────────────────────────────────────────────────┘
 //!
 //!   STEP 5: Update linked list
@@ -152,8 +154,8 @@
 //!
 //! ### Deallocation Process
 //!
-//! Deallocation marks a block as free. If the deallocated block is the **last**
-//! block in the list, the heap is shrunk using a negative `sbrk` call:
+//! Deallocation marks a middle block as free. If the deallocated block is the
+//! **last** block in the list, the heap is shrunk using its exact `allocationSize`:
 //!
 //! ```text
 //!   BEFORE DEALLOCATION:
@@ -324,8 +326,8 @@ export enum SearchMode {
 /// # Memory Management Strategy
 ///
 /// The `HeapAllocator` maintains a singly-linked list of allocation blocks.
-/// Each block contains metadata (size, free status, next pointer) followed
-/// by the user's data.
+/// Each block contains metadata (payload size, free status, next pointer, and
+/// exact `sbrk` increment) followed by the user's data.
 ///
 /// ```text
 ///   ┌───────────────────────────────────────────────────────────┐
@@ -716,18 +718,16 @@ export record HeapAllocator {
   ///   Example with 16-byte alignment:
   ///
   ///     raw_address = 0x1000
-  ///     header_size = 24 bytes
+  ///     header_size = 32 bytes
   ///     align = 16
   ///
-  ///     unaligned = 0x1000 + 24 = 0x1018
-  ///     content_addr = align_to(0x1018, 16) = 0x1020
-  ///     block_addr = 0x1020 - 24 = 0x1008
+  ///     unaligned = 0x1000 + 32 = 0x1020
+  ///     content_addr = align_to(0x1020, 16) = 0x1020
+  ///     block_addr = 0x1020 - 32 = 0x1000
   ///
   ///     Memory:
-  ///     0x1000 ┌────────┐
-  ///            │ unused │ (8 bytes of padding)
-  ///     0x1008 ├────────┤ ← Block header starts here
-  ///            │ header │ (24 bytes)
+  ///     0x1000 ┌────────┐ ← Block header starts here
+  ///            │ header │ (32 bytes)
   ///     0x1020 ├────────┤ ← Content starts here (16-byte aligned)
   ///            │  data  │
   ///            └────────┘
@@ -771,13 +771,32 @@ export record HeapAllocator {
   public allocate(&mut self, layout: Layout): *mut u8 {
     let alignment: u64 = layout.align();
     let headerSize: u64 = sizeOf<Block>();
+    let maxIncrement: u64 = maxOf<i64>() as u64;
+    let layoutSize: u64 = layout.size();
+    let alignmentPadding: u64 = alignment - 1;
+
+    if (headerSize > maxIncrement || layoutSize > maxIncrement - headerSize) {
+      return null;
+    }
+
+    let sizeWithHeader: u64 = headerSize + layoutSize;
+
+    if (alignmentPadding > maxIncrement - sizeWithHeader) {
+      return null;
+    }
+
+    let unalignedSize: u64 = sizeWithHeader + alignmentPadding;
+
+    if (unalignedSize > maxIncrement - 7) {
+      return null;
+    }
 
     // Calculate total size needed:
     // - headerSize: space for Block metadata
     // - layout.size(): user-requested allocation size
     // - (alignment - 1): worst-case padding for alignment
     // The result is word-aligned via the align() function
-    let sizeForSbrk: u64 = Align::align(headerSize + layout.size() + (alignment - 1));
+    let sizeForSbrk: u64 = Align::align(unalignedSize);
 
     // Extend the heap by requesting more memory from the OS
     // sbrk returns the OLD program break (start of new memory)
@@ -798,6 +817,7 @@ export record HeapAllocator {
     (*block).isFree = false;
     (*block).size = layout.size() as i64;
     (*block).next = null;
+    (*block).allocationSize = sizeForSbrk;
 
     // Update the linked list of blocks
     if (self.first == null) {
@@ -855,7 +875,7 @@ export record HeapAllocator {
   ///                                │
   ///                         now `last`
   ///
-  ///   Heap shrunk via: sbrk(-(block_C_size + overhead))
+  ///   Heap shrunk via: sbrk(-block_C_allocation_size)
   /// ```
   ///
   /// # List Update for Last Block Deallocation
@@ -875,7 +895,7 @@ export record HeapAllocator {
   ///   current = B
   ///     └─► B.next = C (== last) ──► STOP
   ///
-  ///   Set last = B, then shrink heap
+  ///   Shrink the heap, then set last = B if sbrk succeeds
   /// ```
   ///
   /// # Special Case: Single Block
@@ -911,6 +931,9 @@ export record HeapAllocator {
   ///
   /// This function does not panic, but passing an invalid pointer
   /// results in undefined behavior.
+  ///
+  /// If shrinking the heap fails, the allocator preserves all block metadata
+  /// and continues to treat the tail block as allocated.
   public deallocate(&mut self, address: *mut u8): void {
     // Null pointer deallocation is a no-op (matches C free() behavior)
     if (address == null) {
@@ -919,39 +942,45 @@ export record HeapAllocator {
 
     // Find the block header by going back headerSize bytes
     let block: *mut Block = self.findBlock(address);
-    (*block).isFree = true;
+
+    if (block == self.last && (*block).allocationSize > (maxOf<i64>() as u64)) {
+      return;
+    }
 
     // Only the last block can be returned to the OS
     // Middle blocks remain as "holes" in the heap
     if (block != self.last) {
+      (*block).isFree = true;
       return;
     }
 
-    // Update the linked list to remove the last block
-    if (self.first == self.last) {
-      // This was the only block - reset to empty state
-      self.first = null;
-      self.last = null;
-    } else {
-      // Find the second-to-last block (new last)
-      // This requires O(n) traversal since we have a singly-linked list
+    let toRelease: u64 = (*block).allocationSize;
+    let decrement: i64 = -(toRelease as i64);
+    let mut newLast: *mut Block = null;
+
+    if (self.first != self.last) {
       let mut current: *mut Block = self.first;
 
       while ((*current).next != null && (*current).next != self.last) {
         current = (*current).next;
       }
 
-      self.last = current;
+      newLast = current;
     }
 
-    // Calculate how much memory to release
-    // Note: includes extra headerSize for alignment padding considerations
-    let toRelease: u64 = Align::align(((*block).size as u64) + sizeOf<Block>() + sizeOf<Block>());
+    let releasedAddress: CType::CVoidPtr = LibC::Memory::sbrk(decrement as CType::IntPtrT);
 
-    // Shrink the heap by calling sbrk with a negative value
-    let decrement: i64 = -(toRelease as i64);
+    if (releasedAddress == (maxOf<u64>() as CType::CVoidPtr)) {
+      return;
+    }
 
-    LibC::Memory::sbrk(decrement as CType::IntPtrT);
+    self.last = newLast;
+
+    if (newLast == null) {
+      self.first = null;
+    } else {
+      (*newLast).next = null;
+    }
   }
 
   /// Finds the block header associated with a user data pointer.

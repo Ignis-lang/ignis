@@ -1,6 +1,6 @@
-//! Block metadata for the bump allocator.
+//! Block metadata for the heap allocator.
 //!
-//! Each allocation in the bump allocator is preceded by a `Block` header
+//! Each allocation in the heap allocator is preceded by a `Block` header
 //! that stores metadata about the allocation.
 
 ///
@@ -18,22 +18,24 @@
 ///   ┌─────────────────────────────────────────────────────┐
 ///   │  Offset   │   Field   │   Size   │    Description   │
 ///   ├───────────┼───────────┼──────────┼──────────────────┤
-///   │   0x00    │   size    │  8 bytes │  Allocation size │
+///   │   0x00    │   size    │  8 bytes │   Payload size   │
 ///   ├───────────┼───────────┼──────────┼──────────────────┤
 ///   │   0x08    │  is_free  │  1 byte  │  Free flag       │
 ///   │           │ (padding) │  7 bytes │  (alignment)     │
 ///   ├───────────┼───────────┼──────────┼──────────────────┤
 ///   │   0x10    │   next    │  8 bytes │  Next block ptr  │
+///   ├───────────┼───────────┼──────────┼──────────────────┤
+///   │   0x18    │ allocationSize │ 8 bytes │ `sbrk` increment │
 ///   └───────────┴───────────┴──────────┴──────────────────┘
 ///
-///   Total size: 24 bytes (with padding for alignment)
+///   Total size: 32 bytes (with padding for alignment)
 ///
 ///   In-memory representation:
-///   ┌──────────┬──────────┬───────────────────┬──────────────┐
-///   │   size   │ is_free  │     (padding)     │     next     │
-///   │  8 bytes │  1 byte  │      7 bytes      │    8 bytes   │
-///   └──────────┴──────────┴───────────────────┴──────────────┘
-///    0x00       0x08       0x09                0x10      0x18
+///   ┌──────────┬──────────┬───────────┬──────────────┬────────────────┐
+///   │   size   │ is_free  │ (padding) │     next     │ allocationSize │
+///   │  8 bytes │  1 byte  │  7 bytes  │    8 bytes   │    8 bytes     │
+///   └──────────┴──────────┴───────────┴──────────────┴────────────────┘
+///    0x00       0x08       0x09        0x10           0x18         0x20
 /// ```
 ///
 /// # Relationship to User Data
@@ -75,12 +77,12 @@
 /// * `size` - The size of the user data region in bytes (not including the header)
 /// * `is_free` - Whether this block has been deallocated and is available for reuse
 /// * `next` - Pointer to the next block in the linked list, or null if this is the last block
+/// * `allocationSize` - Exact `sbrk` increment, including the 32-byte header, payload, padding, and rounding
 ///
 export record Block {
   /// Size of the user data region in bytes.
   ///
   /// This is the size requested by the user, not the total allocation size.
-  /// The total memory used is approximately `size_of::<Block>() + size`.
   public size: i64;
 
   /// Flag indicating whether this block is free (deallocated).
@@ -100,19 +102,25 @@ export record Block {
   /// This forms a singly-linked list for O(n) traversal of all allocations.
   public next: *mut Block;
 
+  /// Exact number of bytes requested from `sbrk`, including the 32-byte header,
+  /// user payload, alignment padding, and allocator rounding.
+  public allocationSize: u64;
+
   public static init(): Block {
     return Block {
       size: 0,
       isFree: true,
       next: null,
+      allocationSize: 0,
     };
   }
 
-  public static init(size: i64, isFree: boolean, next: *mut Block): Block {
+  public static init(size: i64, isFree: boolean, next: *mut Block, allocationSize: u64): Block {
     return Block {
       size: size,
       isFree: isFree,
       next: next,
+      allocationSize: allocationSize,
     };
   }
 }

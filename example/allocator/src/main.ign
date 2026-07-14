@@ -37,12 +37,13 @@ function printSection(title: str): void {
   Io::println(String::create("--- ").concat(title).concat(" ---"));
 }
 
-/// Prints OK or FAIL based on condition.
-function check(name: str, condition: boolean): void {
+/// Prints OK or FAIL and records whether the run remains successful.
+function check(name: str, condition: boolean, allPassed: &mut boolean): void {
   if (condition) {
     Io::println(String::create("  ").concat(name).concat(": OK"));
   } else {
     Io::println(String::create("  ").concat(name).concat(": FAIL"));
+    *allPassed = false;
   }
 }
 
@@ -53,7 +54,7 @@ function printArenaStats(arena: &ArenaAllocator): void {
   printValue("  Available: ", arena.available());
 }
 
-function testHeapAllocator(): void {
+function testHeapAllocator(allPassed: &mut boolean): void {
   printHeader("Heap Allocator Test");
 
   printProgramBreak("Initial program break");
@@ -67,13 +68,13 @@ function testHeapAllocator(): void {
 
   let ptrU32: *mut u8 = allocator.allocate(layoutU32);
   printValue("  Allocated at: ", ptrU32 as u64);
-  check("Pointer not null", ptrU32 != null);
-  check("4-byte aligned", Align::isAligned(ptrU32 as u64, 4));
+  check("Pointer not null", ptrU32 != null, allPassed);
+  check("4-byte aligned", Align::isAligned(ptrU32 as u64, 4), allPassed);
 
   // Write a value to verify memory is usable
   let u32Ptr: *mut u32 = ptrU32 as *mut u32;
   *u32Ptr = 0xDEADBEEF;
-  check("Write/read u32", *u32Ptr == 0xDEADBEEF);
+  check("Write/read u32", *u32Ptr == 0xDEADBEEF, allPassed);
 
   printProgramBreak("After u32 allocation");
 
@@ -81,7 +82,7 @@ function testHeapAllocator(): void {
   let layoutU8Array: Layout = Layout::init(12 as u64, 1 as u64);
   let ptrU8Array: *mut u8 = allocator.allocate(layoutU8Array);
   printValue("  Allocated at: ", ptrU8Array as u64);
-  check("Pointer not null", ptrU8Array != null);
+  check("Pointer not null", ptrU8Array != null, allPassed);
 
   // Write pattern to array
   let mut i: u64 = 0;
@@ -94,26 +95,26 @@ function testHeapAllocator(): void {
   // Verify pattern
   let byte0: *mut u8 = ptrU8Array;
   let byte11: *mut u8 = (ptrU8Array as u64 + 11) as *mut u8;
-  check("First byte correct", *byte0 == 1);
-  check("Last byte correct", *byte11 == 12);
+  check("First byte correct", *byte0 == 1, allPassed);
+  check("Last byte correct", *byte11 == 12, allPassed);
 
   printSection("Test 3: Allocate u64 (8-byte alignment)");
   let layoutU64: Layout = Layout::init<u64>();
   let ptrU64: *mut u8 = allocator.allocate(layoutU64);
   printValue("  Allocated at: ", ptrU64 as u64);
-  check("Pointer not null", ptrU64 != null);
-  check("8-byte aligned", Align::isAligned(ptrU64 as u64, 8));
+  check("Pointer not null", ptrU64 != null, allPassed);
+  check("8-byte aligned", Align::isAligned(ptrU64 as u64, 8), allPassed);
 
   let u64Ptr: *mut u64 = ptrU64 as *mut u64;
   *u64Ptr = 0x123456789ABCDEF0;
-  check("Write/read u64", *u64Ptr == 0x123456789ABCDEF0);
+  check("Write/read u64", *u64Ptr == 0x123456789ABCDEF0, allPassed);
 
   printSection("Test 4: Allocate u16 array (32 bytes, 2-byte align)");
   let layoutU16Array: Layout = Layout::init(32 as u64, 2 as u64);
   let ptrU16Array: *mut u8 = allocator.allocate(layoutU16Array);
   printValue("  Allocated at: ", ptrU16Array as u64);
-  check("Pointer not null", ptrU16Array != null);
-  check("2-byte aligned", Align::isAligned(ptrU16Array as u64, 2));
+  check("Pointer not null", ptrU16Array != null, allPassed);
+  check("2-byte aligned", Align::isAligned(ptrU16Array as u64, 2), allPassed);
 
   printProgramBreak("After 4 allocations");
 
@@ -127,13 +128,14 @@ function testHeapAllocator(): void {
   printProgramBreak("After deallocating middle block");
 
   printSection("Test 7: Large allocation (64KB)");
+  let programBreakBeforeLarge: *mut u8 = LibC::Memory::sbrk(0) as *mut u8;
   let layoutLarge: Layout = Layout::init(65536 as u64, 8 as u64);
   Io::println(String::create("  Requesting ").concat(layoutLarge.size()).concat(" bytes"));
 
   let ptrLarge: *mut u8 = allocator.allocate(layoutLarge);
   printValue("  Allocated at: ", ptrLarge as u64);
-  check("Pointer not null", ptrLarge != null);
-  check("8-byte aligned", Align::isAligned(ptrLarge as u64, 8));
+  check("Pointer not null", ptrLarge != null, allPassed);
+  check("8-byte aligned", Align::isAligned(ptrLarge as u64, 8), allPassed);
 
   printProgramBreak("After 64KB allocation");
 
@@ -142,12 +144,14 @@ function testHeapAllocator(): void {
   let lastByte: *mut u8 = (ptrLarge as u64 + 65535) as *mut u8;
   *firstByte = 0xAA;
   *lastByte = 0xBB;
-  check("First byte of large block", *firstByte == 0xAA);
-  check("Last byte of large block", *lastByte == 0xBB);
+  check("First byte of large block", *firstByte == 0xAA, allPassed);
+  check("Last byte of large block", *lastByte == 0xBB, allPassed);
 
   printSection("Test 8: Deallocate large block");
   allocator.deallocate(ptrLarge);
   printProgramBreak("After deallocating 64KB block");
+  let programBreakAfterLarge: *mut u8 = LibC::Memory::sbrk(0) as *mut u8;
+  check("Program break restored", programBreakAfterLarge == programBreakBeforeLarge, allPassed);
 
   printSection("Test 9: Search mode change");
   Io::println("  Changing to BestFit search mode");
@@ -155,15 +159,15 @@ function testHeapAllocator(): void {
   Io::println("  Search mode changed successfully");
 }
 
-function testArenaAllocator(): void {
+function testArenaAllocator(allPassed: &mut boolean): void {
   printHeader("Arena Allocator Test");
 
   printProgramBreak("Before arena creation");
 
   printSection("Test 1: Create arena (4KB)");
   let mut arena: ArenaAllocator = ArenaAllocator::init(4096);
-  check("Arena created", arena.start != null);
-  check("Arena is empty", arena.isEmpty());
+  check("Arena created", arena.start != null, allPassed);
+  check("Arena is empty", arena.isEmpty(), allPassed);
   printArenaStats(&arena);
 
   printProgramBreak("After arena creation");
@@ -172,12 +176,12 @@ function testArenaAllocator(): void {
   let layoutU64: Layout = Layout::init<u64>();
   let ptrU64: *mut u8 = arena.allocate(layoutU64);
   printValue("  Allocated at: ", ptrU64 as u64);
-  check("Pointer not null", ptrU64 != null);
-  check("8-byte aligned", Align::isAligned(ptrU64 as u64, 8));
+  check("Pointer not null", ptrU64 != null, allPassed);
+  check("8-byte aligned", Align::isAligned(ptrU64 as u64, 8), allPassed);
 
   let u64Ptr: *mut u64 = ptrU64 as *mut u64;
   *u64Ptr = 0xCAFEBABE12345678;
-  check("Write/read u64", *u64Ptr == 0xCAFEBABE12345678);
+  check("Write/read u64", *u64Ptr == 0xCAFEBABE12345678, allPassed);
 
   printArenaStats(&arena);
 
@@ -188,16 +192,16 @@ function testArenaAllocator(): void {
   let ptr2: *mut u8 = arena.allocate(layout16);
   let ptr3: *mut u8 = arena.allocate(layout16);
 
-  check("ptr1 not null", ptr1 != null);
-  check("ptr2 not null", ptr2 != null);
-  check("ptr3 not null", ptr3 != null);
+  check("ptr1 not null", ptr1 != null, allPassed);
+  check("ptr2 not null", ptr2 != null, allPassed);
+  check("ptr3 not null", ptr3 != null, allPassed);
 
   // Verify allocations are contiguous (no headers between them)
   let diff1: u64 = (ptr2 as u64) - (ptr1 as u64);
   let diff2: u64 = (ptr3 as u64) - (ptr2 as u64);
   printValue("  Distance ptr1->ptr2: ", diff1);
   printValue("  Distance ptr2->ptr3: ", diff2);
-  check("Contiguous allocation (16 bytes apart)", diff1 == 16 && diff2 == 16);
+  check("Contiguous allocation (16 bytes apart)", diff1 == 16 && diff2 == 16, allPassed);
 
   printArenaStats(&arena);
 
@@ -210,9 +214,9 @@ function testArenaAllocator(): void {
   *p2 = 0x2222222222222222;
   *p3 = 0x3333333333333333;
 
-  check("ptr1 value correct", *p1 == 0x1111111111111111);
-  check("ptr2 value correct", *p2 == 0x2222222222222222);
-  check("ptr3 value correct", *p3 == 0x3333333333333333);
+  check("ptr1 value correct", *p1 == 0x1111111111111111, allPassed);
+  check("ptr2 value correct", *p2 == 0x2222222222222222, allPassed);
+  check("ptr3 value correct", *p3 == 0x3333333333333333, allPassed);
 
   printSection("Test 5: Allocate until near capacity");
   printValue("  Used before: ", arena.used());
@@ -221,44 +225,50 @@ function testArenaAllocator(): void {
   // Allocate most of remaining space
   let largeLayout: Layout = Layout::init(3000 as u64, 8 as u64);
   let ptrLarge: *mut u8 = arena.allocate(largeLayout);
-  check("Large allocation succeeded", ptrLarge != null);
+  check("Large allocation succeeded", ptrLarge != null, allPassed);
 
   printArenaStats(&arena);
 
   printSection("Test 6: Allocation failure (out of space)");
   let hugeLayout: Layout = Layout::init(2000 as u64, 8 as u64);
   let ptrHuge: *mut u8 = arena.allocate(hugeLayout);
-  check("Allocation failed (returned null)", ptrHuge == null);
+  check("Allocation failed (returned null)", ptrHuge == null, allPassed);
 
   printSection("Test 7: Reset arena");
   Io::println("  Resetting arena...");
   arena.reset();
-  check("Arena is empty after reset", arena.isEmpty());
-  check("Used is 0", arena.used() == 0);
-  check("Available equals capacity", arena.available() == arena.capacity());
+  check("Arena is empty after reset", arena.isEmpty(), allPassed);
+  check("Used is 0", arena.used() == 0, allPassed);
+  check("Available equals capacity", arena.available() == arena.capacity(), allPassed);
 
   printArenaStats(&arena);
 
   printSection("Test 8: Allocate after reset");
   let ptrAfterReset: *mut u8 = arena.allocate(layoutU64);
-  check("Allocation after reset succeeded", ptrAfterReset != null);
+  check("Allocation after reset succeeded", ptrAfterReset != null, allPassed);
 
   printValue("  First allocation was at: ", ptrU64 as u64);
   printValue("  After reset allocated at: ", ptrAfterReset as u64);
-  check("Same starting address", ptrAfterReset == ptrU64);
+  check("Same starting address", ptrAfterReset == ptrU64, allPassed);
 
   printSection("Test 9: Destroy arena");
   printProgramBreak("Before destroy");
   arena.destroy();
   printProgramBreak("After destroy");
-  check("Arena pointers are null", arena.start == null);
+  check("Arena pointers are null", arena.start == null, allPassed);
 }
 
 function main(): i32 {
-  testHeapAllocator();
-  testArenaAllocator();
+  let mut allPassed: boolean = true;
+
+  testHeapAllocator(&mut allPassed);
+  testArenaAllocator(&mut allPassed);
 
   printHeader("All tests completed!");
 
-  return 0;
+  if (allPassed) {
+    return 0;
+  }
+
+  return 1;
 }
