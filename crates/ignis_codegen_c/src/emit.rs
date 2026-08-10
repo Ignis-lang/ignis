@@ -700,8 +700,17 @@ impl<'a> CEmitter<'a> {
   ) -> bool {
     let kind = self.classify(def_id);
 
-    (kind.is_std() && self.is_std_test_option_presence_method(def_id))
-      || (kind.is_std() && self.is_missing_std_archive_generic_specialization(def_id))
+    // `Option<T>::isSome`/`isNone` used to be seeded here purely by name,
+    // regardless of archive presence. When std itself instantiates a given
+    // `T` (e.g. `Option<TomlLexeme>`, since std::toml uses it internally),
+    // the specialization is already public and externally linked in the std
+    // archive and its header. Forcing a local copy in that case produced a
+    // `static` redefinition that collides with the header's non-static
+    // declaration in the same translation unit (and, before that, with the
+    // other force-emitting module's own non-static copy at link time). The
+    // archive-missing check below already covers the case this special-cased
+    // pattern was meant for -- a specialization std never instantiated.
+    (kind.is_std() && self.is_missing_std_archive_generic_specialization(def_id))
       || (kind.is_std()
         && self.is_monomorphized_generic_def(def_id)
         && (self.definition_depends_on_user_type(def_id)
@@ -793,16 +802,6 @@ impl<'a> CEmitter<'a> {
       .module_paths
       .and_then(|module_paths| module_paths.get(&self.defs.get(&def_id).owner_module))
       .is_some_and(|module_path| matches!(module_path, ModulePath::Std(name) if name == "test"))
-  }
-
-  fn is_std_test_option_presence_method(
-    &self,
-    def_id: DefinitionId,
-  ) -> bool {
-    let symbol_name = self.def_name(def_id);
-
-    symbol_name.starts_with("Option____")
-      && (symbol_name.ends_with("____isNone") || symbol_name.ends_with("____isSome"))
   }
 
   fn definition_depends_on_user_type(
@@ -2148,11 +2147,15 @@ impl<'a> CEmitter<'a> {
           .is_some_and(|target_module_id| self.defs.get(&def_id).owner_module != target_module_id);
 
       // In per-user-module emission, helper definitions forced from other modules
-      // are implementation details of this translation unit.
-      if is_forced_cross_module_helper
-        && (self.is_missing_std_archive_generic_specialization(def_id)
-          || cross_module_emit_needs_internal_linkage(is_public))
-      {
+      // are implementation details of this translation unit. Every user module
+      // that reaches a forced cross-module helper recomputes its own
+      // `forced_emit_defs` and re-emits a full body for it -- no module ever
+      // relies on another module's copy being externally linked. Keeping the
+      // linkage external here (e.g. for a helper that happens to already be
+      // public and present in the std archive, such as `Option<T>::isSome`)
+      // produces one non-static definition per forcing module, which collide
+      // at link time as soon as two modules force the same helper.
+      if is_forced_cross_module_helper {
         is_public = false;
         needs_internal_linkage = true;
       }
@@ -6118,10 +6121,6 @@ pub fn emit_std_header_from_input(
   output
 }
 
-fn cross_module_emit_needs_internal_linkage(is_effectively_public: bool) -> bool {
-  !is_effectively_public
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -6152,12 +6151,6 @@ mod tests {
     assert!(should_defer_std_module_emit_for_user_specialization(true, true));
     assert!(!should_defer_std_module_emit_for_user_specialization(false, true));
     assert!(!should_defer_std_module_emit_for_user_specialization(true, false));
-  }
-
-  #[test]
-  fn test_cross_module_emit_keeps_exported_linkage_external() {
-    assert!(!cross_module_emit_needs_internal_linkage(true));
-    assert!(cross_module_emit_needs_internal_linkage(false));
   }
 
   fn empty_program() -> (LirProgram, TypeStore, DefinitionStore, NamespaceStore, Rc<RefCell<SymbolTable>>) {
@@ -6473,6 +6466,171 @@ mod tests {
       c_code.contains("static void assertEq____str_void(void)"),
       "expected the forced std::test generic specialization to be emitted with internal linkage"
     );
+  }
+
+  #[test]
+  fn test_forced_option_presence_method_linkage_depends_on_std_archive_presence() {
+    let (mut program, types, mut defs, namespaces, symbols_rc) = empty_program();
+    let mut symbols = symbols_rc.borrow_mut();
+
+    let user_module_a = ModuleId::new(0);
+    let user_module_b = ModuleId::new(1);
+    let std_option_module = ModuleId::new(2);
+    let void_type = types.void();
+    let bool_type = types.boolean();
+
+    let option_toml_lexeme_def = alloc_record(&mut defs, &mut symbols, "Option__TomlLexeme", std_option_module);
+    let is_some = alloc_method(
+      &mut defs,
+      &mut symbols,
+      "Option__TomlLexeme__isSome",
+      option_toml_lexeme_def,
+      std_option_module,
+      bool_type,
+    );
+
+    let mut is_some_blocks = ignis_type::Store::new();
+    let mut is_some_block = Block::new("entry".to_string());
+    is_some_block.terminator = Terminator::Return(None);
+    let is_some_entry = is_some_blocks.alloc(is_some_block);
+
+    program.functions.insert(
+      is_some,
+      FunctionLir {
+        def_id: is_some,
+        params: Vec::new(),
+        return_type: bool_type,
+        locals: ignis_type::Store::new(),
+        temps: ignis_type::Store::new(),
+        blocks: is_some_blocks,
+        entry_block: is_some_entry,
+        is_extern: false,
+        is_variadic: false,
+        inline_mode: InlineMode::None,
+        span: synthetic_span(),
+      },
+    );
+
+    let make_caller = |defs: &mut DefinitionStore, symbols: &mut SymbolTable, owner_module: ModuleId, name: &str| {
+      let caller = alloc_function(defs, symbols, name, Visibility::Private, None, void_type, Vec::new());
+      defs.get_mut(&caller).owner_module = owner_module;
+      caller
+    };
+
+    let caller_a = make_caller(&mut defs, &mut symbols, user_module_a, "callsIsSomeA");
+    let caller_b = make_caller(&mut defs, &mut symbols, user_module_b, "callsIsSomeB");
+
+    for caller in [caller_a, caller_b] {
+      let mut blocks = ignis_type::Store::new();
+      let mut block = Block::new("entry".to_string());
+      block.instructions.push(Instr::Call {
+        dest: None,
+        callee: is_some,
+        args: Vec::new(),
+      });
+      block.terminator = Terminator::Return(None);
+      let entry = blocks.alloc(block);
+
+      program.functions.insert(
+        caller,
+        FunctionLir {
+          def_id: caller,
+          params: Vec::new(),
+          return_type: void_type,
+          locals: ignis_type::Store::new(),
+          temps: ignis_type::Store::new(),
+          blocks,
+          entry_block: entry,
+          is_extern: false,
+          is_variadic: false,
+          inline_mode: InlineMode::None,
+          span: synthetic_span(),
+        },
+      );
+    }
+
+    let module_paths = HashMap::from([
+      (user_module_a, ModulePath::Project(std::path::PathBuf::from("src/project.ign"))),
+      (user_module_b, ModulePath::Project(std::path::PathBuf::from("src/tests.ign"))),
+      (std_option_module, ModulePath::Std("option".to_string())),
+    ]);
+
+    // Row 1: the specialization is already present (and public) in the
+    // compiled std archive -- e.g. std::toml instantiates `Option<TomlLexeme>`
+    // itself, so `std_option.h` already carries a non-static declaration.
+    // Every forcing module must not emit a local body, and any forward
+    // declaration it does emit (the generic method-call forward-declare
+    // path, unrelated to forcing) must stay non-static to match the header:
+    // a `static` copy of either the declaration or the body collides with
+    // the header's non-static declaration in the same translation unit.
+    let mut present_symbols = HashSet::new();
+    present_symbols.insert("Option____TomlLexeme____isSome".to_string());
+
+    for user_module in [user_module_a, user_module_b] {
+      let c_code = CEmitter::with_user_module_target(
+        &program,
+        &types,
+        &defs,
+        &namespaces,
+        &symbols,
+        &[],
+        user_module,
+        &module_paths,
+        std::path::Path::new("std"),
+        Some(&present_symbols),
+      )
+      .emit();
+
+      assert!(
+        !c_code.contains("static boolean Option____TomlLexeme____isSome"),
+        "expected no static (internal-linkage) declaration or definition for the archive-present \
+         Option<T>::isSome specialization in module {:?}, since it would collide with the std \
+         header's non-static declaration in the same translation unit: {}",
+        user_module,
+        c_code
+      );
+      assert!(
+        !c_code.contains("boolean Option____TomlLexeme____isSome(void) {"),
+        "expected no local body for the archive-present Option<T>::isSome specialization in \
+         module {:?} (it must come from the std archive): {}",
+        user_module,
+        c_code
+      );
+      assert!(
+        c_code.contains("Option____TomlLexeme____isSome();"),
+        "expected the call site to still reference the archive-provided specialization in module {:?}",
+        user_module
+      );
+    }
+
+    // Row 2: the specialization is missing from the std archive (e.g. std
+    // never instantiated `Option<T>` for this particular `T`). Every forcing
+    // module must still emit its own complete, internally-linked (`static`)
+    // copy, since no external definition exists to link against.
+    let missing_symbols = HashSet::new();
+
+    for user_module in [user_module_a, user_module_b] {
+      let c_code = CEmitter::with_user_module_target(
+        &program,
+        &types,
+        &defs,
+        &namespaces,
+        &symbols,
+        &[],
+        user_module,
+        &module_paths,
+        std::path::Path::new("std"),
+        Some(&missing_symbols),
+      )
+      .emit();
+
+      assert!(
+        c_code.contains("static boolean Option____TomlLexeme____isSome(void)"),
+        "expected the forced Option<T>::isSome specialization to be emitted with internal linkage \
+         in module {:?} when it is missing from the std archive",
+        user_module
+      );
+    }
   }
 
   #[test]

@@ -2307,6 +2307,35 @@ function main(): i32 {
 }
 
 #[test]
+fn user_defined_hash_trait_does_not_satisfy_primitive_bound() {
+  let source = r#"
+trait Hash {
+}
+
+record Box<T: Hash> {
+    public value: i32;
+
+    public static init(): Box<T> {
+        return Box { value: 0 };
+    }
+}
+
+function main(): i32 {
+    let box: Box<i32> = Box::init<i32>();
+    return box.value;
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0190"]);
+  assert_snapshot!(
+    "user_defined_hash_trait_does_not_satisfy_primitive_bound",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
 fn builtin_eq_rejects_unsupported_record_type() {
   let source = r#"
 record NoEq {

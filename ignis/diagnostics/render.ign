@@ -3,83 +3,10 @@ import Terminal from "std::terminal";
 import Diagnostic, DiagnosticBag, DiagnosticLabel, Severity from "./model";
 import SourceFile, SourceLocation, SourceSpan, trimLineEnding from "./source";
 
-function lineIndexAt(source: &SourceFile, position: u64): u32 {
-  let mut line: u32 = 0;
-  let mut limit: u64 = source.text.length();
-  let mut offset: u64 = 0;
-
-  if (position < limit) {
-    limit = position;
-  }
-
-  while (offset < limit) {
-    let mut endByte: u64 = offset;
-    let Option::SOME(current) = source.text.charAt(offset, &mut endByte) else {
-      break;
-    };
-
-    if (current == '\n') {
-      line += 1;
-    }
-
-    offset = endByte;
-  }
-
-  return line;
-}
-
-function lineStart(source: &SourceFile, lineIndex: u32): u64 {
-  if (lineIndex == 0) {
-    return 0;
-  }
-
-  let mut currentLine: u32 = 0;
-  let mut offset: u64 = 0;
-
-  while (offset < source.text.length()) {
-    let mut endByte: u64 = offset;
-    let Option::SOME(current) = source.text.charAt(offset, &mut endByte) else {
-      break;
-    };
-
-    if (current == '\n') {
-      currentLine += 1;
-
-      if (currentLine == lineIndex) {
-        return endByte;
-      }
-    }
-
-    offset = endByte;
-  }
-
-  return source.text.length();
-}
-
-function lineEnd(source: &SourceFile, lineIndex: u32): u64 {
-  let start: u64 = lineStart(source, lineIndex);
-  let mut offset: u64 = start;
-
-  while (offset < source.text.length()) {
-    let mut endByte: u64 = offset;
-    let Option::SOME(current) = source.text.charAt(offset, &mut endByte) else {
-      break;
-    };
-
-    if (current == '\n') {
-      return endByte;
-    }
-
-    offset = endByte;
-  }
-
-  return source.text.length();
-}
-
 function lineText(source: &SourceFile, lineIndex: u32): String {
-  let start: u64 = lineStart(source, lineIndex);
-  let endExclusive: u64 = lineEnd(source, lineIndex);
-  let contentEnd: u64 = trimLineEnding(source.text.clone(), start, endExclusive);
+  let start: u64 = source.lineStart(lineIndex);
+  let endExclusive: u64 = source.lineEnd(lineIndex);
+  let contentEnd: u64 = trimLineEnding(&source.text, start, endExclusive);
 
   return source.text.substring(start as i64, (contentEnd - start) as i64);
 }
@@ -188,7 +115,7 @@ function appendSourceBlock(
 
   if (includeAdjacentContext) {
     let nextLineIndex: u32 = lineIndex + 1;
-    let nextLineStart: u64 = lineStart(source, nextLineIndex);
+    let nextLineStart: u64 = source.lineStart(nextLineIndex);
 
     if (nextLineStart < source.text.length()) {
       let nextLine: String = lineText(source, nextLineIndex);

@@ -14,6 +14,7 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       statements: &Vector<Ast::StatementId>,
       tail: Option<Ast::ExpressionId>,
+      expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
       Analyzer::Typecheck::pushScope(state);
 
@@ -28,7 +29,7 @@ export namespace Analyzer {
       }
 
       if (let Option::SOME(tailId) = tail) {
-        let tailTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        let tailTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
           state,
           defStore,
           typeStore,
@@ -36,6 +37,7 @@ export namespace Analyzer {
           module,
           resolvedBodies,
           tailId,
+          expected,
         );
         Analyzer::Typecheck::popScope(state);
         return tailTypeOpt;
@@ -1053,6 +1055,28 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       exprId: Ast::ExpressionId,
     ): Option<Analyzer::TypeId> {
+      return Analyzer::Typecheck::checkExprExpected(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        exprId,
+        Option::NONE,
+      );
+    }
+
+    function checkExprExpected(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      expected: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
       let Option::SOME(expr) = module.expressions.get(exprId) else {
         return Option::NONE;
       };
@@ -1092,7 +1116,7 @@ export namespace Analyzer {
           );
         },
         Ast::Expression::Node::Grouped(grouped) -> {
-          let innerTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+          let innerTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
             state,
             defStore,
             typeStore,
@@ -1100,6 +1124,7 @@ export namespace Analyzer {
             module,
             resolvedBodies,
             grouped.expression,
+            expected,
           );
 
           let Option::SOME(innerType) = innerTypeOpt else {
@@ -1204,6 +1229,7 @@ export namespace Analyzer {
             resolvedBodies,
             &value.statements,
             value.tail,
+            expected,
           );
           let Option::SOME(blockType) = blockTypeOpt else {
             return Option::NONE;
@@ -1320,7 +1346,7 @@ export namespace Analyzer {
         },
       };
 
-      @panic("unreachable: checkExpr match did not return");
+      @panic("unreachable: checkExprExpected match did not return");
     }
 
     function checkMatchExpr(
@@ -1522,6 +1548,7 @@ export namespace Analyzer {
             resolvedBodies,
             &blockStmt.statements,
             blockStmt.tail,
+            Option::NONE,
           );
         },
         Ast::Statement::Node::Return(returnStmt) -> {

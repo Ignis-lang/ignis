@@ -34,7 +34,7 @@ function parseSourceSpanNumber(text: &String, start: u64, endExclusive: u64): u6
   return value;
 }
 
-export function trimLineEnding(text: String, start: u64, endExclusive: u64): u64 {
+export function trimLineEnding(text: &String, start: u64, endExclusive: u64): u64 {
   let mut contentEnd: u64 = endExclusive;
 
   if (contentEnd > start) {
@@ -193,7 +193,7 @@ export record SourceFile {
     };
   }
 
-  private lineIndexAt(&self, position: u64): u32 {
+  public lineIndexAt(&self, position: u64): u32 {
     let mut line: u32 = 0;
     let mut limit: u64 = self.text.length();
     let mut offset: u64 = 0;
@@ -218,7 +218,7 @@ export record SourceFile {
     return line;
   }
 
-  private lineStart(&self, lineIndex: u32): u64 {
+  public lineStart(&self, lineIndex: u32): u64 {
     if (lineIndex == 0) {
       return 0;
     }
@@ -246,7 +246,7 @@ export record SourceFile {
     return self.text.length();
   }
 
-  private lineEnd(&self, lineIndex: u32): u64 {
+  public lineEnd(&self, lineIndex: u32): u64 {
     let start: u64 = self.lineStart(lineIndex);
     let mut offset: u64 = start;
 
@@ -350,7 +350,7 @@ export record SourceFile {
   ): void {
     let lineStart: u64 = self.lineStart(lineIndex);
     let lineEnd: u64 = self.lineEnd(lineIndex);
-    let contentEnd: u64 = trimLineEnding(self.text.clone(), lineStart, lineEnd);
+    let contentEnd: u64 = trimLineEnding(&self.text, lineStart, lineEnd);
     let lineText: String = self.text.substring(lineStart as i64, (contentEnd - lineStart) as i64);
     let mut outputRef: &mut String = output;
 
@@ -398,7 +398,7 @@ export record SourceFile {
     while (lineIndex <= endLineIndex) {
       let lineStart: u64 = self.lineStart(lineIndex);
       let lineEnd: u64 = self.lineEnd(lineIndex);
-      let contentEnd: u64 = trimLineEnding(self.text.clone(), lineStart, lineEnd);
+      let contentEnd: u64 = trimLineEnding(&self.text, lineStart, lineEnd);
       let mut highlightStart: u64 = lineStart;
       if (lineIndex == startLineIndex) {
         highlightStart = clampPosition(span.start, lineStart, contentEnd);

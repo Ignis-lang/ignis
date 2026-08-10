@@ -10677,15 +10677,39 @@ impl<'a> Analyzer<'a> {
         | Type::Str
     );
 
-    builtin_capable && (self.is_eq_trait(trait_def_id) || self.is_hash_trait(trait_def_id))
+    // `is_eq_trait` matches any trait definition literally named "Eq" (used by
+    // `@implements`/lang-trait validation, where a locally shadowing marker
+    // trait is accepted by design — see its doc comment). Primitives never go
+    // through `@implements`, so accepting that name-only match here would let
+    // a user-defined `trait Hash {}` silently satisfy a `T: Hash` bound for
+    // `i32`. Require shape as well from the marker-trait checks below.
+    builtin_capable && (self.is_canonical_std_eq_trait(trait_def_id) || self.is_canonical_std_hash_trait(trait_def_id))
   }
 
-  fn is_hash_trait(
+  /// Matches the shape of the canonical `Hash` marker trait: a single method
+  /// named `hash` and no others. Used only to gate builtin trait satisfaction
+  /// for primitives (see `primitive_satisfies_builtin_trait`).
+  ///
+  /// Residual limitation: this cannot additionally require std module origin.
+  /// The standard library itself defines more than one structurally-identical
+  /// `Hash` marker trait (`std::hash::Hash` and a module-local one in
+  /// `std::collections::hash_map`, by design, to avoid forcing key types to
+  /// import the broader `std::hash` surface — see that module's doc comment).
+  /// Restricting to a single canonical module would reject that legitimate
+  /// pattern, so a user-defined trait that reproduces this exact shape is
+  /// still accepted; only the wildcard "any trait named Hash" gap is closed.
+  fn is_canonical_std_hash_trait(
     &self,
     trait_def_id: DefinitionId,
   ) -> bool {
-    matches!(self.defs.get(&trait_def_id).kind, DefinitionKind::Trait(_))
-      && self.get_symbol_name(&self.defs.get(&trait_def_id).name) == "Hash"
+    let def = self.defs.get(&trait_def_id);
+    let DefinitionKind::Trait(trait_def) = &def.kind else {
+      return false;
+    };
+
+    self.get_symbol_name(&def.name) == "Hash"
+      && trait_def.methods.len() == 1
+      && self.get_symbol_name(&trait_def.methods[0].name) == "hash"
   }
 
   fn definition_satisfies_trait_bound(
@@ -10921,6 +10945,35 @@ impl<'a> Analyzer<'a> {
       .effective_implemented_traits_for_definition(type_def_id)
       .iter()
       .any(|trait_def_id| self.is_eq_trait(*trait_def_id))
+  }
+
+  /// Matches the canonical `std::hash::Eq` trait: name `Eq`, shaped as an empty
+  /// marker trait (no methods), and owned by the module registered at std path
+  /// `"std::hash"` in this compilation's module graph. Unlike `Hash`, the
+  /// standard library defines exactly one `Eq` trait (re-exported, never
+  /// redefined, by `std::collections` and others), so origin can additionally
+  /// be required here. Used only to gate builtin trait satisfaction for
+  /// primitives (see `primitive_satisfies_builtin_trait`); `@implements`/
+  /// lang-trait validation intentionally keeps the looser name-only `is_eq_trait`.
+  ///
+  /// Residual limitation: this only confirms the definition originates from
+  /// whichever module the build resolved `std::hash` to. It cannot detect a
+  /// build configuration that redirects the `std` alias itself to
+  /// non-canonical sources; that is a build-configuration trust boundary
+  /// outside the analyzer's reach.
+  fn is_canonical_std_eq_trait(
+    &self,
+    trait_def_id: DefinitionId,
+  ) -> bool {
+    let def = self.defs.get(&trait_def_id);
+    let DefinitionKind::Trait(trait_def) = &def.kind else {
+      return false;
+    };
+
+    self.get_symbol_name(&def.name) == "Eq"
+      && trait_def.methods.is_empty()
+      && def.owner_namespace.is_none()
+      && self.module_for_path.get("std::hash") == Some(&def.owner_module)
   }
 
   fn is_eq_trait(
