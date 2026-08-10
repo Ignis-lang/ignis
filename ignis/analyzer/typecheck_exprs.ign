@@ -1261,6 +1261,8 @@ export namespace Analyzer {
             module,
             resolvedBodies,
             &value,
+            expected,
+            true,
           );
         },
         Ast::Expression::Node::Vector(value) -> {
@@ -1357,6 +1359,8 @@ export namespace Analyzer {
       module: &Ast::Module,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       value: &Ast::Expression::Match,
+      expected: Option<Analyzer::TypeId>,
+      valuePosition: boolean,
     ): Option<Analyzer::TypeId> {
       let scrutineeTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.scrutinee);
 
@@ -1382,6 +1386,16 @@ export namespace Analyzer {
         let _bodyType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, arm.body);
         Analyzer::Typecheck::popScope(state);
         index += 1;
+      }
+
+      let verdict: Analyzer::Typecheck::ExhaustiveVerdict = Analyzer::Typecheck::analyzeMatchExhaustiveness(defStore, typeStore, module, scrutineeTypeOpt, &value.arms);
+      if (let Analyzer::Typecheck::ExhaustiveVerdict::Missing(reason) = verdict) {
+        let message: String = String::create("non-exhaustive match: ").concat(reason.toStr());
+        if (valuePosition) {
+          Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+        } else {
+          Analyzer::Typecheck::emitWarning(state, value.span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+        }
       }
 
       Analyzer::Typecheck::emitUnsupported(state, value.span, "match expressions");
@@ -1528,15 +1542,39 @@ export namespace Analyzer {
           );
         },
         Ast::Statement::Node::Expression(expressionStmt) -> {
-          let _expressionType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
-            state,
-            defStore,
-            typeStore,
-            symbols,
-            module,
-            resolvedBodies,
-            expressionStmt.expression,
-          );
+          let Option::SOME(expressionNode) = module.expressions.get(expressionStmt.expression) else {
+            return;
+          };
+
+          // A statement-position match is checked directly here so its
+          // exhaustiveness diagnostic is a WARNING (`valuePosition = false`).
+          // Every other statement expression, including a parenthesised
+          // `(match ...)` (which arrives as `Node::Grouped`, not
+          // `Node::Match`), falls through to the ordinary expression path,
+          // where a nested match is always checked at `valuePosition = true`.
+          if (let Ast::Expression::Node::Match(matchValue) = expressionNode) {
+            let _matchType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkMatchExpr(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              resolvedBodies,
+              &matchValue,
+              Option::NONE,
+              false,
+            );
+          } else {
+            let _expressionType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              resolvedBodies,
+              expressionStmt.expression,
+            );
+          }
         },
         Ast::Statement::Node::Block(blockStmt) -> {
           let _blockType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkBlockBody(

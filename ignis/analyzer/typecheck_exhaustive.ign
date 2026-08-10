@@ -1,0 +1,155 @@
+import Ast from "@compiler::ast";
+import Vector from "std::vector";
+
+export namespace Analyzer {
+  namespace Typecheck {
+    /// Local coverage accumulator for one match's arm patterns. Self-contained
+    /// (no `TypecheckState` fields) so it stays independent of the IGN-84
+    /// state-migration surface.
+    ///
+    /// `coveredVariants` is carried now so a later slice can add enum-variant
+    /// crediting without reshaping this record; `analyzeMatchExhaustiveness`
+    /// does not read it yet.
+    record MatchCoverage {
+      public irrefutable: boolean;
+      public coveredVariants: Vector<Analyzer::DefinitionId>;
+      public coveredTrue: boolean;
+      public coveredFalse: boolean;
+    }
+
+    enum ExhaustiveVerdict {
+      Exhaustive,
+      Missing(String),
+      Unknown,
+    }
+
+    /// Credits one arm's pattern toward `coverage`. Guarded arms must be
+    /// filtered out by the caller before this is invoked — a guard cannot
+    /// guarantee coverage regardless of the pattern shape.
+    function classifyMatchArmPattern(
+      coverage: &mut Analyzer::Typecheck::MatchCoverage,
+      module: &Ast::Module,
+      patternId: Ast::PatternId,
+    ): void {
+      let Option::SOME(pattern) = module.patterns.get(patternId) else {
+        return;
+      };
+
+      match (pattern) {
+        Ast::Pattern::Node::Wildcard(_) -> {
+          let mut coverageRef: &mut Analyzer::Typecheck::MatchCoverage = coverage;
+          coverageRef.irrefutable = true;
+        },
+        Ast::Pattern::Node::Binding(_) -> {
+          let mut coverageRef: &mut Analyzer::Typecheck::MatchCoverage = coverage;
+          coverageRef.irrefutable = true;
+        },
+        Ast::Pattern::Node::Literal(literal) -> {
+          let Option::SOME(expr) = module.expressions.get(literal.expression) else {
+            return;
+          };
+
+          if (let Ast::Expression::Node::Literal(exprLiteral) = expr) {
+            if (let Ast::Expression::LiteralValue::Boolean(flag) = &exprLiteral.value) {
+              let mut coverageRef: &mut Analyzer::Typecheck::MatchCoverage = coverage;
+              if (flag) {
+                coverageRef.coveredTrue = true;
+              } else {
+                coverageRef.coveredFalse = true;
+              }
+            }
+          }
+        },
+        // Path (enum-variant), Tuple, and Or patterns give no coverage credit
+        // in this slice — Path/enum-variant crediting is a later slice.
+        _ -> {},
+      };
+    }
+
+    /// Analyzes one match's arms for exhaustiveness against its scrutinee
+    /// type. Pure AST-level analysis: no HIR, no `TypecheckState` mutation,
+    /// no diagnostics emitted here — the caller decides severity from
+    /// position and emits accordingly.
+    function analyzeMatchExhaustiveness(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      scrutineeTypeOpt: Option<Analyzer::TypeId>,
+      arms: &Vector<Ast::Expression::MatchArm>,
+    ): Analyzer::Typecheck::ExhaustiveVerdict {
+      let mut coverage: Analyzer::Typecheck::MatchCoverage = Analyzer::Typecheck::MatchCoverage {
+        irrefutable: false,
+        coveredVariants: Vector::new<Analyzer::DefinitionId>(),
+        coveredTrue: false,
+        coveredFalse: false,
+      };
+
+      let mut index: u64 = 0;
+      while (index < arms.length()) {
+        let Option::SOME(arm) = arms.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (arm.guard.isSome()) {
+          index += 1;
+          continue;
+        }
+
+        Analyzer::Typecheck::classifyMatchArmPattern(&mut coverage, module, arm.pattern);
+        index += 1;
+      }
+
+      if (coverage.irrefutable) {
+        return Analyzer::Typecheck::ExhaustiveVerdict::Exhaustive;
+      }
+
+      let Option::SOME(scrutineeType) = scrutineeTypeOpt else {
+        return Analyzer::Typecheck::ExhaustiveVerdict::Unknown;
+      };
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, scrutineeType);
+      let Option::SOME(resolvedTypeNode) = typeStore.get(resolved.typeId) else {
+        return Analyzer::Typecheck::ExhaustiveVerdict::Unknown;
+      };
+
+      match (resolvedTypeNode) {
+        Analyzer::Type::BOOLEAN -> {
+          if (coverage.coveredTrue && coverage.coveredFalse) {
+            return Analyzer::Typecheck::ExhaustiveVerdict::Exhaustive;
+          }
+
+          return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("bool scrutinee requires both `true` and `false` arms, or a wildcard/irrefutable-binding arm"));
+        },
+        Analyzer::Type::Enum(defId) -> {
+          let Option::SOME(def) = defStore.get(defId) else {
+            return Analyzer::Typecheck::ExhaustiveVerdict::Unknown;
+          };
+
+          match (def) {
+            Analyzer::Definition::Enum(enum_) -> {
+              if (enum_.typeParams.length() > 0) {
+                return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("generic enum scrutinee requires a wildcard/irrefutable-binding arm"));
+              }
+
+              // Variant-level coverage crediting is a later slice; until then
+              // a non-generic enum scrutinee always needs a wildcard/irrefutable arm.
+              return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("enum scrutinee requires a wildcard/irrefutable-binding arm"));
+            },
+            _ -> {
+              return Analyzer::Typecheck::ExhaustiveVerdict::Unknown;
+            },
+          };
+        },
+        Analyzer::Type::Instance(_) -> {
+          return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("generic enum scrutinee requires a wildcard/irrefutable-binding arm"));
+        },
+        _ -> {
+          return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("scrutinee requires a wildcard/irrefutable-binding arm"));
+        },
+      };
+
+      @panic("unreachable: analyzeMatchExhaustiveness match did not return");
+    }
+  }
+}

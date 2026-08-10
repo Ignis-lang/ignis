@@ -1,6 +1,6 @@
 import Test from "std::test";
 
-import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
+import DiagnosticCode, Severity, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 
@@ -32,6 +32,17 @@ function typecheckAddWildcardPattern(module: &mut Ast::Module): Ast::PatternId {
   let mut moduleRef: &mut Ast::Module = module;
   return moduleRef.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
     span: typecheckDummySpan(),
+  }));
+}
+
+function typecheckAddLiteralPattern(
+  module: &mut Ast::Module,
+  expression: Ast::ExpressionId,
+): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Literal(Ast::Pattern::Literal {
+    span: typecheckDummySpan(),
+    expression: expression,
   }));
 }
 
@@ -89,6 +100,17 @@ function typecheckAddAnnotatedBinding(
     name: String::create(name),
     annotation: Option::SOME(annotation),
     metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function typecheckAddGroupedExpr(
+  module: &mut Ast::Module,
+  expression: Ast::ExpressionId
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Grouped(Ast::Expression::Grouped {
+    span: typecheckDummySpan(),
+    expression: expression,
   }));
 }
 
@@ -3982,7 +4004,12 @@ function typecheckMatchStatementChecksPatternGuardAndArmBody(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  Test::assertEq<u64>(output.diagnostics.length(), 3);
+  // Since S2b1, a guarded arm never counts toward coverage — not even a
+  // binding pattern that would otherwise be irrefutable — so this sole,
+  // guarded arm leaves the `i32` scrutinee's open domain uncovered and adds
+  // a statement-position exhaustiveness WARNING on top of the pre-existing 3
+  // diagnostics (guard condition, arm-body operand mismatch, match wall).
+  Test::assertEq<u64>(output.diagnostics.length(), 4);
   assertExprType(&output, guardExpr, typeStore.intern(Analyzer::Type::I32));
 }
 
@@ -4050,9 +4077,12 @@ function typecheckMatchWithUnresolvedScrutineeStillChecksArmBody(): void {
 /// non-generic enum scrutinee binds successfully. Before this fix,
 /// `collectPatternBindings` routed every `Path` pattern through
 /// `collectRecordPathPatternBindings`, which rejected `Type::Enum` with
-/// "record destructure annotation must be a non-generic record" — the only
-/// diagnostic present here is `checkMatchExpr`'s still-standing
-/// `emitUnsupported("match expressions")` wall (S3 has not landed).
+/// "record destructure annotation must be a non-generic record". Since S2b1,
+/// enum-variant patterns give no exhaustiveness credit yet (variant crediting
+/// is a later slice), so this single-arm, no-wildcard match also gets a
+/// statement-position non-exhaustive WARNING alongside `checkMatchExpr`'s
+/// still-standing `emitUnsupported("match expressions")` wall (S3 has not
+/// landed).
 /// Spec: selfhost-match-exhaustiveness — enum coverage prerequisite.
 @test
 function typecheckEnumVariantPatternBindsNonGenericEnumScrutinee(): void {
@@ -4107,7 +4137,19 @@ function typecheckEnumVariantPatternBindsNonGenericEnumScrutinee(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support match expressions");
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
+  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckEnumVariantPatternBindsNonGenericEnumScrutinee: missing exhaustiveness diagnostic");
+  };
+  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
+  Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: enum scrutinee requires a wildcard/irrefutable-binding arm");
+
+  let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(1) else {
+    @panic("typecheckEnumVariantPatternBindsNonGenericEnumScrutinee: missing wall diagnostic");
+  };
+  Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
 }
 
 /// Scenario: a bare variant pattern (`E::B`, zero arguments) matching a
@@ -4171,12 +4213,18 @@ function typecheckEnumVariantPatternRejectsPayloadArityMismatch(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
   let Option::SOME(arityDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing arity diagnostic");
   };
   Test::assertEq<str>(arityDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
   Test::assertEq<str>(arityDiagnostic.message, "enum variant pattern arity does not match the variant's declared payload");
+
+  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
+    @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing exhaustiveness diagnostic");
+  };
+  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
+  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: enum scrutinee requires a wildcard/irrefutable-binding arm");
 }
 
 /// Scenario: a qualified variant pattern matching a *generic* enum scrutinee
@@ -4239,10 +4287,346 @@ function typecheckEnumVariantPatternRejectsGenericEnumScrutinee(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
   let Option::SOME(genericDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckEnumVariantPatternRejectsGenericEnumScrutinee: missing generic-enum diagnostic");
   };
   Test::assertEq<str>(genericDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
   Test::assertEq<str>(genericDiagnostic.message, "typecheck does not support generic enum destructuring");
+
+  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
+    @panic("typecheckEnumVariantPatternRejectsGenericEnumScrutinee: missing exhaustiveness diagnostic");
+  };
+  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
+  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: generic enum scrutinee requires a wildcard/irrefutable-binding arm");
+}
+
+// Phase 12: bool/irrefutable exhaustiveness + `valuePosition` plumbing
+// (selfhost-match-exhaustiveness, S2b1)
+// ============================================================
+
+/// Scenario: a `bool` scrutinee with only a `true` literal arm, no
+/// wildcard, in statement position. `false` is uncovered, so
+/// `analyzeMatchExhaustiveness` returns `Missing`; statement position means
+/// the diagnostic is a WARNING (`valuePosition = false`), landing alongside
+/// `checkMatchExpr`'s still-standing `emitUnsupported("match expressions")`
+/// wall (S3 has not lifted it).
+/// Spec: selfhost-match-exhaustiveness — closed-domain coverage, position-
+/// sensitive severity.
+@test
+function typecheckMatchStatementBoolMissingFalseArmWarns(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let scrutinee: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let truePattern: Ast::PatternId = typecheckAddLiteralPattern(&mut module, typecheckAddBoolLiteral(&mut module, true));
+  let armBody: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: truePattern,
+    guard: Option::NONE,
+    body: armBody,
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, scrutinee, arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  // Literal patterns are still walled by `collectPatternBindings`
+  // ("literal patterns" unsupported) independently of exhaustiveness — that
+  // wall fires during the arm-binding loop, before exhaustiveness runs. Its
+  // message is checked only for severity/code, not exact text: dynamically
+  // built diagnostic messages that are not the last one emitted in a test
+  // are not safe to assert on verbatim (see engram note on diagnostic
+  // message buffer reuse).
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
+  let Option::SOME(bindDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckMatchStatementBoolMissingFalseArmWarns: missing pattern-bind diagnostic");
+  };
+  Test::assertEq<Severity>(bindDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(bindDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+
+  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
+    @panic("typecheckMatchStatementBoolMissingFalseArmWarns: missing exhaustiveness diagnostic");
+  };
+  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
+  Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: bool scrutinee requires both `true` and `false` arms, or a wildcard/irrefutable-binding arm");
+
+  let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(2) else {
+    @panic("typecheckMatchStatementBoolMissingFalseArmWarns: missing wall diagnostic");
+  };
+  Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+}
+
+/// Scenario: a `bool` scrutinee with both `true` and `false` literal arms
+/// covers the closed domain — `bool` is a 2-value domain, so no wildcard is
+/// needed. No exhaustiveness diagnostic is emitted; only the pre-existing
+/// `emitUnsupported("match expressions")` wall remains.
+/// Spec: selfhost-match-exhaustiveness — closed-domain coverage.
+@test
+function typecheckMatchStatementBoolBothLiteralsCoveredEmitsNoExhaustivenessDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let scrutinee: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let truePattern: Ast::PatternId = typecheckAddLiteralPattern(&mut module, typecheckAddBoolLiteral(&mut module, true));
+  let falsePattern: Ast::PatternId = typecheckAddLiteralPattern(&mut module, typecheckAddBoolLiteral(&mut module, false));
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: truePattern,
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: falsePattern,
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, scrutinee, arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  // Both arms are literal patterns, so each independently trips the
+  // pre-existing "literal patterns" bind-time wall; exhaustiveness itself
+  // stays silent (bool coverage is complete) and only the match wall remains
+  // on top. The two bind-time diagnostics are checked by severity/code only
+  // (not exact text): they are not the last dynamically-built diagnostic
+  // message in this test, and only the last one is safe to assert on
+  // verbatim (see engram note on diagnostic message buffer reuse).
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
+  let Option::SOME(firstBindDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckMatchStatementBoolBothLiteralsCoveredEmitsNoExhaustivenessDiagnostic: missing first pattern-bind diagnostic");
+  };
+  Test::assertEq<Severity>(firstBindDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(firstBindDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+
+  let Option::SOME(secondBindDiagnostic) = output.typecheck.diagnostics.get(1) else {
+    @panic("typecheckMatchStatementBoolBothLiteralsCoveredEmitsNoExhaustivenessDiagnostic: missing second pattern-bind diagnostic");
+  };
+  Test::assertEq<Severity>(secondBindDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(secondBindDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+
+  let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(2) else {
+    @panic("typecheckMatchStatementBoolBothLiteralsCoveredEmitsNoExhaustivenessDiagnostic: missing wall diagnostic");
+  };
+  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+}
+
+/// Scenario: a wildcard arm satisfies coverage for an open-domain (`i32`)
+/// scrutinee in EXPRESSION position (`let x: i32 = match (...) { ... };`).
+/// `checkExprExpected`'s `Node::Match` arm always calls `checkMatchExpr` with
+/// `valuePosition = true`, so this exercises the ERROR side of the severity
+/// split with an exhaustive match: no exhaustiveness diagnostic is emitted,
+/// only the pre-existing `emitUnsupported("match expressions")` wall.
+/// Spec: selfhost-match-exhaustiveness — open-domain requires catch-all.
+@test
+function typecheckMatchExpressionWildcardCoversOpenDomain(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let scrutinee: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 0);
+  let wildcardPattern: Ast::PatternId = typecheckAddWildcardPattern(&mut module);
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: wildcardPattern,
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, scrutinee, arms);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, xPattern, i32Type, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckMatchExpressionWildcardCoversOpenDomain: missing wall diagnostic");
+  };
+  Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+}
+
+/// Scenario: the same shape as above but with no wildcard and a single
+/// literal arm — the `i32` scrutinee is an open domain, so a non-wildcard
+/// literal arm never guarantees coverage. Because the match sits in
+/// EXPRESSION position (`let` value), the non-exhaustive diagnostic is an
+/// ERROR, not a WARNING.
+/// Spec: selfhost-match-exhaustiveness — open-domain requires catch-all,
+/// position-sensitive severity.
+@test
+function typecheckMatchExpressionNonExhaustiveIsError(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let scrutinee: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 0);
+  let zeroPattern: Ast::PatternId = typecheckAddLiteralPattern(&mut module, typecheckAddIntLiteral(&mut module, 0));
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: zeroPattern,
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, scrutinee, arms);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, xPattern, i32Type, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  // The literal `0` pattern independently trips the pre-existing "literal
+  // patterns" bind-time wall before exhaustiveness runs. It is checked by
+  // severity/code only (not exact text): it is not the last dynamically
+  // built diagnostic message in this test, and only the last one is safe to
+  // assert on verbatim (see engram note on diagnostic message buffer reuse).
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
+  let Option::SOME(bindDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckMatchExpressionNonExhaustiveIsError: missing pattern-bind diagnostic");
+  };
+  Test::assertEq<Severity>(bindDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(bindDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+
+  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
+    @panic("typecheckMatchExpressionNonExhaustiveIsError: missing exhaustiveness diagnostic");
+  };
+  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
+
+  let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(2) else {
+    @panic("typecheckMatchExpressionNonExhaustiveIsError: missing wall diagnostic");
+  };
+  Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+}
+
+/// Scenario: a guarded wildcard arm is the match's only arm. A guard cannot
+/// guarantee coverage regardless of the pattern shape, so
+/// `analyzeMatchExhaustiveness` must skip guarded arms entirely — even a
+/// wildcard pattern gives no credit when guarded. Statement position, so the
+/// diagnostic is a WARNING.
+/// Spec: selfhost-match-exhaustiveness — closed-domain coverage (guarded arms
+/// excluded).
+@test
+function typecheckMatchStatementGuardedWildcardDoesNotCountAsCoverage(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let scrutinee: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 0);
+  let wildcardPattern: Ast::PatternId = typecheckAddWildcardPattern(&mut module);
+  let guardExpr: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: wildcardPattern,
+    guard: Option::SOME(guardExpr),
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, scrutinee, arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
+  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckMatchStatementGuardedWildcardDoesNotCountAsCoverage: missing exhaustiveness diagnostic");
+  };
+  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
+  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
+}
+
+/// Scenario: a parenthesised match used as an expression statement —
+/// `(match (n) { ... });` — arrives as `Node::Grouped` wrapping the match,
+/// not `Node::Match` directly. `checkStmt`'s statement-position guard only
+/// matches a *direct* `Node::Match`, so this takes the ordinary expression
+/// path (`checkExpr`, `valuePosition = true`) and gets the stricter ERROR
+/// severity even though it is syntactically a statement. This is the
+/// documented conservative edge case (design D2).
+/// Spec: selfhost-expected-type-propagation — position mechanism.
+@test
+function typecheckGroupedMatchStatementTakesExpressionPositionPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let scrutinee: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 0);
+  let zeroPattern: Ast::PatternId = typecheckAddLiteralPattern(&mut module, typecheckAddIntLiteral(&mut module, 0));
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: zeroPattern,
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, scrutinee, arms);
+  let groupedExpr: Ast::ExpressionId = typecheckAddGroupedExpr(&mut module, matchExpr);
+  let groupedStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, groupedExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(groupedStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  // The literal `0` pattern independently trips the pre-existing "literal
+  // patterns" bind-time wall before exhaustiveness runs. It is checked by
+  // severity/code only (not exact text): it is not the last dynamically
+  // built diagnostic message in this test, and only the last one is safe to
+  // assert on verbatim (see engram note on diagnostic message buffer reuse).
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
+  let Option::SOME(bindDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckGroupedMatchStatementTakesExpressionPositionPath: missing pattern-bind diagnostic");
+  };
+  Test::assertEq<Severity>(bindDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(bindDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+
+  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
+    @panic("typecheckGroupedMatchStatementTakesExpressionPositionPath: missing exhaustiveness diagnostic");
+  };
+  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
 }
