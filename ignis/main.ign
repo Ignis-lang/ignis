@@ -64,27 +64,6 @@ function analyzerModuleKind(kind: BuildModuleKind): Analyzer::Imports::ModuleKin
   };
 }
 
-function copyImportBindings(bindings: &Vector<Ast::ImportBinding>): Option<Vector<Ast::ImportBinding>> {
-  let mut copied: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
-  let mut index: u64 = 0;
-
-  while (index < bindings.length()) {
-    let Option::SOME(binding) = bindings.get(index) else {
-      return Option::NONE;
-    };
-
-    copied.push(Ast::ImportBinding {
-      span: binding.span,
-      kind: binding.kind,
-      name: Ast::copyOptionalString(binding.name),
-      alias: Ast::copyOptionalString(binding.alias),
-    });
-    index += 1;
-  }
-
-  return Option::SOME(copied);
-}
-
 function mapImportSourcesToDiscoveryTargets(
   module: &mut Ast::Module,
   graph: &BuildGraph,
@@ -119,12 +98,9 @@ function mapImportSourcesToDiscoveryTargets(
           return false;
         };
 
-        let Option::SOME(items) = copyImportBindings(&importItem.items) else {
-          return false;
-        };
         *item = Ast::Item::Node::Import(Ast::Item::Import {
           span: importItem.span,
-          items: items,
+          items: Ast::copyImportBindings(&importItem.items),
           source: target.path.toString(),
           sourceSpan: importItem.sourceSpan,
           metadata: Ast::emptyMetadata(),

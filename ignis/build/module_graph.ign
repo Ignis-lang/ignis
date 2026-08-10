@@ -159,10 +159,11 @@ export namespace ModuleGraph {
 
   function topologicalOrder(graph: &BuildGraph): Vector<u64> {
     let mut visited: Vector<u64> = Vector::new<u64>();
+    let mut visiting: Vector<u64> = Vector::new<u64>();
     let mut order: Vector<u64> = Vector::new<u64>();
 
     match (graph.rootIndex) {
-      Option::SOME(rootIndex) -> ModuleGraph::visit(graph, rootIndex, &mut visited, &mut order),
+      Option::SOME(rootIndex) -> ModuleGraph::visit(graph, rootIndex, &mut visited, &mut visiting, &mut order),
       Option::NONE -> {},
     };
 
@@ -171,11 +172,12 @@ export namespace ModuleGraph {
 
   function allModulesTopologicalOrder(graph: &BuildGraph): Vector<u64> {
     let mut visited: Vector<u64> = Vector::new<u64>();
+    let mut visiting: Vector<u64> = Vector::new<u64>();
     let mut order: Vector<u64> = Vector::new<u64>();
     let mut index: u64 = 0;
 
     while (index < graph.nodes.length()) {
-      ModuleGraph::visit(graph, index, &mut visited, &mut order);
+      ModuleGraph::visit(graph, index, &mut visited, &mut visiting, &mut order);
       index += 1;
     }
 
@@ -186,16 +188,14 @@ export namespace ModuleGraph {
     graph: &BuildGraph,
     nodeIndex: u64,
     visited: &mut Vector<u64>,
+    visiting: &mut Vector<u64>,
     order: &mut Vector<u64>
   ): void {
     // `visited` is the "black" (fully processed) set.  A node is added to `visited`
     // only after all its transitive dependencies have been emitted (post-order DFS).
-    //
-    // Invariant: the resolver rejects cycles before topologicalOrder is called, so
-    // a node cannot be re-entered while it is still on the DFS call stack.  Therefore
-    // "in visited" is equivalent to "fully processed", and checking visited is
-    // sufficient to prevent duplicate emissions (e.g. in a diamond dependency where
-    // A→B, A→C, B→D, C→D: D is visited on the first path and skipped on the second).
+    // `visiting` is the "gray" (on the current DFS call stack) set, used only to
+    // detect a back-edge that would otherwise recurse forever if a cycle slipped
+    // past the resolver's upstream cycle rejection.
     let mut visitedIndex: u64 = 0;
     while (visitedIndex < visited.length()) {
       let Option::SOME(value) = visited.get(visitedIndex) else {
@@ -209,9 +209,27 @@ export namespace ModuleGraph {
       visitedIndex += 1;
     }
 
+    let mut visitingIndex: u64 = 0;
+    while (visitingIndex < visiting.length()) {
+      let Option::SOME(value) = visiting.get(visitingIndex) else {
+        break;
+      };
+
+      if (*value == nodeIndex) {
+        @panic("ModuleGraph::visit: cycle detected in module graph during topological traversal");
+      }
+
+      visitingIndex += 1;
+    }
+
     let Option::SOME(node) = graph.nodes.get(nodeIndex) else {
       return;
     };
+
+    {
+      let mut visitingRef: &mut Vector<u64> = visiting;
+      visitingRef.push(nodeIndex);
+    }
 
     let mut edgeIndex: u64 = 0;
     while (edgeIndex < node.edges.length()) {
@@ -219,8 +237,13 @@ export namespace ModuleGraph {
         break;
       };
 
-      ModuleGraph::visit(graph, edge.targetIndex, visited, order);
+      ModuleGraph::visit(graph, edge.targetIndex, visited, visiting, order);
       edgeIndex += 1;
+    }
+
+    {
+      let mut visitingRef: &mut Vector<u64> = visiting;
+      visitingRef.pop();
     }
 
     // Mark black and emit in post-order (dependencies before dependents).

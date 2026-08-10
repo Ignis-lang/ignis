@@ -1107,14 +1107,7 @@ export namespace Analyzer {
       let placeholderName: Analyzer::SymbolId = existing.name();
       let isRecord: boolean = match (existing) {
         Analyzer::Definition::Record(_) -> true,
-        Analyzer::Definition::Enum(_) -> false,
-        Analyzer::Definition::Function(_) -> false,
-        Analyzer::Definition::Variable(_) -> false,
-        Analyzer::Definition::Field(_) -> false,
-        Analyzer::Definition::Variant(_) -> false,
-        Analyzer::Definition::TypeParam(_) -> false,
-        Analyzer::Definition::TypeAlias(_) -> false,
-        Analyzer::Definition::Trait(_) -> false,
+        _ -> false,
       };
 
       if (!isRecord) {
@@ -1181,6 +1174,7 @@ export namespace Analyzer {
         Analyzer::Definition::Enum(_) -> true,
         Analyzer::Definition::Record(_) -> false,
         Analyzer::Definition::Function(_) -> false,
+        Analyzer::Definition::Method(_) -> false,
         Analyzer::Definition::Variable(_) -> false,
         Analyzer::Definition::Field(_) -> false,
         Analyzer::Definition::Variant(_) -> false,
@@ -1291,6 +1285,9 @@ export namespace Analyzer {
         Analyzer::Definition::Trait(_) -> {
           @panic("completeTypeAlias: invariant broken — expected TypeAlias at defId");
         },
+        Analyzer::Definition::Method(_) -> {
+          @panic("completeTypeAlias: invariant broken — expected TypeAlias at defId");
+        },
       };
     }
 
@@ -1364,6 +1361,9 @@ export namespace Analyzer {
           @panic("completeTrait: invariant broken — expected Trait at defId");
         },
         Analyzer::Definition::TypeAlias(_) -> {
+          @panic("completeTrait: invariant broken — expected Trait at defId");
+        },
+        Analyzer::Definition::Method(_) -> {
           @panic("completeTrait: invariant broken — expected Trait at defId");
         },
       };
@@ -1560,6 +1560,7 @@ export namespace Analyzer {
         scopeSpans: scopeSpans,
       };
 
+      let typeStoreLengthBefore: u64 = typeStore.length();
       let mut index: u64 = 0;
 
       while (index < roots.length()) {
@@ -1567,6 +1568,10 @@ export namespace Analyzer {
           predeclareItem(&mut state, defStore, typeStore, symbols, ast, *itemId, 0);
         }
         index += 1;
+      }
+
+      if (typeStore.length() != typeStoreLengthBefore) {
+        @panic("Binder::predeclareRoots: TypeStore.length() changed during pass 1, which breaks the pass-1 invariant");
       }
 
       let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::BinderOutput {

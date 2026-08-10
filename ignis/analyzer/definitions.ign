@@ -180,6 +180,24 @@ export namespace Analyzer {
         Analyzer::Definition::Trait(wrapper)      -> wrapper.name,
       };
     }
+
+    /// Returns a stable small integer identifying this definition's variant tag,
+    /// used to detect variant-changing replacements in `DefinitionStore::replace`.
+    /// Exhaustive across all ten variants — no wildcard arm.
+    public variantTag(&self): u32 {
+      return match (self) {
+        Analyzer::Definition::Function(_)   -> 0,
+        Analyzer::Definition::Method(_)     -> 1,
+        Analyzer::Definition::Record(_)     -> 2,
+        Analyzer::Definition::Enum(_)       -> 3,
+        Analyzer::Definition::Variable(_)   -> 4,
+        Analyzer::Definition::Field(_)      -> 5,
+        Analyzer::Definition::Variant(_)    -> 6,
+        Analyzer::Definition::TypeParam(_)  -> 7,
+        Analyzer::Definition::TypeAlias(_)  -> 8,
+        Analyzer::Definition::Trait(_)      -> 9,
+      };
+    }
   }
 
   /// Flat, insertion-ordered store of all definitions visible in a module.
@@ -213,6 +231,18 @@ export namespace Analyzer {
     /// Delegates to `IndexVec::set` so production builds only need the setter
     /// specialization instead of a separate public mutable-reference accessor.
     public replace(&mut self, id: Analyzer::DefinitionId, def: Analyzer::Definition): boolean {
+      let mut tagMismatch: boolean = false;
+
+      if (let Option::SOME(existing) = self.definitions.get(id)) {
+        if (existing.variantTag() != def.variantTag()) {
+          tagMismatch = true;
+        }
+      }
+
+      if (tagMismatch) {
+        @panic("DefinitionStore::replace: replacement definition changes variant tag, which breaks every downstream invariant");
+      }
+
       return self.definitions.set(id, def);
     }
   }

@@ -10650,8 +10650,42 @@ impl<'a> Analyzer<'a> {
       Type::Record(def_id) | Type::Enum(def_id) => self.definition_satisfies_trait_bound(*def_id, trait_def_id),
       Type::Instance { generic, .. } => self.definition_satisfies_trait_bound(*generic, trait_def_id),
       Type::Param { owner, index } => self.type_param_has_trait_bound(*owner, *index, trait_def_id),
-      _ => false,
+      _ => self.primitive_satisfies_builtin_trait(actual_type, trait_def_id),
     }
+  }
+
+  /// Primitives satisfy the canonical `Hash` and `Eq` traits through the
+  /// `@hash`/`@eq` builtins instead of trait method implementations, so bound
+  /// checks accept them for exactly the types those builtins support.
+  fn primitive_satisfies_builtin_trait(
+    &self,
+    actual_type: TypeId,
+    trait_def_id: DefinitionId,
+  ) -> bool {
+    let builtin_capable = matches!(
+      self.types.get(&actual_type),
+      Type::Boolean
+        | Type::Char
+        | Type::I8
+        | Type::I16
+        | Type::I32
+        | Type::I64
+        | Type::U8
+        | Type::U16
+        | Type::U32
+        | Type::U64
+        | Type::Str
+    );
+
+    builtin_capable && (self.is_eq_trait(trait_def_id) || self.is_hash_trait(trait_def_id))
+  }
+
+  fn is_hash_trait(
+    &self,
+    trait_def_id: DefinitionId,
+  ) -> bool {
+    matches!(self.defs.get(&trait_def_id).kind, DefinitionKind::Trait(_))
+      && self.get_symbol_name(&self.defs.get(&trait_def_id).name) == "Hash"
   }
 
   fn definition_satisfies_trait_bound(

@@ -6508,3 +6508,35 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_hash_map_primitive_keys() {
+  e2e_workspace_std_test(
+    "hash_map_primitive_keys",
+    r#"
+import HashMap from "std::collections";
+
+function main(): i32 {
+    let mut byUnsigned: HashMap<u32, u32> = HashMap::new<u32, u32>();
+    byUnsigned.insert(7, 40);
+
+    let mut byStr: HashMap<str, u32> = HashMap::new<str, u32>();
+    byStr.insert("two", 2);
+
+    let mut total: u32 = 0;
+    let unsignedKey: u32 = 7;
+    let strKey: str = "two";
+
+    if (let Option::SOME(value) = byUnsigned.get(&unsignedKey)) {
+        total += *value;
+    }
+
+    if (let Option::SOME(value) = byStr.get(&strKey)) {
+        total += *value;
+    }
+
+    return total as i32;
+}
+"#,
+  );
+}

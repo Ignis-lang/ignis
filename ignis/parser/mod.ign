@@ -7,7 +7,7 @@ import _ from "./patterns";
 import _ from "./recovery";
 
 import Ast from "@compiler::ast";
-import DiagnosticBag, SourceFile from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, DiagnosticNote, SourceFile from "@compiler::diagnostics";
 import LexResult, Lexer from "@compiler::lexer";
 
 /// Result of parsing a full source file: the populated module plus the
@@ -19,6 +19,44 @@ export record ParseOutput {
   public parseDiagnostics: DiagnosticBag;
 }
 
+/// Deep-copy a diagnostic (severity, code, message, primary span, labels,
+/// notes, help) since `Diagnostic` does not implement `Clone`.
+function cloneDiagnostic(diag: &Diagnostic): Diagnostic {
+  let mut cloned: Diagnostic = Diagnostic::new(diag.severity, diag.code, diag.message, diag.primarySpan);
+  let mut labelIndex: u64 = 0;
+
+  while (labelIndex < diag.labels.length()) {
+    let Option::SOME(label) = diag.labels.get(labelIndex) else {
+      labelIndex += 1;
+      continue;
+    };
+
+    cloned.addLabel(label.kind, label.span, label.message);
+    labelIndex += 1;
+  }
+
+  let mut noteIndex: u64 = 0;
+
+  while (noteIndex < diag.notes.length()) {
+    let Option::SOME(note) = diag.notes.get(noteIndex) else {
+      noteIndex += 1;
+      continue;
+    };
+
+    cloned.notes.push(DiagnosticNote {
+      kind: note.kind,
+      message: note.message,
+    });
+    noteIndex += 1;
+  }
+
+  if (let Option::SOME(help) = diag.help) {
+    cloned.setHelp(help);
+  }
+
+  return cloned;
+}
+
 export namespace Parser {
   function parseInto(
     file: &SourceFile,
@@ -26,7 +64,20 @@ export namespace Parser {
     diagnostics: &mut DiagnosticBag
   ): void {
     let mut lexResult: LexResult = Lexer::lex(file);
-    let mut parser: ParserShared::State = ParserShared::createState(&mut lexResult.tokens, diagnostics, module);
+    let mut diagnosticsRef: &mut DiagnosticBag = diagnostics;
+    let mut lexDiagIndex: u64 = 0;
+
+    while (lexDiagIndex < lexResult.diagnostics.length()) {
+      let Option::SOME(lexDiag) = lexResult.diagnostics.get(lexDiagIndex) else {
+        lexDiagIndex += 1;
+        continue;
+      };
+
+      diagnosticsRef.push(cloneDiagnostic(lexDiag));
+      lexDiagIndex += 1;
+    }
+
+    let mut parser: ParserShared::State = ParserShared::createState(&mut lexResult.tokens, diagnosticsRef, module);
 
     while (!parser.atEof()) {
       let Option::SOME(itemId) = ParserDeclarations::parseTopLevelItem(&mut parser) else {

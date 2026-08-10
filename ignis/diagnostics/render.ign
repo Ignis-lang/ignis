@@ -1,25 +1,7 @@
 import Terminal from "std::terminal";
 
 import Diagnostic, DiagnosticBag, DiagnosticLabel, Severity from "./model";
-import SourceFile, SourceLocation, SourceSpan from "./source";
-
-function trimLineEnding(source: &SourceFile, start: u64, endExclusive: u64): u64 {
-  let mut contentEnd: u64 = endExclusive;
-
-  if (contentEnd > start) {
-    if (let Option::SOME(last) = source.text.charAt(contentEnd - 1) && last == '\n') {
-      contentEnd -= 1;
-    }
-  }
-
-  if (contentEnd > start) {
-    if (let Option::SOME(last) = source.text.charAt(contentEnd - 1) && last == '\r') {
-      contentEnd -= 1;
-    }
-  }
-
-  return contentEnd;
-}
+import SourceFile, SourceLocation, SourceSpan, trimLineEnding from "./source";
 
 function lineIndexAt(source: &SourceFile, position: u64): u32 {
   let mut line: u32 = 0;
@@ -97,7 +79,7 @@ function lineEnd(source: &SourceFile, lineIndex: u32): u64 {
 function lineText(source: &SourceFile, lineIndex: u32): String {
   let start: u64 = lineStart(source, lineIndex);
   let endExclusive: u64 = lineEnd(source, lineIndex);
-  let contentEnd: u64 = trimLineEnding(source, start, endExclusive);
+  let contentEnd: u64 = trimLineEnding(source.text.clone(), start, endExclusive);
 
   return source.text.substring(start as i64, (contentEnd - start) as i64);
 }
