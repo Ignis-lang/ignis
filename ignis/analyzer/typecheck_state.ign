@@ -571,6 +571,61 @@ export namespace Analyzer {
       @panic("unreachable: requireNonGenericRecordDefId match did not return");
     }
 
+    function requireNonGenericEnumDefId(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+      nonEnumMessage: str,
+      genericMessage: str,
+    ): Option<Analyzer::DefinitionId> {
+      let resolvedType: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (let Option::SOME(aliasDefId) = resolvedType.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return Option::NONE;
+      }
+
+      let Option::SOME(resolvedTypeNode) = typeStore.get(resolvedType.typeId) else {
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonEnumMessage);
+        return Option::NONE;
+      };
+
+      match (resolvedTypeNode) {
+        Analyzer::Type::Enum(defId) -> {
+          let Option::SOME(def) = defStore.get(defId) else {
+            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonEnumMessage);
+            return Option::NONE;
+          };
+
+          match (def) {
+            Analyzer::Definition::Enum(enum_) -> {
+              if (enum_.typeParams.length() > 0) {
+                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+                return Option::NONE;
+              }
+
+              return Option::SOME(defId);
+            },
+            _ -> {
+              Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonEnumMessage);
+              return Option::NONE;
+            },
+          };
+        },
+        Analyzer::Type::Instance(_) -> {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+          return Option::NONE;
+        },
+        _ -> {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonEnumMessage);
+          return Option::NONE;
+        },
+      };
+
+      @panic("unreachable: requireNonGenericEnumDefId match did not return");
+    }
+
     record RequiredMethodOwner {
       public defId: Analyzer::DefinitionId;
       public typeId: Analyzer::TypeId;
@@ -850,6 +905,91 @@ export namespace Analyzer {
       return true;
     }
 
+    /// Binds an enum-variant path pattern (`EnumName::Variant` or
+    /// `EnumName::Variant(args...)`) against a scrutinee type. Parallel to
+    /// `collectRecordPathPatternBindings`, but the constructor's kind is
+    /// resolved once by the caller (`collectPatternBindings`) via the
+    /// `BodyResolutionMap`, so this function receives `variantDefId` directly
+    /// instead of re-deriving it from `pattern`.
+    ///
+    /// Arity/payload-typed binding is forward-compatible dead code today:
+    /// the resolver (`resolvePatternPathVariantArity`, ADR-R5) currently
+    /// forces every variant *pattern* to zero arguments, so `pattern.arguments`
+    /// is always empty by the time this runs. The arity check still fires
+    /// when the variant *declaration* itself carries payload slots (e.g. a
+    /// bare `Variant` pattern matching a variant declared with payload) —
+    /// that mismatch is a real, reachable diagnostic today.
+    function collectEnumVariantPatternBindings(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      module: &Ast::Module,
+      pattern: &Ast::Pattern::Path,
+      variantDefId: Analyzer::DefinitionId,
+      typeId: Analyzer::TypeId,
+      mutable: boolean,
+      span: SourceSpan,
+    ): boolean {
+      let expectedEnumDefIdOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::requireNonGenericEnumDefId(
+        state,
+        defStore,
+        typeStore,
+        span,
+        typeId,
+        "enum variant pattern must match a non-generic enum",
+        "typecheck does not support generic enum destructuring",
+      );
+      let Option::SOME(expectedEnumDefId) = expectedEnumDefIdOpt else {
+        return false;
+      };
+
+      let Option::SOME(variantDefNode) = defStore.get(variantDefId) else {
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "enum variant pattern must resolve to a variant of the scrutinee's enum");
+        return false;
+      };
+
+      let variant: Analyzer::VariantDef = match (variantDefNode) {
+        Analyzer::Definition::Variant(v) -> v,
+        _ -> {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "enum variant pattern must resolve to a variant of the scrutinee's enum");
+          return false;
+        },
+      };
+
+      if (variant.owner.raw() != expectedEnumDefId.raw()) {
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "enum variant pattern does not belong to the scrutinee's enum");
+        return false;
+      }
+
+      let expectedArity: u64 = variant.payload.length();
+      if (pattern.arguments.length() != expectedArity) {
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "enum variant pattern arity does not match the variant's declared payload");
+        return false;
+      }
+
+      let mut index: u64 = 0;
+      while (index < expectedArity) {
+        let Option::SOME(argPatternId) = pattern.arguments.get(index) else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(payloadType) = variant.payload.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *argPatternId, *payloadType, mutable, span)) {
+          return false;
+        }
+
+        index += 1;
+      }
+
+      return true;
+    }
+
     function collectPatternBindings(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -874,6 +1014,27 @@ export namespace Analyzer {
           return true;
         },
         Ast::Pattern::Node::Path(path) -> {
+          let patternRefOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupPatternRef(resolvedBodies, patternId);
+          if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = patternRefOpt) {
+            if (let Option::SOME(def) = defStore.get(defId)) {
+              if (let Analyzer::Definition::Variant(_) = def) {
+                return Analyzer::Typecheck::collectEnumVariantPatternBindings(
+                  state,
+                  defStore,
+                  typeStore,
+                  symbols,
+                  resolvedBodies,
+                  module,
+                  &path,
+                  defId,
+                  typeId,
+                  mutable,
+                  span,
+                );
+              }
+            }
+          }
+
           return Analyzer::Typecheck::collectRecordPathPatternBindings(
             state,
             defStore,

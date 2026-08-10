@@ -50,6 +50,23 @@ function typecheckAddPathPattern(
   }));
 }
 
+function typecheckAddPathPattern2(
+  module: &mut Ast::Module,
+  seg0: str,
+  seg1: str,
+  arguments: Vector<Ast::PatternId>,
+): Ast::PatternId {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create(seg0));
+  segments.push(String::create(seg1));
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+    span: typecheckDummySpan(),
+    segments: segments,
+    arguments: arguments,
+  }));
+}
+
 function typecheckAddTuplePattern(
   module: &mut Ast::Module,
   elements: Vector<Ast::PatternId>
@@ -4024,4 +4041,208 @@ function typecheckMatchWithUnresolvedScrutineeStillChecksArmBody(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
+}
+
+// Phase 11: Enum-variant pattern binding (selfhost-match-exhaustiveness prerequisite, S2a)
+// ============================================================
+
+/// Scenario: a qualified enum-variant pattern (`E::A`) matching a
+/// non-generic enum scrutinee binds successfully. Before this fix,
+/// `collectPatternBindings` routed every `Path` pattern through
+/// `collectRecordPathPatternBindings`, which rejected `Type::Enum` with
+/// "record destructure annotation must be a non-generic record" — the only
+/// diagnostic present here is `checkMatchExpr`'s still-standing
+/// `emitUnsupported("match expressions")` wall (S3 has not landed).
+/// Spec: selfhost-match-exhaustiveness — enum coverage prerequisite.
+@test
+function typecheckEnumVariantPatternBindsNonGenericEnumScrutinee(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "A"));
+  variants.push(typecheckAddBinding(&mut module, "B"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let enumType: Ast::TypeId = typecheckAddPathType(&mut module, "E");
+  let eParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "e", enumType);
+  let eExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "e");
+
+  let variantPattern: Ast::PatternId = typecheckAddPathPattern2(&mut module, "E", "A", Vector::new<Ast::PatternId>());
+  let armBody: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: variantPattern,
+    guard: Option::NONE,
+    body: armBody,
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, eExpr, arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(eParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useEnum"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support match expressions");
+}
+
+/// Scenario: a bare variant pattern (`E::B`, zero arguments) matching a
+/// variant declared with one payload slot. The resolver's own arity check
+/// (`resolvePatternPathVariantArity`, ADR-R5) only ever validates against a
+/// hardcoded zero, so it accepts this pattern — the mismatch against the
+/// variant's *declared* payload arity is caught by typecheck's own
+/// `collectEnumVariantPatternBindings` arity check.
+/// Spec: selfhost-match-exhaustiveness — enum coverage prerequisite.
+@test
+function typecheckEnumVariantPatternRejectsPayloadArityMismatch(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut declArgs: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  declArgs.push(typecheckAddWildcardPattern(&mut module));
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddPathPattern(&mut module, "B", declArgs));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let enumType: Ast::TypeId = typecheckAddPathType(&mut module, "E");
+  let eParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "e", enumType);
+  let eExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "e");
+
+  let variantPattern: Ast::PatternId = typecheckAddPathPattern2(&mut module, "E", "B", Vector::new<Ast::PatternId>());
+  let armBody: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: variantPattern,
+    guard: Option::NONE,
+    body: armBody,
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, eExpr, arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(eParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useEnum"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
+  let Option::SOME(arityDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing arity diagnostic");
+  };
+  Test::assertEq<str>(arityDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(arityDiagnostic.message, "enum variant pattern arity does not match the variant's declared payload");
+}
+
+/// Scenario: a qualified variant pattern matching a *generic* enum scrutinee
+/// (annotated with the bare generic enum name, so its declared type resolves
+/// to the enum's own `typeId` with `typeParams.length() > 0`) is still
+/// walled off — `requireNonGenericEnumDefId` rejects it exactly like
+/// `requireNonGenericRecordDefId` rejects generic record destructuring.
+/// Spec: selfhost-match-exhaustiveness — generic scrutineess stay out of scope.
+@test
+function typecheckEnumVariantPatternRejectsGenericEnumScrutinee(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "A"));
+  let mut genericParameters: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParameters.push(typecheckGenericParam("T"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("E"),
+    genericParameters: genericParameters,
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let enumType: Ast::TypeId = typecheckAddPathType(&mut module, "E");
+  let eParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "e", enumType);
+  let eExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "e");
+
+  let variantPattern: Ast::PatternId = typecheckAddPathPattern2(&mut module, "E", "A", Vector::new<Ast::PatternId>());
+  let armBody: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: variantPattern,
+    guard: Option::NONE,
+    body: armBody,
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, eExpr, arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(eParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useEnum"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
+  let Option::SOME(genericDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckEnumVariantPatternRejectsGenericEnumScrutinee: missing generic-enum diagnostic");
+  };
+  Test::assertEq<str>(genericDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(genericDiagnostic.message, "typecheck does not support generic enum destructuring");
 }
