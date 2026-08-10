@@ -687,6 +687,127 @@ fn import_non_exported_symbol_error() {
 }
 
 #[test]
+fn import_used_only_in_match_patterns_is_not_unused_import() {
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
+  let lib_src = r#"
+    export enum Kind {
+      NOTE,
+      HELP,
+    }
+
+    export function makeKind(): Kind {
+      return Kind::NOTE;
+    }
+  "#;
+
+  let lib_output = analyze_library_with_shared_stores(
+    lib_src,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
+  assert_eq!(error_count(&lib_output), 0, "Library should have no errors");
+
+  let lib_exports = lib_output.collect_exports();
+  let lib_module_id = ModuleId::new(0);
+
+  let mut export_table: ExportTable = HashMap::new();
+  export_table.insert(lib_module_id, lib_exports);
+
+  let mut module_for_path: HashMap<String, ModuleId> = HashMap::new();
+  module_for_path.insert("./lib".to_string(), lib_module_id);
+
+  let main_src = r#"
+    import Kind, makeKind from "./lib";
+
+    function main(): i32 {
+      return match (makeKind()) {
+        Kind::NOTE -> 1,
+        Kind::HELP -> 2,
+      };
+    }
+  "#;
+
+  let output = analyze_with_imports(
+    main_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols,
+  );
+
+  assert!(
+    !has_error_code(&output, "A0123"),
+    "Import used only in match pattern paths should not be unused. Got diagnostics: {:?}",
+    output.diagnostics
+  );
+}
+
+#[test]
+fn import_used_only_in_record_literal_is_not_unused_import() {
+  let mut shared_types = TypeStore::new();
+  let mut shared_defs = DefinitionStore::new();
+  let mut shared_namespaces = NamespaceStore::new();
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+
+  let lib_src = r#"
+    export record Note {
+      public message: str;
+    }
+  "#;
+
+  let lib_output = analyze_library_with_shared_stores(
+    lib_src,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols.clone(),
+  );
+  assert_eq!(error_count(&lib_output), 0, "Library should have no errors");
+
+  let lib_exports = lib_output.collect_exports();
+  let lib_module_id = ModuleId::new(0);
+
+  let mut export_table: ExportTable = HashMap::new();
+  export_table.insert(lib_module_id, lib_exports);
+
+  let mut module_for_path: HashMap<String, ModuleId> = HashMap::new();
+  module_for_path.insert("./lib".to_string(), lib_module_id);
+
+  let main_src = r#"
+    import Note from "./lib";
+
+    function main(): str {
+      let note = Note { message: "hi" };
+      return note.message;
+    }
+  "#;
+
+  let output = analyze_with_imports(
+    main_src,
+    &export_table,
+    &module_for_path,
+    &mut shared_types,
+    &mut shared_defs,
+    &mut shared_namespaces,
+    symbols,
+  );
+
+  assert!(
+    !has_error_code(&output, "A0123"),
+    "Import used only as a record literal constructor should not be unused. Got diagnostics: {:?}",
+    output.diagnostics
+  );
+}
+
+#[test]
 fn import_used_in_type_path_is_not_unused_import() {
   let mut shared_types = TypeStore::new();
   let mut shared_defs = DefinitionStore::new();

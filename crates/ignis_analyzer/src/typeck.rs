@@ -1530,6 +1530,8 @@ impl<'a> Analyzer<'a> {
           variant_index,
         }) = self.resolve_qualified_path(&path_segments)
         {
+          self.mark_referenced(enum_def);
+
           let expected_enum = self.resolve_expected_enum_for_pattern(expected_type);
 
           if let Some((expected_enum_def, subst)) = expected_enum {
@@ -1608,6 +1610,7 @@ impl<'a> Analyzer<'a> {
           && let DefinitionKind::Constant(ref c) = self.defs.get(&def_id).kind
         {
           let const_ty = c.type_id;
+          self.mark_referenced(def_id);
           self.typecheck_assignment(expected_type, &const_ty, span);
           return false;
         }
@@ -3383,6 +3386,8 @@ impl<'a> Analyzer<'a> {
       );
       return self.types.error();
     };
+
+    self.mark_referenced(def_id);
 
     // Check it's a record
     let rd = match &self.defs.get(&def_id).kind {
