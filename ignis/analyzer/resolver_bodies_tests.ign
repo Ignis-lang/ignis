@@ -1,9 +1,10 @@
 import Test from "std::test";
 
-import SourceSpan from "@compiler::diagnostics";
+import DiagnosticBag, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 import Id from "@compiler::ids";
+import HashMap from "std::collections";
 
 /// Build a zero-byte source span suitable for test use.
 function bodiesDummySpan(): SourceSpan {
@@ -504,7 +505,7 @@ function resolveBodiesEmptyModuleProducesEmptyOutput(): void {
     &module,
   );
 
-  Test::assertEq<u64>(output.bodyResolution.nodeIds.length(), 0);
+  Test::assertEq<u64>(output.bodyResolution.index.length(), 0);
   Test::assertEq<u64>(output.diagnostics.length(), 0);
 }
 
@@ -1884,21 +1885,24 @@ function resolveBodiesDeterministicAcrossTwoRuns(): void {
     &pass2,
   );
 
-  Test::assertEq<u64>(out1.bodyResolution.nodeIds.length(), out2.bodyResolution.nodeIds.length());
+  Test::assertEq<u64>(out1.bodyResolution.index.length(), out2.bodyResolution.index.length());
   Test::assertEq<u64>(out1.diagnostics.length(), out2.diagnostics.length());
 
-  let mut i: u64 = 0;
-  while (i < out1.bodyResolution.nodeIds.length()) {
-    let Option::SOME(id1) = out1.bodyResolution.nodeIds.get(i) else {
-      i += 1;
-      continue;
+  // Every node id recorded in the first run must also be recorded (with the
+  // same key) in the second run — the HashMap-backed index does not preserve
+  // insertion order, but the recorded key SET must be identical across runs.
+  let mut cursor: Option<u64> = out1.bodyResolution.index.firstEntryCursor();
+  while (true) {
+    match (cursor) {
+      Option::SOME(pos) -> {
+        let key: &u32 = out1.bodyResolution.index.entryKey(pos);
+        Test::assert(out2.bodyResolution.index.contains(key));
+        cursor = out1.bodyResolution.index.nextEntryCursor(pos);
+      },
+      Option::NONE -> {
+        break;
+      },
     };
-    let Option::SOME(id2) = out2.bodyResolution.nodeIds.get(i) else {
-      i += 1;
-      continue;
-    };
-    Test::assertEq<u32>(*id1, *id2);
-    i += 1;
   }
 }
 
@@ -3472,4 +3476,74 @@ function resolveBodiesFunctionAsPatternPathOwnerEmitsInvalidQualifierDiagnostic(
     @panic("resolveBodiesFunctionAsPatternPathOwnerEmitsInvalidQualifierDiagnostic: pattern ref not found");
   };
   assertUnresolved(patRef);
+}
+
+/// Build an empty `ResolverBodiesState` suitable for direct `recordExprRef` /
+/// `recordPatternRef` / `findExprRef` / `findPatternRef` side-table tests,
+/// bypassing the full `resolveBodies` walk.
+function emptyResolverBodiesState(): Analyzer::ResolverBodies::ResolverBodiesState {
+  let sentinel: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+
+  return Analyzer::ResolverBodies::ResolverBodiesState {
+    diagnostics: DiagnosticBag::init(),
+    globalNameSyms: Vector::new<Analyzer::SymbolId>(),
+    globalNameDefs: Vector::new<Analyzer::DefinitionId>(),
+    importSyms: Vector::new<Analyzer::SymbolId>(),
+    importDefs: Vector::new<Analyzer::DefinitionId>(),
+    currentFunction: sentinel,
+    localStack: Analyzer::ResolverBodies::LocalStack {
+      scopeStarts: Vector::new<u64>(),
+      names: Vector::new<Analyzer::SymbolId>(),
+      locals: Vector::new<Analyzer::ResolverBodies::LocalId>(),
+    },
+    typeParamScope: Analyzer::Resolver::TypeParamScope {
+      syms: Vector::new<Analyzer::SymbolId>(),
+      typeIds: Vector::new<Analyzer::TypeId>(),
+    },
+    bodyResolution: Analyzer::ResolverBodies::BodyResolutionMap {
+      index: HashMap::new<u32, Analyzer::ResolverBodies::ResolvedRef>(),
+    },
+  };
+}
+
+/// Scenario: the `BodyResolutionMap` side table stores expression and pattern
+/// refs sharing the same raw node id under distinct `PATTERN_KEY_BIT`-masked
+/// keys, without collision, and misses an id that was never recorded.
+/// Spec: guards the `findExprRef`/`findPatternRef` lookup contract that the
+/// HashMap-index migration for `BodyResolutionMap` (ADR-B4) must preserve.
+@test
+function bodyResolutionMapDistinguishesExprAndPatternKeysAndMissesUnknownId(): void {
+  let mut state: Analyzer::ResolverBodies::ResolverBodiesState = emptyResolverBodiesState();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let exprId: Ast::ExpressionId = Id::fromRaw<Ast::ExpressionTag>(7);
+  let patId: Ast::PatternId = Id::fromRaw<Ast::PatternTag>(7);
+  let sym: Analyzer::SymbolId = symbols.intern("T");
+
+  Analyzer::ResolverBodies::recordExprRef(&mut state, exprId, Analyzer::ResolverBodies::ResolvedRef::TypeParam(sym));
+  Analyzer::ResolverBodies::recordPatternRef(&mut state, patId, Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")));
+
+  let Option::SOME(exprRef) = Analyzer::ResolverBodies::findExprRef(&state.bodyResolution, exprId.raw()) else {
+    @panic("expected expr ref at raw id 7");
+  };
+  match (exprRef) {
+    Analyzer::ResolverBodies::ResolvedRef::TypeParam(found) -> Test::assertEq<u32>(found.raw(), sym.raw()),
+    Analyzer::ResolverBodies::ResolvedRef::Local(_) -> @panic("expected TypeParam"),
+    Analyzer::ResolverBodies::ResolvedRef::Definition(_) -> @panic("expected TypeParam"),
+    Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> @panic("expected TypeParam"),
+  };
+
+  let Option::SOME(patRef) = Analyzer::ResolverBodies::findPatternRef(&state.bodyResolution, patId.raw()) else {
+    @panic("expected pattern ref at raw id 7");
+  };
+  assertUnresolved(patRef);
+
+  match (Analyzer::ResolverBodies::findExprRef(&state.bodyResolution, 999)) {
+    Option::SOME(_) -> @panic("expected findExprRef to miss an unrecorded id"),
+    Option::NONE -> {},
+  };
+  match (Analyzer::ResolverBodies::findPatternRef(&state.bodyResolution, 999)) {
+    Option::SOME(_) -> @panic("expected findPatternRef to miss an unrecorded id"),
+    Option::NONE -> {},
+  };
 }

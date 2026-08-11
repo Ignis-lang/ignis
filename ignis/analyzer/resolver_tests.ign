@@ -1,8 +1,9 @@
 import Test from "std::test";
 
-import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
+import DiagnosticBag, DiagnosticCode, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
+import HashMap from "std::collections";
 
 /// Build a zero-byte source span suitable for test diagnostics.
 function resolverDummySpan(): SourceSpan {
@@ -3383,4 +3384,70 @@ function resolverRejectsSelfOutsideMethodSignature(): void {
     @panic("expected diagnostic at index 0");
   };
   Test::assertEq<str>(diag.code, DiagnosticCode::UNDEFINED_TYPE);
+}
+
+/// Scenario: pass-1 (Record) and pass-2 (Function) predeclare the same name.
+/// Spec: `globalLookup` must keep first-hit-wins precedence — pass-1 entries
+/// take precedence over pass-2 duplicates (documented in `buildGlobalNameIndex`).
+/// This is the semantics the HashMap-index migration for `ResolverState`
+/// must preserve exactly (insert-if-absent, pass-1 index built first).
+@test
+function globalLookupPrefersPass1OverPass2DuplicateName(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Box"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let body: Ast::StatementId = module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: resolverDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: resolverDummySpan(),
+    name: String::create("Box"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module);
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module, &pass1);
+
+  let Option::SOME(recordDefId) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("record not found in pass-1 output");
+  };
+
+  let mut state: Analyzer::Resolver::ResolverState = Analyzer::Resolver::ResolverState {
+    diagnostics: DiagnosticBag::init(),
+    globalNameIndex: HashMap::new<u32, Analyzer::DefinitionId>(),
+    importNameIndex: HashMap::new<u32, Analyzer::DefinitionId>(),
+  };
+
+  Analyzer::Resolver::buildGlobalNameIndex(&mut state, &mut defStore, &pass1);
+  Analyzer::Resolver::buildGlobalNameIndex(&mut state, &mut defStore, &pass2);
+
+  let boxSym: Analyzer::SymbolId = symbols.intern("Box");
+  let Option::SOME(foundDefId) = Analyzer::Resolver::globalLookup(&mut state, boxSym) else {
+    @panic("expected globalLookup to find Box");
+  };
+
+  Test::assert(foundDefId.equals(&recordDefId));
+
+  let unknownSym: Analyzer::SymbolId = symbols.intern("DoesNotExist");
+  match (Analyzer::Resolver::globalLookup(&mut state, unknownSym)) {
+    Option::SOME(_) -> @panic("expected globalLookup to miss an unknown symbol"),
+    Option::NONE -> {},
+  };
 }

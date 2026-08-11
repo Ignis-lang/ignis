@@ -10,6 +10,7 @@ import
 from "@compiler::diagnostics";
 
 import Ast from "@compiler::ast";
+import HashMap from "std::collections";
 
 /// Type-syntax resolver for the Ignis selfhost compiler.
 ///
@@ -39,15 +40,17 @@ export namespace Analyzer {
     /// Per ADR-4: stores hold &mut borrow-style state via explicit parameter
     /// threading because Ignis borrow checker rejects &mut fields inside records.
     ///
-    /// `globalNameSyms` / `globalNameDefs` are co-indexed parallel vectors
-    /// mapping interned type-name symbols to their DefinitionIds (Records and
-    /// Enums only). Built once at the start of `resolveTypes`.
+    /// `globalNameIndex` / `importNameIndex` map interned name symbols (keyed
+    /// by `SymbolId.raw()`) to their `DefinitionId`s. `globalNameIndex` covers
+    /// Records, Enums, TypeAliases, and Traits; `importNameIndex` covers the
+    /// direct-import overlay. Both are lookup-only — never iterated — so they
+    /// are plain `HashMap`s rather than ordered co-indexed `Vector`s (ADR-1).
+    /// Built once at the start of `resolveTypes` via insert-if-absent so the
+    /// first index built (pass-1, then real imports) wins on name collisions.
     record ResolverState {
       public diagnostics: DiagnosticBag;
-      public globalNameSyms: Vector<Analyzer::SymbolId>;
-      public globalNameDefs: Vector<Analyzer::DefinitionId>;
-      public importNameSyms: Vector<Analyzer::SymbolId>;
-      public importNameDefs: Vector<Analyzer::DefinitionId>;
+      public globalNameIndex: HashMap<u32, Analyzer::DefinitionId>;
+      public importNameIndex: HashMap<u32, Analyzer::DefinitionId>;
     }
 
     /// Type-parameter scope for one item walk (Record, Enum, or Function).
@@ -117,62 +120,32 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
-    /// Linear scan of `state.globalNameSyms` for a matching symbol.
-    /// Returns the corresponding `DefinitionId` on match, NONE otherwise.
+    /// O(1) `HashMap` lookup of `sym` against `state.globalNameIndex`.
     ///
     /// Takes `&mut` per binder ADR-4 pattern (no auto-coercion of &mut to &).
     function globalLookup(
       state: &mut Analyzer::Resolver::ResolverState,
       sym: Analyzer::SymbolId,
     ): Option<Analyzer::DefinitionId> {
-      let mut index: u64 = 0;
+      let key: u32 = sym.raw();
 
-      while (index < state.globalNameSyms.length()) {
-        let Option::SOME(stored) = state.globalNameSyms.get(index) else {
-          index += 1;
-          continue;
-        };
-
-        if (stored.raw() == sym.raw()) {
-          let Option::SOME(defId) = state.globalNameDefs.get(index) else {
-            index += 1;
-            continue;
-          };
-
-          return Option::SOME(*defId);
-        }
-
-        index += 1;
-      }
-
-      return Option::NONE;
+      return match (state.globalNameIndex.get(&key)) {
+        Option::SOME(defId) -> Option::SOME(*defId),
+        Option::NONE -> Option::NONE,
+      };
     }
 
+    /// O(1) `HashMap` lookup of `sym` against `state.importNameIndex`.
     function importLookup(
       state: &mut Analyzer::Resolver::ResolverState,
       sym: Analyzer::SymbolId,
     ): Option<Analyzer::DefinitionId> {
-      let mut index: u64 = 0;
+      let key: u32 = sym.raw();
 
-      while (index < state.importNameSyms.length()) {
-        let Option::SOME(stored) = state.importNameSyms.get(index) else {
-          index += 1;
-          continue;
-        };
-
-        if (stored.raw() == sym.raw()) {
-          let Option::SOME(defId) = state.importNameDefs.get(index) else {
-            index += 1;
-            continue;
-          };
-
-          return Option::SOME(*defId);
-        }
-
-        index += 1;
-      }
-
-      return Option::NONE;
+      return match (state.importNameIndex.get(&key)) {
+        Option::SOME(defId) -> Option::SOME(*defId),
+        Option::NONE -> Option::NONE,
+      };
     }
 
     /// Map a primitive type name string to its pre-interned `TypeId`.
@@ -1577,9 +1550,24 @@ export namespace Analyzer {
     // Top-level walk — buildGlobalNameIndex, resolveItem, resolveTypes.
     // =========================================================================
 
-    /// Populate `state.globalNameSyms` / `state.globalNameDefs` from one
-    /// `BinderOutput`. Records and Enums only — these are the only types
-    /// addressable as type names.
+    /// Insert `(sym, defId)` into `state.globalNameIndex` only if `sym` is not
+    /// already mapped, preserving first-hit-wins precedence across repeated
+    /// `buildGlobalNameIndex` calls (pass-1 before pass-2).
+    function insertGlobalNameIfAbsent(
+      state: &mut Analyzer::Resolver::ResolverState,
+      sym: Analyzer::SymbolId,
+      defId: Analyzer::DefinitionId,
+    ): void {
+      let key: u32 = sym.raw();
+      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+
+      if (!stateRef.globalNameIndex.contains(&key)) {
+        stateRef.globalNameIndex.insert(key, defId);
+      }
+    }
+
+    /// Populate `state.globalNameIndex` from one `BinderOutput`. Records and
+    /// Enums only — these are the only types addressable as type names.
     ///
     /// Called twice (pass-1 then pass-2). Duplicate names not deduplicated —
     /// first-hit wins in `globalLookup`, so pass-1 entries take precedence.
@@ -1603,14 +1591,10 @@ export namespace Analyzer {
 
         match (def) {
           Analyzer::Definition::Record(rec) -> {
-            let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
-            stateRef.globalNameSyms.push(rec.name);
-            stateRef.globalNameDefs.push(*defId);
+            insertGlobalNameIfAbsent(state, rec.name, *defId);
           },
           Analyzer::Definition::Enum(en) -> {
-            let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
-            stateRef.globalNameSyms.push(en.name);
-            stateRef.globalNameDefs.push(*defId);
+            insertGlobalNameIfAbsent(state, en.name, *defId);
           },
           Analyzer::Definition::Function(_) -> {},
           Analyzer::Definition::Variable(_) -> {},
@@ -1621,14 +1605,10 @@ export namespace Analyzer {
           // are never addressable as type names — excluded from the flat index.
           Analyzer::Definition::Method(_) -> {},
           Analyzer::Definition::TypeAlias(alias) -> {
-            let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
-            stateRef.globalNameSyms.push(alias.name);
-            stateRef.globalNameDefs.push(*defId);
+            insertGlobalNameIfAbsent(state, alias.name, *defId);
           },
           Analyzer::Definition::Trait(trait_) -> {
-            let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
-            stateRef.globalNameSyms.push(trait_.name);
-            stateRef.globalNameDefs.push(*defId);
+            insertGlobalNameIfAbsent(state, trait_.name, *defId);
           },
         };
 
@@ -1695,6 +1675,9 @@ export namespace Analyzer {
       };
     }
 
+    /// Populate `state.importNameIndex` from the direct-import overlay.
+    /// Insert-if-absent so the first overlay entry for a name wins, matching
+    /// the previous linear-scan `importLookup` first-hit-wins behavior.
     function appendImportOverlayToState(
       state: &mut Analyzer::Resolver::ResolverState,
       overlay: &Analyzer::Imports::ImportOverlay,
@@ -1711,9 +1694,11 @@ export namespace Analyzer {
           continue;
         };
 
+        let key: u32 = sym.raw();
         let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
-        stateRef.importNameSyms.push(*sym);
-        stateRef.importNameDefs.push(*defId);
+        if (!stateRef.importNameIndex.contains(&key)) {
+          stateRef.importNameIndex.insert(key, *defId);
+        }
         index += 1;
       }
     }
@@ -1734,10 +1719,8 @@ export namespace Analyzer {
     ): Analyzer::Resolver::ResolverOutput {
       let mut state: Analyzer::Resolver::ResolverState = Analyzer::Resolver::ResolverState {
         diagnostics: DiagnosticBag::init(),
-        globalNameSyms: Vector::new<Analyzer::SymbolId>(),
-        globalNameDefs: Vector::new<Analyzer::DefinitionId>(),
-        importNameSyms: Vector::new<Analyzer::SymbolId>(),
-        importNameDefs: Vector::new<Analyzer::DefinitionId>(),
+        globalNameIndex: HashMap::new<u32, Analyzer::DefinitionId>(),
+        importNameIndex: HashMap::new<u32, Analyzer::DefinitionId>(),
       };
 
       buildGlobalNameIndex(&mut state, defStore, pass1);

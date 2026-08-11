@@ -9,6 +9,7 @@ from "@compiler::diagnostics";
 
 import Ast from "@compiler::ast";
 import Id from "@compiler::ids";
+import HashMap from "std::collections";
 
 /// Body-level name resolver for the Ignis selfhost compiler.
 ///
@@ -96,14 +97,16 @@ export namespace Analyzer {
       MemberNotFoundOnRecord,
     }
 
-    /// NodeId → ResolvedRef side-table. Parallel co-indexed vectors per binder ADR-1.
+    /// NodeId → ResolvedRef side-table, backed by a `HashMap<u32, ResolvedRef>`.
     ///
     /// Keys are raw `u32`; expression ids stored plain, pattern ids stored with
     /// `PATTERN_KEY_BIT` (0x8000_0000) OR'd in (ADR-B4). Use `findExprRef` /
-    /// `findPatternRef` for lookup — they handle the masking.
+    /// `findPatternRef` for lookup — they handle the masking. This table is
+    /// pushed once per node and only ever looked up by key, never iterated in
+    /// order, so a `HashMap` replaces the earlier ADR-1 parallel-vector
+    /// fallback outright (`u32` now satisfies `Hash & Eq`).
     record BodyResolutionMap {
-      public nodeIds: Vector<u32>;
-      public refs: Vector<Analyzer::ResolverBodies::ResolvedRef>;
+      public index: HashMap<u32, Analyzer::ResolverBodies::ResolvedRef>;
     }
 
     /// Output produced by `resolveBodies`. Sibling to `Resolver::ResolverOutput`.
@@ -174,64 +177,31 @@ export namespace Analyzer {
     /// Look up a resolved ref for an expression node in the side-table.
     ///
     /// Returns SOME if the ExpressionId was recorded during body resolution,
-    /// NONE otherwise. Linear scan — O(n).
+    /// NONE otherwise. O(1) `HashMap` lookup.
     function findExprRef(
       map: &Analyzer::ResolverBodies::BodyResolutionMap,
       exprRaw: u32,
     ): Option<Analyzer::ResolverBodies::ResolvedRef> {
-      let mut i: u64 = 0;
-
-      while (i < map.nodeIds.length()) {
-        let Option::SOME(k) = map.nodeIds.get(i) else {
-          i += 1;
-          continue;
-        };
-
-        if (*k == exprRaw) {
-          let Option::SOME(r) = map.refs.get(i) else {
-            i += 1;
-            continue;
-          };
-
-          return Option::SOME(Analyzer::ResolverBodies::copyResolvedRef(r));
-        }
-
-        i += 1;
-      }
-
-      return Option::NONE;
+      return match (map.index.get(&exprRaw)) {
+        Option::SOME(r) -> Option::SOME(Analyzer::ResolverBodies::copyResolvedRef(r)),
+        Option::NONE -> Option::NONE,
+      };
     }
 
     /// Look up a resolved ref for a pattern node in the side-table.
     ///
     /// Pattern keys are stored with `PATTERN_KEY_BIT` OR'd in (ADR-B4).
-    /// Linear scan — O(n).
+    /// O(1) `HashMap` lookup.
     function findPatternRef(
       map: &Analyzer::ResolverBodies::BodyResolutionMap,
       patRaw: u32,
     ): Option<Analyzer::ResolverBodies::ResolvedRef> {
       let key: u32 = patRaw | PATTERN_KEY_BIT;
-      let mut i: u64 = 0;
 
-      while (i < map.nodeIds.length()) {
-        let Option::SOME(k) = map.nodeIds.get(i) else {
-          i += 1;
-          continue;
-        };
-
-        if (*k == key) {
-          let Option::SOME(r) = map.refs.get(i) else {
-            i += 1;
-            continue;
-          };
-
-          return Option::SOME(Analyzer::ResolverBodies::copyResolvedRef(r));
-        }
-
-        i += 1;
-      }
-
-      return Option::NONE;
+      return match (map.index.get(&key)) {
+        Option::SOME(r) -> Option::SOME(Analyzer::ResolverBodies::copyResolvedRef(r)),
+        Option::NONE -> Option::NONE,
+      };
     }
 
     /// Deep-copy a `ResolvedRef` so it can be returned by value from a shared
@@ -262,6 +232,10 @@ export namespace Analyzer {
 
     /// Record an expression ref into the side-table.
     ///
+    /// Each `ExpressionId` is visited and recorded at most once per walk (one
+    /// AST node, one resolution site), so a plain `insert` is equivalent to
+    /// the earlier linear-scan `findExprRef`'s first-recorded-entry semantics.
+    ///
     /// @panic if the raw ExpressionId has the high bit set (ADR-B4 overflow).
     function recordExprRef(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
@@ -275,11 +249,12 @@ export namespace Analyzer {
       }
 
       let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
-      stateRef.bodyResolution.nodeIds.push(raw);
-      stateRef.bodyResolution.refs.push(r);
+      stateRef.bodyResolution.index.insert(raw, r);
     }
 
     /// Record a pattern ref into the side-table with PATTERN_KEY_BIT OR'd in.
+    ///
+    /// See `recordExprRef` — each PatternId is recorded at most once per walk.
     ///
     /// @panic if the raw PatternId has the high bit set (ADR-B4 overflow).
     function recordPatternRef(
@@ -295,8 +270,7 @@ export namespace Analyzer {
 
       let key: u32 = raw | PATTERN_KEY_BIT;
       let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
-      stateRef.bodyResolution.nodeIds.push(key);
-      stateRef.bodyResolution.refs.push(r);
+      stateRef.bodyResolution.index.insert(key, r);
     }
 
     // =========================================================================
@@ -2359,8 +2333,7 @@ export namespace Analyzer {
           typeIds: Vector::new<Analyzer::TypeId>(),
         },
         bodyResolution: Analyzer::ResolverBodies::BodyResolutionMap {
-          nodeIds: Vector::new<u32>(),
-          refs: Vector::new<Analyzer::ResolverBodies::ResolvedRef>(),
+          index: HashMap::new<u32, Analyzer::ResolverBodies::ResolvedRef>(),
         },
       };
 

@@ -2788,3 +2788,46 @@ function binderClassifiesRecordNoSelfMethodAsStatic(): void {
     Option::NONE -> @panic("record definition missing"),
   };
 }
+
+/// Scenario: `BinderOutput` maps multiple predeclared roots to distinct
+/// `DefinitionId`s and rejects raw ids that were never predeclared.
+/// Spec: guards the `findDef` lookup contract (hit/hit/miss) that the
+/// HashMap-index migration must preserve exactly.
+@test
+function findDefLooksUpEachPredeclaredRootAndMissesUnknownRawId(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let firstId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("First"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+  let secondId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: dummySpan(),
+    name: String::create("Second"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(Analyzer::Binder::nodeDefCount(&pass1), 2);
+
+  let Option::SOME(firstDefId) = Analyzer::Binder::findDef(&pass1, firstId.raw()) else {
+    @panic("expected First to be predeclared");
+  };
+  let Option::SOME(secondDefId) = Analyzer::Binder::findDef(&pass1, secondId.raw()) else {
+    @panic("expected Second to be predeclared");
+  };
+
+  Test::assert(!firstDefId.equals(&secondDefId));
+  assertItemNotPredeclared(&pass1, 999999);
+}

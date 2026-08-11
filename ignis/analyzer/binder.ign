@@ -8,6 +8,7 @@ import
 from "@compiler::diagnostics";
 
 import Ast from "@compiler::ast";
+import HashMap from "std::collections";
 
 /// Pass-1 binder for the Ignis selfhost compiler.
 ///
@@ -21,13 +22,30 @@ import Ast from "@compiler::ast";
 /// the sentinel `typeId`; the real `Type::Record` / `Type::Enum` entries are
 /// allocated in pass 2.
 ///
-/// Note on nodeDefs representation: the design called for `HashMap<u32, DefinitionId>`.
-/// `u32` does not satisfy the `Hash & Eq` bounds on `std::collections::HashMap`, and
-/// sub-namespace types (a NodeKey wrapper) are inaccessible from external test code
-/// due to Ignis namespace resolution constraints in this selfhost revision. We use
-/// parallel `Vector<u32>` / `Vector<Analyzer::DefinitionId>` instead. `findDef`
-/// provides O(n) lookup — acceptable for the small scope of pass-1 test scenarios.
-/// This is documented as ADR-1 (parallel-vector fallback).
+/// ADR-1 (updated, IGN-84): the original blocker — `u32` not satisfying
+/// `Hash & Eq` for `std::collections::HashMap` keys — is fixed; primitives
+/// now implement the canonical `Hash`/`Eq` bounds. `nodeIds` / `defIds`
+/// remain ordered, co-indexed `Vector`s because callers (e.g.
+/// `directIndexAppendOutput`) walk them in push order to build other
+/// order-sensitive indices, and `HashMap` iteration order is not insertion
+/// order. `BinderOutput.index` adds a `HashMap<u32, DefinitionId>` alongside
+/// those vectors purely for O(1) `findDef` lookups; it is never iterated.
+///
+/// Whole-program HashMap migration status (IGN-84):
+/// - Migrated: `Binder::BinderOutput.index` (this file), `Resolver::ResolverState`
+///   global/import name indices (`resolver.ign`), `ResolverBodies::BodyResolutionMap`
+///   (`resolver_bodies.ign`, ADR-B4 side table — the largest win, replacing a
+///   per-node linear scan across every resolved body).
+/// - Left as parallel vectors, reviewed and rejected: `Imports::ImportOverlay` /
+///   `DirectDeclarationIndex` (small per-module cardinality, heavy positional
+///   test coupling, no quadratic hot path); `Typecheck::TypecheckState` local-
+///   binding vectors (push/pop/truncate scope stack — truncation semantics do
+///   not translate to `HashMap`); `StringInterner.texts` (index IS the `Symbol`
+///   identity — `resolve()` needs positional access; a `str`-keyed dedup index
+///   would require reasoning about `str` views into a growing `Vector<String>`,
+///   which Ignis's borrow checker does not verify); `TypeStore::internCompound`
+///   (structural-equality dedup — would need a structural `Hash` over the
+///   recursive `Type` enum; substantial new surface, left as future work).
 export namespace Analyzer {
   namespace Binder {
     /// Internal mutable state threaded through the pass-1 walk.
@@ -50,12 +68,18 @@ export namespace Analyzer {
     ///
     /// `nodeIds[i]` is the raw `u32` of an `Ast::ItemId` and `defIds[i]` is the
     /// corresponding placeholder `Analyzer::DefinitionId`. The vectors are co-indexed
-    /// and always have the same length.
+    /// and always have the same length; they remain the ordered iteration source
+    /// (see `directIndexAppendOutput`).
+    ///
+    /// `index` mirrors the same entries as a `HashMap<u32, DefinitionId>` for
+    /// O(1) `findDef` lookups. It is built once from `nodeIds`/`defIds` and MUST
+    /// NOT be relied on for iteration order.
     ///
     /// `diagnostics` carries any errors emitted during the walk.
     record BinderOutput {
       public nodeIds: Vector<u32>;
       public defIds: Vector<Analyzer::DefinitionId>;
+      public index: HashMap<u32, Analyzer::DefinitionId>;
       public diagnostics: DiagnosticBag;
     }
 
@@ -71,27 +95,39 @@ export namespace Analyzer {
     }
 
     /// Returns the `DefinitionId` for the given raw item id, or `NONE` if not mapped.
-    /// Linear scan — O(n). Suitable for pass-1 test assertions.
+    /// O(1) lookup via `BinderOutput.index`.
     function findDef(
       output: &Analyzer::Binder::BinderOutput,
       rawId: u32
     ): Option<Analyzer::DefinitionId> {
-      let mut index: u64 = 0;
-      let count: u64 = output.nodeIds.length();
-      let mut found: Option<Analyzer::DefinitionId> = Option::NONE;
+      return match (output.index.get(&rawId)) {
+        Option::SOME(defId) -> Option::SOME(*defId),
+        Option::NONE -> Option::NONE,
+      };
+    }
 
-      while (index < count) {
-        if (let Option::SOME(storedId) = output.nodeIds.get(index)) {
-          if (*storedId == rawId) {
-            if (let Option::SOME(defId) = output.defIds.get(index)) {
-              found = Option::SOME(*defId);
-            }
+    /// Builds the `rawId -> DefinitionId` lookup index from the ordered,
+    /// co-indexed `nodeIds`/`defIds` vectors. Duplicate raw ids (not expected
+    /// during a single pass) resolve to the last-pushed entry, matching the
+    /// previous linear-scan `findDef` behavior.
+    function buildNodeDefIndex(
+      nodeIds: &Vector<u32>,
+      defIds: &Vector<Analyzer::DefinitionId>,
+    ): HashMap<u32, Analyzer::DefinitionId> {
+      let mut index: HashMap<u32, Analyzer::DefinitionId> = HashMap::new<u32, Analyzer::DefinitionId>();
+      let mut position: u64 = 0;
+      let count: u64 = nodeIds.length();
+
+      while (position < count) {
+        if (let Option::SOME(rawId) = nodeIds.get(position)) {
+          if (let Option::SOME(defId) = defIds.get(position)) {
+            index.insert(*rawId, *defId);
           }
         }
-        index += 1;
+        position += 1;
       }
 
-      return found;
+      return index;
     }
 
     /// Check if (scopeKey, sym) has already been declared in `state.scopeKeys`.
@@ -1582,9 +1618,12 @@ export namespace Analyzer {
         @panic("Binder::predeclareRoots: TypeStore.length() changed during pass 1, which breaks the pass-1 invariant");
       }
 
+      let nodeDefIndex: HashMap<u32, Analyzer::DefinitionId> = Analyzer::Binder::buildNodeDefIndex(&state.nodeIds, &state.defIds);
+
       let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::BinderOutput {
         nodeIds: state.nodeIds,
         defIds: state.defIds,
+        index: nodeDefIndex,
         diagnostics: state.diagnostics,
       };
 
@@ -1640,9 +1679,12 @@ export namespace Analyzer {
         index += 1;
       }
 
+      let nodeDefIndex: HashMap<u32, Analyzer::DefinitionId> = Analyzer::Binder::buildNodeDefIndex(&state.nodeIds, &state.defIds);
+
       return Analyzer::Binder::BinderOutput {
         nodeIds: state.nodeIds,
         defIds: state.defIds,
+        index: nodeDefIndex,
         diagnostics: state.diagnostics,
       };
     }
