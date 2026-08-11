@@ -2968,6 +2968,52 @@ function main(): i32 {
 }
 
 // =========================================================================
+// Diverging-branch ownership merge
+// =========================================================================
+
+#[test]
+fn e2e_ownership_diverging_branch_no_double_drop() {
+  e2e_workspace_std_test(
+    "ownership_diverging_branch_no_double_drop",
+    r#"
+import Io from "std::io";
+
+@implements(Drop)
+record Owned {
+    public id: i32;
+
+    drop(&mut self): void {
+        Io::println("dropped");
+    }
+}
+
+function consume(x: Owned): void {
+    return;
+}
+
+function useIt(x: Owned, flag: boolean): i32 {
+    if (flag) {
+        consume(x);
+        return 1;
+    }
+
+    return 2;
+}
+
+function main(): i32 {
+    let a: Owned = Owned { id: 1 };
+    let r: i32 = useIt(a, true);
+
+    let b: Owned = Owned { id: 2 };
+    let r2: i32 = useIt(b, false);
+
+    return r + r2;
+}
+"#,
+  );
+}
+
+// =========================================================================
 // Overwrite-drop ordering
 // =========================================================================
 

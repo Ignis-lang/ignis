@@ -1839,3 +1839,86 @@ function main(): u32 {
   );
   assert_snapshot!("arithmetic_u8_plus_u32_hir", common::format_hir(&result));
 }
+
+#[test]
+fn move_in_diverging_branch_is_not_inconsistent() {
+  // The then-branch always diverges (ends in `return`), so it never reaches
+  // the post-if join point. The move it performs must not be merged with the
+  // fall-through (else-less) path's state, and must not raise O0003.
+  common::assert_ok(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+function consume(s: Owned): void {
+    return;
+}
+
+function useIt(x: Owned, flag: boolean): i32 {
+    if (flag) {
+        consume(x);
+        return 1;
+    }
+
+    return 2;
+}
+"#,
+  );
+}
+
+#[test]
+fn move_in_diverging_else_branch_is_not_inconsistent() {
+  // Same shape as above, but the diverging move happens in an explicit
+  // `else` branch (both arms return, one directly and one via a moving call).
+  common::assert_ok(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+function consume(s: Owned): i32 {
+    return 1;
+}
+
+function useIt(x: Owned, flag: boolean): i32 {
+    if (flag) {
+        return consume(x);
+    } else {
+        return 2;
+    }
+}
+"#,
+  );
+}
+
+#[test]
+fn move_when_both_branches_diverge_is_not_inconsistent() {
+  // Both branches move and return: the join point is unreachable, so no
+  // merge diagnostic should fire regardless of which branch moved what.
+  common::assert_ok(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+function consume(s: Owned): i32 {
+    return 1;
+}
+
+function useIt(x: Owned, flag: boolean): i32 {
+    if (flag) {
+        return consume(x);
+    } else {
+        return consume(x);
+    }
+}
+"#,
+  );
+}

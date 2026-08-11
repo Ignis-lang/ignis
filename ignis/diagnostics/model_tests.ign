@@ -22,12 +22,12 @@ function assertLabel(
   Test::assertEq<LabelKind>(label.kind, kind);
   Test::assertEq<u64>(label.span.start, start);
   Test::assertEq<u64>(label.span.end, end);
-  Test::assertEq<str>(label.message, message);
+  Test::assertEq<str>(label.messageText(), message);
 }
 
 function assertNote(note: &DiagnosticNote, kind: NoteKind, message: str): void {
   Test::assertEq<NoteKind>(note.kind, kind);
-  Test::assertEq<str>(note.message, message);
+  Test::assertEq<str>(note.messageText(), message);
 }
 
 @test
@@ -70,7 +70,7 @@ function diagnosticBagPreservesInsertionOrderAndStructuredFields(): void {
 
   Test::assertEq<Severity>(firstDiagnostic.severity, Severity::ERROR);
   Test::assertEq<str>(firstDiagnostic.code, "I0001");
-  Test::assertEq<str>(firstDiagnostic.message, "expected expression");
+  Test::assertEq<str>(firstDiagnostic.messageText(), "expected expression");
   Test::assertEq<str>(firstDiagnostic.primarySpan.filePath, "input.ign");
 
   let firstLabel: &DiagnosticLabel = match (firstDiagnostic.labels.get(0)) {
@@ -85,7 +85,7 @@ function diagnosticBagPreservesInsertionOrderAndStructuredFields(): void {
   };
   assertNote(firstNote, NoteKind::NOTE, "parser stopped here");
 
-  Test::assert(match (secondDiagnostic.help) {
+  Test::assert(match (secondDiagnostic.helpText()) {
     Option::SOME(_) -> true,
     Option::NONE -> false,
   });
@@ -120,7 +120,7 @@ function diagnosticTracksPrimarySecondaryLabelsAndOptionalHelp(): void {
   assertLabel(primaryLabel, LabelKind::PRIMARY, 16, 20, "used here");
   assertLabel(secondaryLabel, LabelKind::SECONDARY, 2, 5, "declared here");
 
-  let help: str = match (diagnostic.help) {
+  let help: str = match (diagnostic.helpText()) {
     Option::SOME(value) -> value,
     Option::NONE -> @panic("missing help"),
   };

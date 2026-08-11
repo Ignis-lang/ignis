@@ -1147,15 +1147,34 @@ impl<'a> HirOwnershipChecker<'a> {
       // Pop snapshot
       self.branch_snapshots.pop();
 
-      // Merge branch states
-      self.merge_branch_states(vec![then_state, else_state], span);
+      // A branch that diverges (e.g. ends in `return`) never reaches the join
+      // point, so its state must not participate in the merge: the moves it
+      // performed are only visible on its own (unreachable-after) path, not
+      // on the path that actually falls through. Only merge states from
+      // branches that are still reachable; when neither branch falls
+      // through, the join point itself is unreachable and any state is safe
+      // since nothing downstream will observe it, so fall back to a
+      // conservative (most-restrictive) merge.
+      match (then_reachable, else_reachable) {
+        (true, true) => self.merge_branch_states(vec![then_state, else_state], span),
+        (true, false) => self.states = then_state,
+        (false, true) => self.states = else_state,
+        (false, false) => self.states = self.conservative_merge(&then_state, &else_state),
+      }
 
       // Reachable after if-else: at least one branch must be reachable
       self.reachable = then_reachable || else_reachable;
     } else {
-      // No explicit else: merge then-state with the pre-if snapshot.
+      // No explicit else: merge then-state with the pre-if snapshot. The
+      // implicit "else" (falling through the if entirely) is only reachable
+      // when we reached the if in the first place, i.e. always here.
       let pre_if_state = self.branch_snapshots.pop().unwrap();
-      self.merge_branch_states(vec![then_state, pre_if_state], span);
+
+      if then_reachable {
+        self.merge_branch_states(vec![then_state, pre_if_state], span);
+      } else {
+        self.states = pre_if_state;
+      }
 
       // No else means the "else" path always falls through → reachable
       self.reachable = then_reachable || pre_if_reachable;

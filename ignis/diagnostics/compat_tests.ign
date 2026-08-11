@@ -35,7 +35,7 @@ function assertCompatLabel(
   Test::assertEq<LabelKind>(label.kind, kind);
   Test::assertEq<u64>(label.span.start, start);
   Test::assertEq<u64>(label.span.end, end);
-  Test::assertEq<str>(label.message, message);
+  Test::assertEq<str>(label.messageText(), message);
 }
 
 function formatParsedDiagnostics(parsed: &ParsedDiagnostics): String {
@@ -53,7 +53,7 @@ function formatParsedDiagnostics(parsed: &ParsedDiagnostics): String {
   rendered.pushStr("|");
   rendered.pushStr(diagnostic.code);
   rendered.pushStr("|");
-  rendered.pushStr(diagnostic.message);
+  rendered.pushStr(diagnostic.messageText());
   rendered.pushStr("|");
   rendered.pushStr(diagnostic.primarySpan.filePath);
   rendered.pushStr(":");
@@ -129,7 +129,7 @@ function parseExpectedDiagnosticsPreservesStructuredFields(): void {
 
   Test::assertEq<Severity>(diagnostic.severity, Severity::ERROR);
   Test::assertEq<str>(diagnostic.code, DiagnosticCode::TYPE_MISMATCH);
-  Test::assertEq<str>(diagnostic.message, "type mismatch");
+  Test::assertEq<str>(diagnostic.messageText(), "type mismatch");
   Test::assertEq<str>(diagnostic.primarySpan.filePath, "input.ign");
   Test::assertEq<u64>(diagnostic.primarySpan.start, 23);
   Test::assertEq<u64>(diagnostic.primarySpan.end, 27);
@@ -148,7 +148,7 @@ function parseExpectedDiagnosticsPreservesStructuredFields(): void {
   assertCompatLabel(primaryLabel, LabelKind::PRIMARY, 23, 27, "used here");
   assertCompatLabel(secondaryLabel, LabelKind::SECONDARY, 4, 10, "declared here");
 
-  let help: str = match (diagnostic.help) {
+  let help: str = match (diagnostic.helpText()) {
     Option::SOME(value) -> value,
     Option::NONE -> @panic("missing help"),
   };

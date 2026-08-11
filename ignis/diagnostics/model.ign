@@ -103,9 +103,16 @@ export enum NoteKind {
 export record DiagnosticLabel {
   public kind: LabelKind;
   public span: SourceSpan;
-  public message: str;
+  public message: String;
+
+  /// Zero-copy borrowed view of the owned message. Valid only while this
+  /// label (and its owning `Diagnostic`) is alive.
+  public messageText(&self): str {
+    return self.message.toStr();
+  }
 }
 
+@implements(Drop)
 export record DiagnosticLabelList {
   data: *mut DiagnosticLabel;
   length: u64;
@@ -156,6 +163,13 @@ export record DiagnosticLabelList {
   }
 
   drop(&mut self): void {
+    let mut index: u64 = 0;
+
+    while (index < self.length) {
+      @dropInPlace<DiagnosticLabel>((&mut self.data[index]) as *mut DiagnosticLabel);
+      index += 1;
+    }
+
     if (self.data != null) {
       LibC::Allocator::free(self.data as CType::CVoidPtr);
       self.data = null;
@@ -168,9 +182,16 @@ export record DiagnosticLabelList {
 
 export record DiagnosticNote {
   public kind: NoteKind;
-  public message: str;
+  public message: String;
+
+  /// Zero-copy borrowed view of the owned message. Valid only while this
+  /// note (and its owning `Diagnostic`) is alive.
+  public messageText(&self): str {
+    return self.message.toStr();
+  }
 }
 
+@implements(Drop)
 export record DiagnosticNoteList {
   data: *mut DiagnosticNote;
   length: u64;
@@ -221,6 +242,13 @@ export record DiagnosticNoteList {
   }
 
   drop(&mut self): void {
+    let mut index: u64 = 0;
+
+    while (index < self.length) {
+      @dropInPlace<DiagnosticNote>((&mut self.data[index]) as *mut DiagnosticNote);
+      index += 1;
+    }
+
     if (self.data != null) {
       LibC::Allocator::free(self.data as CType::CVoidPtr);
       self.data = null;
@@ -233,12 +261,15 @@ export record DiagnosticNoteList {
 
 export record Diagnostic {
   public severity: Severity;
+  /// Diagnostic codes are always `DiagnosticCode` constants — static `str`
+  /// literals with `'static` lifetime — so borrowing them here never risks
+  /// dangling on drop, unlike `message`/`help`, which are caller-built.
   public code: str;
-  public message: str;
+  public message: String;
   public primarySpan: SourceSpan;
   public labels: DiagnosticLabelList;
   public notes: DiagnosticNoteList;
-  public help: Option<str>;
+  public help: Option<String>;
 
   public static new(
     severity: Severity,
@@ -249,7 +280,7 @@ export record Diagnostic {
     return Diagnostic {
       severity: severity,
       code: code,
-      message: message,
+      message: String::create(message),
       primarySpan: primarySpan,
       labels: DiagnosticLabelList::init(),
       notes: DiagnosticNoteList::init(),
@@ -257,11 +288,26 @@ export record Diagnostic {
     };
   }
 
+  /// Zero-copy borrowed view of the owned message. Valid only while this
+  /// `Diagnostic` is alive.
+  public messageText(&self): str {
+    return self.message.toStr();
+  }
+
+  /// Zero-copy borrowed view of the owned help text, if any. Valid only
+  /// while this `Diagnostic` is alive.
+  public helpText(&self): Option<str> {
+    return match (&self.help) {
+      Option::SOME(text) -> Option::SOME(text.toStr()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
   public addLabel(&mut self, kind: LabelKind, span: SourceSpan, message: str): void {
     self.labels.push(DiagnosticLabel {
       kind: kind,
       span: span,
-      message: message,
+      message: String::create(message),
     });
   }
 
@@ -272,15 +318,16 @@ export record Diagnostic {
   public addNote(&mut self, message: str): void {
     self.notes.push(DiagnosticNote {
       kind: NoteKind::NOTE,
-      message: message,
+      message: String::create(message),
     });
   }
 
   public setHelp(&mut self, message: str): void {
-    self.help = Option::SOME(message);
+    self.help = Option::SOME(String::create(message));
   }
 }
 
+@implements(Drop)
 export record DiagnosticBag {
   diagnostics: *mut Diagnostic;
   length: u64;
@@ -343,6 +390,13 @@ export record DiagnosticBag {
   }
 
   drop(&mut self): void {
+    let mut index: u64 = 0;
+
+    while (index < self.length) {
+      @dropInPlace<Diagnostic>((&mut self.diagnostics[index]) as *mut Diagnostic);
+      index += 1;
+    }
+
     if (self.diagnostics != null) {
       LibC::Allocator::free(self.diagnostics as CType::CVoidPtr);
       self.diagnostics = null;

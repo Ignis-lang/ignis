@@ -629,7 +629,7 @@ function assertSingleDiagnostic(output: &Analyzer::AnalyzerOutput, code: str, me
     @panic("assertSingleDiagnostic: missing diagnostic");
   };
   Test::assertEq<str>(diagnostic.code, code);
-  Test::assertEq<str>(diagnostic.message, message);
+  Test::assertEq<str>(diagnostic.messageText(), message);
 }
 
 @test
@@ -1921,8 +1921,8 @@ function typecheckLoopControlDiagnosticsRespectLoopDepth(): void {
   let Option::SOME(secondDiagnostic) = output.diagnostics.get(1) else {
     @panic("typecheckLoopControlDiagnosticsRespectLoopDepth: missing second diagnostic");
   };
-  Test::assertEq<str>(firstDiagnostic.message, "`break` used outside of loop");
-  Test::assertEq<str>(secondDiagnostic.message, "`continue` used outside of loop");
+  Test::assertEq<str>(firstDiagnostic.messageText(), "`break` used outside of loop");
+  Test::assertEq<str>(secondDiagnostic.messageText(), "`continue` used outside of loop");
 }
 
 @test
@@ -1965,7 +1965,7 @@ function typecheckRejectsNonBooleanForConditionAndBreakValues(): void {
   let Option::SOME(secondDiagnostic) = output.diagnostics.get(1) else {
     @panic("typecheckRejectsNonBooleanForConditionAndBreakValues: missing second diagnostic");
   };
-  Test::assertEq<str>(secondDiagnostic.message, "typecheck does not support break values");
+  Test::assertEq<str>(secondDiagnostic.messageText(), "typecheck does not support break values");
 }
 
 @test
@@ -4152,22 +4152,20 @@ function typecheckEnumVariantPatternBindsNonGenericEnumScrutinee(): void {
 
   // Slice S2b2 credits the `E::A` arm's variant toward coverage, so only `B`
   // remains uncovered — the message now names it instead of the blanket
-  // "requires a wildcard" wording from S2b1. Not the last dynamically-built
-  // diagnostic in this test (the wall diagnostic follows), so only
-  // severity/code are pinned here — see engram note on diagnostic message
-  // buffer reuse.
+  // "requires a wildcard" wording from S2b1.
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
   let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckEnumVariantPatternBindsNonGenericEnumScrutinee: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
   Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: enum scrutinee is missing variant `B`");
 
   let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(1) else {
     @panic("typecheckEnumVariantPatternBindsNonGenericEnumScrutinee: missing wall diagnostic");
   };
   Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+  Test::assertEq<str>(wallDiagnostic.messageText(), "typecheck does not support match expressions");
 }
 
 /// Scenario: a bare variant pattern (`E::B`, zero arguments) matching a
@@ -4240,13 +4238,13 @@ function typecheckEnumVariantPatternRejectsPayloadArityMismatch(): void {
     @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing arity diagnostic");
   };
   Test::assertEq<str>(arityDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
-  Test::assertEq<str>(arityDiagnostic.message, "enum variant pattern arity does not match the variant's declared payload");
+  Test::assertEq<str>(arityDiagnostic.messageText(), "enum variant pattern arity does not match the variant's declared payload");
 
   let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(1) else {
     @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing wall diagnostic");
   };
   Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+  Test::assertEq<str>(wallDiagnostic.messageText(), "typecheck does not support match expressions");
 }
 
 /// Scenario: a qualified variant pattern matching a *generic* enum scrutinee
@@ -4314,13 +4312,13 @@ function typecheckEnumVariantPatternRejectsGenericEnumScrutinee(): void {
     @panic("typecheckEnumVariantPatternRejectsGenericEnumScrutinee: missing generic-enum diagnostic");
   };
   Test::assertEq<str>(genericDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
-  Test::assertEq<str>(genericDiagnostic.message, "typecheck does not support generic enum destructuring");
+  Test::assertEq<str>(genericDiagnostic.messageText(), "typecheck does not support generic enum destructuring");
 
   let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
     @panic("typecheckEnumVariantPatternRejectsGenericEnumScrutinee: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
-  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: generic enum scrutinee requires a wildcard/irrefutable-binding arm");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: generic enum scrutinee requires a wildcard/irrefutable-binding arm");
 }
 
 // Phase 12: bool/irrefutable exhaustiveness + `valuePosition` plumbing
@@ -4364,30 +4362,27 @@ function typecheckMatchStatementBoolMissingFalseArmWarns(): void {
 
   // Literal patterns are still walled by `collectPatternBindings`
   // ("literal patterns" unsupported) independently of exhaustiveness — that
-  // wall fires during the arm-binding loop, before exhaustiveness runs. Its
-  // message is checked only for severity/code, not exact text: dynamically
-  // built diagnostic messages that are not the last one emitted in a test
-  // are not safe to assert on verbatim (see engram note on diagnostic
-  // message buffer reuse).
+  // wall fires during the arm-binding loop, before exhaustiveness runs.
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
   let Option::SOME(bindDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckMatchStatementBoolMissingFalseArmWarns: missing pattern-bind diagnostic");
   };
   Test::assertEq<Severity>(bindDiagnostic.severity, Severity::ERROR);
   Test::assertEq<str>(bindDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(bindDiagnostic.messageText(), "typecheck does not support literal patterns");
 
   let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
     @panic("typecheckMatchStatementBoolMissingFalseArmWarns: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
   Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
-  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: bool scrutinee requires both `true` and `false` arms, or a wildcard/irrefutable-binding arm");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: bool scrutinee requires both `true` and `false` arms, or a wildcard/irrefutable-binding arm");
 
   let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(2) else {
     @panic("typecheckMatchStatementBoolMissingFalseArmWarns: missing wall diagnostic");
   };
   Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+  Test::assertEq<str>(wallDiagnostic.messageText(), "typecheck does not support match expressions");
 }
 
 /// Scenario: a `bool` scrutinee with both `true` and `false` literal arms
@@ -4430,27 +4425,26 @@ function typecheckMatchStatementBoolBothLiteralsCoveredEmitsNoExhaustivenessDiag
   // Both arms are literal patterns, so each independently trips the
   // pre-existing "literal patterns" bind-time wall; exhaustiveness itself
   // stays silent (bool coverage is complete) and only the match wall remains
-  // on top. The two bind-time diagnostics are checked by severity/code only
-  // (not exact text): they are not the last dynamically-built diagnostic
-  // message in this test, and only the last one is safe to assert on
-  // verbatim (see engram note on diagnostic message buffer reuse).
+  // on top.
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
   let Option::SOME(firstBindDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckMatchStatementBoolBothLiteralsCoveredEmitsNoExhaustivenessDiagnostic: missing first pattern-bind diagnostic");
   };
   Test::assertEq<Severity>(firstBindDiagnostic.severity, Severity::ERROR);
   Test::assertEq<str>(firstBindDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(firstBindDiagnostic.messageText(), "typecheck does not support literal patterns");
 
   let Option::SOME(secondBindDiagnostic) = output.typecheck.diagnostics.get(1) else {
     @panic("typecheckMatchStatementBoolBothLiteralsCoveredEmitsNoExhaustivenessDiagnostic: missing second pattern-bind diagnostic");
   };
   Test::assertEq<Severity>(secondBindDiagnostic.severity, Severity::ERROR);
   Test::assertEq<str>(secondBindDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(secondBindDiagnostic.messageText(), "typecheck does not support literal patterns");
 
   let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(2) else {
     @panic("typecheckMatchStatementBoolBothLiteralsCoveredEmitsNoExhaustivenessDiagnostic: missing wall diagnostic");
   };
-  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+  Test::assertEq<str>(wallDiagnostic.messageText(), "typecheck does not support match expressions");
 }
 
 /// Scenario: a wildcard arm satisfies coverage for an open-domain (`i32`)
@@ -4493,7 +4487,7 @@ function typecheckMatchExpressionWildcardCoversOpenDomain(): void {
     @panic("typecheckMatchExpressionWildcardCoversOpenDomain: missing wall diagnostic");
   };
   Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+  Test::assertEq<str>(wallDiagnostic.messageText(), "typecheck does not support match expressions");
 }
 
 /// Scenario: the same shape as above but with no wildcard and a single
@@ -4532,29 +4526,27 @@ function typecheckMatchExpressionNonExhaustiveIsError(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   // The literal `0` pattern independently trips the pre-existing "literal
-  // patterns" bind-time wall before exhaustiveness runs. It is checked by
-  // severity/code only (not exact text): it is not the last dynamically
-  // built diagnostic message in this test, and only the last one is safe to
-  // assert on verbatim (see engram note on diagnostic message buffer reuse).
+  // patterns" bind-time wall before exhaustiveness runs.
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
   let Option::SOME(bindDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckMatchExpressionNonExhaustiveIsError: missing pattern-bind diagnostic");
   };
   Test::assertEq<Severity>(bindDiagnostic.severity, Severity::ERROR);
   Test::assertEq<str>(bindDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(bindDiagnostic.messageText(), "typecheck does not support literal patterns");
 
   let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
     @panic("typecheckMatchExpressionNonExhaustiveIsError: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::ERROR);
   Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
-  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
 
   let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(2) else {
     @panic("typecheckMatchExpressionNonExhaustiveIsError: missing wall diagnostic");
   };
   Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+  Test::assertEq<str>(wallDiagnostic.messageText(), "typecheck does not support match expressions");
 }
 
 /// Scenario: a guarded wildcard arm is the match's only arm. A guard cannot
@@ -4596,7 +4588,7 @@ function typecheckMatchStatementGuardedWildcardDoesNotCountAsCoverage(): void {
     @panic("typecheckMatchStatementGuardedWildcardDoesNotCountAsCoverage: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
-  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
 }
 
 /// Scenario: a parenthesised match used as an expression statement —
@@ -4635,22 +4627,20 @@ function typecheckGroupedMatchStatementTakesExpressionPositionPath(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   // The literal `0` pattern independently trips the pre-existing "literal
-  // patterns" bind-time wall before exhaustiveness runs. It is checked by
-  // severity/code only (not exact text): it is not the last dynamically
-  // built diagnostic message in this test, and only the last one is safe to
-  // assert on verbatim (see engram note on diagnostic message buffer reuse).
+  // patterns" bind-time wall before exhaustiveness runs.
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
   let Option::SOME(bindDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckGroupedMatchStatementTakesExpressionPositionPath: missing pattern-bind diagnostic");
   };
   Test::assertEq<Severity>(bindDiagnostic.severity, Severity::ERROR);
   Test::assertEq<str>(bindDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(bindDiagnostic.messageText(), "typecheck does not support literal patterns");
 
   let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
     @panic("typecheckGroupedMatchStatementTakesExpressionPositionPath: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
 }
 
 // Phase 13: enum variant coverage crediting (selfhost-match-exhaustiveness,
@@ -4729,7 +4719,7 @@ function typecheckMatchStatementEnumAllVariantsCoveredEmitsNoExhaustivenessDiagn
     @panic("typecheckMatchStatementEnumAllVariantsCoveredEmitsNoExhaustivenessDiagnostic: missing wall diagnostic");
   };
   Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+  Test::assertEq<str>(wallDiagnostic.messageText(), "typecheck does not support match expressions");
 }
 
 /// Scenario: two arms match the same variant (`Red` twice), plus one arm for
@@ -4803,7 +4793,7 @@ function typecheckMatchStatementEnumDuplicateVariantArmFullCoverageIsExhaustive(
     @panic("typecheckMatchStatementEnumDuplicateVariantArmFullCoverageIsExhaustive: missing wall diagnostic");
   };
   Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+  Test::assertEq<str>(wallDiagnostic.messageText(), "typecheck does not support match expressions");
 }
 
 /// Scenario: the `Red` arm carries a guard, so it must not count toward
@@ -4869,21 +4859,21 @@ function typecheckMatchStatementEnumGuardedVariantArmDoesNotCountAsCoverage(): v
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  // `exhaustivenessDiagnostic` is not the last dynamically-built diagnostic
-  // in this test (the wall diagnostic follows), so only severity/code are
-  // pinned here — see engram note on diagnostic message buffer reuse.
+  // The guarded `Red` arm gives no coverage credit, so `Red` is reported
+  // missing by name even though its pattern otherwise matches a real variant.
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
   let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckMatchStatementEnumGuardedVariantArmDoesNotCountAsCoverage: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
   Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: enum scrutinee is missing variant `Red`");
 
   let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(1) else {
     @panic("typecheckMatchStatementEnumGuardedVariantArmDoesNotCountAsCoverage: missing wall diagnostic");
   };
   Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+  Test::assertEq<str>(wallDiagnostic.messageText(), "typecheck does not support match expressions");
 }
 
 /// Scenario: a match over a plain (non-generic) record scrutinee, with a
@@ -4947,7 +4937,7 @@ function typecheckMatchStatementRecordScrutineeStaysSilentOnCoverage(): void {
     @panic("typecheckMatchStatementRecordScrutineeStaysSilentOnCoverage: missing wall diagnostic");
   };
   Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+  Test::assertEq<str>(wallDiagnostic.messageText(), "typecheck does not support match expressions");
 }
 
 /// Scenario: a match over a generic record scrutinee instantiated with
@@ -5011,26 +5001,25 @@ function typecheckMatchStatementGenericRecordInstanceScrutineeUsesRecordWordedMe
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   // The destructure pattern independently trips the generic-record-
-  // destructure bind-time wall before exhaustiveness runs (checked by
-  // severity/code only — not the last dynamically-built diagnostic, see
-  // engram note on diagnostic message buffer reuse).
+  // destructure bind-time wall before exhaustiveness runs.
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
   let Option::SOME(bindDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckMatchStatementGenericRecordInstanceScrutineeUsesRecordWordedMessage: missing bind diagnostic");
   };
   Test::assertEq<Severity>(bindDiagnostic.severity, Severity::ERROR);
   Test::assertEq<str>(bindDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(bindDiagnostic.messageText(), "typecheck does not support generic record destructuring");
 
   let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
     @panic("typecheckMatchStatementGenericRecordInstanceScrutineeUsesRecordWordedMessage: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
   Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
-  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: generic record scrutinee requires a wildcard/irrefutable-binding arm");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: generic record scrutinee requires a wildcard/irrefutable-binding arm");
 
   let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(2) else {
     @panic("typecheckMatchStatementGenericRecordInstanceScrutineeUsesRecordWordedMessage: missing wall diagnostic");
   };
   Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+  Test::assertEq<str>(wallDiagnostic.messageText(), "typecheck does not support match expressions");
 }

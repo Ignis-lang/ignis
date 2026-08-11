@@ -22,7 +22,7 @@ export record ParseOutput {
 /// Deep-copy a diagnostic (severity, code, message, primary span, labels,
 /// notes, help) since `Diagnostic` does not implement `Clone`.
 function cloneDiagnostic(diag: &Diagnostic): Diagnostic {
-  let mut cloned: Diagnostic = Diagnostic::new(diag.severity, diag.code, diag.message, diag.primarySpan);
+  let mut cloned: Diagnostic = Diagnostic::new(diag.severity, diag.code, diag.messageText(), diag.primarySpan);
   let mut labelIndex: u64 = 0;
 
   while (labelIndex < diag.labels.length()) {
@@ -31,7 +31,7 @@ function cloneDiagnostic(diag: &Diagnostic): Diagnostic {
       continue;
     };
 
-    cloned.addLabel(label.kind, label.span, label.message);
+    cloned.addLabel(label.kind, label.span, label.messageText());
     labelIndex += 1;
   }
 
@@ -45,12 +45,12 @@ function cloneDiagnostic(diag: &Diagnostic): Diagnostic {
 
     cloned.notes.push(DiagnosticNote {
       kind: note.kind,
-      message: note.message,
+      message: note.message.clone(),
     });
     noteIndex += 1;
   }
 
-  if (let Option::SOME(help) = diag.help) {
+  if (let Option::SOME(help) = diag.helpText()) {
     cloned.setHelp(help);
   }
 
