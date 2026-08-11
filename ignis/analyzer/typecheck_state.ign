@@ -570,6 +570,57 @@ export namespace Analyzer {
       return Analyzer::ResolverBodies::findPatternRef(&resolvedBodies.bodyResolution, patternId.raw());
     }
 
+    /// Strips a single `&T` / `&mut T` layer from a receiver type so member
+    /// access and method calls reach the referent's record or enum.
+    ///
+    /// `self` inside a method body has type `Reference(Owner)` because the
+    /// parser emits `&self` / `&mut self` as a reference pattern, so without
+    /// this every `self.field` and `self.method()` fails to resolve.
+    ///
+    /// Aliases are chased before and after the strip so `&Alias` reaches the
+    /// aliased type. Exactly one layer is removed, matching the reference
+    /// compiler: chasing further would silently accept a `&&T` receiver that
+    /// nothing in the language produces.
+    ///
+    /// Applied at receiver sites only. Record initializers and enum patterns
+    /// share the `require*` helpers and must keep rejecting a reference.
+    function derefReceiverType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Analyzer::TypeId {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      if (resolved.cycleAlias.isSome()) {
+        return typeId;
+      }
+
+      let Option::SOME(resolvedNode) = typeStore.get(resolved.typeId) else {
+        return typeId;
+      };
+
+      let mut referentOpt: Option<Analyzer::TypeId> = Option::NONE;
+
+      match (resolvedNode) {
+        Analyzer::Type::Reference(reference) -> {
+          referentOpt = Option::SOME(reference.referent);
+        },
+        _ -> {},
+      };
+
+      let Option::SOME(referent) = referentOpt else {
+        return typeId;
+      };
+
+      let referentResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, referent);
+
+      if (referentResolved.cycleAlias.isSome()) {
+        return typeId;
+      }
+
+      return referentResolved.typeId;
+    }
+
     function requireNonGenericRecordDefId(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
