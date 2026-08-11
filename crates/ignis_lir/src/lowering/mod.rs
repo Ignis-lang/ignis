@@ -3628,6 +3628,13 @@ impl<'a> LoweringContext<'a> {
   ) -> Option<ConstValue> {
     use ignis_type::definition::ConstValue as DefConstValue;
     match value {
+      // The analyzer holds every integer constant as an `i64` bit pattern, so a
+      // `u64` at or above 2^63 arrives here looking negative. Emitting it as a
+      // signed constant would make C apply signed semantics to it — an
+      // arithmetic right shift, a signed division, a signed comparison — and the
+      // folded program would silently disagree with the same expression written
+      // out at runtime.
+      DefConstValue::Int(i) if self.types.is_unsigned(&ty) => Some(ConstValue::UInt(*i as u64, ty)),
       DefConstValue::Int(i) => Some(ConstValue::Int(*i, ty)),
       DefConstValue::Float(f) => Some(ConstValue::Float(*f, ty)),
       DefConstValue::Bool(b) => Some(ConstValue::Bool(*b, ty)),

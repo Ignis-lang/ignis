@@ -218,6 +218,23 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  /// Whether an operand's checked type is an unsigned integer.
+  ///
+  /// `ConstValue::Int` stores the two's-complement bit pattern in an `i64`, so
+  /// the value alone cannot say whether `>>`, `/`, `%` or a comparison should
+  /// use signed or unsigned semantics. A `u64` at or above 2^63 is stored as a
+  /// negative `i64`, and folding it with signed operators produced results the
+  /// runtime never agrees with.
+  fn const_operand_is_unsigned(
+    &self,
+    node_id: &NodeId,
+  ) -> bool {
+    self
+      .node_types
+      .get(node_id)
+      .is_some_and(|type_id| self.types.is_unsigned(type_id))
+  }
+
   pub(crate) fn const_eval_expression_node(
     &self,
     node_id: &NodeId,
@@ -250,7 +267,8 @@ impl<'a> Analyzer<'a> {
         ASTExpression::Binary(binary) => {
           let left = self.const_eval_expression_node(&binary.left, _scope_kind);
           let right = self.const_eval_expression_node(&binary.right, _scope_kind);
-          const_eval_binary(&binary.operator, left, right)
+          let unsigned = self.const_operand_is_unsigned(&binary.left);
+          const_eval_binary(&binary.operator, left, right, unsigned)
         },
         ASTExpression::Ternary(ternary) => {
           let condition = self.const_eval_expression_node(&ternary.condition, _scope_kind)?;
@@ -263,7 +281,8 @@ impl<'a> Analyzer<'a> {
         },
         ASTExpression::Unary(unary) => {
           let operand = self.const_eval_expression_node(&unary.operand, _scope_kind);
-          const_eval_unary(&unary.operator, operand)
+          let unsigned = self.const_operand_is_unsigned(&unary.operand);
+          const_eval_unary(&unary.operator, operand, unsigned)
         },
         ASTExpression::Vector(vector) => {
           let values: Option<Vec<ConstValue>> = vector
@@ -316,48 +335,101 @@ fn const_value_from_literal(value: &IgnisLiteralValue) -> ConstValue {
   }
 }
 
+/// Folds an integer binary operation over the two's-complement bit patterns held
+/// by `ConstValue::Int`.
+///
+/// `unsigned` comes from the left operand's checked type. Addition, subtraction,
+/// multiplication, the bitwise operators and a left shift produce the same bits
+/// either way, so only division, remainder, the ordering comparisons and a right
+/// shift branch on it. Getting that wrong is silent: the folded result simply
+/// disagrees with what the same expression computes at runtime.
+fn const_eval_int_binary(
+  op: &ASTBinaryOperator,
+  l: i64,
+  r: i64,
+  unsigned: bool,
+) -> Option<ConstValue> {
+  let from_unsigned = |value: u64| ConstValue::Int(value as i64);
+
+  match op {
+    ASTBinaryOperator::Add => {
+      if unsigned {
+        (l as u64).checked_add(r as u64).map(from_unsigned)
+      } else {
+        l.checked_add(r).map(ConstValue::Int)
+      }
+    },
+    ASTBinaryOperator::Subtract => {
+      if unsigned {
+        (l as u64).checked_sub(r as u64).map(from_unsigned)
+      } else {
+        l.checked_sub(r).map(ConstValue::Int)
+      }
+    },
+    ASTBinaryOperator::Multiply => {
+      if unsigned {
+        (l as u64).checked_mul(r as u64).map(from_unsigned)
+      } else {
+        l.checked_mul(r).map(ConstValue::Int)
+      }
+    },
+    ASTBinaryOperator::Divide => {
+      if unsigned {
+        (l as u64).checked_div(r as u64).map(from_unsigned)
+      } else {
+        l.checked_div(r).map(ConstValue::Int)
+      }
+    },
+    ASTBinaryOperator::Modulo => {
+      if unsigned {
+        (l as u64).checked_rem(r as u64).map(from_unsigned)
+      } else {
+        l.checked_rem(r).map(ConstValue::Int)
+      }
+    },
+    ASTBinaryOperator::Equal => Some(ConstValue::Bool(l == r)),
+    ASTBinaryOperator::NotEqual => Some(ConstValue::Bool(l != r)),
+    ASTBinaryOperator::LessThan => Some(ConstValue::Bool(if unsigned { (l as u64) < (r as u64) } else { l < r })),
+    ASTBinaryOperator::LessThanOrEqual => {
+      Some(ConstValue::Bool(if unsigned { (l as u64) <= (r as u64) } else { l <= r }))
+    },
+    ASTBinaryOperator::GreaterThan => Some(ConstValue::Bool(if unsigned { (l as u64) > (r as u64) } else { l > r })),
+    ASTBinaryOperator::GreaterThanOrEqual => {
+      Some(ConstValue::Bool(if unsigned { (l as u64) >= (r as u64) } else { l >= r }))
+    },
+    ASTBinaryOperator::BitAnd => Some(ConstValue::Int(l & r)),
+    ASTBinaryOperator::BitOr => Some(ConstValue::Int(l | r)),
+    ASTBinaryOperator::BitXor => Some(ConstValue::Int(l ^ r)),
+    ASTBinaryOperator::ShiftLeft => u32::try_from(r)
+      .ok()
+      .and_then(|shift| l.checked_shl(shift))
+      .map(ConstValue::Int),
+    ASTBinaryOperator::ShiftRight => {
+      let shift = u32::try_from(r).ok()?;
+
+      if unsigned {
+        (l as u64).checked_shr(shift).map(from_unsigned)
+      } else {
+        l.checked_shr(shift).map(ConstValue::Int)
+      }
+    },
+    _ => None,
+  }
+}
+
 fn const_eval_binary(
   op: &ASTBinaryOperator,
   left: Option<ConstValue>,
   right: Option<ConstValue>,
+  unsigned: bool,
 ) -> Option<ConstValue> {
   match (left, right) {
-    (Some(ConstValue::Int(l)), Some(ConstValue::Int(r))) => match op {
-      ASTBinaryOperator::Add => l.checked_add(r).map(ConstValue::Int),
-      ASTBinaryOperator::Subtract => l.checked_sub(r).map(ConstValue::Int),
-      ASTBinaryOperator::Multiply => l.checked_mul(r).map(ConstValue::Int),
-      ASTBinaryOperator::Divide => {
-        if r != 0 {
-          l.checked_div(r).map(ConstValue::Int)
-        } else {
-          None
-        }
-      },
-      ASTBinaryOperator::Modulo => {
-        if r != 0 {
-          l.checked_rem(r).map(ConstValue::Int)
-        } else {
-          None
-        }
-      },
-      ASTBinaryOperator::Equal => Some(ConstValue::Bool(l == r)),
-      ASTBinaryOperator::NotEqual => Some(ConstValue::Bool(l != r)),
-      ASTBinaryOperator::LessThan => Some(ConstValue::Bool(l < r)),
-      ASTBinaryOperator::LessThanOrEqual => Some(ConstValue::Bool(l <= r)),
-      ASTBinaryOperator::GreaterThan => Some(ConstValue::Bool(l > r)),
-      ASTBinaryOperator::GreaterThanOrEqual => Some(ConstValue::Bool(l >= r)),
-      ASTBinaryOperator::BitAnd => Some(ConstValue::Int(l & r)),
-      ASTBinaryOperator::BitOr => Some(ConstValue::Int(l | r)),
-      ASTBinaryOperator::BitXor => Some(ConstValue::Int(l ^ r)),
-      ASTBinaryOperator::ShiftLeft => u32::try_from(r)
-        .ok()
-        .and_then(|shift| l.checked_shl(shift))
-        .map(ConstValue::Int),
-      ASTBinaryOperator::ShiftRight => u32::try_from(r)
-        .ok()
-        .and_then(|shift| l.checked_shr(shift))
-        .map(ConstValue::Int),
-      _ => None,
+    (Some(ConstValue::Int(l)), Some(ConstValue::Int(r))) => {
+      if matches!(op, ASTBinaryOperator::Divide | ASTBinaryOperator::Modulo) && r == 0 {
+        return None;
+      }
+
+      const_eval_int_binary(op, l, r, unsigned)
     },
     (Some(ConstValue::Float(l)), Some(ConstValue::Float(r))) => {
       let result = match op {
@@ -406,9 +478,13 @@ fn const_eval_binary(
 fn const_eval_unary(
   op: &UnaryOperator,
   operand: Option<ConstValue>,
+  unsigned: bool,
 ) -> Option<ConstValue> {
   match operand {
     Some(ConstValue::Int(i)) => match op {
+      // Negating an unsigned value has no meaning here; leaving it unfolded
+      // keeps a wrong constant out of the program.
+      UnaryOperator::Negate if unsigned => None,
       UnaryOperator::Negate => i.checked_neg().map(ConstValue::Int),
       UnaryOperator::Not => Some(ConstValue::Bool(i == 0)),
       UnaryOperator::BitNot => Some(ConstValue::Int(!i)),

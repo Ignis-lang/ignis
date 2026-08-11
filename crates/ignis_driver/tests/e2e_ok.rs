@@ -6608,13 +6608,7 @@ function main(): i32 {
         return 2;
     }
 
-    // Kept off the constant-folding path on purpose: constant arithmetic still
-    // rounds u64 through i64, so a folded `HIGH_U64 >> 63` shifts arithmetically.
-    // That is a separate defect from the literal widening this test pins.
-    let mut high: u64 = HIGH_U64;
-    high = high + 0;
-
-    if ((high >> 63) != 1) {
+    if ((HIGH_U64 >> 63) != 1) {
         return 3;
     }
 
@@ -6626,6 +6620,61 @@ function main(): i32 {
 
     if ((wide >> 32) != 1) {
         return 5;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_unsigned_constants_keep_unsigned_semantics() {
+  e2e_test(
+    "unsigned_constants_keep_unsigned_semantics",
+    r#"
+const MAX_U64: u64 = 18446744073709551615;
+const HIGH_U64: u64 = 9223372036854775808;
+
+// Folded inside the analyzer.
+const FOLDED_QUOTIENT: u64 = MAX_U64 / 3;
+const FOLDED_REMAINDER: u64 = MAX_U64 % 10;
+const FOLDED_TOP_BIT: u64 = HIGH_U64 >> 63;
+
+// Every value here sits at or above 2^63, where the i64 bit pattern the
+// analyzer stores looks negative. Signed semantics would give -1 for the
+// shifts, 0 for the quotient, and would order the comparisons backwards.
+function main(): i32 {
+    if (FOLDED_QUOTIENT != 6148914691236517205) {
+        return 1;
+    }
+
+    if (FOLDED_REMAINDER != 5) {
+        return 2;
+    }
+
+    if (FOLDED_TOP_BIT != 1) {
+        return 3;
+    }
+
+    let emittedShift: u64 = MAX_U64 >> 60;
+
+    if (emittedShift != 15) {
+        return 4;
+    }
+
+    let emittedQuotient: u64 = MAX_U64 / 3;
+
+    if (emittedQuotient != 6148914691236517205) {
+        return 5;
+    }
+
+    if (HIGH_U64 <= 1) {
+        return 6;
+    }
+
+    if (MAX_U64 < HIGH_U64) {
+        return 7;
     }
 
     return 0;
