@@ -615,3 +615,60 @@ fn trims_trailing_whitespace_from_lines() {
     assert_eq!(line, line.trim_end(), "line has trailing whitespace: {:?}", line);
   }
 }
+
+#[test]
+fn lambda_block_body_indents_relative_to_its_binding() {
+  let source = "\
+function main(): i32 {
+  let mut counter: i32 = 0;
+
+  let inc = (): void -> {
+    counter = counter + 1;
+  };
+
+  inc();
+  return counter;
+}
+";
+
+  let formatted = format_text(
+    source,
+    &FormatOptions {
+      check: false,
+      config: FormatterConfig::default(),
+    },
+  )
+  .expect("lambda block body should format");
+
+  assert_eq!(formatted, source);
+}
+
+#[test]
+fn nested_lambda_block_bodies_keep_their_nesting() {
+  let source = "\
+function main(): i32 {
+  let outerVal: i32 = 10;
+
+  let outer = (x: i32): i32 -> {
+    let inner = (y: i32): i32 -> {
+      return outerVal + x + y;
+    };
+
+    return inner(5);
+  };
+
+  return outer(20);
+}
+";
+
+  let formatted = format_text(
+    source,
+    &FormatOptions {
+      check: false,
+      config: FormatterConfig::default(),
+    },
+  )
+  .expect("nested lambda block bodies should format");
+
+  assert_eq!(formatted, source);
+}

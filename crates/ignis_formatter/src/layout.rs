@@ -1854,7 +1854,7 @@ impl<'a> AstChunkFormatter<'a> {
         Ok(self.format_record_init_inline(record_init)?)
       },
       ASTExpression::BuiltinCall(builtin) => self.format_builtin_call(builtin),
-      ASTExpression::Lambda(lambda) => self.format_lambda(lambda, parent_precedence),
+      ASTExpression::Lambda(lambda) => self.format_lambda(lambda, parent_precedence, indent_level),
       ASTExpression::PostfixIncrement { expr, .. } => Ok(format!("{}++", self.format_expression_node(*expr, 12, 0)?)),
       ASTExpression::PostfixDecrement { expr, .. } => Ok(format!("{}--", self.format_expression_node(*expr, 12, 0)?)),
       ASTExpression::Try { expr, .. } => Ok(format!("{}!", self.format_expression_node(*expr, 12, 0)?)),
@@ -2071,10 +2071,14 @@ impl<'a> AstChunkFormatter<'a> {
     Ok(formatted)
   }
 
+  /// `indent_level` is the level the lambda expression itself sits at, so a
+  /// block body indents its statements one level deeper and closes its brace
+  /// back at that level instead of collapsing to column zero.
   fn format_lambda(
     &self,
     lambda: &ignis_ast::expressions::ASTLambda,
     parent_precedence: u8,
+    indent_level: usize,
   ) -> Result<String, LayoutFailure> {
     let mut formatted = String::from("(");
     formatted.push_str(
@@ -2091,8 +2095,10 @@ impl<'a> AstChunkFormatter<'a> {
     formatted.push_str(" -> ");
 
     match &lambda.body {
-      LambdaBody::Expression(expression) => formatted.push_str(&self.format_expression_node(*expression, 0, 0)?),
-      LambdaBody::Block(block) => formatted.push_str(&self.format_block_node(*block, 0)?),
+      LambdaBody::Expression(expression) => {
+        formatted.push_str(&self.format_expression_node(*expression, 0, indent_level)?)
+      },
+      LambdaBody::Block(block) => formatted.push_str(&self.format_block_node(*block, indent_level)?),
     }
 
     if parent_precedence > 0 {
