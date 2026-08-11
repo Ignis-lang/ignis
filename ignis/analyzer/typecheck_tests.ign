@@ -555,6 +555,19 @@ function typecheckAddPathType2(module: &mut Ast::Module, seg0: str, seg1: str): 
   }));
 }
 
+function typecheckAddGenericType(
+  module: &mut Ast::Module,
+  base: Ast::TypeId,
+  arguments: Vector<Ast::TypeId>,
+): Ast::TypeId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Generic(Ast::Type::Generic {
+    span: typecheckDummySpan(),
+    base: base,
+    arguments: arguments,
+  }));
+}
+
 function typecheckAnalyzeModule(
   defStore: &mut Analyzer::DefinitionStore,
   typeStore: &mut Analyzer::TypeStore,
@@ -4137,13 +4150,18 @@ function typecheckEnumVariantPatternBindsNonGenericEnumScrutinee(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
+  // Slice S2b2 credits the `E::A` arm's variant toward coverage, so only `B`
+  // remains uncovered — the message now names it instead of the blanket
+  // "requires a wildcard" wording from S2b1. Not the last dynamically-built
+  // diagnostic in this test (the wall diagnostic follows), so only
+  // severity/code are pinned here — see engram note on diagnostic message
+  // buffer reuse.
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
   let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckEnumVariantPatternBindsNonGenericEnumScrutinee: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
   Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
-  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: enum scrutinee requires a wildcard/irrefutable-binding arm");
 
   let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(1) else {
     @panic("typecheckEnumVariantPatternBindsNonGenericEnumScrutinee: missing wall diagnostic");
@@ -4213,18 +4231,22 @@ function typecheckEnumVariantPatternRejectsPayloadArityMismatch(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
+  // `E` declares a single variant (`B`). Slice S2b2 credits `E::B` toward
+  // coverage regardless of the (independently diagnosed) arity mismatch, so
+  // the enum is fully covered and no exhaustiveness diagnostic is emitted —
+  // only the arity diagnostic and the still-standing wall remain.
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
   let Option::SOME(arityDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing arity diagnostic");
   };
   Test::assertEq<str>(arityDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
   Test::assertEq<str>(arityDiagnostic.message, "enum variant pattern arity does not match the variant's declared payload");
 
-  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
-    @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing exhaustiveness diagnostic");
+  let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(1) else {
+    @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing wall diagnostic");
   };
-  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
-  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: enum scrutinee requires a wildcard/irrefutable-binding arm");
+  Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
 }
 
 /// Scenario: a qualified variant pattern matching a *generic* enum scrutinee
@@ -4629,4 +4651,386 @@ function typecheckGroupedMatchStatementTakesExpressionPositionPath(): void {
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::ERROR);
   Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
+}
+
+// Phase 13: enum variant coverage crediting (selfhost-match-exhaustiveness,
+// S2b2), plus review findings R3-001 and R3-002.
+// ============================================================
+
+/// Scenario: every declared variant of a non-generic enum has its own
+/// unguarded arm. `classifyMatchArmPattern` now credits each `Path` arm that
+/// resolves to a `Definition::Variant` into `coveredVariants`, so the enum
+/// is fully covered without a wildcard arm — no exhaustiveness diagnostic.
+/// Spec: selfhost-match-exhaustiveness — closed-domain coverage.
+@test
+function typecheckMatchStatementEnumAllVariantsCoveredEmitsNoExhaustivenessDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "Red"));
+  variants.push(typecheckAddBinding(&mut module, "Green"));
+  variants.push(typecheckAddBinding(&mut module, "Blue"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let colorType: Ast::TypeId = typecheckAddPathType(&mut module, "Color");
+  let cParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "c", colorType);
+  let cExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "c");
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Red", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Green", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Blue", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 3),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, cExpr, arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(cParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useColor"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckMatchStatementEnumAllVariantsCoveredEmitsNoExhaustivenessDiagnostic: missing wall diagnostic");
+  };
+  Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+}
+
+/// Scenario: two arms match the same variant (`Red` twice), plus one arm for
+/// the remaining variant (`Green`). Duplicate credit must not double-count
+/// or otherwise break the coverage check — `matchCoverageHasVariant` dedups
+/// by `raw()` id, and the enum is still fully covered.
+/// Spec: selfhost-match-exhaustiveness — closed-domain coverage.
+@test
+function typecheckMatchStatementEnumDuplicateVariantArmFullCoverageIsExhaustive(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "Red"));
+  variants.push(typecheckAddBinding(&mut module, "Green"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let colorType: Ast::TypeId = typecheckAddPathType(&mut module, "Color");
+  let cParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "c", colorType);
+  let cExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "c");
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Red", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Red", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Green", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 3),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, cExpr, arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(cParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useColor"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckMatchStatementEnumDuplicateVariantArmFullCoverageIsExhaustive: missing wall diagnostic");
+  };
+  Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+}
+
+/// Scenario: the `Red` arm carries a guard, so it must not count toward
+/// coverage regardless of matching a real variant — `analyzeMatchExhaustiveness`
+/// skips guarded arms before classification ever runs. Only `Green` is
+/// credited, so `Red` is reported missing by name.
+/// Spec: selfhost-match-exhaustiveness — closed-domain coverage (guarded arms
+/// excluded).
+@test
+function typecheckMatchStatementEnumGuardedVariantArmDoesNotCountAsCoverage(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "Red"));
+  variants.push(typecheckAddBinding(&mut module, "Green"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let colorType: Ast::TypeId = typecheckAddPathType(&mut module, "Color");
+  let cParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "c", colorType);
+  let cExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "c");
+  let guardExpr: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Red", Vector::new<Ast::PatternId>()),
+    guard: Option::SOME(guardExpr),
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Green", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, cExpr, arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(cParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useColor"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  // `exhaustivenessDiagnostic` is not the last dynamically-built diagnostic
+  // in this test (the wall diagnostic follows), so only severity/code are
+  // pinned here — see engram note on diagnostic message buffer reuse.
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
+  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckMatchStatementEnumGuardedVariantArmDoesNotCountAsCoverage: missing exhaustiveness diagnostic");
+  };
+  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
+  Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+
+  let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(1) else {
+    @panic("typecheckMatchStatementEnumGuardedVariantArmDoesNotCountAsCoverage: missing wall diagnostic");
+  };
+  Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+}
+
+/// Scenario: a match over a plain (non-generic) record scrutinee, with a
+/// single record-destructure arm that is not irrefutable-by-pattern-shape in
+/// this slice's coverage model (`Path` patterns only credit enum variants).
+/// R3-002: rather than falsely reporting `Missing`, `Type::Record(_)`
+/// scrutinees stay `Unknown` (silent) until record destructure crediting
+/// lands (S3-adjacent follow-up) — no false-positive exhaustiveness
+/// diagnostic on a match that is actually exhaustive-by-shape.
+/// Spec: selfhost-match-exhaustiveness — review finding R3-002.
+@test
+function typecheckMatchStatementRecordScrutineeStaysSilentOnCoverage(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(typecheckAddAnnotatedField(&mut module, "x", i32Type));
+  typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), fields);
+
+  let pointType: Ast::TypeId = typecheckAddPathType(&mut module, "Point");
+  let pParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "p", pointType);
+  let pExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "p");
+
+  let mut destructureArgs: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  destructureArgs.push(typecheckAddBinding(&mut module, "a"));
+  let destructurePattern: Ast::PatternId = typecheckAddPathPattern(&mut module, "Point", destructureArgs);
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: destructurePattern,
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, pExpr, arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(pParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("usePoint"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckMatchStatementRecordScrutineeStaysSilentOnCoverage: missing wall diagnostic");
+  };
+  Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
+}
+
+/// Scenario: a match over a generic record scrutinee instantiated with
+/// concrete type arguments (`Box<i32>`), which resolves to `Type::Instance`.
+/// R3-001: the `Type::Instance(_)` arm used to say "generic enum scrutinee"
+/// unconditionally; it must look up the instance's generic definition and
+/// use record-appropriate wording when that definition is a record.
+/// Spec: selfhost-match-exhaustiveness — review finding R3-001.
+@test
+function typecheckMatchStatementGenericRecordInstanceScrutineeUsesRecordWordedMessage(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  boxFields.push(typecheckAddAnnotatedField(&mut module, "value", tTypeId));
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(typecheckGenericParam("T"));
+  typecheckAddRecordItem(&mut module, "Box", genericParams, boxFields);
+
+  let boxBaseType: Ast::TypeId = typecheckAddPathType(&mut module, "Box");
+  let mut typeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  typeArguments.push(typecheckAddPathType(&mut module, "i32"));
+  let boxInstanceType: Ast::TypeId = typecheckAddGenericType(&mut module, boxBaseType, typeArguments);
+
+  let bParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "b", boxInstanceType);
+  let bExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "b");
+
+  let mut destructureArgs: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  destructureArgs.push(typecheckAddBinding(&mut module, "v"));
+  let destructurePattern: Ast::PatternId = typecheckAddPathPattern(&mut module, "Box", destructureArgs);
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: destructurePattern,
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, bExpr, arms);
+  let matchStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(bParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useBox"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  // The destructure pattern independently trips the generic-record-
+  // destructure bind-time wall before exhaustiveness runs (checked by
+  // severity/code only — not the last dynamically-built diagnostic, see
+  // engram note on diagnostic message buffer reuse).
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 3);
+  let Option::SOME(bindDiagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckMatchStatementGenericRecordInstanceScrutineeUsesRecordWordedMessage: missing bind diagnostic");
+  };
+  Test::assertEq<Severity>(bindDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(bindDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+
+  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
+    @panic("typecheckMatchStatementGenericRecordInstanceScrutineeUsesRecordWordedMessage: missing exhaustiveness diagnostic");
+  };
+  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
+  Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(exhaustivenessDiagnostic.message, "non-exhaustive match: generic record scrutinee requires a wildcard/irrefutable-binding arm");
+
+  let Option::SOME(wallDiagnostic) = output.typecheck.diagnostics.get(2) else {
+    @panic("typecheckMatchStatementGenericRecordInstanceScrutineeUsesRecordWordedMessage: missing wall diagnostic");
+  };
+  Test::assertEq<Severity>(wallDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<str>(wallDiagnostic.message, "typecheck does not support match expressions");
 }

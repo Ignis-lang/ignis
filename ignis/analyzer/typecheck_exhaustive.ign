@@ -6,10 +6,6 @@ export namespace Analyzer {
     /// Local coverage accumulator for one match's arm patterns. Self-contained
     /// (no `TypecheckState` fields) so it stays independent of the IGN-84
     /// state-migration surface.
-    ///
-    /// `coveredVariants` is carried now so a later slice can add enum-variant
-    /// crediting without reshaping this record; `analyzeMatchExhaustiveness`
-    /// does not read it yet.
     record MatchCoverage {
       public irrefutable: boolean;
       public coveredVariants: Vector<Analyzer::DefinitionId>;
@@ -23,12 +19,37 @@ export namespace Analyzer {
       Unknown,
     }
 
+    /// Returns `true` if `coverage.coveredVariants` already contains
+    /// `variantDefId`, compared by `raw()` id.
+    function matchCoverageHasVariant(
+      coverage: &mut Analyzer::Typecheck::MatchCoverage,
+      variantDefId: Analyzer::DefinitionId,
+    ): boolean {
+      let mut index: u64 = 0;
+      while (index < coverage.coveredVariants.length()) {
+        let Option::SOME(existing) = coverage.coveredVariants.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (existing.raw() == variantDefId.raw()) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     /// Credits one arm's pattern toward `coverage`. Guarded arms must be
     /// filtered out by the caller before this is invoked — a guard cannot
     /// guarantee coverage regardless of the pattern shape.
     function classifyMatchArmPattern(
       coverage: &mut Analyzer::Typecheck::MatchCoverage,
+      defStore: &mut Analyzer::DefinitionStore,
       module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       patternId: Ast::PatternId,
     ): void {
       let Option::SOME(pattern) = module.patterns.get(patternId) else {
@@ -60,8 +81,27 @@ export namespace Analyzer {
             }
           }
         },
-        // Path (enum-variant), Tuple, and Or patterns give no coverage credit
-        // in this slice — Path/enum-variant crediting is a later slice.
+        Ast::Pattern::Node::Path(_) -> {
+          let patternRefOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupPatternRef(resolvedBodies, patternId);
+          let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(variantDefId)) = patternRefOpt else {
+            return;
+          };
+
+          let Option::SOME(def) = defStore.get(variantDefId) else {
+            return;
+          };
+
+          let Analyzer::Definition::Variant(_) = def else {
+            return;
+          };
+
+          if (!Analyzer::Typecheck::matchCoverageHasVariant(coverage, variantDefId)) {
+            let mut coverageRef: &mut Analyzer::Typecheck::MatchCoverage = coverage;
+            coverageRef.coveredVariants.push(variantDefId);
+          }
+        },
+        // Tuple and Or patterns give no coverage credit in this slice —
+        // record/tuple destructure crediting is a later slice.
         _ -> {},
       };
     }
@@ -73,7 +113,9 @@ export namespace Analyzer {
     function analyzeMatchExhaustiveness(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       scrutineeTypeOpt: Option<Analyzer::TypeId>,
       arms: &Vector<Ast::Expression::MatchArm>,
     ): Analyzer::Typecheck::ExhaustiveVerdict {
@@ -96,7 +138,7 @@ export namespace Analyzer {
           continue;
         }
 
-        Analyzer::Typecheck::classifyMatchArmPattern(&mut coverage, module, arm.pattern);
+        Analyzer::Typecheck::classifyMatchArmPattern(&mut coverage, defStore, module, resolvedBodies, arm.pattern);
         index += 1;
       }
 
@@ -132,17 +174,70 @@ export namespace Analyzer {
                 return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("generic enum scrutinee requires a wildcard/irrefutable-binding arm"));
               }
 
-              // Variant-level coverage crediting is a later slice; until then
-              // a non-generic enum scrutinee always needs a wildcard/irrefutable arm.
-              return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("enum scrutinee requires a wildcard/irrefutable-binding arm"));
+              let mut missingCount: u64 = 0;
+              let mut firstMissingName: Option<str> = Option::NONE;
+              let mut variantIndex: u64 = 0;
+              while (variantIndex < enum_.variants.length()) {
+                let Option::SOME(variantId) = enum_.variants.get(variantIndex) else {
+                  variantIndex += 1;
+                  continue;
+                };
+
+                if (!Analyzer::Typecheck::matchCoverageHasVariant(&mut coverage, *variantId)) {
+                  missingCount += 1;
+
+                  if (firstMissingName.isNone()) {
+                    if (let Option::SOME(Analyzer::Definition::Variant(variant)) = defStore.get(*variantId)) {
+                      firstMissingName = symbols.resolve(variant.name);
+                    }
+                  }
+                }
+
+                variantIndex += 1;
+              }
+
+              if (missingCount == 0) {
+                return Analyzer::Typecheck::ExhaustiveVerdict::Exhaustive;
+              }
+
+              if (let Option::SOME(name) = firstMissingName) {
+                let message: String = String::create("enum scrutinee is missing variant `").concat(name).concat("`");
+                return Analyzer::Typecheck::ExhaustiveVerdict::Missing(message);
+              }
+
+              let message: String = String::create("enum scrutinee is missing ").concat(missingCount).concat(" variant(s)");
+              return Analyzer::Typecheck::ExhaustiveVerdict::Missing(message);
             },
             _ -> {
               return Analyzer::Typecheck::ExhaustiveVerdict::Unknown;
             },
           };
         },
-        Analyzer::Type::Instance(_) -> {
-          return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("generic enum scrutinee requires a wildcard/irrefutable-binding arm"));
+        Analyzer::Type::Instance(instance) -> {
+          let Option::SOME(genericDef) = defStore.get(instance.definition) else {
+            return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("generic scrutinee requires a wildcard/irrefutable-binding arm"));
+          };
+
+          match (genericDef) {
+            Analyzer::Definition::Record(_) -> {
+              return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("generic record scrutinee requires a wildcard/irrefutable-binding arm"));
+            },
+            _ -> {
+              return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("generic enum scrutinee requires a wildcard/irrefutable-binding arm"));
+            },
+          };
+        },
+        // Record and Tuple scrutinees are irrefutable-by-shape (a plain
+        // destructure pattern always matches), but this slice does not yet
+        // credit record/tuple destructure patterns toward coverage (S3).
+        // Staying silent here avoids a false-positive `Missing` verdict on a
+        // match that is actually exhaustive; S3 will replace this with real
+        // destructure crediting.
+        Analyzer::Type::Record(_) -> {
+          return Analyzer::Typecheck::ExhaustiveVerdict::Unknown;
+        },
+        Analyzer::Type::Tuple(_) -> {
+          return Analyzer::Typecheck::ExhaustiveVerdict::Unknown;
         },
         _ -> {
           return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("scrutinee requires a wildcard/irrefutable-binding arm"));
