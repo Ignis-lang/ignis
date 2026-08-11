@@ -5108,7 +5108,7 @@ fn collect_external_type_definition_ids(
   loop {
     let mut newly_discovered: Vec<(String, DefinitionId)> = Vec::new();
 
-    for (_, &def_id) in referenced_definitions.iter() {
+    for &def_id in referenced_definitions.values() {
       let def = defs.get(&def_id);
       let mut deps = std::collections::HashSet::new();
 
