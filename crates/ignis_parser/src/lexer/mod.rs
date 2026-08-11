@@ -1,5 +1,5 @@
 use ignis_diagnostics::{message::DiagnosticMessage};
-use ignis_token::{token::Token, token_types::TokenType};
+use ignis_token::{token::Token, token::parse_int_literal, token_types::TokenType};
 use ignis_type::{BytePosition, file::FileId, span::Span};
 
 type LexerResult = Result<TokenType, Box<DiagnosticMessage>>;
@@ -470,13 +470,13 @@ impl<'a> IgnisLexer<'a> {
       return Ok(TokenType::Float);
     }
 
-    // Integer literals are widened to the narrowest of i32/i64/u64 that fits.
-    // Anything past that has no representation, and rejecting it here keeps it
-    // from reaching the analyzer as some other number.
+    // Rejected here rather than in the analyzer so an unrepresentable literal
+    // never reaches it as some other number. `parse_int_literal` is the same
+    // ladder the token conversion uses to widen, so acceptance here and
+    // representability there cannot disagree.
     let digits = self.source[self.start..self.current].replace('_', "");
-    let representable = digits.parse::<i64>().is_ok() || digits.parse::<u64>().is_ok();
 
-    if !representable {
+    if parse_int_literal(&digits).is_none() {
       return Err(Box::new(DiagnosticMessage::IntegerLiteralOutOfRange {
         literal: digits,
         span: self.mk_span(self.start, self.current),
@@ -761,6 +761,36 @@ mod tests {
         (TokenType::Eof, ""),
       ],
     );
+  }
+
+  #[test]
+  fn lexes_negative_literals_down_to_the_i64_boundary() {
+    let LexResult { tokens, diagnostics } = lex("-2147483648 -2147483649 -9223372036854775808");
+
+    assert!(diagnostics.is_empty(), "unexpected diagnostics: {:?}", diagnostics);
+
+    assert_tokens(
+      &tokens,
+      &[
+        (TokenType::Int, "-2147483648"),
+        (TokenType::Int, "-2147483649"),
+        (TokenType::Int, "-9223372036854775808"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn rejects_a_negative_literal_below_the_i64_boundary() {
+    let LexResult { diagnostics, .. } = lex("-9223372036854775809");
+
+    assert_eq!(diagnostics.len(), 1, "expected one diagnostic, got {:?}", diagnostics);
+    match &diagnostics[0] {
+      DiagnosticMessage::IntegerLiteralOutOfRange { literal, .. } => {
+        assert_eq!(literal, "-9223372036854775809");
+      },
+      other => panic!("unexpected diagnostic: {:?}", other),
+    }
   }
 
   #[test]

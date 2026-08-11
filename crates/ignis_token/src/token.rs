@@ -58,7 +58,8 @@ impl std::fmt::Display for Token {
   }
 }
 
-/// Picks the narrowest literal variant that can hold the written digits.
+/// Picks the narrowest literal variant that can hold the written digits, or
+/// `None` when no integer type can represent them.
 ///
 /// Integer literals carry no suffix, so the type checker coerces from whatever
 /// this returns. Widening past `i32` is a correctness requirement rather than a
@@ -66,29 +67,34 @@ impl std::fmt::Display for Token {
 /// `i32::MAX` into `0` without a diagnostic, so `const MASK: u32 = 2147483648;`
 /// compiled to a silent `0`.
 ///
-/// A literal too large for `u64` yields `Null`, which fails to type-check
-/// against any numeric type. That is deliberate — an unrepresentable literal
-/// must not reach codegen as some other number.
-fn int_literal_from_lexeme(lexeme: &str) -> IgnisLiteralValue {
+/// The lexer calls this to decide whether to reject a literal, and the token
+/// conversion below calls it to decide how to widen one. Both go through this
+/// single ladder so the two decisions cannot drift apart: a literal the lexer
+/// accepts is always one this can represent.
+///
+/// The sign is part of the lexeme (`-42` lexes as one token), which is why a
+/// negative literal below `i64::MIN` is unrepresentable — `u64` parsing rejects
+/// the leading minus rather than wrapping it.
+pub fn parse_int_literal(lexeme: &str) -> Option<IgnisLiteralValue> {
   if let Ok(value) = lexeme.parse::<i32>() {
-    return IgnisLiteralValue::Int32(value);
+    return Some(IgnisLiteralValue::Int32(value));
   }
 
   if let Ok(value) = lexeme.parse::<i64>() {
-    return IgnisLiteralValue::Int64(value);
+    return Some(IgnisLiteralValue::Int64(value));
   }
 
   if let Ok(value) = lexeme.parse::<u64>() {
-    return IgnisLiteralValue::UnsignedInt64(value);
+    return Some(IgnisLiteralValue::UnsignedInt64(value));
   }
 
-  IgnisLiteralValue::Null
+  None
 }
 
 impl From<&Token> for IgnisLiteralValue {
   fn from(val: &Token) -> Self {
     match val.type_ {
-      TokenType::Int => int_literal_from_lexeme(&val.lexeme),
+      TokenType::Int => parse_int_literal(&val.lexeme).unwrap_or(IgnisLiteralValue::Null),
       TokenType::Float => IgnisLiteralValue::Float64(val.lexeme.parse().unwrap_or(OrderedFloat::default())),
       TokenType::Char => IgnisLiteralValue::Char(val.lexeme.parse().unwrap_or(0)),
       TokenType::String => IgnisLiteralValue::String(val.lexeme.clone()),
@@ -105,6 +111,41 @@ mod tests {
   use super::Token;
   use crate::token_types::TokenType;
   use ignis_type::{BytePosition, file::SourceMap, span::Span};
+
+  #[test]
+  fn int_literal_ladder_picks_the_narrowest_representable_variant() {
+    use ignis_type::value::IgnisLiteralValue;
+
+    use super::parse_int_literal;
+
+    assert_eq!(parse_int_literal("0"), Some(IgnisLiteralValue::Int32(0)));
+    assert_eq!(parse_int_literal("2147483647"), Some(IgnisLiteralValue::Int32(i32::MAX)));
+    assert_eq!(parse_int_literal("-2147483648"), Some(IgnisLiteralValue::Int32(i32::MIN)));
+
+    assert_eq!(parse_int_literal("2147483648"), Some(IgnisLiteralValue::Int64(2147483648)));
+    assert_eq!(parse_int_literal("4294967295"), Some(IgnisLiteralValue::Int64(4294967295)));
+    assert_eq!(parse_int_literal("-2147483649"), Some(IgnisLiteralValue::Int64(-2147483649)));
+    assert_eq!(
+      parse_int_literal("9223372036854775807"),
+      Some(IgnisLiteralValue::Int64(i64::MAX))
+    );
+    assert_eq!(
+      parse_int_literal("-9223372036854775808"),
+      Some(IgnisLiteralValue::Int64(i64::MIN))
+    );
+
+    assert_eq!(
+      parse_int_literal("9223372036854775808"),
+      Some(IgnisLiteralValue::UnsignedInt64(9223372036854775808))
+    );
+    assert_eq!(
+      parse_int_literal("18446744073709551615"),
+      Some(IgnisLiteralValue::UnsignedInt64(u64::MAX))
+    );
+
+    assert_eq!(parse_int_literal("18446744073709551616"), None);
+    assert_eq!(parse_int_literal("-9223372036854775809"), None);
+  }
 
   #[test]
   fn source_text_uses_span_boundaries() {
