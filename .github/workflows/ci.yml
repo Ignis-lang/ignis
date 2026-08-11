@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same ref makes the in-flight run obsolete. The selfhost
+# job takes tens of minutes, so letting superseded runs finish wastes most of
+# the queue.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v0-rust"
+          shared-key: "ci-rust"
+          cache-targets: true
+          cache-on-failure: true
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      # No clippy warning is acceptable in this workspace. Keeping this as a
+      # gate is the only thing that stops them accumulating again.
+      - name: Lint
+        run: cargo clippy --all-targets --workspace --locked -- -D warnings
+
+      # End-to-end and codegen tests compile generated C, so the runner's gcc is
+      # part of the contract.
+      - name: Test
+        run: cargo test --workspace --locked --no-fail-fast
+
+  selfhost:
+    name: Selfhost gates
+    runs-on: ubuntu-latest
+    # These steps run the compiler under test against its own source, so a hang
+    # introduced by the change being tested is a real outcome. Without a cap it
+    # would hold a runner for six hours, and on a pull request anyone can
+    # trigger that. The budget is roughly double the slowest observed run.
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v0-rust"
+          shared-key: "ci-selfhost"
+          cache-targets: true
+          cache-on-failure: true
+
+      - name: Build Ignis
+        run: cargo build --locked -p ignis
+
+      - name: Add Ignis to PATH
+        run: echo "${GITHUB_WORKSPACE}/target/debug" >> "$GITHUB_PATH"
+
+      # `ignis fmt --check` exits non-zero listing every file that is not in
+      # canonical layout. `example/add.ign` is excluded because it hits the
+      # deferred `export inline` token-shape drift pinned by
+      # `deferred_example_add_token_shape_drift_from_export_inline`.
+      - name: Check Ignis formatting
+        run: |
+          mapfile -t sources < <(find std ignis example -name '*.ign' ! -path 'example/add.ign')
+          ignis fmt --check "${sources[@]}"
+
+      - name: Analyze the standard library and the selfhost compiler
+        run: ignis check
+
+      - name: Run the selfhost test suite
+        run: ignis test
