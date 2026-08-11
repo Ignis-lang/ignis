@@ -127,10 +127,8 @@ impl<'a> Analyzer<'a> {
         // pass).
         self.pre_define_items(&ns_stmt.items);
       },
-      ASTStatement::Export(export_stmt) => {
-        if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {
-          self.pre_define_node(&decl);
-        }
+      ASTStatement::Export(ignis_ast::statements::ASTExport::Declaration { decl, .. }) => {
+        self.pre_define_node(&decl);
       },
       ASTStatement::Extern(extern_stmt) => {
         for item in &extern_stmt.items {
@@ -286,10 +284,8 @@ impl<'a> Analyzer<'a> {
           self.pre_resolve_signatures(item);
         }
       },
-      ASTStatement::Export(export_stmt) => {
-        if let ignis_ast::statements::ASTExport::Declaration { decl, .. } = export_stmt {
-          self.pre_resolve_signatures(&decl);
-        }
+      ASTStatement::Export(ignis_ast::statements::ASTExport::Declaration { decl, .. }) => {
+        self.pre_resolve_signatures(&decl);
       },
       ASTStatement::Extern(extern_stmt) => {
         for item in &extern_stmt.items {

@@ -540,13 +540,13 @@ fn code_actions_for_open_document(
   document: Option<LspCodeActionDocument>,
   diagnostics: &[Diagnostic],
 ) -> Vec<CodeActionOrCommand> {
-  if uri
+  let is_ignis_document = uri
     .to_file_path()
     .ok()
     .and_then(|path| path.extension().map(|extension| extension == "ign"))
-    .unwrap_or(false)
-    == false
-  {
+    .unwrap_or(false);
+
+  if !is_ignis_document {
     return vec![];
   }
 

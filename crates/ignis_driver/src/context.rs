@@ -1192,6 +1192,19 @@ fn cycle_is_embedded_std_only(
   })
 }
 
+fn build_type_compilation_context(config: &IgnisConfig) -> TypeCompilationContext {
+  let mut ctx = if config.target_triple.is_empty() {
+    TypeCompilationContext::default()
+  } else {
+    TypeCompilationContext::from_target_triple(&config.target_triple)
+  };
+
+  ctx.debug = config.debug;
+  ctx.features = config.enabled_features.clone();
+  ctx.known_features = config.known_features.clone();
+  ctx
+}
+
 #[cfg(test)]
 mod tests {
   use std::fs;
@@ -1211,8 +1224,10 @@ mod tests {
     fs::write(&hash_set_path, "").expect("write hash set module");
     fs::write(&string_mod_path, "").expect("write string module");
 
-    let mut config = IgnisConfig::default();
-    config.std_path = temp.path().to_string_lossy().into_owned();
+    let config = IgnisConfig {
+      std_path: temp.path().to_string_lossy().into_owned(),
+      ..IgnisConfig::default()
+    };
 
     let ctx = CompilationContext::new(&config);
 
@@ -1234,8 +1249,10 @@ mod tests {
     fs::create_dir_all(test_path.parent().expect("tests parent")).expect("create tests parent");
     fs::write(&test_path, "").expect("write tests module");
 
-    let mut config = IgnisConfig::default();
-    config.std_path = temp.path().to_string_lossy().into_owned();
+    let config = IgnisConfig {
+      std_path: temp.path().to_string_lossy().into_owned(),
+      ..IgnisConfig::default()
+    };
 
     let ctx = CompilationContext::new(&config);
 
@@ -1244,12 +1261,14 @@ mod tests {
 
   #[test]
   fn prelude_std_modules_comes_only_from_manifest_auto_load() {
-    let mut config = IgnisConfig::default();
-    config.manifest = IgnisSTDManifest {
-      auto_load: Some(StdAutoLoad {
-        modules: vec!["option".to_string(), "result".to_string()],
-      }),
-      ..IgnisSTDManifest::default()
+    let mut config = IgnisConfig {
+      manifest: IgnisSTDManifest {
+        auto_load: Some(StdAutoLoad {
+          modules: vec!["option".to_string(), "result".to_string()],
+        }),
+        ..IgnisSTDManifest::default()
+      },
+      ..IgnisConfig::default()
     };
 
     assert_eq!(CompilationContext::prelude_std_modules(&config), vec!["option", "result"]);
@@ -1352,8 +1371,10 @@ string = "string/mod.ign"
     )
     .expect("write manifest");
 
-    let mut config = IgnisConfig::default();
-    config.std_path = temp.path().to_string_lossy().into_owned();
+    let config = IgnisConfig {
+      std_path: temp.path().to_string_lossy().into_owned(),
+      ..IgnisConfig::default()
+    };
 
     let ctx = CompilationContext::new(&config);
 
@@ -1415,9 +1436,11 @@ string = "string/mod.ign"
 
     fs::write(mod_b.join("layout.ign"), "export record LayoutB {\n  y: i32;\n}\n").expect("write mod_b/layout.ign");
 
-    let mut config = IgnisConfig::default();
-    config.std_path = String::new();
-    config.quiet = true;
+    let config = IgnisConfig {
+      std_path: String::new(),
+      quiet: true,
+      ..IgnisConfig::default()
+    };
 
     let mut ctx = CompilationContext::new(&config);
     let entry = src.join("main.ign");
@@ -1483,7 +1506,7 @@ string = "string/mod.ign"
       .parsed_modules
       .iter()
       .find_map(|(mid, pm)| {
-        let mod_a_mod_fid = ctx.source_map.lookup_by_path(&mod_a.join("mod.ign"))?;
+        let mod_a_mod_fid = ctx.source_map.lookup_by_path(mod_a.join("mod.ign"))?;
         if pm.file_id == mod_a_mod_fid { Some(*mid) } else { None }
       })
       .expect("mod_a/mod.ign must have a ModuleId");
@@ -1492,7 +1515,7 @@ string = "string/mod.ign"
       .parsed_modules
       .iter()
       .find_map(|(mid, pm)| {
-        let mod_b_mod_fid = ctx.source_map.lookup_by_path(&mod_b.join("mod.ign"))?;
+        let mod_b_mod_fid = ctx.source_map.lookup_by_path(mod_b.join("mod.ign"))?;
         if pm.file_id == mod_b_mod_fid { Some(*mid) } else { None }
       })
       .expect("mod_b/mod.ign must have a ModuleId");
@@ -1577,17 +1600,4 @@ string = "string/mod.ign"
       "compilation must produce no errors after per-module import path fix"
     );
   }
-}
-
-fn build_type_compilation_context(config: &IgnisConfig) -> TypeCompilationContext {
-  let mut ctx = if config.target_triple.is_empty() {
-    TypeCompilationContext::default()
-  } else {
-    TypeCompilationContext::from_target_triple(&config.target_triple)
-  };
-
-  ctx.debug = config.debug;
-  ctx.features = config.enabled_features.clone();
-  ctx.known_features = config.known_features.clone();
-  ctx
 }

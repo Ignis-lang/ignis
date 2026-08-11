@@ -2339,10 +2339,8 @@ impl<'a> CEmitter<'a> {
           }
         }
       },
-      Type::Enum(def_id) => {
-        if self.record_has_drop_trait(def_id) {
-          writeln!(self.output, "    {}.__ignis_drop_state = 1;", expr).unwrap();
-        }
+      Type::Enum(def_id) if self.record_has_drop_trait(def_id) => {
+        writeln!(self.output, "    {}.__ignis_drop_state = 1;", expr).unwrap();
       },
       _ => {},
     }
