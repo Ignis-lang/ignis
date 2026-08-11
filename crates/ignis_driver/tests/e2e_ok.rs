@@ -6586,3 +6586,50 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_integer_literals_wider_than_i32() {
+  e2e_test(
+    "integer_literals_wider_than_i32",
+    r#"
+const SIGN_BIT: u32 = 2147483648;
+const ALL_ONES: u32 = 4294967295;
+const HIGH_U64: u64 = 9223372036854775808;
+
+// Every check shifts the constant down instead of comparing it to another
+// literal: a literal that folds to zero would compare equal to a zero-folded
+// expectation and the test would pass while the value was wrong.
+function main(): i32 {
+    if ((SIGN_BIT >> 31) != 1) {
+        return 1;
+    }
+
+    if ((ALL_ONES >> 24) != 255) {
+        return 2;
+    }
+
+    // Kept off the constant-folding path on purpose: constant arithmetic still
+    // rounds u64 through i64, so a folded `HIGH_U64 >> 63` shifts arithmetically.
+    // That is a separate defect from the literal widening this test pins.
+    let mut high: u64 = HIGH_U64;
+    high = high + 0;
+
+    if ((high >> 63) != 1) {
+        return 3;
+    }
+
+    if (((7 | SIGN_BIT) >> 28) != 8) {
+        return 4;
+    }
+
+    let wide: i64 = 4294967296;
+
+    if ((wide >> 32) != 1) {
+        return 5;
+    }
+
+    return 0;
+}
+"#,
+  );
+}

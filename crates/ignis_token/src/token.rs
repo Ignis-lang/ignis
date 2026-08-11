@@ -58,10 +58,37 @@ impl std::fmt::Display for Token {
   }
 }
 
+/// Picks the narrowest literal variant that can hold the written digits.
+///
+/// Integer literals carry no suffix, so the type checker coerces from whatever
+/// this returns. Widening past `i32` is a correctness requirement rather than a
+/// convenience: parsing every literal as `i32` turned anything above
+/// `i32::MAX` into `0` without a diagnostic, so `const MASK: u32 = 2147483648;`
+/// compiled to a silent `0`.
+///
+/// A literal too large for `u64` yields `Null`, which fails to type-check
+/// against any numeric type. That is deliberate — an unrepresentable literal
+/// must not reach codegen as some other number.
+fn int_literal_from_lexeme(lexeme: &str) -> IgnisLiteralValue {
+  if let Ok(value) = lexeme.parse::<i32>() {
+    return IgnisLiteralValue::Int32(value);
+  }
+
+  if let Ok(value) = lexeme.parse::<i64>() {
+    return IgnisLiteralValue::Int64(value);
+  }
+
+  if let Ok(value) = lexeme.parse::<u64>() {
+    return IgnisLiteralValue::UnsignedInt64(value);
+  }
+
+  IgnisLiteralValue::Null
+}
+
 impl From<&Token> for IgnisLiteralValue {
   fn from(val: &Token) -> Self {
     match val.type_ {
-      TokenType::Int => IgnisLiteralValue::Int32(val.lexeme.parse().unwrap_or(0)),
+      TokenType::Int => int_literal_from_lexeme(&val.lexeme),
       TokenType::Float => IgnisLiteralValue::Float64(val.lexeme.parse().unwrap_or(OrderedFloat::default())),
       TokenType::Char => IgnisLiteralValue::Char(val.lexeme.parse().unwrap_or(0)),
       TokenType::String => IgnisLiteralValue::String(val.lexeme.clone()),

@@ -432,6 +432,10 @@ pub enum DiagnosticMessage {
     target_type: String,
     span: Span,
   },
+  IntegerLiteralOutOfRange {
+    literal: String,
+    span: Span,
+  },
   // Import/Module errors
   ModuleNotFound {
     path: String,
@@ -1358,6 +1362,9 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::IntegerOverflow { value, target_type, .. } => {
         write!(f, "Integer literal {} overflows type '{}'", value, target_type)
       },
+      DiagnosticMessage::IntegerLiteralOutOfRange { literal, .. } => {
+        write!(f, "Integer literal {} is too large for any integer type", literal)
+      },
 
       // Import/Module errors
       DiagnosticMessage::ModuleNotFound { path, .. } => {
@@ -2030,7 +2037,8 @@ impl DiagnosticMessage {
       | DiagnosticMessage::ViewOutlivesOwner { span, .. }
       | DiagnosticMessage::UndefinedIdentifier { span, .. }
       | DiagnosticMessage::AssignmentTypeMismatch { span, .. }
-      | DiagnosticMessage::IntegerOverflow { span, .. } => span.clone(),
+      | DiagnosticMessage::IntegerOverflow { span, .. }
+      | DiagnosticMessage::IntegerLiteralOutOfRange { span, .. } => span.clone(),
 
       DiagnosticMessage::ModuleNotFound { at, .. }
       | DiagnosticMessage::SymbolNotExported { at, .. }
@@ -2262,6 +2270,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::UndefinedIdentifier { .. } => "A0044",
       DiagnosticMessage::AssignmentTypeMismatch { .. } => "A0045",
       DiagnosticMessage::IntegerOverflow { .. } => "A0046",
+      DiagnosticMessage::IntegerLiteralOutOfRange { .. } => "A0203",
       DiagnosticMessage::InvalidSizeOfOperand { .. } => "A0049",
       DiagnosticMessage::InvalidMinMaxType { .. } => "A0072",
       DiagnosticMessage::StaticFieldRequiresInit { .. } => "A0065",

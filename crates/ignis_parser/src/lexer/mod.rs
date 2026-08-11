@@ -467,10 +467,23 @@ impl<'a> IgnisLexer<'a> {
     }
 
     if is_float {
-      Ok(TokenType::Float)
-    } else {
-      Ok(TokenType::Int)
+      return Ok(TokenType::Float);
     }
+
+    // Integer literals are widened to the narrowest of i32/i64/u64 that fits.
+    // Anything past that has no representation, and rejecting it here keeps it
+    // from reaching the analyzer as some other number.
+    let digits = self.source[self.start..self.current].replace('_', "");
+    let representable = digits.parse::<i64>().is_ok() || digits.parse::<u64>().is_ok();
+
+    if !representable {
+      return Err(Box::new(DiagnosticMessage::IntegerLiteralOutOfRange {
+        literal: digits,
+        span: self.mk_span(self.start, self.current),
+      }));
+    }
+
+    Ok(TokenType::Int)
   }
 
   fn binary_number(&mut self) -> LexerResult {
@@ -731,6 +744,36 @@ mod tests {
         (TokenType::Eof, ""),
       ],
     );
+  }
+
+  #[test]
+  fn lexes_integers_wider_than_i32_without_a_diagnostic() {
+    let LexResult { tokens, diagnostics } = lex("2147483648 4294967295 18446744073709551615");
+
+    assert!(diagnostics.is_empty(), "unexpected diagnostics: {:?}", diagnostics);
+
+    assert_tokens(
+      &tokens,
+      &[
+        (TokenType::Int, "2147483648"),
+        (TokenType::Int, "4294967295"),
+        (TokenType::Int, "18446744073709551615"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn rejects_an_integer_literal_too_large_for_any_integer_type() {
+    let LexResult { diagnostics, .. } = lex("18446744073709551616");
+
+    assert_eq!(diagnostics.len(), 1, "expected one diagnostic, got {:?}", diagnostics);
+    match &diagnostics[0] {
+      DiagnosticMessage::IntegerLiteralOutOfRange { literal, .. } => {
+        assert_eq!(literal, "18446744073709551616");
+      },
+      other => panic!("unexpected diagnostic: {:?}", other),
+    }
   }
 
   #[test]
