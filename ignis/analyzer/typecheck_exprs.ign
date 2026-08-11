@@ -1253,7 +1253,7 @@ export namespace Analyzer {
           return Option::NONE;
         },
         Ast::Expression::Node::Match(value) -> {
-          return Analyzer::Typecheck::checkMatchExpr(
+          let matchTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkMatchExpr(
             state,
             defStore,
             typeStore,
@@ -1264,6 +1264,13 @@ export namespace Analyzer {
             expected,
             true,
           );
+
+          let Option::SOME(matchType) = matchTypeOpt else {
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, matchType);
+          return Option::SOME(matchType);
         },
         Ast::Expression::Node::Vector(value) -> {
           let mut index: u64 = 0;
@@ -1351,6 +1358,89 @@ export namespace Analyzer {
       @panic("unreachable: checkExprExpected match did not return");
     }
 
+    /// Returns `true` when `typeId` resolves (through alias chains) to the
+    /// interned `NEVER` type — used by `joinTypes` to exclude diverging arms
+    /// (e.g. a `return`-only body) from the cross-arm join without needing a
+    /// separate divergence marker.
+    function isNeverType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      let Option::SOME(resolvedNode) = typeStore.get(resolved.typeId) else {
+        return false;
+      };
+
+      let Analyzer::Type::NEVER = resolvedNode else {
+        return false;
+      };
+
+      return true;
+    }
+
+    /// Joins the value-producing arm bodies of an expression-position match
+    /// into a single result type (design D2). `candidates` holds only the arm
+    /// body types that were themselves successfully typechecked — a body that
+    /// already failed typechecking (and was diagnosed at its own call site)
+    /// contributes nothing here. Diverging (`NEVER`-typed) arms are excluded
+    /// from the pairwise comparison so they never poison the join. When every
+    /// candidate is excluded, the match itself types as `NEVER`. The result
+    /// (or `NEVER`) is compared against `expected` exactly once, when present.
+    function joinTypes(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      candidates: &Vector<Analyzer::TypeId>,
+      expected: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
+      let mut accumulated: Option<Analyzer::TypeId> = Option::NONE;
+
+      let mut index: u64 = 0;
+      while (index < candidates.length()) {
+        let Option::SOME(candidateRef) = candidates.get(index) else {
+          index += 1;
+          continue;
+        };
+        let candidate: Analyzer::TypeId = *candidateRef;
+
+        if (Analyzer::Typecheck::isNeverType(state, defStore, typeStore, candidate)) {
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(current) = accumulated else {
+          accumulated = Option::SOME(candidate);
+          index += 1;
+          continue;
+        };
+
+        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, current, candidate)) {
+          Analyzer::Typecheck::emitMatchArmTypeMismatch(state, typeStore, span, current, candidate);
+          return Option::NONE;
+        }
+
+        index += 1;
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let mut joinedType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::NEVER);
+      if (let Option::SOME(t) = accumulated) {
+        joinedType = t;
+      }
+
+      if (let Option::SOME(expectedType) = expected) {
+        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, expectedType, joinedType)) {
+          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, expectedType, joinedType);
+          return Option::NONE;
+        }
+      }
+
+      return Option::SOME(joinedType);
+    }
+
     function checkMatchExpr(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1363,6 +1453,8 @@ export namespace Analyzer {
       valuePosition: boolean,
     ): Option<Analyzer::TypeId> {
       let scrutineeTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.scrutinee);
+
+      let mut armTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
 
       let mut index: u64 = 0;
       while (index < value.arms.length()) {
@@ -1383,7 +1475,14 @@ export namespace Analyzer {
           }
         }
 
-        let _bodyType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, arm.body);
+        // `expected` propagates into arm bodies regardless of position: in
+        // statement position it is always `Option::NONE` (see the `checkStmt`
+        // call site below), so `checkExprExpected` transparently falls back
+        // to synthesis-only checking there.
+        let bodyTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(state, defStore, typeStore, symbols, module, resolvedBodies, arm.body, expected);
+        if (let Option::SOME(bodyType) = bodyTypeOpt) {
+          armTypes.push(bodyType);
+        }
         Analyzer::Typecheck::popScope(state);
         index += 1;
       }
@@ -1398,8 +1497,15 @@ export namespace Analyzer {
         }
       }
 
-      Analyzer::Typecheck::emitUnsupported(state, value.span, "match expressions");
-      return Option::NONE;
+      // Statement position discards the match's value: no cross-arm join is
+      // imposed (design D2), and the match itself produces no expression
+      // type — mirroring how sibling statement forms (`if`, `while`) never
+      // record an expression type for themselves.
+      if (!valuePosition) {
+        return Option::NONE;
+      }
+
+      return Analyzer::Typecheck::joinTypes(state, defStore, typeStore, value.span, &armTypes, expected);
     }
 
     function checkLetElse(
