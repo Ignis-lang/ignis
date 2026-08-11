@@ -1171,11 +1171,29 @@ export namespace Analyzer {
           );
         },
         Ast::Expression::Node::Ternary(value) -> {
-          let _conditionType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
-          let _thenType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.thenBranch);
-          let _elseType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.elseBranch);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "ternary expressions");
-          return Option::NONE;
+          let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
+          if (let Option::SOME(conditionType) = conditionTypeOpt) {
+            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+          }
+
+          let thenTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(state, defStore, typeStore, symbols, module, resolvedBodies, value.thenBranch, expected);
+          let elseTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(state, defStore, typeStore, symbols, module, resolvedBodies, value.elseBranch, expected);
+
+          let mut candidates: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          if (let Option::SOME(thenType) = thenTypeOpt) {
+            candidates.push(thenType);
+          }
+          if (let Option::SOME(elseType) = elseTypeOpt) {
+            candidates.push(elseType);
+          }
+
+          let ternaryTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::joinTypes(state, defStore, typeStore, value.span, &candidates, 2, Analyzer::Typecheck::JoinKind::Branches, expected);
+          let Option::SOME(ternaryType) = ternaryTypeOpt else {
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, ternaryType);
+          return Option::SOME(ternaryType);
         },
         Ast::Expression::Node::Cast(value) -> {
           let _innerType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression);
@@ -1235,22 +1253,17 @@ export namespace Analyzer {
             return Option::NONE;
           };
 
-          if (value.tail.isSome()) {
-            Analyzer::Typecheck::emitUnsupported(state, value.span, "block expressions with tail values");
-            return Option::NONE;
-          }
-
           Analyzer::Typecheck::recordExprType(state, exprId, blockType);
           return Option::SOME(blockType);
         },
         Ast::Expression::Node::If(value) -> {
-          let _conditionType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
-          Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.thenBranch);
-          if (let Option::SOME(elseId) = value.elseBranch) {
-            Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, elseId);
-          }
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "if expressions");
-          return Option::NONE;
+          let ifTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkIfExpr(state, defStore, typeStore, symbols, module, resolvedBodies, &value, expected);
+          let Option::SOME(ifType) = ifTypeOpt else {
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, ifType);
+          return Option::SOME(ifType);
         },
         Ast::Expression::Node::Match(value) -> {
           let matchTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkMatchExpr(
@@ -1380,20 +1393,41 @@ export namespace Analyzer {
       return true;
     }
 
-    /// Joins the value-producing arm bodies of an expression-position match
-    /// into a single result type (design D2). `candidates` holds only the arm
-    /// body types that were themselves successfully typechecked — a body that
-    /// already failed typechecking (and was diagnosed at its own call site)
-    /// contributes nothing here. Diverging (`NEVER`-typed) arms are excluded
-    /// from the pairwise comparison so they never poison the join. When every
-    /// candidate is excluded, the match itself types as `NEVER`. The result
-    /// (or `NEVER`) is compared against `expected` exactly once, when present.
+    /// Selects which pairwise-mismatch diagnostic `joinTypes` emits, so the
+    /// same join algorithm serves both match arms (S3) and if/ternary
+    /// branches (S4) with their own distinct diagnostic wording (design D5:
+    /// `match-arm-type-mismatch` vs `branch-type-mismatch`).
+    enum JoinKind {
+      MatchArms,
+      Branches,
+    }
+
+    /// Joins the value-producing candidates of an expression-position
+    /// match/if/ternary into a single result type (design D2). `candidates`
+    /// holds only the candidate types that were themselves successfully
+    /// typechecked — a body/branch that already failed typechecking (and was
+    /// diagnosed at its own call site) contributes nothing here. Diverging
+    /// (`NEVER`-typed) candidates are excluded from the pairwise comparison
+    /// so they never poison the join. `attemptedCount` is the number of
+    /// bodies/branches that were attempted regardless of outcome: when it is
+    /// positive but every candidate was excluded because none of them
+    /// successfully typechecked, the failure was already diagnosed at each
+    /// candidate's own call site, so `joinTypes` returns `Option::NONE`
+    /// without a further diagnostic (S3 review follow-up — do not conflate
+    /// "nothing typed" with "everything diverged"). When candidates exist but
+    /// all are excluded as diverging, the join itself types as `NEVER`. The
+    /// result (or `NEVER`) is compared against `expected` exactly once, when
+    /// present — this is the only place a join vs. `expected` mismatch can be
+    /// diagnosed, since no per-candidate leaf checker enforces `expected`
+    /// against its synthesized type today.
     function joinTypes(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
       span: SourceSpan,
       candidates: &Vector<Analyzer::TypeId>,
+      attemptedCount: u64,
+      kind: Analyzer::Typecheck::JoinKind,
       expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
       let mut accumulated: Option<Analyzer::TypeId> = Option::NONE;
@@ -1418,11 +1452,18 @@ export namespace Analyzer {
         };
 
         if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, current, candidate)) {
-          Analyzer::Typecheck::emitMatchArmTypeMismatch(state, typeStore, span, current, candidate);
+          match (kind) {
+            Analyzer::Typecheck::JoinKind::MatchArms -> Analyzer::Typecheck::emitMatchArmTypeMismatch(state, typeStore, span, current, candidate),
+            Analyzer::Typecheck::JoinKind::Branches -> Analyzer::Typecheck::emitBranchTypeMismatch(state, typeStore, span, current, candidate),
+          };
           return Option::NONE;
         }
 
         index += 1;
+      }
+
+      if (accumulated.isNone() && candidates.length() == 0 && attemptedCount > 0) {
+        return Option::NONE;
       }
 
       let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
@@ -1505,7 +1546,86 @@ export namespace Analyzer {
         return Option::NONE;
       }
 
-      return Analyzer::Typecheck::joinTypes(state, defStore, typeStore, value.span, &armTypes, expected);
+      return Analyzer::Typecheck::joinTypes(state, defStore, typeStore, value.span, &armTypes, value.arms.length(), Analyzer::Typecheck::JoinKind::MatchArms, expected);
+    }
+
+    /// Types a single if-expression branch as a value, threading `expected`
+    /// into it. If-expression branches always arrive as a `Block` statement
+    /// (mirroring `if (cond) { ... } else { ... }` syntax) so their value is
+    /// the block's tail, checked through `checkBlockBody` exactly like any
+    /// other value-producing block. Any other statement shape has no value
+    /// to contribute: it is still checked for its own diagnostics via
+    /// `checkStmt`, but contributes nothing to the branch join.
+    function checkIfBranchExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      stmtId: Ast::StatementId,
+      expected: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(stmt) = module.statements.get(stmtId) else {
+        return Option::NONE;
+      };
+
+      if (let Ast::Statement::Node::Block(blockStmt) = stmt) {
+        return Analyzer::Typecheck::checkBlockBody(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          &blockStmt.statements,
+          blockStmt.tail,
+          expected,
+        );
+      }
+
+      Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, stmtId);
+      return Option::NONE;
+    }
+
+    /// Types an if-expression (design D2/D5, S4): both branches are checked
+    /// with `expected` threaded in, then joined via the same `joinTypes`
+    /// algorithm as match arms. An if-expression with no `else` branch has no
+    /// value to produce, so it is diagnosed instead of falling back to
+    /// `void`.
+    function checkIfExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      value: &Ast::Expression::If,
+      expected: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
+      let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
+      if (let Option::SOME(conditionType) = conditionTypeOpt) {
+        Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+      }
+
+      let Option::SOME(elseId) = value.elseBranch else {
+        let _thenType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkIfBranchExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.thenBranch, Option::NONE);
+        Analyzer::Typecheck::emitIfMissingElse(state, value.span);
+        return Option::NONE;
+      };
+
+      let thenTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkIfBranchExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.thenBranch, expected);
+      let elseTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkIfBranchExpr(state, defStore, typeStore, symbols, module, resolvedBodies, elseId, expected);
+
+      let mut candidates: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      if (let Option::SOME(thenType) = thenTypeOpt) {
+        candidates.push(thenType);
+      }
+      if (let Option::SOME(elseType) = elseTypeOpt) {
+        candidates.push(elseType);
+      }
+
+      return Analyzer::Typecheck::joinTypes(state, defStore, typeStore, value.span, &candidates, 2, Analyzer::Typecheck::JoinKind::Branches, expected);
     }
 
     function checkLetElse(

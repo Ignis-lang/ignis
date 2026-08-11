@@ -288,6 +288,19 @@ function typecheckAddBlock(
   }));
 }
 
+function typecheckAddBlockStmt(
+  module: &mut Ast::Module,
+  stmts: Vector<Ast::StatementId>,
+  tail: Option<Ast::ExpressionId>,
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: typecheckDummySpan(),
+    statements: stmts,
+    tail: tail,
+  }));
+}
+
 function typecheckAddExprStmt(
   module: &mut Ast::Module,
   exprId: Ast::ExpressionId
@@ -477,6 +490,36 @@ function typecheckAddBlockExpr(
     span: typecheckDummySpan(),
     statements: stmts,
     tail: tail,
+  }));
+}
+
+function typecheckAddIfExpr(
+  module: &mut Ast::Module,
+  condition: Ast::ExpressionId,
+  thenBranch: Ast::StatementId,
+  elseBranch: Option<Ast::StatementId>,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::If(Ast::Expression::If {
+    span: typecheckDummySpan(),
+    condition: condition,
+    thenBranch: thenBranch,
+    elseBranch: elseBranch,
+  }));
+}
+
+function typecheckAddTernaryExpr(
+  module: &mut Ast::Module,
+  condition: Ast::ExpressionId,
+  thenBranch: Ast::ExpressionId,
+  elseBranch: Ast::ExpressionId,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Ternary(Ast::Expression::Ternary {
+    span: typecheckDummySpan(),
+    condition: condition,
+    thenBranch: thenBranch,
+    elseBranch: elseBranch,
   }));
 }
 
@@ -2009,8 +2052,12 @@ function typecheckBlockExpressionWithoutTailYieldsVoid(): void {
   assertExprType(&output, blockExpr, typeStore.intern(Analyzer::Type::VOID));
 }
 
+/// Scenario: a block expression with a tail, used as a bare statement
+/// (`expected = Option::NONE`), types as its tail's type instead of hitting
+/// the (now-lifted) `"block expressions with tail values"` wall.
+/// Spec: selfhost-typecheck — if-as-expression / ternary / block tail (S4).
 @test
-function typecheckBlockExpressionWithTailStaysUnsupported(): void {
+function typecheckBlockExpressionWithTailTypesAsTail(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -2030,7 +2077,7 @@ function typecheckBlockExpressionWithTailStaysUnsupported(): void {
 
   module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
     span: typecheckDummySpan(),
-    name: String::create("blockExprTailUnsupported"),
+    name: String::create("blockExprTail"),
     genericParameters: Vector::new<Ast::GenericParam>(),
     parameters: Vector::new<Ast::PatternId>(),
     returnType: Option::NONE,
@@ -2040,7 +2087,8 @@ function typecheckBlockExpressionWithTailStaysUnsupported(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "typecheck does not support block expressions with tail values");
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, blockExpr, typeStore.intern(Analyzer::Type::I32));
 }
 
 @test
@@ -5313,4 +5361,234 @@ function typecheckMatchStatementArmTypeDivergenceProducesNoDiagnostic(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+}
+
+// Phase 15: if-as-expression, ternary, block tails +
+// join-diagnosis follow-ups (selfhost-bidirectional-typecheck, S4)
+// ============================================================
+
+/// Scenario: an if-expression whose `then`/`else` branches both produce
+/// `i32` joins cleanly, exactly like a match expression, and the joined
+/// type is recorded as the if-expression's own type.
+/// Spec: selfhost-typecheck — if-as-expression / ternary / block tail.
+@test
+function typecheckIfExpressionJoinsCompatibleBranchTypes(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+
+  let condition: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let thenBranch: Ast::StatementId = typecheckAddBlockStmt(&mut module, Vector::new<Ast::StatementId>(), Option::SOME(typecheckAddIntLiteral(&mut module, 1)));
+  let elseBranch: Ast::StatementId = typecheckAddBlockStmt(&mut module, Vector::new<Ast::StatementId>(), Option::SOME(typecheckAddIntLiteral(&mut module, 2)));
+  let ifExpr: Ast::ExpressionId = typecheckAddIfExpr(&mut module, condition, thenBranch, Option::SOME(elseBranch));
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, xPattern, i32Type, ifExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, ifExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: an if-expression with no `else` branch cannot produce a value,
+/// so it is diagnosed instead of silently typing as `void`.
+/// Spec: selfhost-typecheck — if-as-expression requires an else branch.
+@test
+function typecheckIfExpressionMissingElseProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let condition: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let thenBranch: Ast::StatementId = typecheckAddBlockStmt(&mut module, Vector::new<Ast::StatementId>(), Option::SOME(typecheckAddIntLiteral(&mut module, 1)));
+  let ifExpr: Ast::ExpressionId = typecheckAddIfExpr(&mut module, condition, thenBranch, Option::NONE);
+  let ifStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, ifExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(ifStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "if expression requires an else branch");
+}
+
+/// Scenario: an if-expression used as a bare statement (no `expected` type
+/// reaches either branch) still checks `then`/`else` compatibility, mirroring
+/// the closed match-expression oracle bug (design D2): compatibility does
+/// not depend on `expected.isSome()`. Exactly one `branch type mismatch`
+/// diagnostic is emitted — no cascade into a second diagnostic once the
+/// pairwise join fails.
+/// Spec: selfhost-typecheck — arm/branch compatibility checked unconditionally.
+@test
+function typecheckIfExpressionBranchTypeMismatchProducesExactlyOneDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let condition: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let thenBranch: Ast::StatementId = typecheckAddBlockStmt(&mut module, Vector::new<Ast::StatementId>(), Option::SOME(typecheckAddIntLiteral(&mut module, 1)));
+  let elseBranch: Ast::StatementId = typecheckAddBlockStmt(&mut module, Vector::new<Ast::StatementId>(), Option::SOME(typecheckAddBoolLiteral(&mut module, true)));
+  let ifExpr: Ast::ExpressionId = typecheckAddIfExpr(&mut module, condition, thenBranch, Option::SOME(elseBranch));
+  let ifStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, ifExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(ifStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "branch type mismatch: expected `i32`, found `boolean`");
+}
+
+/// Scenario: a ternary expression joins its `then`/`else` operand types the
+/// same way as an if-expression, with `expected` threaded into both operands.
+/// Spec: selfhost-typecheck — if-as-expression / ternary / block tail.
+@test
+function typecheckTernaryExpressionJoinsBranchTypes(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+
+  let condition: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let thenBranch: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let elseBranch: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 2);
+  let ternaryExpr: Ast::ExpressionId = typecheckAddTernaryExpr(&mut module, condition, thenBranch, elseBranch);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, xPattern, i32Type, ternaryExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, ternaryExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: a block expression with a tail resolves to the tail's type
+/// (with `expected` threaded into it) instead of hitting the
+/// `"block expressions with tail values"` wall.
+/// Spec: selfhost-typecheck — if-as-expression / ternary / block tail.
+@test
+function typecheckBlockWithTailExpressionTypesAsTailWithExpectation(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+
+  let blockExpr: Ast::ExpressionId = typecheckAddBlockExpr(&mut module, Vector::new<Ast::StatementId>(), Option::SOME(typecheckAddIntLiteral(&mut module, 1)));
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, xPattern, i32Type, blockExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, blockExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario (follow-up a, S3 review): when every arm body fails to
+/// typecheck (an unresolved variable reference in both arms), `joinTypes`
+/// must NOT fall back to claiming the match's own type is `NEVER` and then
+/// compare that synthetic `NEVER` against `expected` — that would add a
+/// spurious third diagnostic on top of the two unresolved-reference
+/// diagnostics already emitted at each arm's own call site. Distinguishing
+/// "no candidates because none typed" from "all candidates were `NEVER`-
+/// typed diverging arms" requires the caller to report how many bodies were
+/// attempted; `joinTypes` returns `Option::NONE` (undiagnosed further) here,
+/// and the match expression itself records no expression type.
+/// Spec: selfhost-typecheck — arm/branch compatibility checked unconditionally
+/// (S3 review follow-up, not a spec regression).
+@test
+function typecheckMatchExpressionAllFailedArmsReturnsNoneNotNever(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "Red"));
+  variants.push(typecheckAddBinding(&mut module, "Green"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let colorType: Ast::TypeId = typecheckAddPathType(&mut module, "Color");
+  let cParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "c", colorType);
+  let cExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "c");
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Red", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddVariable(&mut module, "missingA"),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Green", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddVariable(&mut module, "missingB"),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, cExpr, arms);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, xPattern, i32Type, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(cParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useColor"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  // Only the two unresolved-reference diagnostics (one per arm body) remain
+  // — no additional "type mismatch: expected `i32`, found `NEVER`" from a
+  // spurious NEVER fallback.
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
+  Test::assertEq<boolean>(findExprType(&output, matchExpr).isSome(), false);
 }
