@@ -5592,3 +5592,419 @@ function typecheckMatchExpressionAllFailedArmsReturnsNoneNotNever(): void {
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
   Test::assertEq<boolean>(findExprType(&output, matchExpr).isSome(), false);
 }
+
+// Phase 16: record-init and call-argument expectation
+// (selfhost-bidirectional-typecheck, S5)
+// ============================================================
+
+/// Scenario: a call argument that is itself a match-expression is now
+/// checked with `expected` set to the parameter's declared type, so a
+/// consistently-typed-but-wrong-typed set of arms is caught by `joinTypes`'
+/// own expected-comparison (`type mismatch`) instead of by the call site's
+/// generic `invalid argument type` fallback. Exactly one diagnostic is
+/// emitted — no cascade into a second one once `joinTypes` already reported
+/// the mismatch and returned `Option::NONE`.
+/// Spec: selfhost-typecheck — record-init and call-argument expectation.
+@test
+function typecheckCallArgumentMatchExpressionJoinsAgainstParameterType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "Red"));
+  variants.push(typecheckAddBinding(&mut module, "Green"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let boolTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let helperParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "flag", boolTypeId);
+  let helperExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "flag");
+  let helperRet: Ast::StatementId = typecheckAddReturnExpr(&mut module, helperExpr);
+  let mut helperBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  helperBodyStmts.push(helperRet);
+  let helperBody: Ast::StatementId = typecheckAddBlock(&mut module, helperBodyStmts);
+  let mut helperParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  helperParams.push(helperParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("helper"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: helperParams,
+    returnType: Option::SOME(boolTypeId),
+    body: helperBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let colorType: Ast::TypeId = typecheckAddPathType(&mut module, "Color");
+  let cParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "c", colorType);
+  let cExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "c");
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Red", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Green", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  let matchArg: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, cExpr, arms);
+
+  let helperCallee: Ast::ExpressionId = typecheckAddVariable(&mut module, "helper");
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(matchArg);
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, helperCallee, callArgs);
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(callStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(cParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useColor"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  // Before threading `expected` into the call-argument check, this mismatch
+  // would surface as `invalid argument type` from the call site's own
+  // fallback comparison. With `expected` threaded, `joinTypes` catches it
+  // first (via its own `expected`-comparison) and reports the generic
+  // `type mismatch` diagnostic instead — still exactly one diagnostic.
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `boolean`, found `i32`");
+}
+
+/// Scenario: a call argument that is a match-expression whose joined type
+/// already matches the parameter's declared type typechecks cleanly, with
+/// the match's own expression type recorded as the parameter's type.
+/// Spec: selfhost-typecheck — record-init and call-argument expectation.
+@test
+function typecheckCallArgumentMatchExpressionAgainstCompatibleParameterType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "Red"));
+  variants.push(typecheckAddBinding(&mut module, "Green"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let helperParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", i32TypeId);
+  let helperExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let helperRet: Ast::StatementId = typecheckAddReturnExpr(&mut module, helperExpr);
+  let mut helperBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  helperBodyStmts.push(helperRet);
+  let helperBody: Ast::StatementId = typecheckAddBlock(&mut module, helperBodyStmts);
+  let mut helperParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  helperParams.push(helperParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("helper"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: helperParams,
+    returnType: Option::SOME(i32TypeId),
+    body: helperBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let colorType: Ast::TypeId = typecheckAddPathType(&mut module, "Color");
+  let cParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "c", colorType);
+  let cExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "c");
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Red", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Green", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  let matchArg: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, cExpr, arms);
+
+  let helperCallee: Ast::ExpressionId = typecheckAddVariable(&mut module, "helper");
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(matchArg);
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, helperCallee, callArgs);
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(callStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(cParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useColor"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, matchArg, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: a record-init field value that is a match-expression is now
+/// checked with `expected` set to the field's declared type, so `joinTypes`'
+/// own expected-comparison — not the record-init's generic field-mismatch
+/// fallback — is what reports the mismatch. The diagnostic's span is the
+/// match expression's own span (recorded from inside `checkMatchExpr`), not
+/// the record-init's span, proving `expected` actually reached the field
+/// value instead of being discarded at the call site. Exactly one
+/// diagnostic is emitted; the record-init's own fallback check never runs
+/// because `checkExprExpected` already returned `Option::NONE`.
+/// Spec: selfhost-typecheck — record-init and call-argument expectation.
+@test
+function typecheckRecordInitFieldValueMatchExpressionJoinsAgainstFieldType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let boolTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let xField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "x", boolTypeId);
+  let mut pointFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  pointFields.push(xField);
+  typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), pointFields);
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "Red"));
+  variants.push(typecheckAddBinding(&mut module, "Green"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let colorType: Ast::TypeId = typecheckAddPathType(&mut module, "Color");
+  let cParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "c", colorType);
+  let cExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "c");
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Red", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Green", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  let matchSpan: SourceSpan = SourceSpan::new("typecheck_tests.ign", 30, 40);
+  let matchFieldValue: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Match(Ast::Expression::Match {
+    span: matchSpan,
+    scrutinee: cExpr,
+    arms: arms,
+  }));
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", matchFieldValue));
+  let recordSpan: SourceSpan = SourceSpan::new("typecheck_tests.ign", 10, 20);
+  let initExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::RecordInit(Ast::Expression::RecordInit {
+    span: recordSpan,
+    path: pointPath,
+    typeArguments: Vector::new<Ast::TypeId>(),
+    fields: initFields,
+  }));
+  let initStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, initExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(initStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(cParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useColor"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(diagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckRecordInitFieldValueMatchExpressionJoinsAgainstFieldType: missing diagnostic");
+  };
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(diagnostic.messageText(), "type mismatch: expected `boolean`, found `i32`");
+  Test::assertEq<u64>(diagnostic.primarySpan.start, 30);
+}
+
+/// Scenario: a record-init field value that is a nested record-init
+/// resolves and checks cleanly once `expected` reaches the outer field
+/// value — pinning that threading `expected` through `checkRecordInitExpr`'s
+/// field loop does not disturb ordinary nested initializers (the nested
+/// record's own path resolution is independent of the outer expectation;
+/// only its own declared field types matter).
+/// Spec: selfhost-typecheck — record-init and call-argument expectation.
+@test
+function typecheckRecordInitFieldValueNestedRecordInitTypechecksCleanly(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let innerValueField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "value", i32TypeId);
+  let mut innerFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  innerFields.push(innerValueField);
+  typecheckAddRecordItem(&mut module, "Inner", Vector::new<Ast::GenericParam>(), innerFields);
+
+  let innerPathType: Ast::TypeId = typecheckAddPathType(&mut module, "Inner");
+  let outerInnerField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "inner", innerPathType);
+  let mut outerFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  outerFields.push(outerInnerField);
+  typecheckAddRecordItem(&mut module, "Outer", Vector::new<Ast::GenericParam>(), outerFields);
+
+  let innerPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Inner");
+  let mut innerInitFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  innerInitFields.push(typecheckRecordInitField("value", typecheckAddIntLiteral(&mut module, 1)));
+  let innerInit: Ast::ExpressionId = typecheckAddRecordInit(&mut module, innerPath, Vector::new<Ast::TypeId>(), innerInitFields);
+
+  let outerPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Outer");
+  let mut outerInitFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  outerInitFields.push(typecheckRecordInitField("inner", innerInit));
+  let outerInit: Ast::ExpressionId = typecheckAddRecordInit(&mut module, outerPath, Vector::new<Ast::TypeId>(), outerInitFields);
+  let outerStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, outerInit);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(outerStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  Test::assertEq<boolean>(findExprType(&output, innerInit).isSome(), true);
+  Test::assertEq<boolean>(findExprType(&output, outerInit).isSome(), true);
+}
+
+/// Scenario (mandatory S4-review follow-up): a match-expression where one
+/// arm typechecks successfully (`i32`) and the sibling arm fails on its own
+/// (an unresolved variable reference). Pins two things: (a) exactly the
+/// failed arm's own diagnostic is emitted — `joinTypes` does not add a
+/// second diagnostic for the mismatch-that-never-happens, since the failed
+/// arm contributes no candidate to the join at all; and (b) the CURRENT
+/// survivor-propagation behavior — the match's joined type is the one
+/// successfully-typed arm's type (`i32`) — even though its sibling failed.
+/// This is intentional-for-now: overall compilation already fails because
+/// of the failed arm's own diagnostic, so a "wrong" survivor type causes no
+/// additional harm today. A future change to divergent-arm handling should
+/// treat this test as the point of deliberate departure, not a silent
+/// regression.
+/// Spec: selfhost-typecheck — arm/branch compatibility checked unconditionally.
+@test
+function typecheckMatchExpressionMixedPartialJoinUsesSurvivorType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "Red"));
+  variants.push(typecheckAddBinding(&mut module, "Green"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let colorType: Ast::TypeId = typecheckAddPathType(&mut module, "Color");
+  let cParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "c", colorType);
+  let cExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "c");
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Red", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddVariable(&mut module, "missing"),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Green", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, cExpr, arms);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, xPattern, i32Type, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(cParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useColor"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  // Follow-up (a): exactly the failed arm's own unresolved-reference
+  // diagnostic — no additional join-mismatch diagnostic.
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+
+  // Follow-up (b): the joined type is the survivor arm's type (`i32`),
+  // pinned as CURRENT, intentional-for-now behavior.
+  assertExprType(&output, matchExpr, typeStore.intern(Analyzer::Type::I32));
+}

@@ -431,7 +431,29 @@ export namespace Analyzer {
           continue;
         };
 
-        let argumentTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        let Option::SOME(paramDef) = defStore.get(*paramDefId) else {
+          index += 1;
+          continue;
+        };
+
+        // Only a `Variable` (ordinary parameter) has a declared type worth
+        // propagating as the expectation; every other definition kind hits
+        // the "non-variable function parameters" wall below regardless of
+        // the argument's own type, so no expectation is threaded for them.
+        let expectedType: Option<Analyzer::TypeId> = match (paramDef) {
+          Analyzer::Definition::Variable(parameter) -> Option::SOME(parameter.declaredType),
+          Analyzer::Definition::Function(_) -> Option::NONE,
+          Analyzer::Definition::Record(_) -> Option::NONE,
+          Analyzer::Definition::Enum(_) -> Option::NONE,
+          Analyzer::Definition::Field(_) -> Option::NONE,
+          Analyzer::Definition::Variant(_) -> Option::NONE,
+          Analyzer::Definition::TypeParam(_) -> Option::NONE,
+          Analyzer::Definition::TypeAlias(_) -> Option::NONE,
+          Analyzer::Definition::Trait(_) -> Option::NONE,
+          Analyzer::Definition::Method(_) -> Option::NONE,
+        };
+
+        let argumentTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
           state,
           defStore,
           typeStore,
@@ -439,13 +461,9 @@ export namespace Analyzer {
           module,
           resolvedBodies,
           *argumentId,
+          expectedType,
         );
         let Option::SOME(argumentType) = argumentTypeOpt else {
-          index += 1;
-          continue;
-        };
-
-        let Option::SOME(paramDef) = defStore.get(*paramDefId) else {
           index += 1;
           continue;
         };
@@ -976,7 +994,7 @@ export namespace Analyzer {
 
         seenFieldNames.push(fieldDef.name);
 
-        let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
           state,
           defStore,
           typeStore,
@@ -984,6 +1002,7 @@ export namespace Analyzer {
           module,
           resolvedBodies,
           field.value,
+          Option::SOME(fieldDef.fieldType),
         );
         let Option::SOME(actualType) = actualTypeOpt else {
           return Option::NONE;
