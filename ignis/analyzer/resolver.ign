@@ -76,18 +76,17 @@ export namespace Analyzer {
     // Leaf helpers — no calls to other resolver functions.
     // =========================================================================
 
-    /// Emit a `DiagnosticCode::UNDEFINED_TYPE` (I0043) ERROR diagnostic.
-    ///
-    /// All resolver errors reuse this single code with discriminating message text
-    /// (ADR-R2: Diagnostic Code Reuse).
+    /// Emit an ERROR diagnostic with the class-specific `code` for the
+    /// resolver failure being reported (ADR-R2: Diagnostic Code Catalog).
     function emitUndefinedType(
       state: &mut Analyzer::Resolver::ResolverState,
       span: SourceSpan,
+      code: str,
       message: str,
     ): void {
       let mut diag: Diagnostic = Diagnostic::new(
         Severity::ERROR,
-        DiagnosticCode::UNDEFINED_TYPE,
+        code,
         message,
         span,
       );
@@ -852,13 +851,13 @@ export namespace Analyzer {
       p: &Ast::Type::Path,
     ): Analyzer::TypeId {
       if (p.segments.length() == 0) {
-        emitUndefinedType(state, p.span, "empty type path");
+        emitUndefinedType(state, p.span, DiagnosticCode::UNDEFINED_TYPE, "empty type path");
         let mut tsRef: &mut Analyzer::TypeStore = typeStore;
         return tsRef.intern(Analyzer::Type::VOID);
       }
 
       if (p.segments.length() > 1) {
-        emitUndefinedType(state, p.span, "multi-segment type paths are not yet supported");
+        emitUndefinedType(state, p.span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "multi-segment type paths are not yet supported");
         let mut tsRef: &mut Analyzer::TypeStore = typeStore;
         return tsRef.intern(Analyzer::Type::VOID);
       }
@@ -895,7 +894,7 @@ export namespace Analyzer {
         // Trait names are not valid in type position.
         if (isTraitDef(defStore, defId)) {
           let message: String = String::create("trait `").concat(nameStr.toStr()).concat("` cannot be used in type position");
-          emitUndefinedType(state, p.span, message.toStr());
+          emitUndefinedType(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
           let mut tsRef: &mut Analyzer::TypeStore = typeStore;
           return tsRef.intern(Analyzer::Type::VOID);
         }
@@ -908,14 +907,14 @@ export namespace Analyzer {
       if (let Option::SOME(defId) = importOpt) {
         if (isTraitDef(defStore, defId)) {
           let message: String = String::create("trait `").concat(nameStr.toStr()).concat("` cannot be used in type position");
-          emitUndefinedType(state, p.span, message.toStr());
+          emitUndefinedType(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
           let mut tsRef: &mut Analyzer::TypeStore = typeStore;
           return tsRef.intern(Analyzer::Type::VOID);
         }
 
         if (!isTypeNameDef(defStore, defId)) {
           let message: String = String::create("unknown type name: `").concat(nameStr.toStr()).concat("`");
-          emitUndefinedType(state, p.span, message.toStr());
+          emitUndefinedType(state, p.span, DiagnosticCode::UNDEFINED_TYPE, message.toStr());
           let mut tsRef: &mut Analyzer::TypeStore = typeStore;
           return tsRef.intern(Analyzer::Type::VOID);
         }
@@ -925,7 +924,7 @@ export namespace Analyzer {
 
       // 4. Unknown.
       let message: String = String::create("unknown type name: `").concat(nameStr.toStr()).concat("`");
-      emitUndefinedType(state, p.span, message.toStr());
+      emitUndefinedType(state, p.span, DiagnosticCode::UNDEFINED_TYPE, message.toStr());
       let mut tsRef: &mut Analyzer::TypeStore = typeStore;
       return tsRef.intern(Analyzer::Type::VOID);
     }
@@ -1040,19 +1039,19 @@ export namespace Analyzer {
           let gSpan: SourceSpan = g.span;
 
           let Option::SOME(basePath) = extractBasePath(module, g.base) else {
-            emitUndefinedType(state, gSpan, "generic base must be a single-segment path");
+            emitUndefinedType(state, gSpan, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "generic base must be a single-segment path");
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           };
 
           if (basePath.segments.length() != 1) {
-            emitUndefinedType(state, gSpan, "generic base must be a single-segment path");
+            emitUndefinedType(state, gSpan, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "generic base must be a single-segment path");
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           }
 
           let Option::SOME(firstSeg) = basePath.segments.get(0) else {
-            emitUndefinedType(state, gSpan, "generic base must be a single-segment path");
+            emitUndefinedType(state, gSpan, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "generic base must be a single-segment path");
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           };
@@ -1068,7 +1067,7 @@ export namespace Analyzer {
             let message: String = String::create("type parameter `")
               .concat(baseNameStr.toStr())
               .concat("` cannot take generic arguments");
-            emitUndefinedType(state, gSpan, message.toStr());
+            emitUndefinedType(state, gSpan, DiagnosticCode::GENERIC_ARGS_NOT_ALLOWED, message.toStr());
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           }
@@ -1080,7 +1079,7 @@ export namespace Analyzer {
             let message: String = String::create("primitive type `")
               .concat(baseNameStr.toStr())
               .concat("` does not take generic arguments");
-            emitUndefinedType(state, gSpan, message.toStr());
+            emitUndefinedType(state, gSpan, DiagnosticCode::GENERIC_ARGS_NOT_ALLOWED, message.toStr());
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           }
@@ -1096,14 +1095,14 @@ export namespace Analyzer {
             let message: String = String::create("unknown generic type: `")
               .concat(baseNameStr.toStr())
               .concat("`");
-            emitUndefinedType(state, basePathSpan, message.toStr());
+            emitUndefinedType(state, basePathSpan, DiagnosticCode::UNDEFINED_TYPE, message.toStr());
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           };
 
           if (isTraitDef(defStore, defId)) {
             let message: String = String::create("trait `").concat(baseNameStr.toStr()).concat("` cannot be used in type position");
-            emitUndefinedType(state, basePathSpan, message.toStr());
+            emitUndefinedType(state, basePathSpan, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           }
@@ -1112,7 +1111,7 @@ export namespace Analyzer {
             let message: String = String::create("unknown generic type: `")
               .concat(baseNameStr.toStr())
               .concat("`");
-            emitUndefinedType(state, basePathSpan, message.toStr());
+            emitUndefinedType(state, basePathSpan, DiagnosticCode::UNDEFINED_TYPE, message.toStr());
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           }
@@ -1128,7 +1127,7 @@ export namespace Analyzer {
               .concat(expectedArity)
               .concat(" type arguments, found ")
               .concat(actualArity);
-            emitUndefinedType(state, gSpan, message.toStr());
+            emitUndefinedType(state, gSpan, DiagnosticCode::GENERIC_ARITY_MISMATCH, message.toStr());
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           }

@@ -235,8 +235,12 @@ export namespace Analyzer {
     /// Each `ExpressionId` is visited and recorded at most once per walk (one
     /// AST node, one resolution site), so a plain `insert` is equivalent to
     /// the earlier linear-scan `findExprRef`'s first-recorded-entry semantics.
+    /// The `contains` check below guards that once-per-walk invariant: it
+    /// runs before the insert (and before `r` is moved into it) so the guard
+    /// itself never disturbs `r`'s ownership.
     ///
     /// @panic if the raw ExpressionId has the high bit set (ADR-B4 overflow).
+    /// @panic if this node id was already recorded during this walk.
     function recordExprRef(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       exprId: Ast::ExpressionId,
@@ -249,14 +253,22 @@ export namespace Analyzer {
       }
 
       let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+
+      if (stateRef.bodyResolution.index.contains(&raw)) {
+        @panic("BodyResolutionMap: node id recorded twice — once-per-walk invariant broken");
+      }
+
       stateRef.bodyResolution.index.insert(raw, r);
     }
 
     /// Record a pattern ref into the side-table with PATTERN_KEY_BIT OR'd in.
     ///
-    /// See `recordExprRef` — each PatternId is recorded at most once per walk.
+    /// See `recordExprRef` — each PatternId is recorded at most once per walk,
+    /// and the same `contains` guard applies before the key is moved into
+    /// `insert`.
     ///
     /// @panic if the raw PatternId has the high bit set (ADR-B4 overflow).
+    /// @panic if this node id was already recorded during this walk.
     function recordPatternRef(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       patId: Ast::PatternId,
@@ -270,6 +282,11 @@ export namespace Analyzer {
 
       let key: u32 = raw | PATTERN_KEY_BIT;
       let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+
+      if (stateRef.bodyResolution.index.contains(&key)) {
+        @panic("BodyResolutionMap: node id recorded twice — once-per-walk invariant broken");
+      }
+
       stateRef.bodyResolution.index.insert(key, r);
     }
 
@@ -277,17 +294,17 @@ export namespace Analyzer {
     // Diagnostic helpers
     // =========================================================================
 
-    /// Emit an `UNDECLARED_VARIABLE` (I0033) ERROR diagnostic.
-    ///
-    /// All body-resolver name errors reuse this code (ADR-B1).
+    /// Emit an ERROR diagnostic with the class-specific `code` for the
+    /// body-resolver failure being reported (ADR-R2: Diagnostic Code Catalog).
     function emitUndeclaredVariable(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       span: SourceSpan,
+      code: str,
       message: str,
     ): void {
       let mut diag: Diagnostic = Diagnostic::new(
         Severity::ERROR,
-        DiagnosticCode::UNDECLARED_VARIABLE,
+        code,
         message,
         span,
       );
@@ -998,7 +1015,7 @@ export namespace Analyzer {
           let message: String = String::create("trait `")
             .concat(name)
             .concat("` cannot be used in expression position");
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
           Analyzer::ResolverBodies::recordExprRef(
             state,
             exprId,
@@ -1018,7 +1035,7 @@ export namespace Analyzer {
           let message: String = String::create("trait `")
             .concat(name)
             .concat("` cannot be used in expression position");
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
           Analyzer::ResolverBodies::recordExprRef(
             state,
             exprId,
@@ -1033,7 +1050,7 @@ export namespace Analyzer {
 
       // 5. Unknown.
       let message: String = String::create("undeclared variable: `").concat(name).concat("`");
-      Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+      Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
       Analyzer::ResolverBodies::recordExprRef(
         state,
         exprId,
@@ -1063,31 +1080,31 @@ export namespace Analyzer {
         },
         Analyzer::ResolverBodies::PathTailLookup::InstanceMethod(_) -> {
           let message: String = String::create("instance method `").concat(memberName).concat("` requires a receiver");
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::OwnerIsTrait -> {
           let message: String = String::create("trait `").concat(ownerName).concat("` cannot be used as a path qualifier");
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, "left of '::' must be a record or enum");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::INVALID_ENTITY_POSITION, "left of '::' must be a record or enum");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::OwnerNotFound -> {
           let message: String = String::create("undeclared name in path: `").concat(ownerName).concat("`");
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnEnum -> {
           let message: String = String::create("unknown variant or static method: `").concat(memberName).concat("`");
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnRecord -> {
           let message: String = String::create("unknown method or type in path: `").concat(memberName).concat("`");
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, message.toStr());
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
       };
@@ -1112,7 +1129,7 @@ export namespace Analyzer {
       let segCount: u64 = p.segments.length();
 
       if (segCount == 0) {
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "empty path");
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, "empty path");
         Analyzer::ResolverBodies::recordExprRef(
           state,
           exprId,
@@ -1300,7 +1317,7 @@ export namespace Analyzer {
       segCount: u64,
     ): Analyzer::ResolverBodies::ResolvedRef {
       if (segCount == 0) {
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "empty pattern path");
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, "empty pattern path");
         return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
       }
 
@@ -1312,11 +1329,11 @@ export namespace Analyzer {
       // expression position. Segments before `owner` are unvalidated,
       // TODO(namespace-path-validation).
       let Option::SOME(ownerStr) = p.segments.get(segCount - 2) else {
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown enum");
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, "unknown enum");
         return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
       };
       let Option::SOME(memberStr) = p.segments.get(segCount - 1) else {
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "unknown variant");
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, "unknown variant");
         return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
       };
 
@@ -1342,7 +1359,7 @@ export namespace Analyzer {
     ///
     /// If the name resolves to a Record in the global index, returns `Definition(recordDefId)`.
     /// Bare enum variant names (unqualified) are not yet supported (ADR-B9):
-    /// those emit `UNDECLARED_VARIABLE` and return `Unresolved`.
+    /// those emit `UNSUPPORTED_CONSTRUCT` and return `Unresolved`.
     /// TODO(unqualified-variant-patterns).
     function resolvePatternPath1Seg(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
@@ -1351,7 +1368,7 @@ export namespace Analyzer {
       p: &Ast::Pattern::Path,
     ): Analyzer::ResolverBodies::ResolvedRef {
       let Option::SOME(nameStr) = p.segments.get(0) else {
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "empty pattern segment");
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, "empty pattern segment");
         return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
       };
 
@@ -1360,14 +1377,14 @@ export namespace Analyzer {
       let globalOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookup(state, sym);
 
       let Option::SOME(defId) = globalOpt else {
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "undefined constructor");
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, "undefined constructor");
         return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
       };
 
       // Only Record constructors are supported as single-segment patterns.
       // Unqualified enum variant names require qualified syntax (ADR-B9).
       let Option::SOME(def) = defStore.get(defId) else {
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "undefined constructor");
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, "undefined constructor");
         return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
       };
 
@@ -1377,39 +1394,39 @@ export namespace Analyzer {
         },
         Analyzer::Definition::Enum(_) -> {
           // Bare enum name without variant selector is not valid in pattern position.
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "bare-variant pattern not yet supported");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::Definition::Function(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "bare-variant pattern not yet supported");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::Definition::Variable(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "bare-variant pattern not yet supported");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::Definition::Trait(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "bare-variant pattern not yet supported");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::Definition::TypeAlias(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "bare-variant pattern not yet supported");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::Definition::Field(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "bare-variant pattern not yet supported");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::Definition::Variant(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "bare-variant pattern not yet supported");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::Definition::TypeParam(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "bare-variant pattern not yet supported");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::Definition::Method(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "methods are not valid in pattern position");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, "methods are not valid in pattern position");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
       };
@@ -1450,7 +1467,7 @@ export namespace Analyzer {
       defId: Analyzer::DefinitionId,
     ): Analyzer::ResolverBodies::ResolvedRef {
       let Option::SOME(def) = defStore.get(defId) else {
-        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "undefined constructor");
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, "undefined constructor");
         return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
       };
 
@@ -1459,7 +1476,7 @@ export namespace Analyzer {
           return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
         },
         Analyzer::Definition::Enum(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "bare-variant pattern not yet supported");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "bare-variant pattern not yet supported");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::Definition::Function(_) -> {
@@ -1511,35 +1528,35 @@ export namespace Analyzer {
           return Analyzer::ResolverBodies::resolvePatternPathTypeFallback(state, defStore, p, defId);
         },
         Analyzer::ResolverBodies::PathTailLookup::StaticMethod(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "methods are not valid in pattern position");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, "methods are not valid in pattern position");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::InstanceMethod(_) -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "methods are not valid in pattern position");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, "methods are not valid in pattern position");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::OwnerIsTrait -> {
           let message: String = String::create("trait `").concat(ownerName).concat("` cannot be used as a path qualifier");
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, message.toStr());
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid -> {
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, "left of '::' must be a record or enum");
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, "left of '::' must be a record or enum");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::OwnerNotFound -> {
           let message: String = String::create("undeclared name in path: `").concat(ownerName).concat("`");
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, message.toStr());
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnEnum -> {
           let message: String = String::create("unknown variant or static method: `").concat(memberName).concat("`");
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, message.toStr());
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnRecord -> {
           let message: String = String::create("unknown method or type in path: `").concat(memberName).concat("`");
-          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, message.toStr());
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
       };

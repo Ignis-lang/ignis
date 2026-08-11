@@ -108,7 +108,7 @@ export namespace Analyzer {
         .concat("`, found `")
         .concat(typeStore.nameOf(actual).toStr())
         .concat("`");
-      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::ARM_OR_BRANCH_TYPE_MISMATCH, message.toStr());
     }
 
     function emitBranchTypeMismatch(
@@ -123,14 +123,14 @@ export namespace Analyzer {
         .concat("`, found `")
         .concat(typeStore.nameOf(actual).toStr())
         .concat("`");
-      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::ARM_OR_BRANCH_TYPE_MISMATCH, message.toStr());
     }
 
     function emitIfMissingElse(
       state: &mut Analyzer::Typecheck::TypecheckState,
       span: SourceSpan,
     ): void {
-      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "if expression requires an else branch");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::IF_MISSING_ELSE, "if expression requires an else branch");
     }
 
     function emitInvalidNumberOfArguments(
@@ -167,7 +167,7 @@ export namespace Analyzer {
       detail: str,
     ): void {
       let message: String = String::create("typecheck does not support ").concat(detail);
-      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, message.toStr());
     }
 
     function recordExprType(
@@ -295,7 +295,7 @@ export namespace Analyzer {
       let message: String = String::create("cyclic type alias `")
         .concat(typeStore.nameOf(aliasTypeId).toStr())
         .concat("`");
-      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::CYCLIC_TYPE_ALIAS, message.toStr());
     }
 
     function typesEqual(
@@ -600,7 +600,7 @@ export namespace Analyzer {
           match (def) {
             Analyzer::Definition::Record(record_) -> {
               if (record_.typeParams.length() > 0) {
-                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, genericMessage);
                 return Option::NONE;
               }
 
@@ -613,7 +613,7 @@ export namespace Analyzer {
           };
         },
         Analyzer::Type::Instance(_) -> {
-          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, genericMessage);
           return Option::NONE;
         },
         _ -> {
@@ -655,7 +655,7 @@ export namespace Analyzer {
           match (def) {
             Analyzer::Definition::Enum(enum_) -> {
               if (enum_.typeParams.length() > 0) {
-                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, genericMessage);
                 return Option::NONE;
               }
 
@@ -668,7 +668,7 @@ export namespace Analyzer {
           };
         },
         Analyzer::Type::Instance(_) -> {
-          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, genericMessage);
           return Option::NONE;
         },
         _ -> {
@@ -744,7 +744,7 @@ export namespace Analyzer {
           match (def) {
             Analyzer::Definition::Record(record_) -> {
               if (record_.typeParams.length() > 0) {
-                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, genericMessage);
                 return Option::NONE;
               }
 
@@ -770,7 +770,7 @@ export namespace Analyzer {
           match (def) {
             Analyzer::Definition::Enum(enum_) -> {
               if (enum_.typeParams.length() > 0) {
-                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, genericMessage);
                 return Option::NONE;
               }
 
@@ -788,7 +788,7 @@ export namespace Analyzer {
           };
         },
         Analyzer::Type::Instance(_) -> {
-          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, genericMessage);
           return Option::NONE;
         },
         _ -> {
@@ -933,7 +933,7 @@ export namespace Analyzer {
 
       let expectedFieldCount: u64 = Analyzer::Typecheck::recordFieldCount(defStore, expectedRecordDefId);
       if (pattern.arguments.length() != expectedFieldCount) {
-        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "record destructure field count mismatch");
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::PATTERN_ARITY_MISMATCH, "record destructure field count mismatch");
         return false;
       }
 
@@ -1019,7 +1019,7 @@ export namespace Analyzer {
 
       let expectedArity: u64 = variant.payload.length();
       if (pattern.arguments.length() != expectedArity) {
-        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "enum variant pattern arity does not match the variant's declared payload");
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::PATTERN_ARITY_MISMATCH, "enum variant pattern arity does not match the variant's declared payload");
         return false;
       }
 
@@ -1639,7 +1639,7 @@ export namespace Analyzer {
         Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> {
           let methodInfoOpt: Option<Analyzer::Typecheck::MethodCallInfo> = Analyzer::Typecheck::lookupMethodDefInfo(defStore, defId);
           if (methodInfoOpt.isSome()) {
-            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "method references are not values; call the method instead");
+            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, "method references are not values; call the method instead");
             return Option::NONE;
           }
 

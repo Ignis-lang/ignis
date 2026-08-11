@@ -230,7 +230,7 @@ export namespace Analyzer {
       };
 
       if (!localBinding.mutable) {
-        Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::TYPE_MISMATCH, "cannot assign to immutable local");
+        Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot assign to immutable local");
         return Option::NONE;
       }
 
@@ -310,7 +310,7 @@ export namespace Analyzer {
           Analyzer::Typecheck::recordExprType(state, call.callee, calleeType);
 
           if (!methodInfo.isStatic) {
-            Analyzer::Typecheck::emitDiagnostic(state, call.span, DiagnosticCode::TYPE_MISMATCH, "instance method calls require a receiver");
+            Analyzer::Typecheck::emitDiagnostic(state, call.span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, "instance method calls require a receiver");
             return Option::NONE;
           }
 
@@ -586,11 +586,11 @@ export namespace Analyzer {
 
         if (staticOpt.isSome()) {
           let message: String = String::create("static method `").concat(memberName).concat("` cannot be called through an instance");
-          Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+          Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, message.toStr());
           return Option::NONE;
         }
 
-        Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, ma.span, "unknown method", memberName);
+        Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, ma.span, DiagnosticCode::UNKNOWN_MEMBER, "unknown method", memberName);
         return Option::NONE;
       };
 
@@ -610,7 +610,7 @@ export namespace Analyzer {
 
               if (let Option::SOME(binding) = bindingOpt) {
                 if (!binding.mutable) {
-                  Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::TYPE_MISMATCH, "cannot call mutable method on immutable receiver");
+                  Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method on immutable receiver");
                   return Option::NONE;
                 }
               }
@@ -718,7 +718,7 @@ export namespace Analyzer {
           match (def) {
             Analyzer::Definition::Record(record_) -> {
               if (record_.typeParams.length() > 0) {
-                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, genericMessage);
                 return Option::NONE;
               }
 
@@ -747,7 +747,7 @@ export namespace Analyzer {
           };
         },
         Analyzer::Type::Instance(_) -> {
-          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, genericMessage);
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, genericMessage);
           return Option::NONE;
         },
         _ -> {
@@ -803,11 +803,12 @@ export namespace Analyzer {
     function emitNamedRecordFieldDiagnostic(
       state: &mut Analyzer::Typecheck::TypecheckState,
       span: SourceSpan,
+      code: str,
       prefix: str,
       name: str,
     ): void {
       let message: String = String::create(prefix).concat(" `").concat(name).concat("`");
-      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+      Analyzer::Typecheck::emitDiagnostic(state, span, code, message.toStr());
     }
 
     function checkMemberAccessExpr(
@@ -910,11 +911,11 @@ export namespace Analyzer {
 
       if (methodHit.isSome()) {
         let message: String = String::create("method `").concat(memberName).concat("` requires a call");
-        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, message.toStr());
         return;
       }
 
-      Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, span, "unknown record field", memberName);
+      Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, span, DiagnosticCode::UNKNOWN_MEMBER, "unknown record field", memberName);
     }
 
     function checkRecordInitExpr(
@@ -973,7 +974,7 @@ export namespace Analyzer {
           field.name.toStr(),
         );
         let Option::SOME(fieldDef) = fieldDefOpt else {
-          Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, "unknown record field", field.name.toStr());
+          Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, DiagnosticCode::UNKNOWN_MEMBER, "unknown record field", field.name.toStr());
           return Option::NONE;
         };
 
@@ -985,7 +986,7 @@ export namespace Analyzer {
           };
 
           if (seenFieldName.raw() == fieldDef.name.raw()) {
-            Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, "duplicate record field", field.name.toStr());
+            Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, DiagnosticCode::DUPLICATE_RECORD_FIELD_INIT, "duplicate record field", field.name.toStr());
             return Option::NONE;
           }
 
@@ -1051,7 +1052,7 @@ export namespace Analyzer {
                 Option::SOME(name) -> String::create(name),
                 Option::NONE -> String::create("<unknown>"),
               };
-              Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, "missing record field", missingName.toStr());
+              Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, DiagnosticCode::MISSING_RECORD_FIELD_INIT, "missing record field", missingName.toStr());
               return Option::NONE;
             }
           },
@@ -1551,9 +1552,9 @@ export namespace Analyzer {
       if (let Analyzer::Typecheck::ExhaustiveVerdict::Missing(reason) = verdict) {
         let message: String = String::create("non-exhaustive match: ").concat(reason.toStr());
         if (valuePosition) {
-          Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+          Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::NON_EXHAUSTIVE_MATCH, message.toStr());
         } else {
-          Analyzer::Typecheck::emitWarning(state, value.span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+          Analyzer::Typecheck::emitWarning(state, value.span, DiagnosticCode::NON_EXHAUSTIVE_MATCH, message.toStr());
         }
       }
 
@@ -1911,7 +1912,7 @@ export namespace Analyzer {
         },
         Ast::Statement::Node::Break(value) -> {
           if (state.loopDepth == 0) {
-            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::TYPE_MISMATCH, "`break` used outside of loop");
+            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::CONTROL_FLOW_OUTSIDE_LOOP, "`break` used outside of loop");
             return;
           }
 
@@ -1922,7 +1923,7 @@ export namespace Analyzer {
         },
         Ast::Statement::Node::Continue(value) -> {
           if (state.loopDepth == 0) {
-            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::TYPE_MISMATCH, "`continue` used outside of loop");
+            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::CONTROL_FLOW_OUTSIDE_LOOP, "`continue` used outside of loop");
           }
         },
         Ast::Statement::Node::Defer(value) -> {
