@@ -411,6 +411,12 @@ pub enum DiagnosticMessage {
   CannotReturnLocalReference {
     span: Span,
   },
+  ViewOutlivesOwner {
+    view_name: String,
+    owner_name: String,
+    span: Span,
+    owner_span: Span,
+  },
   UndefinedIdentifier {
     name: String,
     span: Span,
@@ -1331,6 +1337,11 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::CannotReturnLocalReference { .. } => {
         write!(f, "Cannot return reference to local variable")
       },
+      DiagnosticMessage::ViewOutlivesOwner {
+        view_name, owner_name, ..
+      } => {
+        write!(f, "View '{}' outlives '{}', the value it borrows from", view_name, owner_name)
+      },
       DiagnosticMessage::UndefinedIdentifier { name, .. } => {
         write!(f, "Undefined identifier '{}'", name)
       },
@@ -2016,6 +2027,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::ContinueOutsideLoop { span, .. }
       | DiagnosticMessage::ReturnOutsideFunction { span, .. }
       | DiagnosticMessage::CannotReturnLocalReference { span, .. }
+      | DiagnosticMessage::ViewOutlivesOwner { span, .. }
       | DiagnosticMessage::UndefinedIdentifier { span, .. }
       | DiagnosticMessage::AssignmentTypeMismatch { span, .. }
       | DiagnosticMessage::IntegerOverflow { span, .. } => span.clone(),
@@ -2246,6 +2258,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::ContinueOutsideLoop { .. } => "A0041",
       DiagnosticMessage::ReturnOutsideFunction { .. } => "A0042",
       DiagnosticMessage::CannotReturnLocalReference { .. } => "A0043",
+      DiagnosticMessage::ViewOutlivesOwner { .. } => "A0202",
       DiagnosticMessage::UndefinedIdentifier { .. } => "A0044",
       DiagnosticMessage::AssignmentTypeMismatch { .. } => "A0045",
       DiagnosticMessage::IntegerOverflow { .. } => "A0046",
@@ -2445,6 +2458,14 @@ impl DiagnosticMessage {
           (directive_use_span.clone(), "directive use".to_string()),
           (target_span.clone(), "target item".to_string()),
         ]
+      },
+      DiagnosticMessage::ViewOutlivesOwner {
+        owner_name, owner_span, ..
+      } => {
+        vec![(
+          owner_span.clone(),
+          format!("'{}' is dropped at the end of this scope", owner_name),
+        )]
       },
       DiagnosticMessage::PipePlaceholderOutsidePipe { .. } => {
         vec![]

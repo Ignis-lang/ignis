@@ -1,0 +1,40 @@
+// Test: `str` views whose storage outlives the binding are accepted
+// Expected: no borrow errors
+
+@implements(Drop)
+record Buffer {
+  text: str;
+
+  drop(&mut self): void {
+    return;
+  }
+
+  view(&self): str {
+    return self.text;
+  }
+}
+
+function passthrough(input: str): str {
+  return input;
+}
+
+function fromParameter(buffer: &Buffer): str {
+  return buffer.view();
+}
+
+function staticLiteral(): str {
+  return "literal";
+}
+
+function sameScope(): void {
+  let owned: Buffer = Buffer { text: "hello" };
+  let view: str = owned.view();
+  let aliased: str = view;
+  passthrough(aliased);
+
+  return;
+}
+
+function main(): i32 {
+  return 0;
+}

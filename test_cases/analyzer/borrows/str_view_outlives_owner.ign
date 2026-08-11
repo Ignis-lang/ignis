@@ -1,0 +1,35 @@
+// Test: a `str` view must not outlive the value whose buffer it borrows
+// Expected: A0043 for the escaping return, A0202 for the cross-scope binding
+
+@implements(Drop)
+record Buffer {
+  text: str;
+
+  drop(&mut self): void {
+    return;
+  }
+
+  view(&self): str {
+    return self.text;
+  }
+}
+
+function escapingReturn(): str {
+  let owned: Buffer = Buffer { text: "hello" };
+  return owned.view();
+}
+
+function crossScopeBinding(): void {
+  let mut view: str = "";
+
+  {
+    let owned: Buffer = Buffer { text: "hello" };
+    view = owned.view();
+  }
+
+  return;
+}
+
+function main(): i32 {
+  return 0;
+}

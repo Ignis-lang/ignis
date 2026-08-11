@@ -63,6 +63,17 @@ struct ScopeEntry {
 /// - Double mutable borrow (A0038)
 /// - Mutation of a borrowed variable (A0047)
 /// - Return of reference to local variable (A0043)
+/// - `str` view outliving the value it borrows from (A0202)
+///
+/// `str` is a non-owning UTF-8 view, so a `str` produced from a value that owns
+/// its buffer is only valid while that owner is alive. The checker constrains
+/// such views in three places: they cannot be returned (A0043), they cannot be
+/// stored into a binding declared in a shallower scope than their owner (A0202),
+/// and their owner stays immutably borrowed for the lifetime of the binding so
+/// that reallocating it while the view is live is reported (A0036/A0037).
+///
+/// Not yet constrained: views stored into record fields or containers, and
+/// owners moved (rather than mutated) while a view is live.
 pub struct HirBorrowChecker<'a> {
   hir: &'a HIR,
   types: &'a TypeStore,
@@ -71,6 +82,12 @@ pub struct HirBorrowChecker<'a> {
   source_map: Option<&'a SourceMap>,
 
   borrow_state: HashMap<DefinitionId, BorrowState>,
+
+  /// Nesting depth of the scope each local was declared in, captured when its
+  /// `let` was walked. Used to reject views that outlive the value they borrow
+  /// from: a view stored into a shallower binding than its owner dangles as
+  /// soon as the owner's scope ends.
+  var_scope_depth: HashMap<DefinitionId, usize>,
 
   scope_stack: Vec<ScopeEntry>,
 
@@ -103,6 +120,7 @@ impl<'a> HirBorrowChecker<'a> {
       symbols,
       source_map: None,
       borrow_state: HashMap::new(),
+      var_scope_depth: HashMap::new(),
       scope_stack: Vec::new(),
       branch_snapshots: Vec::new(),
       reachable: true,
@@ -154,6 +172,7 @@ impl<'a> HirBorrowChecker<'a> {
     return_type: TypeId,
   ) {
     self.borrow_state.clear();
+    self.var_scope_depth.clear();
     self.scope_stack.clear();
     self.branch_snapshots.clear();
     self.reachable = true;
@@ -186,6 +205,8 @@ impl<'a> HirBorrowChecker<'a> {
       },
 
       HIRKind::Let { name, value } => {
+        self.var_scope_depth.insert(name, self.scope_stack.len());
+
         if let Some(val_id) = value {
           self.check_node(val_id);
 
@@ -199,6 +220,12 @@ impl<'a> HirBorrowChecker<'a> {
           // If the value is a closure with ByRef/ByMutRef captures, register
           // borrows on the captured variables for the lifetime of this binding.
           self.try_record_closure_capture_borrows(name, val_id, &span);
+
+          // If the binding stores a `str` view into a value that owns its
+          // buffer, the view must not outlive that owner, and the owner stays
+          // borrowed for the lifetime of the binding.
+          self.check_str_view_lifetime(name, val_id, &span);
+          self.try_record_str_view_borrow(name, val_id, &span);
         }
       },
 
@@ -206,19 +233,29 @@ impl<'a> HirBorrowChecker<'a> {
         self.check_node(value);
         self.check_node(target);
 
-        // Check mutation of borrowed variable
-        if let Some(target_def) = self.extract_root_variable(target)
-          && self
+        if let Some(target_def) = self.extract_root_variable(target) {
+          if self
             .borrow_state
             .get(&target_def)
             .copied()
             .unwrap_or(BorrowState::None)
             .is_borrowed()
-        {
-          let var_name = self.def_name(target_def);
-          self
-            .diagnostics
-            .push(DiagnosticMessage::MutatedWhileBorrowed { var_name, span }.report());
+          {
+            let var_name = self.def_name(target_def);
+            self.diagnostics.push(
+              DiagnosticMessage::MutatedWhileBorrowed {
+                var_name,
+                span: span.clone(),
+              }
+              .report(),
+            );
+          }
+
+          // Assigning a `str` view into an existing binding carries the same
+          // lifetime constraint and the same borrow on the owner as binding one
+          // with `let`.
+          self.check_str_view_lifetime(target_def, value, &span);
+          self.try_record_str_view_borrow(target_def, value, &span);
         }
       },
 
@@ -659,6 +696,174 @@ impl<'a> HirBorrowChecker<'a> {
     }
   }
 
+  /// Reject a `str` view stored into a binding that outlives the value the view
+  /// borrows from.
+  ///
+  /// `str` is a non-owning UTF-8 view. When it is produced from a local that
+  /// owns its buffer (a `String`, or any drop-needing local), the view stays
+  /// valid only while that owner is alive. Storing it into a binding declared in
+  /// a shallower scope leaves a dangling view the moment the owner's scope ends.
+  ///
+  /// Views rooted in parameters, statics, or literals are unconstrained here:
+  /// their storage outlives the function body.
+  fn check_str_view_lifetime(
+    &mut self,
+    binder: DefinitionId,
+    value_id: HIRId,
+    span: &Span,
+  ) {
+    if !matches!(self.types.get(self.defs.type_of(&binder)), Type::Str) {
+      return;
+    }
+
+    let Some(owner) = self.str_view_owner_root(value_id) else {
+      return;
+    };
+
+    let Some(&owner_depth) = self.var_scope_depth.get(&owner) else {
+      return;
+    };
+
+    let binder_depth = self.var_scope_depth.get(&binder).copied().unwrap_or(0);
+
+    if owner_depth <= binder_depth {
+      return;
+    }
+
+    let owner_def = self.defs.get(&owner);
+
+    self.diagnostics.push(
+      DiagnosticMessage::ViewOutlivesOwner {
+        view_name: self.def_name(binder),
+        owner_name: self.def_name(owner),
+        span: span.clone(),
+        owner_span: owner_def.name_span.clone(),
+      }
+      .report(),
+    );
+  }
+
+  /// Walks a `str`-typed expression back to the local whose buffer the view
+  /// points into, or `None` when the view does not borrow from a local at all.
+  ///
+  /// A `str` local is followed through its initializer so chains of views
+  /// (`let a = owned.toStr(); let b = a;`) resolve to the original owner.
+  /// Parameters have no recorded initializer and therefore terminate the walk,
+  /// which is what keeps `function trim(s: str): str` from being flagged.
+  fn str_view_owner_root(
+    &self,
+    hir_id: HIRId,
+  ) -> Option<DefinitionId> {
+    let node = self.hir.get(hir_id);
+
+    match &node.kind {
+      HIRKind::Variable(def_id) => {
+        if !matches!(self.defs.get(def_id).kind, DefinitionKind::Variable(_)) {
+          return None;
+        }
+
+        let var_type = self.defs.type_of(def_id);
+
+        if matches!(self.types.get(var_type), Type::Str) {
+          return self
+            .hir
+            .variables_inits
+            .get(def_id)
+            .and_then(|init_hir_id| self.str_view_owner_root(*init_hir_id));
+        }
+
+        if self.types.needs_drop_with_defs(var_type, self.defs) {
+          return Some(*def_id);
+        }
+
+        None
+      },
+      HIRKind::MethodCall {
+        receiver: Some(receiver),
+        ..
+      } if matches!(self.types.get(&node.type_id), Type::Str) => self.str_view_owner_root(*receiver),
+      HIRKind::FieldAccess { base, .. } | HIRKind::Index { base, .. } => self.str_view_owner_root(*base),
+      HIRKind::Reference { expression, .. } => self.str_view_owner_root(*expression),
+      HIRKind::Dereference(inner) => self.str_view_owner_root(*inner),
+      _ => None,
+    }
+  }
+
+  /// Keep the owner of a `str` view immutably borrowed while the view binding is
+  /// in scope, so mutating the owner through it (which can reallocate its
+  /// buffer) is reported instead of silently invalidating the view.
+  ///
+  /// Applies to both `let` bindings and assignments into an existing binding:
+  /// either way the view is live from here to the end of the current scope.
+  fn try_record_str_view_borrow(
+    &mut self,
+    binder: DefinitionId,
+    value_id: HIRId,
+    span: &Span,
+  ) {
+    if !matches!(self.types.get(self.defs.type_of(&binder)), Type::Str) {
+      return;
+    }
+
+    let Some(owner) = self.str_view_owner_root(value_id) else {
+      return;
+    };
+
+    self.try_borrow(owner, false, span);
+
+    if let Some(scope) = self.scope_stack.last_mut() {
+      scope.borrows.push(ActiveBorrow {
+        binder,
+        target: owner,
+        mutable: false,
+      });
+    }
+  }
+
+  /// Returns true when a `str` view is taken from an unnamed owned temporary,
+  /// as in `String::create("x").toStr()`. The temporary is dropped at the end of
+  /// the enclosing statement, so the view dangles immediately.
+  ///
+  /// Only method receivers are inspected: a call that yields a `str` directly
+  /// returns storage it does not own, which is unconstrained here.
+  fn str_view_borrows_temporary(
+    &self,
+    hir_id: HIRId,
+  ) -> bool {
+    let node = self.hir.get(hir_id);
+
+    match &node.kind {
+      HIRKind::MethodCall {
+        receiver: Some(receiver),
+        ..
+      } if matches!(self.types.get(&node.type_id), Type::Str) => {
+        self.is_owned_temporary(*receiver) || self.str_view_borrows_temporary(*receiver)
+      },
+      HIRKind::FieldAccess { base, .. } | HIRKind::Index { base, .. } => self.str_view_borrows_temporary(*base),
+      HIRKind::Reference { expression, .. } => self.str_view_borrows_temporary(*expression),
+      HIRKind::Dereference(inner) => self.str_view_borrows_temporary(*inner),
+      _ => false,
+    }
+  }
+
+  /// Whether the expression produces an unnamed value that owns resources and is
+  /// therefore dropped at the end of the enclosing statement. Auto-references
+  /// inserted around method receivers are transparent here.
+  fn is_owned_temporary(
+    &self,
+    hir_id: HIRId,
+  ) -> bool {
+    let node = self.hir.get(hir_id);
+
+    match &node.kind {
+      HIRKind::Reference { expression, .. } => self.is_owned_temporary(*expression),
+      HIRKind::Call { .. } | HIRKind::MethodCall { .. } | HIRKind::RecordInit { .. } => {
+        self.types.needs_drop_with_defs(&node.type_id, self.defs)
+      },
+      _ => false,
+    }
+  }
+
   /// Check a temporary reference passed as a function argument.
   /// These borrows are transient: conflict-check only, no persistent state.
   fn check_temporary_borrow(
@@ -818,6 +1023,17 @@ impl<'a> HirBorrowChecker<'a> {
       .is_some_and(|return_type| matches!(self.types.get(&return_type), Type::Slice { .. }))
       && let Some(def_id) = self.extract_slice_borrow_root(value_id)
       && matches!(self.defs.get(&def_id).kind, DefinitionKind::Variable(_))
+    {
+      self
+        .diagnostics
+        .push(DiagnosticMessage::CannotReturnLocalReference { span: span.clone() }.report());
+      return;
+    }
+
+    if self
+      .current_return_type
+      .is_some_and(|return_type| matches!(self.types.get(&return_type), Type::Str))
+      && (self.str_view_owner_root(value_id).is_some() || self.str_view_borrows_temporary(value_id))
     {
       self
         .diagnostics

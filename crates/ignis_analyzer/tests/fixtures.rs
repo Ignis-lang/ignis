@@ -84,6 +84,21 @@ fn fixture_return_local_slice() {
   test_fixture("test_cases/analyzer/borrows/return_local_slice.ign");
 }
 
+#[test]
+fn fixture_str_view_outlives_owner() {
+  test_fixture("test_cases/analyzer/borrows/str_view_outlives_owner.ign");
+}
+
+#[test]
+fn fixture_str_view_invalidation() {
+  test_fixture("test_cases/analyzer/borrows/str_view_invalidation.ign");
+}
+
+#[test]
+fn fixture_str_view_valid_lifetimes() {
+  test_fixture("test_cases/analyzer/borrows/str_view_valid_lifetimes.ign");
+}
+
 // --- Cast Tests ---
 
 #[test]

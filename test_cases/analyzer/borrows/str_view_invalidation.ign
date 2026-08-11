@@ -1,0 +1,58 @@
+// Test: `str` views taken from a dying temporary, and owners mutated while viewed
+// Expected: A0043 for the temporary, A0037 for each mutation through the owner
+// (once for the let-bound view, once for the assign-bound view)
+
+@implements(Drop)
+record Buffer {
+  text: str;
+
+  drop(&mut self): void {
+    return;
+  }
+
+  view(&self): str {
+    return self.text;
+  }
+
+  reset(&mut self): void {
+    self.text = "";
+    return;
+  }
+}
+
+function consume(text: str): void {
+  return;
+}
+
+function makeBuffer(): Buffer {
+  return Buffer { text: "hello" };
+}
+
+function temporaryReturn(): str {
+  return makeBuffer().view();
+}
+
+function mutateWhileViewed(): void {
+  let mut owned: Buffer = Buffer { text: "hello" };
+  let view: str = owned.view();
+
+  owned.reset();
+  consume(view);
+
+  return;
+}
+
+function mutateWhileAssignedViewLive(): void {
+  let mut owned: Buffer = Buffer { text: "hello" };
+  let mut view: str = "";
+
+  view = owned.view();
+  owned.reset();
+  consume(view);
+
+  return;
+}
+
+function main(): i32 {
+  return 0;
+}
