@@ -3991,6 +3991,8 @@ impl<'a> CEmitter<'a> {
       _ => None,
     };
 
+    let test_suffix = test_module_discriminator(def);
+
     match def.owner_namespace {
       Some(ns_id) => {
         let ns_path = self.namespaces.full_path(ns_id);
@@ -4007,6 +4009,9 @@ impl<'a> CEmitter<'a> {
         if !param_suffix.is_empty() {
           parts.push(param_suffix);
         }
+        if let Some(test_suffix) = test_suffix {
+          parts.push(test_suffix);
+        }
         parts.join("_")
       },
       None => {
@@ -4017,6 +4022,9 @@ impl<'a> CEmitter<'a> {
         };
         if !param_suffix.is_empty() {
           name = format!("{}_{}", name, param_suffix);
+        }
+        if let Some(test_suffix) = test_suffix {
+          name = format!("{}_{}", name, test_suffix);
         }
         name
       },
@@ -5451,6 +5459,25 @@ fn function_is_extension(function: &FunctionDefinition) -> bool {
     .any(|attr| matches!(attr, FunctionAttr::Extension { .. }))
 }
 
+/// Discriminator appended to a `@test` function's C symbol.
+///
+/// Test functions keep external linkage so the generated harness translation
+/// unit can call them, and a bare `@test function foo()` sits in no namespace,
+/// so its symbol is just the name plus the parameter suffix. Two modules that
+/// each declare a test with the same name — the normal case, since tests are
+/// named after what they assert, not after where they live — then emit the same
+/// symbol and the link fails with a multiple-definition error.
+///
+/// The owning module id is used rather than a readable path because both
+/// manglers must agree byte for byte and only one of them has module paths
+/// available. It is stable within a build, which is all the linker needs.
+fn test_module_discriminator(def: &ignis_type::definition::Definition) -> Option<String> {
+  match &def.kind {
+    DefinitionKind::Function(function) if function.has_test_attr() => Some(format!("m{}", def.owner_module.index())),
+    _ => None,
+  }
+}
+
 fn build_mangled_name_standalone(
   def_id: DefinitionId,
   defs: &DefinitionStore,
@@ -5511,6 +5538,8 @@ fn build_mangled_name_standalone(
     _ => None,
   };
 
+  let test_suffix = test_module_discriminator(def);
+
   match def.owner_namespace {
     Some(ns_id) => {
       let ns_path = namespaces.full_path(ns_id);
@@ -5526,6 +5555,9 @@ fn build_mangled_name_standalone(
         format!("{}_{}", escape_ident(&raw_name), param_suffix)
       };
       parts.push(name_with_suffix);
+      if let Some(test_suffix) = test_suffix {
+        parts.push(test_suffix);
+      }
       parts.join("_")
     },
     None => {
@@ -5533,6 +5565,10 @@ fn build_mangled_name_standalone(
         escape_ident(&raw_name)
       } else {
         format!("{}_{}", escape_ident(&raw_name), param_suffix)
+      };
+      let name_with_suffix = match test_suffix {
+        Some(test_suffix) => format!("{}_{}", name_with_suffix, test_suffix),
+        None => name_with_suffix,
       };
       if let Some(type_prefix) = owner_type_prefix {
         format!("{}_{}", type_prefix, name_with_suffix)

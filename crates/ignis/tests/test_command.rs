@@ -1891,3 +1891,49 @@ fn fmt_emit_diff_prints_the_diff_without_rewriting_the_file() {
 
   cleanup_project_dir(&project_dir);
 }
+
+#[test]
+fn same_named_tests_in_different_modules_link_and_run() {
+  let project_dir = make_temp_project_dir("test-mangling-collision");
+
+  fs::create_dir_all(project_dir.join("src/alpha")).expect("create alpha dir");
+  fs::create_dir_all(project_dir.join("src/beta")).expect("create beta dir");
+
+  write_test_project(&project_dir, "function main(): i32 {\n  return 0;\n}\n");
+
+  let test_module = |value: i32| {
+    format!(
+      "import Test from \"std::test\";\n\n@test\nfunction sharedName(): void {{\n  \
+       Test::assertEq<i32>({value}, {value});\n}}\n"
+    )
+  };
+
+  fs::write(project_dir.join("src/alpha/tests.ign"), test_module(1)).expect("write alpha tests");
+  fs::write(project_dir.join("src/beta/tests.ign"), test_module(2)).expect("write beta tests");
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("test")
+    .arg("--project")
+    .arg(&project_dir)
+    .env("IGNIS_STD_PATH", workspace_std_path())
+    .output()
+    .expect("run ignis test");
+
+  let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+  let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+  assert!(
+    output.status.success(),
+    "same-named tests in different modules must link\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+
+  // The runner reports progress on stderr when stdout is not a tty.
+  let reported = format!("{stdout}{stderr}");
+
+  assert!(
+    reported.contains("alpha::tests::sharedName") && reported.contains("beta::tests::sharedName"),
+    "both tests must be discovered and reported under their own module\n{reported}"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
