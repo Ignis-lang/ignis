@@ -1860,3 +1860,34 @@ function writesSnapshot(): void {
 
   cleanup_project_dir(&project_dir);
 }
+
+#[test]
+fn fmt_emit_diff_prints_the_diff_without_rewriting_the_file() {
+  let project_dir = make_temp_project_dir("fmt-emit-diff");
+  let unformatted = "function main(): i32 {\nreturn 0;\n}\n";
+  let file_path = write_single_test_file(&project_dir, "unformatted.ign", unformatted);
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("fmt")
+    .arg("--emit")
+    .arg("diff")
+    .arg(&file_path)
+    .env("IGNIS_STD_PATH", workspace_std_path())
+    .output()
+    .expect("run ignis fmt --emit diff");
+
+  let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+  assert!(
+    stdout.contains("-return 0;") && stdout.contains("+  return 0;"),
+    "expected a non-empty unified diff, got:\n{stdout}"
+  );
+
+  assert_eq!(
+    fs::read_to_string(&file_path).expect("read source after --emit diff"),
+    unformatted,
+    "--emit diff must not rewrite the file"
+  );
+
+  cleanup_project_dir(&project_dir);
+}

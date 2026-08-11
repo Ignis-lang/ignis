@@ -197,6 +197,11 @@ fn run_fmt(cmd: &FmtCommand) -> Result<(), ()> {
 
   let emit_diff = cmd.emit.iter().any(|e| e == "diff");
 
+  // `--emit diff` previews the formatting, so it must leave the file on disk
+  // untouched: the diff is computed against the file's current content, and a
+  // rewrite would make every diff come out empty.
+  let read_only = cmd.check || emit_diff;
+
   match resolve_fmt_input(cmd)? {
     FmtInput::ExplicitFiles(paths) => {
       let mut dirty_files = Vec::new();
@@ -206,7 +211,7 @@ fn run_fmt(cmd: &FmtCommand) -> Result<(), ()> {
           eprintln!("{} {}: {}", "Error:".red().bold(), path.display(), error);
         })?;
         let options = FormatOptions {
-          check: cmd.check,
+          check: read_only,
           config: formatter_config,
         };
 
@@ -235,7 +240,7 @@ fn run_fmt(cmd: &FmtCommand) -> Result<(), ()> {
         eprintln!("{} {}", "Error:".red().bold(), error);
       })?;
       let options = FormatOptions {
-        check: cmd.check,
+        check: read_only,
         config: formatter_config,
       };
 
