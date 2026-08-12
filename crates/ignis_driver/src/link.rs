@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -241,6 +242,58 @@ pub fn format_tool_error(
   )
 }
 
+/// The C standard the generated code is compiled under when a project states none.
+///
+/// Without an explicit `-std`, the host compiler's default decides whether the
+/// generated C is even valid. gcc 15 defaults to gnu23, which legalizes redefining
+/// a struct with an identical member list; gcc 13 and earlier reject it. That single
+/// difference hid a real emitter defect through a full development session and only
+/// surfaced on CI, where the compiler was older.
+///
+/// gnu17 is the floor rather than the newest standard: the emitter targets plain C
+/// and gains nothing from C23, so pinning low keeps the widest set of toolchains
+/// able to build Ignis output. A project that needs something else can put its own
+/// `-std=` in `cflags`, which suppresses this default.
+const DEFAULT_C_STANDARD: &str = "-std=gnu17";
+
+/// Whether a compiler flag selects the C standard, in either spelling a driver accepts.
+fn selects_c_standard(flag: &str) -> bool {
+  flag.starts_with("-std=") || flag.starts_with("--std=") || flag == "-std" || flag == "--std"
+}
+
+/// Build the full argument list for compiling one C file to an object file.
+///
+/// Split out from the spawn so the flag policy — in particular whether the pinned
+/// standard is present and whether a project's own `-std` suppresses it — can be
+/// asserted directly, without depending on how the host compiler happens to behave.
+fn compile_arguments(
+  c_path: &Path,
+  obj_path: &Path,
+  link_plan: &LinkPlan,
+) -> Vec<OsString> {
+  let mut args: Vec<OsString> = vec![
+    OsString::from("-c"),
+    c_path.as_os_str().to_owned(),
+    OsString::from("-o"),
+    obj_path.as_os_str().to_owned(),
+  ];
+
+  if !link_plan.cflags.iter().any(|flag| selects_c_standard(flag)) {
+    args.push(OsString::from(DEFAULT_C_STANDARD));
+  }
+
+  for flag in &link_plan.cflags {
+    args.push(OsString::from(flag));
+  }
+
+  for inc_dir in &link_plan.include_dirs {
+    args.push(OsString::from("-I"));
+    args.push(inc_dir.as_os_str().to_owned());
+  }
+
+  args
+}
+
 /// Compile a C file to an object file using gcc.
 pub fn compile_to_object(
   c_path: &Path,
@@ -255,15 +308,7 @@ pub fn compile_to_object(
   };
 
   let mut cmd = Command::new(compiler);
-  cmd.arg("-c").arg(c_path).arg("-o").arg(obj_path);
-
-  for flag in &link_plan.cflags {
-    cmd.arg(flag);
-  }
-
-  for inc_dir in &link_plan.include_dirs {
-    cmd.arg("-I").arg(inc_dir);
-  }
+  cmd.args(compile_arguments(c_path, obj_path, link_plan));
 
   if !quiet {
     eprintln!(
@@ -615,5 +660,116 @@ mod tests {
     // base header only (no dupe)
     assert_eq!(plan.headers.len(), 1);
     assert!(plan.objects.is_empty());
+  }
+
+  fn plan_with_cflags(cflags: Vec<String>) -> LinkPlan {
+    LinkPlan {
+      headers: Vec::new(),
+      objects: Vec::new(),
+      std_archive: None,
+      user_archive: None,
+      libs: Vec::new(),
+      include_dirs: Vec::new(),
+      cc: "gcc".to_string(),
+      cflags,
+    }
+  }
+
+  fn arguments_for(cflags: Vec<String>) -> Vec<String> {
+    compile_arguments(Path::new("/tmp/in.c"), Path::new("/tmp/out.o"), &plan_with_cflags(cflags))
+      .into_iter()
+      .map(|argument| argument.to_string_lossy().into_owned())
+      .collect()
+  }
+
+  /// Asserted on the argument list rather than on compiler behavior on purpose. A
+  /// behavioral check would only discriminate on a host whose default standard differs
+  /// from the pin, so it would silently stop guarding anything on the very toolchains
+  /// the pin exists to protect.
+  #[test]
+  fn compilation_pins_the_c_standard_instead_of_inheriting_the_host_default() {
+    let arguments = arguments_for(Vec::new());
+
+    assert!(
+      arguments.iter().any(|argument| argument == DEFAULT_C_STANDARD),
+      "expected the pinned standard in {:?}",
+      arguments
+    );
+  }
+
+  #[test]
+  fn a_project_supplied_standard_replaces_the_default_rather_than_joining_it() {
+    for spelling in ["-std=gnu23", "--std=gnu23"] {
+      let arguments = arguments_for(vec![spelling.to_string()]);
+
+      let standards: Vec<&String> = arguments
+        .iter()
+        .filter(|argument| selects_c_standard(argument))
+        .collect();
+
+      assert_eq!(
+        standards,
+        vec![&spelling.to_string()],
+        "a project's own standard must be the only one passed, got {:?}",
+        arguments
+      );
+    }
+  }
+
+  #[test]
+  fn unrelated_project_flags_do_not_suppress_the_pinned_standard() {
+    let arguments = arguments_for(vec!["-O2".to_string(), "-DSTD_SOMETHING=1".to_string()]);
+
+    assert!(
+      arguments.iter().any(|argument| argument == DEFAULT_C_STANDARD),
+      "expected the pinned standard in {:?}",
+      arguments
+    );
+  }
+
+  /// The pin is worthless if the compiler rejects the spelling, so this one does spawn
+  /// the compiler. It asserts the specific diagnostic rather than mere failure: a
+  /// missing compiler or an unwritable path would otherwise read as a pass.
+  #[test]
+  fn the_pinned_standard_is_accepted_and_rejects_pre_c23_invalid_code() {
+    let dir = std::env::temp_dir().join(format!(
+      "ignis_link_std_{}_{:?}",
+      std::process::id(),
+      std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+
+    let valid = dir.join("valid.c");
+    std::fs::write(&valid, "int main(void) { return 0; }\n").expect("write C file");
+
+    let accepted = compile_to_object(&valid, &dir.join("valid.o"), &plan_with_cflags(Vec::new()), true);
+
+    let duplicate = dir.join("duplicate.c");
+    std::fs::write(
+      &duplicate,
+      "struct Pair { int a; int b; };\nstruct Pair { int a; int b; };\nint main(void) { return 0; }\n",
+    )
+    .expect("write C file");
+
+    let rejected = compile_to_object(&duplicate, &dir.join("duplicate.o"), &plan_with_cflags(Vec::new()), true);
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The positive control is what makes the rejection below meaningful. Both halves
+    // use the same compiler, plan and directory, so a missing compiler or an unusable
+    // path fails here rather than masquerading as the expected rejection. The
+    // diagnostic text itself is deliberately not asserted: a localized toolchain
+    // translates it, which would make the test a property of the machine.
+    assert!(
+      accepted.is_ok(),
+      "the compiler must accept the pinned standard, got: {:?}",
+      accepted
+    );
+
+    assert!(
+      rejected.is_err(),
+      "a duplicate struct definition must not compile under the pinned standard, so this \
+       compiling means the standard was not applied"
+    );
   }
 }
