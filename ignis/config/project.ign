@@ -959,6 +959,23 @@ function assertSomeStringEndsWith(value: Option<String>, suffix: str): void {
   };
 }
 
+function assertEquals(value: &String, expected: String): void {
+  Test::assertEq<str>(value.toStr(), expected.toStr());
+}
+
+/// Assert a project path is exactly `root` followed by `relative`.
+///
+/// A bare suffix would accept a path rooted anywhere, so this pins each field to the
+/// root the loader actually discovered. It does not separate two fields that resolve to
+/// the same path: the source directory and the `@compiler` alias are both `root/ignis`,
+/// and nothing in this test can tell them apart.
+function assertSomeStringUnderRoot(value: Option<String>, root: &String, relative: str): void {
+  match (value) {
+    Option::SOME(text) -> assertEquals(&text, root.concat(relative)),
+    Option::NONE -> Test::fail(),
+  };
+}
+
 @test
 function projectLoaderConsumesReturnedWorkspaceProjectFields(): void {
   let start: Path::PathBuf = fixturePath("ignis/parser");
@@ -967,18 +984,24 @@ function projectLoaderConsumesReturnedWorkspaceProjectFields(): void {
     Result::OK(project) -> {
       assertSomeString(project.packageNameText(), "ignis");
       assertSomeString(project.packageVersionText(), "0.1.0");
-      assertSomeStringEndsWith(project.rootText(), "/ignisc.rs");
-      assertSomeStringEndsWith(project.configPathText(), "/ignisc.rs/ignis.toml");
-      assertSomeStringEndsWith(project.sourceDirText(), "/ignisc.rs/ignis");
+
+      // Every path is compared against the discovered root rather than against a literal:
+      // the checkout directory is named by whoever cloned the repository, so a literal
+      // pins the author's machine.
+      let workspaceRoot: String = fixturePath(".").toString();
+      assertSomeString(project.rootText(), workspaceRoot.toStr());
+
+      assertSomeStringUnderRoot(project.configPathText(), &workspaceRoot, "/ignis.toml");
+      assertSomeStringUnderRoot(project.sourceDirText(), &workspaceRoot, "/ignis");
       let entryText: String = project.entryText();
-      assertEndsWith(&entryText, "/ignisc.rs/ignis/main.ign");
-      assertSomeStringEndsWith(project.outDirText(), "/ignisc.rs/build/selfhost");
-      assertSomeStringEndsWith(project.stdManifestPathText(), "/ignisc.rs/std/manifest.toml");
-      assertSomeStringEndsWith(project.stdRootText(), "/ignisc.rs/std");
-      assertSomeStringEndsWith(project.runtimeRootText(), "/ignisc.rs/std/runtime");
+      assertEquals(&entryText, workspaceRoot.concat("/ignis/main.ign"));
+      assertSomeStringUnderRoot(project.outDirText(), &workspaceRoot, "/build/selfhost");
+      assertSomeStringUnderRoot(project.stdManifestPathText(), &workspaceRoot, "/std/manifest.toml");
+      assertSomeStringUnderRoot(project.stdRootText(), &workspaceRoot, "/std");
+      assertSomeStringUnderRoot(project.runtimeRootText(), &workspaceRoot, "/std/runtime");
       Test::assertEq<u64>(project.aliasCount(), 1);
       assertSomeString(project.aliasRawPathText("@compiler"), "./ignis");
-      assertSomeStringEndsWith(project.aliasPathText("@compiler"), "/ignisc.rs/ignis");
+      assertSomeStringUnderRoot(project.aliasPathText("@compiler"), &workspaceRoot, "/ignis");
     },
     Result::ERROR(_) -> Test::fail(),
   };

@@ -4672,7 +4672,11 @@ function main(): i32 {
 
     fs::write(
       &harness_path,
-      "#!/bin/sh\nif [ \"$1\" != \"--ignis-test\" ]; then exit 2; fi\ncase \"$2\" in\n  \"math::pass\") printf \"pass\\n\"; exit 0 ;;&\n  \"math::fail\") printf \"boom\\n\" >&2; exit 101 ;;&\n  \"math::later\") printf \"later\\n\"; exit 0 ;;&\n  *) exit 2 ;;&\nesac\n",
+      // The interpreter is pinned rather than inherited. `#!/bin/sh` resolves to bash on
+      // this project's development shell and to dash on most CI images, so a construct
+      // that works while writing the test can fail only on another machine — which is
+      // exactly how this fixture broke. Pinning makes the dialect part of the fixture.
+      "#!/usr/bin/env bash\nif [ \"$1\" != \"--ignis-test\" ]; then exit 2; fi\ncase \"$2\" in\n  \"math::pass\") printf \"pass\\n\"; exit 0 ;;\n  \"math::fail\") printf \"boom\\n\" >&2; exit 101 ;;\n  \"math::later\") printf \"later\\n\"; exit 0 ;;\n  *) exit 2 ;;\nesac\n",
     )
     .expect("write harness script");
 
@@ -4727,7 +4731,7 @@ function main(): i32 {
 
     fs::write(
       &harness_path,
-      "#!/bin/sh\nif [ \"$1\" != \"--ignis-test\" ]; then exit 2; fi\nprintf '%s|%s|%s\\n' \"$IGNIS_TEST_NAME\" \"$IGNIS_TEST_SNAPSHOT_DIR\" \"$IGNIS_TEST_UPDATE_SNAPSHOTS\"\n",
+      "#!/usr/bin/env bash\nif [ \"$1\" != \"--ignis-test\" ]; then exit 2; fi\nprintf '%s|%s|%s\\n' \"$IGNIS_TEST_NAME\" \"$IGNIS_TEST_SNAPSHOT_DIR\" \"$IGNIS_TEST_UPDATE_SNAPSHOTS\"\n",
     )
     .expect("write harness script");
 
