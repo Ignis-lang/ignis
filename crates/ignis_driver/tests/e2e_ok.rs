@@ -6747,3 +6747,110 @@ function main(): i32 {
 "#,
   );
 }
+
+/// A bare type name written inside a namespace must reach that namespace's own type, even
+/// when another namespace declares one with the same short name.
+///
+/// Resolution went through a flat scope holding every namespace's members, so the first
+/// declaration of a given name won regardless of where the name was written. Both functions
+/// below returned the same record, and the program failed to compile with a mismatch between
+/// two types that print identically.
+#[test]
+fn e2e_same_named_records_resolve_within_their_own_namespace() {
+  e2e_test(
+    "same_named_records_resolve_within_their_own_namespace",
+    r#"
+export namespace First {
+    record Point {
+        public x: i32;
+    }
+
+    function make(): Point {
+        return Point { x: 3 };
+    }
+}
+
+export namespace Second {
+    record Point {
+        public x: i32;
+    }
+
+    function make(): Point {
+        return Point { x: 4 };
+    }
+}
+
+function main(): i32 {
+    let first: First::Point = First::make();
+    let second: Second::Point = Second::make();
+
+    return first.x * 10 + second.x;
+}
+"#,
+  );
+}
+
+/// A generic parameter is bound nearer than any namespace member, so it keeps precedence
+/// over an identically named type declared by the enclosing namespace.
+#[test]
+fn e2e_type_parameter_outranks_a_same_named_namespace_type() {
+  e2e_test(
+    "type_parameter_outranks_a_same_named_namespace_type",
+    r#"
+export namespace Holder {
+    record T {
+        public trap: i32;
+    }
+
+    function identity<T>(value: T): T {
+        return value;
+    }
+
+    function run(): i32 {
+        return Holder::identity<i32>(34);
+    }
+}
+
+function main(): i32 {
+    return Holder::run();
+}
+"#,
+  );
+}
+
+/// A nested namespace resolves its own members through the parent walk, and an outer
+/// member stays reachable by its short name from the inner body.
+#[test]
+fn e2e_nested_namespace_resolves_own_and_outer_types() {
+  e2e_test(
+    "nested_namespace_resolves_own_and_outer_types",
+    r#"
+export namespace Outer {
+    record Shared {
+        public value: i32;
+    }
+
+    namespace Inner {
+        record Own {
+            public value: i32;
+        }
+
+        function make(): Own {
+            return Own { value: 4 };
+        }
+
+        function fromOuter(): Shared {
+            return Shared { value: 3 };
+        }
+    }
+}
+
+function main(): i32 {
+    let own: Outer::Inner::Own = Outer::Inner::make();
+    let shared: Outer::Shared = Outer::Inner::fromOuter();
+
+    return shared.value * 10 + own.value;
+}
+"#,
+  );
+}

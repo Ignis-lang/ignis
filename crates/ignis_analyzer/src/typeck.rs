@@ -51,6 +51,12 @@ impl<'a> Analyzer<'a> {
     roots: &[NodeId],
   ) {
     self.reset_scopes(roots);
+
+    // The binder leaves this pointing at whatever namespace it finished in. Type resolution
+    // now reads it, so a top-level name would otherwise be looked up inside a stale namespace
+    // before lexical scope is consulted.
+    self.current_namespace = None;
+
     let ctx = TypecheckContext::new();
 
     // Global signature pre-pass: resolve return/param types for every function
@@ -122,10 +128,10 @@ impl<'a> Analyzer<'a> {
       },
       ASTStatement::Namespace(ns_stmt) => {
         self.define_decl_in_current_scope(node_id);
-        // Recurse so deeply-nested decls are also pre-defined (cross-namespace
-        // short-name lookups still depend on item ordering, just like the body
-        // pass).
+
+        let previous_namespace = self.enter_declared_namespace(node_id);
         self.pre_define_items(&ns_stmt.items);
+        self.current_namespace = previous_namespace;
       },
       ASTStatement::Export(ignis_ast::statements::ASTExport::Declaration { decl, .. }) => {
         self.pre_define_node(&decl);
@@ -280,9 +286,13 @@ impl<'a> Analyzer<'a> {
         self.exit_type_params_scope(&enum_def_id);
       },
       ASTStatement::Namespace(ns_stmt) => {
+        let previous_namespace = self.enter_declared_namespace(node_id);
+
         for item in &ns_stmt.items {
           self.pre_resolve_signatures(item);
         }
+
+        self.current_namespace = previous_namespace;
       },
       ASTStatement::Export(ignis_ast::statements::ASTExport::Declaration { decl, .. }) => {
         self.pre_resolve_signatures(&decl);
@@ -714,9 +724,14 @@ impl<'a> Analyzer<'a> {
         self.types.void()
       },
       ASTStatement::Namespace(ns_stmt) => {
+        let previous_namespace = self.enter_declared_namespace(node_id);
+
         for item in &ns_stmt.items {
           self.typecheck_node(item, scope_kind, ctx);
         }
+
+        self.current_namespace = previous_namespace;
+
         self.types.void()
       },
       ASTStatement::Export(export_stmt) => {
@@ -3512,9 +3527,11 @@ impl<'a> Analyzer<'a> {
       return None;
     }
 
-    // Start with first segment in scope
+    // The leading segment goes through the same namespace-first lookup as a bare type
+    // name: a record literal written inside a namespace must reach that namespace's own
+    // record before an identically named one declared elsewhere.
     let (first_sym, _) = &path[0];
-    let mut current_def = self.scopes.lookup_def(first_sym).cloned()?;
+    let mut current_def = self.lookup_type_name(first_sym)?;
 
     // Walk through remaining segments
     for (segment_sym, _) in path.iter().skip(1) {
@@ -9522,6 +9539,88 @@ impl<'a> Analyzer<'a> {
     self.types.error()
   }
 
+  /// Point `current_namespace` at the namespace `node_id` declares, returning the previous one.
+  ///
+  /// The typechecker walks a namespace's items without entering a scope for it, so without
+  /// this a bare type name inside a namespace is resolved against a flat scope holding every
+  /// namespace's members, where the first declaration of a given name wins.
+  fn enter_declared_namespace(
+    &mut self,
+    node_id: &NodeId,
+  ) -> Option<ignis_type::namespace::NamespaceId> {
+    let previous = self.current_namespace;
+
+    if let Some(def_id) = self.lookup_def(node_id).copied()
+      && let DefinitionKind::Namespace(ns_def) = &self.defs.get(&def_id).kind
+    {
+      self.current_namespace = Some(ns_def.namespace_id);
+    }
+
+    previous
+  }
+
+  /// Resolve a bare type name, preferring the enclosing namespace over lexical scope.
+  ///
+  /// Two namespaces may each declare a record of the same short name. Lexical scope holds
+  /// both, so resolving there alone picks whichever was declared first regardless of where
+  /// the name was written. The enclosing namespace chain is searched outward first, and
+  /// lexical scope remains the fallback for imports and top-level declarations.
+  fn lookup_type_name(
+    &self,
+    symbol: &SymbolId,
+  ) -> Option<DefinitionId> {
+    let lexical = self.scopes.lookup_def(symbol).copied();
+
+    // A type parameter is always bound nearer than any namespace member, so it keeps
+    // precedence: `function f<T>()` inside a namespace that also declares a `T` must see
+    // its own parameter.
+    if let Some(def_id) = lexical
+      && matches!(self.defs.get(&def_id).kind, DefinitionKind::TypeParam(_))
+    {
+      return Some(def_id);
+    }
+
+    let mut namespace = self.current_namespace;
+
+    while let Some(namespace_id) = namespace {
+      // Only a definition that can stand in a type position ends the walk. A namespace member
+      // that shares the name but is a function, constant or variable is not a candidate, and
+      // neither is an overload group, which `as_single` already rejects; in both cases the
+      // walk continues outward instead of shadowing a real type with a non-type.
+      if let Some(def_id) = self
+        .namespaces
+        .lookup_def(namespace_id, symbol)
+        .and_then(|entry| entry.as_single())
+        .filter(|def_id| self.names_a_type(def_id))
+      {
+        return Some(*def_id);
+      }
+
+      namespace = self.namespaces.get(&namespace_id).parent;
+    }
+
+    lexical
+  }
+
+  /// Whether a definition can stand where a type name is written.
+  ///
+  /// `Namespace` counts because a qualified path such as `First::Point` reaches its record
+  /// through the namespace named by the leading segment.
+  fn names_a_type(
+    &self,
+    def_id: &DefinitionId,
+  ) -> bool {
+    matches!(
+      self.defs.get(def_id).kind,
+      DefinitionKind::Record(_)
+        | DefinitionKind::Enum(_)
+        | DefinitionKind::TypeAlias(_)
+        | DefinitionKind::TypeParam(_)
+        | DefinitionKind::Trait(_)
+        | DefinitionKind::Namespace(_)
+    )
+  }
+
   fn resolve_type_syntax_impl(
     &mut self,
     ty: &IgnisTypeSyntax,
@@ -9577,7 +9676,7 @@ impl<'a> Analyzer<'a> {
         symbol,
         span: name_span,
       } => {
-        if let Some(def_id) = self.scopes.lookup_def(symbol).cloned() {
+        if let Some(def_id) = self.lookup_type_name(symbol) {
           self.mark_referenced(def_id);
 
           // Register span for hover/goto-definition on type references
@@ -10150,6 +10249,35 @@ impl<'a> Analyzer<'a> {
     )
   }
 
+  /// Name a record or enum for a diagnostic, prefixed by the namespace that declares it.
+  ///
+  /// Two namespaces may declare types with the same short name. Printing only the short name
+  /// produces messages like `expected 'Point', found 'Point'`, which names the problem
+  /// without saying which two types are involved.
+  fn qualified_definition_name(
+    &self,
+    def_id: &ignis_type::definition::DefinitionId,
+  ) -> String {
+    let def = self.defs.get(def_id);
+    let symbols = self.symbols.borrow();
+    let name = symbols.get(&def.name).to_string();
+
+    let Some(namespace_id) = def.owner_namespace else {
+      return name;
+    };
+
+    let mut qualified: Vec<String> = self
+      .namespaces
+      .full_path(namespace_id)
+      .iter()
+      .map(|segment| symbols.get(segment).to_string())
+      .collect();
+
+    qualified.push(name);
+
+    qualified.join("::")
+  }
+
   fn format_type_for_error(
     &self,
     type_id: &ignis_type::types::TypeId,
@@ -10215,14 +10343,7 @@ impl<'a> Analyzer<'a> {
           self.format_type_for_error(ret)
         )
       },
-      Type::Record(def_id) => {
-        let def = self.defs.get(def_id);
-        self.symbols.borrow().get(&def.name).to_string()
-      },
-      Type::Enum(def_id) => {
-        let def = self.defs.get(def_id);
-        self.symbols.borrow().get(&def.name).to_string()
-      },
+      Type::Record(def_id) | Type::Enum(def_id) => self.qualified_definition_name(def_id),
       Type::Param { owner, index } => {
         // Try to get the type param name from the owner's definition
         let owner_def = self.defs.get(owner);

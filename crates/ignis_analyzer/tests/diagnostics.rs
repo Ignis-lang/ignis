@@ -617,3 +617,48 @@ function main(): i32 {
     5,
   );
 }
+
+/// Two namespaces may each declare a type with the same short name. Naming only the short
+/// name in a mismatch produces `expected 'Point', found 'Point'`, which states that there is
+/// a problem without saying which two types are involved.
+#[test]
+fn type_mismatch_between_same_named_types_names_both_namespaces() {
+  let result = common::analyze(
+    r#"
+export namespace First {
+    record Point {
+        public x: i32;
+    }
+
+    function make(): Point {
+        return Point { x: 1 };
+    }
+}
+
+export namespace Second {
+    record Point {
+        public x: i32;
+    }
+}
+
+function main(): i32 {
+    let point: Second::Point = First::make();
+
+    return point.x;
+}
+"#,
+  );
+
+  let mismatch = result
+    .output
+    .diagnostics
+    .iter()
+    .find(|diagnostic| diagnostic.error_code == "A0045")
+    .expect("expected a type mismatch between the two same-named records");
+
+  assert!(
+    mismatch.message.contains("Second::Point") && mismatch.message.contains("First::Point"),
+    "expected both namespaces to be named, got: {}",
+    mismatch.message
+  );
+}
