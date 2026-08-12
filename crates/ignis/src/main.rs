@@ -1100,6 +1100,31 @@ mod tests {
     dir
   }
 
+  /// Write a minimal project whose std location is stated in the manifest.
+  ///
+  /// Resolution falls back to `$IGNIS_STD_PATH` when the manifest is silent, and the
+  /// development shell exports that variable. A manifest without `std_path` therefore
+  /// passes on a developer machine and fails anywhere the variable is absent, which
+  /// is a property of the shell rather than of the code under test.
+  fn write_project(dir: &Path) {
+    let std_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .join("../../std")
+      .canonicalize()
+      .expect("canonical workspace std path");
+
+    std::fs::write(
+      dir.join("ignis.toml"),
+      format!(
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\n[ignis]\nstd_path = \"{}\"\n",
+        std_path.to_string_lossy().replace('\\', "/")
+      ),
+    )
+    .expect("write ignis.toml");
+
+    std::fs::create_dir_all(dir.join("src")).expect("create src dir");
+    std::fs::write(dir.join("src").join("main.ign"), "function main(): void { return; }").expect("write entry file");
+  }
+
   #[test]
   fn resolve_test_input_accepts_single_file_mode() {
     let temp_dir = make_temp_dir("single_file");
@@ -1123,11 +1148,7 @@ mod tests {
   #[test]
   fn resolve_test_input_uses_project_mode_for_filter_text() {
     let temp_dir = make_temp_dir("project_mode");
-    std::fs::write(temp_dir.join("ignis.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n")
-      .expect("write ignis.toml");
-    std::fs::create_dir_all(temp_dir.join("src")).expect("create src dir");
-    std::fs::write(temp_dir.join("src").join("main.ign"), "function main(): void { return; }")
-      .expect("write entry file");
+    write_project(&temp_dir);
 
     let cmd = TestCommand {
       filter: Some("math".to_string()),
@@ -1155,11 +1176,7 @@ mod tests {
     let filter_path = temp_dir.join("math_filter.txt");
     std::fs::write(&filter_path, "math::adds").expect("write filter file");
 
-    std::fs::write(temp_dir.join("ignis.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n")
-      .expect("write ignis.toml");
-    std::fs::create_dir_all(temp_dir.join("src")).expect("create src dir");
-    std::fs::write(temp_dir.join("src").join("main.ign"), "function main(): void { return; }")
-      .expect("write entry file");
+    write_project(&temp_dir);
 
     let cmd = TestCommand {
       filter: Some(filter_path.to_string_lossy().into_owned()),
