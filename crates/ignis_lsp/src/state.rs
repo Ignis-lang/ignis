@@ -178,21 +178,26 @@ impl OpenDoc {
   ///
   /// Tokens are cached and reused if the version matches.
   pub fn get_or_compute_tokens(&mut self) -> &[Token] {
-    // Check if we have cached tokens for the current version
-    if self.cached_tokens.as_ref().map(|c| c.version) == Some(self.version) {
-      return &self.cached_tokens.as_ref().unwrap().tokens;
+    let cached_version = self.cached_tokens.as_ref().map(|cached| cached.version);
+
+    if cached_version != Some(self.version) {
+      let mut lexer = IgnisLexer::new(FileId::default(), &self.text);
+      lexer.scan_tokens();
+
+      self.cached_tokens = Some(CachedTokens {
+        version: self.version,
+        tokens: lexer.tokens,
+      });
     }
 
-    // Compute tokens
-    let mut lexer = IgnisLexer::new(FileId::default(), &self.text);
-    lexer.scan_tokens();
-
-    self.cached_tokens = Some(CachedTokens {
-      version: self.version,
-      tokens: lexer.tokens,
-    });
-
-    &self.cached_tokens.as_ref().unwrap().tokens
+    match &self.cached_tokens {
+      Some(cached) => &cached.tokens,
+      // Unreachable: the branch above stores a value whenever the version does not match,
+      // and a match implies one was already stored. Written as an empty slice rather than
+      // a panic because this runs on every keystroke inside a language server, where an
+      // unwrap that is wrong once takes the whole session down.
+      None => &[],
+    }
   }
 }
 
