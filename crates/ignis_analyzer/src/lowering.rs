@@ -452,7 +452,7 @@ impl<'a> Analyzer<'a> {
         // Push a scope containing the namespace's definitions so that
         // record/enum lowering inside the namespace can find their own
         // DefinitionIds (e.g., PathBuf inside `namespace Path { ... }`).
-        let ns_defs = self.collect_namespace_defs(&ns.path);
+        let ns_defs = self.collect_namespace_defs(node_id);
 
         self.scopes.push(ScopeKind::Block);
         for (sym, def_id) in &ns_defs {
@@ -2289,40 +2289,24 @@ impl<'a> Analyzer<'a> {
     Some(current_def)
   }
 
-  /// Collect all definitions inside a namespace, navigating through nested namespace segments.
-  /// Returns pairs of (SymbolId, DefinitionId) for each definition in the namespace.
+  /// Collect every definition declared in the namespace that `node_id` declares.
+  ///
+  /// The namespace is taken from the definition the binder attached to this declaration
+  /// rather than re-resolved from its written path. The written path is not enough on its
+  /// own: `namespace Outer::Inner` puts only `Outer::Inner` in the namespace tree and never
+  /// puts `Outer` in lexical scope, so resolving the leading segment through scopes fails
+  /// for every multi-segment declaration, and resolving it from the tree root would ignore
+  /// any enclosing namespace. The binder already applied the enclosing path when it created
+  /// the namespace, so its answer is the only one that is correct for both shapes.
   fn collect_namespace_defs(
     &self,
-    ns_path: &[SymbolId],
+    node_id: &NodeId,
   ) -> Vec<(SymbolId, DefinitionId)> {
-    if ns_path.is_empty() {
-      return Vec::new();
-    }
-
-    // Navigate through the namespace path segments
-    let Some(mut current_def) = self.scopes.lookup_def(&ns_path[0]).cloned() else {
+    let Some(def_id) = self.lookup_def(node_id) else {
       return Vec::new();
     };
 
-    for segment in &ns_path[1..] {
-      match &self.defs.get(&current_def).kind {
-        DefinitionKind::Namespace(ns_def) => {
-          let Some(next) = self
-            .namespaces
-            .lookup_def(ns_def.namespace_id, segment)
-            .and_then(|e| e.as_single())
-            .cloned()
-          else {
-            return Vec::new();
-          };
-          current_def = next;
-        },
-        _ => return Vec::new(),
-      }
-    }
-
-    // current_def should now be the namespace definition
-    let DefinitionKind::Namespace(ns_def) = &self.defs.get(&current_def).kind else {
+    let DefinitionKind::Namespace(ns_def) = &self.defs.get(def_id).kind else {
       return Vec::new();
     };
 

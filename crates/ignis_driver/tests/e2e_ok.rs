@@ -6682,3 +6682,68 @@ function main(): i32 {
 "#,
   );
 }
+
+/// A record used by its bare name inside the namespace that declares it must still be
+/// resolvable when the declaration spells the whole path in one header.
+///
+/// Resolving the leading segment against lexical scope alone fails for that form, because
+/// only a relative declaration puts its leading segment in scope. The record literal then
+/// lowered to nothing and the field values were dropped, so this program returned 0 while
+/// reporting no diagnostic.
+#[test]
+fn e2e_record_literal_inside_multi_segment_namespace() {
+  e2e_test(
+    "record_literal_inside_multi_segment_namespace",
+    r#"
+export namespace Outer::Inner {
+    record Point {
+        public x: i32;
+        public y: i32;
+    }
+
+    function make(): Point {
+        return Point { x: 3, y: 4 };
+    }
+}
+
+function main(): i32 {
+    let point: Outer::Inner::Point = Outer::Inner::make();
+
+    return point.x * 10 + point.y;
+}
+"#,
+  );
+}
+
+/// The same shape, nested inside another namespace.
+///
+/// The declaration's own path is `Inner::Deep`, but the namespace it declares is
+/// `Outer::Inner::Deep`. Resolving that path from the namespace tree root would land on a
+/// different namespace, so the declaration is matched to the one the binder created for it,
+/// which already carries the enclosing path.
+#[test]
+fn e2e_record_literal_inside_nested_multi_segment_namespace() {
+  e2e_test(
+    "record_literal_inside_nested_multi_segment_namespace",
+    r#"
+export namespace Outer {
+    namespace Inner::Deep {
+        record Point {
+            public x: i32;
+            public y: i32;
+        }
+
+        function make(): Point {
+            return Point { x: 3, y: 4 };
+        }
+    }
+}
+
+function main(): i32 {
+    let point: Outer::Inner::Deep::Point = Outer::Inner::Deep::make();
+
+    return point.x * 10 + point.y;
+}
+"#,
+  );
+}
