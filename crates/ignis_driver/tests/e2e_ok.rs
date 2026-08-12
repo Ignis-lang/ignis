@@ -6854,3 +6854,55 @@ function main(): i32 {
 "#,
   );
 }
+
+/// A record's own field list carries the types member access reads, and only the body pass
+/// used to fill it. A function typechecked before the record's own statement therefore saw
+/// every field as the error type, which reached lowering with no diagnostic behind it.
+#[test]
+fn e2e_field_access_on_a_record_declared_later_in_the_file() {
+  e2e_test(
+    "field_access_on_a_record_declared_later_in_the_file",
+    r#"
+function readValue(state: &mut State): i32 {
+    return state.value;
+}
+
+record State {
+    public value: i32;
+}
+
+function main(): i32 {
+    let mut state: State = State { value: 7 };
+
+    return readValue(&mut state);
+}
+"#,
+  );
+}
+
+/// The same forward reference inside a namespace, reached through a qualified path.
+#[test]
+fn e2e_field_access_on_a_namespace_record_declared_later() {
+  e2e_test(
+    "field_access_on_a_namespace_record_declared_later",
+    r#"
+export namespace Holder {
+    function readValue(state: &mut Holder::State): i32 {
+        let alias: &mut Holder::State = state;
+
+        return alias.value;
+    }
+
+    record State {
+        public value: i32;
+    }
+}
+
+function main(): i32 {
+    let mut state: Holder::State = Holder::State { value: 9 };
+
+    return Holder::readValue(&mut state);
+}
+"#,
+  );
+}

@@ -218,6 +218,15 @@ impl<'a> Analyzer<'a> {
               {
                 field_def.type_id = field_type;
               }
+
+              // The record's own field list carries a second copy of the type, and it is what
+              // member access reads. Leaving it behind means a function body typechecked before
+              // this record's own statement sees every field as the error type.
+              if let DefinitionKind::Record(rd) = &mut self.defs.get_mut(&record_def_id).kind
+                && let Some(record_field) = rd.fields.iter_mut().find(|f| f.name == field.name)
+              {
+                record_field.type_id = field_type;
+              }
             }
           }
         }
