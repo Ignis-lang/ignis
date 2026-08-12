@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn workspace_std_path() -> PathBuf {
@@ -13,6 +14,40 @@ fn workspace_root() -> PathBuf {
     .join("../..")
     .canonicalize()
     .expect("canonicalize workspace root")
+}
+
+/// Build the selfhost compiler once for the whole test binary and return its path.
+///
+/// Every selfhost adapter test needs the same compiler, built from the same sources into the
+/// one output directory the project config names. Cargo runs those tests on separate threads,
+/// so building per test lets one test read a binary another is still writing, or compile C
+/// that a concurrent emission left half-written. `get_or_init` blocks the other threads until
+/// the first build finishes, which also keeps the suite from paying for the same build four
+/// times.
+fn selfhost_compiler() -> &'static Path {
+  static COMPILER: OnceLock<PathBuf> = OnceLock::new();
+
+  COMPILER.get_or_init(|| {
+    let workspace_root = workspace_root();
+
+    let build = Command::new(env!("CARGO_BIN_EXE_ignis"))
+      .current_dir(&workspace_root)
+      .arg("build")
+      .arg("--project")
+      .arg(".")
+      .arg("ignis/main.ign")
+      .output()
+      .expect("build selfhost compiler");
+
+    assert!(
+      build.status.success(),
+      "expected selfhost build to succeed\nstdout:\n{}\nstderr:\n{}",
+      String::from_utf8_lossy(&build.stdout),
+      String::from_utf8_lossy(&build.stderr)
+    );
+
+    workspace_root.join("build/selfhost/bin/ignis")
+  })
 }
 
 fn make_temp_project_dir(label: &str) -> PathBuf {
@@ -305,25 +340,7 @@ export function increment(): i32 {
 "#,
   );
 
-  let workspace_root = workspace_root();
-  let selfhost_build = Command::new(env!("CARGO_BIN_EXE_ignis"))
-    .current_dir(&workspace_root)
-    .arg("build")
-    .arg("--project")
-    .arg(".")
-    .arg("ignis/main.ign")
-    .output()
-    .expect("build selfhost compiler");
-
-  let selfhost_build_stdout = String::from_utf8_lossy(&selfhost_build.stdout);
-  let selfhost_build_stderr = String::from_utf8_lossy(&selfhost_build.stderr);
-  assert!(
-    selfhost_build.status.success(),
-    "expected selfhost build to succeed\nstdout:\n{selfhost_build_stdout}\nstderr:\n{selfhost_build_stderr}"
-  );
-
-  let selfhost_binary = workspace_root.join("build/selfhost/bin/ignis");
-  let selfhost_output = Command::new(&selfhost_binary)
+  let selfhost_output = Command::new(selfhost_compiler())
     .arg(project_dir.join("src/main.ign"))
     .output()
     .expect("execute selfhost compiler");
@@ -366,25 +383,7 @@ export function doubleIncrement(): i32 {
 "#,
   );
 
-  let workspace_root = workspace_root();
-  let selfhost_build = Command::new(env!("CARGO_BIN_EXE_ignis"))
-    .current_dir(&workspace_root)
-    .arg("build")
-    .arg("--project")
-    .arg(".")
-    .arg("ignis/main.ign")
-    .output()
-    .expect("build selfhost compiler");
-
-  assert!(
-    selfhost_build.status.success(),
-    "expected selfhost build to succeed\nstdout:\n{}\nstderr:\n{}",
-    String::from_utf8_lossy(&selfhost_build.stdout),
-    String::from_utf8_lossy(&selfhost_build.stderr)
-  );
-
-  let selfhost_binary = workspace_root.join("build/selfhost/bin/ignis");
-  let selfhost_output = Command::new(&selfhost_binary)
+  let selfhost_output = Command::new(selfhost_compiler())
     .arg(project_dir.join("src/main.ign"))
     .output()
     .expect("execute selfhost compiler");
@@ -413,25 +412,7 @@ function main(): i32 {
 "#,
   );
 
-  let workspace_root = workspace_root();
-  let selfhost_build = Command::new(env!("CARGO_BIN_EXE_ignis"))
-    .current_dir(&workspace_root)
-    .arg("build")
-    .arg("--project")
-    .arg(".")
-    .arg("ignis/main.ign")
-    .output()
-    .expect("build selfhost compiler");
-
-  assert!(
-    selfhost_build.status.success(),
-    "expected selfhost build to succeed\nstdout:\n{}\nstderr:\n{}",
-    String::from_utf8_lossy(&selfhost_build.stdout),
-    String::from_utf8_lossy(&selfhost_build.stderr)
-  );
-
-  let selfhost_binary = workspace_root.join("build/selfhost/bin/ignis");
-  let selfhost_output = Command::new(&selfhost_binary)
+  let selfhost_output = Command::new(selfhost_compiler())
     .arg(project_dir.join("src/main.ign"))
     .output()
     .expect("execute selfhost compiler");
@@ -474,25 +455,7 @@ function main(): void {
 "#,
   );
 
-  let workspace_root = workspace_root();
-  let selfhost_build = Command::new(env!("CARGO_BIN_EXE_ignis"))
-    .current_dir(&workspace_root)
-    .arg("build")
-    .arg("--project")
-    .arg(".")
-    .arg("ignis/main.ign")
-    .output()
-    .expect("build selfhost compiler");
-
-  assert!(
-    selfhost_build.status.success(),
-    "expected selfhost build to succeed\nstdout:\n{}\nstderr:\n{}",
-    String::from_utf8_lossy(&selfhost_build.stdout),
-    String::from_utf8_lossy(&selfhost_build.stderr)
-  );
-
-  let selfhost_binary = workspace_root.join("build/selfhost/bin/ignis");
-  let selfhost_output = Command::new(&selfhost_binary)
+  let selfhost_output = Command::new(selfhost_compiler())
     .arg(project_dir.join("src/main.ign"))
     .output()
     .expect("execute selfhost compiler");
