@@ -92,14 +92,35 @@ fn read_optional_file(path: &Path) -> Option<Vec<u8>> {
   fs::read(path).ok()
 }
 
-struct FileRestoreGuard {
-  path: PathBuf,
-  contents: Vec<u8>,
+/// Copy the workspace standard library into the temp project and return the copy's root.
+///
+/// Snapshot updates write back into the std tree they were told to use. Pointing a test
+/// at the checkout would make it rewrite tracked files, and a run that dies before its
+/// cleanup leaves the working tree dirty — which then fails a later, unrelated run with
+/// a message about a missing baseline.
+fn copy_workspace_std(project_dir: &Path) -> PathBuf {
+  let destination = project_dir.join("std");
+
+  copy_tree(&workspace_std_path(), &destination);
+
+  destination
 }
 
-impl Drop for FileRestoreGuard {
-  fn drop(&mut self) {
-    let _ = fs::write(&self.path, &self.contents);
+fn copy_tree(
+  source: &Path,
+  destination: &Path,
+) {
+  fs::create_dir_all(destination).expect("create std copy dir");
+
+  for entry in fs::read_dir(source).expect("read std dir") {
+    let entry = entry.expect("read std dir entry");
+    let target = destination.join(entry.file_name());
+
+    if entry.file_type().expect("std entry file type").is_dir() {
+      copy_tree(&entry.path(), &target);
+    } else {
+      fs::copy(entry.path(), &target).expect("copy std file");
+    }
   }
 }
 
@@ -552,13 +573,14 @@ function smoke(): void {
 fn ignis_test_std_executes_workspace_std_tests_via_cli_from_outside_project_root() {
   let project_dir = make_temp_project_dir("test-std-outside-project");
   let output_dir = project_dir.join("std-build");
+  let std_root = copy_workspace_std(&project_dir);
 
   let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
     .current_dir(&project_dir)
     .arg("test-std")
     .arg("vector::tests::clearDropsStringElementsBeforeReuse")
     .arg("--std-path")
-    .arg(workspace_std_path())
+    .arg(&std_root)
     .arg("--output-dir")
     .arg(&output_dir)
     .output()
@@ -590,13 +612,14 @@ fn ignis_test_std_executes_workspace_std_tests_via_cli_from_outside_project_root
 fn ignis_test_std_executes_workspace_time_tests_via_cli() {
   let project_dir = make_temp_project_dir("test-std-time-module");
   let output_dir = project_dir.join("std-build");
+  let std_root = copy_workspace_std(&project_dir);
 
   let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
     .current_dir(&project_dir)
     .arg("test-std")
     .arg("time::tests")
     .arg("--std-path")
-    .arg(workspace_std_path())
+    .arg(&std_root)
     .arg("--output-dir")
     .arg(&output_dir)
     .output()
@@ -632,18 +655,10 @@ fn ignis_test_std_executes_workspace_time_tests_via_cli() {
 fn ignis_test_std_updates_workspace_snapshots_via_cli() {
   let project_dir = make_temp_project_dir("test-std-update-snapshots");
   let output_dir = project_dir.join("std-build");
-  let snapshot_path = std_snapshot_path(
-    &workspace_std_path(),
-    "string",
-    "string::tests::snapshotStdRunnerSmoke",
-    "smoke",
-  );
+  let std_root = copy_workspace_std(&project_dir);
+  let snapshot_path = std_snapshot_path(&std_root, "string", "string::tests::snapshotStdRunnerSmoke", "smoke");
 
   let original_snapshot = read_optional_file(&snapshot_path).expect("expected committed std snapshot baseline");
-  let _restore_snapshot = FileRestoreGuard {
-    path: snapshot_path.clone(),
-    contents: original_snapshot.clone(),
-  };
 
   let _ = fs::remove_file(&snapshot_path);
 
@@ -653,7 +668,7 @@ fn ignis_test_std_updates_workspace_snapshots_via_cli() {
     .arg("string::tests::snapshotStdRunnerSmoke")
     .arg("--update-snapshots")
     .arg("--std-path")
-    .arg(workspace_std_path())
+    .arg(&std_root)
     .arg("--output-dir")
     .arg(&output_dir)
     .output()
