@@ -1344,11 +1344,21 @@ impl<'a> CEmitter<'a> {
           call_params.push(self.format_type(p));
         }
 
+        // The module header emits the same struct under this guard whenever another
+        // module consumes the signature. A translation unit includes its own header,
+        // so an unguarded definition here is a second definition of the same tag.
+        // C23 tolerates that; every earlier standard rejects it, and the compiler
+        // does not pin `-std`, so the generated code has to be valid pre-C23.
+        let guard = format!("IGNIS_TYPE_DEF_{}", sanitize_macro_name(&struct_name));
+
+        writeln!(self.output, "#ifndef {}", guard).unwrap();
+        writeln!(self.output, "#define {}", guard).unwrap();
         writeln!(self.output, "struct {} {{", struct_name).unwrap();
         writeln!(self.output, "    {} (*call)({});", ret_str, call_params.join(", ")).unwrap();
         writeln!(self.output, "    void (*drop_fn)(u8*);").unwrap();
         writeln!(self.output, "    u8* env;").unwrap();
         writeln!(self.output, "}};").unwrap();
+        writeln!(self.output, "#endif // {}", guard).unwrap();
 
         self.closure_struct_names.insert(sig_type_id, struct_name);
       }
