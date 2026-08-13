@@ -878,20 +878,26 @@ function resolveBodiesMultiSegmentPathIsUnresolvedNoDiagnostic(): void {
   assertUnresolved(ref_);
 }
 
-/// Scenario: Lambda expression records Unresolved, no diagnostic (REQ-B18).
+/// Scenario: a lambda binds its parameters and resolves its body against them.
+/// Spec: IGN-14 — the resolver walks into closures instead of deferring them.
 @test
-function resolveBodiesEmitsClosuresUnsupported(): void {
+function resolveBodiesBindsLambdaParameters(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
   let mut module: Ast::Module = Ast::Module::init();
 
-  // function f(): void { lambda body = { return; }; return; }
-  // The lambda body itself:
-  let lambdaBodyStmt: Ast::StatementId = addReturn(&mut module);
+  // function f(): void { (p) -> { return p; }; return; }
+  let paramPat: Ast::PatternId = addBinding(&mut module, "p");
+  let paramUse: Ast::ExpressionId = addVariable(&mut module, "p");
+  let lambdaBodyStmt: Ast::StatementId = addReturnExpr(&mut module, paramUse);
+
+  let mut parameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  parameters.push(paramPat);
+
   let lambdaExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
     span: bodiesDummySpan(),
-    parameters: Vector::new<Ast::PatternId>(),
+    parameters: parameters,
     returnType: Option::NONE,
     body: lambdaBodyStmt,
   }));
@@ -924,14 +930,247 @@ function resolveBodiesEmitsClosuresUnsupported(): void {
     &module,
   );
 
-  // No diagnostic for closures.
   Test::assertEq<u64>(output.diagnostics.length(), 0);
 
-  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(
-    &output.bodyResolution,
-    lambdaExpr,
+  let bound: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, paramPat);
+  let used: Analyzer::ResolverBodies::LocalId = assertLocal(assertExprRef(&output.bodyResolution, paramUse));
+
+  Test::assertEq<u32>(used.index, bound.index);
+
+  let Option::SOME(captured) = Analyzer::ResolverBodies::findCaptureCount(&output.captures, lambdaExpr.raw()) else {
+    @panic("expected the lambda to have been walked");
+  };
+
+  Test::assertEq<u64>(captured, 0);
+}
+
+/// Scenario: a lambda reading a local from the enclosing function captures it.
+/// Spec: IGN-14 — capture detection, the half that feeds env-struct construction.
+@test
+function resolveBodiesCapturesEnclosingLocal(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { let a = 1; () -> { return a; }; return; }
+  let aPat: Ast::PatternId = addBinding(&mut module, "a");
+  let intLit: Ast::ExpressionId = addIntLiteral(&mut module, 1);
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: bodiesDummySpan(),
+    pattern: aPat,
+    annotation: Option::NONE,
+    value: Option::SOME(intLit),
+  }));
+
+  let capturedUse: Ast::ExpressionId = addVariable(&mut module, "a");
+  let lambdaBodyStmt: Ast::StatementId = addReturnExpr(&mut module, capturedUse);
+
+  let lambdaExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
+    span: bodiesDummySpan(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: lambdaBodyStmt,
+  }));
+
+  let lambdaStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: lambdaExpr,
+  }));
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(lambdaStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
   );
-  assertUnresolved(ref_);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let outerLocal: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, aPat);
+
+  let Option::SOME(capturedCount) = Analyzer::ResolverBodies::findCaptureCount(&output.captures, lambdaExpr.raw()) else {
+    @panic("expected the lambda to have been walked");
+  };
+
+  Test::assertEq<u64>(capturedCount, 1);
+  Test::assert(Analyzer::ResolverBodies::capturesLocal(&output.captures, lambdaExpr.raw(), outerLocal));
+}
+
+/// Scenario: a parameter shadowing an enclosing local is not a capture.
+/// Spec: IGN-14 — the boundary is the local count at lambda entry, and parameters bind above it.
+@test
+function resolveBodiesLambdaParameterShadowsEnclosingLocal(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { let a = 1; (a) -> { return a; }; return; }
+  let outerPat: Ast::PatternId = addBinding(&mut module, "a");
+  let intLit: Ast::ExpressionId = addIntLiteral(&mut module, 1);
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: bodiesDummySpan(),
+    pattern: outerPat,
+    annotation: Option::NONE,
+    value: Option::SOME(intLit),
+  }));
+
+  let paramPat: Ast::PatternId = addBinding(&mut module, "a");
+  let paramUse: Ast::ExpressionId = addVariable(&mut module, "a");
+  let lambdaBodyStmt: Ast::StatementId = addReturnExpr(&mut module, paramUse);
+
+  let mut parameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  parameters.push(paramPat);
+
+  let lambdaExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
+    span: bodiesDummySpan(),
+    parameters: parameters,
+    returnType: Option::NONE,
+    body: lambdaBodyStmt,
+  }));
+
+  let lambdaStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: lambdaExpr,
+  }));
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(lambdaStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let paramLocal: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, paramPat);
+  let usedLocal: Analyzer::ResolverBodies::LocalId = assertLocal(assertExprRef(&output.bodyResolution, paramUse));
+
+  Test::assertEq<u32>(usedLocal.index, paramLocal.index);
+
+  let Option::SOME(capturedCount) = Analyzer::ResolverBodies::findCaptureCount(&output.captures, lambdaExpr.raw()) else {
+    @panic("expected the lambda to have been walked");
+  };
+
+  Test::assertEq<u64>(capturedCount, 0);
+}
+
+/// Scenario: a local read from an inner lambda is captured by both lambdas.
+/// Spec: IGN-14 — the outer closure has to carry what the inner one needs.
+@test
+function resolveBodiesNestedLambdasBothCaptureOuterLocal(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { let a = 1; () -> { () -> { return a; }; return; }; return; }
+  let aPat: Ast::PatternId = addBinding(&mut module, "a");
+  let intLit: Ast::ExpressionId = addIntLiteral(&mut module, 1);
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: bodiesDummySpan(),
+    pattern: aPat,
+    annotation: Option::NONE,
+    value: Option::SOME(intLit),
+  }));
+
+  let capturedUse: Ast::ExpressionId = addVariable(&mut module, "a");
+  let innerBodyStmt: Ast::StatementId = addReturnExpr(&mut module, capturedUse);
+  let innerLambda: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
+    span: bodiesDummySpan(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: innerBodyStmt,
+  }));
+
+  let innerStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: innerLambda,
+  }));
+  let innerReturn: Ast::StatementId = addReturn(&mut module);
+
+  let mut outerLambdaStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  outerLambdaStmts.push(innerStmt);
+  outerLambdaStmts.push(innerReturn);
+  let outerLambdaBody: Ast::StatementId = addBlock(&mut module, outerLambdaStmts);
+
+  let outerLambda: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
+    span: bodiesDummySpan(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: outerLambdaBody,
+  }));
+
+  let outerStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: outerLambda,
+  }));
+  let retStmt: Ast::StatementId = addReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(outerStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let outerLocal: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, aPat);
+
+  Test::assert(Analyzer::ResolverBodies::capturesLocal(&output.captures, innerLambda.raw(), outerLocal));
+  Test::assert(Analyzer::ResolverBodies::capturesLocal(&output.captures, outerLambda.raw(), outerLocal));
 }
 
 // ============================================================
@@ -3500,8 +3739,18 @@ function emptyResolverBodiesState(): Analyzer::ResolverBodies::ResolverBodiesSta
       syms: Vector::new<Analyzer::SymbolId>(),
       typeIds: Vector::new<Analyzer::TypeId>(),
     },
+    lambdaExprs: Vector::new<u32>(),
+    lambdaBoundaries: Vector::new<u32>(),
+    lambdaCaptureStarts: Vector::new<u64>(),
+    pendingCaptures: Vector::new<Analyzer::ResolverBodies::LocalId>(),
     bodyResolution: Analyzer::ResolverBodies::BodyResolutionMap {
       index: HashMap::new<u32, Analyzer::ResolverBodies::ResolvedRef>(),
+    },
+    captures: Analyzer::ResolverBodies::LambdaCaptureMap {
+      lambdaExprs: Vector::new<u32>(),
+      starts: Vector::new<u64>(),
+      lengths: Vector::new<u64>(),
+      locals: Vector::new<Analyzer::ResolverBodies::LocalId>(),
     },
   };
 }

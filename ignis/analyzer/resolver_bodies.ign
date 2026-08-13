@@ -109,12 +109,29 @@ export namespace Analyzer {
       public index: HashMap<u32, Analyzer::ResolverBodies::ResolvedRef>;
     }
 
+    /// Captures collected per lambda, as parallel vectors (ADR-1).
+    ///
+    /// Entry `i` describes the lambda on `lambdaExprs[i]`: its captured locals are
+    /// `locals[starts[i] .. starts[i] + lengths[i]]`. A lambda that captures nothing still
+    /// gets an entry with length zero, which is what tells "walked, captures nothing" apart
+    /// from "never walked".
+    ///
+    /// Flat vectors rather than a map of vectors: a nested generic instantiation crashes
+    /// codegen today (IGN-106), and this is the shape the rest of this file already uses.
+    record LambdaCaptureMap {
+      public lambdaExprs: Vector<u32>;
+      public starts: Vector<u64>;
+      public lengths: Vector<u64>;
+      public locals: Vector<Analyzer::ResolverBodies::LocalId>;
+    }
+
     /// Output produced by `resolveBodies`. Sibling to `Resolver::ResolverOutput`.
     ///
     /// Does NOT extend or mutate the type-syntax resolver's output.
     record ResolverBodiesOutput {
       public diagnostics: DiagnosticBag;
       public bodyResolution: Analyzer::ResolverBodies::BodyResolutionMap;
+      public captures: Analyzer::ResolverBodies::LambdaCaptureMap;
     }
 
     /// Lexical local scope stack. Parallel vectors per binder ADR-1.
@@ -152,8 +169,23 @@ export namespace Analyzer {
       public localStack: Analyzer::ResolverBodies::LocalStack;
       public typeParamScope: Analyzer::Resolver::TypeParamScope;
 
-      /// Side-table being accumulated across the entire module walk.
+      /// Lambdas currently being walked, outermost first. Parallel vectors: the expression
+      /// that opened the frame, the local count at that moment, and where the frame's
+      /// captures start in `pendingCaptures`.
+      ///
+      /// A local whose index is below a frame's boundary was bound before that lambda
+      /// opened, so reading it from inside the body is a capture. Only the innermost frame
+      /// records it; closing a frame hands its captures outward to the frame around it,
+      /// which is what makes an inner lambda's reference to a variable outside both count
+      /// as a capture of both without interleaving the two frames' ranges.
+      public lambdaExprs: Vector<u32>;
+      public lambdaBoundaries: Vector<u32>;
+      public lambdaCaptureStarts: Vector<u64>;
+      public pendingCaptures: Vector<Analyzer::ResolverBodies::LocalId>;
+
+      /// Side-tables being accumulated across the entire module walk.
       public bodyResolution: Analyzer::ResolverBodies::BodyResolutionMap;
+      public captures: Analyzer::ResolverBodies::LambdaCaptureMap;
     }
 
     // =========================================================================
@@ -181,6 +213,84 @@ export namespace Analyzer {
         Option::SOME(r) -> Option::SOME(Analyzer::ResolverBodies::copyResolvedRef(r)),
         Option::NONE -> Option::NONE,
       };
+    }
+
+    /// How many locals the lambda on `exprRaw` captures.
+    ///
+    /// Returns NONE when no lambda was walked for that id, which is what tells a consumer
+    /// apart from a lambda that captures nothing.
+    function findCaptureCount(
+      map: &Analyzer::ResolverBodies::LambdaCaptureMap,
+      exprRaw: u32,
+    ): Option<u64> {
+      let Option::SOME(entry) = Analyzer::ResolverBodies::findCaptureEntry(map, exprRaw) else {
+        return Option::NONE;
+      };
+
+      return match (map.lengths.get(entry)) {
+        Option::SOME(length) -> Option::SOME(*length),
+        Option::NONE -> Option::NONE,
+      };
+    }
+
+    /// Whether the lambda on `exprRaw` captures `lid`.
+    function capturesLocal(
+      map: &Analyzer::ResolverBodies::LambdaCaptureMap,
+      exprRaw: u32,
+      lid: Analyzer::ResolverBodies::LocalId,
+    ): boolean {
+      let Option::SOME(entry) = Analyzer::ResolverBodies::findCaptureEntry(map, exprRaw) else {
+        return false;
+      };
+
+      let Option::SOME(start) = map.starts.get(entry) else {
+        return false;
+      };
+
+      let Option::SOME(length) = map.lengths.get(entry) else {
+        return false;
+      };
+
+      let stop: u64 = *start + *length;
+      let mut index: u64 = *start;
+
+      while (index < stop) {
+        let Option::SOME(stored) = map.locals.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (stored.index == lid.index && stored.enclosingFn.raw() == lid.enclosingFn.raw()) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Index of the entry describing the lambda on `exprRaw`.
+    function findCaptureEntry(
+      map: &Analyzer::ResolverBodies::LambdaCaptureMap,
+      exprRaw: u32,
+    ): Option<u64> {
+      let mut index: u64 = 0;
+
+      while (index < map.lambdaExprs.length()) {
+        let Option::SOME(stored) = map.lambdaExprs.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (*stored == exprRaw) {
+          return Option::SOME(index);
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
     }
 
     /// Look up a resolved ref for a pattern node in the side-table.
@@ -381,6 +491,165 @@ export namespace Analyzer {
       stateRef.localStack.names.push(sym);
       stateRef.localStack.locals.push(lid);
       return lid;
+    }
+
+    /// Open a capture frame for the lambda `exprId` is on.
+    ///
+    /// Call after `pushScope` and before the parameters are bound, so parameters land above
+    /// the boundary and are never mistaken for captures.
+    function openLambdaFrame(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      exprId: Ast::ExpressionId,
+    ): void {
+      let boundary: u32 = state.localStack.locals.length() as u32;
+      let start: u64 = state.pendingCaptures.length();
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+
+      stateRef.lambdaExprs.push(exprId.raw());
+      stateRef.lambdaBoundaries.push(boundary);
+      stateRef.lambdaCaptureStarts.push(start);
+    }
+
+    /// Close the innermost capture frame, publish its captures, and hand outward the ones the
+    /// enclosing lambda must carry too.
+    ///
+    /// Publishing happens even when nothing was captured: an empty entry says the lambda was
+    /// walked, which a missing entry would not.
+    function closeLambdaFrame(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      exprId: Ast::ExpressionId,
+    ): void {
+      let Option::SOME(start) = state.lambdaCaptureStarts.pop() else {
+        return;
+      };
+
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+
+      stateRef.lambdaExprs.pop();
+      stateRef.lambdaBoundaries.pop();
+
+      let published: u64 = stateRef.captures.locals.length();
+      let mut index: u64 = start;
+
+      while (index < stateRef.pendingCaptures.length()) {
+        let Option::SOME(lid) = stateRef.pendingCaptures.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        stateRef.captures.locals.push(Analyzer::ResolverBodies::LocalId {
+          enclosingFn: lid.enclosingFn,
+          index: lid.index,
+        });
+        index += 1;
+      }
+
+      let count: u64 = stateRef.captures.locals.length() - published;
+
+      stateRef.captures.lambdaExprs.push(exprId.raw());
+      stateRef.captures.starts.push(published);
+      stateRef.captures.lengths.push(count);
+
+      // Drop this frame's pending range first. The values were copied into the published
+      // list above, and leaving them in place would make the dedup check below believe the
+      // enclosing frame already holds them.
+      Analyzer::ResolverBodies::truncatePendingCaptures(stateRef, start);
+
+      // Hand the captures outward: a local this lambda reads from outside the enclosing one
+      // has to travel through the enclosing closure's environment to get here.
+      let mut promoted: u64 = 0;
+
+      while (promoted < count) {
+        let Option::SOME(lid) = stateRef.captures.locals.get(published + promoted) else {
+          promoted += 1;
+          continue;
+        };
+
+        let carried: Analyzer::ResolverBodies::LocalId = Analyzer::ResolverBodies::LocalId {
+          enclosingFn: lid.enclosingFn,
+          index: lid.index,
+        };
+
+        Analyzer::ResolverBodies::noteCapture(stateRef, carried);
+        promoted += 1;
+      }
+    }
+
+    /// Drop pending captures back to `mark`, the snapshot taken when the frame opened.
+    function truncatePendingCaptures(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      mark: u64,
+    ): void {
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+
+      while (stateRef.pendingCaptures.length() > mark) {
+        stateRef.pendingCaptures.pop();
+      }
+    }
+
+    /// Record `lid` as a capture of the innermost open lambda, if it was bound outside it.
+    ///
+    /// Only the innermost frame is touched. `closeLambdaFrame` is what carries a capture
+    /// outward, which keeps each frame's range in `pendingCaptures` contiguous.
+    function noteCapture(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      lid: Analyzer::ResolverBodies::LocalId,
+    ): void {
+      let frames: u64 = state.lambdaBoundaries.length();
+
+      if (frames == 0) {
+        return;
+      }
+
+      let Option::SOME(boundary) = state.lambdaBoundaries.get(frames - 1) else {
+        return;
+      };
+
+      if (lid.index >= *boundary) {
+        return;
+      }
+
+      let Option::SOME(start) = state.lambdaCaptureStarts.get(frames - 1) else {
+        return;
+      };
+
+      let rangeStart: u64 = *start;
+
+      if (Analyzer::ResolverBodies::containsLocalFrom(&state.pendingCaptures, rangeStart, lid)) {
+        return;
+      }
+
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+
+      stateRef.pendingCaptures.push(Analyzer::ResolverBodies::LocalId {
+        enclosingFn: lid.enclosingFn,
+        index: lid.index,
+      });
+    }
+
+    /// Whether `locals[from..]` already holds `lid`. Captures are a set: a body may read one
+    /// many times and the environment has a single field for it.
+    function containsLocalFrom(
+      locals: &Vector<Analyzer::ResolverBodies::LocalId>,
+      rangeStart: u64,
+      lid: Analyzer::ResolverBodies::LocalId,
+    ): boolean {
+      let mut index: u64 = rangeStart;
+
+      while (index < locals.length()) {
+        let Option::SOME(stored) = locals.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (stored.index == lid.index && stored.enclosingFn.raw() == lid.enclosingFn.raw()) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
     }
 
     /// Lower-level local binding for use in tests (no `state` threading).
@@ -990,6 +1259,7 @@ export namespace Analyzer {
       let localOpt: Option<Analyzer::ResolverBodies::LocalId> = Analyzer::ResolverBodies::lookupLocal(&state.localStack, sym);
 
       if (let Option::SOME(lid) = localOpt) {
+        Analyzer::ResolverBodies::noteCapture(state, lid);
         Analyzer::ResolverBodies::recordExprRef(state, exprId, Analyzer::ResolverBodies::ResolvedRef::Local(lid));
         return;
       }
@@ -1762,24 +2032,33 @@ export namespace Analyzer {
             argIdx += 1;
           }
         },
-        Ast::Expression::Node::Lambda(_) -> {
-          // Closures are fully deferred (REQ-B18). Do NOT recurse into the body.
-          // TODO(closures-resolver).
-          Analyzer::ResolverBodies::recordExprRef(
-            state,
-            exprId,
-            Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-          );
+        Ast::Expression::Node::Lambda(l) -> {
+          // A lambda expression names nothing, so it gets no side-table entry of its own.
+          // Its parameters bind in a scope of their own and its body is walked inside that
+          // scope, which is what makes a name written in the body reach either a parameter,
+          // an enclosing local, or a global.
+          Analyzer::ResolverBodies::pushScope(&mut state.localStack);
+          Analyzer::ResolverBodies::openLambdaFrame(state, exprId);
+
+          let mut paramIndex: u64 = 0;
+
+          while (paramIndex < l.parameters.length()) {
+            let Option::SOME(paramPatId) = l.parameters.get(paramIndex) else {
+              paramIndex += 1;
+              continue;
+            };
+
+            Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, *paramPatId);
+            paramIndex += 1;
+          }
+
+          Analyzer::ResolverBodies::walkStmt(state, defStore, symbols, module, l.body);
+          Analyzer::ResolverBodies::closeLambdaFrame(state, exprId);
+          Analyzer::ResolverBodies::popScope(&mut state.localStack);
         },
         Ast::Expression::Node::CaptureOverride(c) -> {
-          // Capture override expression: record unresolved, then walk the inner
-          // expression (which is the variable being captured — still valid to walk).
-          // TODO(closures-resolver).
-          Analyzer::ResolverBodies::recordExprRef(
-            state,
-            exprId,
-            Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-          );
+          // The override modifies how the inner expression is captured, so it names nothing
+          // itself. Walking the inner expression is what records the capture.
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, c.expression);
         },
         Ast::Expression::Node::Pipe(p) -> {
@@ -2344,8 +2623,18 @@ export namespace Analyzer {
           syms: Vector::new<Analyzer::SymbolId>(),
           typeIds: Vector::new<Analyzer::TypeId>(),
         },
+        lambdaExprs: Vector::new<u32>(),
+        lambdaBoundaries: Vector::new<u32>(),
+        lambdaCaptureStarts: Vector::new<u64>(),
+        pendingCaptures: Vector::new<Analyzer::ResolverBodies::LocalId>(),
         bodyResolution: Analyzer::ResolverBodies::BodyResolutionMap {
           index: HashMap::new<u32, Analyzer::ResolverBodies::ResolvedRef>(),
+        },
+        captures: Analyzer::ResolverBodies::LambdaCaptureMap {
+          lambdaExprs: Vector::new<u32>(),
+          starts: Vector::new<u64>(),
+          lengths: Vector::new<u64>(),
+          locals: Vector::new<Analyzer::ResolverBodies::LocalId>(),
         },
       };
 
@@ -2370,6 +2659,7 @@ export namespace Analyzer {
       return Analyzer::ResolverBodies::ResolverBodiesOutput {
         diagnostics: state.diagnostics,
         bodyResolution: state.bodyResolution,
+        captures: state.captures,
       };
     }
   }
