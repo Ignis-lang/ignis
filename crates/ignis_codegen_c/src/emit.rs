@@ -1210,16 +1210,33 @@ impl<'a> CEmitter<'a> {
       return;
     }
 
+    // Definition order is not a valid C definition order. Monomorphization reserves a
+    // container's id before concretizing its fields, so a specialization used by value
+    // always gets a higher id than the type holding it, and a struct would be defined
+    // before the type of one of its fields. Sorting by id first only keeps the output
+    // deterministic where the dependency order leaves a choice.
     type_defs.sort_by_key(|(id, _)| id.index());
 
+    let ordered = topologically_order_type_defs(
+      type_defs.iter().map(|(id, _)| *id).collect(),
+      self.defs,
+      self.types,
+      self.symbols,
+      self.namespaces,
+    );
+
     writeln!(self.output, "// Type definitions").unwrap();
-    for (def_id, def) in type_defs {
+    for def_id in ordered {
+      let def = self.defs.get(&def_id);
+
       match &def.kind {
         DefinitionKind::Record(rd) => {
-          self.emit_record_definition(def_id, rd);
+          let rd = rd.clone();
+          self.emit_record_definition(def_id, &rd);
         },
         DefinitionKind::Enum(ed) => {
-          self.emit_enum_definition(def_id, ed);
+          let ed = ed.clone();
+          self.emit_enum_definition(def_id, &ed);
         },
         _ => {},
       }
@@ -5486,6 +5503,103 @@ fn test_module_discriminator(def: &ignis_type::definition::Definition) -> Option
     DefinitionKind::Function(function) if function.has_test_attr() => Some(format!("m{}", def.owner_module.index())),
     _ => None,
   }
+}
+
+/// Order type definitions so a struct is defined after every type it holds by value.
+///
+/// C needs a complete type for a by-value field, and definition order does not provide one:
+/// monomorphization reserves a container's id before concretizing its fields, so a nested
+/// specialization always lands on a higher id than the type that contains it.
+///
+/// Every candidate comes back exactly once, in `candidates` order wherever the dependencies
+/// leave a choice. Two definitions that mangle to the same name are both returned: emitting
+/// both is a duplicate-definition error the C compiler reports, where dropping one would
+/// instead leave a reference to a struct that is never defined.
+///
+/// A dependency cycle cannot be ordered at all. The remainder is appended in candidate order
+/// rather than dropped, so the C compiler reports the incomplete type instead of the emitter
+/// silently producing a program missing a definition.
+fn topologically_order_type_defs(
+  candidates: Vec<DefinitionId>,
+  defs: &DefinitionStore,
+  types: &TypeStore,
+  symbols: &SymbolTable,
+  namespaces: &NamespaceStore,
+) -> Vec<DefinitionId> {
+  let entries: Vec<(String, DefinitionId)> = candidates
+    .into_iter()
+    .map(|def_id| (build_mangled_name_standalone(def_id, defs, namespaces, symbols, types), def_id))
+    .collect();
+
+  // How many entries still waiting to be emitted carry each name. A dependency counts as
+  // satisfied once nothing pending answers to its name, which is also true for a name that
+  // was never a candidate here — those are emitted elsewhere or come from a header.
+  let mut pending: HashMap<String, usize> = HashMap::new();
+
+  for (name, _) in &entries {
+    *pending.entry(name.clone()).or_insert(0) += 1;
+  }
+
+  let mut emitted = vec![false; entries.len()];
+  let mut ordered: Vec<DefinitionId> = Vec::with_capacity(entries.len());
+
+  while ordered.len() < entries.len() {
+    let mut progressed = false;
+
+    for (index, (name, def_id)) in entries.iter().enumerate() {
+      if emitted[index] {
+        continue;
+      }
+
+      let def = defs.get(def_id);
+      let mut dependencies = HashSet::new();
+
+      match &def.kind {
+        DefinitionKind::Record(rd) => {
+          for field in &rd.fields {
+            collect_struct_dependencies_from_type(field.type_id, types, defs, symbols, namespaces, &mut dependencies);
+          }
+        },
+        DefinitionKind::Enum(ed) => {
+          for variant in &ed.variants {
+            for payload in &variant.payload {
+              collect_struct_dependencies_from_type(*payload, types, defs, symbols, namespaces, &mut dependencies);
+            }
+          }
+        },
+        _ => {},
+      }
+
+      dependencies.remove(name);
+
+      let ready = dependencies
+        .iter()
+        .all(|dependency| pending.get(dependency).copied().unwrap_or(0) == 0);
+
+      if ready {
+        ordered.push(*def_id);
+        emitted[index] = true;
+
+        if let Some(count) = pending.get_mut(name) {
+          *count -= 1;
+        }
+
+        progressed = true;
+      }
+    }
+
+    if !progressed {
+      for (index, (_, def_id)) in entries.iter().enumerate() {
+        if !emitted[index] {
+          ordered.push(*def_id);
+        }
+      }
+
+      break;
+    }
+  }
+
+  ordered
 }
 
 fn build_mangled_name_standalone(

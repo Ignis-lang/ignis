@@ -7137,3 +7137,68 @@ function main(): i32 {
 "#,
   );
 }
+
+/// A generic specialization used by value inside another one has to be defined first in C.
+/// Definition order does not give that: monomorphization reserves a container's id before
+/// concretizing its fields, so the nested specialization always lands on a higher id than the
+/// type holding it, and gcc rejected the field as incomplete.
+#[test]
+fn e2e_nested_generic_specializations_are_defined_before_use() {
+  e2e_test(
+    "nested_generic_specializations_are_defined_before_use",
+    r#"
+@implements(Drop)
+record Leaf {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+@implements(Drop)
+record Holder<T> {
+    public value: T;
+
+    drop(&mut self): void {
+        @dropInPlace<T>(&mut self.value);
+    }
+}
+
+function main(): i32 {
+    let nested: Holder<Holder<Leaf>> = Holder<Holder<Leaf>> {
+        value: Holder<Leaf> { value: Leaf { tag: 9 } },
+    };
+
+    return nested.value.value.tag;
+}
+"#,
+  );
+}
+
+/// Three levels, so the ordering is proved transitive rather than one deep.
+#[test]
+fn e2e_three_level_generic_specializations_are_ordered_transitively() {
+  e2e_test(
+    "three_level_generic_specializations_are_ordered_transitively",
+    r#"
+record Leaf {
+    public tag: i32;
+}
+
+record Holder<T> {
+    public value: T;
+}
+
+function main(): i32 {
+    let deep: Holder<Holder<Holder<Leaf>>> = Holder<Holder<Holder<Leaf>>> {
+        value: Holder<Holder<Leaf>> {
+            value: Holder<Leaf> { value: Leaf { tag: 21 } },
+        },
+    };
+
+    return deep.value.value.value.tag;
+}
+"#,
+  );
+}
