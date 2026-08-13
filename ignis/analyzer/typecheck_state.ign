@@ -133,6 +133,18 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::IF_MISSING_ELSE, "if expression requires an else branch");
     }
 
+    function emitCallOnNonCallable(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      calleeType: Analyzer::TypeId,
+    ): void {
+      let message: String = String::create("cannot call a value of type `")
+        .concat(typeStore.nameOf(calleeType).toStr())
+        .concat("`");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::CALL_ON_NON_CALLABLE, message.toStr());
+    }
+
     function emitInvalidNumberOfArguments(
       state: &mut Analyzer::Typecheck::TypecheckState,
       span: SourceSpan,
@@ -1619,8 +1631,47 @@ export namespace Analyzer {
         Ast::Type::Node::FixedArray(_) -> {
           return Option::NONE;
         },
-        Ast::Type::Node::Function(_) -> {
-          return Option::NONE;
+        Ast::Type::Node::Function(functionType) -> {
+          let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut paramIndex: u64 = 0;
+
+          while (paramIndex < functionType.parameters.length()) {
+            let Option::SOME(paramTypeId) = functionType.parameters.get(paramIndex) else {
+              return Option::NONE;
+            };
+
+            // One unresolvable parameter makes the whole signature unusable: a partial
+            // function type would compare equal to a different one.
+            let Option::SOME(resolvedParam) = Analyzer::Typecheck::resolveLocalAnnotation(
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              *paramTypeId,
+            ) else {
+              return Option::NONE;
+            };
+
+            params.push(resolvedParam);
+            paramIndex += 1;
+          }
+
+          let Option::SOME(resolvedReturn) = Analyzer::Typecheck::resolveLocalAnnotation(
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            functionType.returnType,
+          ) else {
+            return Option::NONE;
+          };
+
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+          return Option::SOME(typeStoreRef.intern(Analyzer::Type::Function(Analyzer::FunctionType {
+            params: params,
+            returnType: resolvedReturn,
+          })));
         },
         Ast::Type::Node::Generic(_) -> {
           return Option::NONE;

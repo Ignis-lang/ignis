@@ -6108,3 +6108,368 @@ function typecheckMatchExpressionMixedPartialJoinUsesSurvivorType(): void {
   // pinned as CURRENT, intentional-for-now behavior.
   assertExprType(&output, matchExpr, typeStore.intern(Analyzer::Type::I32));
 }
+
+/// Scenario: a lambda with annotated parameters and an annotated return type takes the
+/// function type it denotes, and its body is checked against its own return type.
+/// Spec: IGN-26 — lambda typing, unblocked by the closure resolution of IGN-14.
+@test
+function typecheckLambdaExpressionHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function main(): void { let f: (i32) -> i32 = (x: i32): i32 -> { return x; }; return; }
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let mut annotationParams: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  annotationParams.push(i32TypeId);
+  let lambdaAnnotation: Ast::TypeId = module.addType(Ast::Type::Node::Function(Ast::Type::Function {
+    span: typecheckDummySpan(),
+    parameters: annotationParams,
+    returnType: i32TypeId,
+  }));
+
+  let paramPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let paramUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let lambdaReturn: Ast::StatementId = typecheckAddReturnExpr(&mut module, paramUse);
+
+  let mut lambdaBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  lambdaBodyStmts.push(lambdaReturn);
+  let lambdaBody: Ast::StatementId = typecheckAddBlock(&mut module, lambdaBodyStmts);
+
+  let mut lambdaParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  lambdaParams.push(paramPattern);
+
+  let lambdaExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
+    span: typecheckDummySpan(),
+    parameters: lambdaParams,
+    returnType: Option::SOME(i32TypeId),
+    body: lambdaBody,
+  }));
+
+  let fPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "f", lambdaAnnotation);
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: fPattern,
+    annotation: Option::SOME(lambdaAnnotation),
+    value: Option::SOME(lambdaExpr),
+  }));
+
+  let retStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: typecheckDummySpan(),
+    value: Option::NONE,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(voidTypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let i32Type: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  let mut expectedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  expectedParams.push(i32Type);
+  let expectedLambdaType: Analyzer::TypeId = typeStore.intern(Analyzer::Type::Function(Analyzer::FunctionType {
+    params: expectedParams,
+    returnType: i32Type,
+  }));
+
+  assertExprType(&output, lambdaExpr, expectedLambdaType);
+  assertExprType(&output, paramUse, i32Type);
+}
+
+/// Scenario: calling a local that holds a function value takes its signature from the local's
+/// own type, checks the arguments against it, and yields its return type.
+/// Spec: IGN-26 — callees that are locals rather than definitions.
+@test
+function typecheckCallThroughLocalFunctionValueHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function main(): i32 { let f: (i32) -> i32 = (x: i32): i32 -> { return x; }; return f(1); }
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+
+  let mut annotationParams: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  annotationParams.push(i32TypeId);
+  let lambdaAnnotation: Ast::TypeId = module.addType(Ast::Type::Node::Function(Ast::Type::Function {
+    span: typecheckDummySpan(),
+    parameters: annotationParams,
+    returnType: i32TypeId,
+  }));
+
+  let paramPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let paramUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let lambdaReturn: Ast::StatementId = typecheckAddReturnExpr(&mut module, paramUse);
+
+  let mut lambdaBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  lambdaBodyStmts.push(lambdaReturn);
+  let lambdaBody: Ast::StatementId = typecheckAddBlock(&mut module, lambdaBodyStmts);
+
+  let mut lambdaParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  lambdaParams.push(paramPattern);
+
+  let lambdaExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
+    span: typecheckDummySpan(),
+    parameters: lambdaParams,
+    returnType: Option::SOME(i32TypeId),
+    body: lambdaBody,
+  }));
+
+  let fPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "f", lambdaAnnotation);
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: fPattern,
+    annotation: Option::SOME(lambdaAnnotation),
+    value: Option::SOME(lambdaExpr),
+  }));
+
+  let calleeExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "f");
+  let argExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(argExpr);
+
+  let callExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Call(Ast::Expression::Call {
+    span: typecheckDummySpan(),
+    callee: calleeExpr,
+    typeArguments: Vector::new<Ast::TypeId>(),
+    arguments: callArgs,
+  }));
+
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(i32TypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let i32Type: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  assertExprType(&output, callExpr, i32Type);
+}
+
+/// Build `function main(): i32 { let f: (i32) -> i32 = (x: i32): i32 -> { return x; }; <tail> }`
+/// and return the module plus the identifiers a caller needs to assert on.
+///
+/// Every call-through-a-local scenario needs the same lambda-bound local; only what follows it
+/// differs, so the shared part lives here rather than in each test.
+function typecheckAddFunctionValuedLocal(
+  module: &mut Ast::Module,
+  i32TypeId: Ast::TypeId,
+): Ast::StatementId {
+  let mut annotationParams: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  annotationParams.push(i32TypeId);
+
+  let mut moduleRef: &mut Ast::Module = module;
+  let lambdaAnnotation: Ast::TypeId = moduleRef.addType(Ast::Type::Node::Function(Ast::Type::Function {
+    span: typecheckDummySpan(),
+    parameters: annotationParams,
+    returnType: i32TypeId,
+  }));
+
+  let paramPattern: Ast::PatternId = typecheckAddAnnotatedBinding(module, "x", i32TypeId);
+  let paramUse: Ast::ExpressionId = typecheckAddVariable(module, "x");
+  let lambdaReturn: Ast::StatementId = typecheckAddReturnExpr(module, paramUse);
+
+  let mut lambdaBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  lambdaBodyStmts.push(lambdaReturn);
+  let lambdaBody: Ast::StatementId = typecheckAddBlock(module, lambdaBodyStmts);
+
+  let mut lambdaParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  lambdaParams.push(paramPattern);
+
+  let mut moduleRef2: &mut Ast::Module = module;
+  let lambdaExpr: Ast::ExpressionId = moduleRef2.addExpression(Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
+    span: typecheckDummySpan(),
+    parameters: lambdaParams,
+    returnType: Option::SOME(i32TypeId),
+    body: lambdaBody,
+  }));
+
+  let fPattern: Ast::PatternId = typecheckAddAnnotatedBinding(module, "f", lambdaAnnotation);
+
+  let mut moduleRef3: &mut Ast::Module = module;
+  return moduleRef3.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: fPattern,
+    annotation: Option::SOME(lambdaAnnotation),
+    value: Option::SOME(lambdaExpr),
+  }));
+}
+
+/// Add `f(<args>)` and return the call expression id.
+function typecheckAddLocalCall(
+  module: &mut Ast::Module,
+  args: Vector<Ast::ExpressionId>,
+): Ast::ExpressionId {
+  let calleeExpr: Ast::ExpressionId = typecheckAddVariable(module, "f");
+  let mut moduleRef: &mut Ast::Module = module;
+
+  return moduleRef.addExpression(Ast::Expression::Node::Call(Ast::Expression::Call {
+    span: typecheckDummySpan(),
+    callee: calleeExpr,
+    typeArguments: Vector::new<Ast::TypeId>(),
+    arguments: args,
+  }));
+}
+
+/// Wrap `stmts` in `function main(): <returnType> { ... }` and register it as a root item.
+function typecheckAddMainFunction(
+  module: &mut Ast::Module,
+  stmts: Vector<Ast::StatementId>,
+  returnType: Ast::TypeId,
+): void {
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(module, stmts);
+  let mut moduleRef: &mut Ast::Module = module;
+
+  moduleRef.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(returnType),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Scenario: calling a function-valued local with the wrong number of arguments reports the
+/// arity mismatch, and the call still takes the declared return type so one mistake does not
+/// cascade.
+/// Spec: IGN-26 — callees that are locals.
+@test
+function typecheckCallThroughLocalWithWrongArityProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let letStmt: Ast::StatementId = typecheckAddFunctionValuedLocal(&mut module, i32TypeId);
+
+  let firstArg: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let secondArg: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 2);
+
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(firstArg);
+  callArgs.push(secondArg);
+
+  let callExpr: Ast::ExpressionId = typecheckAddLocalCall(&mut module, callArgs);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+  assertExprType(&output, callExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: an argument whose type does not match the parameter is reported against the
+/// signature carried by the local's own type.
+/// Spec: IGN-26 — callees that are locals.
+@test
+function typecheckCallThroughLocalWithWrongArgumentTypeProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let letStmt: Ast::StatementId = typecheckAddFunctionValuedLocal(&mut module, i32TypeId);
+
+  let boolArg: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(boolArg);
+
+  let callExpr: Ast::ExpressionId = typecheckAddLocalCall(&mut module, callArgs);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_ARGUMENT_TYPE);
+}
+
+/// Scenario: calling a local that is not a function at all is a type error naming the type,
+/// not an unsupported construct.
+/// Spec: IGN-26 — A0069.
+@test
+function typecheckCallThroughNonCallableLocalProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function main(): i32 { let f: i32 = 1; return f(); }
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let fPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "f", i32TypeId);
+  let initExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: fPattern,
+    annotation: Option::SOME(i32TypeId),
+    value: Option::SOME(initExpr),
+  }));
+
+  let callExpr: Ast::ExpressionId = typecheckAddLocalCall(&mut module, Vector::new<Ast::ExpressionId>());
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::CALL_ON_NON_CALLABLE);
+}

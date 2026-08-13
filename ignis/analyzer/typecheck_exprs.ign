@@ -357,9 +357,20 @@ export namespace Analyzer {
 
       let functionDefId: Analyzer::DefinitionId = match (resolved) {
         Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> defId,
-        Analyzer::ResolverBodies::ResolvedRef::Local(_) -> {
-          Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through local values");
-          return Option::NONE;
+        Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> {
+          // A local holding a function value carries its whole signature in its type, so the
+          // call is checked against that rather than against a definition.
+          return Analyzer::Typecheck::checkCallThroughLocal(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            callExprId,
+            call,
+            localId,
+          );
         },
         Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {
           Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through type parameters");
@@ -392,6 +403,81 @@ export namespace Analyzer {
         &signature,
         0,
       );
+    }
+
+    /// Typecheck a call whose callee is a local holding a function value.
+    ///
+    /// The signature comes from the local's own type instead of from a definition, so the
+    /// parameter types are `TypeId`s directly rather than parameter definitions.
+    function checkCallThroughLocal(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+      localId: Analyzer::ResolverBodies::LocalId,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(binding) = Analyzer::Typecheck::lookupLocalBinding(state, localId) else {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through local values");
+        return Option::NONE;
+      };
+
+      let Option::SOME(calleeType) = typeStore.get(binding.typeId) else {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through local values");
+        return Option::NONE;
+      };
+
+      let Analyzer::Type::Function(signature) = calleeType else {
+        Analyzer::Typecheck::emitCallOnNonCallable(state, typeStore, call.span, binding.typeId);
+        return Option::NONE;
+      };
+
+      let expectedArity: u64 = signature.params.length();
+
+      if (call.arguments.length() != expectedArity) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), expectedArity);
+      }
+
+      let mut argIndex: u64 = 0;
+
+      while (argIndex < call.arguments.length()) {
+        let Option::SOME(argExprId) = call.arguments.get(argIndex) else {
+          argIndex += 1;
+          continue;
+        };
+
+        let expectedParam: Option<Analyzer::TypeId> = match (signature.params.get(argIndex)) {
+          Option::SOME(paramType) -> Option::SOME(*paramType),
+          Option::NONE -> Option::NONE,
+        };
+
+        let actualOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          *argExprId,
+          expectedParam,
+        );
+
+        if (let Option::SOME(expectedType) = expectedParam) {
+          if (let Option::SOME(actualType) = actualOpt) {
+            if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, call.span, expectedType, actualType)) {
+              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, expectedType, actualType);
+            }
+          }
+        }
+
+        argIndex += 1;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
+      return Option::SOME(signature.returnType);
     }
 
     /// Typechecks `call.arguments` against `signature.params[firstParamIndex..]`
@@ -1367,8 +1453,20 @@ export namespace Analyzer {
           return Option::NONE;
         },
         Ast::Expression::Node::Lambda(value) -> {
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "lambda expressions");
-          return Option::NONE;
+          let Option::SOME(lambdaType) = Analyzer::Typecheck::checkLambdaExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            &value,
+          ) else {
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, lambdaType);
+          return Option::SOME(lambdaType);
         },
         Ast::Expression::Node::CaptureOverride(value) -> {
           let _innerType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression);
@@ -1745,6 +1843,148 @@ export namespace Analyzer {
       }
 
       Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, patternId, expectedType, mutable, span);
+    }
+
+    /// Type a lambda: its parameters bind in a scope of their own, its body is checked
+    /// against its declared return type, and the result is the function type it denotes.
+    ///
+    /// Both the parameter annotations and the return annotation are required. Inferring them
+    /// needs an expected type flowing in from the use site, which `checkExprExpected` does not
+    /// carry through a lambda yet.
+    function checkLambdaExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      lambda: &Ast::Expression::Lambda,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(declaredReturn) = lambda.returnType else {
+        Analyzer::Typecheck::emitUnsupported(state, lambda.span, "lambdas without an explicit return type");
+        return Option::NONE;
+      };
+
+      let Option::SOME(returnType) = Analyzer::Typecheck::resolveLocalAnnotation(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        declaredReturn,
+      ) else {
+        Analyzer::Typecheck::emitUnsupported(state, lambda.span, "unsupported lambda return type");
+        return Option::NONE;
+      };
+
+      let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < lambda.parameters.length()) {
+        let Option::SOME(paramPatternId) = lambda.parameters.get(paramIndex) else {
+          return Option::NONE;
+        };
+
+        let Option::SOME(paramType) = Analyzer::Typecheck::lambdaParameterType(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          *paramPatternId,
+          lambda.span,
+        ) else {
+          return Option::NONE;
+        };
+
+        paramTypes.push(paramType);
+        paramIndex += 1;
+      }
+
+      // The body is checked in its own scope, against its own return type. Without saving the
+      // enclosing one, a `return` inside the lambda would be checked against the function the
+      // lambda is written in.
+      let enclosingReturnType: Analyzer::TypeId = state.currentReturnType;
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.currentReturnType = returnType;
+
+      Analyzer::Typecheck::pushScope(stateRef);
+
+      let mut boundIndex: u64 = 0;
+
+      while (boundIndex < lambda.parameters.length()) {
+        let Option::SOME(paramPatternId) = lambda.parameters.get(boundIndex) else {
+          boundIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(paramType) = paramTypes.get(boundIndex) else {
+          boundIndex += 1;
+          continue;
+        };
+
+        let _bound: boolean = Analyzer::Typecheck::pushPatternLocal(
+          stateRef,
+          resolvedBodies,
+          *paramPatternId,
+          *paramType,
+          false,
+          lambda.span,
+        );
+        boundIndex += 1;
+      }
+
+      Analyzer::Typecheck::checkStmt(stateRef, defStore, typeStore, symbols, module, resolvedBodies, lambda.body);
+      Analyzer::Typecheck::popScope(stateRef);
+
+      stateRef.currentReturnType = enclosingReturnType;
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+      return Option::SOME(typeStoreRef.intern(Analyzer::Type::Function(Analyzer::FunctionType {
+        params: paramTypes,
+        returnType: returnType,
+      })));
+    }
+
+    /// The declared type of one lambda parameter.
+    ///
+    /// The parser only ever produces binding patterns here, and the annotation is what gives
+    /// the parameter its type: there is nothing else to infer it from.
+    function lambdaParameterType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      patternId: Ast::PatternId,
+      span: SourceSpan,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(pattern) = module.patterns.get(patternId) else {
+        return Option::NONE;
+      };
+
+      let Ast::Pattern::Node::Binding(binding) = pattern else {
+        Analyzer::Typecheck::emitUnsupported(state, span, "non-binding lambda parameters");
+        return Option::NONE;
+      };
+
+      let Option::SOME(annotation) = binding.annotation else {
+        Analyzer::Typecheck::emitUnsupported(state, span, "lambda parameters without explicit annotations");
+        return Option::NONE;
+      };
+
+      let Option::SOME(paramType) = Analyzer::Typecheck::resolveLocalAnnotation(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        annotation,
+      ) else {
+        Analyzer::Typecheck::emitUnsupported(state, span, "unsupported lambda parameter type");
+        return Option::NONE;
+      };
+
+      return Option::SOME(paramType);
     }
 
     function checkStmt(
