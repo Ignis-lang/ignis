@@ -6906,3 +6906,143 @@ function main(): i32 {
 "#,
   );
 }
+
+/// A generic body can only name the method on the bound's trait, since its receiver is a type
+/// parameter. Lowering had no branch for that receiver and produced an error placeholder, so
+/// the call emitted nothing: the function ran, skipped the call, and returned its untouched
+/// accumulator with no diagnostic anywhere.
+#[test]
+fn e2e_generic_calls_the_implementation_behind_a_trait_bound() {
+  e2e_test(
+    "generic_calls_the_implementation_behind_a_trait_bound",
+    r#"
+trait Weigh {
+    weigh(&self): i32;
+}
+
+@implements(Weigh)
+record Stone {
+    public grams: i32;
+
+    weigh(&self): i32 {
+        return self.grams * 2;
+    }
+}
+
+@implements(Weigh)
+record Feather {
+    public grams: i32;
+
+    weigh(&self): i32 {
+        return self.grams + 1;
+    }
+}
+
+function total<T: Weigh>(value: &T): i32 {
+    return value.weigh();
+}
+
+function main(): i32 {
+    let stone: Stone = Stone { grams: 20 };
+    let feather: Feather = Feather { grams: 5 };
+
+    return total<Stone>(&stone) + total<Feather>(&feather);
+}
+"#,
+  );
+}
+
+/// The same dispatch reached through the try operator, which is how the standard library's
+/// serializers use it. Both the propagated error path and the value path stay intact.
+#[test]
+fn e2e_generic_trait_bound_call_propagates_through_try() {
+  e2e_test(
+    "generic_trait_bound_call_propagates_through_try",
+    r#"
+@lang(try)
+enum Outcome<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+trait Emit {
+    emit(&self): Outcome<i32, i32>;
+}
+
+@implements(Emit)
+record Label {
+    public ok: boolean;
+    public weight: i32;
+
+    emit(&self): Outcome<i32, i32> {
+        if (self.ok) {
+            return Outcome::Ok(self.weight);
+        }
+
+        return Outcome::Err(7);
+    }
+}
+
+function render<T: Emit>(value: &T): Outcome<i32, i32> {
+    let carried: i32 = value.emit()!;
+
+    return Outcome::Ok(carried + 1);
+}
+
+function main(): i32 {
+    let good: Label = Label { ok: true, weight: 4 };
+    let bad: Label = Label { ok: false, weight: 4 };
+
+    let rendered: i32 = match (render<Label>(&good)) {
+        Outcome::Ok(value) -> value,
+        Outcome::Err(_) -> -1,
+    };
+
+    let failed: i32 = match (render<Label>(&bad)) {
+        Outcome::Ok(_) -> -1,
+        Outcome::Err(code) -> code,
+    };
+
+    return rendered * 10 + failed;
+}
+"#,
+  );
+}
+
+/// The implementing type may overload the name the trait declares. The name alone no longer
+/// identifies the implementation, so dispatch matches on the declared parameter list, keeping
+/// in mind that a trait declares its methods without a receiver and an implementation does not.
+#[test]
+fn e2e_generic_trait_bound_call_picks_the_matching_overload() {
+  e2e_test(
+    "generic_trait_bound_call_picks_the_matching_overload",
+    r#"
+trait Weigh {
+    weigh(&self): i32;
+}
+
+@implements(Weigh)
+record Stone {
+    public grams: i32;
+
+    weigh(&self): i32 {
+        return self.grams * 2;
+    }
+
+    weigh(&self, factor: i32): i32 {
+        return self.grams * factor;
+    }
+}
+
+function total<T: Weigh>(value: &T): i32 {
+    return value.weigh();
+}
+
+function main(): i32 {
+    let stone: Stone = Stone { grams: 20 };
+
+    return total<Stone>(&stone) + stone.weigh(3);
+}
+"#,
+  );
+}

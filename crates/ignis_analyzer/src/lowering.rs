@@ -3082,6 +3082,18 @@ impl<'a> Analyzer<'a> {
           None
         }
       },
+      // A method reached through a type parameter's trait bound. The receiver has no record
+      // definition to search, so the only source is the method typechecking already resolved
+      // from the bound. Monomorphization rewrites it to the implementing type's own method.
+      Type::Param { .. } => {
+        self
+          .lookup_resolved_call(node_id)
+          .cloned()
+          .and_then(|method_id| match &self.defs.get(&method_id).kind {
+            DefinitionKind::Method(md) => Some((method_id, md.self_mutable)),
+            _ => None,
+          })
+      },
       _ => None,
     };
 

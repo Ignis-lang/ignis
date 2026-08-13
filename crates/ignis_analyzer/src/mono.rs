@@ -910,6 +910,14 @@ impl<'a> Monomorphizer<'a> {
         // Clone receiver first to get the concretized type
         let new_receiver = receiver.map(|r| self.clone_hir_tree(r));
 
+        // A call written against a type parameter's bound names the trait's method. Now that
+        // the receiver is concrete, redirect it to the implementation before anything else
+        // reads the method's owner.
+        let method = &new_receiver
+          .map(|recv| self.output_hir.get(recv).type_id)
+          .and_then(|recv_ty| self.dispatch_trait_method(*method, recv_ty))
+          .unwrap_or(*method);
+
         // Extract owner type args and method type args
         // For instance methods: owner_args come from receiver, method_type_args from call
         // For static methods: type_args are split between owner and method
@@ -917,7 +925,7 @@ impl<'a> Monomorphizer<'a> {
           // Instance method: extract owner args from receiver type
           let recv_ty = self.output_hir.get(new_recv_id).type_id;
 
-          let (def_id, mut extracted_args) = if let Some((def, args)) = self.unwrap_to_instance_type(recv_ty) {
+          let (owner_def_id, mut extracted_args) = if let Some((def, args)) = self.unwrap_to_instance_type(recv_ty) {
             if is_verbose() {
               eprintln!(
                 "[MONO]   unwrap_to_instance_type returned: def={:?}, args.len()={}",
@@ -925,13 +933,25 @@ impl<'a> Monomorphizer<'a> {
                 args.len()
               );
             }
-            (def, args)
+            (Some(def), args)
           } else {
-            panic!("Cannot extract owner from receiver type {:?}", self.types.get(&recv_ty));
+            // The receiver still carries a type parameter, so this is a generic template
+            // being copied rather than an instantiation. Carrying the receiver type through
+            // keeps the call marked unresolved; the copy made for a concrete instantiation
+            // resolves it there.
+            if is_verbose() {
+              eprintln!(
+                "[MONO]   receiver is still generic: {:?}, leaving the call unresolved",
+                self.types.get(&recv_ty)
+              );
+            }
+            (None, vec![recv_ty])
           };
 
           // If args is empty, search cache for the concrete def's original args
-          if extracted_args.is_empty() {
+          if extracted_args.is_empty()
+            && let Some(def_id) = owner_def_id
+          {
             if is_verbose() {
               eprintln!("[MONO]   Args empty for def={:?}, searching cache", def_id);
             }
@@ -2212,6 +2232,14 @@ impl<'a> Monomorphizer<'a> {
         args,
       } => {
         let new_receiver = receiver.map(|r| self.substitute_hir(r, subst));
+
+        // Same redirect as in `clone_hir_tree`: the generic body could only name the trait's
+        // method, and the receiver is concrete now that its type parameter was substituted.
+        let method = &new_receiver
+          .map(|recv| self.output_hir.get(recv).type_id)
+          .and_then(|recv_ty| self.dispatch_trait_method(*method, recv_ty))
+          .unwrap_or(*method);
+
         // Substitute type params in method's type_args
         let substituted_type_args: Vec<_> = type_args.iter().map(|ty| self.types.substitute(*ty, subst)).collect();
         let concrete_method = if new_receiver.is_none() {
@@ -2880,6 +2908,100 @@ impl<'a> Monomorphizer<'a> {
         _ => return None,
       }
     }
+  }
+
+  /// Redirect a trait method to the implementing type's own method.
+  ///
+  /// A call written against a type parameter's bound names the method on the trait, because
+  /// that is all the generic body can see. Once the receiver's type is concrete, the call has
+  /// to reach the implementation instead; the trait declaration has no body to lower.
+  ///
+  /// Returns `None` when the call already names a concrete method, or when the receiver type
+  /// carries no implementation of that name, in which case the caller keeps the original.
+  fn dispatch_trait_method(
+    &self,
+    method_generic: DefinitionId,
+    receiver_type: TypeId,
+  ) -> Option<DefinitionId> {
+    let method_def = self.input_defs.get(&method_generic);
+
+    let DefinitionKind::Method(md) = &method_def.kind else {
+      return None;
+    };
+
+    if !matches!(self.input_defs.get(&md.owner_type).kind, DefinitionKind::Trait(_)) {
+      return None;
+    }
+
+    let mut receiver = receiver_type;
+
+    while let Type::Reference { inner, .. } | Type::Pointer { inner, .. } = self.types.get(&receiver) {
+      receiver = *inner;
+    }
+
+    let type_def_id = match self.types.get(&receiver) {
+      Type::Record(def_id) | Type::Enum(def_id) => *def_id,
+      Type::Instance { generic, .. } => *generic,
+      _ => return None,
+    };
+
+    let instance_methods = match &self.input_defs.get(&type_def_id).kind {
+      DefinitionKind::Record(rd) => &rd.instance_methods,
+      DefinitionKind::Enum(ed) => &ed.instance_methods,
+      _ => return None,
+    };
+
+    match instance_methods.get(&method_def.name)? {
+      SymbolEntry::Single(def_id) => Some(*def_id),
+      SymbolEntry::Overload(group) => {
+        // The name alone does not identify the implementation, so the parameter list has to.
+        // Two members cannot share one signature — analysis rejects that with A0103 long
+        // before this runs — so a second match means the assumption broke. Staying
+        // unresolved is the safe answer there: guessing would silently call another body.
+        let expected = self.method_parameter_types(&method_generic, false)?;
+
+        let mut matches = group.iter().filter(|candidate| {
+          self
+            .method_parameter_types(candidate, true)
+            .is_some_and(|found| found == expected)
+        });
+
+        let selected = matches.next()?;
+
+        matches.next().is_none().then_some(*selected)
+      },
+    }
+  }
+
+  /// The declared parameter types of a method, in order, or `None` if it is not a method.
+  ///
+  /// A trait declares its methods without a receiver parameter while an implementing type
+  /// carries one, so comparing the two requires dropping the receiver from the implementation
+  /// side. `skip_receiver` says which side is being read.
+  fn method_parameter_types(
+    &self,
+    method_def_id: &DefinitionId,
+    skip_receiver: bool,
+  ) -> Option<Vec<TypeId>> {
+    let DefinitionKind::Method(md) = &self.input_defs.get(method_def_id).kind else {
+      return None;
+    };
+
+    let declared = if skip_receiver && !md.is_static {
+      md.params.get(1..)?
+    } else {
+      md.params.as_slice()
+    };
+
+    // Collected strictly: dropping an entry that is not a parameter would make two methods
+    // with different signatures compare equal.
+    declared
+      .iter()
+      .map(|param_id| match &self.input_defs.get(param_id).kind {
+        DefinitionKind::Parameter(pd) => Some(pd.type_id),
+        _ => None,
+      })
+      .collect()
   }
 
   /// Resolve a method call to its concrete instantiation, given the owner's type args.

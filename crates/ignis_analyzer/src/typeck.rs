@@ -6031,6 +6031,12 @@ impl<'a> Analyzer<'a> {
         self.set_import_item_def(&ma.member_span, &method_id);
         self.mark_referenced(method_id);
 
+        // Record the trait method the bound resolved to. Lowering has no other way to learn
+        // it: the receiver is a type parameter, so it cannot look the name up on a record.
+        // Monomorphization redirects this to the implementing type's own method.
+        self.set_resolved_call(node_id, method_id);
+        self.set_resolved_call(&call.callee, method_id);
+
         let method = match &self.defs.get(&method_id).kind {
           DefinitionKind::Method(md) => md.clone(),
           _ => return self.types.error(),
