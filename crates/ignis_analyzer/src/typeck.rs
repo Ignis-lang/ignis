@@ -1545,6 +1545,11 @@ impl<'a> Analyzer<'a> {
           .map(|(name, segment_span)| ASTPathSegment::new(*name, segment_span.clone()))
           .collect();
 
+        // A pattern is a use of everything its path names, prefix included. Expression paths
+        // already mark theirs; without this, an import reached only from a match arm is
+        // reported unused even though deleting it breaks the build.
+        self.mark_path_prefix_referenced(&path_segments);
+
         if let Some(ResolvedPath::EnumVariant {
           enum_def,
           variant_index,
@@ -3408,6 +3413,16 @@ impl<'a> Analyzer<'a> {
     };
 
     self.mark_referenced(def_id);
+
+    // A record literal written through a namespace uses that namespace too, so its prefix has
+    // to count as a reference the same way an expression path's does.
+    let path_segments: Vec<ASTPathSegment> = ri
+      .path
+      .iter()
+      .map(|(name, segment_span)| ASTPathSegment::new(*name, segment_span.clone()))
+      .collect();
+
+    self.mark_path_prefix_referenced(&path_segments);
 
     // Check it's a record
     let rd = match &self.defs.get(&def_id).kind {
