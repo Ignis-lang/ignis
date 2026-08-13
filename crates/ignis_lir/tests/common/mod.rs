@@ -18,6 +18,18 @@ pub struct LirResult {
 
 /// Run the full pipeline: lexer -> parser -> analyzer -> LIR lowering
 pub fn lower_to_lir(src: &str) -> LirResult {
+  lower_to_lir_with_hir_edit(src, |_| {})
+}
+
+/// Same as `lower_to_lir`, with a chance to edit the analyzed HIR before lowering.
+///
+/// The edit runs after the analyzer-error assertion, so it can produce states a well-formed
+/// program cannot reach — an error placeholder surviving an error-free analysis is exactly
+/// the condition under test and has no source-level spelling.
+pub fn lower_to_lir_with_hir_edit(
+  src: &str,
+  edit: impl FnOnce(&mut ignis_hir::HIR),
+) -> LirResult {
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("test.ign", src.to_string());
 
@@ -29,7 +41,7 @@ pub fn lower_to_lir(src: &str) -> LirResult {
   let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
   let (nodes, roots) = parser.parse().expect("Parse failed");
 
-  let output = Analyzer::analyze(&nodes, &roots, symbols);
+  let mut output = Analyzer::analyze(&nodes, &roots, symbols);
 
   // Check for analyzer errors
   let has_errors = output
@@ -37,6 +49,8 @@ pub fn lower_to_lir(src: &str) -> LirResult {
     .iter()
     .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error));
   assert!(!has_errors, "Analyzer errors: {:?}", output.diagnostics);
+
+  edit(&mut output.hir);
 
   let mut types = output.types.clone();
 

@@ -467,3 +467,50 @@ function loop_with_owned(): i32 {
 
   assert_snapshot!("lir_drop_in_loop_scope_end", common::format_lir(&result));
 }
+
+fn reports_error_node(result: &common::LirResult) -> bool {
+  result
+    .verify_errors
+    .iter()
+    .any(|error| matches!(error, ignis_lir::verify::VerifyError::ErrorNodeReachedLowering { .. }))
+}
+
+const SIMPLE_PROGRAM: &str = r#"
+function main(): i32 {
+    return 1 + 2;
+}
+"#;
+
+/// Lowering runs only after analysis reported no errors, so a reachable error placeholder
+/// means a phase produced one without a diagnostic. It lowers to nothing, which deletes the
+/// user's code from the emitted program.
+#[test]
+fn an_error_placeholder_reaching_lowering_is_reported() {
+  let result = common::lower_to_lir_with_hir_edit(SIMPLE_PROGRAM, |hir| {
+    let body_id = *hir
+      .function_bodies
+      .values()
+      .next()
+      .expect("expected the analyzed program to have a function body");
+
+    hir.get_mut(body_id).kind = ignis_hir::HIRKind::Error;
+  });
+
+  assert!(
+    reports_error_node(&result),
+    "expected the reachable error placeholder to be reported, got: {:?}",
+    result.verify_errors
+  );
+}
+
+/// The counterpart, so the check is not satisfied by reporting on everything.
+#[test]
+fn a_well_formed_program_reports_no_error_placeholder() {
+  let result = common::lower_to_lir(SIMPLE_PROGRAM);
+
+  assert!(
+    !reports_error_node(&result),
+    "a well-formed program must not report an error placeholder, got: {:?}",
+    result.verify_errors
+  );
+}

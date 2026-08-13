@@ -74,6 +74,10 @@ pub struct LoweringContext<'a> {
   /// not be spilled for synthetic drops - their source local has its own schedule.
   load_alias_temps: HashSet<TempId>,
 
+  /// Error placeholders that were actually reached while lowering, with the function
+  /// each one was reached from.
+  lowered_error_nodes: Vec<(Span, Option<DefinitionId>)>,
+
   thunk_captures: HashMap<DefinitionId, Vec<HIRCapture>>,
   drop_fn_captures: HashMap<DefinitionId, Vec<HIRCapture>>,
 
@@ -110,6 +114,7 @@ impl<'a> LoweringContext<'a> {
       emit_modules,
       synthetic_owned_stack: Vec::new(),
       load_alias_temps: HashSet::new(),
+      lowered_error_nodes: Vec::new(),
       thunk_captures: HashMap::new(),
       drop_fn_captures: HashMap::new(),
       byref_captures: HashSet::new(),
@@ -117,8 +122,12 @@ impl<'a> LoweringContext<'a> {
     }
   }
 
-  /// Lower the entire HIR to LIR.
-  pub fn lower(mut self) -> LirProgram {
+  /// Lower the entire HIR to LIR, along with every error placeholder that was reached.
+  ///
+  /// The placeholders come back with the program rather than staying inside the context:
+  /// reaching one means code was dropped from the output, so no caller should be able to
+  /// take the program without seeing them.
+  pub fn lower(mut self) -> (LirProgram, Vec<(Span, Option<DefinitionId>)>) {
     self.program.entry_point = self.hir.entry_point;
 
     self.collect_thunk_captures();
@@ -157,7 +166,7 @@ impl<'a> LoweringContext<'a> {
       }
     }
 
-    self.program
+    (self.program, self.lowered_error_nodes)
   }
 
   fn lower_function(
@@ -530,7 +539,10 @@ impl<'a> LoweringContext<'a> {
         }
         None
       },
-      HIRKind::Error => None,
+      HIRKind::Error => {
+        self.lowered_error_nodes.push((node.span, self.current_fn_def_id));
+        None
+      },
       HIRKind::TypeOf(operand_hir) => self.lower_typeof(*operand_hir, node.type_id, node.span),
       HIRKind::SizeOf(ty) => self.lower_sizeof(*ty, node.type_id, node.span),
       HIRKind::AlignOf(ty) => self.lower_alignof(*ty, node.type_id, node.span),
@@ -3792,22 +3804,14 @@ impl<'a> LoweringContext<'a> {
   }
 }
 
-/// Lower HIR to LIR.
+/// Lower HIR to LIR and verify the result.
 ///
 /// If `emit_modules` is Some, only emit function bodies for those modules;
 /// other functions become extern declarations.
-pub fn lower_hir(
-  hir: &HIR,
-  types: &mut TypeStore,
-  defs: &DefinitionStore,
-  symbols: &SymbolTable,
-  drop_schedules: &DropSchedules,
-  emit_modules: Option<&HashSet<ModuleId>>,
-) -> LirProgram {
-  LoweringContext::new(hir, types, defs, symbols, drop_schedules, emit_modules).lower()
-}
-
-/// Lower HIR to LIR and verify the result.
+///
+/// An error placeholder reached during lowering is reported here as a verification error.
+/// Lowering runs only after analysis reported no errors, so reaching one means a phase
+/// produced it without a diagnostic, and it emits no code at all.
 pub fn lower_and_verify(
   hir: &HIR,
   types: &mut TypeStore,
@@ -3816,7 +3820,18 @@ pub fn lower_and_verify(
   drop_schedules: &DropSchedules,
   emit_modules: Option<&HashSet<ModuleId>>,
 ) -> (LirProgram, Result<(), Vec<crate::VerifyError>>) {
-  let program = lower_hir(hir, types, defs, symbols, drop_schedules, emit_modules);
-  let verify_result = crate::verify::verify_lir(&program, types, defs);
+  let (program, error_nodes) = LoweringContext::new(hir, types, defs, symbols, drop_schedules, emit_modules).lower();
+
+  let mut errors: Vec<crate::VerifyError> = error_nodes
+    .into_iter()
+    .map(|(span, function)| crate::VerifyError::ErrorNodeReachedLowering { span, function })
+    .collect();
+
+  if let Err(verify_errors) = crate::verify::verify_lir(&program, types, defs) {
+    errors.extend(verify_errors);
+  }
+
+  let verify_result = if errors.is_empty() { Ok(()) } else { Err(errors) };
+
   (program, verify_result)
 }

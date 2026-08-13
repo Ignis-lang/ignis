@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use ignis_type::{
-  definition::DefinitionStore,
+  definition::{DefinitionId, DefinitionStore},
+  span::Span,
   types::{Type, TypeId, TypeStore},
 };
 
@@ -73,6 +74,16 @@ pub enum VerifyError {
     local: LocalId,
     actual_type: TypeId,
   },
+
+  /// An analysis error placeholder was reached while lowering.
+  ///
+  /// Lowering runs only after analysis reported no errors, so this means a phase produced
+  /// the placeholder without a diagnostic to go with it. It lowers to nothing, which
+  /// deletes whatever the user wrote at that span from the emitted program.
+  ///
+  /// Constructed by `lowering::lower_and_verify` rather than by the verifier itself, since
+  /// only lowering knows which placeholders it actually reached.
+  ErrorNodeReachedLowering { span: Span, function: Option<DefinitionId> },
 }
 
 /// LIR verification result.
