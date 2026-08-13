@@ -786,12 +786,25 @@ impl<'a> Monomorphizer<'a> {
         )
       },
       HIRKind::BuiltinDropInPlace { ty, ptr } => {
-        self.copy_drop_method_if_original(*ty);
+        // Concretize before resolving the drop method: an already-monomorphic function can
+        // still carry an operand inherited from an enclosing instantiation.
+        let new_ty = self.concretize_type(*ty);
+
+        self.copy_drop_method_if_original(new_ty);
 
         let new_ptr = self.clone_hir_tree(*ptr);
-        (HIRKind::BuiltinDropInPlace { ty: *ty, ptr: new_ptr }, None)
+        (
+          HIRKind::BuiltinDropInPlace {
+            ty: new_ty,
+            ptr: new_ptr,
+          },
+          None,
+        )
       },
-      HIRKind::BuiltinDropGlue { ty } => (HIRKind::BuiltinDropGlue { ty: *ty }, None),
+      HIRKind::BuiltinDropGlue { ty } => {
+        let new_ty = self.concretize_type(*ty);
+        (HIRKind::BuiltinDropGlue { ty: new_ty }, None)
+      },
       HIRKind::Reference { expression, mutable } => {
         let new_expr = self.clone_hir_tree(*expression);
         (
@@ -2444,7 +2457,12 @@ impl<'a> Monomorphizer<'a> {
       },
       HIRKind::BuiltinDropInPlace { ty, ptr } => {
         let new_ptr = self.substitute_hir(*ptr, subst);
-        let new_ty = self.types.substitute(*ty, subst);
+
+        // Substituting a type parameter can leave a `Type::Instance` behind when the argument
+        // is itself a generic instantiation. Concretizing turns that into the record this
+        // pass already created for it; without this the operand reaches codegen unresolved.
+        let substituted = self.types.substitute(*ty, subst);
+        let new_ty = self.concretize_type(substituted);
 
         self.copy_drop_method_if_original(new_ty);
 
@@ -2454,7 +2472,9 @@ impl<'a> Monomorphizer<'a> {
         }
       },
       HIRKind::BuiltinDropGlue { ty } => {
-        let new_ty = self.types.substitute(*ty, subst);
+        let substituted = self.types.substitute(*ty, subst);
+        let new_ty = self.concretize_type(substituted);
+
         HIRKind::BuiltinDropGlue { ty: new_ty }
       },
       HIRKind::Index { base, index } => {

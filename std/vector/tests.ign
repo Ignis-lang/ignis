@@ -108,3 +108,35 @@ function clearAndDropRunElementDropExactlyOnce(): void {
 
   Test::assertEq<i32>(drops, 123);
 }
+
+/// A vector whose element type is itself a generic instantiation. Substituting the element
+/// type parameter in `@dropInPlace<T>` used to leave the inner instantiation unresolved, and
+/// it reached C emission as a type the backend cannot name.
+@test
+function nestedVectorElementsSurviveMonomorphization(): void {
+  let mut outer: Vector<Vector<i32>> = Vector::new<Vector<i32>>();
+  let mut first: Vector<i32> = Vector::new<i32>();
+
+  first.push(4);
+  first.push(5);
+  outer.push(first);
+
+  let mut second: Vector<i32> = Vector::new<i32>();
+
+  second.push(6);
+  outer.push(second);
+
+  Test::assertEq<u64>(outer.length(), 2 as u64);
+
+  let Option::SOME(head) = outer.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  let Option::SOME(value) = head.get(1) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<i32>(*value, 5);
+}
