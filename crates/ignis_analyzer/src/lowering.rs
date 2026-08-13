@@ -2270,8 +2270,11 @@ impl<'a> Analyzer<'a> {
       return None;
     }
 
+    // The leading segment resolves exactly as it did during typechecking. Resolving it any
+    // other way lets the two passes disagree, and lowering has no diagnostic to report when
+    // it loses: it emits an error placeholder and the literal disappears from the program.
     let (first_sym, _) = &path[0];
-    let mut current_def = self.scopes.lookup_def(first_sym).cloned()?;
+    let mut current_def = self.lookup_type_name(first_sym)?;
 
     for (segment_sym, _) in path.iter().skip(1) {
       match &self.defs.get(&current_def).kind {

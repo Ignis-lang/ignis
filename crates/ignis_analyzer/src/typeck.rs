@@ -9580,7 +9580,7 @@ impl<'a> Analyzer<'a> {
   /// both, so resolving there alone picks whichever was declared first regardless of where
   /// the name was written. The enclosing namespace chain is searched outward first, and
   /// lexical scope remains the fallback for imports and top-level declarations.
-  fn lookup_type_name(
+  pub(crate) fn lookup_type_name(
     &self,
     symbol: &SymbolId,
   ) -> Option<DefinitionId> {
@@ -9614,7 +9614,14 @@ impl<'a> Analyzer<'a> {
       namespace = self.namespaces.get(&namespace_id).parent;
     }
 
-    lexical
+    // Lexical scope applies the same filter for the same reason: a constant or function taking
+    // the name in an inner scope must not hide a type of that name declared further out. The
+    // unfiltered binding is still the last resort, so a genuinely wrong name reaches the
+    // diagnostic that names what it actually found.
+    self
+      .scopes
+      .lookup_def_where(symbol, |def_id| self.names_a_type(def_id))
+      .or(lexical)
   }
 
   /// Whether a definition can stand where a type name is written.

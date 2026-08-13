@@ -7046,3 +7046,94 @@ function main(): i32 {
 "#,
   );
 }
+
+/// A constant can take a name a record already has. Resolution used to stop at whichever
+/// binding it hit first, so the literal resolved to the constant, produced no diagnostic, and
+/// vanished from the program: the failure surfaced as a LIR verification error naming neither
+/// the type nor the constant.
+#[test]
+fn e2e_record_literal_resolves_past_a_constant_of_the_same_name() {
+  e2e_test(
+    "record_literal_resolves_past_a_constant_of_the_same_name",
+    r#"
+record Point {
+    public x: i32;
+}
+
+export namespace Holder {
+    const Point: i32 = 99;
+
+    function make(): Point {
+        return Point { x: 34 };
+    }
+
+    function constant(): i32 {
+        return Holder::Point;
+    }
+}
+
+function main(): i32 {
+    return Holder::make().x + Holder::constant();
+}
+"#,
+  );
+}
+
+/// The same precedence rule in an ordinary type annotation, not a record literal. A local
+/// binding can take a type's name, and the annotation still has to reach the type: a value
+/// binding can never be what a type position wants, so skipping it loses nothing.
+#[test]
+fn e2e_type_annotation_resolves_past_a_local_of_the_same_name() {
+  e2e_test(
+    "type_annotation_resolves_past_a_local_of_the_same_name",
+    r#"
+record Point {
+    public x: i32;
+}
+
+function main(): i32 {
+    let Point: i32 = 7;
+    let origin: Point = Point { x: 5 };
+
+    return origin.x * 10 + Point;
+}
+"#,
+  );
+}
+
+/// The skipped binding can also be an overload group rather than a single definition. Records
+/// are not overloadable, so a group of that name can never be the type, and the walk has to
+/// continue past it.
+#[test]
+fn e2e_type_name_resolves_past_an_overload_group_of_the_same_name() {
+  e2e_test(
+    "type_name_resolves_past_an_overload_group_of_the_same_name",
+    r#"
+record Point {
+    public x: i32;
+}
+
+export namespace Holder {
+    function Point(value: i32): i32 {
+        return value;
+    }
+
+    function Point(first: i32, second: i32): i32 {
+        return first + second;
+    }
+
+    function make(): Point {
+        return Point { x: 4 };
+    }
+
+    function sum(): i32 {
+        return Holder::Point(1, 2) + Holder::Point(30);
+    }
+}
+
+function main(): i32 {
+    return Holder::make().x + Holder::sum();
+}
+"#,
+  );
+}

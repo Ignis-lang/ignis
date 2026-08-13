@@ -662,3 +662,25 @@ function main(): i32 {
     mismatch.message
   );
 }
+
+#[test]
+fn constant_taking_a_type_name_still_reports_a_missing_record() {
+  // Line 5: Point { x: 34 } — the only `Point` in scope is a constant, and no record of that
+  // name exists anywhere, so the literal has to be reported rather than silently dropped.
+  common::assert_diagnostic_at_line(
+    r#"
+export namespace Holder {
+    const Point: i32 = 99;
+
+    function make(): i32 {
+        return Point { x: 34 }.x;
+    }
+}
+
+function main(): i32 {
+    return Holder::make();
+}"#,
+    "A0053", // NotARecord
+    6,
+  );
+}

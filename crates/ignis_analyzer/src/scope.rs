@@ -137,6 +137,31 @@ impl ScopeTree {
     self.lookup(name).and_then(|entry| entry.as_single())
   }
 
+  /// Walk the scope chain outward, returning the first definition of `name` the caller accepts.
+  ///
+  /// An inner scope can bind a name to something that cannot appear in the position the name was
+  /// written in — a constant where a type belongs, say. Stopping at that first binding reports
+  /// the name as unusable while the definition that does fit sits one scope further out.
+  pub fn lookup_def_where(
+    &self,
+    name: &SymbolId,
+    accept: impl Fn(&DefinitionId) -> bool,
+  ) -> Option<DefinitionId> {
+    let mut current = self.current;
+
+    loop {
+      let scope = self.scopes.get(&current);
+
+      if let Some(def_id) = scope.symbols.get(name).and_then(|entry| entry.as_single())
+        && accept(def_id)
+      {
+        return Some(*def_id);
+      }
+
+      current = scope.parent?;
+    }
+  }
+
   pub fn find_loop_scope(&self) -> Option<ScopeId> {
     let mut current = self.current;
     loop {
