@@ -44,3 +44,86 @@ function createJoinAndToStringRemainCompatible(): void {
   Test::assertEq<str>(joined.asStr(), "/tmp/ignis-path-test.txt");
   Test::assertEq<str>(owned.toStr(), "/tmp/ignis-path-test.txt");
 }
+
+@test
+function parentStopsAtRootAndAtASingleComponent(): void {
+  let nested: Path::PathBuf = Path::PathBuf::create("/usr/local/bin");
+  let trailing: Path::PathBuf = Path::PathBuf::create("/usr/local/bin/");
+  let underRoot: Path::PathBuf = Path::PathBuf::create("/foo");
+
+  let Option::SOME(nestedParent) = nested.parent() else {
+    Test::fail();
+    return;
+  };
+
+  let Option::SOME(trailingParent) = trailing.parent() else {
+    Test::fail();
+    return;
+  };
+
+  let Option::SOME(rootParent) = underRoot.parent() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(nestedParent.asStr(), "/usr/local");
+  Test::assertEq<str>(trailingParent.asStr(), "/usr/local");
+  Test::assertEq<str>(rootParent.asStr(), "/");
+}
+
+@test
+function parentIsNoneForRootRelativeLeafAndEmptyPath(): void {
+  let root: Path::PathBuf = Path::PathBuf::create("/");
+  let leaf: Path::PathBuf = Path::PathBuf::create("foo");
+  let empty: Path::PathBuf = Path::PathBuf::create("");
+
+  Test::assert(root.parent().isNone());
+  Test::assert(leaf.parent().isNone());
+  Test::assert(empty.parent().isNone());
+}
+
+@test
+function extensionTakesTheLastDotAndIgnoresDotfiles(): void {
+  let simple: Path::PathBuf = Path::PathBuf::create("/tmp/archive.tar");
+  let doubled: Path::PathBuf = Path::PathBuf::create("/tmp/photo.tar.gz");
+  let dotfile: Path::PathBuf = Path::PathBuf::create("/home/user/.bashrc");
+  let bare: Path::PathBuf = Path::PathBuf::create("/src/Makefile");
+  let trailingDot: Path::PathBuf = Path::PathBuf::create("/tmp/name.");
+
+  let Option::SOME(simpleExtension) = simple.extension() else {
+    Test::fail();
+    return;
+  };
+
+  let Option::SOME(doubledExtension) = doubled.extension() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(simpleExtension.toStr(), "tar");
+  Test::assertEq<str>(doubledExtension.toStr(), "gz");
+  Test::assert(dotfile.extension().isNone());
+  Test::assert(bare.extension().isNone());
+  Test::assert(trailingDot.extension().isNone());
+}
+
+@test
+function fileNameIgnoresTrailingSeparatorsAndIsNoneAtRoot(): void {
+  let trailing: Path::PathBuf = Path::PathBuf::create("/usr/local/bin/");
+  let leaf: Path::PathBuf = Path::PathBuf::create("notes.txt");
+  let root: Path::PathBuf = Path::PathBuf::create("/");
+
+  let Option::SOME(trailingName) = trailing.fileName() else {
+    Test::fail();
+    return;
+  };
+
+  let Option::SOME(leafName) = leaf.fileName() else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(trailingName.toStr(), "bin");
+  Test::assertEq<str>(leafName.toStr(), "notes.txt");
+  Test::assert(root.fileName().isNone());
+}

@@ -497,3 +497,146 @@ function removeDirAllFailsWhenMissingAndRemovesNestedTreesWithoutFollowingSymlin
   Test::assert(externalFileStillExists);
   Test::assert(linkGone);
 }
+
+@test
+function metadataDistinguishesFilesFromDirectoriesAndReportsSize(): void {
+  let rootPath: str = "/tmp/ignis_std_test_runner_fs_metadata";
+  let filePath: str = "/tmp/ignis_std_test_runner_fs_metadata/payload.txt";
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_metadata");
+
+  // Deferred so the tree is removed on the early-failure paths too, not only on success.
+  defer shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_metadata");
+
+  match (Fs::createDirAll(rootPath)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let payload: String = String::create("twelve bytes");
+  let Result::OK(_) = Fs::writeString(filePath, &payload) else {
+    Test::fail();
+    return;
+  };
+
+  let fileMetadata: Fs::Metadata = match (Fs::metadata(filePath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let dirMetadata: Fs::Metadata = match (Fs::metadata(rootPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assert(fileMetadata.isFile());
+  Test::assert(!fileMetadata.isDir());
+  Test::assertEq<i64>(fileMetadata.len(), 12);
+
+  Test::assert(dirMetadata.isDir());
+  Test::assert(!dirMetadata.isFile());
+}
+
+@test
+function metadataFailsForAMissingPath(): void {
+  let missingPath: str = "/tmp/ignis_std_test_runner_fs_metadata_missing";
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_metadata_missing");
+
+  match (Fs::metadata(missingPath)) {
+    Result::OK(_) -> Test::fail(),
+    Result::ERROR(error) -> Test::assert(error.errorKind() == Io::ErrorKind::NOT_FOUND),
+  };
+}
+
+@test
+function createDirAllSucceedsAgainOnAnExistingTree(): void {
+  let nestedPath: str = "/tmp/ignis_std_test_runner_fs_create_dir_all/one/two";
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_create_dir_all");
+
+  defer shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_create_dir_all");
+
+  match (Fs::createDirAll(nestedPath)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  // The second call is the point of the test: creating a tree that already exists is a
+  // no-op, not an error, so callers do not have to probe first.
+  let secondResult: Result<void, Io::IoError> = Fs::createDirAll(nestedPath);
+
+  let nestedMetadata: Result<Fs::Metadata, Io::IoError> = Fs::metadata(nestedPath);
+
+  match (secondResult) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  match (nestedMetadata) {
+    Result::OK(value) -> Test::assert(value.isDir()),
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function walkYieldsDescendantsAndExcludesTheDirectoryItself(): void {
+  let rootPath: str = "/tmp/ignis_std_test_runner_fs_walk_empty";
+  let emptyChildPath: str = "/tmp/ignis_std_test_runner_fs_walk_empty/child";
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_walk_empty");
+
+  defer shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_walk_empty");
+
+  match (Fs::createDirAll(rootPath)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let emptyWalk: Vector<String> = match (Fs::walk(rootPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  match (Fs::createDirAll(emptyChildPath)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let populatedWalk: Vector<String> = match (Fs::walk(rootPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  // Walking a directory yields what is under it, never the directory itself, so an empty
+  // one yields nothing at all rather than a single self entry.
+  Test::assertEq<u64>(emptyWalk.length(), 0 as u64);
+
+  Test::assertEq<u64>(populatedWalk.length(), 1 as u64);
+  Test::assert(Fs::walkContains(&populatedWalk, emptyChildPath));
+  Test::assert(!Fs::walkContains(&populatedWalk, rootPath));
+}
