@@ -247,7 +247,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, localBinding.typeId, actualType)) {
+      if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, localBinding.typeId, actualType)) {
         Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, localBinding.typeId, actualType);
         return Option::NONE;
       }
@@ -467,7 +467,7 @@ export namespace Analyzer {
 
         if (let Option::SOME(expectedType) = expectedParam) {
           if (let Option::SOME(actualType) = actualOpt) {
-            if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, call.span, expectedType, actualType)) {
+            if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, expectedType, actualType)) {
               Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, expectedType, actualType);
             }
           }
@@ -556,7 +556,7 @@ export namespace Analyzer {
 
         match (paramDef) {
           Analyzer::Definition::Variable(parameter) -> {
-            if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, call.span, parameter.declaredType, argumentType)) {
+            if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, parameter.declaredType, argumentType)) {
               Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, parameter.declaredType, argumentType);
               Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
               return Option::SOME(signature.returnType);
@@ -1099,7 +1099,7 @@ export namespace Analyzer {
           return Option::NONE;
         };
 
-        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, fieldDef.fieldType, actualType)) {
+        if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, fieldDef.fieldType, actualType)) {
           Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, fieldDef.fieldType, actualType);
           return Option::NONE;
         }
@@ -1449,8 +1449,19 @@ export namespace Analyzer {
           );
         },
         Ast::Expression::Node::BuiltinCall(value) -> {
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "builtin calls");
-          return Option::NONE;
+          let Option::SOME(builtinType) = Analyzer::Typecheck::checkBuiltinCall(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            &value,
+          ) else {
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, builtinType);
+          return Option::SOME(builtinType);
         },
         Ast::Expression::Node::Lambda(value) -> {
           let Option::SOME(lambdaType) = Analyzer::Typecheck::checkLambdaExpr(
@@ -1513,6 +1524,37 @@ export namespace Analyzer {
       };
 
       return true;
+    }
+
+    /// Whether an expression of type `actual` may be supplied where `expected` is required.
+    ///
+    /// A diverging expression never produces a value, so there is no value that could be
+    /// of the wrong type: `NEVER` fits every position. Comparing it with `typesEqual`
+    /// would reject `return @panic("...")` inside a function returning anything but
+    /// `never`, reporting a type error for code that cannot reach the return at all.
+    ///
+    /// This must be used wherever a value flows into an expected type — return, local
+    /// annotation, assignment, argument, field initializer, constant initializer, and the
+    /// joined type of an all-diverging `match`. Symmetric comparisons (binary operands, a
+    /// pattern against its annotation) stay on `typesEqual`: neither side is a value being
+    /// supplied to the other. The reference compiler exempts `never` only at `return`, so
+    /// it rejects `let x: u64 = @panic("...")`; accepting it here is deliberate, since a
+    /// bottom type that is assignable in one position and not another is not a bottom type.
+    function valueSatisfiesType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      expected: Analyzer::TypeId,
+      actual: Analyzer::TypeId,
+    ): boolean {
+      // `typesEqual` reports cyclic aliases as it resolves them, so it runs first even when
+      // the answer is already known: testing divergence first would swallow that diagnostic.
+      if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, expected, actual)) {
+        return true;
+      }
+
+      return Analyzer::Typecheck::isNeverType(state, defStore, typeStore, actual);
     }
 
     /// Selects which pairwise-mismatch diagnostic `joinTypes` emits, so the
@@ -1595,7 +1637,7 @@ export namespace Analyzer {
       }
 
       if (let Option::SOME(expectedType) = expected) {
-        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, expectedType, joinedType)) {
+        if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, expectedType, joinedType)) {
           Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, expectedType, joinedType);
           return Option::NONE;
         }
@@ -1778,7 +1820,7 @@ export namespace Analyzer {
 
       if (let Option::SOME(expectedType) = expectedTypeOpt) {
         if (let Option::SOME(actualType) = actualTypeOpt) {
-          if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, expectedType, actualType)) {
+          if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, expectedType, actualType)) {
             Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, expectedType, actualType);
           }
         }
@@ -1837,12 +1879,207 @@ export namespace Analyzer {
       );
 
       if (let Option::SOME(actualType) = actualTypeOpt) {
-        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, expectedType, actualType)) {
+        if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, expectedType, actualType)) {
           Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, expectedType, actualType);
         }
       }
 
       Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, patternId, expectedType, mutable, span);
+    }
+
+    /// Type a `@name(...)` builtin call.
+    ///
+    /// Builtins are not declarations, so there is nothing to resolve a name against: the
+    /// name itself selects the signature. Only the ones the self-hosted compiler needs for
+    /// its own sources are typed so far; the rest are named in their diagnostic instead of
+    /// being reported as one undifferentiated wall.
+    function checkBuiltinCall(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      call: &Ast::Expression::BuiltinCall,
+    ): Option<Analyzer::TypeId> {
+      let name: &String = &call.name;
+
+      if (name.equals("sizeOf") || name.equals("alignOf")) {
+        let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        let resultType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::U64);
+
+        return Analyzer::Typecheck::checkBuiltinWithOneTypeArgument(state, defStore, typeStore, symbols, module, call, resultType);
+      }
+
+      if (name.equals("typeName")) {
+        let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        let resultType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::STR);
+
+        return Analyzer::Typecheck::checkBuiltinWithOneTypeArgument(state, defStore, typeStore, symbols, module, call, resultType);
+      }
+
+      if (name.equals("panic")) {
+        return Analyzer::Typecheck::checkBuiltinPanic(state, typeStore, module, call);
+      }
+
+      if (name.equals("trap") || name.equals("unreachable")) {
+        return Analyzer::Typecheck::checkBuiltinWithoutArguments(state, typeStore, call);
+      }
+
+      if (Analyzer::Typecheck::isKnownBuiltinName(name)) {
+        let detail: String = String::create("the `@").concat(name.toStr()).concat("` builtin");
+        Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
+        return Option::NONE;
+      }
+
+      Analyzer::Typecheck::emitUnknownBuiltin(state, call.span, name.toStr());
+      return Option::NONE;
+    }
+
+    /// Whether `name` is a builtin the language defines, typed here or not.
+    ///
+    /// Separating this from the typed set is what lets a misspelling be reported as an
+    /// unknown builtin instead of as a construct that is merely unimplemented.
+    ///
+    /// `configFlag` is a directive rather than a builtin, but the parser turns every
+    /// `@ident(...)` in expression position into a `BuiltinCall`, so it arrives here and
+    /// belongs in the list — dropping it to match the builtin registry exactly would
+    /// report legal source as an unknown builtin.
+    function isKnownBuiltinName(name: &String): boolean {
+      if (name.equals("typeOf") || name.equals("compileError") || name.equals("configFlag")) {
+        return true;
+      }
+
+      if (name.equals("bitCast") || name.equals("pointerCast")) {
+        return true;
+      }
+
+      if (name.equals("integerFromPointer") || name.equals("pointerFromInteger")) {
+        return true;
+      }
+
+      if (name.equals("sliceFromParts") || name.equals("read") || name.equals("write")) {
+        return true;
+      }
+
+      if (name.equals("hash") || name.equals("eq")) {
+        return true;
+      }
+
+      if (name.equals("maxOf") || name.equals("minOf")) {
+        return true;
+      }
+
+      return name.equals("dropInPlace") || name.equals("dropGlue");
+    }
+
+    /// `@name<T>()`: exactly one type argument, no value arguments, fixed result type.
+    function checkBuiltinWithOneTypeArgument(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      call: &Ast::Expression::BuiltinCall,
+      resultType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      if (call.typeArguments.length() != 1) {
+        Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 1, call.typeArguments.length());
+        return Option::NONE;
+      }
+
+      if (call.arguments.length() != 0) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 0);
+        return Option::NONE;
+      }
+
+      let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(_operandType) = Analyzer::Typecheck::resolveLocalAnnotation(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        *typeArgId,
+      ) else {
+        let detail: String = String::create("the type argument of `@").concat(call.name.toStr()).concat("`");
+        Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
+        return Option::NONE;
+      };
+
+      return Option::SOME(resultType);
+    }
+
+    /// `@panic("literal")`: no type arguments, one string-literal argument, never returns.
+    function checkBuiltinPanic(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      call: &Ast::Expression::BuiltinCall,
+    ): Option<Analyzer::TypeId> {
+      if (call.typeArguments.length() != 0) {
+        Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 0, call.typeArguments.length());
+        return Option::NONE;
+      }
+
+      if (call.arguments.length() != 1) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 1);
+        return Option::NONE;
+      }
+
+      let Option::SOME(messageExprId) = call.arguments.get(0) else {
+        return Option::NONE;
+      };
+
+      if (!Analyzer::Typecheck::isStringLiteralExpr(module, *messageExprId)) {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "`@panic` messages that are not string literals");
+        return Option::NONE;
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      return Option::SOME(typeStoreRef.intern(Analyzer::Type::NEVER));
+    }
+
+    /// `@name()`: no type arguments, no value arguments, never returns.
+    function checkBuiltinWithoutArguments(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      call: &Ast::Expression::BuiltinCall,
+    ): Option<Analyzer::TypeId> {
+      if (call.typeArguments.length() != 0) {
+        Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 0, call.typeArguments.length());
+        return Option::NONE;
+      }
+
+      if (call.arguments.length() != 0) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 0);
+        return Option::NONE;
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      return Option::SOME(typeStoreRef.intern(Analyzer::Type::NEVER));
+    }
+
+    /// Whether `exprId` is a string literal written in place.
+    function isStringLiteralExpr(module: &Ast::Module, exprId: Ast::ExpressionId): boolean {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      let Ast::Expression::Node::Literal(literal) = expr else {
+        return false;
+      };
+
+      return match (&literal.value) {
+        Ast::Expression::LiteralValue::String(_) -> true,
+        Ast::Expression::LiteralValue::Int(_) -> false,
+        Ast::Expression::LiteralValue::UInt(_) -> false,
+        Ast::Expression::LiteralValue::Float(_) -> false,
+        Ast::Expression::LiteralValue::Boolean(_) -> false,
+        Ast::Expression::LiteralValue::Character(_) -> false,
+        Ast::Expression::LiteralValue::Null -> false,
+      };
     }
 
     /// Type a lambda: its parameters bind in a scope of their own, its body is checked
@@ -2092,7 +2329,7 @@ export namespace Analyzer {
             );
 
             if (let Option::SOME(actualType) = actualTypeOpt) {
-              if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, returnStmt.span, state.currentReturnType, actualType)) {
+              if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, returnStmt.span, state.currentReturnType, actualType)) {
                 Analyzer::Typecheck::emitTypeMismatch(state, typeStore, returnStmt.span, state.currentReturnType, actualType);
               }
             }

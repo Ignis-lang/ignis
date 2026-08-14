@@ -6473,3 +6473,500 @@ function typecheckCallThroughNonCallableLocalProducesDiagnostic(): void {
 
   assertSingleDiagnosticCode(&output, DiagnosticCode::CALL_ON_NON_CALLABLE);
 }
+
+/// Add `@name<typeArgs>(args)` and return its expression id.
+function typecheckAddBuiltinCall(
+  module: &mut Ast::Module,
+  name: str,
+  typeArgs: Vector<Ast::TypeId>,
+  args: Vector<Ast::ExpressionId>,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+
+  return moduleRef.addExpression(Ast::Expression::Node::BuiltinCall(Ast::Expression::BuiltinCall {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    typeArguments: typeArgs,
+    arguments: args,
+  }));
+}
+
+/// Scenario: `@sizeOf<i32>()`, `@alignOf<i32>()`, and `@typeName<i32>()` take one
+/// type argument and yield their fixed result types.
+/// Spec: IGN-26 — builtin calls.
+@test
+function typecheckTypeArgumentBuiltinsHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let u64TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "u64");
+
+  let mut typeArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  typeArgs.push(i32TypeId);
+  let mut alignOfTypeArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  alignOfTypeArgs.push(i32TypeId);
+  let mut typeNameTypeArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  typeNameTypeArgs.push(i32TypeId);
+
+  let builtinExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "sizeOf",
+    typeArgs,
+    Vector::new<Ast::ExpressionId>(),
+  );
+
+  let alignOfExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "alignOf",
+    alignOfTypeArgs,
+    Vector::new<Ast::ExpressionId>(),
+  );
+
+  let typeNameExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "typeName",
+    typeNameTypeArgs,
+    Vector::new<Ast::ExpressionId>(),
+  );
+
+  let alignOfStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: typecheckDummySpan(),
+    expression: alignOfExpr,
+  }));
+  let typeNameStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: typecheckDummySpan(),
+    expression: typeNameExpr,
+  }));
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, builtinExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(alignOfStmt);
+  bodyStmts.push(typeNameStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, u64TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, builtinExpr, typeStore.intern(Analyzer::Type::U64));
+  assertExprType(&output, alignOfExpr, typeStore.intern(Analyzer::Type::U64));
+  assertExprType(&output, typeNameExpr, typeStore.intern(Analyzer::Type::STR));
+}
+
+/// Scenario: `@panic("boom")`, `@trap()`, and `@unreachable()` never return.
+/// Spec: IGN-26 — builtin calls.
+@test
+function typecheckDivergingBuiltinsHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let messageExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::String(String::create("boom")),
+  }));
+
+  let mut args: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  args.push(messageExpr);
+
+  let builtinExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "panic",
+    Vector::new<Ast::TypeId>(),
+    args,
+  );
+
+  let trapExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "trap",
+    Vector::new<Ast::TypeId>(),
+    Vector::new<Ast::ExpressionId>(),
+  );
+  let unreachableExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "unreachable",
+    Vector::new<Ast::TypeId>(),
+    Vector::new<Ast::ExpressionId>(),
+  );
+
+  let trapStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: typecheckDummySpan(),
+    expression: trapExpr,
+  }));
+  let unreachableStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: typecheckDummySpan(),
+    expression: unreachableExpr,
+  }));
+
+  let exprStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: typecheckDummySpan(),
+    expression: builtinExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(trapStmt);
+  bodyStmts.push(unreachableStmt);
+  bodyStmts.push(exprStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, builtinExpr, typeStore.intern(Analyzer::Type::NEVER));
+  assertExprType(&output, trapExpr, typeStore.intern(Analyzer::Type::NEVER));
+  assertExprType(&output, unreachableExpr, typeStore.intern(Analyzer::Type::NEVER));
+}
+
+/// Scenario: `@sizeOf()` without its type argument reports the arity, not a generic wall.
+/// Spec: IGN-26 — builtin calls.
+@test
+function typecheckSizeOfBuiltinWithoutTypeArgumentProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u64TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "u64");
+
+  let builtinExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "sizeOf",
+    Vector::new<Ast::TypeId>(),
+    Vector::new<Ast::ExpressionId>(),
+  );
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, builtinExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, u64TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::GENERIC_ARITY_MISMATCH);
+}
+
+/// Scenario: a misspelled builtin is reported as unknown, not as unimplemented.
+/// Spec: IGN-26 — A0070.
+@test
+function typecheckUnknownBuiltinProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let builtinExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "sizeOfff",
+    Vector::new<Ast::TypeId>(),
+    Vector::new<Ast::ExpressionId>(),
+  );
+
+  let exprStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: typecheckDummySpan(),
+    expression: builtinExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::UNKNOWN_BUILTIN);
+}
+
+/// Scenario: a builtin the language defines but typecheck does not type yet says so by name,
+/// rather than reporting every builtin as one undifferentiated wall.
+/// Spec: IGN-26 — builtin calls.
+@test
+function typecheckKnownButUntypedBuiltinNamesItself(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let builtinExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "typeOf",
+    Vector::new<Ast::TypeId>(),
+    Vector::new<Ast::ExpressionId>(),
+  );
+
+  let exprStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: typecheckDummySpan(),
+    expression: builtinExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support the `@typeOf` builtin");
+}
+
+/// Scenario: `return @panic("boom")` from a `u64` function is accepted — the return is
+/// unreachable, so there is no value that could be of the wrong type.
+/// Spec: IGN-26 — builtin calls.
+@test
+function typecheckDivergingBuiltinSatisfiesAnyReturnType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u64TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "u64");
+
+  let messageExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::String(String::create("boom")),
+  }));
+
+  let mut args: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  args.push(messageExpr);
+
+  let builtinExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "panic",
+    Vector::new<Ast::TypeId>(),
+    args,
+  );
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, builtinExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, u64TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, builtinExpr, typeStore.intern(Analyzer::Type::NEVER));
+}
+
+/// Scenario: `@panic(message)` with a non-literal message is rejected by name, so the
+/// unsupported case is not silently typed as a diverging call.
+/// Spec: IGN-26 — builtin calls.
+@test
+function typecheckPanicWithNonLiteralMessageProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let messageExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::Int(7),
+  }));
+
+  let mut args: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  args.push(messageExpr);
+
+  let builtinExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "panic",
+    Vector::new<Ast::TypeId>(),
+    args,
+  );
+
+  let exprStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: typecheckDummySpan(),
+    expression: builtinExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support `@panic` messages that are not string literals");
+}
+
+/// Scenario: `@trap(x)` takes no value arguments, and says so rather than diverging.
+/// Spec: IGN-26 — builtin calls.
+@test
+function typecheckTrapWithArgumentProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let argExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::Int(1),
+  }));
+
+  let mut args: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  args.push(argExpr);
+
+  let builtinExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "trap",
+    Vector::new<Ast::TypeId>(),
+    args,
+  );
+
+  let exprStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: typecheckDummySpan(),
+    expression: builtinExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+}
+
+/// Scenario: `@sizeOf<i32>(x)` takes no value arguments — the type argument being correct
+/// does not license passing one.
+/// Spec: IGN-26 — builtin calls.
+@test
+function typecheckSizeOfWithValueArgumentProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let mut typeArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  typeArgs.push(i32TypeId);
+
+  let argExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::Int(1),
+  }));
+
+  let mut args: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  args.push(argExpr);
+
+  let builtinExpr: Ast::ExpressionId = typecheckAddBuiltinCall(&mut module, "sizeOf", typeArgs, args);
+
+  let exprStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: typecheckDummySpan(),
+    expression: builtinExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+}
+
+/// Scenario: `f(@panic("boom"))` is accepted — a diverging argument is not a value of the
+/// wrong parameter type, it is no value at all.
+/// Spec: IGN-26 — builtin calls.
+@test
+function typecheckDivergingBuiltinSatisfiesArgumentType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let letStmt: Ast::StatementId = typecheckAddFunctionValuedLocal(&mut module, i32TypeId);
+
+  let messageExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::String(String::create("boom")),
+  }));
+
+  let mut panicArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  panicArgs.push(messageExpr);
+  let panicExpr: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "panic",
+    Vector::new<Ast::TypeId>(),
+    panicArgs,
+  );
+
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(panicExpr);
+  let callExpr: Ast::ExpressionId = typecheckAddLocalCall(&mut module, callArgs);
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(callStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, panicExpr, typeStore.intern(Analyzer::Type::NEVER));
+}
+
+/// Scenario: a `match` whose every arm diverges joins to `never`, and that joined type
+/// still satisfies the expected type rather than reporting a mismatch against it.
+/// Spec: IGN-26 — builtin calls.
+@test
+function typecheckAllDivergingMatchSatisfiesExpectedType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u64TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "u64");
+
+  let firstMessage: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::String(String::create("a")),
+  }));
+  let mut firstArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  firstArgs.push(firstMessage);
+  let firstBody: Ast::ExpressionId = typecheckAddBuiltinCall(&mut module, "panic", Vector::new<Ast::TypeId>(), firstArgs);
+
+  let secondBody: Ast::ExpressionId = typecheckAddBuiltinCall(
+    &mut module,
+    "unreachable",
+    Vector::new<Ast::TypeId>(),
+    Vector::new<Ast::ExpressionId>(),
+  );
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddWildcardPattern(&mut module),
+    guard: Option::NONE,
+    body: firstBody,
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddWildcardPattern(&mut module),
+    guard: Option::NONE,
+    body: secondBody,
+  });
+
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, typecheckAddIntLiteral(&mut module, 1), arms);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, matchExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, u64TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
