@@ -2082,8 +2082,8 @@ export namespace Analyzer {
     /// contains, and the pipe takes the right side's type. Nothing about arity or
     /// parameters is inspected here: the right side already says where the value lands.
     ///
-    /// A right side with no `_` means the value is passed implicitly, which is not typed
-    /// yet and is reported as unsupported rather than silently accepted.
+    /// A right side with no `_` passes the value implicitly, as the callee's first
+    /// argument.
     function checkPipeExpr(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -2111,8 +2111,22 @@ export namespace Analyzer {
       }
 
       if (placeholderCount == 0) {
-        Analyzer::Typecheck::emitUnsupported(state, pipe.span, "pipes whose right side has no `_` placeholder");
-        return Option::NONE;
+        // Without the left side's type there is nothing to pass, and checking the callee
+        // against a guessed one would report an argument nobody wrote.
+        let Option::SOME(leftTypeForPrepend) = leftTypeOpt else {
+          return Option::NONE;
+        };
+
+        return Analyzer::Typecheck::checkPipeImplicit(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          pipe,
+          leftTypeForPrepend,
+        );
       }
 
       // A `_` only means "the piped value goes here" inside something that consumes an
@@ -2147,6 +2161,330 @@ export namespace Analyzer {
       stateRef2.pipeValueTypes.pop();
 
       return rightTypeOpt;
+    }
+
+    /// Dispatch a pipe whose right side names no `_`, so the value is passed implicitly.
+    ///
+    /// A call supplies its own arguments after the piped value; a bare name is called with
+    /// the value alone. A form that takes arguments but has no argument list to prepend to
+    /// — a record initializer, a vector literal, a builtin call — cannot receive the value
+    /// implicitly and has to say where it goes, which is a different mistake from writing
+    /// something that cannot be called at all.
+    function checkPipeImplicit(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      pipe: &Ast::Expression::Pipe,
+      leftType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      // `(f)` is the same callee as `f`. Only this path sees the wrapper — the placeholder
+      // path goes through `checkExpr`, which looks past it — so without unwrapping, a pair
+      // of parentheses would change the verdict.
+      let rightExprId: Ast::ExpressionId = Analyzer::Typecheck::unwrapGroupedExpr(module, pipe.right);
+
+      let Option::SOME(rightExpr) = module.expressions.get(rightExprId) else {
+        return Option::NONE;
+      };
+
+      // A bare callee writes no arguments of its own; the piped value is the only one.
+      let noExtraArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+
+      return match (rightExpr) {
+        Ast::Expression::Node::Call(call) -> {
+          // The direct call path refuses these, so accepting them here would let a pipe
+          // type a construct the compiler otherwise rejects.
+          if (call.typeArguments.length() > 0) {
+            Analyzer::Typecheck::emitUnsupported(state, pipe.span, "generic call type arguments");
+            return Option::NONE;
+          }
+
+          return Analyzer::Typecheck::checkPipePrepend(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            pipe,
+            call.callee,
+            &call.arguments,
+            leftType,
+          );
+        },
+        Ast::Expression::Node::Path(_) -> Analyzer::Typecheck::checkPipePrepend(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          pipe,
+          rightExprId,
+          &noExtraArgs,
+          leftType,
+        ),
+        Ast::Expression::Node::Variable(_) -> Analyzer::Typecheck::checkPipePrepend(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          pipe,
+          rightExprId,
+          &noExtraArgs,
+          leftType,
+        ),
+        Ast::Expression::Node::RecordInit(_) -> {
+          Analyzer::Typecheck::emitPipeRightNeedsPlaceholder(state, pipe.span);
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Vector(_) -> {
+          Analyzer::Typecheck::emitPipeRightNeedsPlaceholder(state, pipe.span);
+          return Option::NONE;
+        },
+        Ast::Expression::Node::BuiltinCall(_) -> {
+          Analyzer::Typecheck::emitPipeRightNeedsPlaceholder(state, pipe.span);
+          return Option::NONE;
+        },
+        Ast::Expression::Node::Lambda(_) -> {
+          Analyzer::Typecheck::emitUnsupported(state, pipe.span, "pipes into a lambda written in place");
+          return Option::NONE;
+        },
+        Ast::Expression::Node::MemberAccess(_) -> {
+          Analyzer::Typecheck::emitUnsupported(state, pipe.span, "pipes into a method");
+          return Option::NONE;
+        },
+        _ -> {
+          Analyzer::Typecheck::emitPipeRightNotCallable(state, pipe.span);
+          return Option::NONE;
+        },
+      };
+    }
+
+    /// Look past any number of parentheses around `exprId`.
+    function unwrapGroupedExpr(module: &Ast::Module, exprId: Ast::ExpressionId): Ast::ExpressionId {
+      let mut current: Ast::ExpressionId = exprId;
+
+      while (true) {
+        let Option::SOME(expr) = module.expressions.get(current) else {
+          return current;
+        };
+
+        let Ast::Expression::Node::Grouped(grouped) = expr else {
+          return current;
+        };
+
+        current = grouped.expression;
+      }
+
+      return current;
+    }
+
+    /// A callee's parameter types and result, flattened out of whichever form it came in.
+    ///
+    /// A resolved function carries its parameters as definitions and a local holding a
+    /// function value carries them as types; the pipe cares about neither distinction, so
+    /// both are reduced to the same shape before arity and types are checked.
+    record PipeSignature {
+      public paramTypes: Vector<Analyzer::TypeId>;
+      public returnType: Analyzer::TypeId;
+    }
+
+    /// Resolve what `calleeExprId` names and flatten its signature.
+    ///
+    /// Reports its own failures, because only here is the reason known: a name that never
+    /// resolved, a value that is not callable, and a method needing a receiver are three
+    /// different mistakes, and one catch-all would describe two of them wrongly. A name the
+    /// resolver already rejected is passed over in silence rather than reported twice.
+    function pipeCalleeSignature(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      span: SourceSpan,
+      calleeExprId: Ast::ExpressionId,
+    ): Option<Analyzer::Typecheck::PipeSignature> {
+      let Option::SOME(resolved) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, calleeExprId) else {
+        return Option::NONE;
+      };
+
+      match (resolved) {
+        Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> {
+          // A method's first parameter is its receiver, so treating it as an ordinary
+          // function would match the piped value against `self` and skip the receiver
+          // checks the direct call path performs.
+          if (let Option::SOME(calleeDef) = defStore.get(defId)) {
+            if (let Analyzer::Definition::Method(_) = calleeDef) {
+              Analyzer::Typecheck::emitUnsupported(state, span, "pipes into a method");
+              return Option::NONE;
+            }
+          }
+
+          let Option::SOME(signature) = Analyzer::Typecheck::extractFunctionSignature(defStore, defId) else {
+            Analyzer::Typecheck::emitPipeRightNotCallable(state, span);
+            return Option::NONE;
+          };
+
+          let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut index: u64 = 0;
+
+          while (index < signature.params.length()) {
+            let Option::SOME(paramDefId) = signature.params.get(index) else {
+              return Option::NONE;
+            };
+            let Option::SOME(paramDef) = defStore.get(*paramDefId) else {
+              return Option::NONE;
+            };
+
+            // Anything but an ordinary parameter has no declared type to check against, and
+            // guessing one would report the piped value against a type nobody wrote.
+            let Analyzer::Definition::Variable(parameter) = paramDef else {
+              Analyzer::Typecheck::emitUnsupported(state, span, "pipes into a callee with non-variable parameters");
+              return Option::NONE;
+            };
+
+            paramTypes.push(parameter.declaredType);
+            index += 1;
+          }
+
+          return Option::SOME(Analyzer::Typecheck::PipeSignature {
+            paramTypes: paramTypes,
+            returnType: signature.returnType,
+          });
+        },
+        Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> {
+          let Option::SOME(binding) = Analyzer::Typecheck::lookupLocalBinding(state, localId) else {
+            return Option::NONE;
+          };
+          let Option::SOME(bindingType) = typeStore.get(binding.typeId) else {
+            return Option::NONE;
+          };
+          let Analyzer::Type::Function(functionType) = bindingType else {
+            Analyzer::Typecheck::emitCallOnNonCallable(state, typeStore, span, binding.typeId);
+            return Option::NONE;
+          };
+
+          // The parameter list belongs to the interned type, so it is copied rather than
+          // handed over: moving it out leaves the store holding freed memory.
+          let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut paramIndex: u64 = 0;
+
+          while (paramIndex < functionType.params.length()) {
+            let Option::SOME(paramType) = functionType.params.get(paramIndex) else {
+              return Option::NONE;
+            };
+
+            paramTypes.push(*paramType);
+            paramIndex += 1;
+          }
+
+          return Option::SOME(Analyzer::Typecheck::PipeSignature {
+            paramTypes: paramTypes,
+            returnType: functionType.returnType,
+          });
+        },
+        Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {
+          Analyzer::Typecheck::emitUnsupported(state, span, "pipes into a type parameter");
+          return Option::NONE;
+        },
+        // The resolver already reported the name; a second diagnostic here would claim the
+        // callee's kind was understood when it was never found at all.
+        Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> {
+          return Option::NONE;
+        },
+      };
+    }
+
+    /// Type a pipe that passes its value implicitly, as the callee's first argument.
+    ///
+    /// `extraArgs` are the arguments written at the call site, which follow the piped
+    /// value: `x |> f(a)` calls `f(x, a)`. A bare callee (`x |> f`) has none.
+    function checkPipePrepend(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      pipe: &Ast::Expression::Pipe,
+      calleeExprId: Ast::ExpressionId,
+      extraArgs: &Vector<Ast::ExpressionId>,
+      leftType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      // `pipeCalleeSignature` reports whatever went wrong, so nothing is added here.
+      let Option::SOME(signature) = Analyzer::Typecheck::pipeCalleeSignature(
+        state,
+        defStore,
+        typeStore,
+        resolvedBodies,
+        pipe.span,
+        calleeExprId,
+      ) else {
+        return Option::NONE;
+      };
+
+      let suppliedCount: u64 = extraArgs.length() + 1;
+
+      // A wrong count is reported once and then the arguments are still checked against
+      // the parameters that do line up, and the pipe still takes the callee's return type.
+      // Bailing out instead would hide every other mistake in the same expression behind
+      // one recompile, and would strip the type off a pipe whose callee is known.
+      if (suppliedCount != signature.paramTypes.length()) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, pipe.span, suppliedCount, signature.paramTypes.length());
+      }
+
+      // The piped value fills the first parameter; everything written at the call site
+      // shifts one place right.
+      if (let Option::SOME(firstParamType) = signature.paramTypes.get(0)) {
+        if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, pipe.span, *firstParamType, leftType)) {
+          Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, pipe.span, *firstParamType, leftType);
+        }
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < extraArgs.length()) {
+        let Option::SOME(argExprId) = extraArgs.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let expectedType: Option<Analyzer::TypeId> = match (signature.paramTypes.get(index + 1)) {
+          Option::SOME(paramType) -> Option::SOME(*paramType),
+          Option::NONE -> Option::NONE,
+        };
+
+        let actualOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          *argExprId,
+          expectedType,
+        );
+
+        if (let Option::SOME(expected) = expectedType) {
+          if (let Option::SOME(actual) = actualOpt) {
+            if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, pipe.span, expected, actual)) {
+              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, pipe.span, expected, actual);
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      // The right side is the call being made, so it carries the same type as the pipe.
+      // Without this the table would hold an entry for `1 |> f(_)` and none for `1 |> f(a)`.
+      Analyzer::Typecheck::recordExprType(state, pipe.right, signature.returnType);
+
+      return Option::SOME(signature.returnType);
     }
 
     /// The type a `_` stands for: the value piped by the innermost enclosing pipe.
