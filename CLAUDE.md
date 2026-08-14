@@ -232,7 +232,9 @@ Builtins use `@name(args)` or `@name<Type>(args)` syntax in Ignis source.
 5. **Emit C** in `crates/ignis_codegen_c/src/emit.rs`:
    - Handle the new LIR instruction or HIR-level construct.
 
-Existing builtins: `sizeOf`, `alignOf`, `typeName`, `bitCast`, `pointerCast`, `integerFromPointer`, `pointerFromInteger`, `read`, `write`, `dropInPlace`, `dropGlue`, `hash`, `eq`, `maxOf`, `minOf`, `panic`, `trap`, `unreachable`, `configFlag`, `compileError`.
+Existing builtins: `typeOf`, `sizeOf`, `alignOf`, `typeName`, `bitCast`, `pointerCast`, `integerFromPointer`, `pointerFromInteger`, `sliceFromParts`, `read`, `write`, `dropInPlace`, `dropGlue`, `hash`, `eq`, `maxOf`, `minOf`, `compileError`, `panic`, `trap`, `unreachable`.
+
+`crates/ignis_type/src/at_items.rs` is the authority for this list — check it rather than this paragraph before deciding whether a name is a builtin. Note that `configFlag` is registered there as a *directive*, not a builtin, even though it is written like one in expression position.
 
 ### Adding a New Pattern Form
 
