@@ -1485,14 +1485,28 @@ export namespace Analyzer {
           return Option::NONE;
         },
         Ast::Expression::Node::Pipe(value) -> {
-          let _leftType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.left);
-          let _rightType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.right);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "pipe expressions");
-          return Option::NONE;
+          let Option::SOME(pipeType) = Analyzer::Typecheck::checkPipeExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            &value,
+          ) else {
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, pipeType);
+          return Option::SOME(pipeType);
         },
         Ast::Expression::Node::PipePlaceholder(value) -> {
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "pipe placeholders");
-          return Option::NONE;
+          let Option::SOME(placeholderType) = Analyzer::Typecheck::checkPipePlaceholderExpr(state, &value) else {
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, placeholderType);
+          return Option::SOME(placeholderType);
         },
         Ast::Expression::Node::Try(value) -> {
           let _innerType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression);
@@ -2059,6 +2073,314 @@ export namespace Analyzer {
 
       let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
       return Option::SOME(typeStoreRef.intern(Analyzer::Type::NEVER));
+    }
+
+    /// Type a pipe whose right side names where the piped value goes with a `_`.
+    ///
+    /// The placeholder stands for the left side, so the right side is checked as an
+    /// ordinary expression with the left side's type made available to whatever `_` it
+    /// contains, and the pipe takes the right side's type. Nothing about arity or
+    /// parameters is inspected here: the right side already says where the value lands.
+    ///
+    /// A right side with no `_` means the value is passed implicitly, which is not typed
+    /// yet and is reported as unsupported rather than silently accepted.
+    function checkPipeExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      pipe: &Ast::Expression::Pipe,
+    ): Option<Analyzer::TypeId> {
+      let leftTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        pipe.left,
+      );
+
+      let placeholderCount: u64 = Analyzer::Typecheck::countPipePlaceholders(module, pipe.right);
+
+      if (placeholderCount > 1) {
+        Analyzer::Typecheck::emitPipeMultiplePlaceholders(state, pipe.span);
+        return Option::NONE;
+      }
+
+      if (placeholderCount == 0) {
+        Analyzer::Typecheck::emitUnsupported(state, pipe.span, "pipes whose right side has no `_` placeholder");
+        return Option::NONE;
+      }
+
+      // A `_` only means "the piped value goes here" inside something that consumes an
+      // argument. Anywhere else — `1 |> _ + 2`, `1 |> _.field`, a bare `1 |> _` — it reads
+      // as a value the pipe does nothing with, so the shape is rejected rather than
+      // quietly accepted with the right side's type.
+      if (!Analyzer::Typecheck::pipeRightSideTakesPlaceholder(module, pipe.right)) {
+        Analyzer::Typecheck::emitPipePlaceholderNotInCall(state, pipe.span);
+        return Option::NONE;
+      }
+
+      // Without the left side's type there is nothing to give the placeholder, and pushing
+      // a guessed one would report the placeholder's uses against a type never written.
+      let Option::SOME(leftType) = leftTypeOpt else {
+        return Option::NONE;
+      };
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.pipeValueTypes.push(leftType);
+
+      let rightTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        pipe.right,
+      );
+
+      let mut stateRef2: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef2.pipeValueTypes.pop();
+
+      return rightTypeOpt;
+    }
+
+    /// The type a `_` stands for: the value piped by the innermost enclosing pipe.
+    function checkPipePlaceholderExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      placeholder: &Ast::Expression::PipePlaceholder,
+    ): Option<Analyzer::TypeId> {
+      let depth: u64 = state.pipeValueTypes.length();
+
+      if (depth == 0) {
+        Analyzer::Typecheck::emitPipePlaceholderOutsidePipe(state, placeholder.span);
+        return Option::NONE;
+      }
+
+      let Option::SOME(valueType) = state.pipeValueTypes.get(depth - 1) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(*valueType);
+    }
+
+    /// Whether a right side of this shape can hold the piped value in a `_`.
+    ///
+    /// These are the forms that take arguments, so a `_` among them names a position the
+    /// value fills. The list is closed on purpose: accepting any right side that merely
+    /// contains a `_` somewhere would make `1 |> _ + 2` mean something, and no rule says
+    /// what.
+    function pipeRightSideTakesPlaceholder(
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId
+    ): boolean {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      return match (expr) {
+        Ast::Expression::Node::Call(_) -> true,
+        Ast::Expression::Node::BuiltinCall(_) -> true,
+        Ast::Expression::Node::RecordInit(_) -> true,
+        Ast::Expression::Node::Vector(_) -> true,
+        _ -> false,
+      };
+    }
+
+    /// How many `_` placeholders belong to the pipe step rooted at `exprId`.
+    ///
+    /// A lambda body and a nested pipe each own whatever `_` they contain, so the walk
+    /// stops at both: counting through them would let an inner `_` decide the outer pipe's
+    /// shape. Every other expression is transparent.
+    function countPipePlaceholders(module: &Ast::Module, exprId: Ast::ExpressionId): u64 {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return 0;
+      };
+
+      return match (expr) {
+        Ast::Expression::Node::PipePlaceholder(_) -> 1,
+        Ast::Expression::Node::Lambda(_) -> 0,
+        Ast::Expression::Node::Pipe(_) -> 0,
+        Ast::Expression::Node::Literal(_) -> 0,
+        Ast::Expression::Node::Path(_) -> 0,
+        Ast::Expression::Node::Variable(_) -> 0,
+        Ast::Expression::Node::Unit(_) -> 0,
+        Ast::Expression::Node::Block(value) -> Analyzer::Typecheck::countPipePlaceholdersInStatements(module, &value.statements)
+          + Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.tail),
+        Ast::Expression::Node::If(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.condition)
+          + Analyzer::Typecheck::countPipePlaceholdersInStatement(module, value.thenBranch)
+          + Analyzer::Typecheck::countPipePlaceholdersInOptionalStatement(module, value.elseBranch),
+        Ast::Expression::Node::Grouped(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
+        Ast::Expression::Node::Cast(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
+        Ast::Expression::Node::CaptureOverride(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
+        Ast::Expression::Node::Try(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
+        Ast::Expression::Node::Dereference(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.operand),
+        Ast::Expression::Node::Unary(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.operand),
+        Ast::Expression::Node::PostfixIncrement(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.operand),
+        Ast::Expression::Node::PostfixDecrement(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.operand),
+        Ast::Expression::Node::Reference(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.target),
+        Ast::Expression::Node::LetCondition(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.value),
+        // The member is a name, not an expression, so only the object can hold a `_`.
+        Ast::Expression::Node::MemberAccess(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.object),
+        Ast::Expression::Node::Binary(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.left)
+          + Analyzer::Typecheck::countPipePlaceholders(module, value.right),
+        Ast::Expression::Node::Assignment(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.target)
+          + Analyzer::Typecheck::countPipePlaceholders(module, value.value),
+        Ast::Expression::Node::VectorAccess(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.vector)
+          + Analyzer::Typecheck::countPipePlaceholders(module, value.index),
+        Ast::Expression::Node::Ternary(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.condition)
+          + Analyzer::Typecheck::countPipePlaceholders(module, value.thenBranch)
+          + Analyzer::Typecheck::countPipePlaceholders(module, value.elseBranch),
+        Ast::Expression::Node::Call(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.callee)
+          + Analyzer::Typecheck::countPipePlaceholdersIn(module, &value.arguments),
+        Ast::Expression::Node::BuiltinCall(value) -> Analyzer::Typecheck::countPipePlaceholdersIn(module, &value.arguments),
+        Ast::Expression::Node::Tuple(value) -> Analyzer::Typecheck::countPipePlaceholdersIn(module, &value.elements),
+        Ast::Expression::Node::Vector(value) -> Analyzer::Typecheck::countPipePlaceholdersIn(module, &value.elements),
+        Ast::Expression::Node::RecordInit(value) -> Analyzer::Typecheck::countPipePlaceholdersInFields(module, &value.fields),
+        Ast::Expression::Node::Match(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.scrutinee)
+          + Analyzer::Typecheck::countPipePlaceholdersInArms(module, &value.arms),
+      };
+    }
+
+    /// Placeholders inside a statement, so a `_` in a braced block or an `if` branch is
+    /// counted rather than hidden.
+    ///
+    /// A statement that opens a new function body (an `Item`) is not part of this pipe
+    /// step, for the same reason a lambda is not, so it contributes nothing.
+    function countPipePlaceholdersInStatement(
+      module: &Ast::Module,
+      statementId: Ast::StatementId
+    ): u64 {
+      let Option::SOME(statement) = module.statements.get(statementId) else {
+        return 0;
+      };
+
+      return match (statement) {
+        Ast::Statement::Node::Continue(_) -> 0,
+        Ast::Statement::Node::Comment(_) -> 0,
+        Ast::Statement::Node::Item(_) -> 0,
+        Ast::Statement::Node::Expression(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.expression),
+        Ast::Statement::Node::Defer(value) -> Analyzer::Typecheck::countPipePlaceholdersInStatement(module, value.statement),
+        Ast::Statement::Node::Variable(value) -> Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.value),
+        Ast::Statement::Node::Let(value) -> Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.value),
+        Ast::Statement::Node::Return(value) -> Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.value),
+        Ast::Statement::Node::Break(value) -> Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.value),
+        Ast::Statement::Node::LetElse(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.value)
+          + Analyzer::Typecheck::countPipePlaceholdersInStatement(module, value.elseBranch),
+        Ast::Statement::Node::While(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.condition)
+          + Analyzer::Typecheck::countPipePlaceholdersInStatement(module, value.body),
+        Ast::Statement::Node::ForOf(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.iterable)
+          + Analyzer::Typecheck::countPipePlaceholdersInStatement(module, value.body),
+        Ast::Statement::Node::Block(value) -> Analyzer::Typecheck::countPipePlaceholdersInStatements(module, &value.statements)
+          + Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.tail),
+        Ast::Statement::Node::If(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value.condition)
+          + Analyzer::Typecheck::countPipePlaceholdersInStatement(module, value.thenBranch)
+          + Analyzer::Typecheck::countPipePlaceholdersInOptionalStatement(module, value.elseBranch),
+        Ast::Statement::Node::For(value) -> Analyzer::Typecheck::countPipePlaceholdersInOptionalStatement(module, value.initializer)
+          + Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.condition)
+          + Analyzer::Typecheck::countPipePlaceholdersInOptional(module, value.update)
+          + Analyzer::Typecheck::countPipePlaceholdersInStatement(module, value.body),
+      };
+    }
+
+    function countPipePlaceholdersInStatements(
+      module: &Ast::Module,
+      statementIds: &Vector<Ast::StatementId>
+    ): u64 {
+      let mut total: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < statementIds.length()) {
+        if (let Option::SOME(statementId) = statementIds.get(index)) {
+          total += Analyzer::Typecheck::countPipePlaceholdersInStatement(module, *statementId);
+        }
+
+        index += 1;
+      }
+
+      return total;
+    }
+
+    function countPipePlaceholdersInOptional(
+      module: &Ast::Module,
+      exprId: Option<Ast::ExpressionId>
+    ): u64 {
+      return match (exprId) {
+        Option::SOME(value) -> Analyzer::Typecheck::countPipePlaceholders(module, value),
+        Option::NONE -> 0,
+      };
+    }
+
+    function countPipePlaceholdersInOptionalStatement(
+      module: &Ast::Module,
+      statementId: Option<Ast::StatementId>
+    ): u64 {
+      return match (statementId) {
+        Option::SOME(value) -> Analyzer::Typecheck::countPipePlaceholdersInStatement(module, value),
+        Option::NONE -> 0,
+      };
+    }
+
+    function countPipePlaceholdersIn(
+      module: &Ast::Module,
+      exprIds: &Vector<Ast::ExpressionId>
+    ): u64 {
+      let mut total: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < exprIds.length()) {
+        if (let Option::SOME(exprId) = exprIds.get(index)) {
+          total += Analyzer::Typecheck::countPipePlaceholders(module, *exprId);
+        }
+
+        index += 1;
+      }
+
+      return total;
+    }
+
+    function countPipePlaceholdersInFields(
+      module: &Ast::Module,
+      fields: &Vector<Ast::Expression::RecordInitField>,
+    ): u64 {
+      let mut total: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < fields.length()) {
+        if (let Option::SOME(field) = fields.get(index)) {
+          total += Analyzer::Typecheck::countPipePlaceholders(module, field.value);
+        }
+
+        index += 1;
+      }
+
+      return total;
+    }
+
+    function countPipePlaceholdersInArms(
+      module: &Ast::Module,
+      arms: &Vector<Ast::Expression::MatchArm>,
+    ): u64 {
+      let mut total: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < arms.length()) {
+        if (let Option::SOME(arm) = arms.get(index)) {
+          total += Analyzer::Typecheck::countPipePlaceholders(module, arm.body);
+
+          if (let Option::SOME(guardId) = arm.guard) {
+            total += Analyzer::Typecheck::countPipePlaceholders(module, guardId);
+          }
+        }
+
+        index += 1;
+      }
+
+      return total;
     }
 
     /// Whether `exprId` is a string literal written in place.

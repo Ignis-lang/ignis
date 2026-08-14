@@ -35,6 +35,12 @@ export namespace Analyzer {
       public localIndexes: Vector<u32>;
       public localTypeIds: Vector<Analyzer::TypeId>;
       public localMutableFlags: Vector<boolean>;
+      /// Type of the piped value for each pipe currently being checked, innermost last.
+      ///
+      /// A `_` placeholder has no declaration to resolve against, so it reads its type from
+      /// the pipe enclosing it. A stack rather than a single slot because a pipe's right
+      /// side may itself contain a pipe.
+      public pipeValueTypes: Vector<Analyzer::TypeId>;
     }
 
     record AliasResolutionResult {
@@ -147,6 +153,42 @@ export namespace Analyzer {
         .concat(" type arguments, found ")
         .concat(actual);
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::GENERIC_ARITY_MISMATCH, message.toStr());
+    }
+
+    function emitPipePlaceholderOutsidePipe(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::PIPE_PLACEHOLDER_OUTSIDE_PIPE,
+        "`_` placeholder is only valid inside the right side of a pipe",
+      );
+    }
+
+    function emitPipeMultiplePlaceholders(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::PIPE_MULTIPLE_PLACEHOLDERS,
+        "only one `_` placeholder is allowed per pipe step",
+      );
+    }
+
+    function emitPipePlaceholderNotInCall(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::PIPE_PLACEHOLDER_NOT_IN_CALL,
+        "`_` placeholder must appear inside an expression on the right side of a pipe",
+      );
     }
 
     function emitUnknownBuiltin(

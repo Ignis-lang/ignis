@@ -6970,3 +6970,304 @@ function typecheckAllDivergingMatchSatisfiesExpectedType(): void {
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
 }
+
+/// Add a `_` placeholder expression.
+function typecheckAddPipePlaceholder(module: &mut Ast::Module): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+
+  return moduleRef.addExpression(Ast::Expression::Node::PipePlaceholder(Ast::Expression::PipePlaceholder {
+    span: typecheckDummySpan(),
+  }));
+}
+
+/// Add `() -> <returnType> { <body> }`.
+function typecheckAddNullaryLambda(
+  module: &mut Ast::Module,
+  returnType: Ast::TypeId,
+  body: Ast::StatementId,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+
+  return moduleRef.addExpression(Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
+    span: typecheckDummySpan(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(returnType),
+    body: body,
+  }));
+}
+
+/// Add a block expression `{ <tail> }` with no statements.
+function typecheckAddBlockExprWithTail(
+  module: &mut Ast::Module,
+  tail: Ast::ExpressionId,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+
+  return moduleRef.addExpression(Ast::Expression::Node::Block(Ast::Expression::Block {
+    span: typecheckDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::SOME(tail),
+  }));
+}
+
+/// Add `left |> right`.
+function typecheckAddPipe(
+  module: &mut Ast::Module,
+  left: Ast::ExpressionId,
+  right: Ast::ExpressionId,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+
+  return moduleRef.addExpression(Ast::Expression::Node::Pipe(Ast::Expression::Pipe {
+    span: typecheckDummySpan(),
+    left: left,
+    right: right,
+  }));
+}
+
+/// Scenario: `1 |> f(_)` types the placeholder as the piped value and the pipe as the
+/// call's return type.
+/// Spec: IGN-26 — pipe expressions.
+@test
+function typecheckPipeWithPlaceholderArgumentHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+
+  let letStmt: Ast::StatementId = typecheckAddFunctionValuedLocal(&mut module, i32TypeId);
+
+  let placeholderExpr: Ast::ExpressionId = typecheckAddPipePlaceholder(&mut module);
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(placeholderExpr);
+  let callExpr: Ast::ExpressionId = typecheckAddLocalCall(&mut module, callArgs);
+
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, callExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, placeholderExpr, typeStore.intern(Analyzer::Type::I32));
+  assertExprType(&output, pipeExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: a `_` written where no pipe encloses it is reported, not silently typed.
+/// Spec: IGN-26 — A0071.
+@test
+function typecheckPipePlaceholderOutsidePipeProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+
+  let placeholderExpr: Ast::ExpressionId = typecheckAddPipePlaceholder(&mut module);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, placeholderExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::PIPE_PLACEHOLDER_OUTSIDE_PIPE);
+}
+
+/// Scenario: two `_` in one pipe step are rejected — the value has one destination.
+/// Spec: IGN-26 — A0072.
+@test
+function typecheckPipeMultiplePlaceholdersProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let firstPlaceholder: Ast::ExpressionId = typecheckAddPipePlaceholder(&mut module);
+  let secondPlaceholder: Ast::ExpressionId = typecheckAddPipePlaceholder(&mut module);
+  let sumExpr: Ast::ExpressionId = typecheckAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Add,
+    firstPlaceholder,
+    secondPlaceholder,
+  );
+
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, sumExpr);
+  let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::PIPE_MULTIPLE_PLACEHOLDERS);
+}
+
+/// Scenario: `1 |> _` is rejected — a bare placeholder consumes the value without ever
+/// doing anything with it.
+/// Spec: IGN-26 — A0073.
+@test
+function typecheckPipeBarePlaceholderRightSideProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(
+    &mut module,
+    typecheckAddIntLiteral(&mut module, 1),
+    typecheckAddPipePlaceholder(&mut module),
+  );
+  let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::PIPE_PLACEHOLDER_NOT_IN_CALL);
+}
+
+/// Scenario: a `_` inside a lambda on the right side belongs to the lambda, not to the
+/// pipe, so the pipe counts no placeholder at all.
+///
+/// The count is what this pins. Placeholders are counted through statements, so without
+/// the lambda boundary the walk would reach the `_` in the body and count 1, and the pipe
+/// would report the lambda as a right side that cannot hold a placeholder instead.
+/// Spec: IGN-26 — pipe placeholder boundaries.
+@test
+function typecheckPipePlaceholderInsideLambdaDoesNotBindToPipe(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let placeholderExpr: Ast::ExpressionId = typecheckAddPipePlaceholder(&mut module);
+  let lambdaReturn: Ast::StatementId = typecheckAddReturnExpr(&mut module, placeholderExpr);
+  let mut lambdaBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  lambdaBodyStmts.push(lambdaReturn);
+  let lambdaBody: Ast::StatementId = typecheckAddBlock(&mut module, lambdaBodyStmts);
+
+  let lambdaExpr: Ast::ExpressionId = typecheckAddNullaryLambda(&mut module, i32TypeId, lambdaBody);
+
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, lambdaExpr);
+  let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  // The lambda hides its `_` from the count, so the pipe takes the no-placeholder path and
+  // reports that; the `_` itself is never reached, since that path stops before the right
+  // side is checked.
+  assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support pipes whose right side has no `_` placeholder");
+}
+
+/// Scenario: `1 |> _ + 2` is rejected — a `_` outside anything that takes arguments names
+/// no position for the value to land in.
+/// Spec: IGN-26 — A0073.
+@test
+function typecheckPipePlaceholderInNonArgumentPositionProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let placeholderExpr: Ast::ExpressionId = typecheckAddPipePlaceholder(&mut module);
+  let twoExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 2);
+  let sumExpr: Ast::ExpressionId = typecheckAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Add,
+    placeholderExpr,
+    twoExpr,
+  );
+
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, sumExpr);
+  let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::PIPE_PLACEHOLDER_NOT_IN_CALL);
+}
+
+/// Scenario: a second `_` hidden inside a braced block still counts, so the pipe reports
+/// two placeholders instead of binding both to the piped value.
+///
+/// This is the case that makes counting through statements matter: the typechecker walks
+/// into the block either way, so a counter that stopped at the block would say one
+/// placeholder while two were bound.
+/// Spec: IGN-26 — A0072.
+@test
+function typecheckPipePlaceholderHiddenInBlockStillCounts(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let voidTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+
+  let letStmt: Ast::StatementId = typecheckAddFunctionValuedLocal(&mut module, i32TypeId);
+
+  // The hidden one: a block expression whose tail is `_`.
+  let hiddenPlaceholder: Ast::ExpressionId = typecheckAddPipePlaceholder(&mut module);
+  let blockExpr: Ast::ExpressionId = typecheckAddBlockExprWithTail(&mut module, hiddenPlaceholder);
+
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(blockExpr);
+  let callExpr: Ast::ExpressionId = typecheckAddLocalCall(&mut module, callArgs);
+
+  let visiblePlaceholder: Ast::ExpressionId = typecheckAddPipePlaceholder(&mut module);
+  let sumExpr: Ast::ExpressionId = typecheckAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::Add,
+    callExpr,
+    visiblePlaceholder,
+  );
+
+  let mut outerArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  outerArgs.push(sumExpr);
+  let outerCall: Ast::ExpressionId = typecheckAddLocalCall(&mut module, outerArgs);
+
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, outerCall);
+  let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(exprStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::PIPE_MULTIPLE_PLACEHOLDERS);
+}
