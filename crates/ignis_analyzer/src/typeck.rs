@@ -523,7 +523,7 @@ impl<'a> Analyzer<'a> {
         if let Some(value_id) = &const_.value {
           let infer = InferContext::expecting(const_type);
           let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
-          self.typecheck_assignment(&const_type, &value_type, &const_.span);
+          self.typecheck_constant_initializer(&const_type, &value_type, &const_.span);
         }
 
         self.define_decl_in_current_scope(node_id);
@@ -2025,7 +2025,7 @@ impl<'a> Analyzer<'a> {
             if let Some(value_id) = &field.value {
               let infer = InferContext::expecting(field_type);
               let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
-              self.typecheck_assignment(&field_type, &value_type, &field.span);
+              self.typecheck_constant_initializer(&field_type, &value_type, &field.span);
             }
           }
         } else {
@@ -2209,7 +2209,7 @@ impl<'a> Analyzer<'a> {
             if let Some(value_id) = &field.value {
               let infer = InferContext::expecting(field_type);
               let value_type = self.typecheck_node_with_infer(value_id, scope_kind, ctx, &infer);
-              self.typecheck_assignment(&field_type, &value_type, &field.span);
+              self.typecheck_constant_initializer(&field_type, &value_type, &field.span);
             }
           }
         },
@@ -9383,11 +9383,39 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  /// The assignment check for a position that lowers to runtime code.
+  ///
+  /// Such a position may be reached by a diverging value, which simply means control never
+  /// arrives — so `never` is accepted here. A position that must yield an actual value at
+  /// compile time must call [`Self::typecheck_constant_initializer`] instead; using this
+  /// one there lets a diverging initializer through analysis and fails much later, in LIR
+  /// verification, as an internal invariant rather than a diagnostic.
   fn typecheck_assignment(
     &mut self,
     target_type: &TypeId,
     value_type: &TypeId,
     span: &Span,
+  ) {
+    self.typecheck_assignment_allowing_divergence(target_type, value_type, span, true)
+  }
+
+  /// The assignment check for a position that must produce a value, so a diverging
+  /// initializer is a genuine error rather than unreachable code.
+  fn typecheck_constant_initializer(
+    &mut self,
+    target_type: &TypeId,
+    value_type: &TypeId,
+    span: &Span,
+  ) {
+    self.typecheck_assignment_allowing_divergence(target_type, value_type, span, false)
+  }
+
+  fn typecheck_assignment_allowing_divergence(
+    &mut self,
+    target_type: &TypeId,
+    value_type: &TypeId,
+    span: &Span,
+    allow_divergence: bool,
   ) {
     if self.types.is_error(target_type) || self.types.is_error(value_type) {
       return;
@@ -9399,6 +9427,9 @@ impl<'a> Analyzer<'a> {
       return;
     }
 
+    // Kept ahead of the divergence exemption: an uninitialized `let` whose only
+    // assignment diverges still needs `never` unified into its inference variable, or the
+    // variable is left unresolved and reported as uninferable.
     if self.types.is_infer_var(target_type) {
       let _ = self
         .infer_ctx
@@ -9412,6 +9443,14 @@ impl<'a> Analyzer<'a> {
       }
 
       self.add_diagnostic(DiagnosticMessage::InvalidNullLiteral { span: span.clone() }.report());
+      return;
+    }
+
+    // A diverging value never reaches the target, so there is no value that could be of
+    // the wrong type. `return` and `defer` already exempt it; without the same exemption
+    // here, `let x: u64 = @panic("...")` is reported as a mismatch against code that
+    // cannot run.
+    if allow_divergence && matches!(self.types.get(value_type), Type::Never) {
       return;
     }
 

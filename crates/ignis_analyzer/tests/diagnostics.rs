@@ -684,3 +684,87 @@ function main(): i32 {
     6,
   );
 }
+
+#[test]
+fn diverging_initializer_is_accepted_for_a_local_binding() {
+  // The binding is unreachable, so `never` cannot produce a wrongly-typed value. Only
+  // `return` and `defer` used to exempt it, which made this a mismatch against code that
+  // cannot run.
+  let result = common::analyze(
+    r#"
+function bail(flag: boolean): u64 {
+    if (flag) {
+        let value: u64 = @panic("bail");
+        return value;
+    }
+
+    return 7;
+}
+"#,
+  );
+
+  let mismatch = result
+    .output
+    .diagnostics
+    .iter()
+    .find(|diagnostic| diagnostic.error_code == "A0045");
+
+  assert!(
+    mismatch.is_none(),
+    "a diverging initializer must not be reported as a type mismatch, got: {:?}",
+    mismatch.map(|diagnostic| &diagnostic.message)
+  );
+}
+
+#[test]
+fn diverging_initializer_is_still_rejected_for_a_constant() {
+  // A constant must produce a compile-time value, so divergence is a real error here
+  // rather than unreachable code. Without the distinction the program reaches LIR
+  // verification and fails with an internal invariant error instead of a diagnostic.
+  let result = common::analyze(
+    r#"
+const LIMIT: u64 = @panic("no const");
+
+function main(): i32 {
+    return LIMIT as i32;
+}
+"#,
+  );
+
+  assert!(
+    result
+      .output
+      .diagnostics
+      .iter()
+      .any(|diagnostic| diagnostic.error_code == "A0045"),
+    "a diverging constant initializer must still be reported"
+  );
+}
+
+#[test]
+fn diverging_assignment_still_resolves_an_inference_variable() {
+  // The divergence exemption sits after inference-variable unification on purpose: an
+  // uninitialized `let` whose only assignment diverges still needs `never` unified in, or
+  // the variable is left unresolved and reported as uninferable.
+  let result = common::analyze(
+    r#"
+function main(): i32 {
+    let mut value;
+    value = @panic("bail");
+    return 0;
+}
+"#,
+  );
+
+  let uninferable = result
+    .output
+    .diagnostics
+    .iter()
+    .find(|diagnostic| diagnostic.error_code == "A0077");
+
+  assert!(
+    uninferable.is_none(),
+    "a diverging assignment must still resolve the inference variable, got: {:?}",
+    uninferable.map(|diagnostic| &diagnostic.message)
+  );
+}

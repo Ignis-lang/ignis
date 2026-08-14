@@ -7202,3 +7202,60 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_diverging_initializer_satisfies_declared_type() {
+  e2e_test(
+    "diverging_initializer_satisfies_declared_type",
+    r#"
+function bail(flag: boolean): u64 {
+    if (flag) {
+        let value: u64 = @panic("bail");
+        return value;
+    }
+
+    return 7;
+}
+
+function main(): i32 {
+    return bail(false) as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_diverging_assignment_satisfies_declared_type() {
+  e2e_test(
+    "diverging_assignment_satisfies_declared_type",
+    r#"
+function main(): i32 {
+    let mut value: u64 = 5;
+    let flag: boolean = false;
+
+    if (flag) {
+        value = @panic("bail");
+    }
+
+    return value as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_diverging_initializer_panics_when_reached() {
+  // The companion tests branch away from the diverging initializer, so they pin only that
+  // it compiles. This one takes it, pinning that codegen emits the panic rather than
+  // storing into `value` from an expression that produced nothing.
+  e2e_test(
+    "diverging_initializer_panics_when_reached",
+    r#"
+function main(): i32 {
+    let value: u64 = @panic("init");
+
+    return value as i32;
+}
+"#,
+  );
+}
