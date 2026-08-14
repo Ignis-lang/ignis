@@ -109,7 +109,17 @@ function monotonicNowElapsedAndOrderingStayNonNegative(): void {
     Option::NONE -> @panic("expected monotonic ordering to be preserved"),
   };
 
-  Test::assertEq<boolean>(earlier.checkedDurationSince(later).isNone(), true);
+  // The clock is non-decreasing, not strictly increasing, so two reads inside one tick
+  // are the same instant. `checkedDurationSince` answers NONE only for a strictly earlier
+  // operand, so the reverse direction is NONE when the reads differ and zero when they do
+  // not — asserting NONE alone fails whenever the two samples land in the same tick.
+  match (earlier.checkedDurationSince(later)) {
+    Option::SOME(reverse) -> {
+      Test::assertEq<u64>(reverse.secs, 0);
+      Test::assertEq<u32>(reverse.nanos, 0 as u32);
+    },
+    Option::NONE -> {},
+  };
 }
 
 @test
