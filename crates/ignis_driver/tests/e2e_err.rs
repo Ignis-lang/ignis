@@ -707,6 +707,45 @@ function main(): i32 {
   );
 }
 
+// Sibling of the field-move regression above: handing the borrowed binding itself
+// to the match result moves the whole payload out of storage the reference still
+// owns, so the caller's drop and the referenced value's drop free the same bytes.
+// The move must be rejected during ownership analysis instead.
+#[test]
+fn e2e_err_move_reference_destructured_binding_by_value() {
+  e2e_ownership_error_test(
+    "err_move_reference_destructured_binding_by_value",
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+function takeFromBorrow(src: &Source): Payload {
+    return match (src) {
+        Source::SOME(payload) -> payload,
+        Source::NONE -> @panic("none"),
+    };
+}
+
+function main(): i32 {
+    let source: Source = Source::SOME(Payload { value: 42 });
+    let taken: Payload = takeFromBorrow(&source);
+    return taken.value;
+}
+"#,
+  );
+}
+
 #[test]
 fn e2e_err_conditional_drop_then_use() {
   e2e_ownership_error_test(

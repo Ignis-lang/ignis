@@ -937,6 +937,30 @@ export namespace Analyzer {
       return out;
     }
 
+    /// Copies a variant's `Vector<TypeId>` payload element-by-element, for the
+    /// same reason as `copyDefinitionIdVector`: `Vector` has no `clone()`, and
+    /// matching a `&Definition` binds its payload by reference. Named apart from
+    /// `copyTypeIdVector` in typecheck_exprs.ign, which is not visible from this
+    /// module and would collide if redeclared.
+    function copyVariantPayloadTypeIds(
+      source: &Vector<Analyzer::TypeId>
+    ): Vector<Analyzer::TypeId> {
+      let mut out: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < source.length()) {
+        let Option::SOME(typeId) = source.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        out.push(*typeId);
+        index += 1;
+      }
+
+      return out;
+    }
+
     /// Parallel to `requireNonGenericRecord` (ADR A4 — that helper is NOT
     /// modified, its record-init/destructuring callers rely on its record-only
     /// rejection). Accepts non-generic Record OR Enum owners for method-call
@@ -1232,7 +1256,12 @@ export namespace Analyzer {
       };
 
       let variant: Analyzer::VariantDef = match (variantDefNode) {
-        Analyzer::Definition::Variant(v) -> v,
+        Analyzer::Definition::Variant(v) -> Analyzer::VariantDef {
+          name: v.name,
+          payload: Analyzer::Typecheck::copyVariantPayloadTypeIds(&v.payload),
+          owner: v.owner,
+          tagValue: v.tagValue,
+        },
         _ -> {
           Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "enum variant pattern must resolve to a variant of the scrutinee's enum");
           return false;

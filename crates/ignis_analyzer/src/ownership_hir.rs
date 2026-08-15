@@ -656,7 +656,7 @@ impl<'a> HirOwnershipChecker<'a> {
             self.try_consume(source_def, span.clone());
           }
 
-          self.reject_move_out_of_borrow(val_id, &span);
+          self.reject_move_out_of_borrow(val_id);
 
           // Track pointer aliasing: `let q: *mut T = p` makes q alias p
           self.try_record_pointer_alias_from_init(name, val_id);
@@ -738,6 +738,8 @@ impl<'a> HirOwnershipChecker<'a> {
         self.check_node(callee);
         for &arg in &args {
           self.check_node(arg);
+          self.reject_move_out_of_borrow(arg);
+
           if let Some(arg_def) = self.get_moved_var(arg) {
             let arg_ty = self.defs.type_of(&arg_def);
             if self.types.needs_drop_with_defs(arg_ty, self.defs) && !self.types.is_copy_with_defs(arg_ty, self.defs) {
@@ -824,6 +826,7 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::VectorLiteral { elements } => {
         for elem in elements {
           self.check_node(elem);
+          self.reject_move_out_of_borrow(elem);
 
           if let Some(source_def) = self.get_moved_var(elem) {
             self.try_consume(source_def, span.clone());
@@ -834,6 +837,7 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::TupleLiteral { elements } => {
         for elem in elements {
           self.check_node(elem);
+          self.reject_move_out_of_borrow(elem);
 
           if let Some(source_def) = self.get_moved_var(elem) {
             self.try_consume(source_def, span.clone());
@@ -858,6 +862,7 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::RecordInit { fields, .. } => {
         for (_, field_value) in fields {
           self.check_node(field_value);
+          self.reject_move_out_of_borrow(field_value);
 
           if let Some(source_def) = self.get_moved_var(field_value) {
             self.try_consume(source_def, span.clone());
@@ -887,6 +892,10 @@ impl<'a> HirOwnershipChecker<'a> {
         for &arg in &args {
           self.check_node(arg);
 
+          if !is_drop {
+            self.reject_move_out_of_borrow(arg);
+          }
+
           if !is_drop && let Some(arg_def) = self.get_moved_var(arg) {
             let arg_ty = self.defs.type_of(&arg_def);
             if self.types.needs_drop_with_defs(arg_ty, self.defs) && !self.types.is_copy_with_defs(arg_ty, self.defs) {
@@ -903,6 +912,7 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::EnumVariant { payload, .. } => {
         for &p in &payload {
           self.check_node(p);
+          self.reject_move_out_of_borrow(p);
 
           if let Some(source_def) = self.get_moved_var(p) {
             self.try_consume(source_def, span.clone());
@@ -933,6 +943,14 @@ impl<'a> HirOwnershipChecker<'a> {
           if cap.mode == CaptureMode::ByValue {
             let src_ty = self.defs.type_of(&cap.source_def);
             if self.types.needs_drop_with_defs(src_ty, self.defs) && !self.types.is_copy_with_defs(src_ty, self.defs) {
+              // A by-value capture moves the source into the closure environment; a
+              // borrowed pattern binding cannot be moved there any more than into a `let`.
+              if self.borrowed_pattern_bindings.contains(&cap.source_def) {
+                self
+                  .diagnostics
+                  .push(DiagnosticMessage::CannotMoveOutOfBorrowedValue { span: span.clone() }.report());
+              }
+
               self.try_consume(cap.source_def, span.clone());
             }
           }
@@ -1024,6 +1042,8 @@ impl<'a> HirOwnershipChecker<'a> {
       }
     }
 
+    self.reject_move_out_of_borrow(value);
+
     // If assigning from an owned variable, mark source as moved
     if let Some(source_def) = self.get_moved_var(value) {
       self.try_consume(source_def, span);
@@ -1068,7 +1088,7 @@ impl<'a> HirOwnershipChecker<'a> {
         }
       }
 
-      self.reject_move_out_of_borrow(val_id, &_span);
+      self.reject_move_out_of_borrow(val_id);
     }
 
     // Calculate drops and defers for all scopes we're exiting (to function root)
@@ -1209,7 +1229,7 @@ impl<'a> HirOwnershipChecker<'a> {
       if self.field_base_is_borrowed(scrutinee) {
         // A borrowed base wins over field-owner drop suppression: suppressing the
         // owner's drop would silently accept a move out of storage we do not own.
-        self.reject_move_out_of_borrow(scrutinee, &span);
+        self.reject_move_out_of_borrow(scrutinee);
       } else if let Some(source_def) = self.get_moved_var(scrutinee) {
         self.try_consume(source_def, span.clone());
       } else if let Some(owner_def) = self.get_moved_field_owner(scrutinee) {
@@ -1217,7 +1237,7 @@ impl<'a> HirOwnershipChecker<'a> {
       } else {
         // Neither a variable nor a field of one we own: the only remaining source is a
         // field behind a reference, which cannot be moved out of at all.
-        self.reject_move_out_of_borrow(scrutinee, &span);
+        self.reject_move_out_of_borrow(scrutinee);
       }
     } else if let Some(source_def) = self.get_moved_var(scrutinee) {
       self.try_consume(source_def, span.clone());
@@ -1267,15 +1287,28 @@ impl<'a> HirOwnershipChecker<'a> {
 
         // The arm's value flows out of the match, so producing it from a field behind a
         // reference moves out of a borrow just as a `let` or `return` would.
-        self.reject_move_out_of_borrow(arm.body, &span);
+        self.reject_move_out_of_borrow(arm.body);
 
         // An arm whose value is one of its own bindings hands that binding to the match
         // result. Without consuming it here it stays `Valid`, gets scheduled, and the
         // drop frees storage the result now owns.
-        if let Some(result_def) = self.arm_result_binding(arm.body)
-          && arm_pattern_defs.contains(&result_def)
-        {
-          self.try_consume(result_def, span.clone());
+        if let Some(result_def) = self.arm_result_binding(arm.body) {
+          // A block-bodied arm hides the binding behind the block node, so the direct
+          // rejection above never sees it; the walk here does.
+          if !self.is_borrowed_binding(arm.body)
+            && self.borrowed_pattern_bindings.contains(&result_def)
+            && self
+              .types
+              .needs_drop_with_defs(self.defs.type_of(&result_def), self.defs)
+          {
+            self
+              .diagnostics
+              .push(DiagnosticMessage::CannotMoveOutOfBorrowedValue { span: span.clone() }.report());
+          }
+
+          if arm_pattern_defs.contains(&result_def) {
+            self.try_consume(result_def, span.clone());
+          }
         }
       }
 
@@ -1459,6 +1492,7 @@ impl<'a> HirOwnershipChecker<'a> {
 
     for (i, &arg_id) in args.iter().enumerate() {
       self.check_node(arg_id);
+      self.reject_move_out_of_borrow(arg_id);
 
       if let Some(arg_def) = self.get_moved_var(arg_id) {
         let arg_ty = self.defs.type_of(&arg_def);
@@ -2181,7 +2215,24 @@ impl<'a> HirOwnershipChecker<'a> {
     }
   }
 
-  /// Report a move whose source is a field reached through a reference.
+  /// Whether the node is itself a binding whose bytes live in borrowed storage.
+  ///
+  /// A bare variable is the other way a borrow leaks into a move: fields are covered by
+  /// `field_base_is_borrowed`, but a pattern binding produced by destructuring a
+  /// reference-typed scrutinee can also be handed off whole — as an arm result, a `let`
+  /// initializer, a return value, or a call argument.
+  fn is_borrowed_binding(
+    &self,
+    hir_id: HIRId,
+  ) -> bool {
+    matches!(
+      &self.hir.get(hir_id).kind,
+      HIRKind::Variable(def_id) if self.borrowed_pattern_bindings.contains(def_id)
+    )
+  }
+
+  /// Report a move whose source is borrowed storage: a field reached through a reference,
+  /// or a pattern binding that carries a borrow forward.
   ///
   /// Only owned values matter: a `Copy` field is read, not moved, and the borrow survives.
   /// A raw pointer dereference is deliberately excluded — auto-deref only synthesises
@@ -2189,21 +2240,23 @@ impl<'a> HirOwnershipChecker<'a> {
   fn reject_move_out_of_borrow(
     &mut self,
     hir_id: HIRId,
-    span: &Span,
   ) {
-    if !self.field_base_is_borrowed(hir_id) {
+    if !self.field_base_is_borrowed(hir_id) && !self.is_borrowed_binding(hir_id) {
       return;
     }
 
-    let moved_type = self.hir.get(hir_id).type_id;
+    let node = self.hir.get(hir_id);
+    let moved_type = node.type_id;
 
     if !self.types.needs_drop_with_defs(&moved_type, self.defs) {
       return;
     }
 
+    let span = node.span.clone();
+
     self
       .diagnostics
-      .push(DiagnosticMessage::CannotMoveOutOfBorrowedValue { span: span.clone() }.report());
+      .push(DiagnosticMessage::CannotMoveOutOfBorrowedValue { span }.report());
   }
 
   fn pattern_moves_owned_value(

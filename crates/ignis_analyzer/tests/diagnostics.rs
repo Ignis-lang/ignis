@@ -508,6 +508,197 @@ function main(): i32 {
 }
 
 #[test]
+fn cannot_move_borrowed_binding_as_arm_result() {
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+function takeFromBorrow(src: &Source): i32 {
+    let taken: Payload = match (src) {
+        Source::SOME(payload) -> payload,
+        Source::NONE -> @panic("none"),
+    };
+    return taken.value;
+}
+
+function main(): i32 {
+    let source: Source = Source::SOME(Payload { value: 7 });
+    return takeFromBorrow(&source);
+}
+"#,
+    "A0186", // CannotMoveOutOfBorrowedValue
+    18,
+  );
+}
+
+#[test]
+fn cannot_move_borrowed_binding_into_let() {
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+function takeFromBorrow(src: &Source): i32 {
+    match (src) {
+        Source::SOME(payload) -> {
+            let owned: Payload = payload;
+        },
+        Source::NONE -> {},
+    };
+    return 0;
+}
+
+function main(): i32 {
+    let source: Source = Source::SOME(Payload { value: 7 });
+    return takeFromBorrow(&source);
+}
+"#,
+    "A0186", // CannotMoveOutOfBorrowedValue
+    19,
+  );
+}
+
+#[test]
+fn cannot_return_borrowed_binding_by_value() {
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+function takeFromBorrow(src: &Source): Payload {
+    match (src) {
+        Source::SOME(payload) -> {
+            return payload;
+        },
+        Source::NONE -> {},
+    };
+    return Payload { value: 0 };
+}
+
+function main(): i32 {
+    let source: Source = Source::SOME(Payload { value: 7 });
+    let taken: Payload = takeFromBorrow(&source);
+    return taken.value;
+}
+"#,
+    "A0186", // CannotMoveOutOfBorrowedValue
+    19,
+  );
+}
+
+#[test]
+fn cannot_pass_borrowed_binding_by_value() {
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+function consume(p: Payload): i32 {
+    return p.value;
+}
+
+function takeFromBorrow(src: &Source): i32 {
+    return match (src) {
+        Source::SOME(payload) -> consume(payload),
+        Source::NONE -> 0,
+    };
+}
+
+function main(): i32 {
+    let source: Source = Source::SOME(Payload { value: 7 });
+    return takeFromBorrow(&source);
+}
+"#,
+    "A0186", // CannotMoveOutOfBorrowedValue
+    22,
+  );
+}
+
+#[test]
+fn cannot_assign_borrowed_binding_by_value() {
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+function takeFromBorrow(src: &Source): i32 {
+    let mut owned: Payload = Payload { value: 0 };
+    match (src) {
+        Source::SOME(payload) -> {
+            owned = payload;
+        },
+        Source::NONE -> {},
+    };
+    return owned.value;
+}
+
+function main(): i32 {
+    let source: Source = Source::SOME(Payload { value: 7 });
+    return takeFromBorrow(&source);
+}
+"#,
+    "A0186", // CannotMoveOutOfBorrowedValue
+    20,
+  );
+}
+
+#[test]
 fn match_guard_must_be_boolean() {
   common::assert_diagnostic_at_line(
     r#"
