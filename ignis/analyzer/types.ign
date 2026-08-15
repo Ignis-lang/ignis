@@ -1101,6 +1101,212 @@ export namespace Analyzer {
       }));
     }
 
+    /// Substitutes every `Param(sym)` occurrence reachable from `typeId` with the
+    /// corresponding entry of `args`, matched positionally against `params`.
+    ///
+    /// Substitution is keyed by Symbol, which is globally text-interned
+    /// (SymbolTable.intern -> StringInterner). This is sound ONLY because
+    /// resolver.ign:buildTypeParamScope never lets a field-type annotation name a
+    /// generic parameter outside its own item's scope, so inside one record's field
+    /// types Param(Symbol("T")) can only mean that record's own T.
+    /// INVARIANT: never memoize substitution results keyed on Symbol across
+    /// different owning records.
+    ///
+    /// Returns `typeId` unchanged when `params.length() != args.length()`.
+    ///
+    /// Known parity gap (matches the Rust reference): `Alias` is not followed,
+    /// so a generic alias whose `aliasedType` carries `Param` is not substituted.
+    public substitute(
+      &mut self,
+      typeId: Analyzer::TypeId,
+      params: &Vector<Symbol>,
+      args: &Vector<Analyzer::TypeId>,
+    ): Analyzer::TypeId {
+      if (params.length() != args.length()) {
+        return typeId;
+      }
+
+      let Option::SOME(kind) = self.types.get(typeId) else {
+        return typeId;
+      };
+
+      match (kind) {
+        Analyzer::Type::I8 -> { return typeId; },
+        Analyzer::Type::I16 -> { return typeId; },
+        Analyzer::Type::I32 -> { return typeId; },
+        Analyzer::Type::I64 -> { return typeId; },
+        Analyzer::Type::U8 -> { return typeId; },
+        Analyzer::Type::U16 -> { return typeId; },
+        Analyzer::Type::U32 -> { return typeId; },
+        Analyzer::Type::U64 -> { return typeId; },
+        Analyzer::Type::F32 -> { return typeId; },
+        Analyzer::Type::F64 -> { return typeId; },
+        Analyzer::Type::BOOLEAN -> { return typeId; },
+        Analyzer::Type::CHAR -> { return typeId; },
+        Analyzer::Type::STR -> { return typeId; },
+        Analyzer::Type::VOID -> { return typeId; },
+        Analyzer::Type::NEVER -> { return typeId; },
+        Analyzer::Type::Record(_) -> { return typeId; },
+        Analyzer::Type::Enum(_) -> { return typeId; },
+        Analyzer::Type::Alias(_) -> { return typeId; },
+        Analyzer::Type::Pointer(p) -> {
+          let substitutedPointee: Analyzer::TypeId = self.substitute(p.pointee, params, args);
+
+          if (substitutedPointee.raw() == p.pointee.raw()) {
+            return typeId;
+          }
+
+          if (p.mutable) {
+            return self.mutablePointer(substitutedPointee);
+          }
+
+          return self.pointer(substitutedPointee);
+        },
+        Analyzer::Type::Reference(r) -> {
+          let substitutedReferent: Analyzer::TypeId = self.substitute(r.referent, params, args);
+
+          if (substitutedReferent.raw() == r.referent.raw()) {
+            return typeId;
+          }
+
+          if (r.mutable) {
+            return self.mutableReference(substitutedReferent);
+          }
+
+          return self.reference(substitutedReferent);
+        },
+        Analyzer::Type::Slice(element) -> {
+          let substitutedElement: Analyzer::TypeId = self.substitute(element, params, args);
+
+          if (substitutedElement.raw() == element.raw()) {
+            return typeId;
+          }
+
+          return self.slice(substitutedElement);
+        },
+        Analyzer::Type::FixedArray(element, length) -> {
+          let substitutedElement: Analyzer::TypeId = self.substitute(element, params, args);
+
+          if (substitutedElement.raw() == element.raw()) {
+            return typeId;
+          }
+
+          return self.fixedArray(substitutedElement, length);
+        },
+        Analyzer::Type::Tuple(t) -> {
+          let mut changed: boolean = false;
+          let mut newElements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut index: u64 = 0;
+
+          while (index < t.elements.length()) {
+            let Option::SOME(elementId) = t.elements.get(index) else {
+              index += 1;
+              continue;
+            };
+
+            let substitutedElement: Analyzer::TypeId = self.substitute(*elementId, params, args);
+
+            if (substitutedElement.raw() != elementId.raw()) {
+              changed = true;
+            }
+
+            newElements.push(substitutedElement);
+            index += 1;
+          }
+
+          if (changed) {
+            return self.tuple(newElements);
+          }
+
+          return typeId;
+        },
+        Analyzer::Type::Function(f) -> {
+          let mut changed: boolean = false;
+          let mut newParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut index: u64 = 0;
+
+          while (index < f.params.length()) {
+            let Option::SOME(paramTypeId) = f.params.get(index) else {
+              index += 1;
+              continue;
+            };
+
+            let substitutedParam: Analyzer::TypeId = self.substitute(*paramTypeId, params, args);
+
+            if (substitutedParam.raw() != paramTypeId.raw()) {
+              changed = true;
+            }
+
+            newParams.push(substitutedParam);
+            index += 1;
+          }
+
+          let substitutedReturnType: Analyzer::TypeId = self.substitute(f.returnType, params, args);
+
+          if (substitutedReturnType.raw() != f.returnType.raw()) {
+            changed = true;
+          }
+
+          if (changed) {
+            return self.functionType(newParams, substitutedReturnType);
+          }
+
+          return typeId;
+        },
+        Analyzer::Type::Param(symbol) -> {
+          let mut index: u64 = 0;
+
+          while (index < params.length()) {
+            let Option::SOME(paramSymbol) = params.get(index) else {
+              index += 1;
+              continue;
+            };
+
+            if (paramSymbol.raw() == symbol.raw()) {
+              let Option::SOME(argTypeId) = args.get(index) else {
+                return typeId;
+              };
+
+              return *argTypeId;
+            }
+
+            index += 1;
+          }
+
+          return typeId;
+        },
+        Analyzer::Type::Instance(instance) -> {
+          let mut changed: boolean = false;
+          let mut newTypeArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut index: u64 = 0;
+
+          while (index < instance.typeArguments.length()) {
+            let Option::SOME(typeArgumentId) = instance.typeArguments.get(index) else {
+              index += 1;
+              continue;
+            };
+
+            let substitutedTypeArgument: Analyzer::TypeId = self.substitute(*typeArgumentId, params, args);
+
+            if (substitutedTypeArgument.raw() != typeArgumentId.raw()) {
+              changed = true;
+            }
+
+            newTypeArguments.push(substitutedTypeArgument);
+            index += 1;
+          }
+
+          if (changed) {
+            return self.instance(instance.definition, newTypeArguments);
+          }
+
+          return typeId;
+        },
+      };
+
+      @panic("unreachable: substitute match did not return");
+    }
+
     /// Formats a tuple type as a comma-separated parenthesized list.
     /// Empty tuple -> "()", single element -> "(i32)", multiple -> "(i32, str)".
     private tupleNameOf(&self, elements: &Vector<Analyzer::TypeId>): String {

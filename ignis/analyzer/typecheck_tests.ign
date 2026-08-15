@@ -2511,25 +2511,35 @@ function typecheckRecordInitRejectsExplicitTypeArguments(): void {
   assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support generic record initializers");
 }
 
+/// Scenario: a generic record initializer with no explicit type arguments
+/// and no `expected` type (a statement-position initializer, since
+/// `Ast::Statement::Node::Expression` checks its expression through
+/// `checkExpr`, which always passes `Option::NONE`). `checkRecordInitExpr`
+/// no longer unconditionally rejects this — `inferRecordInitTypeArguments`
+/// falls through to an empty argument list, and the expression's result
+/// type is the record's bare `typeId` (not an `Instance`), matching the "no
+/// expected type" MODIFIED requirement. `Box` is declared with zero fields
+/// so the field loop has nothing to compare a raw unsubstituted `T` against
+/// — per design D4, when `typeArgs` is empty a generic field's declared
+/// type stays an unresolved `Param` and an ordinary value would naturally
+/// fail `valueSatisfiesType` against it (Rust's exact behavior); this test
+/// isolates the wall-removal itself from that separate, expected, per-field
+/// comparison outcome.
+/// Spec: generic-record-init — expected-type-driven generic record
+/// initializer inference (S1), "No expected type yields bare generic type".
 @test
-function typecheckRecordInitRejectsGenericRecordWithoutTypeArguments(): void {
+function typecheckRecordInitWithoutExpectedAcceptsGenericRecordWithEmptyArgs(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
   let mut module: Ast::Module = Ast::Module::init();
 
-  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
-  let valueField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "value", tTypeId);
-  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
-  boxFields.push(valueField);
   let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
   genericParams.push(typecheckGenericParam("T"));
-  let _boxId: Ast::ItemId = typecheckAddRecordItem(&mut module, "Box", genericParams, boxFields);
+  let _boxId: Ast::ItemId = typecheckAddRecordItem(&mut module, "Box", genericParams, Vector::new<Ast::PatternId>());
 
   let boxPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Box");
-  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
-  initFields.push(typecheckRecordInitField("value", typecheckAddIntLiteral(&mut module, 1)));
-  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, boxPath, Vector::new<Ast::TypeId>(), initFields);
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, boxPath, Vector::new<Ast::TypeId>(), Vector::new<Ast::Expression::RecordInitField>());
   let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, initExpr);
   let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
   let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
@@ -2549,7 +2559,478 @@ function typecheckRecordInitRejectsGenericRecordWithoutTypeArguments(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+
+  let Option::SOME(bareRecordType) = findExprType(&output, boxPath) else {
+    @panic("typecheckRecordInitWithoutExpectedAcceptsGenericRecordWithEmptyArgs: missing Box path type");
+  };
+  assertExprType(&output, initExpr, bareRecordType);
+}
+
+/// Scenario: `checkExprExpected`'s `RecordInit` arm forwards its own
+/// `expected` into `checkRecordInitExpr`, and a generic record initializer
+/// passed as a call argument whose parameter is declared `Box<i32>` has its
+/// type arguments inferred from that expectation: the `value` field is
+/// checked against `i32` (substituted from `T`) and the initializer's
+/// result type is `Type::Instance(Box, [i32])`.
+/// Spec: generic-record-init — expected-type-driven generic record
+/// initializer inference (S1), "Inferred-from-expected init types fields
+/// with substituted expectations".
+@test
+function typecheckRecordInitInfersTypeArgumentsFromCallArgumentExpectedType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "value", tTypeId);
+  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  boxFields.push(valueField);
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(typecheckGenericParam("T"));
+  typecheckAddRecordItem(&mut module, "Box", genericParams, boxFields);
+
+  let boxBaseType: Ast::TypeId = typecheckAddPathType(&mut module, "Box");
+  let mut boxI32Args: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  boxI32Args.push(typecheckAddPathType(&mut module, "i32"));
+  let boxI32Type: Ast::TypeId = typecheckAddGenericType(&mut module, boxBaseType, boxI32Args);
+  let bParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "b", boxI32Type);
+
+  let useBoxBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let mut useBoxParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  useBoxParams.push(bParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useBox"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: useBoxParams,
+    returnType: Option::NONE,
+    body: useBoxBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let boxPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Box");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("value", typecheckAddIntLiteral(&mut module, 1)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, boxPath, Vector::new<Ast::TypeId>(), initFields);
+
+  let useBoxCallee: Ast::ExpressionId = typecheckAddVariable(&mut module, "useBox");
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(initExpr);
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, useBoxCallee, callArgs);
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(callStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+
+  let Option::SOME(boxPathType) = findExprType(&output, boxPath) else {
+    @panic("typecheckRecordInitInfersTypeArgumentsFromCallArgumentExpectedType: missing Box path type");
+  };
+  let Option::SOME(boxRecordType) = typeStore.get(boxPathType) else {
+    @panic("typecheckRecordInitInfersTypeArgumentsFromCallArgumentExpectedType: Box path type not interned");
+  };
+  let boxDefId: Analyzer::DefinitionId = match (boxRecordType) {
+    Analyzer::Type::Record(defId) -> defId,
+    _ -> @panic("typecheckRecordInitInfersTypeArgumentsFromCallArgumentExpectedType: Box path type is not a Record"),
+  };
+
+  let mut expectedArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  expectedArgs.push(typeStore.intern(Analyzer::Type::I32));
+  let expectedInstanceType: Analyzer::TypeId = typeStore.instance(boxDefId, expectedArgs);
+  assertExprType(&output, initExpr, expectedInstanceType);
+}
+
+/// Scenario: `expected` alias-resolves through a `type BoxI = Box<i32>`
+/// declaration before the `Type::Instance` match, so a call argument
+/// declared `BoxI` also infers `[i32]` for the record initializer.
+/// Spec: generic-record-init D3 — `expected` is passed through
+/// `resolveAliasChainChecked` before the `Instance` match.
+@test
+function typecheckRecordInitInfersTypeArgumentsFromAliasResolvedExpectedType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "value", tTypeId);
+  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  boxFields.push(valueField);
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(typecheckGenericParam("T"));
+  typecheckAddRecordItem(&mut module, "Box", genericParams, boxFields);
+
+  let boxBaseType: Ast::TypeId = typecheckAddPathType(&mut module, "Box");
+  let mut boxI32Args: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  boxI32Args.push(typecheckAddPathType(&mut module, "i32"));
+  let boxI32Type: Ast::TypeId = typecheckAddGenericType(&mut module, boxBaseType, boxI32Args);
+  typecheckAddTypeAliasItem(&mut module, "BoxI", boxI32Type);
+
+  let boxIType: Ast::TypeId = typecheckAddPathType(&mut module, "BoxI");
+  let bParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "b", boxIType);
+
+  let useBoxBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let mut useBoxParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  useBoxParams.push(bParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useBox"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: useBoxParams,
+    returnType: Option::NONE,
+    body: useBoxBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let boxPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Box");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("value", typecheckAddIntLiteral(&mut module, 1)));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, boxPath, Vector::new<Ast::TypeId>(), initFields);
+
+  let useBoxCallee: Ast::ExpressionId = typecheckAddVariable(&mut module, "useBox");
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(initExpr);
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, useBoxCallee, callArgs);
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(callStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+
+  let Option::SOME(boxPathType) = findExprType(&output, boxPath) else {
+    @panic("typecheckRecordInitInfersTypeArgumentsFromAliasResolvedExpectedType: missing Box path type");
+  };
+  let Option::SOME(boxRecordType) = typeStore.get(boxPathType) else {
+    @panic("typecheckRecordInitInfersTypeArgumentsFromAliasResolvedExpectedType: Box path type not interned");
+  };
+  let boxDefId: Analyzer::DefinitionId = match (boxRecordType) {
+    Analyzer::Type::Record(defId) -> defId,
+    _ -> @panic("typecheckRecordInitInfersTypeArgumentsFromAliasResolvedExpectedType: Box path type is not a Record"),
+  };
+
+  let mut expectedArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  expectedArgs.push(typeStore.intern(Analyzer::Type::I32));
+  let expectedInstanceType: Analyzer::TypeId = typeStore.instance(boxDefId, expectedArgs);
+  assertExprType(&output, initExpr, expectedInstanceType);
+}
+
+/// Scenario (exact-def-match negative): `expected` resolves to
+/// `Instance(Wrapper, [i32])`, a distinct unrelated generic record, while
+/// the initializer targets `Box`. Inference MUST NOT borrow `Wrapper`'s type
+/// arguments for `Box` — `inferRecordInitTypeArguments` falls through to
+/// empty args (the "no expected type" behavior), so the initializer's own
+/// result type is `Box`'s bare `typeId`, not an `Instance`. `Box` and
+/// `Wrapper` are declared with zero fields, so the record-init call site
+/// itself emits nothing; the call's own argument-type check (`checkCallExpr`,
+/// unrelated to this change) then reports an ordinary downstream
+/// `INVALID_ARGUMENT_TYPE` because a bare `Box` value does not satisfy the
+/// declared `Wrapper<i32>` parameter — proving no diagnostic was emitted by
+/// the record-init call site itself for the mismatched record identity.
+/// Spec: generic-record-init — "Exact-def-match negative — wrong record in
+/// expected type".
+@test
+function typecheckRecordInitWithMismatchedExpectedRecordFallsBackToEmptyArgs(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut boxGenericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  boxGenericParams.push(typecheckGenericParam("T"));
+  typecheckAddRecordItem(&mut module, "Box", boxGenericParams, Vector::new<Ast::PatternId>());
+
+  let mut wrapperGenericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  wrapperGenericParams.push(typecheckGenericParam("U"));
+  typecheckAddRecordItem(&mut module, "Wrapper", wrapperGenericParams, Vector::new<Ast::PatternId>());
+
+  let wrapperBaseType: Ast::TypeId = typecheckAddPathType(&mut module, "Wrapper");
+  let mut wrapperI32Args: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  wrapperI32Args.push(typecheckAddPathType(&mut module, "i32"));
+  let wrapperI32Type: Ast::TypeId = typecheckAddGenericType(&mut module, wrapperBaseType, wrapperI32Args);
+  let wParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "w", wrapperI32Type);
+
+  let useWrapperBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let mut useWrapperParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  useWrapperParams.push(wParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useWrapper"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: useWrapperParams,
+    returnType: Option::NONE,
+    body: useWrapperBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let boxPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Box");
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, boxPath, Vector::new<Ast::TypeId>(), Vector::new<Ast::Expression::RecordInitField>());
+
+  let useWrapperCallee: Ast::ExpressionId = typecheckAddVariable(&mut module, "useWrapper");
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(initExpr);
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, useWrapperCallee, callArgs);
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(callStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  // The record-init call site emits nothing for the mismatched record
+  // identity; the single diagnostic present is `checkCallExpr`'s own
+  // downstream call-argument type check (`INVALID_ARGUMENT_TYPE`, distinct
+  // from the record-init field-mismatch fallback's `TYPE_MISMATCH`).
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_ARGUMENT_TYPE);
+
+  let Option::SOME(boxPathType) = findExprType(&output, boxPath) else {
+    @panic("typecheckRecordInitWithMismatchedExpectedRecordFallsBackToEmptyArgs: missing Box path type");
+  };
+  assertExprType(&output, initExpr, boxPathType);
+}
+
+/// Scenario: explicit type-argument syntax (`value.typeArguments.length() >
+/// 0`) remains rejected with the unchanged Wall A diagnostic even when a
+/// call argument position also supplies a real `expected` type — the check
+/// runs before `expected` is consulted at all.
+/// Spec: generic-record-init — "Explicit type arguments still rejected
+/// regardless of generic-ness".
+@test
+function typecheckRecordInitExplicitTypeArgumentsStillRejectedWithExpectedPresent(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "value", tTypeId);
+  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  boxFields.push(valueField);
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(typecheckGenericParam("T"));
+  typecheckAddRecordItem(&mut module, "Box", genericParams, boxFields);
+
+  let boxBaseType: Ast::TypeId = typecheckAddPathType(&mut module, "Box");
+  let mut boxI32Args: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  boxI32Args.push(typecheckAddPathType(&mut module, "i32"));
+  let boxI32Type: Ast::TypeId = typecheckAddGenericType(&mut module, boxBaseType, boxI32Args);
+  let bParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "b", boxI32Type);
+
+  let useBoxBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let mut useBoxParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  useBoxParams.push(bParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useBox"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: useBoxParams,
+    returnType: Option::NONE,
+    body: useBoxBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let boxPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Box");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("value", typecheckAddIntLiteral(&mut module, 1)));
+  let mut explicitTypeArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  explicitTypeArgs.push(typecheckAddPathType(&mut module, "i32"));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, boxPath, explicitTypeArgs, initFields);
+
+  let useBoxCallee: Ast::ExpressionId = typecheckAddVariable(&mut module, "useBox");
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(initExpr);
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, useBoxCallee, callArgs);
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(callStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
   assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support generic record initializers");
+}
+
+/// Scenario (S5 trap): a record-init field value that mismatches the
+/// *substituted* field type reports its diagnostic at the nested
+/// expression's own span, not the record-init's span — proving `substitute`
+/// actually ran and its result (not the raw `T`) reached the field's
+/// `checkExprExpected`. The field value is a statement-position-shaped
+/// match expression with its own distinct span; `T` substitutes to `i32`
+/// (inferred from the call argument's `expected = Box<i32>`), both arms
+/// produce `boolean`, so `joinTypes` reports the mismatch against the
+/// substituted `i32` expectation from inside `checkMatchExpr`, using the
+/// match's own span. The record-init's own field-mismatch fallback (which
+/// uses the record-init's span) never runs, because the field's
+/// `checkExprExpected` already returned `Option::NONE`.
+/// Spec: generic-record-init — "Diagnostic assertions must be span-anchored
+/// (S5 trap)".
+@test
+function typecheckRecordInitFieldMismatchUnderSubstitutedExpectedIsSpanAnchoredToFieldValue(
+): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "value", tTypeId);
+  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  boxFields.push(valueField);
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(typecheckGenericParam("T"));
+  typecheckAddRecordItem(&mut module, "Box", genericParams, boxFields);
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "Red"));
+  variants.push(typecheckAddBinding(&mut module, "Green"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let boxBaseType: Ast::TypeId = typecheckAddPathType(&mut module, "Box");
+  let mut boxI32Args: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  boxI32Args.push(typecheckAddPathType(&mut module, "i32"));
+  let boxI32Type: Ast::TypeId = typecheckAddGenericType(&mut module, boxBaseType, boxI32Args);
+  let bParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "b", boxI32Type);
+
+  let colorType: Ast::TypeId = typecheckAddPathType(&mut module, "Color");
+  let cParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "c", colorType);
+  let cExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "c");
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Red", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddBoolLiteral(&mut module, true),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddPathPattern2(&mut module, "Color", "Green", Vector::new<Ast::PatternId>()),
+    guard: Option::NONE,
+    body: typecheckAddBoolLiteral(&mut module, false),
+  });
+  let matchSpan: SourceSpan = SourceSpan::new("typecheck_tests.ign", 30, 40);
+  let matchFieldValue: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Match(Ast::Expression::Match {
+    span: matchSpan,
+    scrutinee: cExpr,
+    arms: arms,
+  }));
+
+  let useBoxBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let mut useBoxParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  useBoxParams.push(bParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useBox"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: useBoxParams,
+    returnType: Option::NONE,
+    body: useBoxBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let boxPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Box");
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("value", matchFieldValue));
+  let recordSpan: SourceSpan = SourceSpan::new("typecheck_tests.ign", 10, 20);
+  let initExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::RecordInit(Ast::Expression::RecordInit {
+    span: recordSpan,
+    path: boxPath,
+    typeArguments: Vector::new<Ast::TypeId>(),
+    fields: initFields,
+  }));
+
+  let useBoxCallee: Ast::ExpressionId = typecheckAddVariable(&mut module, "useBox");
+  let mut callArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArgs.push(initExpr);
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, useBoxCallee, callArgs);
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(callStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(cParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(diagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckRecordInitFieldMismatchUnderSubstitutedExpectedIsSpanAnchoredToFieldValue: missing diagnostic");
+  };
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(diagnostic.messageText(), "type mismatch: expected `i32`, found `boolean`");
+  Test::assertEq<u64>(diagnostic.primarySpan.start, 30);
 }
 
 @test
@@ -2590,6 +3071,175 @@ function typecheckMemberAccessRejectsNonRecord(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "member access target must be a non-generic record");
+}
+
+/// Scenario (S2 preserved-rejection pin, design D5): a member-access receiver
+/// that is a bare generic `Record` (declared `b: Box`, no type arguments —
+/// `resolvePath` never arity-checks a bare path, so this resolves to
+/// `Type::Instance`-free `Type::Record(defId)` with `typeParams.length() > 0`)
+/// keeps hitting `requireNonGenericRecord`'s existing generic-record
+/// rejection, unchanged code/message/span, even after S2 adds the
+/// `Type::Instance` shape-dispatch path. This test is written and MUST pass
+/// against the current (pre-S2) `checkMemberAccessExpr`, which resolves
+/// every receiver through `requireNonGenericRecord` unconditionally; S2's
+/// dispatch must not alter this outcome for the non-`Instance` branch.
+/// Spec: generic-record-init — "Member access on a non-Instance generic path
+/// is still rejected".
+@test
+function typecheckMemberAccessOnBareGenericRecordStillRejectedWithUnchangedDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "value", tTypeId);
+  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  boxFields.push(valueField);
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(typecheckGenericParam("T"));
+  typecheckAddRecordItem(&mut module, "Box", genericParams, boxFields);
+
+  let bareBoxType: Ast::TypeId = typecheckAddPathType(&mut module, "Box");
+  let bParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "b", bareBoxType);
+  let bExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "b");
+
+  let accessSpan: SourceSpan = SourceSpan::new("typecheck_tests.ign", 40, 45);
+  let accessExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::MemberAccess(Ast::Expression::MemberAccess {
+    span: accessSpan,
+    object: bExpr,
+    operator: Ast::Expression::AccessOperator::Dot,
+    member: String::create("value"),
+  }));
+  let accessStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, accessExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(accessStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(bParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useBox"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(diagnostic) = output.typecheck.diagnostics.get(0) else {
+    @panic("typecheckMemberAccessOnBareGenericRecordStillRejectedWithUnchangedDiagnostic: missing diagnostic");
+  };
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::UNSUPPORTED_CONSTRUCT);
+  Test::assertEq<str>(diagnostic.messageText(), "member access target must be a non-generic record");
+  Test::assertEq<u64>(diagnostic.primarySpan.start, 40);
+}
+
+/// Scenario: member access on a concretely instantiated generic record
+/// (`b: Box<i32>`, resolving to `Type::Instance`) returns the field's type
+/// substituted via `TypeStore.substitute` using the instance's own type
+/// arguments — `b.value` types as `i32`, not the raw `Param(T)`.
+/// Spec: generic-record-init — "Member access on an Instance receiver
+/// returns the substituted field type".
+@test
+function typecheckMemberAccessOnInstanceReceiverReturnsSubstitutedFieldType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "value", tTypeId);
+  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  boxFields.push(valueField);
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(typecheckGenericParam("T"));
+  typecheckAddRecordItem(&mut module, "Box", genericParams, boxFields);
+
+  let boxBaseType: Ast::TypeId = typecheckAddPathType(&mut module, "Box");
+  let mut boxI32Args: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  boxI32Args.push(typecheckAddPathType(&mut module, "i32"));
+  let boxI32Type: Ast::TypeId = typecheckAddGenericType(&mut module, boxBaseType, boxI32Args);
+  let bParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "b", boxI32Type);
+  let bExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "b");
+
+  let accessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, bExpr, "value");
+  let accessStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, accessExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(accessStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(bParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useBox"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, accessExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario (S2 regression): a member-access receiver typed through a
+/// self-referential cyclic alias (`type A = A;`) still emits exactly one
+/// `CYCLIC_TYPE_ALIAS` diagnostic, proving the D5 non-emitting shape peek
+/// (`resolveAliasChainChecked`, called once before dispatch to detect the
+/// `Instance` shape) does not itself emit, and that `requireNonGenericRecord`
+/// — invoked on the original, unpeeked `receiverType` for every non-`Instance`
+/// shape including a cyclic alias — remains the single diagnostic owner.
+/// Spec: generic-record-init design D5 risk register — "S2 peek double-emits
+/// on the cyclic-alias path".
+@test
+function typecheckMemberAccessOnCyclicAliasReceiverEmitsExactlyOneDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let aliasTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "A");
+  typecheckAddTypeAliasItem(&mut module, "A", aliasTypeId);
+
+  let vParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "v", aliasTypeId);
+  let vExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "v");
+
+  let accessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, vExpr, "x");
+  let accessStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, accessExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(accessStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(vParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("cyclicMemberAccess"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::CYCLIC_TYPE_ALIAS);
 }
 
 @test
