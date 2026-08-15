@@ -9294,3 +9294,59 @@ function typecheckPipeIntoMethodWithWrongArityKeepsReturnType(): void {
   assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
   assertExprType(&output, pipeExpr, typeStore.intern(Analyzer::Type::I32));
 }
+
+/// Scenario: `1 |> identity` where `identity<T>(value: T): T` infers `T = i32` from the
+/// piped value, so the pipe types as i32 rather than as the unresolved parameter.
+/// Spec: IGN-116 — generic inference for a piped callee.
+@test
+function typecheckPipeIntoGenericFunctionInfersTypeArgument(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function identity<T>(value: T): T { return value; }
+  let tType: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", tType);
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let identityRet: Ast::StatementId = typecheckAddReturnExpr(&mut module, valueExpr);
+  let mut identityStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  identityStmts.push(identityRet);
+  let identityBody: Ast::StatementId = typecheckAddBlock(&mut module, identityStmts);
+
+  let mut identityParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  identityParams.push(valueParam);
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(Ast::GenericParam {
+    span: typecheckDummySpan(),
+    name: String::create("T"),
+    bounds: Vector::new<Ast::GenericBound>(),
+  });
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("identity"),
+    genericParameters: genericParams,
+    parameters: identityParams,
+    returnType: Option::SOME(typecheckAddPathType(&mut module, "T")),
+    body: identityBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+
+  let calleeExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "identity");
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, calleeExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, pipeExpr, typeStore.intern(Analyzer::Type::I32));
+}

@@ -2885,6 +2885,108 @@ export namespace Analyzer {
       public returnType: Analyzer::TypeId;
     }
 
+    /// The type-parameter symbols a callee declares, in declaration order.
+    ///
+    /// Empty for a non-generic callee, and for anything that is not a function or a
+    /// method — nothing else carries type parameters a call can specialize.
+    function calleeTypeParamSymbols(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::SymbolId> {
+      let mut symbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+
+      let Option::SOME(def) = defStore.get(defId) else {
+        return symbols;
+      };
+
+      let typeParams: Vector<Analyzer::DefinitionId> = match (def) {
+        Analyzer::Definition::Function(function_) -> Analyzer::Typecheck::copyDefinitionIdVector(&function_.typeParams),
+        Analyzer::Definition::Method(method) -> Analyzer::Typecheck::copyDefinitionIdVector(&method.typeParams),
+        _ -> Vector::new<Analyzer::DefinitionId>(),
+      };
+
+      let mut index: u64 = 0;
+
+      while (index < typeParams.length()) {
+        let Option::SOME(typeParamDefId) = typeParams.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        match (defStore.get(*typeParamDefId)) {
+          Option::SOME(Analyzer::Definition::TypeParam(typeParam)) -> {
+            symbols.push(typeParam.name);
+          },
+          _ -> {},
+        };
+
+        index += 1;
+      }
+
+      return symbols;
+    }
+
+    /// Specialize a generic callee's signature from the piped value.
+    ///
+    /// The piped value lands in the first parameter, so that parameter is what the
+    /// value's type is unified against; every parameter and the return type are then
+    /// substituted with what came out. `NONE` whenever there is nothing sound to
+    /// specialize — a non-generic callee, an already-concrete first parameter, a shape
+    /// the value does not match, or a type parameter the first parameter never mentions
+    /// — and the caller keeps the declared signature.
+    function inferPipeSignature(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      defId: Analyzer::DefinitionId,
+      paramTypes: &Vector<Analyzer::TypeId>,
+      returnType: Analyzer::TypeId,
+      leftType: Analyzer::TypeId,
+    ): Option<Analyzer::Typecheck::PipeSignature> {
+      let paramSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, defId);
+
+      if (paramSymbols.length() == 0) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(firstParamType) = paramTypes.get(0) else {
+        return Option::NONE;
+      };
+
+      let targetType: Analyzer::TypeId = *firstParamType;
+
+      if (!typeStore.containsTypeParam(targetType)) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(typeArguments) = typeStore.inferTypeArguments(targetType, leftType, &paramSymbols) else {
+        return Option::NONE;
+      };
+
+      let mut specializedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < paramTypes.length()) {
+        let Option::SOME(paramType) = paramTypes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let declaredType: Analyzer::TypeId = *paramType;
+        let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+        specializedParams.push(typeStoreParamRef.substitute(declaredType, &paramSymbols, &typeArguments));
+
+        index += 1;
+      }
+
+      let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
+      let specializedReturn: Analyzer::TypeId = typeStoreReturnRef.substitute(returnType, &paramSymbols, &typeArguments);
+
+      return Option::SOME(Analyzer::Typecheck::PipeSignature {
+        paramTypes: specializedParams,
+        returnType: specializedReturn,
+      });
+    }
+
     /// Resolve what `calleeExprId` names and flatten its signature.
     ///
     /// Reports its own failures, because only here is the reason known: a name that never
@@ -2898,6 +3000,7 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       span: SourceSpan,
       calleeExprId: Ast::ExpressionId,
+      leftType: Analyzer::TypeId,
     ): Option<Analyzer::Typecheck::PipeSignature> {
       let Option::SOME(resolved) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, calleeExprId) else {
         return Option::NONE;
@@ -2936,6 +3039,22 @@ export namespace Analyzer {
 
             paramTypes.push(parameter.declaredType);
             index += 1;
+          }
+
+          // A generic callee's declared parameters mention its type parameters, so the
+          // piped value is what says which types they stand for. Nothing is inferred
+          // when the callee is not generic, when the first parameter is already
+          // concrete, or when the value's shape disagrees with it — the declared types
+          // are used and the ordinary argument check reports whatever is wrong.
+          if (let Option::SOME(specialized) = Analyzer::Typecheck::inferPipeSignature(
+            defStore,
+            typeStore,
+            defId,
+            &paramTypes,
+            signature.returnType,
+            leftType,
+          )) {
+            return Option::SOME(specialized);
           }
 
           return Option::SOME(Analyzer::Typecheck::PipeSignature {
@@ -3010,6 +3129,7 @@ export namespace Analyzer {
         resolvedBodies,
         pipe.span,
         calleeExprId,
+        leftType,
       ) else {
         return Option::NONE;
       };
