@@ -2905,19 +2905,12 @@ export namespace Analyzer {
 
       match (resolved) {
         Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> {
-          // A path naming a method reaches here as `Type::method`. Only a static one can
-          // be called without a receiver; an instance method piped this way would match
-          // the piped value against `self` and skip the receiver checks the direct call
-          // path performs, so it is refused with the same wording that path uses.
-          let methodInfoOpt: Option<Analyzer::Typecheck::MethodCallInfo> = Analyzer::Typecheck::lookupMethodDefInfo(defStore, defId);
-
-          if (let Option::SOME(methodInfo) = methodInfoOpt) {
-            if (!methodInfo.isStatic) {
-              Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, "instance method calls require a receiver");
-              return Option::NONE;
-            }
-          }
-
+          // A path naming a method reaches here as `Type::method`, and only a static one
+          // ever does: `resolvePathTail` turns an instance method into `Unresolved` after
+          // reporting that it requires a receiver (resolver_bodies.ign, `InstanceMethod`
+          // arm), so this side never sees one and needs no guard of its own. A static
+          // method has no receiver to skip, so its parameters are taken whole, like any
+          // other callee's.
           let Option::SOME(signature) = Analyzer::Typecheck::extractFunctionSignature(defStore, defId) else {
             Analyzer::Typecheck::emitPipeRightNotCallable(state, span);
             return Option::NONE;
@@ -3083,11 +3076,12 @@ export namespace Analyzer {
 
     /// Check the piped value against the single parameter a bare right side takes.
     ///
-    /// Shared by the lambda and bare-method forms, which differ in how they obtain
-    /// `paramTypes` but agree on what to do with it: an empty parameter list cannot
-    /// receive the value at all, while a list of the wrong length is reported and the
-    /// first parameter still checked, so one arity mistake does not hide a type one.
-    /// Returns false only for the empty case, where there is nothing left to check.
+    /// A right side that takes no parameter at all has nowhere to put the value, and one
+    /// that takes several is reported once and then still checked against its first, so an
+    /// arity mistake does not hide a type one. Reporting is all this does: whether the
+    /// pipe keeps a type afterwards is the caller's decision, because a callee whose
+    /// return type is known can still supply it while a lambda that turned out not to be
+    /// callable cannot.
     function checkPipedValueAgainstFirstParam(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -3095,18 +3089,13 @@ export namespace Analyzer {
       span: SourceSpan,
       paramTypes: &Vector<Analyzer::TypeId>,
       leftType: Analyzer::TypeId,
-    ): boolean {
-      if (paramTypes.length() == 0) {
-        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, span, 1, 0);
-        return false;
-      }
-
+    ): void {
       if (paramTypes.length() != 1) {
         Analyzer::Typecheck::emitInvalidNumberOfArguments(state, span, 1, paramTypes.length());
       }
 
       let Option::SOME(firstParamType) = paramTypes.get(0) else {
-        return false;
+        return;
       };
 
       let expectedType: Analyzer::TypeId = *firstParamType;
@@ -3114,8 +3103,6 @@ export namespace Analyzer {
       if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, expectedType, leftType)) {
         Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, span, expectedType, leftType);
       }
-
-      return true;
     }
 
     /// Type `x |> (v) -> ...`, a lambda written as the right side of a pipe.
@@ -3149,7 +3136,11 @@ export namespace Analyzer {
       let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&functionType.params);
       let returnType: Analyzer::TypeId = functionType.returnType;
 
-      if (!Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, &paramTypes, leftType)) {
+      Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, &paramTypes, leftType);
+
+      // A lambda taking no parameter is not a callee this pipe can complete, so the pipe
+      // has no type to offer — unlike a named callee, whose return type stands on its own.
+      if (paramTypes.length() == 0) {
         return Option::NONE;
       }
 
@@ -3222,9 +3213,10 @@ export namespace Analyzer {
 
       let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(defStore, &signature, info.isStatic);
 
-      if (!Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, &paramTypes, leftType)) {
-        return Option::NONE;
-      }
+      // A wrong count is reported and the pipe still takes the method's return type, the
+      // same way `checkPipePrepend` treats a miscounted call: the method is known, so
+      // stripping the type would hide every later mistake behind one recompile.
+      Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, &paramTypes, leftType);
 
       Analyzer::Typecheck::recordExprType(state, pipe.right, signature.returnType);
 
