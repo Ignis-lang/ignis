@@ -723,7 +723,21 @@ impl<'a> HirOwnershipChecker<'a> {
           self.try_consume(source_def, span.clone());
         }
 
-        self.declare_owned_pattern_bindings(&pattern);
+        // Destructuring a reference-typed scrutinee binds payloads that still live in
+        // the referenced storage, exactly as in `check_match`: the bindings are live for
+        // the rest of the scope but own nothing, so they get no drop of their own and
+        // cannot be moved out of.
+        if self.scrutinee_binds_borrowed_payloads(value) {
+          let pattern_defs = self.collect_droppable_pattern_def_ids(&pattern);
+
+          for &def in &pattern_defs {
+            self.states.insert(def, OwnershipState::Valid);
+          }
+
+          self.borrowed_pattern_bindings.extend(pattern_defs);
+        } else {
+          self.declare_owned_pattern_bindings(&pattern);
+        }
       },
 
       HIRKind::Loop { condition, body } => {

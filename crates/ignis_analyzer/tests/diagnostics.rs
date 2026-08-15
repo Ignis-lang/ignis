@@ -1006,3 +1006,163 @@ function main(): i32 {
     uninferable.map(|diagnostic| &diagnostic.message)
   );
 }
+
+#[test]
+fn cannot_move_borrowed_binding_from_let_else() {
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+function takeFromBorrow(src: &Source): i32 {
+    let Source::SOME(payload) = src else {
+        return 0;
+    };
+
+    let owned: Payload = payload;
+    return owned.value;
+}
+
+function main(): i32 {
+    let source: Source = Source::SOME(Payload { value: 7 });
+    return takeFromBorrow(&source);
+}
+"#,
+    "A0186", // CannotMoveOutOfBorrowedValue
+    21,
+  );
+}
+
+#[test]
+fn cannot_return_borrowed_binding_from_let_else() {
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+function takeFromBorrow(src: &Source): Payload {
+    let Source::SOME(payload) = src else {
+        return Payload { value: 0 };
+    };
+
+    return payload;
+}
+
+function main(): i32 {
+    let source: Source = Source::SOME(Payload { value: 7 });
+    let taken: Payload = takeFromBorrow(&source);
+    return taken.value;
+}
+"#,
+    // The span is the destructure itself, not the `return`: the binding is refused as a
+    // whole at the point it would leave borrowed storage.
+    "A0186", // CannotMoveOutOfBorrowedValue
+    21,
+  );
+}
+
+#[test]
+fn cannot_move_borrowed_binding_into_record_field() {
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+record Holder {
+    public held: Payload;
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+function takeFromBorrow(src: &Source): i32 {
+    match (src) {
+        Source::SOME(payload) -> {
+            let holder: Holder = Holder { held: payload };
+            return holder.held.value;
+        },
+        Source::NONE -> {},
+    };
+
+    return 0;
+}
+
+function main(): i32 {
+    let source: Source = Source::SOME(Payload { value: 7 });
+    return takeFromBorrow(&source);
+}
+"#,
+    "A0186", // CannotMoveOutOfBorrowedValue
+    23,
+  );
+}
+
+#[test]
+fn cannot_move_borrowed_binding_into_enum_payload() {
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+function takeFromBorrow(src: &Source): i32 {
+    match (src) {
+        Source::SOME(payload) -> {
+            let rewrapped: Source = Source::SOME(payload);
+            return 1;
+        },
+        Source::NONE -> {},
+    };
+
+    return 0;
+}
+
+function main(): i32 {
+    let source: Source = Source::SOME(Payload { value: 7 });
+    return takeFromBorrow(&source);
+}
+"#,
+    "A0186", // CannotMoveOutOfBorrowedValue
+    19,
+  );
+}
