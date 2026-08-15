@@ -657,6 +657,56 @@ function main(): i32 {
   );
 }
 
+// Regression for the double free reported when a binding produced by
+// variant-destructuring a reference had a non-copy field moved out of it:
+// the arm-end drop for the moved payload freed storage the referenced value
+// still owned. The move must be rejected during ownership analysis instead.
+#[test]
+fn e2e_err_move_field_out_of_reference_destructured_binding() {
+  e2e_ownership_error_test(
+    "err_move_field_out_of_reference_destructured_binding",
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+record ExportItem {
+    public source: Source;
+}
+
+enum Node {
+    Export(ExportItem),
+    Nothing,
+}
+
+function readSource(item: &Node): i32 {
+    return match (item) {
+        Node::Export(exportItem) -> match (exportItem.source) {
+            Source::SOME(path) -> path.value,
+            Source::NONE -> 0,
+        },
+        Node::Nothing -> 0,
+    };
+}
+
+function main(): i32 {
+    let node: Node = Node::Export(ExportItem { source: Source::SOME(Payload { value: 42 }) });
+    return readSource(&node);
+}
+"#,
+  );
+}
+
 #[test]
 fn e2e_err_conditional_drop_then_use() {
   e2e_ownership_error_test(
