@@ -2831,3 +2831,179 @@ function findDefLooksUpEachPredeclaredRootAndMissesUnknownRawId(): void {
   Test::assert(!firstDefId.equals(&secondDefId));
   assertItemNotPredeclared(&pass1, 999999);
 }
+
+/// Build `@lang(<argument>)` metadata.
+function langMetadata(argument: str): Ast::Metadata {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create(argument));
+
+  let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  attributes.push(Ast::Attribute {
+    span: dummySpan(),
+    name: String::create("lang"),
+    arguments: arguments,
+  });
+
+  return Ast::Metadata {
+    attributes: attributes,
+    modifiers: Vector::new<Ast::Modifier>(),
+  };
+}
+
+/// Add an enum with `variantNames` unit variants and the given metadata.
+function addEnumWithMetadata(
+  module: &mut Ast::Module,
+  name: str,
+  variantNames: Vector<String>,
+  metadata: Ast::Metadata,
+): Ast::ItemId {
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let mut index: u64 = 0;
+
+  while (index < variantNames.length()) {
+    let Option::SOME(variantName) = variantNames.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    let mut patternModule: &mut Ast::Module = module;
+    let patternId: Ast::PatternId = patternModule.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+      span: dummySpan(),
+      name: String::create(variantName.toStr()),
+      annotation: Option::NONE,
+      metadata: Ast::emptyMetadata(),
+    }));
+    variants.push(patternId);
+
+    index += 1;
+  }
+
+  let mut moduleRef: &mut Ast::Module = module;
+
+  return moduleRef.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: dummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: metadata,
+  }));
+}
+
+/// Read the `tryCapable` of the enum bound from `itemId`.
+function enumTryCapabilityOf(
+  defStore: &Analyzer::DefinitionStore,
+  pass1: &Analyzer::Binder::BinderOutput,
+  itemId: Ast::ItemId,
+): Option<Analyzer::TryCapability> {
+  let Option::SOME(defId) = Analyzer::Binder::findDef(pass1, itemId.raw()) else {
+    @panic("enum not found in pass-1 output");
+  };
+
+  let Option::SOME(def) = defStore.get(defId) else {
+    @panic("defStore.get returned NONE");
+  };
+
+  let Analyzer::Definition::Enum(en) = def else {
+    @panic("expected Enum");
+  };
+
+  return en.tryCapable;
+}
+
+/// Scenario: `@lang(try)` on a two-variant enum records which variant carries success and
+/// which carries failure, taken in declaration order.
+/// Spec: IGN-108 — binder consumes attributes.
+@test
+function binderLangTryOnTwoVariantEnumRecordsCapability(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("OK"));
+  names.push(String::create("ERROR"));
+
+  let enumId: Ast::ItemId = addEnumWithMetadata(&mut module, "Outcome", names, langMetadata("try"));
+
+  let pass1 = Analyzer::Binder::predeclareRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module);
+  let pass2 = Analyzer::Binder::completeRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module, &pass1);
+
+  Test::assertEq<u64>(pass2.diagnostics.length(), 0);
+
+  let Option::SOME(capability) = enumTryCapabilityOf(&defStore, &pass1, enumId) else {
+    @panic("expected the enum to be try capable");
+  };
+
+  Test::assertEq<u32>(capability.okVariant, 0 as u32);
+  Test::assertEq<u32>(capability.errVariant, 1 as u32);
+}
+
+/// Scenario: an enum without `@lang(try)` is not try capable, so `?` cannot be used on it.
+/// Spec: IGN-108 — binder consumes attributes.
+@test
+function binderEnumWithoutLangTryIsNotTryCapable(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("OK"));
+  names.push(String::create("ERROR"));
+
+  let enumId: Ast::ItemId = addEnumWithMetadata(&mut module, "Plain", names, Ast::emptyMetadata());
+
+  let pass1 = Analyzer::Binder::predeclareRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module);
+  let pass2 = Analyzer::Binder::completeRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module, &pass1);
+
+  Test::assertEq<u64>(pass2.diagnostics.length(), 0);
+  Test::assertEq<boolean>(enumTryCapabilityOf(&defStore, &pass1, enumId).isNone(), true);
+}
+
+/// Scenario: `?` unwraps one variant and propagates the other, so a `@lang(try)` enum with
+/// three variants leaves no way to say which is which and is rejected.
+/// Spec: IGN-108 — binder consumes attributes.
+@test
+function binderLangTryRejectsEnumWithoutTwoVariants(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("OK"));
+  names.push(String::create("ERROR"));
+  names.push(String::create("PENDING"));
+
+  let enumId: Ast::ItemId = addEnumWithMetadata(&mut module, "Tri", names, langMetadata("try"));
+
+  let pass1 = Analyzer::Binder::predeclareRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module);
+  let pass2 = Analyzer::Binder::completeRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module, &pass1);
+
+  Test::assertEq<u64>(pass2.diagnostics.length(), 1);
+  Test::assertEq<boolean>(enumTryCapabilityOf(&defStore, &pass1, enumId).isNone(), true);
+}
+
+/// Scenario: `@lang` naming something other than `try` is reported rather than ignored.
+/// Spec: IGN-108 — binder consumes attributes.
+@test
+function binderLangWithUnknownArgumentIsReported(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("OK"));
+  names.push(String::create("ERROR"));
+
+  let enumId: Ast::ItemId = addEnumWithMetadata(&mut module, "Odd", names, langMetadata("nonsense"));
+
+  let pass1 = Analyzer::Binder::predeclareRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module);
+  let pass2 = Analyzer::Binder::completeRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module, &pass1);
+
+  Test::assertEq<u64>(pass2.diagnostics.length(), 1);
+  Test::assertEq<boolean>(enumTryCapabilityOf(&defStore, &pass1, enumId).isNone(), true);
+}

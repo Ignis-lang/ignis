@@ -219,6 +219,9 @@ export namespace Analyzer {
         visibility: Analyzer::Visibility::PUBLIC,
         typeParams: typeParams,
         variants: variants,
+        // Pass 1 predeclares the name only; the variants it would be counted against are
+        // not bound yet, so the capability is decided in pass 2.
+        tryCapable: Option::NONE,
         instanceMethods: Vector::new<Analyzer::DefinitionId>(),
         staticMethods: Vector::new<Analyzer::DefinitionId>(),
         typeId: sentinelId,
@@ -449,6 +452,92 @@ export namespace Analyzer {
         span,
       );
       diag.addLabel(LabelKind::PRIMARY, span, "second declaration here");
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
+    /// The try capability an enum's attributes ask for, if any.
+    ///
+    /// `@lang(try)` is what makes `?` work on an enum. The two variants are taken in
+    /// declaration order — first is success, second is failure — so an enum naming them
+    /// `OK`/`ERROR` and one naming them `SOME`/`NONE` are both usable.
+    ///
+    /// Attribute arguments arrive from the parser as raw lexeme text, so `try` is matched
+    /// as a string rather than as a resolved name.
+    function enumTryCapability(
+      state: &mut Analyzer::Binder::BinderState,
+      metadata: &Ast::Metadata,
+      variantCount: u64,
+      span: SourceSpan,
+    ): Option<Analyzer::TryCapability> {
+      let mut index: u64 = 0;
+      let mut requested: boolean = false;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let name: &String = &attribute.name;
+        if (!name.equals("lang")) {
+          index += 1;
+          continue;
+        }
+
+        if (attribute.arguments.length() != 1) {
+          Analyzer::Binder::emitInvalidLangAttribute(state, "`@lang` takes exactly one argument", span);
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(argument) = attribute.arguments.get(0) else {
+          index += 1;
+          continue;
+        };
+
+        if (argument.equals("try")) {
+          requested = true;
+        } else {
+          let detail: String = String::create("unknown `@lang` argument: ").concat(argument.toStr());
+          Analyzer::Binder::emitInvalidLangAttribute(state, detail.toStr(), span);
+        }
+
+        index += 1;
+      }
+
+      if (!requested) {
+        return Option::NONE;
+      }
+
+      // `?` unwraps one variant and propagates the other, so a different count leaves no
+      // way to say which is which.
+      if (variantCount != 2) {
+        Analyzer::Binder::emitInvalidLangAttribute(state, "`@lang(try)` requires exactly two variants", span);
+        return Option::NONE;
+      }
+
+      return Option::SOME(Analyzer::TryCapability {
+        okVariant: 0 as u32,
+        errVariant: 1 as u32,
+      });
+    }
+
+    /// Emit a diagnostic for a malformed `@lang` attribute.
+    /// Reuses `DiagnosticCode::INVALID_META_ENTITY` per design §5 (reuse an existing code
+    /// with a discriminator message rather than minting one per attribute).
+    function emitInvalidLangAttribute(
+      state: &mut Analyzer::Binder::BinderState,
+      detail: str,
+      span: SourceSpan,
+    ): void {
+      let mut diag: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        DiagnosticCode::INVALID_META_ENTITY,
+        detail,
+        span,
+      );
+      diag.addLabel(LabelKind::PRIMARY, span, "on this declaration");
       let mut stateRef: &mut Analyzer::Binder::BinderState = state;
       stateRef.diagnostics.push(diag);
     }
@@ -1247,11 +1336,19 @@ export namespace Analyzer {
       let mut typesRef: &mut Analyzer::TypeStore = typeStore;
       let realTypeId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::Enum(defId));
 
+      let tryCapable: Option<Analyzer::TryCapability> = Analyzer::Binder::enumTryCapability(
+        state,
+        &en.metadata,
+        variants.length(),
+        en.span,
+      );
+
       let newEnum: Analyzer::EnumDef = Analyzer::EnumDef {
         name: placeholderName,
         visibility: Analyzer::Visibility::PUBLIC,
         typeParams: typeParams,
         variants: variants,
+        tryCapable: tryCapable,
         instanceMethods: methods.instanceMethods,
         staticMethods: methods.staticMethods,
         typeId: realTypeId,
