@@ -1195,8 +1195,24 @@ export namespace Analyzer {
         Ast::Expression::Node::Literal(literal) -> {
           match (&literal.value) {
             Ast::Expression::LiteralValue::Null -> {
-              Analyzer::Typecheck::emitUnsupported(state, literal.span, "null literals");
-              return Option::NONE;
+              let Option::SOME(expectedType) = expected else {
+                Analyzer::Typecheck::emitCannotInferNullLiteral(state, literal.span);
+                return Option::NONE;
+              };
+
+              let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
+              let Option::SOME(resolvedNode) = typeStore.get(resolved.typeId) else {
+                Analyzer::Typecheck::emitInvalidNullLiteral(state, typeStore, literal.span, expectedType);
+                return Option::NONE;
+              };
+
+              let Analyzer::Type::Pointer(_) = resolvedNode else {
+                Analyzer::Typecheck::emitInvalidNullLiteral(state, typeStore, literal.span, expectedType);
+                return Option::NONE;
+              };
+
+              Analyzer::Typecheck::recordExprType(state, exprId, expectedType);
+              return Option::SOME(expectedType);
             },
             _ -> {},
           };
@@ -1861,7 +1877,28 @@ export namespace Analyzer {
       span: SourceSpan,
     ): void {
       let Option::SOME(annotationId) = annotation else {
-        Analyzer::Typecheck::emitUnsupported(state, span, "locals without explicit annotations");
+        let Option::SOME(valueExprId) = value else {
+          Analyzer::Typecheck::emitCannotInferLocal(state, span);
+          return;
+        };
+
+        let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          valueExprId,
+        );
+
+        // A failed initializer already reported its own diagnostic; a second
+        // one for the binding would only repeat it.
+        let Option::SOME(actualType) = actualTypeOpt else {
+          return;
+        };
+
+        Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, patternId, actualType, mutable, span);
         return;
       };
 
@@ -1878,11 +1915,11 @@ export namespace Analyzer {
       };
 
       let Option::SOME(valueExprId) = value else {
-        Analyzer::Typecheck::emitUnsupported(state, span, "locals without initializers");
+        Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, patternId, expectedType, mutable, span);
         return;
       };
 
-      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
         state,
         defStore,
         typeStore,
@@ -1890,6 +1927,7 @@ export namespace Analyzer {
         module,
         resolvedBodies,
         valueExprId,
+        Option::SOME(expectedType),
       );
 
       if (let Option::SOME(actualType) = actualTypeOpt) {
