@@ -1434,6 +1434,269 @@ export namespace Analyzer {
       return Option::SOME(recordDef.typeId);
     }
 
+    /// Decomposed view of a try-capable enum type: its definition plus the
+    /// ok/err payload types with the instance's type arguments applied.
+    record TryEnumView {
+      public enumDefId: Analyzer::DefinitionId;
+      public okType: Analyzer::TypeId;
+      public errType: Analyzer::TypeId;
+    }
+
+    /// Payload type carried by `variants[index]`, with `typeParamSymbols` /
+    /// `typeArguments` substituted. A variant with zero or several payload
+    /// elements yields `void`, mirroring stage0 `typecheck_try`.
+    function tryVariantPayloadType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      variants: &Vector<Analyzer::DefinitionId>,
+      index: u32,
+      typeParamSymbols: &Vector<Analyzer::SymbolId>,
+      typeArguments: &Vector<Analyzer::TypeId>,
+    ): Analyzer::TypeId {
+      let mut typeStoreVoidRef: &mut Analyzer::TypeStore = typeStore;
+      let voidType: Analyzer::TypeId = typeStoreVoidRef.intern(Analyzer::Type::VOID);
+
+      let Option::SOME(variantDefId) = variants.get(index as u64) else {
+        return voidType;
+      };
+
+      let Option::SOME(variantDef) = defStore.get(*variantDefId) else {
+        return voidType;
+      };
+
+      match (variantDef) {
+        Analyzer::Definition::Variant(variant) -> {
+          if (variant.payload.length() != 1) {
+            return voidType;
+          }
+
+          let Option::SOME(payloadType) = variant.payload.get(0) else {
+            return voidType;
+          };
+
+          let payloadTypeId: Analyzer::TypeId = *payloadType;
+          let mut typeStoreSubstituteRef: &mut Analyzer::TypeStore = typeStore;
+          return typeStoreSubstituteRef.substitute(payloadTypeId, typeParamSymbols, typeArguments);
+        },
+        _ -> {
+          return voidType;
+        },
+      };
+
+      @panic("unreachable: tryVariantPayloadType match did not return");
+    }
+
+    /// Resolves `typeId` (aliases followed) to a try-capable enum and computes
+    /// the substituted payload types of its ok/err variants. On failure emits
+    /// `code`/`message` (or the cyclic-alias diagnostic) and returns `NONE`.
+    /// Mirrors stage0 `typecheck_try`'s operand and return-type decomposition.
+    function requireTryEnumView(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+      code: str,
+      message: str,
+    ): Option<Analyzer::Typecheck::TryEnumView> {
+      let resolvedType: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (let Option::SOME(aliasDefId) = resolvedType.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return Option::NONE;
+      }
+
+      let Option::SOME(parts) = Analyzer::Typecheck::tryDecomposeEnumType(typeStore, resolvedType.typeId) else {
+        Analyzer::Typecheck::emitDiagnostic(state, span, code, message);
+        return Option::NONE;
+      };
+
+      let Option::SOME(pieces) = Analyzer::Typecheck::tryEnumParts(defStore, parts.enumDefId) else {
+        Analyzer::Typecheck::emitDiagnostic(state, span, code, message);
+        return Option::NONE;
+      };
+
+      let mut typeParamSymbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut typeParamIndex: u64 = 0;
+
+      while (typeParamIndex < pieces.typeParams.length()) {
+        let Option::SOME(typeParamDefId) = pieces.typeParams.get(typeParamIndex) else {
+          typeParamIndex += 1;
+          continue;
+        };
+
+        match (defStore.get(*typeParamDefId)) {
+          Option::SOME(Analyzer::Definition::TypeParam(typeParam)) -> {
+            typeParamSymbols.push(typeParam.name);
+          },
+          _ -> {},
+        };
+
+        typeParamIndex += 1;
+      }
+
+      let okType: Analyzer::TypeId = Analyzer::Typecheck::tryVariantPayloadType(
+        defStore,
+        typeStore,
+        &pieces.variants,
+        pieces.okVariant,
+        &typeParamSymbols,
+        &parts.typeArguments,
+      );
+      let errType: Analyzer::TypeId = Analyzer::Typecheck::tryVariantPayloadType(
+        defStore,
+        typeStore,
+        &pieces.variants,
+        pieces.errVariant,
+        &typeParamSymbols,
+        &parts.typeArguments,
+      );
+
+      return Option::SOME(Analyzer::Typecheck::TryEnumView {
+        enumDefId: parts.enumDefId,
+        okType: okType,
+        errType: errType,
+      });
+    }
+
+    /// Intermediate decomposition of a resolved type into an enum definition
+    /// and its applied type arguments (empty for a non-generic enum).
+    record TryEnumDecomposition {
+      public enumDefId: Analyzer::DefinitionId;
+      public typeArguments: Vector<Analyzer::TypeId>;
+    }
+
+    /// Owned copy of the enum pieces `requireTryEnumView` needs after the
+    /// borrowed `&Definition` match ends.
+    record TryEnumParts {
+      public variants: Vector<Analyzer::DefinitionId>;
+      public typeParams: Vector<Analyzer::DefinitionId>;
+      public okVariant: u32;
+      public errVariant: u32;
+    }
+
+    /// `typeId` (aliases already resolved) as an enum definition plus applied
+    /// type arguments: empty for a bare `Enum`, copied from the instance for
+    /// `Instance`. `NONE` for every non-enum type.
+    function tryDecomposeEnumType(
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Option<Analyzer::Typecheck::TryEnumDecomposition> {
+      let Option::SOME(typeNode) = typeStore.get(typeId) else {
+        return Option::NONE;
+      };
+
+      match (typeNode) {
+        Analyzer::Type::Enum(defId) -> {
+          return Option::SOME(Analyzer::Typecheck::TryEnumDecomposition {
+            enumDefId: defId,
+            typeArguments: Vector::new<Analyzer::TypeId>(),
+          });
+        },
+        Analyzer::Type::Instance(instance) -> {
+          return Option::SOME(Analyzer::Typecheck::TryEnumDecomposition {
+            enumDefId: instance.definition,
+            typeArguments: Analyzer::Typecheck::copyTypeIdVector(&instance.typeArguments),
+          });
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      @panic("unreachable: tryDecomposeEnumType match did not return");
+    }
+
+    /// Owned copies of the variant/type-param tables and the ok/err indices of
+    /// `enumDefId`, or `NONE` when it is not an enum or not `@lang(try)`.
+    function tryEnumParts(
+      defStore: &mut Analyzer::DefinitionStore,
+      enumDefId: Analyzer::DefinitionId,
+    ): Option<Analyzer::Typecheck::TryEnumParts> {
+      let Option::SOME(def) = defStore.get(enumDefId) else {
+        return Option::NONE;
+      };
+
+      match (def) {
+        Analyzer::Definition::Enum(enum_) -> {
+          let Option::SOME(capability) = &enum_.tryCapable else {
+            return Option::NONE;
+          };
+
+          return Option::SOME(Analyzer::Typecheck::TryEnumParts {
+            variants: Analyzer::Typecheck::copyDefinitionIdVector(&enum_.variants),
+            typeParams: Analyzer::Typecheck::copyDefinitionIdVector(&enum_.typeParams),
+            okVariant: capability.okVariant,
+            errVariant: capability.errVariant,
+          });
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      @panic("unreachable: tryEnumParts match did not return");
+    }
+
+    /// Types a `?` expression: the operand must be a try-capable enum, the
+    /// enclosing function's return type must be the same enum with an equal
+    /// error payload (the error propagates unchanged), and the expression's
+    /// own type is the operand's ok payload. Mirrors stage0 `typecheck_try`.
+    function checkTryExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      value: &Ast::Expression::Try,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(operandType) = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(operandView) = Analyzer::Typecheck::requireTryEnumView(
+        state,
+        defStore,
+        typeStore,
+        value.span,
+        operandType,
+        DiagnosticCode::TRY_ON_NON_TRY_TYPE,
+        "the `?` operator requires a `@lang(try)` enum operand",
+      ) else {
+        return Option::NONE;
+      };
+
+      let returnViewOpt: Option<Analyzer::Typecheck::TryEnumView> = Analyzer::Typecheck::requireTryEnumView(
+        state,
+        defStore,
+        typeStore,
+        value.span,
+        state.currentReturnType,
+        DiagnosticCode::TRY_RETURN_TYPE_MISMATCH,
+        "`?` propagates its error to the caller, so the enclosing function must return a `@lang(try)` enum",
+      );
+
+      if (let Option::SOME(returnView) = returnViewOpt) {
+        if (returnView.enumDefId.raw() != operandView.enumDefId.raw()) {
+          Analyzer::Typecheck::emitDiagnostic(
+            state,
+            value.span,
+            DiagnosticCode::TRY_RETURN_TYPE_MISMATCH,
+            "`?` propagates its error to the caller, so the enclosing function must return the operand's `@lang(try)` enum",
+          );
+        } else if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, operandView.errType, returnView.errType)) {
+          Analyzer::Typecheck::emitDiagnostic(
+            state,
+            value.span,
+            DiagnosticCode::TRY_ERROR_TYPE_MISMATCH,
+            "the operand's error payload does not match the enclosing return type's error payload",
+          );
+        }
+      }
+
+      return Option::SOME(operandView.okType);
+    }
+
     function checkExpr(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1804,9 +2067,12 @@ export namespace Analyzer {
           return Option::SOME(placeholderType);
         },
         Ast::Expression::Node::Try(value) -> {
-          let _innerType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "try expressions");
-          return Option::NONE;
+          let Option::SOME(tryType) = Analyzer::Typecheck::checkTryExpr(state, defStore, typeStore, symbols, module, resolvedBodies, &value) else {
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, tryType);
+          return Option::SOME(tryType);
         },
       };
 
