@@ -1,0 +1,11 @@
+# nextest runs one process per test, so the OnceLock guard in
+# `selfhost_compiler()` no longer serializes the shared `build/selfhost`
+# construction: concurrent tests would build over the same tree and race on
+# the emitted objects. This group keeps those tests sequential; the first one
+# pays the build and the rest reuse the module stamps.
+[test-groups]
+selfhost-build = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary_id(ignis::test_command) and test(/^selfhost_adapter_/)'
+test-group = 'selfhost-build'
