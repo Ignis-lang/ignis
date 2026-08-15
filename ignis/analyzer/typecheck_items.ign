@@ -83,11 +83,6 @@ export namespace Analyzer {
         },
       };
 
-      if (constant.annotation.isNone()) {
-        Analyzer::Typecheck::emitUnsupported(state, constant.span, "constants without explicit annotations");
-        return;
-      }
-
       let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
       stateRef.currentFunction = constantDefId;
       stateRef.currentReturnType = variableDef.declaredType;
@@ -99,7 +94,29 @@ export namespace Analyzer {
       stateRef.localTypeIds = Vector::new<Analyzer::TypeId>();
       stateRef.localMutableFlags = Vector::new<boolean>();
 
-      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+      if (constant.annotation.isNone()) {
+        // Both parsers require the annotation grammatically, so this path is
+        // only reachable from programmatic ASTs. The binder left the `VOID`
+        // sentinel as `declaredType`; infer it from the value instead. A
+        // value that fails to type already reported its own diagnostic.
+        let inferredTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          constant.value,
+        );
+
+        if (let Option::SOME(inferredType) = inferredTypeOpt) {
+          Analyzer::Typecheck::patchVariableDeclaredType(defStore, constantDefId, inferredType);
+        }
+
+        return;
+      }
+
+      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
         state,
         defStore,
         typeStore,
@@ -107,6 +124,7 @@ export namespace Analyzer {
         module,
         resolvedBodies,
         constant.value,
+        Option::SOME(variableDef.declaredType),
       );
 
       if (let Option::SOME(actualType) = actualTypeOpt) {

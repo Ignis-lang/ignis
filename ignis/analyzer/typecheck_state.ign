@@ -273,6 +273,79 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, message.toStr());
     }
 
+    function emitCannotInferLocal(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::CANNOT_INFER_TYPE,
+        "cannot infer the type of this local; add a type annotation or an initializer",
+      );
+    }
+
+    function emitCannotInferNullLiteral(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::CANNOT_INFER_TYPE,
+        "cannot infer a pointer type for `null`; add a type annotation",
+      );
+    }
+
+    function emitInvalidNullLiteral(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      expected: Analyzer::TypeId,
+    ): void {
+      let message: String = String::create("`null` can only be used with pointer types, expected `")
+        .concat(typeStore.nameOf(expected).toStr())
+        .concat("`");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_NULL_LITERAL, message.toStr());
+    }
+
+    /// Patch `VariableDef.declaredType` at `varDefId` via `DefinitionStore::replace`.
+    ///
+    /// Local mirror of the resolver's `patchVariableType`, used when an
+    /// unannotated constant's type is inferred from its value: the binder left
+    /// the `VOID` sentinel there and the resolver had no annotation to patch.
+    function patchVariableDeclaredType(
+      defStore: &mut Analyzer::DefinitionStore,
+      varDefId: Analyzer::DefinitionId,
+      typeId: Analyzer::TypeId,
+    ): void {
+      let Option::SOME(existing) = defStore.get(varDefId) else {
+        return;
+      };
+
+      match (existing) {
+        Analyzer::Definition::Variable(v) -> {
+          let updated: Analyzer::VariableDef = Analyzer::VariableDef {
+            name: v.name,
+            visibility: v.visibility,
+            declaredType: typeId,
+            mutable: v.mutable,
+          };
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.replace(varDefId, Analyzer::Definition::Variable(updated));
+        },
+        Analyzer::Definition::Record(_) -> {},
+        Analyzer::Definition::Enum(_) -> {},
+        Analyzer::Definition::Function(_) -> {},
+        Analyzer::Definition::Field(_) -> {},
+        Analyzer::Definition::Variant(_) -> {},
+        Analyzer::Definition::TypeParam(_) -> {},
+        Analyzer::Definition::TypeAlias(_) -> {},
+        Analyzer::Definition::Trait(_) -> {},
+        Analyzer::Definition::Method(_) -> {},
+      };
+    }
+
     function recordExprType(
       state: &mut Analyzer::Typecheck::TypecheckState,
       exprId: Ast::ExpressionId,
@@ -1707,8 +1780,23 @@ export namespace Analyzer {
 
           return Option::NONE;
         },
-        Ast::Type::Node::Pointer(_) -> {
-          return Option::NONE;
+        Ast::Type::Node::Pointer(pointer) -> {
+          let Option::SOME(pointee) = Analyzer::Typecheck::resolveLocalAnnotation(
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            pointer.pointee,
+          ) else {
+            return Option::NONE;
+          };
+
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          if (pointer.mutable) {
+            return Option::SOME(typeStoreRef.mutablePointer(pointee));
+          }
+
+          return Option::SOME(typeStoreRef.pointer(pointee));
         },
         Ast::Type::Node::Reference(_) -> {
           return Option::NONE;

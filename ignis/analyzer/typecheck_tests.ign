@@ -18,6 +18,19 @@ function typecheckAddPathType(module: &mut Ast::Module, name: str): Ast::TypeId 
   }));
 }
 
+function typecheckAddPointerType(
+  module: &mut Ast::Module,
+  pointee: Ast::TypeId,
+  mutable: boolean,
+): Ast::TypeId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Pointer(Ast::Type::Pointer {
+    span: typecheckDummySpan(),
+    mutable: mutable,
+    pointee: pointee,
+  }));
+}
+
 function typecheckAddBinding(module: &mut Ast::Module, name: str): Ast::PatternId {
   let mut moduleRef: &mut Ast::Module = module;
   return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
@@ -135,6 +148,14 @@ function typecheckAddBoolLiteral(module: &mut Ast::Module, value: boolean): Ast:
   return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
     span: typecheckDummySpan(),
     value: Ast::Expression::LiteralValue::Boolean(value),
+  }));
+}
+
+function typecheckAddStringLiteral(module: &mut Ast::Module, value: str): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::String(String::create(value)),
   }));
 }
 
@@ -369,6 +390,49 @@ function typecheckAddMutableVariableStmt(
     mutable: true,
     pattern: pattern,
     annotation: Option::SOME(annotation),
+    value: Option::SOME(value),
+  }));
+}
+
+function typecheckAddUnannotatedLetStmt(
+  module: &mut Ast::Module,
+  pattern: Ast::PatternId,
+  value: Ast::ExpressionId,
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: pattern,
+    annotation: Option::NONE,
+    value: Option::SOME(value),
+  }));
+}
+
+function typecheckAddUninitializedLetStmt(
+  module: &mut Ast::Module,
+  pattern: Ast::PatternId,
+  annotation: Option<Ast::TypeId>,
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: pattern,
+    annotation: annotation,
+    value: Option::NONE,
+  }));
+}
+
+function typecheckAddUnannotatedMutableVariableStmt(
+  module: &mut Ast::Module,
+  pattern: Ast::PatternId,
+  value: Ast::ExpressionId,
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Variable(Ast::Statement::Variable {
+    span: typecheckDummySpan(),
+    mutable: true,
+    pattern: pattern,
+    annotation: Option::NONE,
     value: Option::SOME(value),
   }));
 }
@@ -1306,7 +1370,7 @@ function typecheckSiblingBlockLocalReuseStaysDistinct(): void {
 }
 
 @test
-function typecheckNullLiteralProducesExplicitUnsupportedDiagnostic(): void {
+function typecheckNullAgainstNonPointerConstantAnnotationProducesDiagnostic(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -1330,11 +1394,11 @@ function typecheckNullLiteralProducesExplicitUnsupportedDiagnostic(): void {
     &module,
   );
 
-  assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support null literals");
+  assertSingleDiagnostic(&output, DiagnosticCode::INVALID_NULL_LITERAL, "`null` can only be used with pointer types, expected `i32`");
 }
 
 @test
-function typecheckConstantWithoutAnnotationProducesExplicitUnsupportedDiagnostic(): void {
+function typecheckUnannotatedConstantInfersDeclaredTypeFromValue(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -1342,7 +1406,7 @@ function typecheckConstantWithoutAnnotationProducesExplicitUnsupportedDiagnostic
 
   let literalExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 7);
 
-  module.addRootItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+  let constId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Constant(Ast::Item::Constant {
     span: typecheckDummySpan(),
     name: String::create("INFERRED"),
     annotation: Option::NONE,
@@ -1357,7 +1421,31 @@ function typecheckConstantWithoutAnnotationProducesExplicitUnsupportedDiagnostic
     &module,
   );
 
-  assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support constants without explicit annotations");
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, literalExpr, typeStore.intern(Analyzer::Type::I32));
+
+  let Option::SOME(constDefId) = Analyzer::Binder::findDef(&output.pass2, constId.raw()) else {
+    @panic("typecheckUnannotatedConstantInfersDeclaredTypeFromValue: constant not found in pass-2 output");
+  };
+
+  let Option::SOME(constDef) = defStore.get(constDefId) else {
+    @panic("typecheckUnannotatedConstantInfersDeclaredTypeFromValue: defStore.get NONE for constant");
+  };
+
+  match (constDef) {
+    Analyzer::Definition::Variable(v) -> {
+      Test::assertEq<u32>(v.declaredType.raw(), typeStore.intern(Analyzer::Type::I32).raw());
+    },
+    Analyzer::Definition::Record(_) -> @panic("expected Variable"),
+    Analyzer::Definition::Enum(_) -> @panic("expected Variable"),
+    Analyzer::Definition::Function(_) -> @panic("expected Variable"),
+    Analyzer::Definition::Field(_) -> @panic("expected Variable"),
+    Analyzer::Definition::Variant(_) -> @panic("expected Variable"),
+    Analyzer::Definition::TypeParam(_) -> @panic("expected Variable"),
+    Analyzer::Definition::TypeAlias(_) -> @panic("expected Variable"),
+    Analyzer::Definition::Trait(_) -> @panic("expected Variable"),
+    Analyzer::Definition::Method(_) -> @panic("expected Variable"),
+  };
 }
 
 @test
@@ -7533,4 +7621,323 @@ function typecheckPipeArityErrorStillTypesThePipe(): void {
 
   assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
   assertExprType(&output, pipeExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckUnannotatedLetInfersIntInitializerType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let letStmt: Ast::StatementId = typecheckAddUnannotatedLetStmt(&mut module, xPattern, oneExpr);
+  let xExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, xExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, xExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckUnannotatedLetInfersStrInitializerType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let strTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "str");
+  let sPattern: Ast::PatternId = typecheckAddBinding(&mut module, "s");
+  let strExpr: Ast::ExpressionId = typecheckAddStringLiteral(&mut module, "hello");
+  let letStmt: Ast::StatementId = typecheckAddUnannotatedLetStmt(&mut module, sPattern, strExpr);
+  let sExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "s");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, sExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, strTypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, sExpr, typeStore.intern(Analyzer::Type::STR));
+}
+
+@test
+function typecheckUnannotatedLetInfersRecordInitializerType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xField: Ast::PatternId = typecheckAddAnnotatedField(&mut module, "x", i32TypeId);
+  let mut pointFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  pointFields.push(xField);
+  typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), pointFields);
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", oneExpr));
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, pointPath, Vector::new<Ast::TypeId>(), initFields);
+
+  let pointPattern: Ast::PatternId = typecheckAddBinding(&mut module, "point");
+  let letStmt: Ast::StatementId = typecheckAddUnannotatedLetStmt(&mut module, pointPattern, initExpr);
+  let pointExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "point");
+  let accessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, pointExpr, "x");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, accessExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let Option::SOME(initType) = findExprType(&output, initExpr) else {
+    @panic("typecheckUnannotatedLetInfersRecordInitializerType: missing init type");
+  };
+  let Option::SOME(pointType) = findExprType(&output, pointExpr) else {
+    @panic("typecheckUnannotatedLetInfersRecordInitializerType: missing point type");
+  };
+
+  Test::assertEq<u32>(initType.raw(), pointType.raw());
+  assertExprType(&output, accessExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckUnannotatedMutableVariableInfersInitializerType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let varStmt: Ast::StatementId = typecheckAddUnannotatedMutableVariableStmt(&mut module, xPattern, oneExpr);
+
+  let targetExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let twoExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 2);
+  let assignExpr: Ast::ExpressionId = typecheckAddAssignment(
+    &mut module,
+    Ast::Expression::AssignmentOperator::Assign,
+    targetExpr,
+    twoExpr,
+  );
+  let assignStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, assignExpr);
+
+  let xExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, xExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(varStmt);
+  bodyStmts.push(assignStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, xExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+@test
+function typecheckAnnotatedLetWithNullPointerInitializerHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let ptrTypeId: Ast::TypeId = typecheckAddPointerType(&mut module, typecheckAddPathType(&mut module, "i32"), false);
+  let pPattern: Ast::PatternId = typecheckAddBinding(&mut module, "p");
+  let nullExpr: Ast::ExpressionId = typecheckAddNullLiteral(&mut module);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, pPattern, ptrTypeId, nullExpr);
+
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, oneExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  let i32SemanticId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  assertExprType(&output, nullExpr, typeStore.pointer(i32SemanticId));
+}
+
+@test
+function typecheckAnnotatedMutableVariableWithNullMutPointerInitializerHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let ptrTypeId: Ast::TypeId = typecheckAddPointerType(&mut module, typecheckAddPathType(&mut module, "i32"), true);
+  let pPattern: Ast::PatternId = typecheckAddBinding(&mut module, "p");
+  let nullExpr: Ast::ExpressionId = typecheckAddNullLiteral(&mut module);
+  let varStmt: Ast::StatementId = typecheckAddMutableVariableStmt(&mut module, pPattern, ptrTypeId, nullExpr);
+
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, oneExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(varStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  let i32SemanticId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  assertExprType(&output, nullExpr, typeStore.mutablePointer(i32SemanticId));
+}
+
+@test
+function typecheckNullAgainstPointerAliasAnnotationHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let ptrTypeId: Ast::TypeId = typecheckAddPointerType(&mut module, typecheckAddPathType(&mut module, "i32"), false);
+  typecheckAddTypeAliasItem(&mut module, "IntPtr", ptrTypeId);
+
+  let aliasTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "IntPtr");
+  let pPattern: Ast::PatternId = typecheckAddBinding(&mut module, "p");
+  let nullExpr: Ast::ExpressionId = typecheckAddNullLiteral(&mut module);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, pPattern, aliasTypeId, nullExpr);
+
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, oneExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+@test
+function typecheckUnannotatedLetWithNullProducesCannotInferDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let nullExpr: Ast::ExpressionId = typecheckAddNullLiteral(&mut module);
+  let letStmt: Ast::StatementId = typecheckAddUnannotatedLetStmt(&mut module, xPattern, nullExpr);
+
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, oneExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::CANNOT_INFER_TYPE, "cannot infer a pointer type for `null`; add a type annotation");
+}
+
+@test
+function typecheckNullAgainstNonPointerLetAnnotationProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let nullExpr: Ast::ExpressionId = typecheckAddNullLiteral(&mut module);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, xPattern, typecheckAddPathType(&mut module, "i32"), nullExpr);
+
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, oneExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::INVALID_NULL_LITERAL, "`null` can only be used with pointer types, expected `i32`");
+}
+
+@test
+function typecheckUnannotatedUninitializedLetProducesCannotInferDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let letStmt: Ast::StatementId = typecheckAddUninitializedLetStmt(&mut module, xPattern, Option::NONE);
+
+  let oneExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, oneExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::CANNOT_INFER_TYPE, "cannot infer the type of this local; add a type annotation or an initializer");
+}
+
+@test
+function typecheckAnnotatedUninitializedLetBindsAnnotationType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddBinding(&mut module, "x");
+  let letStmt: Ast::StatementId = typecheckAddUninitializedLetStmt(
+    &mut module,
+    xPattern,
+    Option::SOME(typecheckAddPathType(&mut module, "i32")),
+  );
+  let xExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, xExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, xExpr, typeStore.intern(Analyzer::Type::I32));
 }
