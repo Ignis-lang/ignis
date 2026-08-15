@@ -774,6 +774,15 @@ export namespace Analyzer {
       public defId: Analyzer::DefinitionId;
       public typeId: Analyzer::TypeId;
       public fields: Vector<Analyzer::DefinitionId>;
+      /// Interned names of the record's own declared type parameters, in
+      /// declaration order. Empty for a non-generic record. Populated by
+      /// `requireRecordAllowingGeneric`; left empty by `requireNonGenericRecord`,
+      /// whose only caller never needs substitution.
+      public typeParamSymbols: Vector<Analyzer::SymbolId>;
+      /// Concrete type arguments matched positionally against `typeParamSymbols`.
+      /// Empty unless the receiver was resolved from a `Type::Instance` or
+      /// `checkRecordInitExpr` inferred arguments from an `expected` type.
+      public typeArguments: Vector<Analyzer::TypeId>;
     }
 
     function requireNonGenericRecord(
@@ -826,6 +835,8 @@ export namespace Analyzer {
                 defId: defId,
                 typeId: record_.typeId,
                 fields: fields,
+                typeParamSymbols: Vector::new<Analyzer::SymbolId>(),
+                typeArguments: Vector::new<Analyzer::TypeId>(),
               });
             },
             _ -> {
@@ -845,6 +856,123 @@ export namespace Analyzer {
       };
 
       @panic("unreachable: requireNonGenericRecord match did not return");
+    }
+
+    /// Resolves a record receiver like `requireNonGenericRecord`, but also
+    /// accepts a generic `Type::Record(defId)` (no type parameters bound yet)
+    /// and a `Type::Instance(InstanceType)` (already applied to concrete type
+    /// arguments). Fills `typeParamSymbols`/`typeArguments` on the result so
+    /// callers can substitute field types via `TypeStore.substitute`.
+    ///
+    /// `requireNonGenericRecord` stays the resolution path for every other
+    /// receiver shape (`checkMemberAccessExpr`'s non-`Instance` branch); this
+    /// function never emits the generic-record rejection diagnostic.
+    function requireRecordAllowingGeneric(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+      nonRecordMessage: str,
+    ): Option<Analyzer::Typecheck::RequiredRecordDef> {
+      let resolvedType: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (let Option::SOME(aliasDefId) = resolvedType.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return Option::NONE;
+      }
+
+      let Option::SOME(resolvedTypeNode) = typeStore.get(resolvedType.typeId) else {
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
+        return Option::NONE;
+      };
+
+      match (resolvedTypeNode) {
+        Analyzer::Type::Record(defId) -> {
+          let noTypeArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          return Analyzer::Typecheck::buildRequiredRecordDefForRecord(state, defStore, span, nonRecordMessage, defId, &noTypeArguments);
+        },
+        Analyzer::Type::Instance(instance) -> {
+          return Analyzer::Typecheck::buildRequiredRecordDefForRecord(state, defStore, span, nonRecordMessage, instance.definition, &instance.typeArguments);
+        },
+        _ -> {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
+          return Option::NONE;
+        },
+      };
+
+      @panic("unreachable: requireRecordAllowingGeneric match did not return");
+    }
+
+    /// Shared tail of `requireRecordAllowingGeneric`: resolves `defId` to its
+    /// `RecordDef`, collects field ids and the record's own declared
+    /// type-parameter symbols (in declaration order), and assembles the
+    /// `RequiredRecordDef` result. `typeArguments` is passed through unchanged
+    /// (empty for a bare generic `Record`, populated for an `Instance`).
+    function buildRequiredRecordDefForRecord(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      span: SourceSpan,
+      nonRecordMessage: str,
+      defId: Analyzer::DefinitionId,
+      typeArguments: &Vector<Analyzer::TypeId>,
+    ): Option<Analyzer::Typecheck::RequiredRecordDef> {
+      let Option::SOME(def) = defStore.get(defId) else {
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
+        return Option::NONE;
+      };
+
+      match (def) {
+        Analyzer::Definition::Record(record_) -> {
+          let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+          let mut fieldIndex: u64 = 0;
+          while (fieldIndex < record_.fields.length()) {
+            let Option::SOME(fieldDefId) = record_.fields.get(fieldIndex) else {
+              fieldIndex += 1;
+              continue;
+            };
+
+            fields.push(*fieldDefId);
+            fieldIndex += 1;
+          }
+
+          let mut typeParamSymbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+          let mut typeParamIndex: u64 = 0;
+          while (typeParamIndex < record_.typeParams.length()) {
+            let Option::SOME(typeParamDefId) = record_.typeParams.get(typeParamIndex) else {
+              typeParamIndex += 1;
+              continue;
+            };
+
+            let Option::SOME(typeParamDef) = defStore.get(*typeParamDefId) else {
+              typeParamIndex += 1;
+              continue;
+            };
+
+            match (typeParamDef) {
+              Analyzer::Definition::TypeParam(typeParam) -> {
+                typeParamSymbols.push(typeParam.name);
+              },
+              _ -> {},
+            };
+
+            typeParamIndex += 1;
+          }
+
+          return Option::SOME(Analyzer::Typecheck::RequiredRecordDef {
+            defId: defId,
+            typeId: record_.typeId,
+            fields: fields,
+            typeParamSymbols: typeParamSymbols,
+            typeArguments: Analyzer::Typecheck::copyTypeIdVector(typeArguments),
+          });
+        },
+        _ -> {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonRecordMessage);
+          return Option::NONE;
+        },
+      };
+
+      @panic("unreachable: buildRequiredRecordDefForRecord match did not return");
     }
 
     function findRecordFieldDef(
@@ -899,6 +1027,52 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, code, message.toStr());
     }
 
+    /// S2 (design D5) branch of `checkMemberAccessExpr` for an `Instance`
+    /// receiver: resolves through `requireRecordAllowingGeneric` (which fills
+    /// `typeParamSymbols`/`typeArguments` from the instance) and returns the
+    /// field's type substituted via `TypeStore.substitute`. Split out so the
+    /// non-`Instance` branch in `checkMemberAccessExpr` stays byte-identical
+    /// to its pre-S2 shape (`requireNonGenericRecord`, unsubstituted field
+    /// type) — see the risk register in design obs #14087 rev 2.
+    function checkMemberAccessOnInstanceReceiver(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::MemberAccess,
+      receiverType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let recordDefOpt: Option<Analyzer::Typecheck::RequiredRecordDef> = Analyzer::Typecheck::requireRecordAllowingGeneric(
+        state,
+        defStore,
+        typeStore,
+        value.span,
+        receiverType,
+        "member access target must be a non-generic record",
+      );
+      let Option::SOME(recordDef) = recordDefOpt else {
+        return Option::NONE;
+      };
+
+      let fieldDefOpt: Option<Analyzer::FieldDef> = Analyzer::Typecheck::findRecordFieldDef(
+        defStore,
+        symbols,
+        &recordDef,
+        value.member.toStr(),
+      );
+      let Option::SOME(fieldDef) = fieldDefOpt else {
+        Analyzer::Typecheck::emitBareMethodReferenceOrUnknownField(state, defStore, symbols, value.span, &recordDef, value.member.toStr());
+        return Option::NONE;
+      };
+
+      let mut typeStoreSubstituteRef: &mut Analyzer::TypeStore = typeStore;
+      let substitutedFieldType: Analyzer::TypeId = typeStoreSubstituteRef.substitute(fieldDef.fieldType, &recordDef.typeParamSymbols, &recordDef.typeArguments);
+
+      Analyzer::Typecheck::recordExprType(state, exprId, substitutedFieldType);
+      return Option::SOME(substitutedFieldType);
+    }
+
     function checkMemberAccessExpr(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -928,6 +1102,32 @@ export namespace Analyzer {
       };
 
       let receiverType: Analyzer::TypeId = Analyzer::Typecheck::derefReceiverType(defStore, typeStore, objectType);
+
+      // Non-emitting shape peek (design D5): `resolveAliasChainChecked` emits
+      // nothing itself, so this look-ahead cannot double-diagnose. Only a
+      // receiver that peeks as `Type::Instance` (no cyclic alias) takes the
+      // substituting path; every other shape — cyclic alias, bare generic
+      // `Record`, non-generic `Record`, non-record — falls through to
+      // `requireNonGenericRecord` on the *original* `receiverType`, so that
+      // helper re-resolves and owns every diagnostic it already owns today,
+      // unchanged.
+      let peeked: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, receiverType);
+
+      let mut isInstanceReceiver: boolean = false;
+      if (peeked.cycleAlias.isNone()) {
+        if (let Option::SOME(peekedType) = typeStore.get(peeked.typeId)) {
+          match (peekedType) {
+            Analyzer::Type::Instance(_) -> {
+              isInstanceReceiver = true;
+            },
+            _ -> {},
+          };
+        }
+      }
+
+      if (isInstanceReceiver) {
+        return Analyzer::Typecheck::checkMemberAccessOnInstanceReceiver(state, defStore, typeStore, symbols, exprId, value, receiverType);
+      }
 
       let recordDefOpt: Option<Analyzer::Typecheck::RequiredRecordDef> = Analyzer::Typecheck::requireNonGenericRecord(
         state,
@@ -1008,6 +1208,72 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, span, DiagnosticCode::UNKNOWN_MEMBER, "unknown record field", memberName);
     }
 
+    function copyTypeIdVector(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
+      let mut out: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < source.length()) {
+        let Option::SOME(typeId) = source.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        out.push(*typeId);
+        index += 1;
+      }
+
+      return out;
+    }
+
+    /// Implements `checkRecordInitExpr`'s type-argument inference table: a
+    /// non-generic record (`typeParamSymbols` empty) always gets no arguments
+    /// and ignores `expected` entirely. A generic record only gets arguments
+    /// when `expected` alias-resolves to `Type::Instance` naming this exact
+    /// record definition (`instance.definition == recordDef.defId`, no
+    /// coercion). Every other case — no `expected`, a non-`Instance` expected
+    /// type, or an `Instance` naming a different record — falls through to
+    /// an empty result without emitting any diagnostic; a resulting arity
+    /// mismatch is left to `TypeStore.substitute`'s own passthrough and the
+    /// ordinary per-field type comparison.
+    function inferRecordInitTypeArguments(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      recordDef: &Analyzer::Typecheck::RequiredRecordDef,
+      expected: Option<Analyzer::TypeId>,
+    ): Vector<Analyzer::TypeId> {
+      if (recordDef.typeParamSymbols.length() == 0) {
+        return Vector::new<Analyzer::TypeId>();
+      }
+
+      let Option::SOME(expectedType) = expected else {
+        return Vector::new<Analyzer::TypeId>();
+      };
+
+      let resolvedExpected: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
+      if (resolvedExpected.cycleAlias.isSome()) {
+        return Vector::new<Analyzer::TypeId>();
+      }
+
+      let Option::SOME(resolvedExpectedNode) = typeStore.get(resolvedExpected.typeId) else {
+        return Vector::new<Analyzer::TypeId>();
+      };
+
+      match (resolvedExpectedNode) {
+        Analyzer::Type::Instance(instance) -> {
+          if (instance.definition.raw() != recordDef.defId.raw()) {
+            return Vector::new<Analyzer::TypeId>();
+          }
+
+          return Analyzer::Typecheck::copyTypeIdVector(&instance.typeArguments);
+        },
+        _ -> {
+          return Vector::new<Analyzer::TypeId>();
+        },
+      };
+
+      @panic("unreachable: inferRecordInitTypeArguments match did not return");
+    }
+
     function checkRecordInitExpr(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1017,6 +1283,7 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       exprId: Ast::ExpressionId,
       value: &Ast::Expression::RecordInit,
+      expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
       if (value.typeArguments.length() > 0) {
         Analyzer::Typecheck::emitUnsupported(state, value.span, "generic record initializers");
@@ -1036,18 +1303,19 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      let recordDefOpt: Option<Analyzer::Typecheck::RequiredRecordDef> = Analyzer::Typecheck::requireNonGenericRecord(
+      let recordDefOpt: Option<Analyzer::Typecheck::RequiredRecordDef> = Analyzer::Typecheck::requireRecordAllowingGeneric(
         state,
         defStore,
         typeStore,
         value.span,
         pathType,
         "record initializer target must be a non-generic record",
-        "typecheck does not support generic record initializers",
       );
       let Option::SOME(recordDef) = recordDefOpt else {
         return Option::NONE;
       };
+
+      let typeArgs: Vector<Analyzer::TypeId> = Analyzer::Typecheck::inferRecordInitTypeArguments(defStore, typeStore, &recordDef, expected);
 
       let mut seenFieldNames: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
       let mut fieldIndex: u64 = 0;
@@ -1085,6 +1353,9 @@ export namespace Analyzer {
 
         seenFieldNames.push(fieldDef.name);
 
+        let mut typeStoreSubstituteRef: &mut Analyzer::TypeStore = typeStore;
+        let substitutedFieldType: Analyzer::TypeId = typeStoreSubstituteRef.substitute(fieldDef.fieldType, &recordDef.typeParamSymbols, &typeArgs);
+
         let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
           state,
           defStore,
@@ -1093,14 +1364,14 @@ export namespace Analyzer {
           module,
           resolvedBodies,
           field.value,
-          Option::SOME(fieldDef.fieldType),
+          Option::SOME(substitutedFieldType),
         );
         let Option::SOME(actualType) = actualTypeOpt else {
           return Option::NONE;
         };
 
-        if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, fieldDef.fieldType, actualType)) {
-          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, fieldDef.fieldType, actualType);
+        if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, substitutedFieldType, actualType)) {
+          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, substitutedFieldType, actualType);
           return Option::NONE;
         }
 
@@ -1150,6 +1421,13 @@ export namespace Analyzer {
         };
 
         declaredFieldIndex += 1;
+      }
+
+      if (typeArgs.length() > 0) {
+        let mut typeStoreInstanceRef: &mut Analyzer::TypeStore = typeStore;
+        let instanceType: Analyzer::TypeId = typeStoreInstanceRef.instance(recordDef.defId, typeArgs);
+        Analyzer::Typecheck::recordExprType(state, exprId, instanceType);
+        return Option::SOME(instanceType);
       }
 
       Analyzer::Typecheck::recordExprType(state, exprId, recordDef.typeId);
@@ -1462,6 +1740,7 @@ export namespace Analyzer {
             resolvedBodies,
             exprId,
             &value,
+            expected,
           );
         },
         Ast::Expression::Node::BuiltinCall(value) -> {

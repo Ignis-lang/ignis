@@ -1347,3 +1347,335 @@ function pointerEqualsRejectsMutabilityMismatch(): void {
 
   Test::assert(!immutableType.equals(mutableType));
 }
+
+// ─── TypeStore.substitute (S1a, IGN-25) ────────────────────────────────────
+
+@test
+function substituteParamHitReturnsMappedArg(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(tSymbol);
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+
+  let result: Analyzer::TypeId = store.substitute(paramId, &params, &args);
+
+  Test::assertEq<u32>(result.raw(), idI32.raw());
+}
+
+@test
+function substituteParamMissReturnsOriginalType(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let unrelatedSymbol: Symbol = Symbol::fromRaw(9);
+  let paramId: Analyzer::TypeId = store.param(unrelatedSymbol);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(Symbol::fromRaw(1));
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+
+  let result: Analyzer::TypeId = store.substitute(paramId, &params, &args);
+
+  Test::assertEq<u32>(result.raw(), paramId.raw());
+}
+
+@test
+function substitutePointerRecursesAndPreservesImmutability(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let ptrOfParam: Analyzer::TypeId = store.pointer(paramId);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(tSymbol);
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+
+  let result: Analyzer::TypeId = store.substitute(ptrOfParam, &params, &args);
+  let expected: Analyzer::TypeId = store.pointer(idI32);
+
+  Test::assertEq<u32>(result.raw(), expected.raw());
+  Test::assertEq<str>(store.nameOf(result).toStr(), "*i32");
+}
+
+@test
+function substitutePointerRecursesAndPreservesMutability(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let mutPtrOfParam: Analyzer::TypeId = store.mutablePointer(paramId);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(tSymbol);
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+
+  let result: Analyzer::TypeId = store.substitute(mutPtrOfParam, &params, &args);
+
+  Test::assertEq<str>(store.nameOf(result).toStr(), "*mut i32");
+}
+
+@test
+function substituteReferenceRecursesAndPreservesMutability(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let immutableRefOfParam: Analyzer::TypeId = store.reference(paramId);
+  let mutableRefOfParam: Analyzer::TypeId = store.mutableReference(paramId);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(tSymbol);
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idStr);
+
+  let immutableResult: Analyzer::TypeId = store.substitute(immutableRefOfParam, &params, &args);
+  let mutableResult: Analyzer::TypeId = store.substitute(mutableRefOfParam, &params, &args);
+
+  Test::assertEq<str>(store.nameOf(immutableResult).toStr(), "&str");
+  Test::assertEq<str>(store.nameOf(mutableResult).toStr(), "&mut str");
+}
+
+@test
+function substituteSliceRecursesIntoElement(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let sliceOfParam: Analyzer::TypeId = store.slice(paramId);
+  let idBoolean: Analyzer::TypeId = store.intern(Analyzer::Type::BOOLEAN);
+
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(tSymbol);
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idBoolean);
+
+  let result: Analyzer::TypeId = store.substitute(sliceOfParam, &params, &args);
+
+  Test::assertEq<str>(store.nameOf(result).toStr(), "boolean[]");
+}
+
+@test
+function substituteFixedArrayRecursesAndPreservesLength(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let arrayOfParam: Analyzer::TypeId = store.fixedArray(paramId, 4);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(tSymbol);
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+
+  let result: Analyzer::TypeId = store.substitute(arrayOfParam, &params, &args);
+
+  Test::assertEq<str>(store.nameOf(result).toStr(), "i32[4]");
+}
+
+@test
+function substituteTupleRecursesIntoElements(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut tupleElements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  tupleElements.push(paramId);
+  tupleElements.push(idStr);
+  let tupleOfParamAndStr: Analyzer::TypeId = store.tuple(tupleElements);
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(tSymbol);
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+
+  let result: Analyzer::TypeId = store.substitute(tupleOfParamAndStr, &params, &args);
+
+  Test::assertEq<str>(store.nameOf(result).toStr(), "(i32, str)");
+}
+
+@test
+function substituteFunctionRecursesIntoParamsAndReturnType(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+
+  let mut fnParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fnParams.push(paramId);
+  let fnOfParamToParam: Analyzer::TypeId = store.functionType(fnParams, paramId);
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(tSymbol);
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+
+  let result: Analyzer::TypeId = store.substitute(fnOfParamToParam, &params, &args);
+
+  Test::assertEq<str>(store.nameOf(result).toStr(), "fn(i32) -> i32");
+}
+
+@test
+function substituteInstanceRecursesIntoTypeArguments(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let outerDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(3);
+
+  let mut outerArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  outerArgs.push(paramId);
+  let instanceOfParam: Analyzer::TypeId = store.instance(outerDefId, outerArgs);
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(tSymbol);
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(idI32);
+
+  let result: Analyzer::TypeId = store.substitute(instanceOfParam, &params, &args);
+
+  let mut expectedArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  expectedArgs.push(idI32);
+  let expected: Analyzer::TypeId = store.instance(outerDefId, expectedArgs);
+
+  Test::assertEq<u32>(result.raw(), expected.raw());
+}
+
+@test
+function substitutePrimitiveIsIdentity(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(Symbol::fromRaw(1));
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(store.intern(Analyzer::Type::STR));
+
+  let result: Analyzer::TypeId = store.substitute(idI32, &params, &args);
+
+  Test::assertEq<u32>(result.raw(), idI32.raw());
+}
+
+@test
+function substituteRecordAndEnumAreIdentity(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let recordDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(1);
+  let enumDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(2);
+  let recordId: Analyzer::TypeId = store.recordType(recordDefId);
+  let enumId: Analyzer::TypeId = store.enumType(enumDefId);
+
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(Symbol::fromRaw(1));
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(store.intern(Analyzer::Type::STR));
+
+  let recordResult: Analyzer::TypeId = store.substitute(recordId, &params, &args);
+  let enumResult: Analyzer::TypeId = store.substitute(enumId, &params, &args);
+
+  Test::assertEq<u32>(recordResult.raw(), recordId.raw());
+  Test::assertEq<u32>(enumResult.raw(), enumId.raw());
+}
+
+@test
+function substituteAliasIsIdentity(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let aliasDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(6);
+  let aliasId: Analyzer::TypeId = store.aliasType(aliasDefId);
+
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(Symbol::fromRaw(1));
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(store.intern(Analyzer::Type::STR));
+
+  let result: Analyzer::TypeId = store.substitute(aliasId, &params, &args);
+
+  Test::assertEq<u32>(result.raw(), aliasId.raw());
+}
+
+@test
+function substituteArityMismatchReturnsOriginalType(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(tSymbol);
+  params.push(Symbol::fromRaw(2));
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(store.intern(Analyzer::Type::I32));
+
+  let result: Analyzer::TypeId = store.substitute(paramId, &params, &args);
+
+  Test::assertEq<u32>(result.raw(), paramId.raw());
+}
+
+@test
+function substituteIdentityFastPathAvoidsNewIntern(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut tupleElements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  tupleElements.push(idI32);
+  tupleElements.push(idStr);
+  let nonGenericTuple: Analyzer::TypeId = store.tuple(tupleElements);
+
+  let lengthBeforeSubstitute: u64 = store.length();
+
+  let mut params: Vector<Symbol> = Vector::new<Symbol>();
+  params.push(Symbol::fromRaw(1));
+  let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  args.push(store.intern(Analyzer::Type::BOOLEAN));
+
+  let result: Analyzer::TypeId = store.substitute(nonGenericTuple, &params, &args);
+
+  Test::assertEq<u32>(result.raw(), nonGenericTuple.raw());
+  Test::assertEq<u64>(store.length(), lengthBeforeSubstitute);
+}
+
+@test
+function substituteScopingDoesNotCrossContaminateBetweenRecords(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut syms: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  // Two distinct records both literally declare a generic parameter named "T".
+  // Text-interning means both refer to the same Symbol, so the invariant under
+  // test is that substitution scoping (each call's own params/args pair) keeps
+  // the two records' results independent, not that the symbols differ.
+  let tSymbol: Symbol = syms.intern("T");
+
+  let boxParamId: Analyzer::TypeId = store.param(tSymbol);
+  let wrapperParamId: Analyzer::TypeId = store.param(tSymbol);
+
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut boxParams: Vector<Symbol> = Vector::new<Symbol>();
+  boxParams.push(tSymbol);
+  let mut boxArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  boxArgs.push(idI32);
+
+  let mut wrapperParams: Vector<Symbol> = Vector::new<Symbol>();
+  wrapperParams.push(tSymbol);
+  let mut wrapperArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  wrapperArgs.push(idStr);
+
+  // Substitute Wrapper's field first, then Box's, then re-check both results:
+  // if substitution incorrectly memoized by Symbol across owning records, the
+  // second (Box) result would leak Wrapper's i32/str assignment.
+  let wrapperResult: Analyzer::TypeId = store.substitute(wrapperParamId, &wrapperParams, &wrapperArgs);
+  let boxResult: Analyzer::TypeId = store.substitute(boxParamId, &boxParams, &boxArgs);
+  let wrapperResultAfterBox: Analyzer::TypeId = store.substitute(wrapperParamId, &wrapperParams, &wrapperArgs);
+
+  Test::assertEq<u32>(boxResult.raw(), idI32.raw());
+  Test::assertEq<u32>(wrapperResult.raw(), idStr.raw());
+  Test::assertEq<u32>(wrapperResultAfterBox.raw(), idStr.raw());
+}
