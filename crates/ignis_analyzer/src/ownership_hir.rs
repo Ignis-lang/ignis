@@ -13,7 +13,7 @@ use ignis_type::{
   file::SourceMap,
   span::Span,
   symbol::SymbolTable,
-  types::{TypeId, TypeStore, format_type_name},
+  types::{Type, TypeId, TypeStore, format_type_name},
 };
 
 /// Ownership state for a variable.
@@ -649,6 +649,8 @@ impl<'a> HirOwnershipChecker<'a> {
             self.try_consume(source_def, span.clone());
           }
 
+          self.reject_move_out_of_borrow(val_id, &span);
+
           // Track pointer aliasing: `let q: *mut T = p` makes q alias p
           self.try_record_pointer_alias_from_init(name, val_id);
         }
@@ -1058,6 +1060,8 @@ impl<'a> HirOwnershipChecker<'a> {
           self.states.insert(def_id, OwnershipState::Returned);
         }
       }
+
+      self.reject_move_out_of_borrow(val_id, &_span);
     }
 
     // Calculate drops and defers for all scopes we're exiting (to function root)
@@ -1199,6 +1203,10 @@ impl<'a> HirOwnershipChecker<'a> {
         self.try_consume(source_def, span.clone());
       } else if let Some(owner_def) = self.get_moved_field_owner(scrutinee) {
         self.drop_suppressed_vars.insert(owner_def);
+      } else {
+        // Neither a variable nor a field of one we own: the only remaining source is a
+        // field behind a reference, which cannot be moved out of at all.
+        self.reject_move_out_of_borrow(scrutinee, &span);
       }
     } else if let Some(source_def) = self.get_moved_var(scrutinee) {
       self.try_consume(source_def, span.clone());
@@ -1231,6 +1239,10 @@ impl<'a> HirOwnershipChecker<'a> {
 
       if self.reachable {
         self.check_node(arm.body);
+
+        // The arm's value flows out of the match, so producing it from a field behind a
+        // reference moves out of a borrow just as a `let` or `return` would.
+        self.reject_move_out_of_borrow(arm.body, &span);
       }
 
       // Schedule drops for arm pattern bindings that are still valid at arm body end.
@@ -2053,6 +2065,52 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::FieldAccess { base, .. } => self.get_moved_var(*base).or_else(|| self.get_moved_field_owner(*base)),
       _ => None,
     }
+  }
+
+  /// Whether `hir_id` reads a field through a reference rather than out of a value we own.
+  ///
+  /// Auto-deref lowers `borrowed.field` to a `FieldAccess` over an explicit `Dereference`,
+  /// so the base still says whether the place was borrowed. Nothing else records it: the
+  /// field access itself carries no such flag, which is why moving out of a borrow went
+  /// unreported.
+  fn field_base_is_borrowed(
+    &self,
+    hir_id: HIRId,
+  ) -> bool {
+    match &self.hir.get(hir_id).kind {
+      HIRKind::FieldAccess { base, .. } => match &self.hir.get(*base).kind {
+        HIRKind::Dereference(inner) => {
+          matches!(self.types.get(&self.hir.get(*inner).type_id), Type::Reference { .. }) || self.field_base_is_borrowed(*inner)
+        },
+        _ => self.field_base_is_borrowed(*base),
+      },
+      _ => false,
+    }
+  }
+
+  /// Report a move whose source is a field reached through a reference.
+  ///
+  /// Only owned values matter: a `Copy` field is read, not moved, and the borrow survives.
+  /// A raw pointer dereference is deliberately excluded — auto-deref only synthesises
+  /// `Dereference` for references, and moving through a raw pointer is a separate question.
+  fn reject_move_out_of_borrow(
+    &mut self,
+    hir_id: HIRId,
+    span: &Span,
+  ) {
+    if !self.field_base_is_borrowed(hir_id) {
+      return;
+    }
+
+    let moved_type = self.hir.get(hir_id).type_id;
+
+    if !self.types.needs_drop_with_defs(&moved_type, self.defs) {
+      return;
+    }
+
+    self
+      .diagnostics
+      .push(DiagnosticMessage::CannotMoveOutOfBorrowedValue { span: span.clone() }.report());
   }
 
   fn pattern_moves_owned_value(
