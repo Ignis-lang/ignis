@@ -577,6 +577,30 @@ export namespace Analyzer {
       };
     }
 
+    /// Copies a `Vector<DefinitionId>` element-by-element. `Vector` has no
+    /// `clone()`, and matching a `&Definition` binds its payload by reference,
+    /// so rebuilding a definition for `DefinitionStore::replace` must copy the
+    /// id vectors out instead of moving them from the borrowed entry (mirrors
+    /// `Analyzer::Typecheck::copyDefinitionIdVector`).
+    function copyDefinitionIdVector(
+      source: &Vector<Analyzer::DefinitionId>
+    ): Vector<Analyzer::DefinitionId> {
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+
+      while (index < source.length()) {
+        let Option::SOME(defId) = source.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        out.push(*defId);
+        index += 1;
+      }
+
+      return out;
+    }
+
     /// Patch `FunctionDef.returnType` at `fnDefId` via `DefinitionStore::replace`.
     function patchReturnType(
       defStore: &mut Analyzer::DefinitionStore,
@@ -592,8 +616,8 @@ export namespace Analyzer {
           let updated: Analyzer::FunctionDef = Analyzer::FunctionDef {
             name: fn_.name,
             visibility: fn_.visibility,
-            typeParams: fn_.typeParams,
-            params: fn_.params,
+            typeParams: Analyzer::Resolver::copyDefinitionIdVector(&fn_.typeParams),
+            params: Analyzer::Resolver::copyDefinitionIdVector(&fn_.params),
             returnType: typeId,
           };
           let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
@@ -627,8 +651,8 @@ export namespace Analyzer {
             name: method.name,
             visibility: method.visibility,
             owner: method.owner,
-            typeParams: method.typeParams,
-            params: method.params,
+            typeParams: Analyzer::Resolver::copyDefinitionIdVector(&method.typeParams),
+            params: Analyzer::Resolver::copyDefinitionIdVector(&method.params),
             returnType: typeId,
             isStatic: method.isStatic,
             selfMutable: method.selfMutable,
@@ -1479,7 +1503,7 @@ export namespace Analyzer {
           let updated: Analyzer::TypeAliasDef = Analyzer::TypeAliasDef {
             name: old.name,
             visibility: old.visibility,
-            typeParams: old.typeParams,
+            typeParams: Analyzer::Resolver::copyDefinitionIdVector(&old.typeParams),
             aliasedType: resolved,
             typeId: old.typeId,
           };
