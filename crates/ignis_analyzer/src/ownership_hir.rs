@@ -1212,6 +1212,14 @@ impl<'a> HirOwnershipChecker<'a> {
       self.try_consume(source_def, span.clone());
     }
 
+    // Matching a place that belongs to something else — a field, an element, a
+    // dereference — binds the payload without taking ownership of it. The bytes are still
+    // the base's, and its own schedule frees them; dropping them here frees them twice.
+    let scrutinee_aliases_external_storage = matches!(
+      self.hir.get(scrutinee).kind,
+      HIRKind::FieldAccess { .. } | HIRKind::Index { .. } | HIRKind::Dereference(_) | HIRKind::StaticAccess { .. }
+    );
+
     let pre_match_reachable = self.reachable;
     let pre_match_state = self.states.clone();
 
@@ -1271,7 +1279,7 @@ impl<'a> HirOwnershipChecker<'a> {
       // leak rather than be freed early.
       let body_is_literal = matches!(self.hir.get(arm.body).kind, HIRKind::Literal(_));
 
-      if !pattern_drops.is_empty() && !body_is_literal {
+      if !pattern_drops.is_empty() && !body_is_literal && !scrutinee_aliases_external_storage {
         self
           .schedules
           .on_match_arm_end
