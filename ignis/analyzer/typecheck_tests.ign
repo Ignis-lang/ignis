@@ -8672,7 +8672,7 @@ function typecheckAddTryExpr(
   }));
 }
 
-/// Add `function useTry(r: <paramTypeName>): <returnType annotation> { r?; return r; }`
+/// Add `function useTry(r: <paramTypeName>): <returnType annotation> { r!; return r; }`
 /// and return the try expression id.
 function typecheckAddTryFunction(
   module: &mut Ast::Module,
@@ -8712,7 +8712,7 @@ function typecheckAddTryFunction(
   return tryExpr;
 }
 
-/// Scenario: `r?` on a `@lang(try)` enum inside a function returning that same
+/// Scenario: `r!` on a `@lang(try)` enum inside a function returning that same
 /// enum typechecks without diagnostics. The expression's type is the ok
 /// variant's payload, which is still the VOID sentinel until variant payload
 /// types are resolved (ADR-R5); the try arm picks the real type up unchanged
@@ -8734,7 +8734,7 @@ function typecheckTryOnTryEnumInMatchingFunctionHappyPath(): void {
   assertExprType(&output, tryExpr, typeStore.intern(Analyzer::Type::VOID));
 }
 
-/// Scenario: `r?` on an enum without `@lang(try)` is rejected — the operator
+/// Scenario: `r!` on an enum without `@lang(try)` is rejected — the operator
 /// has no ok/err variants to unwrap and propagate.
 /// Spec: IGN-115 — A0078.
 @test
@@ -8752,7 +8752,7 @@ function typecheckTryOnNonTryEnumProducesDiagnostic(): void {
   assertSingleDiagnosticCode(&output, DiagnosticCode::TRY_ON_NON_TRY_TYPE);
 }
 
-/// Scenario: `r?` inside a function whose return type is not a `@lang(try)`
+/// Scenario: `r!` inside a function whose return type is not a `@lang(try)`
 /// enum is rejected — the propagated error has nowhere to go.
 /// Spec: IGN-115 — A0079.
 @test
@@ -8798,7 +8798,7 @@ function typecheckTryInNonTryReturningFunctionProducesDiagnostic(): void {
   assertSingleDiagnosticCode(&output, DiagnosticCode::TRY_RETURN_TYPE_MISMATCH);
 }
 
-/// Scenario: `r?` on one `@lang(try)` enum inside a function returning a
+/// Scenario: `r!` on one `@lang(try)` enum inside a function returning a
 /// DIFFERENT `@lang(try)` enum is rejected — the error variant cannot be
 /// re-wrapped into an unrelated enum. The shared helper's `return r` also
 /// mismatches the declared return type, so this scenario carries a second,

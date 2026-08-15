@@ -1581,9 +1581,7 @@ export namespace Analyzer {
       typeStore: &mut Analyzer::TypeStore,
       typeId: Analyzer::TypeId,
     ): Option<Analyzer::Typecheck::TryEnumDecomposition> {
-      let Option::SOME(typeNode) = typeStore.get(typeId) else {
-        return Option::NONE;
-      };
+      let typeNode: &Analyzer::Type = typeStore.get(typeId)!;
 
       match (typeNode) {
         Analyzer::Type::Enum(defId) -> {
@@ -1612,9 +1610,7 @@ export namespace Analyzer {
       defStore: &mut Analyzer::DefinitionStore,
       enumDefId: Analyzer::DefinitionId,
     ): Option<Analyzer::Typecheck::TryEnumParts> {
-      let Option::SOME(def) = defStore.get(enumDefId) else {
-        return Option::NONE;
-      };
+      let def: &Analyzer::Definition = defStore.get(enumDefId)!;
 
       match (def) {
         Analyzer::Definition::Enum(enum_) -> {
@@ -1637,8 +1633,8 @@ export namespace Analyzer {
       @panic("unreachable: tryEnumParts match did not return");
     }
 
-    /// Types a `?` expression: the operand must be a try-capable enum, the
-    /// enclosing function's return type must be the same enum with an equal
+    /// Types a postfix `!` expression: the operand must be a try-capable enum,
+    /// the enclosing function's return type must be the same enum with an equal
     /// error payload (the error propagates unchanged), and the expression's
     /// own type is the operand's ok payload. Mirrors stage0 `typecheck_try`.
     function checkTryExpr(
@@ -1650,21 +1646,17 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       value: &Ast::Expression::Try,
     ): Option<Analyzer::TypeId> {
-      let Option::SOME(operandType) = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression) else {
-        return Option::NONE;
-      };
+      let operandType: Analyzer::TypeId = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression)!;
 
-      let Option::SOME(operandView) = Analyzer::Typecheck::requireTryEnumView(
+      let operandView: Analyzer::Typecheck::TryEnumView = Analyzer::Typecheck::requireTryEnumView(
         state,
         defStore,
         typeStore,
         value.span,
         operandType,
         DiagnosticCode::TRY_ON_NON_TRY_TYPE,
-        "the `?` operator requires a `@lang(try)` enum operand",
-      ) else {
-        return Option::NONE;
-      };
+        "the `!` operator requires a `@lang(try)` enum operand",
+      )!;
 
       let returnViewOpt: Option<Analyzer::Typecheck::TryEnumView> = Analyzer::Typecheck::requireTryEnumView(
         state,
@@ -1673,7 +1665,7 @@ export namespace Analyzer {
         value.span,
         state.currentReturnType,
         DiagnosticCode::TRY_RETURN_TYPE_MISMATCH,
-        "`?` propagates its error to the caller, so the enclosing function must return a `@lang(try)` enum",
+        "`!` propagates its error to the caller, so the enclosing function must return a `@lang(try)` enum",
       );
 
       if (let Option::SOME(returnView) = returnViewOpt) {
@@ -1682,7 +1674,7 @@ export namespace Analyzer {
             state,
             value.span,
             DiagnosticCode::TRY_RETURN_TYPE_MISMATCH,
-            "`?` propagates its error to the caller, so the enclosing function must return the operand's `@lang(try)` enum",
+            "`!` propagates its error to the caller, so the enclosing function must return the operand's `@lang(try)` enum",
           );
         } else if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, operandView.errType, returnView.errType)) {
           Analyzer::Typecheck::emitDiagnostic(
@@ -2067,9 +2059,7 @@ export namespace Analyzer {
           return Option::SOME(placeholderType);
         },
         Ast::Expression::Node::Try(value) -> {
-          let Option::SOME(tryType) = Analyzer::Typecheck::checkTryExpr(state, defStore, typeStore, symbols, module, resolvedBodies, &value) else {
-            return Option::NONE;
-          };
+          let tryType: Analyzer::TypeId = Analyzer::Typecheck::checkTryExpr(state, defStore, typeStore, symbols, module, resolvedBodies, &value)!;
 
           Analyzer::Typecheck::recordExprType(state, exprId, tryType);
           return Option::SOME(tryType);
