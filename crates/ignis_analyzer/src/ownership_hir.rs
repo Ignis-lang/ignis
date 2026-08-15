@@ -103,6 +103,11 @@ pub struct HirOwnershipChecker<'a> {
   /// Variables whose storage contains a field moved out by value.
   drop_suppressed_vars: HashSet<DefinitionId>,
 
+  /// Bindings introduced by destructuring a borrowed scrutinee. Their bytes still
+  /// live in the referenced storage, so moving a non-copy field out of them is a
+  /// move out of a borrow even though the binding's own type is not a reference.
+  borrowed_pattern_bindings: HashSet<DefinitionId>,
+
   /// Pre-computed summaries: which parameters each function/method drops.
   /// Built by `build_summaries()` before the main analysis pass.
   summaries: HashMap<DefinitionId, FunctionDropSummary>,
@@ -133,6 +138,7 @@ impl<'a> HirOwnershipChecker<'a> {
       reachable: true,
       loop_continue_stack: Vec::new(),
       drop_suppressed_vars: HashSet::new(),
+      borrowed_pattern_bindings: HashSet::new(),
       summaries: HashMap::new(),
     }
   }
@@ -586,6 +592,7 @@ impl<'a> HirOwnershipChecker<'a> {
     self.reachable = true;
     self.loop_continue_stack.clear();
     self.drop_suppressed_vars.clear();
+    self.borrowed_pattern_bindings.clear();
     self.current_fn = Some(fn_def_id);
 
     // Push function root scope (no block_hir_id)
@@ -1199,7 +1206,11 @@ impl<'a> HirOwnershipChecker<'a> {
       .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
 
     if moves_scrutinee_payload {
-      if let Some(source_def) = self.get_moved_var(scrutinee) {
+      if self.field_base_is_borrowed(scrutinee) {
+        // A borrowed base wins over field-owner drop suppression: suppressing the
+        // owner's drop would silently accept a move out of storage we do not own.
+        self.reject_move_out_of_borrow(scrutinee, &span);
+      } else if let Some(source_def) = self.get_moved_var(scrutinee) {
         self.try_consume(source_def, span.clone());
       } else if let Some(owner_def) = self.get_moved_field_owner(scrutinee) {
         self.drop_suppressed_vars.insert(owner_def);
@@ -1220,6 +1231,8 @@ impl<'a> HirOwnershipChecker<'a> {
       HIRKind::FieldAccess { .. } | HIRKind::Index { .. } | HIRKind::Dereference(_) | HIRKind::StaticAccess { .. }
     );
 
+    let bindings_borrow_payloads = self.scrutinee_binds_borrowed_payloads(scrutinee);
+
     let pre_match_reachable = self.reachable;
     let pre_match_state = self.states.clone();
 
@@ -1239,6 +1252,10 @@ impl<'a> HirOwnershipChecker<'a> {
 
       for &def in &arm_pattern_defs {
         self.states.insert(def, OwnershipState::Valid);
+      }
+
+      if bindings_borrow_payloads {
+        self.borrowed_pattern_bindings.extend(arm_pattern_defs.iter().copied());
       }
 
       if let Some(guard_id) = arm.guard {
@@ -1279,7 +1296,11 @@ impl<'a> HirOwnershipChecker<'a> {
       // leak rather than be freed early.
       let body_is_literal = matches!(self.hir.get(arm.body).kind, HIRKind::Literal(_));
 
-      if !pattern_drops.is_empty() && !body_is_literal && !scrutinee_aliases_external_storage {
+      if !pattern_drops.is_empty()
+        && !body_is_literal
+        && !scrutinee_aliases_external_storage
+        && !bindings_borrow_payloads
+      {
         self
           .schedules
           .on_match_arm_end
@@ -2129,7 +2150,32 @@ impl<'a> HirOwnershipChecker<'a> {
           matches!(self.types.get(&self.hir.get(*inner).type_id), Type::Reference { .. })
             || self.field_base_is_borrowed(*inner)
         },
+        HIRKind::Variable(def_id) => self.borrowed_pattern_bindings.contains(def_id),
         _ => self.field_base_is_borrowed(*base),
+      },
+      _ => false,
+    }
+  }
+
+  /// Whether destructuring this scrutinee binds payloads that still live in borrowed
+  /// storage. A reference-typed scrutinee borrows by construction (patterns match
+  /// through the reference without taking ownership); a binding produced by such a
+  /// destructure carries the borrow forward, as does a place reached through one.
+  fn scrutinee_binds_borrowed_payloads(
+    &self,
+    scrutinee: HIRId,
+  ) -> bool {
+    let node = self.hir.get(scrutinee);
+
+    if matches!(self.types.get(&node.type_id), Type::Reference { .. }) {
+      return true;
+    }
+
+    match &node.kind {
+      HIRKind::Variable(def_id) => self.borrowed_pattern_bindings.contains(def_id),
+      HIRKind::FieldAccess { .. } => self.field_base_is_borrowed(scrutinee),
+      HIRKind::Dereference(inner) => {
+        matches!(self.types.get(&self.hir.get(*inner).type_id), Type::Reference { .. })
       },
       _ => false,
     }

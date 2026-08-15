@@ -461,6 +461,53 @@ function main(): i32 {
 }
 
 #[test]
+fn cannot_move_field_out_of_binding_destructured_from_reference() {
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+record ExportItem {
+    public source: Source;
+}
+
+enum Node {
+    Export(ExportItem),
+    Nothing,
+}
+
+function readSource(item: &Node): i32 {
+    return match (item) {
+        Node::Export(exportItem) -> match (exportItem.source) {
+            Source::SOME(path) -> path.value,
+            Source::NONE -> 0,
+        },
+        Node::Nothing -> 0,
+    };
+}
+
+function main(): i32 {
+    let node: Node = Node::Export(ExportItem { source: Source::SOME(Payload { value: 42 }) });
+    return readSource(&node);
+}
+"#,
+    "A0186", // CannotMoveOutOfBorrowedValue
+    27,
+  );
+}
+
+#[test]
 fn match_guard_must_be_boolean() {
   common::assert_diagnostic_at_line(
     r#"
