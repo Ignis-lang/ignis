@@ -2118,7 +2118,8 @@ impl<'a> HirOwnershipChecker<'a> {
     match &self.hir.get(hir_id).kind {
       HIRKind::FieldAccess { base, .. } => match &self.hir.get(*base).kind {
         HIRKind::Dereference(inner) => {
-          matches!(self.types.get(&self.hir.get(*inner).type_id), Type::Reference { .. }) || self.field_base_is_borrowed(*inner)
+          matches!(self.types.get(&self.hir.get(*inner).type_id), Type::Reference { .. })
+            || self.field_base_is_borrowed(*inner)
         },
         _ => self.field_base_is_borrowed(*base),
       },
