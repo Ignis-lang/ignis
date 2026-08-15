@@ -1,0 +1,155 @@
+name: Nightly
+
+# Chained to CI rather than triggered by the push directly. Both would fire on
+# the same commit, and re-running the gates here would repeat a selfhost job
+# that already takes the better part of an hour. Waiting for the CI run also
+# means a nightly asset only ever comes from a commit that passed every gate.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches:
+      - main
+    types:
+      - completed
+  workflow_dispatch:
+
+# Unlike CI, an in-flight nightly is left to finish. The run force-moves a tag
+# and rewrites one release's assets, so two runs racing on the same rolling
+# release can interleave a delete from one with an upload from the other.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Kept in step with the flake and with ci.yml. A floating channel makes a red
+  # run here mean something different from a red run on a developer machine.
+  RUST_NIGHTLY: nightly-2026-04-22
+
+jobs:
+  release:
+    name: Publish rolling nightly
+    # A failed or cancelled CI run publishes nothing. `workflow_dispatch` has no
+    # originating run, so it is allowed through on its own.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # `workflow_run` starts from the default branch, which may already have
+          # moved on. Build the commit CI actually verified.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-linux-amd64
+          cache-targets: true
+          cache-on-failure: true
+
+      # `.cargo/config.toml` selects mold for the Linux targets, so it has to be
+      # present before any cargo invocation links.
+      - name: Install mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
+
+      - name: Build the C runtime archive
+        run: make -C std/runtime
+
+      - name: Build Ignis
+        run: cargo build --release --locked -p ignis
+
+      - name: Create package
+        run: |
+          mkdir -p pkg/scripts
+
+          cp target/release/ignis pkg/ignis
+          chmod +x pkg/ignis
+
+          cp -r std pkg/std
+          cp scripts/install.sh pkg/scripts/
+          cp scripts/uninstall.sh pkg/scripts/
+          cp scripts/PKGBUILD pkg/scripts/
+          chmod +x pkg/scripts/install.sh pkg/scripts/uninstall.sh
+
+      - name: Create tar archive
+        run: tar -czf ignis-nightly-linux-amd64.tar.gz -C pkg .
+
+      - name: Generate checksum
+        run: sha256sum ignis-nightly-linux-amd64.tar.gz > ignis-nightly-linux-amd64.tar.gz.sha256
+
+      - name: Compose release body
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DATE=$(date -u '+%Y-%m-%d')
+          cat > release_body.md <<EOF
+          > **Nightly build** — produced from \`main\` on every green CI run.
+          > Assets are replaced on each run, so a download is only reproducible
+          > against the commit named below.
+          >
+          > Commit: \`${SHORT_SHA}\` — ${DATE}
+          EOF
+
+      - name: Move the nightly tag to this commit
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git tag -f nightly HEAD
+          git push origin nightly --force
+
+      - name: Prune the previous nightly assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # The release is reused rather than deleted, so its old assets have to
+          # go explicitly or they accumulate under names that no longer match the
+          # commit. A missing release is the first run, not an error.
+          RELEASE_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" 2>/dev/null || true)
+          if [ -z "$RELEASE_JSON" ]; then
+            echo "No nightly release yet; nothing to prune."
+            exit 0
+          fi
+
+          ASSET_IDS=$(jq -r '.assets[]?.id // empty' <<<"$RELEASE_JSON")
+          if [ -z "$ASSET_IDS" ]; then
+            echo "Nightly release has no assets to prune."
+            exit 0
+          fi
+
+          while IFS= read -r ASSET_ID; do
+            [ -n "$ASSET_ID" ] || continue
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${ASSET_ID}"
+          done <<<"$ASSET_IDS"
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: nightly
+          name: Ignis Nightly
+          body_path: release_body.md
+          prerelease: true
+          files: |
+            ignis-nightly-linux-amd64.tar.gz
+            ignis-nightly-linux-amd64.tar.gz.sha256

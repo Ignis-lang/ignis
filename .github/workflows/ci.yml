@@ -12,7 +12,11 @@ on:
 # the queue.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # On a branch, a newer push makes the in-flight run obsolete and cancelling it
+  # frees the queue. On `main` it does the opposite: the superseded commit is
+  # already merged, so cancelling leaves it permanently unverified, and the
+  # nightly release chained to this workflow never fires for it.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -49,6 +53,13 @@ jobs:
           cache-targets: true
           cache-on-failure: true
 
+      # `.cargo/config.toml` selects mold for the Linux targets, so it has to be
+      # present before any cargo invocation links.
+      - name: Install mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
+
       # `std/runtime/libignis_rt.a` is a build artifact excluded by .gitignore, so a
       # clean checkout does not have it. Anything that links Ignis output needs it,
       # which on a developer machine is satisfied by an archive built months ago.
@@ -63,10 +74,21 @@ jobs:
       - name: Lint
         run: cargo clippy --all-targets --workspace --locked -- -D warnings
 
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       # End-to-end and codegen tests compile generated C, so the runner's gcc is
-      # part of the contract.
+      # part of the contract. nextest runs one process per test and reports every
+      # failure, where `cargo test` stops at the first failing target — a run that
+      # aborted after two of twenty-six targets looks green at a glance.
       - name: Test
-        run: cargo test --workspace --locked --no-fail-fast
+        run: cargo nextest run --workspace --locked --no-fail-fast
+
+      # nextest cannot run doctests, so they stay on the built-in harness.
+      - name: Doctests
+        run: cargo test --doc --workspace --locked
 
   selfhost:
     name: Selfhost gates
@@ -93,6 +115,13 @@ jobs:
           shared-key: "ci-selfhost"
           cache-targets: true
           cache-on-failure: true
+
+      # `.cargo/config.toml` selects mold for the Linux targets, so it has to be
+      # present before any cargo invocation links.
+      - name: Install mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
 
       - name: Build the C runtime archive
         run: make -C std/runtime

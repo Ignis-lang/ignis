@@ -34,6 +34,10 @@ let
     nativeBuildInputs = with pkgs; [
       makeWrapper
       pkg-config
+      # `.cargo/config.toml` selects mold for the Linux targets, and that file
+      # applies to this build too. Shipping the linker is less brittle than
+      # patching the config away, and it speeds the release build up as well.
+      mold
     ];
 
     doCheck = false;

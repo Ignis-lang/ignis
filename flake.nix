@@ -24,7 +24,11 @@
           overlays = [ (import rust-overlay) ];
         };
 
-        rustToolchain = pkgs.pkgsBuildHost.rust-bin.nightly.latest.default.override {
+        # Pinned to the exact date ci.yml installs. `nightly.latest` floats, so
+        # the shell and CI drifted apart silently and a lint that existed in only
+        # one of them decided whether a run was red. Moving this means moving
+        # RUST_NIGHTLY in ci.yml and nightly.yml in the same commit.
+        rustToolchain = pkgs.pkgsBuildHost.rust-bin.nightly."2026-04-22".default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
         };
 
@@ -59,6 +63,17 @@
               pkgs.git
               pkgs.pkg-config
               rustToolchain
+              # Selected for the Linux targets by `.cargo/config.toml`; without
+              # it on PATH every link fails.
+              pkgs.mold
+              # Process-per-test runner. Prefer `cargo nextest run` over
+              # `cargo test`: it reports every failing target instead of
+              # stopping at the first, which matters for a suite whose e2e
+              # tests each shell out to gcc. Doctests are not covered — those
+              # still need `cargo test --doc`.
+              pkgs.cargo-nextest
+              # Lints the workflows the same way CI does.
+              pkgs.actionlint
             ];
 
           shellHook = ''
