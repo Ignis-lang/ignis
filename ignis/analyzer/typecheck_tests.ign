@@ -1,6 +1,6 @@
 import Test from "std::test";
 
-import DiagnosticCode, Severity, SourceSpan from "@compiler::diagnostics";
+import DiagnosticBag, DiagnosticCode, Severity, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 
@@ -737,6 +737,49 @@ function assertSingleDiagnostic(output: &Analyzer::AnalyzerOutput, code: str, me
   };
   Test::assertEq<str>(diagnostic.code, code);
   Test::assertEq<str>(diagnostic.messageText(), message);
+}
+
+/// Same as `assertContainsDiagnosticCode`, over the whole run's diagnostics rather
+/// than typecheck's own — for cases an earlier phase is expected to have caught.
+function assertContainsDiagnosticCodeInBag(bag: &DiagnosticBag, code: str): void {
+  let expected: String = String::create(code);
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (expected.equals(diagnostic.code)) {
+      return;
+    }
+
+    index += 1;
+  }
+
+  @panic("assertContainsDiagnosticCodeInBag: no diagnostic with the expected code");
+}
+
+/// For scenarios whose point is that a particular diagnostic is NOT reached.
+/// Pair it with a positive assertion: on its own it also passes when nothing
+/// was checked at all.
+function assertLacksDiagnosticCode(output: &Analyzer::AnalyzerOutput, code: str): void {
+  let unwanted: String = String::create(code);
+  let mut index: u64 = 0;
+
+  while (index < output.typecheck.diagnostics.length()) {
+    let Option::SOME(diagnostic) = output.typecheck.diagnostics.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (unwanted.equals(diagnostic.code)) {
+      @panic("assertLacksDiagnosticCode: found the diagnostic that should not be there");
+    }
+
+    index += 1;
+  }
 }
 
 /// For scenarios that necessarily produce more than one diagnostic, where only
@@ -7952,11 +7995,13 @@ function typecheckPipePlaceholderInsideLambdaDoesNotBindToPipe(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  // The lambda hides its `_` from the count, so the pipe takes the implicit path and
-  // reports the lambda itself as unsupported. The `_` is never reached: were it counted,
-  // the pipe would instead reject the lambda as a right side that cannot hold a
-  // placeholder, which is what pins the boundary.
-  assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support pipes into a lambda written in place");
+  // The lambda hides its `_` from the count, so the pipe takes the implicit path: the
+  // lambda takes no parameters and the piped value has nowhere to land, which is the
+  // arity report. Were the `_` counted instead, the pipe would have rejected the lambda
+  // as a right side that cannot hold a placeholder — that absence is what pins the
+  // boundary, and it survives the lambda wall being lifted.
+  assertContainsDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+  assertLacksDiagnosticCode(&output, DiagnosticCode::PIPE_PLACEHOLDER_NOT_IN_CALL);
 }
 
 /// Scenario: `1 |> _ + 2` is rejected — a `_` outside anything that takes arguments names
@@ -8818,4 +8863,434 @@ function typecheckTryAcrossDifferentTryEnumsProducesDiagnostic(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertContainsDiagnosticCode(&output, DiagnosticCode::TRY_RETURN_TYPE_MISMATCH);
+}
+
+/// Add `(<paramName>: <paramType>) -> <returnType> { return <body>; }`.
+function typecheckAddUnaryLambda(
+  module: &mut Ast::Module,
+  paramName: str,
+  paramType: Ast::TypeId,
+  returnType: Ast::TypeId,
+  body: Ast::StatementId,
+): Ast::ExpressionId {
+  let param: Ast::PatternId = typecheckAddAnnotatedBinding(module, paramName, paramType);
+
+  let mut parameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  parameters.push(param);
+
+  let mut moduleRef: &mut Ast::Module = module;
+
+  return moduleRef.addExpression(Ast::Expression::Node::Lambda(Ast::Expression::Lambda {
+    span: typecheckDummySpan(),
+    parameters: parameters,
+    returnType: Option::SOME(returnType),
+    body: body,
+  }));
+}
+
+/// Add `record R { <methodName>(self, v: i32): i32 { return v; } }`, or its static
+/// counterpart when `isStatic` — a static method declares no `self` parameter.
+function typecheckAddRecordWithI32Method(
+  module: &mut Ast::Module,
+  recordName: str,
+  methodName: str,
+  isStatic: boolean,
+): void {
+  let i32Type: Ast::TypeId = typecheckAddPathType(module, "i32");
+
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(module, "v");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(module, valueExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let methodBody: Ast::StatementId = typecheckAddBlock(module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+
+  if (!isStatic) {
+    params.push(typecheckAddBinding(module, "self"));
+  }
+
+  params.push(typecheckAddAnnotatedBinding(module, "v", typecheckAddPathType(module, "i32")));
+
+  let mut moduleRef: &mut Ast::Module = module;
+  let methodId: Ast::ItemId = moduleRef.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create(methodName),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32Type),
+    body: methodBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  let mut moduleRootRef: &mut Ast::Module = module;
+  moduleRootRef.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create(recordName),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Scenario: `1 |> (v: i32) -> i32` types the pipe as the lambda's return type and
+/// checks the piped value against the lambda's only parameter.
+/// Spec: IGN-116 — pipes into a lambda written in place.
+@test
+function typecheckPipeIntoLambdaWrittenInPlaceHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+
+  let lambdaValue: Ast::ExpressionId = typecheckAddVariable(&mut module, "v");
+  let lambdaRet: Ast::StatementId = typecheckAddReturnExpr(&mut module, lambdaValue);
+  let mut lambdaStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  lambdaStmts.push(lambdaRet);
+  let lambdaBody: Ast::StatementId = typecheckAddBlock(&mut module, lambdaStmts);
+
+  let lambdaExpr: Ast::ExpressionId = typecheckAddUnaryLambda(
+    &mut module,
+    "v",
+    typecheckAddPathType(&mut module, "i32"),
+    typecheckAddPathType(&mut module, "i32"),
+    lambdaBody,
+  );
+
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, lambdaExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, pipeExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: `1 |> () -> i32` has nowhere to put the piped value, so the arity is
+/// reported rather than the value silently dropped.
+/// Spec: IGN-116 — pipes into a lambda written in place.
+@test
+function typecheckPipeIntoNullaryLambdaReportsArity(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+
+  let lambdaLiteral: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 2);
+  let lambdaRet: Ast::StatementId = typecheckAddReturnExpr(&mut module, lambdaLiteral);
+  let mut lambdaStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  lambdaStmts.push(lambdaRet);
+  let lambdaBody: Ast::StatementId = typecheckAddBlock(&mut module, lambdaStmts);
+
+  let lambdaExpr: Ast::ExpressionId = typecheckAddNullaryLambda(
+    &mut module,
+    typecheckAddPathType(&mut module, "i32"),
+    lambdaBody,
+  );
+
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, lambdaExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+}
+
+/// Scenario: `v |> r.m` calls the instance method with the piped value as its only
+/// explicit argument, so the pipe takes the method's return type.
+/// Spec: IGN-116 — pipes into a method.
+@test
+function typecheckPipeIntoInstanceMethodHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddRecordWithI32Method(&mut module, "R", "m", false);
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "r", recordType);
+
+  let receiverExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "r");
+  let memberExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, receiverExpr, "m");
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, memberExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(rParam);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useMethodPipe"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32TypeId),
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, pipeExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: piping into a static method reached through an instance receiver is a
+/// calling-convention mistake, not an unknown member.
+/// Spec: IGN-116 — pipes into a method.
+@test
+function typecheckPipeIntoStaticMethodThroughInstanceIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddRecordWithI32Method(&mut module, "R", "m", true);
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "r", recordType);
+
+  let receiverExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "r");
+  let memberExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, receiverExpr, "m");
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, memberExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(rParam);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useStaticThroughInstance"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32TypeId),
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::METHOD_CALL_KIND_MISMATCH);
+}
+
+/// Scenario: piping into a mutating method whose receiver is an immutable binding is
+/// rejected — a pipe is a call, and it does not grant mutability the receiver lacks.
+/// Spec: IGN-116 — pipes into a method.
+@test
+function typecheckPipeIntoMutatingMethodOnImmutableReceiverIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record R { m(&mut self, v: i32): i32 { return v; } }
+  let i32MethodType: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let methodValue: Ast::ExpressionId = typecheckAddVariable(&mut module, "v");
+  let methodRet: Ast::StatementId = typecheckAddReturnExpr(&mut module, methodValue);
+  let mut methodStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  methodStmts.push(methodRet);
+  let methodBody: Ast::StatementId = typecheckAddBlock(&mut module, methodStmts);
+
+  let mut methodParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  methodParams.push(typecheckAddSelfReceiverPattern(&mut module, true));
+  methodParams.push(typecheckAddAnnotatedBinding(&mut module, "v", typecheckAddPathType(&mut module, "i32")));
+
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("m"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: methodParams,
+    returnType: Option::SOME(i32MethodType),
+    body: methodBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function useImmutableReceiver(r: R): i32 { return 1 |> r.m; }
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "r", recordType);
+
+  let receiverExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "r");
+  let memberExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, receiverExpr, "m");
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, memberExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(rParam);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useImmutableReceiver"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32TypeId),
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::MUTABILITY_VIOLATION);
+}
+
+/// Scenario: `1 |> R::m` naming an instance method is rejected, and the rejection comes
+/// from name resolution rather than typecheck: `resolvePathTail` reports that the method
+/// requires a receiver and resolves the path to `Unresolved`, so the pipe's callee path
+/// never sees an instance method at all. This pins that the case stays covered as the
+/// pipe walls come down — a guard in typecheck would be unreachable code.
+/// Spec: IGN-116 — pipes into a method.
+@test
+function typecheckPipeIntoInstanceMethodByPathIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddRecordWithI32Method(&mut module, "R", "m", false);
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+
+  let calleePath: Ast::ExpressionId = typecheckAddPathExpr2(&mut module, "R", "m");
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, calleePath);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertContainsDiagnosticCodeInBag(&output.diagnostics, DiagnosticCode::METHOD_CALL_KIND_MISMATCH);
+  assertLacksDiagnosticCode(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT);
+}
+
+/// Scenario: `1 |> r.m` where `m` takes two explicit parameters reports the count once
+/// and the pipe still carries the method's return type, so the `return` that consumes it
+/// type-checks and adds no second diagnostic. Bailing out instead would strip the type
+/// and hide every later mistake in the same expression behind one recompile.
+/// Spec: IGN-116 — pipes into a method.
+@test
+function typecheckPipeIntoMethodWithWrongArityKeepsReturnType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // record R { m(self, a: i32, b: i32): i32 { return a; } }
+  let methodReturnType: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let methodValue: Ast::ExpressionId = typecheckAddVariable(&mut module, "a");
+  let methodRet: Ast::StatementId = typecheckAddReturnExpr(&mut module, methodValue);
+  let mut methodStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  methodStmts.push(methodRet);
+  let methodBody: Ast::StatementId = typecheckAddBlock(&mut module, methodStmts);
+
+  let mut methodParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  methodParams.push(typecheckAddSelfReceiverPattern(&mut module, false));
+  methodParams.push(typecheckAddAnnotatedBinding(&mut module, "a", typecheckAddPathType(&mut module, "i32")));
+  methodParams.push(typecheckAddAnnotatedBinding(&mut module, "b", typecheckAddPathType(&mut module, "i32")));
+
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("m"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: methodParams,
+    returnType: Option::SOME(methodReturnType),
+    body: methodBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function useWrongArity(r: R): i32 { return 1 |> r.m; }
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "r", recordType);
+
+  let receiverExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "r");
+  let memberExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, receiverExpr, "m");
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, memberExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(rParam);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useWrongArity"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32TypeId),
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  // The count is the only complaint: the pipe kept the method's `i32`, so the enclosing
+  // `return` never reports a mismatch against the function's own `i32`.
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+  assertExprType(&output, pipeExpr, typeStore.intern(Analyzer::Type::I32));
 }
