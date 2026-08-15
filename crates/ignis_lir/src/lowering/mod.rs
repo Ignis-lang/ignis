@@ -2241,6 +2241,11 @@ impl<'a> LoweringContext<'a> {
             value: val,
           });
         }
+
+        // After the store: an arm whose value is the binding has already handed it over,
+        // and ownership analysis leaves such a binding out of this schedule.
+        self.emit_match_arm_drops(arm.body);
+
         self.fn_builder().terminate(Terminator::Goto(merge_block));
       }
     }
@@ -2364,6 +2369,11 @@ impl<'a> LoweringContext<'a> {
             value: val,
           });
         }
+
+        // After the store: an arm whose value is the binding has already handed it over,
+        // and ownership analysis leaves such a binding out of this schedule.
+        self.emit_match_arm_drops(arm.body);
+
         self.fn_builder().terminate(Terminator::Goto(merge_block));
       }
     }
@@ -3160,6 +3170,23 @@ impl<'a> LoweringContext<'a> {
       for defer_body_id in defers {
         self.lower_hir_node(defer_body_id);
       }
+    }
+  }
+
+  /// Drop the pattern bindings an arm owns, at the end of that arm.
+  ///
+  /// Kept apart from `emit_scope_end_drops` because a block-bodied arm is lowered by
+  /// `lower_block`, which already drains the block-scope channel for the same HIRId.
+  fn emit_match_arm_drops(
+    &mut self,
+    arm_body: HIRId,
+  ) {
+    let Some(drops) = self.drop_schedules.on_match_arm_end.get(&arm_body) else {
+      return;
+    };
+
+    for def_id in drops.clone() {
+      self.emit_drop_for_def(def_id);
     }
   }
 

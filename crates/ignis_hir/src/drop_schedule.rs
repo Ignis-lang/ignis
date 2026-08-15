@@ -30,6 +30,13 @@ pub struct DropSchedules {
   /// Drops at block end, keyed by Block HIRId.
   pub on_scope_end: HashMap<HIRId, Vec<DefinitionId>>,
 
+  /// Drops for a match arm's pattern bindings, keyed by the arm body's HIRId.
+  ///
+  /// Separate from `on_scope_end` because an arm body may itself be a block, and
+  /// sharing the key would make `lower_block` and the match lowering each emit
+  /// the whole list — one drop scheduled, two drops run.
+  pub on_match_arm_end: HashMap<HIRId, Vec<DefinitionId>>,
+
   /// Drops at early exits (return/break/continue/FnEnd).
   pub on_exit: HashMap<ExitKey, Vec<DefinitionId>>,
 

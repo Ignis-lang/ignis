@@ -1243,6 +1243,15 @@ impl<'a> HirOwnershipChecker<'a> {
         // The arm's value flows out of the match, so producing it from a field behind a
         // reference moves out of a borrow just as a `let` or `return` would.
         self.reject_move_out_of_borrow(arm.body, &span);
+
+        // An arm whose value is one of its own bindings hands that binding to the match
+        // result. Without consuming it here it stays `Valid`, gets scheduled, and the
+        // drop frees storage the result now owns.
+        if let Some(result_def) = self.arm_result_binding(arm.body)
+          && arm_pattern_defs.contains(&result_def)
+        {
+          self.try_consume(result_def, span.clone());
+        }
       }
 
       // Schedule drops for arm pattern bindings that are still valid at arm body end.
@@ -1255,10 +1264,17 @@ impl<'a> HirOwnershipChecker<'a> {
         .copied()
         .collect();
 
-      if !pattern_drops.is_empty() {
+      // A literal arm body neither reads nor consumes the binding, which means the
+      // binding is live somewhere this match cannot see — an `if let` desugars to exactly
+      // this shape, and its `then` branch runs after the arm. Dropping here would free a
+      // value that branch still uses, so the drop is skipped and the value is left to
+      // leak rather than be freed early.
+      let body_is_literal = matches!(self.hir.get(arm.body).kind, HIRKind::Literal(_));
+
+      if !pattern_drops.is_empty() && !body_is_literal {
         self
           .schedules
-          .on_scope_end
+          .on_match_arm_end
           .entry(arm.body)
           .or_default()
           .extend(pattern_drops);
@@ -2064,6 +2080,28 @@ impl<'a> HirOwnershipChecker<'a> {
     match &node.kind {
       HIRKind::FieldAccess { base, .. } => self.get_moved_var(*base).or_else(|| self.get_moved_field_owner(*base)),
       _ => None,
+    }
+  }
+
+  /// The binding an arm hands to the match result, if its value is one directly.
+  ///
+  /// A block-bodied arm yields its tail expression, so the walk follows tails until it
+  /// reaches something that is not a block. Only a bare variable counts: anything built
+  /// from the binding has already consumed or borrowed it through the ordinary paths.
+  fn arm_result_binding(
+    &self,
+    body: HIRId,
+  ) -> Option<DefinitionId> {
+    let mut current = body;
+
+    loop {
+      match &self.hir.get(current).kind {
+        HIRKind::Variable(def_id) => return Some(*def_id),
+        HIRKind::Block {
+          expression: Some(tail), ..
+        } => current = *tail,
+        _ => return None,
+      }
     }
   }
 
