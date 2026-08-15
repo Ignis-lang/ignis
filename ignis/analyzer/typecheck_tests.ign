@@ -739,6 +739,28 @@ function assertSingleDiagnostic(output: &Analyzer::AnalyzerOutput, code: str, me
   Test::assertEq<str>(diagnostic.messageText(), message);
 }
 
+/// For scenarios that necessarily produce more than one diagnostic, where only
+/// one of them is under test.
+function assertContainsDiagnosticCode(output: &Analyzer::AnalyzerOutput, code: str): void {
+  let expected: String = String::create(code);
+  let mut index: u64 = 0;
+
+  while (index < output.typecheck.diagnostics.length()) {
+    let Option::SOME(diagnostic) = output.typecheck.diagnostics.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (expected.equals(diagnostic.code)) {
+      return;
+    }
+
+    index += 1;
+  }
+
+  @panic("assertContainsDiagnosticCode: no diagnostic with the expected code");
+}
+
 @test
 function typecheckConstantAnnotationHappyPath(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
@@ -8590,4 +8612,210 @@ function typecheckAnnotatedUninitializedLetBindsAnnotationType(): void {
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
   assertExprType(&output, xExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// `@lang(try)` metadata for an enum declaration built by hand in a test.
+function typecheckTryMetadata(): Ast::Metadata {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("try"));
+
+  let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  attributes.push(Ast::Attribute {
+    span: typecheckDummySpan(),
+    name: String::create("lang"),
+    arguments: arguments,
+  });
+
+  return Ast::Metadata {
+    attributes: attributes,
+    modifiers: Vector::new<Ast::Modifier>(),
+  };
+}
+
+/// Add `enum <name> { OK(_), ERROR(_) }` with the given metadata. One wildcard
+/// payload slot per variant; payload TYPES stay VOID sentinels (ADR-R5).
+function typecheckAddTwoVariantEnum(
+  module: &mut Ast::Module,
+  name: str,
+  metadata: Ast::Metadata,
+): void {
+  let mut okArgs: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  okArgs.push(typecheckAddWildcardPattern(module));
+  let mut errArgs: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  errArgs.push(typecheckAddWildcardPattern(module));
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddPathPattern(module, "OK", okArgs));
+  variants.push(typecheckAddPathPattern(module, "ERROR", errArgs));
+
+  let mut moduleRef: &mut Ast::Module = module;
+  moduleRef.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: metadata,
+  }));
+}
+
+/// Add `<operand>?`.
+function typecheckAddTryExpr(
+  module: &mut Ast::Module,
+  operand: Ast::ExpressionId,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+
+  return moduleRef.addExpression(Ast::Expression::Node::Try(Ast::Expression::Try {
+    span: typecheckDummySpan(),
+    expression: operand,
+  }));
+}
+
+/// Add `function useTry(r: <paramTypeName>): <returnType annotation> { r!; return r; }`
+/// and return the try expression id.
+function typecheckAddTryFunction(
+  module: &mut Ast::Module,
+  paramTypeName: str,
+  returnTypeName: str,
+): Ast::ExpressionId {
+  let paramType: Ast::TypeId = typecheckAddPathType(module, paramTypeName);
+  let rParam: Ast::PatternId = typecheckAddAnnotatedBinding(module, "r", paramType);
+
+  let operandExpr: Ast::ExpressionId = typecheckAddVariable(module, "r");
+  let tryExpr: Ast::ExpressionId = typecheckAddTryExpr(module, operandExpr);
+  let tryStmt: Ast::StatementId = typecheckAddExprStmt(module, tryExpr);
+
+  let returnValue: Ast::ExpressionId = typecheckAddVariable(module, "r");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(module, returnValue);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(tryStmt);
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(rParam);
+
+  let returnType: Ast::TypeId = typecheckAddPathType(module, returnTypeName);
+  let mut moduleRef: &mut Ast::Module = module;
+  moduleRef.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useTry"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(returnType),
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  return tryExpr;
+}
+
+/// Scenario: `r!` on a `@lang(try)` enum inside a function returning that same
+/// enum typechecks without diagnostics. The expression's type is the ok
+/// variant's payload, which is still the VOID sentinel until variant payload
+/// types are resolved (ADR-R5); the try arm picks the real type up unchanged
+/// once that wall lifts.
+/// Spec: IGN-115 — try expressions.
+@test
+function typecheckTryOnTryEnumInMatchingFunctionHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddTwoVariantEnum(&mut module, "Res", typecheckTryMetadata());
+  let tryExpr: Ast::ExpressionId = typecheckAddTryFunction(&mut module, "Res", "Res");
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, tryExpr, typeStore.intern(Analyzer::Type::VOID));
+}
+
+/// Scenario: `r!` on an enum without `@lang(try)` is rejected — the operator
+/// has no ok/err variants to unwrap and propagate.
+/// Spec: IGN-115 — A0078.
+@test
+function typecheckTryOnNonTryEnumProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddTwoVariantEnum(&mut module, "Plain", Ast::emptyMetadata());
+  typecheckAddTryFunction(&mut module, "Plain", "Plain");
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TRY_ON_NON_TRY_TYPE);
+}
+
+/// Scenario: `r!` inside a function whose return type is not a `@lang(try)`
+/// enum is rejected — the propagated error has nowhere to go.
+/// Spec: IGN-115 — A0079.
+@test
+function typecheckTryInNonTryReturningFunctionProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddTwoVariantEnum(&mut module, "Res", typecheckTryMetadata());
+
+  let paramType: Ast::TypeId = typecheckAddPathType(&mut module, "Res");
+  let rParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "r", paramType);
+
+  let operandExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "r");
+  let tryExpr: Ast::ExpressionId = typecheckAddTryExpr(&mut module, operandExpr);
+  let tryStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, tryExpr);
+
+  let zeroExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 0);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, zeroExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(tryStmt);
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(rParam);
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useTry"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(i32Type),
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TRY_RETURN_TYPE_MISMATCH);
+}
+
+/// Scenario: `r!` on one `@lang(try)` enum inside a function returning a
+/// DIFFERENT `@lang(try)` enum is rejected — the error variant cannot be
+/// re-wrapped into an unrelated enum. The shared helper's `return r` also
+/// mismatches the declared return type, so this scenario carries a second,
+/// unrelated diagnostic by construction.
+/// Spec: IGN-115 — A0079.
+@test
+function typecheckTryAcrossDifferentTryEnumsProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddTwoVariantEnum(&mut module, "ResA", typecheckTryMetadata());
+  typecheckAddTwoVariantEnum(&mut module, "ResB", typecheckTryMetadata());
+  typecheckAddTryFunction(&mut module, "ResA", "ResB");
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::TRY_RETURN_TYPE_MISMATCH);
 }
