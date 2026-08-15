@@ -2824,12 +2824,30 @@ export namespace Analyzer {
           return Option::NONE;
         },
         Ast::Expression::Node::Lambda(_) -> {
-          Analyzer::Typecheck::emitUnsupported(state, pipe.span, "pipes into a lambda written in place");
-          return Option::NONE;
+          return Analyzer::Typecheck::checkPipeLambda(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            pipe,
+            rightExprId,
+            leftType,
+          );
         },
-        Ast::Expression::Node::MemberAccess(_) -> {
-          Analyzer::Typecheck::emitUnsupported(state, pipe.span, "pipes into a method");
-          return Option::NONE;
+        Ast::Expression::Node::MemberAccess(ma) -> {
+          return Analyzer::Typecheck::checkPipeBareMethod(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            pipe,
+            &ma,
+            leftType,
+          );
         },
         _ -> {
           Analyzer::Typecheck::emitPipeRightNotCallable(state, pipe.span);
@@ -2887,12 +2905,15 @@ export namespace Analyzer {
 
       match (resolved) {
         Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> {
-          // A method's first parameter is its receiver, so treating it as an ordinary
-          // function would match the piped value against `self` and skip the receiver
-          // checks the direct call path performs.
-          if (let Option::SOME(calleeDef) = defStore.get(defId)) {
-            if (let Analyzer::Definition::Method(_) = calleeDef) {
-              Analyzer::Typecheck::emitUnsupported(state, span, "pipes into a method");
+          // A path naming a method reaches here as `Type::method`. Only a static one can
+          // be called without a receiver; an instance method piped this way would match
+          // the piped value against `self` and skip the receiver checks the direct call
+          // path performs, so it is refused with the same wording that path uses.
+          let methodInfoOpt: Option<Analyzer::Typecheck::MethodCallInfo> = Analyzer::Typecheck::lookupMethodDefInfo(defStore, defId);
+
+          if (let Option::SOME(methodInfo) = methodInfoOpt) {
+            if (!methodInfo.isStatic) {
+              Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, "instance method calls require a receiver");
               return Option::NONE;
             }
           }
@@ -3058,6 +3079,214 @@ export namespace Analyzer {
       Analyzer::Typecheck::recordExprType(state, pipe.right, signature.returnType);
 
       return Option::SOME(signature.returnType);
+    }
+
+    /// Check the piped value against the single parameter a bare right side takes.
+    ///
+    /// Shared by the lambda and bare-method forms, which differ in how they obtain
+    /// `paramTypes` but agree on what to do with it: an empty parameter list cannot
+    /// receive the value at all, while a list of the wrong length is reported and the
+    /// first parameter still checked, so one arity mistake does not hide a type one.
+    /// Returns false only for the empty case, where there is nothing left to check.
+    function checkPipedValueAgainstFirstParam(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      paramTypes: &Vector<Analyzer::TypeId>,
+      leftType: Analyzer::TypeId,
+    ): boolean {
+      if (paramTypes.length() == 0) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, span, 1, 0);
+        return false;
+      }
+
+      if (paramTypes.length() != 1) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, span, 1, paramTypes.length());
+      }
+
+      let Option::SOME(firstParamType) = paramTypes.get(0) else {
+        return false;
+      };
+
+      let expectedType: Analyzer::TypeId = *firstParamType;
+
+      if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, expectedType, leftType)) {
+        Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, span, expectedType, leftType);
+      }
+
+      return true;
+    }
+
+    /// Type `x |> (v) -> ...`, a lambda written as the right side of a pipe.
+    ///
+    /// The lambda is typed through the ordinary path and its function type destructured;
+    /// nothing is propagated from the piped value into its parameters, so an unannotated
+    /// parameter is resolved by the lambda's own rules. A right side whose type is not a
+    /// function is the same mistake as any other uncallable right side.
+    function checkPipeLambda(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      pipe: &Ast::Expression::Pipe,
+      lambdaExprId: Ast::ExpressionId,
+      leftType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let lambdaType: Analyzer::TypeId = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, lambdaExprId)!;
+
+      let Option::SOME(lambdaTypeNode) = typeStore.get(lambdaType) else {
+        return Option::NONE;
+      };
+
+      let Analyzer::Type::Function(functionType) = lambdaTypeNode else {
+        Analyzer::Typecheck::emitPipeRightNotCallable(state, pipe.span);
+        return Option::NONE;
+      };
+
+      let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&functionType.params);
+      let returnType: Analyzer::TypeId = functionType.returnType;
+
+      if (!Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, &paramTypes, leftType)) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(returnType);
+    }
+
+    /// Type `x |> obj.method`, which calls the method with the piped value as its only
+    /// explicit argument.
+    ///
+    /// Resolution mirrors the direct instance-call path — deref the receiver, require a
+    /// non-generic owner, look the member up among the instance methods, and report a
+    /// static method reached through an instance as a kind mismatch rather than an unknown
+    /// member. The receiver's own mutability is checked here too: piping does not make a
+    /// mutating method callable on an immutable binding.
+    function checkPipeBareMethod(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      pipe: &Ast::Expression::Pipe,
+      ma: &Ast::Expression::MemberAccess,
+      leftType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let objectType: Analyzer::TypeId = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, ma.object)!;
+
+      let receiverType: Analyzer::TypeId = Analyzer::Typecheck::derefReceiverType(defStore, typeStore, objectType);
+
+      let owner: Analyzer::Typecheck::RequiredMethodOwner = Analyzer::Typecheck::requireNonGenericMethodOwner(
+        state,
+        defStore,
+        typeStore,
+        ma.span,
+        receiverType,
+        "method call target must be a non-generic record or enum",
+        "typecheck does not support generic method receivers",
+      )!;
+
+      let memberName: str = ma.member.toStr();
+
+      let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupMethodInTable(defStore, &owner.instanceMethods, memberName, symbols) else {
+        let staticOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
+          defStore,
+          &owner.staticMethods,
+          memberName,
+          symbols,
+        );
+
+        if (staticOpt.isSome()) {
+          let message: String = String::create("static method `").concat(memberName).concat("` cannot be called through an instance");
+          Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, message.toStr());
+          return Option::NONE;
+        }
+
+        Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, ma.span, DiagnosticCode::UNKNOWN_MEMBER, "unknown method", memberName);
+        return Option::NONE;
+      };
+
+      let info: Analyzer::Typecheck::MethodCallInfo = Analyzer::Typecheck::lookupMethodDefInfo(defStore, methodDefId)!;
+
+      if (info.selfMutable) {
+        if (!Analyzer::Typecheck::pipeReceiverIsMutable(state, resolvedBodies, ma.object)) {
+          Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method on immutable receiver");
+          return Option::NONE;
+        }
+      }
+
+      let signature: Analyzer::Typecheck::FunctionSignature = Analyzer::Typecheck::extractFunctionSignature(defStore, methodDefId)!;
+
+      let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(defStore, &signature, info.isStatic);
+
+      if (!Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, &paramTypes, leftType)) {
+        return Option::NONE;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, pipe.right, signature.returnType);
+
+      return Option::SOME(signature.returnType);
+    }
+
+    /// Whether the receiver place a piped method call mutates is a mutable binding.
+    ///
+    /// Only a local binding carries mutability the checker can see; a field or a call
+    /// result is the same accepted debt as on the direct call path (ADR D7).
+    function pipeReceiverIsMutable(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      receiverExprId: Ast::ExpressionId,
+    ): boolean {
+      let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(localId)) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, receiverExprId) else {
+        return true;
+      };
+
+      let Option::SOME(binding) = Analyzer::Typecheck::lookupLocalBinding(state, localId) else {
+        return true;
+      };
+
+      return binding.mutable;
+    }
+
+    /// A method's parameter types with the receiver removed: an instance method's first
+    /// parameter is `self`, which the caller never supplies.
+    function methodExplicitParamTypes(
+      defStore: &mut Analyzer::DefinitionStore,
+      signature: &Analyzer::Typecheck::FunctionSignature,
+      isStatic: boolean,
+    ): Vector<Analyzer::TypeId> {
+      let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      if (!isStatic) {
+        index = 1;
+      }
+
+      while (index < signature.params.length()) {
+        let Option::SOME(paramDefId) = signature.params.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(paramDef) = defStore.get(*paramDefId) else {
+          index += 1;
+          continue;
+        };
+
+        match (paramDef) {
+          Analyzer::Definition::Variable(parameter) -> {
+            paramTypes.push(parameter.declaredType);
+          },
+          _ -> {},
+        };
+
+        index += 1;
+      }
+
+      return paramTypes;
     }
 
     /// The type a `_` stands for: the value piped by the innermost enclosing pipe.
