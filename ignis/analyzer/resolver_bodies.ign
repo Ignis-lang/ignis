@@ -158,8 +158,22 @@ export namespace Analyzer {
       /// Global name index built once from pass-1 + pass-2 binder outputs.
       /// Includes Record, Enum, TypeAlias, Trait, Function, and Constant names.
       /// Variant and Field names are resolved via structured path or member-access.
+      /// `globalNameScopeKeys[i]` is the binder scope key of entry `i`'s
+      /// enclosing namespace item (`ItemId.raw() + 1`, 0 = top level), used
+      /// for namespace-prefix validation on qualified paths (IGN-77).
       public globalNameSyms: Vector<Analyzer::SymbolId>;
       public globalNameDefs: Vector<Analyzer::DefinitionId>;
+      public globalNameScopeKeys: Vector<u64>;
+
+      /// Prefix-scope table for namespace-prefix validation: one row per
+      /// pass-1 entry that can act as a scope container (namespace
+      /// placeholders — ADR D3 plain Records). Keyed by the declaring item's
+      /// shifted scope key (`ItemId.raw() + 1`, matching the binder's
+      /// encoding where 0 is the top-level sentinel); rows for real records
+      /// are inert because only namespace scope keys are ever looked up.
+      public scopeItemKeys: Vector<u64>;
+      public scopeItemNameSyms: Vector<Analyzer::SymbolId>;
+      public scopeItemParentKeys: Vector<u64>;
 
       public importSyms: Vector<Analyzer::SymbolId>;
       public importDefs: Vector<Analyzer::DefinitionId>;
@@ -732,6 +746,21 @@ export namespace Analyzer {
           continue;
         };
 
+        let Option::SOME(scopeKeyRef) = binderOutput.declScopeKeys.get(index) else {
+          index += 1;
+          continue;
+        };
+        let scopeKey: u64 = *scopeKeyRef;
+
+        let Option::SOME(rawIdRef) = binderOutput.nodeIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        // Shifted scope key this entry would carry as a scope container,
+        // matching the binder's `ItemId.raw() + 1` encoding.
+        let ownScopeKey: u64 = ((*rawIdRef) as u64) + 1;
+
         let Option::SOME(def) = defStore.get(*defId) else {
           index += 1;
           continue;
@@ -742,16 +771,22 @@ export namespace Analyzer {
             let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
             stateRef.globalNameSyms.push(rec.name);
             stateRef.globalNameDefs.push(*defId);
+            stateRef.globalNameScopeKeys.push(scopeKey);
+            stateRef.scopeItemKeys.push(ownScopeKey);
+            stateRef.scopeItemNameSyms.push(rec.name);
+            stateRef.scopeItemParentKeys.push(scopeKey);
           },
           Analyzer::Definition::Enum(en) -> {
             let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
             stateRef.globalNameSyms.push(en.name);
             stateRef.globalNameDefs.push(*defId);
+            stateRef.globalNameScopeKeys.push(scopeKey);
           },
           Analyzer::Definition::Function(f) -> {
             let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
             stateRef.globalNameSyms.push(f.name);
             stateRef.globalNameDefs.push(*defId);
+            stateRef.globalNameScopeKeys.push(scopeKey);
           },
           Analyzer::Definition::Variable(v) -> {
             // ADR-B6: include all Variable defs. Pass-1 allocates only top-level
@@ -761,11 +796,13 @@ export namespace Analyzer {
             let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
             stateRef.globalNameSyms.push(v.name);
             stateRef.globalNameDefs.push(*defId);
+            stateRef.globalNameScopeKeys.push(scopeKey);
           },
           Analyzer::Definition::TypeAlias(alias) -> {
             let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
             stateRef.globalNameSyms.push(alias.name);
             stateRef.globalNameDefs.push(*defId);
+            stateRef.globalNameScopeKeys.push(scopeKey);
           },
           Analyzer::Definition::Trait(trait_) -> {
             // Trait names are included for ADR-B3: emit a discriminating
@@ -773,6 +810,7 @@ export namespace Analyzer {
             let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
             stateRef.globalNameSyms.push(trait_.name);
             stateRef.globalNameDefs.push(*defId);
+            stateRef.globalNameScopeKeys.push(scopeKey);
           },
           Analyzer::Definition::Field(_) -> {},
           Analyzer::Definition::Variant(_) -> {},
@@ -816,6 +854,179 @@ export namespace Analyzer {
       }
 
       return Option::NONE;
+    }
+
+    /// Position of the first global-index entry whose symbol matches `sym`,
+    /// mirroring `bodyGlobalLookup`'s first-hit order. Namespace-prefix
+    /// validation reads the matched entry's declaring scope key from it.
+    function bodyGlobalLookupPosition(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      sym: Analyzer::SymbolId,
+    ): Option<u64> {
+      let mut i: u64 = 0;
+
+      while (i < state.globalNameSyms.length()) {
+        let Option::SOME(stored) = state.globalNameSyms.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (stored.raw() == sym.raw()) {
+          if (state.globalNameDefs.get(i).isSome()) {
+            return Option::SOME(i);
+          }
+        }
+
+        i += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Find the prefix-scope row whose shifted scope key (`ItemId.raw() + 1`)
+    /// equals `scopeKey`.
+    function lookupScopeItemRow(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      scopeKey: u64,
+    ): Option<u64> {
+      let mut i: u64 = 0;
+
+      while (i < state.scopeItemKeys.length()) {
+        let Option::SOME(stored) = state.scopeItemKeys.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (*stored == scopeKey) {
+          return Option::SOME(i);
+        }
+
+        i += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// True when the written prefix segments `[0 .. segCount-3]` match the
+    /// owner's actual enclosing-namespace chain, compared innermost-to-
+    /// outermost starting from `ownerScopeKey`.
+    ///
+    /// A prefix shorter than the actual chain is accepted (partial
+    /// qualification, consistent with unvalidated 2-segment paths). A wrong
+    /// name, a prefix on a top-level owner (`ownerScopeKey == 0`), or a
+    /// prefix deeper than the actual chain is rejected.
+    function namespacePrefixMatches(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      symbols: &mut Analyzer::SymbolTable,
+      segments: &Vector<String>,
+      segCount: u64,
+      ownerScopeKey: u64,
+    ): boolean {
+      let mut currentKey: u64 = ownerScopeKey;
+      let mut segIndex: u64 = segCount - 2;
+
+      while (segIndex > 0) {
+        segIndex -= 1;
+
+        if (currentKey == 0) {
+          return false;
+        }
+
+        let Option::SOME(rowPos) = Analyzer::ResolverBodies::lookupScopeItemRow(state, currentKey) else {
+          return false;
+        };
+
+        let Option::SOME(scopeName) = state.scopeItemNameSyms.get(rowPos) else {
+          return false;
+        };
+        let scopeNameRaw: u64 = scopeName.raw() as u64;
+
+        let Option::SOME(parentKey) = state.scopeItemParentKeys.get(rowPos) else {
+          return false;
+        };
+        let nextKey: u64 = *parentKey;
+
+        let Option::SOME(seg) = segments.get(segIndex) else {
+          return false;
+        };
+        let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+        let segSym: Analyzer::SymbolId = symbolsRef.intern(seg.toStr());
+
+        if ((segSym.raw() as u64) != scopeNameRaw) {
+          return false;
+        }
+
+        currentKey = nextKey;
+      }
+
+      return true;
+    }
+
+    /// Join the first `segCount` path segments with `::` for diagnostics.
+    function joinPathSegments(segments: &Vector<String>, segCount: u64): String {
+      let mut joined: String = String::create("");
+      let mut i: u64 = 0;
+
+      while (i < segCount) {
+        let Option::SOME(seg) = segments.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (i > 0) {
+          joined.pushStr("::");
+        }
+        joined.pushStr(seg.toStr());
+        i += 1;
+      }
+
+      return joined;
+    }
+
+    /// Validate the namespace prefix of a 3+-segment path against the owner's
+    /// declared namespace chain. Returns true when the prefix is invalid — a
+    /// full-path `UNDECLARED_VARIABLE` diagnostic has then been emitted and
+    /// the caller records the reference as `Unresolved`.
+    ///
+    /// Known limitation: owners that resolve only through the direct-import
+    /// overlay are never validated here — cross-module names are flat in the
+    /// overlay, so no namespace chain is available for them. Owners that do
+    /// not resolve at all are also skipped; `resolvePathTail` emits its own
+    /// diagnostic for those.
+    function rejectInvalidNamespacePrefix(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      symbols: &mut Analyzer::SymbolTable,
+      segments: &Vector<String>,
+      segCount: u64,
+      span: SourceSpan,
+    ): boolean {
+      let Option::SOME(ownerStr) = segments.get(segCount - 2) else {
+        return false;
+      };
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let ownerSym: Analyzer::SymbolId = symbolsRef.intern(ownerStr.toStr());
+
+      let Option::SOME(ownerPos) = Analyzer::ResolverBodies::bodyGlobalLookupPosition(state, ownerSym) else {
+        return false;
+      };
+
+      let Option::SOME(ownerScopeKeyRef) = state.globalNameScopeKeys.get(ownerPos) else {
+        return false;
+      };
+      let ownerScopeKey: u64 = *ownerScopeKeyRef;
+
+      if (Analyzer::ResolverBodies::namespacePrefixMatches(state, symbols, segments, segCount, ownerScopeKey)) {
+        return false;
+      }
+
+      let fullPath: String = Analyzer::ResolverBodies::joinPathSegments(segments, segCount);
+      let message: String = String::create("undeclared name in path: `")
+        .concat(fullPath.toStr())
+        .concat("`");
+      Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
+
+      return true;
     }
 
     function bodyImportLookup(
@@ -1030,9 +1241,11 @@ export namespace Analyzer {
     /// no matching method (namespace placeholder records — ADR D3 — always
     /// fall in this second case, since they carry empty method tables).
     ///
-    /// TODO(namespace-path-validation): segments preceding the owner are never
-    /// checked; a bogus qualifier resolves as long as `memberName` alone is a
-    /// globally unique Record/Enum name.
+    /// Prefix segments before the owner are validated separately by
+    /// `rejectInvalidNamespacePrefix` (IGN-77) when the owner resolves through
+    /// the local global index. When the owner itself is unresolved, this
+    /// fallback still resolves `memberName` by name alone — a known remaining
+    /// hole shared with 2-segment paths.
     function resolvePathTailTypeFallback(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1092,9 +1305,10 @@ export namespace Analyzer {
     }
 
     /// Resolve the last two segments of a multi-segment path (`owner::member`;
-    /// for N>=3 segments, `owner`/`member` are the last two — everything
-    /// before them is intentionally unvalidated, `TODO(namespace-path-validation)`,
-    /// accepted debt per ADR A2).
+    /// for N>=3 segments, `owner`/`member` are the last two — the segments
+    /// before them are validated beforehand by callers via
+    /// `rejectInvalidNamespacePrefix` when the owner resolves through the
+    /// local global index; import-overlay owners stay unvalidated, IGN-77).
     ///
     /// Pure lookup: no diagnostics, no side-table writes. Callers (expression-
     /// and pattern-position path resolvers) map the result to a `ResolvedRef`
@@ -1382,8 +1596,10 @@ export namespace Analyzer {
     /// - 0 segments → error.
     /// - 1 segment → delegate to `resolveIdentifierExpr`.
     /// - 2+ segments → last-two-segment lookup via `resolvePathTail`
-    ///   (`owner` = `segments[N-2]`, `member` = `segments[N-1]`); segments
-    ///   before `owner` are unvalidated, `TODO(namespace-path-validation)`.
+    ///   (`owner` = `segments[N-2]`, `member` = `segments[N-1]`). For 3+
+    ///   segments, the written prefix is first validated against the owner's
+    ///   declared namespace chain (`rejectInvalidNamespacePrefix`, IGN-77);
+    ///   import-overlay owners are exempt (flat overlay).
     function resolvePathExpr(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1410,6 +1626,25 @@ export namespace Analyzer {
 
         Analyzer::ResolverBodies::resolveIdentifierExpr(state, defStore, symbols, exprId, seg.toStr(), p.span);
         return;
+      }
+
+      if (segCount >= 3) {
+        let prefixInvalid: boolean = Analyzer::ResolverBodies::rejectInvalidNamespacePrefix(
+          state,
+          symbols,
+          &p.segments,
+          segCount,
+          p.span,
+        );
+
+        if (prefixInvalid) {
+          Analyzer::ResolverBodies::recordExprRef(
+            state,
+            exprId,
+            Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
+          );
+          return;
+        }
       }
 
       let Option::SOME(ownerStr) = p.segments.get(segCount - 2) else {
@@ -1591,8 +1826,22 @@ export namespace Analyzer {
       }
 
       // 2+ segments: last-two-segment lookup via `resolvePathTail`, mirroring
-      // expression position. Segments before `owner` are unvalidated,
-      // TODO(namespace-path-validation).
+      // expression position, including namespace-prefix validation for 3+
+      // segments (IGN-77).
+      if (segCount >= 3) {
+        let prefixInvalid: boolean = Analyzer::ResolverBodies::rejectInvalidNamespacePrefix(
+          state,
+          symbols,
+          &p.segments,
+          segCount,
+          p.span,
+        );
+
+        if (prefixInvalid) {
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        }
+      }
+
       let Option::SOME(ownerStr) = p.segments.get(segCount - 2) else {
         Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, "unknown enum");
         return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
@@ -2611,6 +2860,10 @@ export namespace Analyzer {
         diagnostics: DiagnosticBag::init(),
         globalNameSyms: Vector::new<Analyzer::SymbolId>(),
         globalNameDefs: Vector::new<Analyzer::DefinitionId>(),
+        globalNameScopeKeys: Vector::new<u64>(),
+        scopeItemKeys: Vector::new<u64>(),
+        scopeItemNameSyms: Vector::new<Analyzer::SymbolId>(),
+        scopeItemParentKeys: Vector::new<u64>(),
         importSyms: Vector::new<Analyzer::SymbolId>(),
         importDefs: Vector::new<Analyzer::DefinitionId>(),
         currentFunction: sentinel,
