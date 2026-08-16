@@ -1,0 +1,372 @@
+import Test from "std::test";
+
+import DiagnosticBag, DiagnosticCode, Severity, SourceFile from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import ParseOutput, Parser from "@compiler::parser";
+import Lowering from "./lowering";
+import Borrowck from "./borrowck";
+
+function borrowckCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function borrowckCountCode(bag: &DiagnosticBag, code: str): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (String::create(diagnostic.code).equals(code)) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// Parses and analyzes `source`, lowers it, and returns what the borrow
+/// checker reports over the resulting HIR.
+///
+/// Parse errors are always rejected: a fixture the parser cannot read lowers
+/// to nothing and would report an empty, meaningless result. Analyzer errors
+/// are rejected too, so that every fixture below is a program the rest of the
+/// pipeline accepts and the reported diagnostics are the borrow checker's
+/// alone.
+function borrowckDiagnostics(source: str): DiagnosticBag {
+  let file: SourceFile = SourceFile::create("borrowck_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(borrowckCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(borrowckCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(borrowckCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &hir,
+  );
+
+  return checked.diagnostics;
+}
+
+/// Scenario: a program that binds locals, takes a shared borrow, calls
+/// through it, and matches an enum reports nothing.
+/// Spec: IGN-38 — no false positives on the constructs lowering emits today.
+@test
+function borrowckAcceptsCleanProgram(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "record Point {\n  public x: u32;\n  public y: u32;\n}\n\nenum Choice {\n  FIRST,\n  SECOND,\n}\n\nfunction total(point: &Point): u32 {\n  return point.x + point.y;\n}\n\nfunction run(choice: Choice): u32 {\n  let origin: Point = Point { x: 1, y: 2 };\n  let view: &Point = &origin;\n  let sum: u32 = total(view);\n\n  return match (choice) {\n    Choice::FIRST -> sum,\n    Choice::SECOND -> 0,\n  };\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: an owning value bound into a second local and then read again
+/// reports the read as a use of a moved value.
+/// Spec: IGN-38 — O0001, ported from the HIR ownership oracle.
+@test
+function borrowckReportsUseAfterMove(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(): u32 {\n  let first: Owned = Owned { id: 1 };\n  let second: Owned = first;\n  let third: Owned = first;\n\n  return second.id + third.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::USE_AFTER_MOVE), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
+/// Scenario: the same shape over a primitive reports nothing, because a Copy
+/// type is never consumed by binding it elsewhere.
+/// Spec: IGN-38 — move tracking keys on drop-needing types.
+@test
+function borrowckExemptsCopyValues(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "function run(): u32 {\n  let first: u32 = 1;\n  let second: u32 = first;\n  let third: u32 = first;\n\n  return second + third;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a record whose fields are all Copy is Copy itself, so binding it
+/// twice is not a move either.
+/// Spec: IGN-38 — drop-needing is transitive over fields.
+@test
+function borrowckExemptsRecordWithoutOwnedFields(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "record Plain {\n  public id: u32;\n}\n\nfunction run(): u32 {\n  let first: Plain = Plain { id: 1 };\n  let second: Plain = first;\n  let third: Plain = first;\n\n  return second.id + third.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a record carrying an owning field is itself owning, so the
+/// second binding of it is a use after move.
+/// Spec: IGN-38 — drop-needing is transitive over fields.
+@test
+function borrowckTracksTransitivelyOwnedRecord(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Handle {\n  public id: u32;\n}\n\nrecord Holder {\n  public handle: Handle;\n}\n\nfunction run(): u32 {\n  let first: Holder = Holder { handle: Handle { id: 1 } };\n  let second: Holder = first;\n  let third: Holder = first;\n\n  return second.handle.id + third.handle.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::USE_AFTER_MOVE), 1);
+}
+
+/// Scenario: two live mutable borrows of the same local conflict.
+/// Spec: IGN-38 — A0038.
+@test
+function borrowckReportsTwoMutableBorrows(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "function run(): u32 {\n  let mut value: u32 = 1;\n  let first: &mut u32 = &mut value;\n  let second: &mut u32 = &mut value;\n\n  return *first + *second;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::BORROW_MUTABLE_WHILE_MUTABLE), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
+/// Scenario: a mutable borrow taken while a shared borrow is live conflicts.
+/// Spec: IGN-38 — A0037.
+@test
+function borrowckReportsMutableBorrowWhileShared(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "function run(): u32 {\n  let mut value: u32 = 1;\n  let shared: &u32 = &value;\n  let exclusive: &mut u32 = &mut value;\n\n  return *shared + *exclusive;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::BORROW_MUTABLE_WHILE_IMMUTABLE), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
+/// Scenario: a shared borrow taken while a mutable borrow is live conflicts.
+///
+/// It is reported twice, and the Rust oracle reports it twice too: a
+/// reference expression is conflict-checked once where it is evaluated and
+/// once when it becomes the binding's named borrow. Releasing a rejected
+/// shared borrow leaves the mutable state in place, so the second check finds
+/// the same conflict — unlike the mutable-while-mutable case, where releasing
+/// clears the state and only the first check reports.
+/// Spec: IGN-38 — A0036.
+@test
+function borrowckReportsSharedBorrowWhileMutable(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "function run(): u32 {\n  let mut value: u32 = 1;\n  let exclusive: &mut u32 = &mut value;\n  let shared: &u32 = &value;\n\n  return *exclusive + *shared;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::BORROW_IMMUTABLE_WHILE_MUTABLE), 2);
+  Test::assertEq<u64>(diagnostics.length(), 2);
+}
+
+/// Scenario: two shared borrows of the same local coexist.
+/// Spec: IGN-38 — shared borrows are counted, not rejected.
+@test
+function borrowckAllowsTwoSharedBorrows(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "function run(): u32 {\n  let value: u32 = 1;\n  let first: &u32 = &value;\n  let second: &u32 = &value;\n\n  return *first + *second;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a borrow bound by a `let` in an inner block is released when
+/// that block ends, so a later mutable borrow is fine.
+/// Spec: IGN-38 — named borrows live until their scope exits.
+@test
+function borrowckReleasesBorrowAtScopeEnd(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "function run(): u32 {\n  let mut value: u32 = 1;\n\n  {\n    let shared: &u32 = &value;\n    value = *shared;\n  }\n\n  let exclusive: &mut u32 = &mut value;\n\n  return *exclusive;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::MUTATED_WHILE_BORROWED), 1);
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::BORROW_MUTABLE_WHILE_IMMUTABLE), 0);
+}
+
+/// Scenario: assigning to a local while a borrow of it is live is reported.
+/// Spec: IGN-38 — A0047.
+@test
+function borrowckReportsAssignmentWhileBorrowed(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "function run(): u32 {\n  let mut value: u32 = 1;\n  let shared: &u32 = &value;\n  value = 2;\n\n  return *shared;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::MUTATED_WHILE_BORROWED), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
+/// Scenario: a value moved in one branch of an `if` and left live in the
+/// other is reported at the join, and the read after the join is reported as
+/// a use of a moved value because the join takes the moved state.
+/// Spec: IGN-38 — O0003 plus the conservative join.
+@test
+function borrowckReportsConditionalMove(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(flag: boolean): u32 {\n  let value: Owned = Owned { id: 1 };\n  let mut total: u32 = 0;\n\n  if (flag) {\n    let taken: Owned = value;\n    total = taken.id;\n  }\n\n  return total + value.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::INCONSISTENT_MOVE_IN_BRANCHES), 1);
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::USE_AFTER_MOVE), 1);
+}
+
+/// Scenario: a value moved in both branches of an `if`/`else` agrees at the
+/// join, so only the read after it is reported.
+/// Spec: IGN-38 — a join whose branches agree reports nothing of its own.
+@test
+function borrowckAcceptsMoveInBothBranches(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(flag: boolean): u32 {\n  let value: Owned = Owned { id: 1 };\n  let mut total: u32 = 0;\n\n  if (flag) {\n    let taken: Owned = value;\n    total = taken.id;\n  } else {\n    let other: Owned = value;\n    total = other.id;\n  }\n\n  return total;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a value moved inside a loop body is reported on the second
+/// iteration, which the checker simulates by walking the body twice.
+/// Spec: IGN-38 — the two-pass loop walk.
+@test
+function borrowckReportsMoveInsideLoop(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(): u32 {\n  let value: Owned = Owned { id: 1 };\n  let mut index: u32 = 0;\n\n  while (index < 2) {\n    let taken: Owned = value;\n    index = index + taken.id;\n  }\n\n  return index;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::USE_AFTER_MOVE), 1);
+}
+
+/// Scenario: a borrow taken and released inside a loop body does not conflict
+/// with itself across iterations.
+/// Spec: IGN-38 — the second pass must not invent conflicts.
+@test
+function borrowckAcceptsBorrowInsideLoop(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "function run(): u32 {\n  let mut value: u32 = 0;\n  let mut index: u32 = 0;\n\n  while (index < 2) {\n    let shared: &u32 = &value;\n    index = index + *shared;\n    index = index + 1;\n  }\n\n  return value + index;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a match arm that moves the scrutinee's payload out does not
+/// leave the binding live for the arms that did not run.
+/// Spec: IGN-38 — arm-local move state.
+@test
+function borrowckAcceptsMovePerMatchArm(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Choice {\n  FIRST,\n  SECOND,\n}\n\nfunction run(choice: Choice): u32 {\n  let value: Owned = Owned { id: 1 };\n\n  return match (choice) {\n    Choice::FIRST -> {\n      let taken: Owned = value;\n      taken.id\n    },\n    Choice::SECOND -> 0,\n  };\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::INCONSISTENT_MOVE_IN_BRANCHES), 1);
+}
+
+/// Scenario: a `&mut self` method call takes a mutable borrow of its
+/// receiver for the duration of the call, which conflicts with a live shared
+/// borrow of the same local.
+/// Spec: IGN-38 — the method-receiver borrow.
+@test
+function borrowckReportsMutatingMethodWhileBorrowed(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "record Counter {\n  public total: u32;\n\n  public bump(&mut self): u32 {\n    return self.total + 1;\n  }\n}\n\nfunction run(): u32 {\n  let mut counter: Counter = Counter { total: 0 };\n  let shared: &Counter = &counter;\n  let bumped: u32 = counter.bump();\n\n  return bumped + shared.total;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::BORROW_MUTABLE_WHILE_IMMUTABLE), 1);
+}
+
+/// Scenario: moving a local while a borrow of it is live reports nothing.
+///
+/// Neither Rust oracle has this rule: the borrow checker only reports
+/// assignment to a borrowed local (A0047), and the ownership checker does not
+/// consult the borrow state at all. The test pins that behaviour so a later
+/// slice that adds the rule does so deliberately rather than by accident.
+/// Spec: IGN-38 — documented parity gap.
+@test
+function borrowckDoesNotReportMoveWhileBorrowed(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(): u32 {\n  let value: Owned = Owned { id: 1 };\n  let shared: &Owned = &value;\n  let taken: Owned = value;\n\n  return taken.id + shared.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a value passed by value to a function is consumed, so reading it
+/// afterwards is a use after move.
+/// Spec: IGN-38 — call arguments consume their source local.
+@test
+function borrowckReportsUseAfterCallArgument(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction consume(value: Owned): u32 {\n  return value.id;\n}\n\nfunction run(): u32 {\n  let value: Owned = Owned { id: 1 };\n  let first: u32 = consume(value);\n  let second: u32 = consume(value);\n\n  return first + second;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::USE_AFTER_MOVE), 1);
+}
+
+/// Scenario: passing a value by reference does not consume it.
+/// Spec: IGN-38 — only by-value arguments move.
+@test
+function borrowckAcceptsBorrowedCallArgument(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction read(value: &Owned): u32 {\n  return value.id;\n}\n\nfunction run(): u32 {\n  let value: Owned = Owned { id: 1 };\n  let first: u32 = read(&value);\n  let second: u32 = read(&value);\n\n  return first + second;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: assigning a fresh value into a moved local revives it, so the
+/// read after the assignment is fine.
+/// Spec: IGN-38 — re-initialization clears the moved state.
+@test
+function borrowckAcceptsReinitializationAfterMove(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(): u32 {\n  let mut value: Owned = Owned { id: 1 };\n  let taken: Owned = value;\n  value = Owned { id: 2 };\n\n  return taken.id + value.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a body that always returns before the join contributes no state
+/// to it, so the value stays live on the path that actually falls through.
+/// Spec: IGN-38 — a diverging branch is excluded from the join.
+@test
+function borrowckExcludesDivergingBranchFromJoin(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(flag: boolean): u32 {\n  let value: Owned = Owned { id: 1 };\n\n  if (flag) {\n    let taken: Owned = value;\n    return taken.id;\n  }\n\n  return value.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
