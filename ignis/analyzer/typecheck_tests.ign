@@ -9350,3 +9350,467 @@ function typecheckPipeIntoGenericFunctionInfersTypeArgument(): void {
   Test::assertEq<u64>(output.diagnostics.length(), 0);
   assertExprType(&output, pipeExpr, typeStore.intern(Analyzer::Type::I32));
 }
+
+function typecheckAddTupleExpr(
+  module: &mut Ast::Module,
+  elements: Vector<Ast::ExpressionId>,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Tuple(Ast::Expression::Tuple {
+    span: typecheckDummySpan(),
+    elements: elements,
+  }));
+}
+
+function typecheckAddUnitExpr(module: &mut Ast::Module): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Unit(Ast::Expression::Unit {
+    span: typecheckDummySpan(),
+  }));
+}
+
+function typecheckAddVectorLiteralExpr(
+  module: &mut Ast::Module,
+  elements: Vector<Ast::ExpressionId>,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Vector(Ast::Expression::VectorLiteral {
+    span: typecheckDummySpan(),
+    elements: elements,
+  }));
+}
+
+function typecheckAddVectorAccessExpr(
+  module: &mut Ast::Module,
+  vector: Ast::ExpressionId,
+  index: Ast::ExpressionId,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::VectorAccess(Ast::Expression::VectorAccess {
+    span: typecheckDummySpan(),
+    vector: vector,
+    index: index,
+  }));
+}
+
+function typecheckAddTupleType(
+  module: &mut Ast::Module,
+  elements: Vector<Ast::TypeId>,
+): Ast::TypeId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Tuple(Ast::Type::Tuple {
+    span: typecheckDummySpan(),
+    elements: elements,
+  }));
+}
+
+function typecheckAddSliceType(module: &mut Ast::Module, element: Ast::TypeId): Ast::TypeId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Slice(Ast::Type::Slice {
+    span: typecheckDummySpan(),
+    element: element,
+  }));
+}
+
+function typecheckAddFixedArrayType(
+  module: &mut Ast::Module,
+  element: Ast::TypeId,
+  size: u64,
+): Ast::TypeId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::FixedArray(Ast::Type::FixedArray {
+    span: typecheckDummySpan(),
+    element: element,
+    size: size,
+  }));
+}
+
+/// Scenario: `let t: (i32, boolean) = (1, true);` types the tuple expression as
+/// `(i32, boolean)` and accepts the tuple annotation without diagnostics.
+/// Spec: IGN-27 — typecheck tuples, unit, and vector literals/indexing.
+@test
+function typecheckTupleExpressionWithTupleAnnotationHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let booleanTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let mut annotationElements: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  annotationElements.push(i32TypeId);
+  annotationElements.push(booleanTypeId);
+  let tupleAnnotation: Ast::TypeId = typecheckAddTupleType(&mut module, annotationElements);
+
+  let mut tupleElements: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  tupleElements.push(typecheckAddIntLiteral(&mut module, 1));
+  tupleElements.push(typecheckAddBoolLiteral(&mut module, true));
+  let tupleExpr: Ast::ExpressionId = typecheckAddTupleExpr(&mut module, tupleElements);
+
+  let tPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "t", tupleAnnotation);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, tPattern, tupleAnnotation, tupleExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useTuple"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let mut expectedElements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  expectedElements.push(typeStore.intern(Analyzer::Type::I32));
+  expectedElements.push(typeStore.intern(Analyzer::Type::BOOLEAN));
+  assertExprType(&output, tupleExpr, typeStore.tuple(expectedElements));
+}
+
+/// Scenario: a bare `()` expression types as `void` with no diagnostics.
+/// Spec: IGN-27 — typecheck tuples, unit, and vector literals/indexing.
+@test
+function typecheckUnitExpressionIsVoid(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let unitExpr: Ast::ExpressionId = typecheckAddUnitExpr(&mut module);
+  let unitStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, unitExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(unitStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useUnit"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, unitExpr, typeStore.intern(Analyzer::Type::VOID));
+}
+
+/// Scenario: `let a: i32[3] = [1, 2, 3];` types the vector literal as a fixed
+/// array of the first element's type and accepts the fixed-array annotation.
+/// Spec: IGN-27 — typecheck tuples, unit, and vector literals/indexing.
+@test
+function typecheckVectorLiteralWithFixedArrayAnnotationHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let arrayAnnotation: Ast::TypeId = typecheckAddFixedArrayType(&mut module, i32TypeId, 3);
+
+  let mut literalElements: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  literalElements.push(typecheckAddIntLiteral(&mut module, 1));
+  literalElements.push(typecheckAddIntLiteral(&mut module, 2));
+  literalElements.push(typecheckAddIntLiteral(&mut module, 3));
+  let vectorExpr: Ast::ExpressionId = typecheckAddVectorLiteralExpr(&mut module, literalElements);
+
+  let aPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "a", arrayAnnotation);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, aPattern, arrayAnnotation, vectorExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useVectorLiteral"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let elementType: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  assertExprType(&output, vectorExpr, typeStore.fixedArray(elementType, 3));
+}
+
+/// Scenario: an empty vector literal has no element to infer a type from, so
+/// it reports `CANNOT_INFER_TYPE` instead of producing a fixed-array type.
+/// Spec: IGN-27 — typecheck tuples, unit, and vector literals/indexing.
+@test
+function typecheckEmptyVectorLiteralProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let vectorExpr: Ast::ExpressionId = typecheckAddVectorLiteralExpr(&mut module, Vector::new<Ast::ExpressionId>());
+  let vectorStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, vectorExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(vectorStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useEmptyVectorLiteral"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::CANNOT_INFER_TYPE);
+}
+
+/// Scenario: indexing a fixed-array local with an integer yields the element
+/// type without diagnostics.
+/// Spec: IGN-27 — typecheck tuples, unit, and vector literals/indexing.
+@test
+function typecheckVectorAccessOnFixedArrayYieldsElementType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let arrayAnnotation: Ast::TypeId = typecheckAddFixedArrayType(&mut module, i32TypeId, 2);
+
+  let mut literalElements: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  literalElements.push(typecheckAddIntLiteral(&mut module, 1));
+  literalElements.push(typecheckAddIntLiteral(&mut module, 2));
+  let vectorExpr: Ast::ExpressionId = typecheckAddVectorLiteralExpr(&mut module, literalElements);
+
+  let aPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "a", arrayAnnotation);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, aPattern, arrayAnnotation, vectorExpr);
+
+  let accessExpr: Ast::ExpressionId = typecheckAddVectorAccessExpr(
+    &mut module,
+    typecheckAddVariable(&mut module, "a"),
+    typecheckAddIntLiteral(&mut module, 0),
+  );
+  let accessStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, accessExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(accessStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("indexFixedArray"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, accessExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: indexing a slice-annotated parameter yields the element type,
+/// exercising slice annotation resolution and slice indexing together.
+/// Spec: IGN-27 — typecheck tuples, unit, and vector literals/indexing.
+@test
+function typecheckVectorAccessOnSliceParameterYieldsElementType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let sliceAnnotation: Ast::TypeId = typecheckAddSliceType(&mut module, i32TypeId);
+  let sParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "s", sliceAnnotation);
+
+  let accessExpr: Ast::ExpressionId = typecheckAddVectorAccessExpr(
+    &mut module,
+    typecheckAddVariable(&mut module, "s"),
+    typecheckAddIntLiteral(&mut module, 1),
+  );
+  let accessStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, accessExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(accessStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(sParam);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("indexSlice"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, accessExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: indexing a fixed array with a boolean reports
+/// `VECTOR_INDEX_NON_INTEGER`; the access still takes the element type so one
+/// mistake does not cascade.
+/// Spec: IGN-27 — typecheck tuples, unit, and vector literals/indexing.
+@test
+function typecheckVectorAccessWithNonIntegerIndexProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let arrayAnnotation: Ast::TypeId = typecheckAddFixedArrayType(&mut module, i32TypeId, 2);
+
+  let mut literalElements: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  literalElements.push(typecheckAddIntLiteral(&mut module, 1));
+  literalElements.push(typecheckAddIntLiteral(&mut module, 2));
+  let vectorExpr: Ast::ExpressionId = typecheckAddVectorLiteralExpr(&mut module, literalElements);
+
+  let aPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "a", arrayAnnotation);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, aPattern, arrayAnnotation, vectorExpr);
+
+  let accessExpr: Ast::ExpressionId = typecheckAddVectorAccessExpr(
+    &mut module,
+    typecheckAddVariable(&mut module, "a"),
+    typecheckAddBoolLiteral(&mut module, true),
+  );
+  let accessStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, accessExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(accessStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("indexWithBoolean"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::VECTOR_INDEX_NON_INTEGER);
+  assertExprType(&output, accessExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: indexing an `i32` value is rejected with `ACCESS_NON_VECTOR`.
+/// Spec: IGN-27 — typecheck tuples, unit, and vector literals/indexing.
+@test
+function typecheckVectorAccessOnNonVectorProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let accessExpr: Ast::ExpressionId = typecheckAddVectorAccessExpr(
+    &mut module,
+    typecheckAddIntLiteral(&mut module, 1),
+    typecheckAddIntLiteral(&mut module, 0),
+  );
+  let accessStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, accessExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(accessStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("indexNonVector"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::ACCESS_NON_VECTOR);
+}
+
+/// Scenario: a heterogeneous vector literal like `[1, true]` reports
+/// `TYPE_MISMATCH` between the first element's type and the offending
+/// element's type instead of silently typing as a fixed array.
+/// Spec: IGN-27 — typecheck tuples, unit, and vector literals/indexing.
+@test
+function typecheckHeterogeneousVectorLiteralProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut literalElements: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  literalElements.push(typecheckAddIntLiteral(&mut module, 1));
+  literalElements.push(typecheckAddBoolLiteral(&mut module, true));
+  let vectorExpr: Ast::ExpressionId = typecheckAddVectorLiteralExpr(&mut module, literalElements);
+
+  let vectorStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, vectorExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(vectorStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useHeterogeneousVector"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
+}

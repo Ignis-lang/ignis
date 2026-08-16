@@ -273,6 +273,42 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, message.toStr());
     }
 
+    function emitVectorIndexNonInteger(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      indexType: Analyzer::TypeId,
+    ): void {
+      let message: String = String::create("Vector index must be integer type, got '")
+        .concat(typeStore.nameOf(indexType).toStr())
+        .concat("'");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::VECTOR_INDEX_NON_INTEGER, message.toStr());
+    }
+
+    function emitAccessNonVector(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      baseType: Analyzer::TypeId,
+    ): void {
+      let message: String = String::create("Cannot index non-vector type '")
+        .concat(typeStore.nameOf(baseType).toStr())
+        .concat("'");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::ACCESS_NON_VECTOR, message.toStr());
+    }
+
+    function emitCannotInferVectorLiteral(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::CANNOT_INFER_TYPE,
+        "cannot infer the element type of an empty vector literal",
+      );
+    }
+
     function emitCannotInferLocal(
       state: &mut Analyzer::Typecheck::TypecheckState,
       span: SourceSpan,
@@ -525,6 +561,36 @@ export namespace Analyzer {
         | Analyzer::Type::U64
         | Analyzer::Type::F32
         | Analyzer::Type::F64 -> true,
+        _ -> false,
+      };
+    }
+
+    function isIntegerType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (let Option::SOME(aliasDefId) = resolved.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return false;
+      }
+
+      let Option::SOME(type_) = typeStore.get(resolved.typeId) else {
+        return false;
+      };
+
+      return match (type_) {
+        Analyzer::Type::I8
+        | Analyzer::Type::I16
+        | Analyzer::Type::I32
+        | Analyzer::Type::I64
+        | Analyzer::Type::U8
+        | Analyzer::Type::U16
+        | Analyzer::Type::U32
+        | Analyzer::Type::U64 -> true,
         _ -> false,
       };
     }
@@ -1830,14 +1896,61 @@ export namespace Analyzer {
         Ast::Type::Node::Reference(_) -> {
           return Option::NONE;
         },
-        Ast::Type::Node::Tuple(_) -> {
-          return Option::NONE;
+        Ast::Type::Node::Tuple(tuple) -> {
+          let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut elementIndex: u64 = 0;
+
+          while (elementIndex < tuple.elements.length()) {
+            let Option::SOME(elementTypeId) = tuple.elements.get(elementIndex) else {
+              return Option::NONE;
+            };
+
+            // One unresolvable element makes the whole tuple unusable: a partial
+            // tuple type would compare equal to a different one.
+            let Option::SOME(resolvedElement) = Analyzer::Typecheck::resolveLocalAnnotation(
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              *elementTypeId,
+            ) else {
+              return Option::NONE;
+            };
+
+            elements.push(resolvedElement);
+            elementIndex += 1;
+          }
+
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          return Option::SOME(typeStoreRef.tuple(elements));
         },
-        Ast::Type::Node::Slice(_) -> {
-          return Option::NONE;
+        Ast::Type::Node::Slice(slice) -> {
+          let Option::SOME(element) = Analyzer::Typecheck::resolveLocalAnnotation(
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            slice.element,
+          ) else {
+            return Option::NONE;
+          };
+
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          return Option::SOME(typeStoreRef.slice(element));
         },
-        Ast::Type::Node::FixedArray(_) -> {
-          return Option::NONE;
+        Ast::Type::Node::FixedArray(fixedArray) -> {
+          let Option::SOME(element) = Analyzer::Typecheck::resolveLocalAnnotation(
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            fixedArray.element,
+          ) else {
+            return Option::NONE;
+          };
+
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          return Option::SOME(typeStoreRef.fixedArray(element, fixedArray.size));
         },
         Ast::Type::Node::Function(functionType) -> {
           let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
