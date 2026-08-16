@@ -760,16 +760,34 @@ export namespace Analyzer {
     }
 
     /// Whether a type has Copy semantics. Mirrors the Rust
-    /// `TypeStore::is_copy`: primitives, pointers, references, slices, and
-    /// function types copy; fixed arrays, tuples, and generic instances copy
-    /// when their components do; records and enums are Copy by default;
-    /// unresolved type parameters conservatively are not.
+    /// `TypeStore::is_copy_with_defs`: primitives, pointers, references,
+    /// slices, and function types copy; fixed arrays, tuples, and generic
+    /// instances copy when their components do; records and enums honor
+    /// `@implements(Drop)`/`@implements(Copy)` and otherwise copy when their
+    /// fields or variant payloads do; unresolved type parameters
+    /// conservatively are not.
     function isCopyType(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
       span: SourceSpan,
       typeId: Analyzer::TypeId,
+    ): boolean {
+      let mut visited: Vector<u32> = Vector::new<u32>();
+      return Analyzer::Typecheck::isCopyTypeInner(state, defStore, typeStore, span, typeId, &mut visited);
+    }
+
+    /// Recursive worker for `isCopyType`. `visited` holds the raw type ids of
+    /// the record/enum types currently being examined so a recursive type
+    /// answers non-Copy on revisit instead of looping, like the Rust
+    /// `is_copy_with_defs_inner`.
+    function isCopyTypeInner(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+      visited: &mut Vector<u32>,
     ): boolean {
       let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
       if (let Option::SOME(aliasDefId) = resolved.cycleAlias) {
@@ -785,6 +803,8 @@ export namespace Analyzer {
       // first so the store borrow ends before the recursive calls.
       let mut directAnswer: Option<boolean> = Option::NONE;
       let mut components: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut recordDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut enumDefId: Option<Analyzer::DefinitionId> = Option::NONE;
 
       match (type_) {
         Analyzer::Type::I8
@@ -816,11 +836,11 @@ export namespace Analyzer {
         Analyzer::Type::Function(_) -> {
           directAnswer = Option::SOME(true);
         },
-        Analyzer::Type::Record(_) -> {
-          directAnswer = Option::SOME(true);
+        Analyzer::Type::Record(defId) -> {
+          recordDefId = Option::SOME(defId);
         },
-        Analyzer::Type::Enum(_) -> {
-          directAnswer = Option::SOME(true);
+        Analyzer::Type::Enum(defId) -> {
+          enumDefId = Option::SOME(defId);
         },
         Analyzer::Type::Param(_) -> {
           directAnswer = Option::SOME(false);
@@ -861,6 +881,14 @@ export namespace Analyzer {
         return answer;
       }
 
+      if (let Option::SOME(defId) = recordDefId) {
+        return Analyzer::Typecheck::recordCopyAnswer(state, defStore, typeStore, span, resolved.typeId, defId, visited);
+      }
+
+      if (let Option::SOME(defId) = enumDefId) {
+        return Analyzer::Typecheck::enumCopyAnswer(state, defStore, typeStore, span, resolved.typeId, defId, visited);
+      }
+
       let mut componentIndex: u64 = 0;
       while (componentIndex < components.length()) {
         let Option::SOME(component) = components.get(componentIndex) else {
@@ -868,7 +896,231 @@ export namespace Analyzer {
           continue;
         };
 
-        if (!Analyzer::Typecheck::isCopyType(state, defStore, typeStore, span, *component)) {
+        if (!Analyzer::Typecheck::isCopyTypeInner(state, defStore, typeStore, span, *component, visited)) {
+          return false;
+        }
+
+        componentIndex += 1;
+      }
+
+      return true;
+    }
+
+    /// Whether `typeRaw` is already on the `visited` stack.
+    function copyVisitAlreadySeen(visited: &mut Vector<u32>, typeRaw: u32): boolean {
+      let mut seenIndex: u64 = 0;
+
+      while (seenIndex < visited.length()) {
+        let Option::SOME(seen) = visited.get(seenIndex) else {
+          seenIndex += 1;
+          continue;
+        };
+
+        if (*seen == typeRaw) {
+          return true;
+        }
+
+        seenIndex += 1;
+      }
+
+      return false;
+    }
+
+    /// Copy answer for a record type, honoring `@implements(...)` metadata.
+    /// Mirrors the Rust `is_copy_with_defs_inner`: `Drop` forces non-Copy,
+    /// `Copy` forces Copy, otherwise the record copies when every field type
+    /// does. A revisit through `visited` answers non-Copy to break cycles.
+    function recordCopyAnswer(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+      defId: Analyzer::DefinitionId,
+      visited: &mut Vector<u32>,
+    ): boolean {
+      let typeRaw: u32 = typeId.raw();
+      if (Analyzer::Typecheck::copyVisitAlreadySeen(visited, typeRaw)) {
+        return false;
+      }
+
+      let mut visitedRef: &mut Vector<u32> = visited;
+      visitedRef.push(typeRaw);
+
+      let mut implementsCopy: boolean = false;
+      let mut implementsDrop: boolean = false;
+      let mut fieldDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(def) = defStore.get(defId)) {
+        match (def) {
+          Analyzer::Definition::Record(recordDef) -> {
+            implementsCopy = recordDef.implementsCopy;
+            implementsDrop = recordDef.implementsDrop;
+
+            let mut fieldIndex: u64 = 0;
+            while (fieldIndex < recordDef.fields.length()) {
+              let Option::SOME(fieldDefId) = recordDef.fields.get(fieldIndex) else {
+                fieldIndex += 1;
+                continue;
+              };
+
+              fieldDefIds.push(*fieldDefId);
+              fieldIndex += 1;
+            }
+          },
+          _ -> {},
+        };
+      }
+
+      let mut fieldTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut fieldDefIndex: u64 = 0;
+      while (fieldDefIndex < fieldDefIds.length()) {
+        let Option::SOME(fieldDefId) = fieldDefIds.get(fieldDefIndex) else {
+          fieldDefIndex += 1;
+          continue;
+        };
+
+        if (let Option::SOME(fieldDefNode) = defStore.get(*fieldDefId)) {
+          if (let Analyzer::Definition::Field(fieldDef) = fieldDefNode) {
+            fieldTypes.push(fieldDef.fieldType);
+          }
+        }
+
+        fieldDefIndex += 1;
+      }
+
+      let answer: boolean = Analyzer::Typecheck::copyAnswerFromTraitFlagsAndComponents(
+        state,
+        defStore,
+        typeStore,
+        span,
+        implementsCopy,
+        implementsDrop,
+        &fieldTypes,
+        visited,
+      );
+
+      let mut popRef: &mut Vector<u32> = visited;
+      popRef.pop();
+      return answer;
+    }
+
+    /// Copy answer for an enum type, honoring `@implements(...)` metadata.
+    /// Same shape as `recordCopyAnswer` with variant payload types standing
+    /// in for record field types.
+    function enumCopyAnswer(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+      defId: Analyzer::DefinitionId,
+      visited: &mut Vector<u32>,
+    ): boolean {
+      let typeRaw: u32 = typeId.raw();
+      if (Analyzer::Typecheck::copyVisitAlreadySeen(visited, typeRaw)) {
+        return false;
+      }
+
+      let mut visitedRef: &mut Vector<u32> = visited;
+      visitedRef.push(typeRaw);
+
+      let mut implementsCopy: boolean = false;
+      let mut implementsDrop: boolean = false;
+      let mut variantDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(def) = defStore.get(defId)) {
+        match (def) {
+          Analyzer::Definition::Enum(enumDef) -> {
+            implementsCopy = enumDef.implementsCopy;
+            implementsDrop = enumDef.implementsDrop;
+
+            let mut variantIndex: u64 = 0;
+            while (variantIndex < enumDef.variants.length()) {
+              let Option::SOME(variantDefId) = enumDef.variants.get(variantIndex) else {
+                variantIndex += 1;
+                continue;
+              };
+
+              variantDefIds.push(*variantDefId);
+              variantIndex += 1;
+            }
+          },
+          _ -> {},
+        };
+      }
+
+      let mut payloadTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut variantDefIndex: u64 = 0;
+      while (variantDefIndex < variantDefIds.length()) {
+        let Option::SOME(variantDefId) = variantDefIds.get(variantDefIndex) else {
+          variantDefIndex += 1;
+          continue;
+        };
+
+        if (let Option::SOME(variantDefNode) = defStore.get(*variantDefId)) {
+          if (let Analyzer::Definition::Variant(variantDef) = variantDefNode) {
+            let mut payloadIndex: u64 = 0;
+            while (payloadIndex < variantDef.payload.length()) {
+              let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex) else {
+                payloadIndex += 1;
+                continue;
+              };
+
+              payloadTypes.push(*payloadType);
+              payloadIndex += 1;
+            }
+          }
+        }
+
+        variantDefIndex += 1;
+      }
+
+      let answer: boolean = Analyzer::Typecheck::copyAnswerFromTraitFlagsAndComponents(
+        state,
+        defStore,
+        typeStore,
+        span,
+        implementsCopy,
+        implementsDrop,
+        &payloadTypes,
+        visited,
+      );
+
+      let mut popRef: &mut Vector<u32> = visited;
+      popRef.pop();
+      return answer;
+    }
+
+    /// Shared tail of `recordCopyAnswer`/`enumCopyAnswer`: `Drop` wins over
+    /// `Copy`, and without either flag the answer is structural over the
+    /// gathered component types.
+    function copyAnswerFromTraitFlagsAndComponents(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      implementsCopy: boolean,
+      implementsDrop: boolean,
+      componentTypes: &Vector<Analyzer::TypeId>,
+      visited: &mut Vector<u32>,
+    ): boolean {
+      if (implementsDrop) {
+        return false;
+      }
+
+      if (implementsCopy) {
+        return true;
+      }
+
+      let mut componentIndex: u64 = 0;
+      while (componentIndex < componentTypes.length()) {
+        let Option::SOME(componentType) = componentTypes.get(componentIndex) else {
+          componentIndex += 1;
+          continue;
+        };
+
+        if (!Analyzer::Typecheck::isCopyTypeInner(state, defStore, typeStore, span, *componentType, visited)) {
           return false;
         }
 

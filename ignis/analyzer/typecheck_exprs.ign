@@ -4443,8 +4443,8 @@ export namespace Analyzer {
       let dataSymbol: Analyzer::SymbolId = symbolsRef.intern("data");
       let lengthSymbol: Analyzer::SymbolId = symbolsRef.intern("length");
 
-      let mut dataElementType: Option<Analyzer::TypeId> = Option::NONE;
-      let mut hasLength: boolean = false;
+      let mut dataFieldType: Option<Analyzer::TypeId> = Option::NONE;
+      let mut lengthFieldType: Option<Analyzer::TypeId> = Option::NONE;
 
       let mut index: u64 = 0;
       while (index < fields.length()) {
@@ -4461,17 +4461,9 @@ export namespace Analyzer {
         match (fieldDefNode) {
           Analyzer::Definition::Field(fieldDef) -> {
             if (fieldDef.name.raw() == dataSymbol.raw()) {
-              if (let Option::SOME(fieldTypeNode) = typeStore.get(fieldDef.fieldType)) {
-                if (let Analyzer::Type::Pointer(pointer) = fieldTypeNode) {
-                  dataElementType = Option::SOME(pointer.pointee);
-                }
-              }
+              dataFieldType = Option::SOME(fieldDef.fieldType);
             } else if (fieldDef.name.raw() == lengthSymbol.raw()) {
-              if (let Option::SOME(fieldTypeNode) = typeStore.get(fieldDef.fieldType)) {
-                if (let Analyzer::Type::U64 = fieldTypeNode) {
-                  hasLength = true;
-                }
-              }
+              lengthFieldType = Option::SOME(fieldDef.fieldType);
             }
           },
           _ -> {},
@@ -4480,11 +4472,52 @@ export namespace Analyzer {
         index += 1;
       }
 
+      // Field types are matched behind their alias chains so a
+      // `type Len = u64;` length field still qualifies, mirroring the
+      // post-resolution types the Rust analyzer stores on fields.
+      let mut dataElementType: Option<Analyzer::TypeId> = Option::NONE;
+      if (let Option::SOME(fieldType) = dataFieldType) {
+        if (let Option::SOME(resolvedType) = Analyzer::Typecheck::nonCyclicAliasResolvedType(defStore, typeStore, fieldType)) {
+          if (let Option::SOME(fieldTypeNode) = typeStore.get(resolvedType)) {
+            if (let Analyzer::Type::Pointer(pointer) = fieldTypeNode) {
+              dataElementType = Option::SOME(pointer.pointee);
+            }
+          }
+        }
+      }
+
+      let mut hasLength: boolean = false;
+      if (let Option::SOME(fieldType) = lengthFieldType) {
+        if (let Option::SOME(resolvedType) = Analyzer::Typecheck::nonCyclicAliasResolvedType(defStore, typeStore, fieldType)) {
+          if (let Option::SOME(fieldTypeNode) = typeStore.get(resolvedType)) {
+            if (let Analyzer::Type::U64 = fieldTypeNode) {
+              hasLength = true;
+            }
+          }
+        }
+      }
+
       if (!hasLength) {
         return Option::NONE;
       }
 
       return dataElementType;
+    }
+
+    /// Alias-resolved type id, or `NONE` when the chain is cyclic. Cyclic
+    /// aliases are diagnosed where they are declared, so callers here simply
+    /// treat them as non-matching.
+    function nonCyclicAliasResolvedType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (let Option::SOME(_) = resolved.cycleAlias) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(resolved.typeId);
     }
 
     /// Extract the element type a `for..of` iterable yields, or emit
