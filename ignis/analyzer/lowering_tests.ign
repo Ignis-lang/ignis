@@ -159,13 +159,15 @@ function loweringSetsEntryPointForMain(): void {
   Test::assertEq<u64>(hir.functionBodies.length(), 1);
 }
 
+/// A cast carries the resolved target type both as the `Cast` target and as
+/// the node's own type, like the oracle's `resolve_type_syntax` result.
 @test
-function loweringOutOfScopeConstructFallsBackToError(): void {
+function loweringCastCarriesResolvedTargetType(): void {
   let rendered: String = loweringRender(
     "function widen(value: i32): i64 {\n  let wide: i64 = value as i64;\n  return wide;\n}\n",
   );
 
-  Test::assertSnapshot("lowering-out-of-scope-error-fallback", rendered.toStr());
+  Test::assertSnapshot("lowering-cast", rendered.toStr());
 }
 
 /// Sibling scopes reuse `LocalId` indexes (ADR-B10), so a reference in the
@@ -247,13 +249,16 @@ function loweringVariantDestructureBindsPayload(): void {
   Test::assertSnapshot("lowering-variant-destructure-binds-payload", rendered.toStr());
 }
 
+/// `defer` lowers to `HirKind::Defer` carrying the deferred expression: the
+/// `Expression` statement the parser wraps it in is unwrapped, so the body is
+/// the call itself rather than a statement node.
 @test
-function loweringStatementLevelConstructFallsBackToError(): void {
+function loweringDeferCarriesTheDeferredExpression(): void {
   let rendered: String = loweringRender(
     "function cleanup(): void {\n  return;\n}\n\nfunction work(): u32 {\n  defer cleanup();\n  return 1;\n}\n",
   );
 
-  Test::assertSnapshot("lowering-statement-error-fallback", rendered.toStr());
+  Test::assertSnapshot("lowering-defer", rendered.toStr());
 }
 
 /// An instance method on a reference receiver passes the object straight
@@ -353,6 +358,175 @@ function loweringPipeWithPlaceholder(): void {
   );
 
   Test::assertSnapshot("lowering-pipe-with-placeholder", rendered.toStr());
+}
+
+/// Record initializer fields are emitted in declaration order even when the
+/// source writes them out of order, which is what the oracle's trailing sort
+/// by field index produces.
+@test
+function loweringRecordInitOrdersFieldsByDeclaration(): void {
+  let rendered: String = loweringRender(
+    "record Point {\n  public x: u32;\n  public y: u32;\n}\n\nfunction make(): Point {\n  return Point { y: 2, x: 1 };\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-record-init", rendered.toStr());
+}
+
+/// `&value` types as a reference to the operand's checked type, and `*ref`
+/// takes the referent back off it.
+@test
+function loweringReferenceAndDereference(): void {
+  let rendered: String = loweringRender(
+    "function readThrough(value: u32): u32 {\n  let borrowed: &u32 = &value;\n  return *borrowed;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-reference-and-dereference", rendered.toStr());
+}
+
+/// A vector literal types as a fixed array of its first element's type, and
+/// an index access takes the element type back off the base.
+@test
+function loweringVectorLiteralAndIndexAccess(): void {
+  let rendered: String = loweringRender(
+    "function first(): u32 {\n  let items: u32[3] = [1, 2, 3];\n  return items[0];\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-vector-and-index", rendered.toStr());
+}
+
+/// Tuple elements lower in source order into a `TupleLiteral`.
+@test
+function loweringTupleLiteral(): void {
+  let rendered: String = loweringRender(
+    "function pair(): u32 {\n  let both = (1, 2);\n  return 0;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-tuple-literal", rendered.toStr());
+}
+
+/// `@sizeOf` and `@alignOf` carry the resolved type argument and type as
+/// `u64`.
+@test
+function loweringBuiltinsWithTypeArguments(): void {
+  let rendered: String = loweringRender(
+    "function sizes(): u64 {\n  let size: u64 = @sizeOf<u32>();\n  let align: u64 = @alignOf<u32>();\n  return size + align;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-builtins-type-arguments", rendered.toStr());
+}
+
+/// `@panic` lowers its message operand; `@trap` and `@unreachable` carry
+/// nothing. All three type as `never`.
+@test
+function loweringDivergingBuiltins(): void {
+  let rendered: String = loweringRender(
+    "function boom(): void {\n  @panic(\"boom\");\n}\n\nfunction halt(): void {\n  @trap();\n}\n\nfunction nope(): void {\n  @unreachable();\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-diverging-builtins", rendered.toStr());
+}
+
+/// A builtin the typechecker rejects as unsupported has no checked operand or
+/// result type to lower against, so it stays on the `Error` fallback even
+/// though `HirKind::MaxOf` exists.
+@test
+function loweringUnsupportedBuiltinFallsBackToError(): void {
+  let rendered: String = loweringRenderChecked(
+    "function limit(): u32 {\n  return @maxOf<u32>();\n}\n",
+    false,
+  );
+
+  Test::assertSnapshot("lowering-unsupported-builtin-error", rendered.toStr());
+}
+
+/// `for ... of` has no lowering: the oracle's desugar reads the binding
+/// definition and the iterable record's data/len field indexes out of tables
+/// the selfhost checker does not produce.
+@test
+function loweringForOfFallsBackToError(): void {
+  let rendered: String = loweringRender(
+    "function firstItem(): u32 {\n  let items: u32[3] = [1, 2, 3];\n  for (let item of items) {\n    return item;\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-for-of-error", rendered.toStr());
+}
+
+/// Record and enum method bodies are registered exactly like free function
+/// bodies (`functionBodies` plus `items`). The HIR display prints only
+/// `Definition::Function` entries — mirroring the Rust printer — so a method
+/// body shows up through the locals it declares.
+@test
+function loweringMethodBodiesAreRegistered(): void {
+  let file: SourceFile = SourceFile::create(
+    "lowering_tests.ign",
+    "record Counter {\n  public n: u32;\n\n  public read(&self): u32 {\n    let current: u32 = self.n;\n    return current;\n  }\n\n  public static one(): u32 {\n    let unit: u32 = 1;\n    return unit;\n  }\n}\n\nfunction go(): u32 {\n  return 1;\n}\n",
+  );
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(loweringCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  Test::assertEq<u64>(hir.functionBodies.length(), 3);
+  Test::assertEq<u64>(hir.items.length(), 3);
+
+  let rendered: String = Hir::Display::printHir(&hir, &typeStore, &defStore, &symbols);
+
+  Test::assertSnapshot("lowering-method-bodies", rendered.toStr());
+}
+
+/// A placeholder nested deeper than a direct argument of the right-side call
+/// has no placement rule, so the whole pipe stays on `Error` and the escaped
+/// placeholder node lowers to its own `Error`.
+@test
+function loweringPipeWithNestedPlaceholderFallsBackToError(): void {
+  let rendered: String = loweringRenderChecked(
+    "function double(value: u32): u32 {\n  return value * 2;\n}\n\nfunction add(left: u32, right: u32): u32 {\n  return left + right;\n}\n\nfunction go(): u32 {\n  return 1 |> add(2, double(_));\n}\n",
+    false,
+  );
+
+  Test::assertSnapshot("lowering-pipe-nested-placeholder-error", rendered.toStr());
+}
+
+/// A pipe whose right side is not a function definition has no callee to
+/// build a `Call` around.
+@test
+function loweringPipeIntoNonFunctionFallsBackToError(): void {
+  let rendered: String = loweringRenderChecked(
+    "function go(): u32 {\n  let target: u32 = 2;\n  return 1 |> target;\n}\n",
+    false,
+  );
+
+  Test::assertSnapshot("lowering-pipe-non-function-error", rendered.toStr());
+}
+
+/// Explicit type arguments on a call need the monomorphization data the
+/// selfhost analyzer does not produce, so the call stays on `Error`.
+@test
+function loweringCallWithExplicitTypeArgumentsFallsBackToError(): void {
+  let rendered: String = loweringRenderChecked(
+    "function identity<T>(value: T): T {\n  return value;\n}\n\nfunction go(): u32 {\n  return identity<u32>(1);\n}\n",
+    false,
+  );
+
+  Test::assertSnapshot("lowering-call-type-arguments-error", rendered.toStr());
 }
 
 /// Enum variant construction has no lowering: the selfhost typechecker

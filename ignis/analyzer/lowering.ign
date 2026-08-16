@@ -5,25 +5,29 @@ import Hir from "@compiler::hir";
 import Vector from "std::vector";
 
 /// AST -> HIR lowering for the Ignis selfhost compiler (IGN-37, slices B,
-/// C and D).
+/// C, D and E).
 ///
 /// Port of the item/statement/expression subset of
 /// `crates/ignis_analyzer/src/lowering.rs` that these slices cover:
-///   - items: free functions (declaration + body), namespaces and exports
-///     recursed into for the functions they contain,
+///   - items: free functions (declaration + body), record and enum methods
+///     (bodies only), namespaces and exports recursed into for the callables
+///     they contain,
 ///   - statements: let (annotated or inferred), assignment, expression
-///     statement, block, if/else, while, return, break, continue,
-///     `let ... else`,
+///     statement, block, if/else, while, C-style `for`, `defer`, return,
+///     break, continue, `let ... else`,
 ///   - expressions: literals, variable references, binary ops, unary ops,
 ///     grouping (transparent), calls to free functions, static method calls
-///     through a path, instance method calls, record field reads, postfix
-///     `!`, pipes into free functions, block expressions, if expressions,
-///     unit, `match`, and `if let` / `while let` conditions,
+///     through a path, instance method calls, record field reads, record
+///     initializers, casts, references, dereferences, tuple literals, vector
+///     literals, index access, postfix `!`, pipes into free functions, block
+///     expressions, if expressions, unit, `match`, `if let` / `while let`
+///     conditions, and the `@sizeOf` / `@alignOf` / `@panic` / `@trap` /
+///     `@unreachable` builtins,
 ///   - patterns: wildcard, binding, literal, enum variant (with nested
 ///     destructuring), tuple, and or-patterns.
 ///
-/// Everything else (closures, for/for-of, defer, builtins, vectors, casts,
-/// references, record init, enum variant construction, record destructuring
+/// Everything else (closures, `for ... of`, the builtins the selfhost
+/// typechecker rejects, enum variant construction, record destructuring
 /// patterns, ...) lowers to a single explicit `HirKind::Error` fallback,
 /// mirroring the Rust oracle's error nodes. A pattern outside the supported
 /// set sends its whole enclosing construct to that fallback rather than
@@ -51,6 +55,17 @@ import Vector from "std::vector";
 ///     the selfhost AST has no payload type-annotation slot), so anything
 ///     the oracle decides by "is this payload type void" is decided by
 ///     payload arity here instead.
+///   - `for ... of` has no lowering at all. The oracle's desugar reads the
+///     binding `DefinitionId` (and through it the by-value/by-ref binding
+///     type) out of a `for_of_binding_defs` table the checker fills, plus the
+///     `data`/`len` field indexes of an iterable record. The selfhost
+///     `TypecheckOutput` carries neither, and the binding type is never
+///     recorded anywhere lowering can read, so the whole statement pins on
+///     `Error` instead of guessing an iteration shape.
+///   - `defer` carries a statement in the selfhost AST and an expression in
+///     the Rust one. The `Expression` statement the parser wraps the deferred
+///     expression in is unwrapped here, exactly like `checkDeferStmt` does, so
+///     the `Defer` body is the expression the oracle would carry.
 export namespace Lowering {
   /// Insertion-ordered map from body-resolver `LocalId`s to the `Variable`
   /// definitions lowering allocated for them. Entries are never popped:
@@ -165,6 +180,11 @@ export namespace Lowering {
     return typeStoreRef.intern(Analyzer::Type::NEVER);
   }
 
+  function unsignedInt64Type(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    return typeStoreRef.intern(Analyzer::Type::U64);
+  }
+
   function exprTypeOrVoid(
     typeStore: &mut Analyzer::TypeStore,
     typecheck: &Analyzer::Typecheck::TypecheckOutput,
@@ -224,6 +244,91 @@ export namespace Lowering {
     };
 
     return Option::SOME(reference.referent);
+  }
+
+  /// Pointee of a pointer or reference type, `NONE` otherwise. Mirrors the
+  /// shapes the oracle's `Dereference` arm unwraps.
+  function pointeeType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Option<Analyzer::TypeId> {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+    if (resolved.cycleAlias.isSome()) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+      return Option::NONE;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::Pointer(pointer) -> Option::SOME(pointer.pointee),
+      Analyzer::Type::Reference(reference) -> Option::SOME(reference.referent),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// Element type an index access yields: slices and fixed arrays contribute
+  /// their element, pointers their pointee, everything else `NONE`.
+  function indexElementType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Option<Analyzer::TypeId> {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+    if (resolved.cycleAlias.isSome()) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+      return Option::NONE;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::Slice(element) -> Option::SOME(element),
+      Analyzer::Type::FixedArray(element, _) -> Option::SOME(element),
+      Analyzer::Type::Pointer(pointer) -> Option::SOME(pointer.pointee),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// Applied type arguments of a generic instance type, empty for every other
+  /// shape — the oracle's `Type::Instance { args, .. }` extraction.
+  function instanceTypeArguments(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Vector<Analyzer::TypeId> {
+    let mut arguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+    if (resolved.cycleAlias.isSome()) {
+      return arguments;
+    }
+
+    let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+      return arguments;
+    };
+
+    let Analyzer::Type::Instance(instance) = typeNode else {
+      return arguments;
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < instance.typeArguments.length()) {
+      if (let Option::SOME(typeArgument) = instance.typeArguments.get(index)) {
+        arguments.push(*typeArgument);
+      }
+
+      index += 1;
+    }
+
+    return arguments;
   }
 
   /// Definition a record/enum type names, `NONE` for every other shape.
@@ -347,6 +452,29 @@ export namespace Lowering {
     }
 
     return Option::NONE;
+  }
+
+  /// Field definitions of the record a type names, in declaration order.
+  /// `NONE` when the type names anything other than a record definition,
+  /// mirroring the oracle's `DefinitionKind::Record(rd)` guard.
+  function recordFieldDefinitions(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Option<Vector<Analyzer::DefinitionId>> {
+    let Option::SOME(recordDef) = Lowering::nominalDefinition(defStore, typeStore, typeId) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(definition) = defStore.get(recordDef) else {
+      return Option::NONE;
+    };
+
+    let Analyzer::Definition::Record(record_) = definition else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(Analyzer::Typecheck::copyDefinitionIdVector(&record_.fields));
   }
 
   function mapBinaryOperator(operator: Ast::Expression::BinaryOperator): Hir::BinaryOperation {
@@ -922,31 +1050,125 @@ export namespace Lowering {
         return Lowering::errorNode(hir, typeStore, ternary.span);
       },
       Ast::Expression::Node::Cast(cast) -> {
-        return Lowering::errorNode(hir, typeStore, cast.span);
+        return Lowering::lowerCast(defStore, typeStore, symbols, module, output, locals, hir, &cast);
       },
       Ast::Expression::Node::Path(path) -> {
         return Lowering::lowerNameRef(defStore, typeStore, symbols, module, output, locals, hir, exprId, path.span);
       },
       Ast::Expression::Node::Dereference(dereference) -> {
-        return Lowering::errorNode(hir, typeStore, dereference.span);
+        let operand: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, dereference.operand);
+        let operandType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, dereference.operand);
+
+        let mut pointeeTypeId: Analyzer::TypeId = Lowering::voidType(typeStore);
+        if (let Option::SOME(pointee) = Lowering::pointeeType(defStore, typeStore, operandType)) {
+          pointeeTypeId = pointee;
+        }
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Dereference(operand),
+          span: dereference.span,
+          typeId: pointeeTypeId,
+        });
       },
       Ast::Expression::Node::Tuple(tuple) -> {
-        return Lowering::errorNode(hir, typeStore, tuple.span);
+        let elements: Vector<Hir::HirId> = Lowering::lowerExpressionList(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          output,
+          locals,
+          hir,
+          &tuple.elements,
+        );
+        let tupleType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::TupleLiteral(elements),
+          span: tuple.span,
+          typeId: tupleType,
+        });
       },
       Ast::Expression::Node::LetCondition(letCondition) -> {
         return Lowering::lowerLetCondition(defStore, typeStore, symbols, module, output, locals, hir, &letCondition);
       },
       Ast::Expression::Node::Reference(reference) -> {
-        return Lowering::errorNode(hir, typeStore, reference.span);
+        let target: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, reference.target);
+        let targetType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, reference.target);
+
+        let mut referenceType: Analyzer::TypeId = Lowering::voidType(typeStore);
+
+        if (reference.mutable) {
+          let mut mutableTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          referenceType = mutableTypeStoreRef.mutableReference(targetType);
+        } else {
+          let mut sharedTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          referenceType = sharedTypeStoreRef.reference(targetType);
+        }
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Reference(Hir::HirReference {
+            expression: target,
+            mutable: reference.mutable,
+          }),
+          span: reference.span,
+          typeId: referenceType,
+        });
       },
       Ast::Expression::Node::Match(matchExpr) -> {
         return Lowering::lowerMatchExpr(defStore, typeStore, symbols, module, output, locals, hir, exprId, &matchExpr);
       },
       Ast::Expression::Node::Vector(vectorLiteral) -> {
-        return Lowering::errorNode(hir, typeStore, vectorLiteral.span);
+        let elements: Vector<Hir::HirId> = Lowering::lowerExpressionList(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          output,
+          locals,
+          hir,
+          &vectorLiteral.elements,
+        );
+
+        // The oracle types a vector literal as a fixed array of its first
+        // element's type rather than reading the checked type back.
+        let mut elementType: Analyzer::TypeId = Lowering::voidType(typeStore);
+        if (let Option::SOME(firstElementId) = vectorLiteral.elements.get(0)) {
+          elementType = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, *firstElementId);
+        }
+
+        let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        let arrayType: Analyzer::TypeId = typeStoreRef.fixedArray(elementType, vectorLiteral.elements.length());
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::VectorLiteral(elements),
+          span: vectorLiteral.span,
+          typeId: arrayType,
+        });
       },
       Ast::Expression::Node::VectorAccess(access) -> {
-        return Lowering::errorNode(hir, typeStore, access.span);
+        let base: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, access.vector);
+        let index: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, access.index);
+        let baseType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, access.vector);
+
+        let mut elementType: Analyzer::TypeId = Lowering::voidType(typeStore);
+        if (let Option::SOME(element) = Lowering::indexElementType(defStore, typeStore, baseType)) {
+          elementType = element;
+        }
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Index(Hir::HirIndex {
+            base: base,
+            index: index,
+          }),
+          span: access.span,
+          typeId: elementType,
+        });
       },
       Ast::Expression::Node::PostfixIncrement(postfix) -> {
         return Lowering::errorNode(hir, typeStore, postfix.span);
@@ -958,10 +1180,10 @@ export namespace Lowering {
         return Lowering::lowerMemberAccess(defStore, typeStore, symbols, module, output, locals, hir, exprId, &memberAccess);
       },
       Ast::Expression::Node::RecordInit(recordInit) -> {
-        return Lowering::errorNode(hir, typeStore, recordInit.span);
+        return Lowering::lowerRecordInit(defStore, typeStore, symbols, module, output, locals, hir, exprId, &recordInit);
       },
       Ast::Expression::Node::BuiltinCall(builtinCall) -> {
-        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+        return Lowering::lowerBuiltinCall(defStore, typeStore, symbols, module, output, locals, hir, &builtinCall);
       },
       Ast::Expression::Node::Lambda(lambda) -> {
         return Lowering::errorNode(hir, typeStore, lambda.span);
@@ -1059,8 +1281,9 @@ export namespace Lowering {
     });
   }
 
-  /// Lowers the argument list of a call in source order.
-  function lowerArguments(
+  /// Lowers a list of expressions in source order: call arguments, tuple
+  /// elements, and vector literal elements all share this walk.
+  function lowerExpressionList(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
@@ -1152,7 +1375,7 @@ export namespace Lowering {
         return Lowering::errorNode(hir, typeStore, call.span);
       }
 
-      let staticArgs: Vector<Hir::HirId> = Lowering::lowerArguments(
+      let staticArgs: Vector<Hir::HirId> = Lowering::lowerExpressionList(
         defStore,
         typeStore,
         symbols,
@@ -1195,7 +1418,7 @@ export namespace Lowering {
       return Lowering::errorNode(hir, typeStore, call.span);
     }
 
-    let args: Vector<Hir::HirId> = Lowering::lowerArguments(
+    let args: Vector<Hir::HirId> = Lowering::lowerExpressionList(
       defStore,
       typeStore,
       symbols,
@@ -1308,7 +1531,7 @@ export namespace Lowering {
       });
     }
 
-    let args: Vector<Hir::HirId> = Lowering::lowerArguments(
+    let args: Vector<Hir::HirId> = Lowering::lowerExpressionList(
       defStore,
       typeStore,
       symbols,
@@ -1400,6 +1623,288 @@ export namespace Lowering {
       }),
       span: memberAccess.span,
       typeId: fieldType,
+    });
+  }
+
+  /// Lowers `expr as T` to `HirKind::Cast`. The target type is resolved from
+  /// the annotation with the same helper the typechecker's cast branch uses,
+  /// and types the node, exactly like the oracle's `resolve_type_syntax`.
+  /// An unresolvable target has no type to cast to and falls back to `Error`.
+  function lowerCast(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    cast: &Ast::Expression::Cast,
+  ): Hir::HirId {
+    let expression: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, cast.expression);
+
+    let Option::SOME(targetType) = Analyzer::Typecheck::resolveLocalAnnotation(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      cast.targetType,
+    ) else {
+      return Lowering::errorNode(hir, typeStore, cast.span);
+    };
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Cast(Hir::HirCast {
+        expression: expression,
+        target: targetType,
+      }),
+      span: cast.span,
+      typeId: targetType,
+    });
+  }
+
+  /// Lowers `Rec { field: value, ... }` to `HirKind::RecordInit`.
+  ///
+  /// Values are lowered in source order and the resulting fields are emitted
+  /// in declaration order, which is what the oracle's trailing sort by field
+  /// index produces. A field name the record does not declare is dropped
+  /// without lowering its value, mirroring the oracle's `find` miss.
+  ///
+  /// The record definition is re-derived from the checked type of the whole
+  /// initializer instead of from the path expression: the selfhost
+  /// typechecker records the record type on this node, and the oracle's
+  /// `resolve_record_path_for_lowering` has no selfhost counterpart.
+  /// Explicit type arguments are rejected outright by the typechecker
+  /// ("generic record initializers"), so they stay on `Error`.
+  function lowerRecordInit(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+    recordInit: &Ast::Expression::RecordInit,
+  ): Hir::HirId {
+    if (recordInit.typeArguments.length() > 0) {
+      return Lowering::errorNode(hir, typeStore, recordInit.span);
+    }
+
+    let resultType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+    let Option::SOME(recordDef) = Lowering::nominalDefinition(defStore, typeStore, resultType) else {
+      return Lowering::errorNode(hir, typeStore, recordInit.span);
+    };
+
+    if (Lowering::recordFieldDefinitions(defStore, typeStore, resultType).isNone()) {
+      return Lowering::errorNode(hir, typeStore, recordInit.span);
+    }
+
+    let mut fieldIndexes: Vector<u32> = Vector::new<u32>();
+    let mut fieldValues: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < recordInit.fields.length()) {
+      let Option::SOME(field) = recordInit.fields.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(location) = Lowering::recordFieldLocation(
+        defStore,
+        typeStore,
+        symbols,
+        resultType,
+        field.name.toStr(),
+      ) else {
+        index += 1;
+        continue;
+      };
+
+      fieldIndexes.push(location.index);
+      fieldValues.push(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, field.value));
+
+      index += 1;
+    }
+
+    let fields: Vector<Hir::HirRecordField> = Lowering::recordFieldsInDeclarationOrder(&fieldIndexes, &fieldValues);
+    let typeArgs: Vector<Analyzer::TypeId> = Lowering::instanceTypeArguments(defStore, typeStore, resultType);
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::RecordInit(Hir::HirRecordInit {
+        recordDef: recordDef,
+        typeArgs: typeArgs,
+        fields: fields,
+      }),
+      span: recordInit.span,
+      typeId: resultType,
+    });
+  }
+
+  /// Reorders the `(field index, value)` pairs collected in source order into
+  /// ascending field index, the order the oracle's sort leaves them in.
+  function recordFieldsInDeclarationOrder(
+    fieldIndexes: &Vector<u32>,
+    fieldValues: &Vector<Hir::HirId>,
+  ): Vector<Hir::HirRecordField> {
+    let mut fields: Vector<Hir::HirRecordField> = Vector::new<Hir::HirRecordField>();
+
+    let mut emitted: Vector<boolean> = Vector::new<boolean>();
+    let mut flagIndex: u64 = 0;
+
+    while (flagIndex < fieldIndexes.length()) {
+      emitted.push(false);
+      flagIndex += 1;
+    }
+
+    let mut remaining: u64 = fieldIndexes.length();
+
+    while (remaining > 0) {
+      let mut bestPosition: Option<u64> = Option::NONE;
+      let mut bestIndex: u32 = 0;
+      let mut position: u64 = 0;
+
+      while (position < fieldIndexes.length()) {
+        let Option::SOME(alreadyEmitted) = emitted.get(position) else {
+          position += 1;
+          continue;
+        };
+        let Option::SOME(fieldIndex) = fieldIndexes.get(position) else {
+          position += 1;
+          continue;
+        };
+
+        if (*alreadyEmitted) {
+          position += 1;
+          continue;
+        }
+
+        if (bestPosition.isNone() || *fieldIndex < bestIndex) {
+          bestPosition = Option::SOME(position);
+          bestIndex = *fieldIndex;
+        }
+
+        position += 1;
+      }
+
+      let Option::SOME(chosen) = bestPosition else {
+        return fields;
+      };
+
+      if (let Option::SOME(value) = fieldValues.get(chosen)) {
+        fields.push(Hir::HirRecordField {
+          fieldIndex: bestIndex,
+          value: *value,
+        });
+      }
+
+      emitted.set(chosen, true);
+      remaining -= 1;
+    }
+
+    return fields;
+  }
+
+  /// Lowers the `@name(...)` builtins the selfhost typechecker accepts.
+  ///
+  /// `@sizeOf` / `@alignOf` take their single type argument through the same
+  /// annotation resolver the checker uses, `@panic` lowers its message
+  /// operand, and `@trap` / `@unreachable` carry nothing. Every other builtin
+  /// — including the ones with an `HirKind` counterpart such as `@maxOf` /
+  /// `@minOf` / `@bitCast` — is rejected by the typechecker as unsupported,
+  /// so no checked operand or result type exists to lower against and the
+  /// call stays on `Error`.
+  ///
+  /// `@typeName` stays on `Error` for a language reason rather than a model
+  /// one: the oracle folds it to the printed type name, and the selfhost type
+  /// printer (`TypeStore::nameOfResolved`) takes shared borrows of the three
+  /// stores, which lowering holds mutably end to end. The compiler has no
+  /// `&mut` to `&` reborrow, so the call cannot be made from here.
+  function lowerBuiltinCall(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    builtinCall: &Ast::Expression::BuiltinCall,
+  ): Hir::HirId {
+    let name: &String = &builtinCall.name;
+
+    if (name.equals("trap")) {
+      let mut trapHirRef: &mut Hir::HirStore = hir;
+      return trapHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Trap,
+        span: builtinCall.span,
+        typeId: Lowering::neverType(typeStore),
+      });
+    }
+
+    if (name.equals("unreachable")) {
+      let mut unreachableHirRef: &mut Hir::HirStore = hir;
+      return unreachableHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::BuiltinUnreachable,
+        span: builtinCall.span,
+        typeId: Lowering::neverType(typeStore),
+      });
+    }
+
+    if (name.equals("panic")) {
+      let Option::SOME(messageId) = builtinCall.arguments.get(0) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let message: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *messageId);
+
+      let mut panicHirRef: &mut Hir::HirStore = hir;
+      return panicHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Panic(message),
+        span: builtinCall.span,
+        typeId: Lowering::neverType(typeStore),
+      });
+    }
+
+    let mut takesTypeArgument: boolean = false;
+
+    if (name.equals("sizeOf") || name.equals("alignOf")) {
+      takesTypeArgument = true;
+    }
+
+    if (!takesTypeArgument) {
+      return Lowering::errorNode(hir, typeStore, builtinCall.span);
+    }
+
+    let Option::SOME(typeArgumentId) = builtinCall.typeArguments.get(0) else {
+      return Lowering::errorNode(hir, typeStore, builtinCall.span);
+    };
+
+    let Option::SOME(operandType) = Analyzer::Typecheck::resolveLocalAnnotation(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      *typeArgumentId,
+    ) else {
+      return Lowering::errorNode(hir, typeStore, builtinCall.span);
+    };
+
+    if (name.equals("sizeOf")) {
+      let mut sizeHirRef: &mut Hir::HirStore = hir;
+      return sizeHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::SizeOf(operandType),
+        span: builtinCall.span,
+        typeId: Lowering::unsignedInt64Type(typeStore),
+      });
+    }
+
+    let mut alignHirRef: &mut Hir::HirStore = hir;
+    return alignHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::AlignOf(operandType),
+      span: builtinCall.span,
+      typeId: Lowering::unsignedInt64Type(typeStore),
     });
   }
 
@@ -2202,6 +2707,51 @@ export namespace Lowering {
     });
   }
 
+  /// Lowers a `defer` to `HirKind::Defer`. The oracle's body is the deferred
+  /// expression; the selfhost parser wraps it in an `Expression` statement,
+  /// which is unwrapped here so the two carry the same node. Any other
+  /// statement form is lowered as-is, exactly like `checkDeferStmt` walks it.
+  function lowerDefer(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    deferStmt: &Ast::Statement::Defer,
+  ): Hir::HirId {
+    let mut deferredExpr: Option<Ast::ExpressionId> = Option::NONE;
+
+    if (let Option::SOME(innerStmt) = module.statements.get(deferStmt.statement)) {
+      if (let Ast::Statement::Node::Expression(expressionStmt) = innerStmt) {
+        deferredExpr = Option::SOME(expressionStmt.expression);
+      }
+    }
+
+    if (let Option::SOME(exprId) = deferredExpr) {
+      let body: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, exprId);
+      return Lowering::deferNode(hir, typeStore, deferStmt.span, body);
+    }
+
+    let body: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, deferStmt.statement);
+    return Lowering::deferNode(hir, typeStore, deferStmt.span, body);
+  }
+
+  function deferNode(
+    hir: &mut Hir::HirStore,
+    typeStore: &mut Analyzer::TypeStore,
+    span: SourceSpan,
+    body: Hir::HirId,
+  ): Hir::HirId {
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Defer(body),
+      span: span,
+      typeId: Lowering::voidType(typeStore),
+    });
+  }
+
   function lowerStmt(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -2345,13 +2895,42 @@ export namespace Lowering {
         return Lowering::lowerLetElse(defStore, typeStore, symbols, module, output, locals, hir, &letElse);
       },
       Ast::Statement::Node::For(forStmt) -> {
-        return Lowering::errorNode(hir, typeStore, forStmt.span);
+        let mut init: Option<Hir::HirId> = Option::NONE;
+        if (let Option::SOME(initializerId) = forStmt.initializer) {
+          init = Option::SOME(Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, initializerId));
+        }
+
+        let mut condition: Option<Hir::HirId> = Option::NONE;
+        if (let Option::SOME(conditionId) = forStmt.condition) {
+          condition = Option::SOME(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, conditionId));
+        }
+
+        let mut update: Option<Hir::HirId> = Option::NONE;
+        if (let Option::SOME(updateId) = forStmt.update) {
+          update = Option::SOME(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, updateId));
+        }
+
+        let body: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, forStmt.body);
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Loop(Hir::HirLoop {
+            condition: Hir::LoopKind::For(Hir::ForLoop {
+              init: init,
+              condition: condition,
+              update: update,
+            }),
+            body: body,
+          }),
+          span: forStmt.span,
+          typeId: Lowering::voidType(typeStore),
+        });
       },
       Ast::Statement::Node::ForOf(forOf) -> {
         return Lowering::errorNode(hir, typeStore, forOf.span);
       },
       Ast::Statement::Node::Defer(deferStmt) -> {
-        return Lowering::errorNode(hir, typeStore, deferStmt.span);
+        return Lowering::lowerDefer(defStore, typeStore, symbols, module, output, locals, hir, &deferStmt);
       },
       Ast::Statement::Node::Item(itemStmt) -> {
         return Lowering::errorNode(hir, typeStore, itemStmt.span);
@@ -2373,16 +2952,20 @@ export namespace Lowering {
   // Items
   // =========================================================================
 
-  /// Owned copy of the signature data lowering needs from a `FunctionDef`,
-  /// taken up front so the `DefinitionStore` borrow ends before body
-  /// lowering pushes new `Variable` definitions into it.
+  /// Owned copy of the signature data lowering needs from a `FunctionDef` or
+  /// a `MethodDef`, taken up front so the `DefinitionStore` borrow ends
+  /// before body lowering pushes new `Variable` definitions into it.
+  ///
+  /// A method's `params` include the receiver binding: the binder binds every
+  /// parameter pattern of the method item, `self` included, so the vector
+  /// stays positionally aligned with the AST parameter patterns.
   record FunctionSignature {
     public name: Analyzer::SymbolId;
     public params: Vector<Analyzer::DefinitionId>;
     public returnType: Analyzer::TypeId;
   }
 
-  function functionSignature(
+  function callableSignature(
     defStore: &mut Analyzer::DefinitionStore,
     defId: Analyzer::DefinitionId,
   ): Option<Lowering::FunctionSignature> {
@@ -2390,25 +2973,27 @@ export namespace Lowering {
       return Option::NONE;
     };
 
-    let Analyzer::Definition::Function(functionDef) = definition else {
-      return Option::NONE;
+    match (definition) {
+      Analyzer::Definition::Function(functionDef) -> {
+        return Option::SOME(Lowering::FunctionSignature {
+          name: functionDef.name,
+          params: Analyzer::Typecheck::copyDefinitionIdVector(&functionDef.params),
+          returnType: functionDef.returnType,
+        });
+      },
+      Analyzer::Definition::Method(methodDef) -> {
+        return Option::SOME(Lowering::FunctionSignature {
+          name: methodDef.name,
+          params: Analyzer::Typecheck::copyDefinitionIdVector(&methodDef.params),
+          returnType: methodDef.returnType,
+        });
+      },
+      _ -> {
+        return Option::NONE;
+      },
     };
 
-    let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
-    let mut index: u64 = 0;
-
-    while (index < functionDef.params.length()) {
-      if (let Option::SOME(paramId) = functionDef.params.get(index)) {
-        params.push(*paramId);
-      }
-      index += 1;
-    }
-
-    return Option::SOME(Lowering::FunctionSignature {
-      name: functionDef.name,
-      params: params,
-      returnType: functionDef.returnType,
-    });
+    return Option::NONE;
   }
 
   /// `DefinitionId` for an item, consulting binder pass 2 first and falling
@@ -2474,32 +3059,146 @@ export namespace Lowering {
       return;
     };
 
-    let Option::SOME(signature) = Lowering::functionSignature(defStore, defId) else {
+    let Option::SOME(signature) = Lowering::callableSignature(defStore, defId) else {
       return;
     };
 
+    Lowering::lowerCallableBody(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      output,
+      locals,
+      hir,
+      defId,
+      function_,
+      &signature,
+    );
+
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let mainSym: Analyzer::SymbolId = symbolsRef.intern("main");
+
+    if (signature.name.raw() == mainSym.raw()) {
+      let mut hirRef: &mut Hir::HirStore = hir;
+      hirRef.setEntryPoint(defId);
+    }
+  }
+
+  /// Registers the parameters of one callable, lowers its body, and records
+  /// the result in the HIR store. `currentReturnType` is saved and restored
+  /// around the body so a nested callable — a record method lowered after the
+  /// function that precedes it — cannot leak its return type into the next
+  /// one's `try` desugar.
+  function lowerCallableBody(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    defId: Analyzer::DefinitionId,
+    function_: &Ast::Item::Function,
+    signature: &Lowering::FunctionSignature,
+  ): void {
     Lowering::registerParams(module, output, locals, &function_.parameters, &signature.params);
+
+    let previousReturnType: Option<Analyzer::TypeId> = locals.currentReturnType;
 
     let mut localsRef: &mut Lowering::LocalMap = locals;
     localsRef.currentReturnType = Option::SOME(signature.returnType);
 
     let body: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, function_.body);
 
+    let mut restoreRef: &mut Lowering::LocalMap = locals;
+    restoreRef.currentReturnType = previousReturnType;
+
     let mut hirRef: &mut Hir::HirStore = hir;
     hirRef.setFunctionBody(defId, body);
     hirRef.addItem(defId);
+  }
 
-    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
-    let mainSym: Analyzer::SymbolId = symbolsRef.intern("main");
+  /// Lowers the bodies of one record's or enum's methods, in declaration
+  /// order. The oracle registers a method body exactly like a free function's
+  /// (`function_bodies` plus `items`) and emits no node for the owner itself,
+  /// which is why nothing is returned here.
+  ///
+  /// Method bodies are invisible in the HIR display: its definition printer
+  /// only renders `Definition::Function` entries, mirroring the Rust printer's
+  /// `DefinitionKind::Function` arm. The locals a method body declares still
+  /// surface in the variable-initializer section.
+  function lowerOwnerMethods(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    methodItemIds: &Vector<Ast::ItemId>,
+  ): void {
+    let mut index: u64 = 0;
 
-    if (signature.name.raw() == mainSym.raw()) {
-      hirRef.setEntryPoint(defId);
+    while (index < methodItemIds.length()) {
+      let Option::SOME(methodItemId) = methodItemIds.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      Lowering::lowerMethodItem(defStore, typeStore, symbols, module, output, locals, hir, *methodItemId);
+      index += 1;
     }
   }
 
-  /// Lowers one root item: functions get bodies, namespaces recurse, and
-  /// exports unwrap. Records, enums, constants, traits, aliases, imports,
-  /// and externs are outside this slice and are skipped without HIR output.
+  /// Lowers one method item's body. Unlike `lowerFunctionItem` this never
+  /// sets the entry point: only a free `main` is an entry point.
+  function lowerMethodItem(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    itemId: Ast::ItemId,
+  ): void {
+    let Option::SOME(item) = module.items.get(itemId) else {
+      return;
+    };
+
+    let Ast::Item::Node::Function(function_) = item else {
+      return;
+    };
+
+    let Option::SOME(defId) = Lowering::findItemDef(output, itemId) else {
+      return;
+    };
+
+    let Option::SOME(signature) = Lowering::callableSignature(defStore, defId) else {
+      return;
+    };
+
+    Lowering::lowerCallableBody(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      output,
+      locals,
+      hir,
+      defId,
+      &function_,
+      &signature,
+    );
+  }
+
+  /// Lowers one root item: functions and owner-local methods get bodies,
+  /// namespaces recurse, and exports unwrap. Constants, traits, aliases,
+  /// imports, and externs are outside this slice and are skipped without HIR
+  /// output; a record or enum contributes only its methods, exactly like the
+  /// oracle, whose record/enum arms lower method bodies and return an empty
+  /// block for the declaration itself.
   function lowerItem(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -2517,6 +3216,12 @@ export namespace Lowering {
     match (item) {
       Ast::Item::Node::Function(function_) -> {
         Lowering::lowerFunctionItem(defStore, typeStore, symbols, module, output, locals, hir, itemId, &function_);
+      },
+      Ast::Item::Node::Record(recordItem) -> {
+        Lowering::lowerOwnerMethods(defStore, typeStore, symbols, module, output, locals, hir, &recordItem.methods);
+      },
+      Ast::Item::Node::Enum(enumItem) -> {
+        Lowering::lowerOwnerMethods(defStore, typeStore, symbols, module, output, locals, hir, &enumItem.methods);
       },
       Ast::Item::Node::Namespace(namespaceItem) -> {
         Lowering::lowerItems(defStore, typeStore, symbols, module, output, locals, hir, &namespaceItem.items);
