@@ -1766,8 +1766,8 @@ export namespace Analyzer {
     ///   returns `Unresolved`. TODO(unqualified-variant-patterns) for bare variants.
     /// - 2+ segments: last-two-segment lookup via `resolvePathTail` (`owner` =
     ///   `segments[N-2]`, `member` = `segments[N-1]`), mirroring expression
-    ///   position. Variant hits still enforce arity (ADR-R5: payloads empty,
-    ///   TODO(variant-payload-arity)); methods are rejected in pattern position.
+    ///   position. Variant hits enforce arity against the variant's declared
+    ///   payload slots; methods are rejected in pattern position.
     ///
     /// Sub-patterns (`p.arguments`) are always recursed into for best-effort binding.
     function resolvePatternPath(
@@ -1949,18 +1949,33 @@ export namespace Analyzer {
     }
 
     /// Check pattern arity against an already-resolved enum variant.
-    /// ADR-R5: variant payloads are currently always empty, so any arguments
-    /// trigger a mismatch. TODO(variant-payload-arity): compare against the
-    /// actual payload once the payload resolver lands.
+    ///
+    /// The expected arity is the length of the variant's payload vector, which
+    /// the binder fills with one entry per declared payload slot. Those entries
+    /// are VOID sentinels (payload *types* stay deferred per ADR-R5), so only
+    /// the length is meaningful here.
     function resolvePatternPathVariantArity(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
       p: &Ast::Pattern::Path,
       variantDefId: Analyzer::DefinitionId,
     ): Analyzer::ResolverBodies::ResolvedRef {
       let argCount: u64 = p.arguments.length();
 
-      if (argCount > 0) {
-        Analyzer::ResolverBodies::emitPatternArityMismatch(state, p.span, argCount, 0);
+      let Option::SOME(def) = defStore.get(variantDefId) else {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, "unknown variant");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+      };
+
+      let Analyzer::Definition::Variant(variant) = def else {
+        Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, "unknown variant");
+        return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+      };
+
+      let expectedCount: u64 = variant.payload.length();
+
+      if (argCount != expectedCount) {
+        Analyzer::ResolverBodies::emitPatternArityMismatch(state, p.span, argCount, expectedCount);
         return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
       }
 
@@ -2036,7 +2051,7 @@ export namespace Analyzer {
     ): Analyzer::ResolverBodies::ResolvedRef {
       match (lookup) {
         Analyzer::ResolverBodies::PathTailLookup::Variant(variantDefId) -> {
-          return Analyzer::ResolverBodies::resolvePatternPathVariantArity(state, p, variantDefId);
+          return Analyzer::ResolverBodies::resolvePatternPathVariantArity(state, defStore, p, variantDefId);
         },
         Analyzer::ResolverBodies::PathTailLookup::TypeFallback(defId) -> {
           return Analyzer::ResolverBodies::resolvePatternPathTypeFallback(state, defStore, p, defId);

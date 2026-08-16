@@ -1785,6 +1785,119 @@ export namespace Analyzer {
       @panic("unreachable: recordFieldCount match did not return");
     }
 
+    /// Type annotation of the `index`-th payload slot of `variantName` inside an
+    /// enum declaration, or `NONE` when the variant or the slot is missing.
+    ///
+    /// The parser models each declared payload slot as a `Pattern::Binding`
+    /// named `_` whose annotation carries the payload type.
+    function astVariantPayloadAnnotationAt(
+      module: &Ast::Module,
+      enumItem: &Ast::Item::Enum,
+      variantName: str,
+      index: u64,
+    ): Option<Ast::TypeId> {
+      let mut variantIndex: u64 = 0;
+
+      while (variantIndex < enumItem.variants.length()) {
+        let Option::SOME(variantPatternId) = enumItem.variants.get(variantIndex) else {
+          variantIndex += 1;
+          continue;
+        };
+        let Option::SOME(variantPattern) = module.patterns.get(*variantPatternId) else {
+          variantIndex += 1;
+          continue;
+        };
+
+        if (let Ast::Pattern::Node::Path(declaration) = variantPattern) {
+          let segmentCount: u64 = declaration.segments.length();
+
+          if (segmentCount > 0) {
+            if (let Option::SOME(declaredName) = declaration.segments.get(segmentCount - 1)) {
+              if (declaredName.equals(variantName)) {
+                let Option::SOME(slotPatternId) = declaration.arguments.get(index) else {
+                  return Option::NONE;
+                };
+                let Option::SOME(slotPattern) = module.patterns.get(*slotPatternId) else {
+                  return Option::NONE;
+                };
+
+                if (let Ast::Pattern::Node::Binding(slot) = slotPattern) {
+                  return slot.annotation;
+                }
+
+                return Option::NONE;
+              }
+            }
+          }
+        }
+
+        variantIndex += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Declared type of the `index`-th payload slot of the variant a pattern
+    /// like `Shape::CIRCLE(radius)` names.
+    ///
+    /// `VariantDef.payload` only records payload *arity*: its entries are VOID
+    /// sentinels because variant payload types stay unresolved (ADR-R5). The
+    /// binding type is therefore read back from the enum declaration in the AST,
+    /// mirroring `astRecordFieldTypeAt`.
+    function astVariantPayloadTypeAt(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pattern: &Ast::Pattern::Path,
+      index: u64,
+    ): Option<Analyzer::TypeId> {
+      let segmentCount: u64 = pattern.segments.length();
+
+      if (segmentCount < 2) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(enumName) = pattern.segments.get(segmentCount - 2) else {
+        return Option::NONE;
+      };
+      let Option::SOME(variantName) = pattern.segments.get(segmentCount - 1) else {
+        return Option::NONE;
+      };
+
+      let mut rootIndex: u64 = 0;
+
+      while (rootIndex < module.roots.length()) {
+        let Option::SOME(itemId) = module.roots.get(rootIndex) else {
+          rootIndex += 1;
+          continue;
+        };
+        let Option::SOME(item) = module.items.get(*itemId) else {
+          rootIndex += 1;
+          continue;
+        };
+
+        if (let Ast::Item::Node::Enum(enumItem) = item) {
+          if (enumItem.name.equals(enumName.toStr())) {
+            let Option::SOME(annotationId) = Analyzer::Typecheck::astVariantPayloadAnnotationAt(
+              module,
+              &enumItem,
+              variantName.toStr(),
+              index,
+            ) else {
+              return Option::NONE;
+            };
+
+            return Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, annotationId);
+          }
+        }
+
+        rootIndex += 1;
+      }
+
+      return Option::NONE;
+    }
+
     function astRecordFieldTypeAt(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
@@ -1931,13 +2044,9 @@ export namespace Analyzer {
     /// `BodyResolutionMap`, so this function receives `variantDefId` directly
     /// instead of re-deriving it from `pattern`.
     ///
-    /// Arity/payload-typed binding is forward-compatible dead code today:
-    /// the resolver (`resolvePatternPathVariantArity`, ADR-R5) currently
-    /// forces every variant *pattern* to zero arguments, so `pattern.arguments`
-    /// is always empty by the time this runs. The arity check still fires
-    /// when the variant *declaration* itself carries payload slots (e.g. a
-    /// bare `Variant` pattern matching a variant declared with payload) —
-    /// that mismatch is a real, reachable diagnostic today.
+    /// Payload sub-patterns are bound against the payload types read back from
+    /// the enum declaration (`astVariantPayloadTypeAt`), because `VariantDef`
+    /// stores payload arity but keeps the types as VOID sentinels (ADR-R5).
     function collectEnumVariantPatternBindings(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1999,12 +2108,20 @@ export namespace Analyzer {
           index += 1;
           continue;
         };
-        let Option::SOME(payloadType) = variant.payload.get(index) else {
-          index += 1;
-          continue;
+        let payloadTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::astVariantPayloadTypeAt(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          pattern,
+          index,
+        );
+        let Option::SOME(payloadType) = payloadTypeOpt else {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "enum variant payload type is unavailable");
+          return false;
         };
 
-        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *argPatternId, *payloadType, mutable, span)) {
+        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *argPatternId, payloadType, mutable, span)) {
           return false;
         }
 
