@@ -67,7 +67,18 @@ export namespace Analyzer {
         resolvedBodies,
         b.left,
       );
-      let rightTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+
+      // The reference analyzer checks the left operand without an expectation
+      // and then checks the right one expecting the left operand's type, so an
+      // unsuffixed literal on the right adopts it instead of defaulting.
+      let mut rightExpected: Option<Analyzer::TypeId> = Option::NONE;
+      if (let Option::SOME(leftType) = leftTypeOpt) {
+        if (Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, leftType)) {
+          rightExpected = Option::SOME(leftType);
+        }
+      }
+
+      let rightTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
         state,
         defStore,
         typeStore,
@@ -75,6 +86,7 @@ export namespace Analyzer {
         module,
         resolvedBodies,
         b.right,
+        rightExpected,
       );
 
       let Option::SOME(leftType) = leftTypeOpt else {
@@ -90,6 +102,13 @@ export namespace Analyzer {
           return Option::SOME(leftType);
         }
 
+        // Operands of different widths unify on the wider one, as the
+        // reference analyzer's `typecheck_common_type` does.
+        if (let Option::SOME(commonType) = Analyzer::Typecheck::commonIntegerType(defStore, typeStore, leftType, rightType)) {
+          Analyzer::Typecheck::recordExprType(state, exprId, commonType);
+          return Option::SOME(commonType);
+        }
+
         Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
         return Option::NONE;
       }
@@ -101,12 +120,24 @@ export namespace Analyzer {
           return Option::SOME(booleanType);
         }
 
+        if (Analyzer::Typecheck::commonIntegerType(defStore, typeStore, leftType, rightType).isSome()) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
         Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
         return Option::NONE;
       }
 
       if (Analyzer::Typecheck::isComparisonBinaryOperator(b.operator)) {
         if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType) && Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, b.span, leftType)) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
+        if (Analyzer::Typecheck::commonIntegerType(defStore, typeStore, leftType, rightType).isSome()) {
           let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
           Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
           return Option::SOME(booleanType);
@@ -231,7 +262,9 @@ export namespace Analyzer {
         return Option::NONE;
       }
 
-      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+      // The assignment target's type is the expectation for the right side,
+      // mirroring the reference analyzer's `typecheck_assignment_expr`.
+      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
         state,
         defStore,
         typeStore,
@@ -239,6 +272,7 @@ export namespace Analyzer {
         module,
         resolvedBodies,
         value.value,
+        Option::SOME(localBinding.typeId),
       );
       let Option::SOME(actualType) = actualTypeOpt else {
         return Option::NONE;
@@ -2364,6 +2398,10 @@ export namespace Analyzer {
     /// would reject `return @panic("...")` inside a function returning anything but
     /// `never`, reporting a type error for code that cannot reach the return at all.
     ///
+    /// A same-sign integer also fits a strictly wider one, mirroring the reference
+    /// analyzer's `is_assignable`/`is_implicit_widening` pair. Narrowing and any
+    /// signed/unsigned crossing remain explicit casts.
+    ///
     /// This must be used wherever a value flows into an expected type — return, local
     /// annotation, assignment, argument, field initializer, constant initializer, and the
     /// joined type of an all-diverging `match`. Symmetric comparisons (binary operands, a
@@ -2382,6 +2420,10 @@ export namespace Analyzer {
       // `typesEqual` reports cyclic aliases as it resolves them, so it runs first even when
       // the answer is already known: testing divergence first would swallow that diagnostic.
       if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, expected, actual)) {
+        return true;
+      }
+
+      if (Analyzer::Typecheck::isImplicitWidening(defStore, typeStore, expected, actual)) {
         return true;
       }
 
@@ -5013,7 +5055,10 @@ export namespace Analyzer {
         },
         Ast::Statement::Node::Return(returnStmt) -> {
           if (let Option::SOME(valueExprId) = returnStmt.value) {
-            let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+            // The enclosing return type is the expectation for the returned
+            // value, mirroring the reference analyzer's `ASTStatement::Return`
+            // arm, which checks it under `InferContext::expecting`.
+            let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
               state,
               defStore,
               typeStore,
@@ -5021,6 +5066,7 @@ export namespace Analyzer {
               module,
               resolvedBodies,
               valueExprId,
+              Option::SOME(state.currentReturnType),
             );
 
             if (let Option::SOME(actualType) = actualTypeOpt) {
