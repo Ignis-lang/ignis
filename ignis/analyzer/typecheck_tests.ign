@@ -9814,3 +9814,545 @@ function typecheckHeterogeneousVectorLiteralProducesDiagnostic(): void {
 
   assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
 }
+
+function typecheckAddCastExpr(
+  module: &mut Ast::Module,
+  expression: Ast::ExpressionId,
+  targetType: Ast::TypeId,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Cast(Ast::Expression::Cast {
+    span: typecheckDummySpan(),
+    expression: expression,
+    targetType: targetType,
+  }));
+}
+
+function typecheckAddDereferenceExpr(
+  module: &mut Ast::Module,
+  operand: Ast::ExpressionId,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Dereference(Ast::Expression::Dereference {
+    span: typecheckDummySpan(),
+    operand: operand,
+  }));
+}
+
+function typecheckAddReferenceExpr(
+  module: &mut Ast::Module,
+  mutable: boolean,
+  target: Ast::ExpressionId,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Reference(Ast::Expression::Reference {
+    span: typecheckDummySpan(),
+    mutable: mutable,
+    target: target,
+  }));
+}
+
+function typecheckAddUnaryExpr(
+  module: &mut Ast::Module,
+  operator: Ast::Expression::UnaryOperator,
+  operand: Ast::ExpressionId,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Unary(Ast::Expression::Unary {
+    span: typecheckDummySpan(),
+    operator: operator,
+    operand: operand,
+  }));
+}
+
+function typecheckAddReferenceType(
+  module: &mut Ast::Module,
+  mutable: boolean,
+  target: Ast::TypeId,
+): Ast::TypeId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Reference(Ast::Type::Reference {
+    span: typecheckDummySpan(),
+    mutable: mutable,
+    target: target,
+  }));
+}
+
+function typecheckAddFloatLiteral(module: &mut Ast::Module, value: f64): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::Float(value),
+  }));
+}
+
+function typecheckAddSingleExprFunction(
+  module: &mut Ast::Module,
+  name: str,
+  stmts: Vector<Ast::StatementId>,
+): void {
+  let mut bodyStmts: Vector<Ast::StatementId> = stmts;
+  bodyStmts.push(typecheckAddReturn(module));
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(module, bodyStmts);
+
+  let mut moduleRef: &mut Ast::Module = module;
+  moduleRef.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Scenario: `1 as i64` accepts the numeric-to-numeric cast and types the
+/// expression as the cast target.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckCastI32AsI64HappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i64TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i64");
+  let castExpr: Ast::ExpressionId = typecheckAddCastExpr(
+    &mut module,
+    typecheckAddIntLiteral(&mut module, 1),
+    i64TypeId,
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, castExpr));
+  typecheckAddSingleExprFunction(&mut module, "castNumeric", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, castExpr, typeStore.intern(Analyzer::Type::I64));
+}
+
+/// Scenario: `true as i32` accepts the boolean-to-integer cast.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckCastBooleanAsI32HappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let castExpr: Ast::ExpressionId = typecheckAddCastExpr(
+    &mut module,
+    typecheckAddBoolLiteral(&mut module, true),
+    i32TypeId,
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, castExpr));
+  typecheckAddSingleExprFunction(&mut module, "castBoolean", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, castExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: `true as f32` has no supported conversion (boolean only casts to
+/// integers), so it reports `INVALID_CAST` while still typing the expression
+/// as the target so one mistake does not cascade.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckCastBooleanAsF32ProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let f32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "f32");
+  let castExpr: Ast::ExpressionId = typecheckAddCastExpr(
+    &mut module,
+    typecheckAddBoolLiteral(&mut module, true),
+    f32TypeId,
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, castExpr));
+  typecheckAddSingleExprFunction(&mut module, "castInvalid", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_CAST);
+  assertExprType(&output, castExpr, typeStore.intern(Analyzer::Type::F32));
+}
+
+/// Scenario: dereferencing a `*i32` parameter yields the pointee type.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckDereferencePointerParameterYieldsPointeeType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let pointerAnnotation: Ast::TypeId = typecheckAddPointerType(&mut module, i32TypeId, false);
+  let pParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "p", pointerAnnotation);
+
+  let derefExpr: Ast::ExpressionId = typecheckAddDereferenceExpr(
+    &mut module,
+    typecheckAddVariable(&mut module, "p"),
+  );
+  let derefStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, derefExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(derefStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(pParam);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("derefPointer"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, derefExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: dereferencing an `i32` value reports `DEREFERENCE_NON_POINTER`.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckDereferenceNonPointerProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let derefExpr: Ast::ExpressionId = typecheckAddDereferenceExpr(
+    &mut module,
+    typecheckAddIntLiteral(&mut module, 1),
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, derefExpr));
+  typecheckAddSingleExprFunction(&mut module, "derefNonPointer", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::DEREFERENCE_NON_POINTER);
+}
+
+/// Scenario: `&x` on an immutable local types as `&i32` without diagnostics.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckReferenceToLocalYieldsReferenceType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, xPattern, i32TypeId, typecheckAddIntLiteral(&mut module, 1));
+
+  let refExpr: Ast::ExpressionId = typecheckAddReferenceExpr(
+    &mut module,
+    false,
+    typecheckAddVariable(&mut module, "x"),
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddExprStmt(&mut module, refExpr));
+  typecheckAddSingleExprFunction(&mut module, "referenceLocal", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, refExpr, typeStore.reference(typeStore.intern(Analyzer::Type::I32)));
+}
+
+/// Scenario: `&mut x` on a mutable local types as `&mut i32` without
+/// diagnostics.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckMutableReferenceToMutableLocalHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let variableStmt: Ast::StatementId = typecheckAddMutableVariableStmt(&mut module, xPattern, i32TypeId, typecheckAddIntLiteral(&mut module, 1));
+
+  let refExpr: Ast::ExpressionId = typecheckAddReferenceExpr(
+    &mut module,
+    true,
+    typecheckAddVariable(&mut module, "x"),
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(variableStmt);
+  bodyStmts.push(typecheckAddExprStmt(&mut module, refExpr));
+  typecheckAddSingleExprFunction(&mut module, "mutableReferenceMutableLocal", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, refExpr, typeStore.mutableReference(typeStore.intern(Analyzer::Type::I32)));
+}
+
+/// Scenario: `&mut x` on an immutable local reports
+/// `MUTABLE_REFERENCE_TO_IMMUTABLE`; the expression still takes the mutable
+/// reference type so one mistake does not cascade.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckMutableReferenceToImmutableLocalProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, xPattern, i32TypeId, typecheckAddIntLiteral(&mut module, 1));
+
+  let refExpr: Ast::ExpressionId = typecheckAddReferenceExpr(
+    &mut module,
+    true,
+    typecheckAddVariable(&mut module, "x"),
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddExprStmt(&mut module, refExpr));
+  typecheckAddSingleExprFunction(&mut module, "mutableReferenceImmutableLocal", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::MUTABLE_REFERENCE_TO_IMMUTABLE);
+  assertExprType(&output, refExpr, typeStore.mutableReference(typeStore.intern(Analyzer::Type::I32)));
+}
+
+/// Scenario: `&1` takes a reference to a literal, which is not an lvalue, so
+/// it reports `INVALID_REFERENCE_TARGET`.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckReferenceToNonLvalueProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let refExpr: Ast::ExpressionId = typecheckAddReferenceExpr(
+    &mut module,
+    false,
+    typecheckAddIntLiteral(&mut module, 1),
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, refExpr));
+  typecheckAddSingleExprFunction(&mut module, "referenceNonLvalue", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_REFERENCE_TARGET);
+}
+
+/// Scenario: `let r: &i32 = &x;` resolves the reference annotation and accepts
+/// the reference expression against it.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckLetWithReferenceAnnotationResolves(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let xPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let xLetStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, xPattern, i32TypeId, typecheckAddIntLiteral(&mut module, 1));
+
+  let referenceAnnotation: Ast::TypeId = typecheckAddReferenceType(&mut module, false, typecheckAddPathType(&mut module, "i32"));
+  let refExpr: Ast::ExpressionId = typecheckAddReferenceExpr(
+    &mut module,
+    false,
+    typecheckAddVariable(&mut module, "x"),
+  );
+  let rPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "r", referenceAnnotation);
+  let rLetStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, rPattern, referenceAnnotation, refExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(xLetStmt);
+  bodyStmts.push(rLetStmt);
+  typecheckAddSingleExprFunction(&mut module, "letReferenceAnnotation", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, refExpr, typeStore.reference(typeStore.intern(Analyzer::Type::I32)));
+}
+
+/// Scenario: `-1` negates a numeric operand and keeps the operand type.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckUnaryNegateOnI32HappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let negateExpr: Ast::ExpressionId = typecheckAddUnaryExpr(
+    &mut module,
+    Ast::Expression::UnaryOperator::Negate,
+    typecheckAddIntLiteral(&mut module, 1),
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, negateExpr));
+  typecheckAddSingleExprFunction(&mut module, "negateI32", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, negateExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: `-true` reports `INVALID_UNARY_OPERAND_TYPE` for `-`.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckUnaryNegateOnBooleanProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let negateExpr: Ast::ExpressionId = typecheckAddUnaryExpr(
+    &mut module,
+    Ast::Expression::UnaryOperator::Negate,
+    typecheckAddBoolLiteral(&mut module, true),
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, negateExpr));
+  typecheckAddSingleExprFunction(&mut module, "negateBoolean", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_UNARY_OPERAND_TYPE);
+}
+
+/// Scenario: `!true` types as `boolean` without diagnostics.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckUnaryNotOnBooleanHappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let notExpr: Ast::ExpressionId = typecheckAddUnaryExpr(
+    &mut module,
+    Ast::Expression::UnaryOperator::Not,
+    typecheckAddBoolLiteral(&mut module, true),
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, notExpr));
+  typecheckAddSingleExprFunction(&mut module, "notBoolean", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, notExpr, typeStore.intern(Analyzer::Type::BOOLEAN));
+}
+
+/// Scenario: `!1` reports `INVALID_UNARY_OPERAND_TYPE` for `!` but still
+/// types the expression as `boolean`, mirroring the Rust typechecker.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckUnaryNotOnI32ProducesDiagnosticAndStaysBoolean(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let notExpr: Ast::ExpressionId = typecheckAddUnaryExpr(
+    &mut module,
+    Ast::Expression::UnaryOperator::Not,
+    typecheckAddIntLiteral(&mut module, 1),
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, notExpr));
+  typecheckAddSingleExprFunction(&mut module, "notI32", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_UNARY_OPERAND_TYPE);
+  assertExprType(&output, notExpr, typeStore.intern(Analyzer::Type::BOOLEAN));
+}
+
+/// Scenario: `~1` accepts the integer operand and keeps its type.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckUnaryBitNotOnI32HappyPath(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let bitNotExpr: Ast::ExpressionId = typecheckAddUnaryExpr(
+    &mut module,
+    Ast::Expression::UnaryOperator::BitNot,
+    typecheckAddIntLiteral(&mut module, 1),
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, bitNotExpr));
+  typecheckAddSingleExprFunction(&mut module, "bitNotI32", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, bitNotExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: `~1.5` applies bitwise-not to a float, which only supports
+/// integers, so it reports `INVALID_UNARY_OPERAND_TYPE` for `~`.
+/// Spec: IGN-28 — typecheck cast, dereference, reference, and unary expressions.
+@test
+function typecheckUnaryBitNotOnFloatProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let bitNotExpr: Ast::ExpressionId = typecheckAddUnaryExpr(
+    &mut module,
+    Ast::Expression::UnaryOperator::BitNot,
+    typecheckAddFloatLiteral(&mut module, 1.5),
+  );
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, bitNotExpr));
+  typecheckAddSingleExprFunction(&mut module, "bitNotFloat", bodyStmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_UNARY_OPERAND_TYPE);
+}

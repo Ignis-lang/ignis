@@ -345,6 +345,71 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_NULL_LITERAL, message.toStr());
     }
 
+    function emitInvalidCast(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      fromType: Analyzer::TypeId,
+      toType: Analyzer::TypeId,
+    ): void {
+      let message: String = String::create("Cannot cast from '")
+        .concat(typeStore.nameOf(fromType).toStr())
+        .concat("' to '")
+        .concat(typeStore.nameOf(toType).toStr())
+        .concat("'");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_CAST, message.toStr());
+    }
+
+    function emitDereferenceNonPointer(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      operandType: Analyzer::TypeId,
+    ): void {
+      let message: String = String::create("Cannot dereference non-pointer type '")
+        .concat(typeStore.nameOf(operandType).toStr())
+        .concat("'");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::DEREFERENCE_NON_POINTER, message.toStr());
+    }
+
+    function emitInvalidReferenceTarget(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::INVALID_REFERENCE_TARGET,
+        "Cannot take reference of non-lvalue expression",
+      );
+    }
+
+    function emitMutableReferenceToImmutable(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+      varName: str,
+    ): void {
+      let message: String = String::create("Cannot create mutable reference to immutable variable '")
+        .concat(varName)
+        .concat("'");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::MUTABLE_REFERENCE_TO_IMMUTABLE, message.toStr());
+    }
+
+    function emitInvalidUnaryOperandType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      operator: str,
+      operandType: Analyzer::TypeId,
+    ): void {
+      let message: String = String::create("Unary operator '")
+        .concat(operator)
+        .concat("' cannot be applied to type '")
+        .concat(typeStore.nameOf(operandType).toStr())
+        .concat("'");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_UNARY_OPERAND_TYPE, message.toStr());
+    }
+
     /// Patch `VariableDef.declaredType` at `varDefId` via `DefinitionStore::replace`.
     ///
     /// Local mirror of the resolver's `patchVariableType`, used when an
@@ -390,6 +455,31 @@ export namespace Analyzer {
       let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
       stateRef.exprTypes.nodeIds.push(exprId.raw());
       stateRef.exprTypes.typeIds.push(typeId);
+    }
+
+    function lookupRecordedExprType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      exprId: Ast::ExpressionId,
+    ): Option<Analyzer::TypeId> {
+      let mut index: u64 = state.exprTypes.nodeIds.length();
+
+      while (index > 0) {
+        index -= 1;
+
+        let Option::SOME(nodeId) = state.exprTypes.nodeIds.get(index) else {
+          continue;
+        };
+
+        if (*nodeId == exprId.raw()) {
+          let Option::SOME(typeId) = state.exprTypes.typeIds.get(index) else {
+            return Option::NONE;
+          };
+
+          return Option::SOME(*typeId);
+        }
+      }
+
+      return Option::NONE;
     }
 
     function pushScope(state: &mut Analyzer::Typecheck::TypecheckState): void {
@@ -1893,8 +1983,23 @@ export namespace Analyzer {
 
           return Option::SOME(typeStoreRef.pointer(pointee));
         },
-        Ast::Type::Node::Reference(_) -> {
-          return Option::NONE;
+        Ast::Type::Node::Reference(reference) -> {
+          let Option::SOME(referent) = Analyzer::Typecheck::resolveLocalAnnotation(
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            reference.target,
+          ) else {
+            return Option::NONE;
+          };
+
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          if (reference.mutable) {
+            return Option::SOME(typeStoreRef.mutableReference(referent));
+          }
+
+          return Option::SOME(typeStoreRef.reference(referent));
         },
         Ast::Type::Node::Tuple(tuple) -> {
           let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
