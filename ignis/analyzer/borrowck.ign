@@ -1,0 +1,2239 @@
+import
+  SourceSpan,
+  Diagnostic,
+  DiagnosticBag,
+  Severity,
+  DiagnosticCode,
+  LabelKind,
+from "@compiler::diagnostics";
+
+import Id from "@compiler::ids";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import Vector from "std::vector";
+
+/// HIR borrow and move checking for the Ignis selfhost compiler (IGN-38,
+/// slice A).
+///
+/// Port of the core rules of two Rust oracles, both of which walk the HIR
+/// after lowering:
+///   - `crates/ignis_analyzer/src/borrowck_hir.rs` contributes the borrow
+///     state machine (shared counts vs. one mutable borrow), the named-borrow
+///     lifetime bound to a `let`, the transient borrows of call arguments and
+///     method receivers, and the assign-while-borrowed rule (A0036, A0037,
+///     A0038, A0047),
+///   - `crates/ignis_analyzer/src/ownership_hir.rs` contributes the move
+///     state machine (`Valid`/`Returned`/`Moved`), the consumption sites, the
+///     branch join that reports an inconsistent move, and the two-pass loop
+///     body walk (O0001, O0003).
+///
+/// Both oracles run over the same HIR in the Rust pipeline and share the same
+/// walk shape, so they are fused into one traversal here instead of two.
+/// Where the two disagree on how to treat a node, each rule keeps its own
+/// oracle's behaviour: an `if` restores and merges both maps, while a `match`
+/// resets only the move map per arm (borrow state flows through arms exactly
+/// as `borrowck_hir.rs` lets it).
+///
+/// Entry point: `Borrowck::checkModule`. Not wired into
+/// `Analyzer::analyzeModule` — callers run it explicitly after
+/// `Lowering::lowerModule`, the same way lowering itself is driven today.
+///
+/// Deliberate scope limits of this slice, each of them an oracle rule that is
+/// not ported yet rather than a rule that is weakened:
+///   - Closures and captures: the selfhost `HirKind` has no `Closure`
+///     variant, so `try_record_closure_capture_borrows` and the by-value
+///     capture consumption have nothing to walk.
+///   - Drop schedules (IGN-39): the ownership oracle produces `DropSchedules`
+///     alongside its diagnostics. Nothing here records a schedule; only the
+///     diagnostics are ported.
+///   - Manual `.drop()`, `deallocate`, pointer aliasing, and the interprocedural
+///     `&mut`-parameter drop summaries, together with the `Dropped`/`Freed`
+///     states and the diagnostics that depend on them (double free, use after
+///     free, use after drop, FFI leak).
+///   - `str`-view lifetimes (A0202), slice-view borrows, and return-of-local
+///     reference (A0043): all three need `needs_drop`-aware view tracking plus
+///     the variable-initializer chain, and the selfhost lowering does not
+///     produce the slice/`MakeSlice` shapes they key on yet.
+///   - Moves out of a borrowed place (A0186) and the borrowed-pattern-binding
+///     bookkeeping behind it.
+///   - Assignment to an immutable local: the Rust oracle emits that from the
+///     typechecker (A0013), not from either HIR checker; the selfhost
+///     typechecker already emits its own equivalent (A0067), so duplicating
+///     it here would report the same program twice.
+///
+/// Known divergences from the oracles, as opposed to unported rules:
+///   - Granularity is whole-local, exactly like both oracles: a borrow or a
+///     move of `value.field` is recorded against `value`. Neither oracle is
+///     path-precise, so this is parity rather than a simplification.
+///   - Move tracking keys on "needs drop" (the oracle's `get_moved_var`
+///     predicate) rather than on "not Copy". The two agree on every type the
+///     selfhost analyzer can build today, because a drop-needing record or
+///     enum is never Copy, and the oracle's consumption sites test
+///     `needs_drop && !is_copy` anyway.
+///   - `needsDropType` resolves `Type::Alias` through its aliased type. The
+///     Rust type model has no alias variant at this point, so there is nothing
+///     to mirror; leaving aliases opaque would silently stop tracking an
+///     aliased owned record.
+///   - `match` consumes a moved scrutinee variable unconditionally. The
+///     oracle first asks whether an arm pattern moves an owned payload out and
+///     splits into a borrowed-base rejection, a field-owner drop suppression,
+///     and this consumption; only the consumption is ported.
+export namespace Borrowck {
+  /// Move state of one local, ordered by restrictiveness so that a plain
+  /// numeric maximum implements the oracle's `most_restrictive`.
+  /// Mirrors the subset of `OwnershipState` this slice models.
+  const MOVE_VALID: u32 = 0;
+  const MOVE_RETURNED: u32 = 1;
+  const MOVE_MOVED: u32 = 2;
+
+  /// Borrow state encoding for one local, mirroring `BorrowState`:
+  /// `0` is unborrowed, `1` is the single mutable borrow, and any value `n`
+  /// above 1 is `n - 1` live shared borrows.
+  const BORROW_NONE: u32 = 0;
+  const BORROW_MUT: u32 = 1;
+  const BORROW_SHARED_BASE: u32 = 1;
+
+  /// Diagnostics produced by one module walk, in emission order.
+  record BorrowckOutput {
+    public diagnostics: DiagnosticBag;
+  }
+
+  /// Copy of the move map, taken around branches and loop bodies.
+  record MoveSnapshot {
+    public defs: Vector<u32>;
+    public values: Vector<u32>;
+  }
+
+  /// Copy of the borrow map plus the scope-held borrows, taken around the
+  /// branches of an `if` so the else side starts from the same borrow state
+  /// the then side did.
+  record BorrowSnapshot {
+    public defs: Vector<u32>;
+    public values: Vector<u32>;
+    public heldTargets: Vector<u32>;
+    public heldMutable: Vector<u32>;
+  }
+
+  /// Per-function checker state.
+  ///
+  /// All maps are parallel vectors keyed by the raw `DefinitionId`, following
+  /// the selfhost convention of avoiding hashing for small maps. Mutation
+  /// lives in methods rather than in free functions because a direct field
+  /// write from outside the record is currently miscompiled for owning
+  /// fields.
+  record State {
+    /// Borrow map: `borrowDefs[i]` has state `borrowValues[i]`.
+    borrowDefs: Vector<u32>;
+    borrowValues: Vector<u32>;
+
+    /// Move map: only locals that were declared owned or that transitioned
+    /// appear here, which is what makes an absent key mean "not tracked"
+    /// during a branch join.
+    moveDefs: Vector<u32>;
+    moveValues: Vector<u32>;
+
+    /// Borrows held until their scope exits, as a flat stack. `scopeStarts`
+    /// holds the index each open scope begins at.
+    heldTargets: Vector<u32>;
+    heldMutable: Vector<u32>;
+    scopeStarts: Vector<u64>;
+
+    /// One entry per enclosing loop, set when a `continue` was seen in it.
+    loopContinue: Vector<u32>;
+
+    /// False after a terminator, until a join restores it.
+    public reachable: boolean;
+
+    /// True while walking a deferred body, where a temporary borrow outlives
+    /// the expression that took it because the body runs at scope exit.
+    public inDefer: boolean;
+
+    public static init(): State {
+      return State {
+        borrowDefs: Vector::new<u32>(),
+        borrowValues: Vector::new<u32>(),
+        moveDefs: Vector::new<u32>(),
+        moveValues: Vector::new<u32>(),
+        heldTargets: Vector::new<u32>(),
+        heldMutable: Vector::new<u32>(),
+        scopeStarts: Vector::new<u64>(),
+        loopContinue: Vector::new<u32>(),
+        reachable: true,
+        inDefer: false,
+      };
+    }
+
+    public setReachable(&mut self, value: boolean): void {
+      self.reachable = value;
+    }
+
+    public setInDefer(&mut self, value: boolean): void {
+      self.inDefer = value;
+    }
+
+    public borrowValue(&self, defRaw: u32): u32 {
+      let mut index: u64 = 0;
+
+      while (index < self.borrowDefs.length()) {
+        if (let Option::SOME(candidate) = self.borrowDefs.get(index)) {
+          if (*candidate == defRaw) {
+            if (let Option::SOME(value) = self.borrowValues.get(index)) {
+              return *value;
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return Borrowck::BORROW_NONE;
+    }
+
+    public setBorrowValue(&mut self, defRaw: u32, value: u32): void {
+      let mut index: u64 = 0;
+
+      while (index < self.borrowDefs.length()) {
+        let mut found: boolean = false;
+
+        if (let Option::SOME(candidate) = self.borrowDefs.get(index)) {
+          if (*candidate == defRaw) {
+            found = true;
+          }
+        }
+
+        if (found) {
+          self.borrowValues.set(index, value);
+          return;
+        }
+
+        index += 1;
+      }
+
+      self.borrowDefs.push(defRaw);
+      self.borrowValues.push(value);
+    }
+
+    public moveValue(&self, defRaw: u32): Option<u32> {
+      let mut index: u64 = 0;
+
+      while (index < self.moveDefs.length()) {
+        if (let Option::SOME(candidate) = self.moveDefs.get(index)) {
+          if (*candidate == defRaw) {
+            if (let Option::SOME(value) = self.moveValues.get(index)) {
+              return Option::SOME(*value);
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    public setMoveValue(&mut self, defRaw: u32, value: u32): void {
+      let mut index: u64 = 0;
+
+      while (index < self.moveDefs.length()) {
+        let mut found: boolean = false;
+
+        if (let Option::SOME(candidate) = self.moveDefs.get(index)) {
+          if (*candidate == defRaw) {
+            found = true;
+          }
+        }
+
+        if (found) {
+          self.moveValues.set(index, value);
+          return;
+        }
+
+        index += 1;
+      }
+
+      self.moveDefs.push(defRaw);
+      self.moveValues.push(value);
+    }
+
+    /// Drops one local from the move map. Match arms use it to keep their own
+    /// pattern bindings out of the cross-arm join, exactly like the oracle
+    /// removes them before merging.
+    public removeMoveValue(&mut self, defRaw: u32): void {
+      let mut defs: Vector<u32> = Vector::new<u32>();
+      let mut values: Vector<u32> = Vector::new<u32>();
+      let mut index: u64 = 0;
+
+      while (index < self.moveDefs.length()) {
+        if (let Option::SOME(candidate) = self.moveDefs.get(index)) {
+          if (let Option::SOME(value) = self.moveValues.get(index)) {
+            if (*candidate != defRaw) {
+              defs.push(*candidate);
+              values.push(*value);
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      self.moveDefs = defs;
+      self.moveValues = values;
+    }
+
+    public snapshotMoves(&self): Borrowck::MoveSnapshot {
+      let mut defs: Vector<u32> = Vector::new<u32>();
+      let mut values: Vector<u32> = Vector::new<u32>();
+      let mut index: u64 = 0;
+
+      while (index < self.moveDefs.length()) {
+        if (let Option::SOME(defRaw) = self.moveDefs.get(index)) {
+          if (let Option::SOME(value) = self.moveValues.get(index)) {
+            defs.push(*defRaw);
+            values.push(*value);
+          }
+        }
+
+        index += 1;
+      }
+
+      return Borrowck::MoveSnapshot { defs: defs, values: values };
+    }
+
+    public restoreMoves(&mut self, snapshot: &Borrowck::MoveSnapshot): void {
+      self.moveDefs = Borrowck::copyU32Vector(&snapshot.defs);
+      self.moveValues = Borrowck::copyU32Vector(&snapshot.values);
+    }
+
+    public snapshotBorrows(&self): Borrowck::BorrowSnapshot {
+      return Borrowck::BorrowSnapshot {
+        defs: Borrowck::copyU32Vector(&self.borrowDefs),
+        values: Borrowck::copyU32Vector(&self.borrowValues),
+        heldTargets: Borrowck::copyU32Vector(&self.heldTargets),
+        heldMutable: Borrowck::copyU32Vector(&self.heldMutable),
+      };
+    }
+
+    public restoreBorrows(&mut self, snapshot: &Borrowck::BorrowSnapshot): void {
+      self.borrowDefs = Borrowck::copyU32Vector(&snapshot.defs);
+      self.borrowValues = Borrowck::copyU32Vector(&snapshot.values);
+      self.heldTargets = Borrowck::copyU32Vector(&snapshot.heldTargets);
+      self.heldMutable = Borrowck::copyU32Vector(&snapshot.heldMutable);
+    }
+
+    /// Joins the current borrow map with `snapshot`, keeping the more
+    /// restrictive state per local: mutable wins over shared, and shared
+    /// counts take the maximum. Mirrors `BorrowState::merge`.
+    public mergeBorrowsWith(&mut self, snapshot: &Borrowck::BorrowSnapshot): void {
+      let mut index: u64 = 0;
+
+      while (index < snapshot.defs.length()) {
+        if (let Option::SOME(defRaw) = snapshot.defs.get(index)) {
+          if (let Option::SOME(other) = snapshot.values.get(index)) {
+            let current: u32 = self.borrowValue(*defRaw);
+            self.setBorrowValue(*defRaw, Borrowck::mergeBorrowValues(current, *other));
+          }
+        }
+
+        index += 1;
+      }
+    }
+
+    public pushScope(&mut self): void {
+      self.scopeStarts.push(self.heldTargets.length());
+    }
+
+    public recordHeldBorrow(&mut self, target: u32, mutable: boolean): void {
+      self.heldTargets.push(target);
+      self.heldMutable.push(Borrowck::boolAsFlag(mutable));
+    }
+
+    /// Pops the innermost scope and releases every borrow registered in it.
+    public popScopeReleasing(&mut self): void {
+      let Option::SOME(start) = self.scopeStarts.pop() else {
+        return;
+      };
+
+      while (self.heldTargets.length() > start) {
+        let Option::SOME(target) = self.heldTargets.pop() else {
+          return;
+        };
+        let Option::SOME(flag) = self.heldMutable.pop() else {
+          return;
+        };
+
+        self.releaseBorrow(target, flag == 1);
+      }
+    }
+
+    /// Releases one borrow: a mutable borrow clears the state, a shared borrow
+    /// decrements the live count. Mirrors `release_borrow`.
+    public releaseBorrow(&mut self, target: u32, mutable: boolean): void {
+      let current: u32 = self.borrowValue(target);
+
+      if (mutable) {
+        self.setBorrowValue(target, Borrowck::BORROW_NONE);
+        return;
+      }
+
+      // The encoding leaves no room between the mutable state and one live
+      // shared borrow, so releasing the last shared borrow clears the state
+      // instead of decrementing into it.
+      if (current == Borrowck::BORROW_SHARED_BASE + 1) {
+        self.setBorrowValue(target, Borrowck::BORROW_NONE);
+        return;
+      }
+
+      if (current > Borrowck::BORROW_MUT) {
+        self.setBorrowValue(target, current - 1);
+      }
+    }
+
+    public pushLoop(&mut self): void {
+      self.loopContinue.push(0);
+    }
+
+    public popLoop(&mut self): void {
+      let _discarded: Option<u32> = self.loopContinue.pop();
+    }
+
+    public markContinue(&mut self): void {
+      if (self.loopContinue.isEmpty()) {
+        return;
+      }
+
+      let last: u64 = self.loopContinue.length() - 1;
+      self.loopContinue.set(last, 1);
+    }
+
+    public continueSeen(&self): boolean {
+      if (self.loopContinue.isEmpty()) {
+        return false;
+      }
+
+      if (let Option::SOME(flag) = self.loopContinue.get(self.loopContinue.length() - 1)) {
+        return *flag == 1;
+      }
+
+      return false;
+    }
+  }
+
+  function boolAsFlag(value: boolean): u32 {
+    return match (value) {
+      true -> 1,
+      false -> 0,
+    };
+  }
+
+  function copyU32Vector(source: &Vector<u32>): Vector<u32> {
+    let mut result: Vector<u32> = Vector::new<u32>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(value) = source.get(index)) {
+        result.push(*value);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// Restrictiveness join of two borrow states, mirroring `BorrowState::merge`.
+  function mergeBorrowValues(left: u32, right: u32): u32 {
+    if (left == Borrowck::BORROW_MUT || right == Borrowck::BORROW_MUT) {
+      return Borrowck::BORROW_MUT;
+    }
+
+    if (left > right) {
+      return left;
+    }
+
+    return right;
+  }
+
+  /// Restrictiveness join of two move states, mirroring `most_restrictive`
+  /// over the subset of states this slice models.
+  function mostRestrictiveMove(left: u32, right: u32): u32 {
+    if (left > right) {
+      return left;
+    }
+
+    return right;
+  }
+
+  /// Takes its haystack mutably so the same helper serves both owned locals
+  /// and the `&mut Vector<u32>` accumulators threaded through the walk; a
+  /// `&mut` cannot be narrowed to a `&` at a call site today (IGN-128).
+  function containsRaw(values: &mut Vector<u32>, raw: u32): boolean {
+    let mut index: u64 = 0;
+
+    while (index < values.length()) {
+      if (let Option::SOME(value) = values.get(index)) {
+        if (*value == raw) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function pushUniqueRaw(values: &mut Vector<u32>, raw: u32): void {
+    if (Borrowck::containsRaw(values, raw)) {
+      return;
+    }
+
+    let mut target: &mut Vector<u32> = values;
+    target.push(raw);
+  }
+
+  // --- definition and type queries -------------------------------------------------
+
+  /// Declared type of a `Variable` definition (a local or a parameter), or
+  /// `NONE` for every other definition kind.
+  function variableTypeOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): Option<Analyzer::TypeId> {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return Option::NONE;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Variable(variable) -> Option::SOME(variable.declaredType),
+      _ -> Option::NONE,
+    };
+  }
+
+  function definitionName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): String {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return String::create("<unknown>");
+    };
+
+    let name: Analyzer::SymbolId = definition.name();
+
+    return match (symbols.resolve(name)) {
+      Option::SOME(text) -> String::create(text),
+      Option::NONE -> String::create("<unknown>"),
+    };
+  }
+
+  /// Whether the receiver of `methodDefId` is bound mutably. Static methods
+  /// and non-methods answer `false`, matching the oracle's early return.
+  function methodSelfMutable(
+    defStore: &mut Analyzer::DefinitionStore,
+    methodDefId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(methodDefId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Method(method) -> method.selfMutable,
+      _ -> false,
+    };
+  }
+
+  /// Field types of a record definition, copied out so the caller can keep
+  /// using the definition store.
+  function recordFieldTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    recordDefId: Analyzer::DefinitionId,
+  ): Vector<Analyzer::TypeId> {
+    let mut fieldIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(recordDefId)) {
+      match (definition) {
+        Analyzer::Definition::Record(recordDef) -> {
+          let mut index: u64 = 0;
+
+          while (index < recordDef.fields.length()) {
+            if (let Option::SOME(fieldId) = recordDef.fields.get(index)) {
+              fieldIds.push(*fieldId);
+            }
+
+            index += 1;
+          }
+        },
+        _ -> {},
+      };
+    }
+
+    let mut types: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut fieldIndex: u64 = 0;
+
+    while (fieldIndex < fieldIds.length()) {
+      if (let Option::SOME(fieldId) = fieldIds.get(fieldIndex)) {
+        if (let Option::SOME(definition) = defStore.get(*fieldId)) {
+          match (definition) {
+            Analyzer::Definition::Field(fieldDef) -> {
+              types.push(fieldDef.fieldType);
+            },
+            _ -> {},
+          };
+        }
+      }
+
+      fieldIndex += 1;
+    }
+
+    return types;
+  }
+
+  /// Every payload type of every variant of an enum definition.
+  function enumPayloadTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    enumDefId: Analyzer::DefinitionId,
+  ): Vector<Analyzer::TypeId> {
+    let mut variantIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(enumDefId)) {
+      match (definition) {
+        Analyzer::Definition::Enum(enumDef) -> {
+          let mut index: u64 = 0;
+
+          while (index < enumDef.variants.length()) {
+            if (let Option::SOME(variantId) = enumDef.variants.get(index)) {
+              variantIds.push(*variantId);
+            }
+
+            index += 1;
+          }
+        },
+        _ -> {},
+      };
+    }
+
+    let mut types: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < variantIds.length()) {
+      if (let Option::SOME(variantId) = variantIds.get(variantIndex)) {
+        if (let Option::SOME(definition) = defStore.get(*variantId)) {
+          match (definition) {
+            Analyzer::Definition::Variant(variantDef) -> {
+              let mut payloadIndex: u64 = 0;
+
+              while (payloadIndex < variantDef.payload.length()) {
+                if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+                  types.push(*payloadType);
+                }
+
+                payloadIndex += 1;
+              }
+            },
+            _ -> {},
+          };
+        }
+      }
+
+      variantIndex += 1;
+    }
+
+    return types;
+  }
+
+  function recordImplementsDrop(
+    defStore: &mut Analyzer::DefinitionStore,
+    recordDefId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(recordDefId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Record(recordDef) -> recordDef.implementsDrop,
+      _ -> false,
+    };
+  }
+
+  function enumImplementsDrop(
+    defStore: &mut Analyzer::DefinitionStore,
+    enumDefId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(enumDefId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Enum(enumDef) -> enumDef.implementsDrop,
+      _ -> false,
+    };
+  }
+
+  function aliasedTypeOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    aliasDefId: Analyzer::DefinitionId,
+  ): Option<Analyzer::TypeId> {
+    let Option::SOME(definition) = defStore.get(aliasDefId) else {
+      return Option::NONE;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::TypeAlias(aliasDef) -> Option::SOME(aliasDef.aliasedType),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// Whether values of this type own resources that must be dropped, mirroring
+  /// `TypeStore::needs_drop_with_defs`. This is the predicate both oracles use
+  /// to decide whether a local participates in move tracking at all.
+  function needsDropType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let mut visiting: Vector<u32> = Vector::new<u32>();
+    return Borrowck::needsDropTypeInner(defStore, typeStore, typeId, &mut visiting);
+  }
+
+  /// Recursive worker for `needsDropType`. `visiting` holds the raw ids of the
+  /// nominal types currently on the stack so a recursive type answers `false`
+  /// on revisit instead of looping, like the Rust `visiting` set.
+  function needsDropTypeInner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+    visiting: &mut Vector<u32>,
+  ): boolean {
+    if (Borrowck::containsRaw(visiting, typeId.raw())) {
+      return false;
+    }
+
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    let mut recordDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut enumDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut aliasDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut instanceDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut components: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    match (type_) {
+      Analyzer::Type::I8
+      | Analyzer::Type::I16
+      | Analyzer::Type::I32
+      | Analyzer::Type::I64
+      | Analyzer::Type::U8
+      | Analyzer::Type::U16
+      | Analyzer::Type::U32
+      | Analyzer::Type::U64
+      | Analyzer::Type::F32
+      | Analyzer::Type::F64
+      | Analyzer::Type::BOOLEAN
+      | Analyzer::Type::CHAR
+      | Analyzer::Type::STR
+      | Analyzer::Type::VOID
+      | Analyzer::Type::NEVER -> {},
+      Analyzer::Type::Pointer(_) -> {},
+      Analyzer::Type::Reference(_) -> {},
+      Analyzer::Type::Slice(_) -> {},
+      Analyzer::Type::Function(_) -> {},
+      Analyzer::Type::Param(_) -> {},
+      Analyzer::Type::FixedArray(element, _) -> {
+        components.push(element);
+      },
+      Analyzer::Type::Tuple(tuple) -> {
+        let mut elementIndex: u64 = 0;
+
+        while (elementIndex < tuple.elements.length()) {
+          if (let Option::SOME(elementType) = tuple.elements.get(elementIndex)) {
+            components.push(*elementType);
+          }
+
+          elementIndex += 1;
+        }
+      },
+      Analyzer::Type::Record(defId) -> {
+        recordDefId = Option::SOME(defId);
+      },
+      Analyzer::Type::Enum(defId) -> {
+        enumDefId = Option::SOME(defId);
+      },
+      Analyzer::Type::Alias(defId) -> {
+        aliasDefId = Option::SOME(defId);
+      },
+      Analyzer::Type::Instance(instance) -> {
+        instanceDefId = Option::SOME(instance.definition);
+
+        let mut argumentIndex: u64 = 0;
+
+        while (argumentIndex < instance.typeArguments.length()) {
+          if (let Option::SOME(argument) = instance.typeArguments.get(argumentIndex)) {
+            components.push(*argument);
+          }
+
+          argumentIndex += 1;
+        }
+      },
+    };
+
+    if (let Option::SOME(defId) = aliasDefId) {
+      let Option::SOME(aliased) = Borrowck::aliasedTypeOf(defStore, defId) else {
+        return false;
+      };
+
+      let mut visitingRef: &mut Vector<u32> = visiting;
+      visitingRef.push(typeId.raw());
+
+      let answer: boolean = Borrowck::needsDropTypeInner(defStore, typeStore, aliased, visiting);
+
+      let mut popRef: &mut Vector<u32> = visiting;
+      let _discarded: Option<u32> = popRef.pop();
+
+      return answer;
+    }
+
+    if (let Option::SOME(defId) = recordDefId) {
+      if (Borrowck::recordImplementsDrop(defStore, defId)) {
+        return true;
+      }
+
+      components = Borrowck::recordFieldTypes(defStore, defId);
+    }
+
+    if (let Option::SOME(defId) = enumDefId) {
+      if (Borrowck::enumImplementsDrop(defStore, defId)) {
+        return true;
+      }
+
+      components = Borrowck::enumPayloadTypes(defStore, defId);
+    }
+
+    if (let Option::SOME(defId) = instanceDefId) {
+      if (Borrowck::recordImplementsDrop(defStore, defId) || Borrowck::enumImplementsDrop(defStore, defId)) {
+        return true;
+      }
+    }
+
+    let mut visitingRef: &mut Vector<u32> = visiting;
+    visitingRef.push(typeId.raw());
+
+    let mut answer: boolean = false;
+    let mut componentIndex: u64 = 0;
+
+    while (componentIndex < components.length()) {
+      if (let Option::SOME(component) = components.get(componentIndex)) {
+        if (Borrowck::needsDropTypeInner(defStore, typeStore, *component, visiting)) {
+          answer = true;
+        }
+      }
+
+      componentIndex += 1;
+    }
+
+    let mut popRef: &mut Vector<u32> = visiting;
+    let _discarded: Option<u32> = popRef.pop();
+
+    return answer;
+  }
+
+  function definitionNeedsDrop(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(typeId) = Borrowck::variableTypeOf(defStore, defId) else {
+      return false;
+    };
+
+    return Borrowck::needsDropType(defStore, typeStore, typeId);
+  }
+
+  // --- HIR place queries ------------------------------------------------------------
+
+  /// Root local of a place expression, following field, index, reference, and
+  /// dereference chains back to the variable they start from. Mirrors
+  /// `extract_root_variable`, and with it the whole-local granularity both
+  /// oracles work at.
+  function extractRootVariable(
+    hir: &Hir::HirStore,
+    nodeId: Hir::HirId,
+  ): Option<Analyzer::DefinitionId> {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return Option::NONE;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Variable(defId) -> Option::SOME(defId),
+      Hir::HirKind::FieldAccess(access) -> Borrowck::extractRootVariable(hir, access.base),
+      Hir::HirKind::Reference(reference) -> Borrowck::extractRootVariable(hir, reference.expression),
+      Hir::HirKind::Dereference(inner) -> Borrowck::extractRootVariable(hir, inner),
+      Hir::HirKind::Index(indexNode) -> Borrowck::extractRootVariable(hir, indexNode.base),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// The local an expression moves out of, if any: a bare variable reference
+  /// whose type owns resources. Mirrors `get_moved_var`, which is why a field
+  /// read or an index is not a move here.
+  function movedVariable(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    nodeId: Hir::HirId,
+  ): Option<Analyzer::DefinitionId> {
+    let mut variableDef: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(node) = hir.get(nodeId)) {
+      variableDef = match (&node.kind) {
+        Hir::HirKind::Variable(defId) -> Option::SOME(defId),
+        _ -> Option::NONE,
+      };
+    }
+
+    let Option::SOME(defId) = variableDef else {
+      return Option::NONE;
+    };
+
+    if (!Borrowck::definitionNeedsDrop(defStore, typeStore, defId)) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(defId);
+  }
+
+  /// The reference expression an initializer is, if it is one directly.
+  /// Returns the borrowed expression and whether the borrow is mutable.
+  function referenceParts(hir: &Hir::HirStore, nodeId: Hir::HirId): Option<Hir::HirReference> {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return Option::NONE;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Reference(reference) -> Option::SOME(Hir::HirReference {
+        expression: reference.expression,
+        mutable: reference.mutable,
+      }),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// The binding a match arm hands to the match result, if its value is one
+  /// directly. Mirrors `arm_result_binding`, including the walk through
+  /// block tails.
+  function armResultBinding(
+    hir: &Hir::HirStore,
+    bodyId: Hir::HirId,
+  ): Option<Analyzer::DefinitionId> {
+    let Option::SOME(node) = hir.get(bodyId) else {
+      return Option::NONE;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Variable(defId) -> Option::SOME(defId),
+      Hir::HirKind::Block(block) -> match (block.expression) {
+        Option::SOME(tail) -> Borrowck::armResultBinding(hir, tail),
+        Option::NONE -> Option::NONE,
+      },
+      _ -> Option::NONE,
+    };
+  }
+
+  /// Every binding of a pattern whose type owns resources, in pattern order.
+  /// Mirrors `collect_droppable_pattern_def_ids`.
+  function collectDroppableBindings(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    pattern: &Hir::HirPattern,
+    output: &mut Vector<u32>,
+  ): void {
+    match (pattern) {
+      Hir::HirPattern::Wildcard -> {},
+      Hir::HirPattern::Literal(_) -> {},
+      Hir::HirPattern::Constant(_) -> {},
+      Hir::HirPattern::Binding(defId) -> {
+        if (Borrowck::definitionNeedsDrop(defStore, typeStore, defId)) {
+          Borrowck::pushUniqueRaw(output, defId.raw());
+        }
+      },
+      Hir::HirPattern::Variant(variant) -> {
+        let mut index: u64 = 0;
+
+        while (index < variant.args.length()) {
+          if (let Option::SOME(argument) = variant.args.get(index)) {
+            Borrowck::collectDroppableBindings(defStore, typeStore, argument, output);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Tuple(elements) -> {
+        let mut index: u64 = 0;
+
+        while (index < elements.length()) {
+          if (let Option::SOME(element) = elements.get(index)) {
+            Borrowck::collectDroppableBindings(defStore, typeStore, element, output);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Or(patterns) -> {
+        let mut index: u64 = 0;
+
+        while (index < patterns.length()) {
+          if (let Option::SOME(alternative) = patterns.get(index)) {
+            Borrowck::collectDroppableBindings(defStore, typeStore, alternative, output);
+          }
+
+          index += 1;
+        }
+      },
+    };
+  }
+
+  // --- diagnostics -------------------------------------------------------------------
+
+  function emitError(
+    diagnostics: &mut DiagnosticBag,
+    span: SourceSpan,
+    code: str,
+    message: str,
+    labelMessage: str,
+  ): void {
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, code, message, span);
+    diagnostic.addLabel(LabelKind::PRIMARY, span, labelMessage);
+
+    let mut bag: &mut DiagnosticBag = diagnostics;
+    bag.push(diagnostic);
+  }
+
+  function copyDiagnostic(source: &Diagnostic): Diagnostic {
+    let mut copy: Diagnostic = Diagnostic::new(
+      source.severity,
+      source.code,
+      source.messageText(),
+      source.primarySpan,
+    );
+
+    let mut index: u64 = 0;
+
+    while (index < source.labels.length()) {
+      if (let Option::SOME(label) = source.labels.get(index)) {
+        copy.addLabel(label.kind, label.span, label.messageText());
+      }
+
+      index += 1;
+    }
+
+    return copy;
+  }
+
+  function bagContainsMessage(bag: &mut DiagnosticBag, message: str): boolean {
+    let mut index: u64 = 0;
+
+    while (index < bag.length()) {
+      if (let Option::SOME(diagnostic) = bag.get(index)) {
+        if (String::create(diagnostic.messageText()).equals(message)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Appends the diagnostics of a loop's second body pass that say something
+  /// the first pass did not already say. Mirrors
+  /// `deduplicate_second_pass_diagnostics`, which compares rendered messages.
+  function appendNewDiagnostics(target: &mut DiagnosticBag, source: &DiagnosticBag): void {
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(diagnostic) = source.get(index)) {
+        if (!Borrowck::bagContainsMessage(target, diagnostic.messageText())) {
+          let mut bag: &mut DiagnosticBag = target;
+          bag.push(Borrowck::copyDiagnostic(diagnostic));
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  // --- borrow and move transitions ---------------------------------------------------
+
+  /// Takes a borrow of `target`, reporting the conflicting-borrow diagnostics
+  /// on a state that cannot accept it. Mirrors `try_borrow`, including its
+  /// choice to leave the state untouched when the borrow is rejected.
+  function tryBorrow(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    target: Analyzer::DefinitionId,
+    mutable: boolean,
+    span: SourceSpan,
+  ): void {
+    let current: u32 = state.borrowValue(target.raw());
+
+    if (mutable) {
+      if (current == Borrowck::BORROW_NONE) {
+        let mut stateRef: &mut Borrowck::State = state;
+        stateRef.setBorrowValue(target.raw(), Borrowck::BORROW_MUT);
+        return;
+      }
+
+      let name: String = Borrowck::definitionName(defStore, symbols, target);
+
+      if (current == Borrowck::BORROW_MUT) {
+        let message: String = String::create("Cannot borrow '")
+          .concat(name)
+          .concat("' as mutable because it is already borrowed as mutable");
+        Borrowck::emitError(
+          diagnostics,
+          span,
+          DiagnosticCode::BORROW_MUTABLE_WHILE_MUTABLE,
+          message.toStr(),
+          "second mutable borrow taken here",
+        );
+        return;
+      }
+
+      let message: String = String::create("Cannot borrow '")
+        .concat(name)
+        .concat("' as mutable because it is already borrowed as immutable");
+      Borrowck::emitError(
+        diagnostics,
+        span,
+        DiagnosticCode::BORROW_MUTABLE_WHILE_IMMUTABLE,
+        message.toStr(),
+        "mutable borrow taken here",
+      );
+      return;
+    }
+
+    if (current == Borrowck::BORROW_MUT) {
+      let name: String = Borrowck::definitionName(defStore, symbols, target);
+      let message: String = String::create("Cannot borrow '")
+        .concat(name)
+        .concat("' as immutable because it is already borrowed as mutable");
+      Borrowck::emitError(
+        diagnostics,
+        span,
+        DiagnosticCode::BORROW_IMMUTABLE_WHILE_MUTABLE,
+        message.toStr(),
+        "shared borrow taken here",
+      );
+      return;
+    }
+
+    let mut stateRef: &mut Borrowck::State = state;
+
+    if (current == Borrowck::BORROW_NONE) {
+      stateRef.setBorrowValue(target.raw(), Borrowck::BORROW_SHARED_BASE + 1);
+      return;
+    }
+
+    stateRef.setBorrowValue(target.raw(), current + 1);
+  }
+
+  /// Reports a read of a local whose value was moved away. Mirrors
+  /// `check_use`, restricted to the states this slice models.
+  function checkUse(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    defId: Analyzer::DefinitionId,
+    span: SourceSpan,
+  ): void {
+    let Option::SOME(value) = state.moveValue(defId.raw()) else {
+      return;
+    };
+
+    if (value != Borrowck::MOVE_MOVED) {
+      return;
+    }
+
+    let name: String = Borrowck::definitionName(defStore, symbols, defId);
+    let message: String = String::create("Use of moved value '").concat(name).concat("'");
+
+    Borrowck::emitError(
+      diagnostics,
+      span,
+      DiagnosticCode::USE_AFTER_MOVE,
+      message.toStr(),
+      "value used here after it was moved",
+    );
+  }
+
+  /// Transitions a local to `Moved`. An already invalid state is left as it
+  /// is, because `checkUse` has already reported it. Mirrors `try_consume`.
+  function tryConsume(state: &mut Borrowck::State, defId: Analyzer::DefinitionId): void {
+    if (let Option::SOME(value) = state.moveValue(defId.raw())) {
+      if (value == Borrowck::MOVE_MOVED) {
+        return;
+      }
+    }
+
+    let mut stateRef: &mut Borrowck::State = state;
+    stateRef.setMoveValue(defId.raw(), Borrowck::MOVE_MOVED);
+  }
+
+  function declareOwned(state: &mut Borrowck::State, defId: Analyzer::DefinitionId): void {
+    let mut stateRef: &mut Borrowck::State = state;
+    stateRef.setMoveValue(defId.raw(), Borrowck::MOVE_VALID);
+  }
+
+  /// Joins the move states of several branches, reporting a local that some
+  /// branch moved and another left live. Mirrors `merge_branch_states`: the
+  /// join only writes back when some branch moved, so a local no branch
+  /// touched keeps the state the last branch left behind.
+  function mergeMoveBranches(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    branches: &Vector<Borrowck::MoveSnapshot>,
+    span: SourceSpan,
+  ): void {
+    let mut variables: Vector<u32> = Vector::new<u32>();
+    let mut branchIndex: u64 = 0;
+
+    while (branchIndex < branches.length()) {
+      if (let Option::SOME(branch) = branches.get(branchIndex)) {
+        let mut entryIndex: u64 = 0;
+
+        while (entryIndex < branch.defs.length()) {
+          if (let Option::SOME(defRaw) = branch.defs.get(entryIndex)) {
+            Borrowck::pushUniqueRaw(&mut variables, *defRaw);
+          }
+
+          entryIndex += 1;
+        }
+      }
+
+      branchIndex += 1;
+    }
+
+    let mut variableIndex: u64 = 0;
+
+    while (variableIndex < variables.length()) {
+      let Option::SOME(defRaw) = variables.get(variableIndex) else {
+        variableIndex += 1;
+        continue;
+      };
+
+      let mut observed: Vector<u32> = Vector::new<u32>();
+      let mut readIndex: u64 = 0;
+
+      while (readIndex < branches.length()) {
+        if (let Option::SOME(branch) = branches.get(readIndex)) {
+          if (let Option::SOME(value) = Borrowck::snapshotValue(branch, *defRaw)) {
+            observed.push(value);
+          }
+        }
+
+        readIndex += 1;
+      }
+
+      if (observed.isEmpty()) {
+        variableIndex += 1;
+        continue;
+      }
+
+      let Option::SOME(firstValue) = observed.get(0) else {
+        variableIndex += 1;
+        continue;
+      };
+      let first: u32 = *firstValue;
+
+      if (Borrowck::allValuesEqual(&observed, first)) {
+        let mut sameRef: &mut Borrowck::State = state;
+        sameRef.setMoveValue(*defRaw, first);
+        variableIndex += 1;
+        continue;
+      }
+
+      let hasMoved: boolean = Borrowck::containsRaw(&mut observed, Borrowck::MOVE_MOVED);
+      let hasValid: boolean = Borrowck::containsRaw(&mut observed, Borrowck::MOVE_VALID);
+
+      if (hasMoved && hasValid) {
+        let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*defRaw);
+        let name: String = Borrowck::definitionName(defStore, symbols, defId);
+        let message: String = String::create("Variable '")
+          .concat(name)
+          .concat("' is moved in one branch but not the other");
+
+        Borrowck::emitError(
+          diagnostics,
+          span,
+          DiagnosticCode::INCONSISTENT_MOVE_IN_BRANCHES,
+          message.toStr(),
+          "branches disagree on whether this value was moved",
+        );
+      }
+
+      if (hasMoved) {
+        let mut movedRef: &mut Borrowck::State = state;
+        movedRef.setMoveValue(*defRaw, Borrowck::MOVE_MOVED);
+      }
+
+      variableIndex += 1;
+    }
+  }
+
+  function snapshotValue(snapshot: &Borrowck::MoveSnapshot, defRaw: u32): Option<u32> {
+    let mut index: u64 = 0;
+
+    while (index < snapshot.defs.length()) {
+      if (let Option::SOME(candidate) = snapshot.defs.get(index)) {
+        if (*candidate == defRaw) {
+          if (let Option::SOME(value) = snapshot.values.get(index)) {
+            return Option::SOME(*value);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function allValuesEqual(values: &Vector<u32>, expected: u32): boolean {
+    let mut index: u64 = 0;
+
+    while (index < values.length()) {
+      if (let Option::SOME(value) = values.get(index)) {
+        if (*value != expected) {
+          return false;
+        }
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  /// Back-edge join for a loop: every local takes the more restrictive of its
+  /// pre-loop state and the state the body left behind. Mirrors
+  /// `conservative_merge`, whose default for an untracked local is `Valid`.
+  function conservativeMergeMoves(
+    state: &mut Borrowck::State,
+    preLoop: &Borrowck::MoveSnapshot,
+  ): void {
+    let current: Borrowck::MoveSnapshot = state.snapshotMoves();
+
+    let mut stateRef: &mut Borrowck::State = state;
+    stateRef.restoreMoves(preLoop);
+
+    let mut index: u64 = 0;
+
+    while (index < current.defs.length()) {
+      if (let Option::SOME(defRaw) = current.defs.get(index)) {
+        if (let Option::SOME(value) = current.values.get(index)) {
+          let previous: u32 = match (Borrowck::snapshotValue(preLoop, *defRaw)) {
+            Option::SOME(found) -> found,
+            Option::NONE -> Borrowck::MOVE_VALID,
+          };
+
+          let mut mergeRef: &mut Borrowck::State = state;
+          mergeRef.setMoveValue(*defRaw, Borrowck::mostRestrictiveMove(previous, *value));
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  // --- traversal ----------------------------------------------------------------------
+
+  /// Walks one HIR node, updating both maps and reporting what the walk finds.
+  ///
+  /// Exhaustive over `HirKind` on purpose: a new variant must state whether it
+  /// borrows, moves, or only recurses, instead of falling into a silent
+  /// catch-all.
+  function checkNode(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    nodeId: Hir::HirId,
+  ): void {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return;
+    };
+
+    let span: SourceSpan = node.span;
+
+    match (&node.kind) {
+      Hir::HirKind::Literal(_) -> {},
+      Hir::HirKind::Unit -> {},
+      Hir::HirKind::Error -> {},
+      Hir::HirKind::SizeOf(_) -> {},
+      Hir::HirKind::AlignOf(_) -> {},
+      Hir::HirKind::MaxOf(_) -> {},
+      Hir::HirKind::MinOf(_) -> {},
+      Hir::HirKind::BuiltinDropGlue(_) -> {},
+
+      Hir::HirKind::Variable(defId) -> {
+        Borrowck::checkUse(defStore, symbols, state, diagnostics, defId, span);
+      },
+      Hir::HirKind::StaticAccess(defId) -> {
+        Borrowck::checkUse(defStore, symbols, state, diagnostics, defId, span);
+      },
+
+      Hir::HirKind::Binary(binaryNode) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, binaryNode.left);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, binaryNode.right);
+      },
+      Hir::HirKind::Unary(unaryNode) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, unaryNode.operand);
+      },
+      Hir::HirKind::Cast(cast) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, cast.expression);
+      },
+      Hir::HirKind::BitCast(cast) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, cast.expression);
+      },
+      Hir::HirKind::TypeOf(inner) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, inner);
+      },
+      Hir::HirKind::Dereference(inner) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, inner);
+      },
+      Hir::HirKind::FieldAccess(access) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, access.base);
+      },
+      Hir::HirKind::Index(indexNode) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, indexNode.base);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, indexNode.index);
+      },
+      Hir::HirKind::MakeSlice(makeSlice) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, makeSlice.data);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, makeSlice.len);
+      },
+      Hir::HirKind::BuiltinLoad(load) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, load.ptr);
+      },
+      Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, dropNode.ptr);
+      },
+      Hir::HirKind::BuiltinStore(storeNode) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, storeNode.ptr);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, storeNode.value);
+      },
+      Hir::HirKind::BuiltinHash(hashNode) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, hashNode.value);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, hashNode.hasher);
+      },
+      Hir::HirKind::BuiltinEq(eqNode) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, eqNode.left);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, eqNode.right);
+      },
+      Hir::HirKind::ExpressionStatement(expression) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, expression);
+      },
+
+      Hir::HirKind::VectorLiteral(elements) -> {
+        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, &elements);
+      },
+      Hir::HirKind::TupleLiteral(elements) -> {
+        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, &elements);
+      },
+      Hir::HirKind::EnumVariant(variant) -> {
+        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, &variant.payload);
+      },
+      Hir::HirKind::RecordInit(init) -> {
+        let mut index: u64 = 0;
+
+        while (index < init.fields.length()) {
+          if (let Option::SOME(field) = init.fields.get(index)) {
+            Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, field.value);
+
+            if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, field.value)) {
+              Borrowck::tryConsume(state, source);
+            }
+          }
+
+          index += 1;
+        }
+      },
+
+      Hir::HirKind::Reference(reference) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, reference.expression);
+
+        if (let Option::SOME(target) = Borrowck::extractRootVariable(hir, reference.expression)) {
+          Borrowck::tryBorrow(defStore, symbols, state, diagnostics, target, reference.mutable, span);
+
+          if (state.inDefer) {
+            let mut heldRef: &mut Borrowck::State = state;
+            heldRef.recordHeldBorrow(target.raw(), reference.mutable);
+          } else {
+            let mut releaseRef: &mut Borrowck::State = state;
+            releaseRef.releaseBorrow(target.raw(), reference.mutable);
+          }
+        }
+      },
+
+      Hir::HirKind::Call(call) -> {
+        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, &call.args, span);
+      },
+      Hir::HirKind::CallClosure(call) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, call.callee);
+        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, &call.args, span);
+      },
+      Hir::HirKind::MethodCall(call) -> {
+        if (let Option::SOME(receiver) = call.receiver) {
+          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, receiver);
+          Borrowck::checkReceiverBorrow(defStore, symbols, hir, state, diagnostics, receiver, call.method, span);
+        }
+
+        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, &call.args, span);
+      },
+
+      Hir::HirKind::Let(letNode) -> {
+        Borrowck::checkLet(defStore, typeStore, symbols, hir, state, diagnostics, &letNode, span);
+      },
+      Hir::HirKind::Assign(assign) -> {
+        Borrowck::checkAssign(defStore, typeStore, symbols, hir, state, diagnostics, &assign, span);
+      },
+      Hir::HirKind::Block(block) -> {
+        Borrowck::checkBlock(defStore, typeStore, symbols, hir, state, diagnostics, &block);
+      },
+      Hir::HirKind::If(ifNode) -> {
+        Borrowck::checkIf(defStore, typeStore, symbols, hir, state, diagnostics, &ifNode, span);
+      },
+      Hir::HirKind::LetElse(letElse) -> {
+        Borrowck::checkLetElse(defStore, typeStore, symbols, hir, state, diagnostics, &letElse);
+      },
+      Hir::HirKind::Loop(loopNode) -> {
+        Borrowck::checkLoop(defStore, typeStore, symbols, hir, state, diagnostics, &loopNode);
+      },
+      Hir::HirKind::Match(matchNode) -> {
+        Borrowck::checkMatch(defStore, typeStore, symbols, hir, state, diagnostics, &matchNode, span);
+      },
+
+      Hir::HirKind::Return(value) -> {
+        if (let Option::SOME(returned) = value) {
+          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, returned);
+
+          if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, returned)) {
+            let mut returnRef: &mut Borrowck::State = state;
+            returnRef.setMoveValue(source.raw(), Borrowck::MOVE_RETURNED);
+          }
+        }
+
+        let mut stateRef: &mut Borrowck::State = state;
+        stateRef.setReachable(false);
+      },
+      Hir::HirKind::Break -> {
+        let mut stateRef: &mut Borrowck::State = state;
+        stateRef.setReachable(false);
+      },
+      Hir::HirKind::Continue -> {
+        let mut stateRef: &mut Borrowck::State = state;
+        stateRef.markContinue();
+        stateRef.setReachable(false);
+      },
+      Hir::HirKind::Panic(message) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, message);
+
+        let mut stateRef: &mut Borrowck::State = state;
+        stateRef.setReachable(false);
+      },
+      Hir::HirKind::Trap -> {
+        let mut stateRef: &mut Borrowck::State = state;
+        stateRef.setReachable(false);
+      },
+      Hir::HirKind::BuiltinUnreachable -> {
+        let mut stateRef: &mut Borrowck::State = state;
+        stateRef.setReachable(false);
+      },
+
+      Hir::HirKind::Defer(body) -> {
+        let saved: boolean = state.inDefer;
+
+        let mut enterRef: &mut Borrowck::State = state;
+        enterRef.setInDefer(true);
+
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, body);
+
+        let mut leaveRef: &mut Borrowck::State = state;
+        leaveRef.setInDefer(saved);
+      },
+    };
+  }
+
+  /// Walks operands that a composite value takes ownership of: vector and
+  /// tuple elements, and enum variant payloads.
+  function checkMovingOperands(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    operands: &Vector<Hir::HirId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < operands.length()) {
+      if (let Option::SOME(operand) = operands.get(index)) {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, *operand);
+
+        if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *operand)) {
+          Borrowck::tryConsume(state, source);
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Walks call arguments: each one is checked, its transient borrow is
+  /// conflict-checked and released, and an argument passed by value out of an
+  /// owning local consumes it.
+  function checkCallArguments(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    args: &Vector<Hir::HirId>,
+    span: SourceSpan,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < args.length()) {
+      if (let Option::SOME(argument) = args.get(index)) {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, *argument);
+        Borrowck::checkTemporaryBorrow(defStore, symbols, hir, state, diagnostics, *argument, span);
+
+        if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *argument)) {
+          Borrowck::tryConsume(state, source);
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Conflict-checks the borrow an argument spelled `&x` / `&mut x` takes for
+  /// the duration of the call, then releases it. Mirrors
+  /// `check_temporary_borrow`, including its deferred-body exception.
+  function checkTemporaryBorrow(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    argument: Hir::HirId,
+    span: SourceSpan,
+  ): void {
+    let Option::SOME(reference) = Borrowck::referenceParts(hir, argument) else {
+      return;
+    };
+
+    let Option::SOME(target) = Borrowck::extractRootVariable(hir, reference.expression) else {
+      return;
+    };
+
+    Borrowck::tryBorrow(defStore, symbols, state, diagnostics, target, reference.mutable, span);
+
+    if (state.inDefer) {
+      let mut heldRef: &mut Borrowck::State = state;
+      heldRef.recordHeldBorrow(target.raw(), reference.mutable);
+      return;
+    }
+
+    let mut releaseRef: &mut Borrowck::State = state;
+    releaseRef.releaseBorrow(target.raw(), reference.mutable);
+  }
+
+  /// Conflict-checks the borrow a method call takes of its receiver, mutable
+  /// exactly when the method binds `&mut self`. Mirrors
+  /// `check_temporary_receiver_borrow`.
+  function checkReceiverBorrow(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    receiver: Hir::HirId,
+    method: Analyzer::DefinitionId,
+    span: SourceSpan,
+  ): void {
+    let Option::SOME(target) = Borrowck::extractRootVariable(hir, receiver) else {
+      return;
+    };
+
+    let mutable: boolean = Borrowck::methodSelfMutable(defStore, method);
+
+    Borrowck::tryBorrow(defStore, symbols, state, diagnostics, target, mutable, span);
+
+    let mut releaseRef: &mut Borrowck::State = state;
+    releaseRef.releaseBorrow(target.raw(), mutable);
+  }
+
+  function checkLet(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    letNode: &Hir::HirLet,
+    span: SourceSpan,
+  ): void {
+    if (let Option::SOME(value) = letNode.value) {
+      Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, value);
+
+      if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, value)) {
+        Borrowck::tryConsume(state, source);
+      }
+
+      Borrowck::recordLetBorrow(defStore, symbols, hir, state, diagnostics, value, span);
+    }
+
+    if (Borrowck::definitionNeedsDrop(defStore, typeStore, letNode.name)) {
+      Borrowck::declareOwned(state, letNode.name);
+    }
+  }
+
+  /// A binding initialized with a reference expression keeps that borrow alive
+  /// until its scope exits. Mirrors `try_record_let_borrow`.
+  function recordLetBorrow(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    value: Hir::HirId,
+    span: SourceSpan,
+  ): void {
+    let Option::SOME(reference) = Borrowck::referenceParts(hir, value) else {
+      return;
+    };
+
+    let Option::SOME(target) = Borrowck::extractRootVariable(hir, reference.expression) else {
+      return;
+    };
+
+    Borrowck::tryBorrow(defStore, symbols, state, diagnostics, target, reference.mutable, span);
+
+    let mut stateRef: &mut Borrowck::State = state;
+    stateRef.recordHeldBorrow(target.raw(), reference.mutable);
+  }
+
+  /// Assignment: the value is walked first, the target is reported when it is
+  /// borrowed, and assigning into a moved local revives it. The target place
+  /// itself is not walked as a use, mirroring the ownership oracle, which
+  /// would otherwise report a write to a moved local as a read of it.
+  function checkAssign(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    assign: &Hir::HirAssign,
+    span: SourceSpan,
+  ): void {
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, assign.value);
+
+    if (let Option::SOME(target) = Borrowck::extractRootVariable(hir, assign.target)) {
+      if (state.borrowValue(target.raw()) != Borrowck::BORROW_NONE) {
+        let name: String = Borrowck::definitionName(defStore, symbols, target);
+        let message: String = String::create("Cannot assign to '").concat(name).concat("' because it is borrowed");
+
+        Borrowck::emitError(
+          diagnostics,
+          span,
+          DiagnosticCode::MUTATED_WHILE_BORROWED,
+          message.toStr(),
+          "assignment happens while a borrow is live",
+        );
+      }
+
+      if (Borrowck::definitionNeedsDrop(defStore, typeStore, target)) {
+        if (let Option::SOME(value) = state.moveValue(target.raw())) {
+          if (value == Borrowck::MOVE_MOVED) {
+            let mut reviveRef: &mut Borrowck::State = state;
+            reviveRef.setMoveValue(target.raw(), Borrowck::MOVE_VALID);
+          }
+        }
+      }
+    }
+
+    if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, assign.value)) {
+      Borrowck::tryConsume(state, source);
+    }
+  }
+
+  function checkBlock(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    block: &Hir::HirBlock,
+  ): void {
+    let mut enterRef: &mut Borrowck::State = state;
+    enterRef.pushScope();
+
+    let mut index: u64 = 0;
+
+    while (index < block.statements.length()) {
+      if (!state.reachable) {
+        break;
+      }
+
+      if (let Option::SOME(statement) = block.statements.get(index)) {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, *statement);
+      }
+
+      index += 1;
+    }
+
+    if (let Option::SOME(tail) = block.expression) {
+      if (state.reachable) {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, tail);
+      }
+    }
+
+    let mut exitRef: &mut Borrowck::State = state;
+    exitRef.popScopeReleasing();
+  }
+
+  function checkIf(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    ifNode: &Hir::HirIf,
+    span: SourceSpan,
+  ): void {
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, ifNode.condition);
+
+    let preReachable: boolean = state.reachable;
+    let preMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
+    let preBorrows: Borrowck::BorrowSnapshot = state.snapshotBorrows();
+
+    let mut thenRef: &mut Borrowck::State = state;
+    thenRef.setReachable(preReachable);
+
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, ifNode.thenBranch);
+
+    let thenMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
+    let thenBorrows: Borrowck::BorrowSnapshot = state.snapshotBorrows();
+    let thenReachable: boolean = state.reachable;
+
+    // The no-else join is handled in a diverging branch rather than in a
+    // `let ... else`: an else block's moves stay visible to the code that
+    // follows it, so consuming the snapshots there would leave them moved for
+    // the else-branch path below.
+    if (ifNode.elseBranch.isNone()) {
+      let mut mergeRef: &mut Borrowck::State = state;
+      mergeRef.mergeBorrowsWith(&preBorrows);
+      mergeRef.setReachable(thenReachable || preReachable);
+
+      if (!thenReachable) {
+        let mut restoreRef: &mut Borrowck::State = state;
+        restoreRef.restoreMoves(&preMoves);
+        return;
+      }
+
+      let mut noElseBranches: Vector<Borrowck::MoveSnapshot> = Vector::new<Borrowck::MoveSnapshot>();
+      noElseBranches.push(thenMoves);
+      noElseBranches.push(preMoves);
+      Borrowck::mergeMoveBranches(defStore, symbols, state, diagnostics, &noElseBranches, span);
+      return;
+    }
+
+    let Option::SOME(elseBranch) = ifNode.elseBranch else {
+      return;
+    };
+
+    let mut elseRef: &mut Borrowck::State = state;
+    elseRef.restoreMoves(&preMoves);
+    elseRef.restoreBorrows(&preBorrows);
+    elseRef.setReachable(preReachable);
+
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, elseBranch);
+
+    let elseMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
+    let elseReachable: boolean = state.reachable;
+
+    let mut borrowRef: &mut Borrowck::State = state;
+    borrowRef.mergeBorrowsWith(&thenBorrows);
+    borrowRef.setReachable(thenReachable || elseReachable);
+
+    if (thenReachable && elseReachable) {
+      let mut branches: Vector<Borrowck::MoveSnapshot> = Vector::new<Borrowck::MoveSnapshot>();
+      branches.push(thenMoves);
+      branches.push(elseMoves);
+      Borrowck::mergeMoveBranches(defStore, symbols, state, diagnostics, &branches, span);
+      return;
+    }
+
+    if (thenReachable) {
+      let mut takeThenRef: &mut Borrowck::State = state;
+      takeThenRef.restoreMoves(&thenMoves);
+      return;
+    }
+
+    if (elseReachable) {
+      return;
+    }
+
+    // Neither branch reaches the join, so nothing downstream observes the
+    // state; the oracle still keeps the most restrictive of the two.
+    Borrowck::conservativeMergeMoves(state, &thenMoves);
+  }
+
+  function checkLetElse(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    letElse: &Hir::HirLetElse,
+  ): void {
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, letElse.value);
+
+    let savedReachable: boolean = state.reachable;
+
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, letElse.elseBlock);
+
+    let mut restoreRef: &mut Borrowck::State = state;
+    restoreRef.setReachable(savedReachable);
+
+    let mut bindings: Vector<u32> = Vector::new<u32>();
+    Borrowck::collectDroppableBindings(defStore, typeStore, &letElse.pattern, &mut bindings);
+
+    let mut index: u64 = 0;
+
+    while (index < bindings.length()) {
+      if (let Option::SOME(defRaw) = bindings.get(index)) {
+        let mut declareRef: &mut Borrowck::State = state;
+        declareRef.setMoveValue(*defRaw, Borrowck::MOVE_VALID);
+      }
+
+      index += 1;
+    }
+  }
+
+  function checkMatch(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    matchNode: &Hir::HirMatch,
+    span: SourceSpan,
+  ): void {
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, matchNode.scrutinee);
+
+    if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
+      Borrowck::tryConsume(state, source);
+    }
+
+    let preReachable: boolean = state.reachable;
+    let preMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
+
+    let mut branches: Vector<Borrowck::MoveSnapshot> = Vector::new<Borrowck::MoveSnapshot>();
+    let mut anyReachable: boolean = false;
+    let mut armIndex: u64 = 0;
+
+    while (armIndex < matchNode.arms.length()) {
+      let Option::SOME(arm) = matchNode.arms.get(armIndex) else {
+        armIndex += 1;
+        continue;
+      };
+
+      let mut armRef: &mut Borrowck::State = state;
+      armRef.restoreMoves(&preMoves);
+      armRef.setReachable(preReachable);
+
+      let mut bindings: Vector<u32> = Vector::new<u32>();
+      Borrowck::collectDroppableBindings(defStore, typeStore, &arm.pattern, &mut bindings);
+
+      let mut bindingIndex: u64 = 0;
+
+      while (bindingIndex < bindings.length()) {
+        if (let Option::SOME(defRaw) = bindings.get(bindingIndex)) {
+          let mut declareRef: &mut Borrowck::State = state;
+          declareRef.setMoveValue(*defRaw, Borrowck::MOVE_VALID);
+        }
+
+        bindingIndex += 1;
+      }
+
+      if (let Option::SOME(guard) = arm.guard) {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, guard);
+      }
+
+      if (state.reachable) {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, arm.body);
+
+        if (let Option::SOME(result) = Borrowck::armResultBinding(hir, arm.body)) {
+          if (Borrowck::containsRaw(&mut bindings, result.raw())) {
+            Borrowck::tryConsume(state, result);
+          }
+        }
+      }
+
+      let mut removeIndex: u64 = 0;
+
+      while (removeIndex < bindings.length()) {
+        if (let Option::SOME(defRaw) = bindings.get(removeIndex)) {
+          let mut removeRef: &mut Borrowck::State = state;
+          removeRef.removeMoveValue(*defRaw);
+        }
+
+        removeIndex += 1;
+      }
+
+      branches.push(state.snapshotMoves());
+
+      if (state.reachable) {
+        anyReachable = true;
+      }
+
+      armIndex += 1;
+    }
+
+    if (branches.isEmpty()) {
+      return;
+    }
+
+    Borrowck::mergeMoveBranches(defStore, symbols, state, diagnostics, &branches, span);
+
+    let mut reachRef: &mut Borrowck::State = state;
+    reachRef.setReachable(anyReachable);
+  }
+
+  /// Loop bodies are walked twice: once for the first iteration, then once
+  /// more from the back-edge state so a value moved in the body is reported on
+  /// the second iteration. The second pass collects into its own bag so that
+  /// only genuinely new messages survive. Mirrors `check_loop`.
+  function checkLoop(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    loopNode: &Hir::HirLoop,
+  ): void {
+    let mut update: Option<Hir::HirId> = Option::NONE;
+
+    match (&loopNode.condition) {
+      Hir::LoopKind::Infinite -> {},
+      Hir::LoopKind::While(condition) -> {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, condition);
+      },
+      Hir::LoopKind::For(forLoop) -> {
+        if (let Option::SOME(init) = forLoop.init) {
+          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, init);
+        }
+
+        if (let Option::SOME(condition) = forLoop.condition) {
+          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, condition);
+        }
+
+        update = forLoop.update;
+      },
+    };
+
+    let preLoopMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
+    let preLoopBorrows: Borrowck::BorrowSnapshot = state.snapshotBorrows();
+    let preBodyReachable: boolean = state.reachable;
+
+    let mut enterRef: &mut Borrowck::State = state;
+    enterRef.pushScope();
+    enterRef.pushLoop();
+
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, loopNode.body);
+
+    let bodyFallsThrough: boolean = state.reachable;
+    let continueSeen: boolean = state.continueSeen();
+
+    if (let Option::SOME(updateId) = update) {
+      if (bodyFallsThrough || continueSeen) {
+        let mut updateRef: &mut Borrowck::State = state;
+        updateRef.setReachable(true);
+
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, updateId);
+      }
+    }
+
+    if (bodyFallsThrough || continueSeen) {
+      Borrowck::conservativeMergeMoves(state, &preLoopMoves);
+
+      let mut secondRef: &mut Borrowck::State = state;
+      secondRef.setReachable(preBodyReachable);
+
+      let mut secondPass: DiagnosticBag = DiagnosticBag::init();
+
+      Borrowck::checkNode(defStore, typeStore, symbols, hir, state, &mut secondPass, loopNode.body);
+
+      let secondFallsThrough: boolean = state.reachable;
+      let secondContinueSeen: boolean = state.continueSeen();
+
+      if (let Option::SOME(updateId) = update) {
+        if (secondFallsThrough || secondContinueSeen) {
+          let mut updateRef: &mut Borrowck::State = state;
+          updateRef.setReachable(true);
+
+          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, &mut secondPass, updateId);
+        }
+      }
+
+      Borrowck::appendNewDiagnostics(diagnostics, &secondPass);
+    }
+
+    let mut exitRef: &mut Borrowck::State = state;
+    exitRef.popLoop();
+    exitRef.popScopeReleasing();
+
+    Borrowck::conservativeMergeMoves(state, &preLoopMoves);
+
+    let mut finalRef: &mut Borrowck::State = state;
+    finalRef.mergeBorrowsWith(&preLoopBorrows);
+    finalRef.setReachable(preBodyReachable);
+  }
+
+  // --- entry points ---------------------------------------------------------------------
+
+  /// Parameter definitions of a callable, copied out so the caller can keep
+  /// mutating the definition store. `NONE` for every other definition kind.
+  function callableParams(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): Option<Vector<Analyzer::DefinitionId>> {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return Option::NONE;
+    };
+
+    let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut isCallable: boolean = false;
+
+    match (definition) {
+      Analyzer::Definition::Function(functionDef) -> {
+        isCallable = true;
+
+        let mut index: u64 = 0;
+
+        while (index < functionDef.params.length()) {
+          if (let Option::SOME(paramId) = functionDef.params.get(index)) {
+            params.push(*paramId);
+          }
+
+          index += 1;
+        }
+      },
+      Analyzer::Definition::Method(methodDef) -> {
+        isCallable = true;
+
+        let mut index: u64 = 0;
+
+        while (index < methodDef.params.length()) {
+          if (let Option::SOME(paramId) = methodDef.params.get(index)) {
+            params.push(*paramId);
+          }
+
+          index += 1;
+        }
+      },
+      _ -> {},
+    };
+
+    if (!isCallable) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(params);
+  }
+
+  function checkFunction(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    diagnostics: &mut DiagnosticBag,
+    params: &Vector<Analyzer::DefinitionId>,
+    bodyId: Hir::HirId,
+  ): void {
+    let mut state: Borrowck::State = Borrowck::State::init();
+    state.pushScope();
+
+    let mut index: u64 = 0;
+
+    while (index < params.length()) {
+      if (let Option::SOME(paramId) = params.get(index)) {
+        if (Borrowck::definitionNeedsDrop(defStore, typeStore, *paramId)) {
+          Borrowck::declareOwned(&mut state, *paramId);
+        }
+      }
+
+      index += 1;
+    }
+
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, &mut state, diagnostics, bodyId);
+
+    state.popScopeReleasing();
+  }
+
+  /// Borrow-check entry point. Walks every function and method body the HIR
+  /// store carries, in item order, and returns the diagnostics they produced.
+  ///
+  /// Not wired into `Analyzer::analyzeModule`: callers run it explicitly after
+  /// `Lowering::lowerModule`.
+  function checkModule(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+  ): Borrowck::BorrowckOutput {
+    let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+    let mut index: u64 = 0;
+
+    while (index < hir.items.length()) {
+      let Option::SOME(itemId) = hir.items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(params) = Borrowck::callableParams(defStore, *itemId) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(bodyId) = hir.functionBody(*itemId) else {
+        index += 1;
+        continue;
+      };
+
+      Borrowck::checkFunction(defStore, typeStore, symbols, hir, &mut diagnostics, &params, bodyId);
+
+      index += 1;
+    }
+
+    return Borrowck::BorrowckOutput { diagnostics: diagnostics };
+  }
+}
