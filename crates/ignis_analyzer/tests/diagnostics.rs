@@ -1166,3 +1166,17 @@ function main(): i32 {
     19,
   );
 }
+
+#[test]
+fn heterogeneous_vector_literal_at_correct_line() {
+  // Line 3: [1, true, 3] — element 1 diverges from the first element's type
+  common::assert_diagnostic_at_line(
+    r#"
+function main(): void {
+    let a: i32[3] = [1, true, 3];
+    return;
+}"#,
+    "I0031", // TypeMismatch
+    3,
+  );
+}

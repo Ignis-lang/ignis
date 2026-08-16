@@ -993,6 +993,29 @@ impl<'a> Analyzer<'a> {
           .and_then(|e| self.lookup_type(e).copied())
           .unwrap_or(self.types.error());
 
+        for item in vector.items.iter().skip(1) {
+          let item_type = self.lookup_type(item).copied().unwrap_or(self.types.error());
+
+          let is_compatible = self.types.types_equal(&elem_type, &item_type)
+            || self.types.is_error(&elem_type)
+            || self.types.is_error(&item_type)
+            || matches!(self.types.get(&elem_type), Type::Never)
+            || matches!(self.types.get(&item_type), Type::Never);
+
+          if !is_compatible {
+            let span = self.node_span(item).clone();
+
+            self.add_diagnostic(
+              DiagnosticMessage::TypeMismatch {
+                expected: self.format_type_for_error(&elem_type),
+                got: self.format_type_for_error(&item_type),
+                at: span,
+              }
+              .report(),
+            );
+          }
+        }
+
         self.types.fixed_array(elem_type, vector.items.len())
       },
       ASTExpression::Path(path) => {
