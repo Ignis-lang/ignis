@@ -27,10 +27,15 @@ function loweringCountErrors(bag: &DiagnosticBag): u64 {
   return count;
 }
 
-/// Parses and analyzes `source`, asserts the pipeline produced no errors,
-/// runs the slice-B lowering, and renders the resulting HIR store with the
-/// display printer.
-function loweringRender(source: str): String {
+/// Parses and analyzes `source`, runs lowering, and renders the resulting
+/// HIR store with the display printer. Parse errors are always rejected;
+/// analyzer errors are only rejected when `requireCleanAnalysis` is true.
+///
+/// Lowering reads name resolution and recorded expression types, so it runs
+/// on analyzer output that carries errors just as well — which is what lets
+/// the `if let` desugar be covered while the selfhost typechecker still
+/// rejects let conditions outright.
+function loweringRenderChecked(source: str, requireCleanAnalysis: boolean): String {
   let file: SourceFile = SourceFile::create("lowering_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
@@ -48,7 +53,9 @@ function loweringRender(source: str): String {
     &parsed.module,
   );
 
-  Test::assertEq<u64>(loweringCountErrors(&output.diagnostics), 0);
+  if (requireCleanAnalysis) {
+    Test::assertEq<u64>(loweringCountErrors(&output.diagnostics), 0);
+  }
 
   let hir: Hir::HirStore = Lowering::lowerModule(
     &mut defStore,
@@ -59,6 +66,11 @@ function loweringRender(source: str): String {
   );
 
   return Hir::Display::printHir(&hir, &typeStore, &defStore, &symbols);
+}
+
+/// Renders `source` after asserting the whole pipeline is diagnostic-free.
+function loweringRender(source: str): String {
+  return loweringRenderChecked(source, true);
 }
 
 @test
@@ -166,6 +178,77 @@ function loweringSiblingScopeLocalIndexReuse(): void {
   );
 
   Test::assertSnapshot("lowering-sibling-scope-local-index-reuse", rendered.toStr());
+}
+
+@test
+function loweringMatchUnitVariantsAndWildcard(): void {
+  let rendered: String = loweringRender(
+    "enum Signal {\n  RED,\n  YELLOW,\n  GREEN,\n}\n\nfunction code(signal: Signal): u32 {\n  return match (signal) {\n    Signal::RED -> 0,\n    Signal::YELLOW -> 1,\n    _ -> 2,\n  };\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-match-unit-variants", rendered.toStr());
+}
+
+@test
+function loweringMatchBindingArmUsesItsBinding(): void {
+  let rendered: String = loweringRender(
+    "function twice(value: u32): u32 {\n  return match (value) {\n    other -> other * 2,\n  };\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-match-binding-arm", rendered.toStr());
+}
+
+/// Sibling match arms reuse `LocalId` indexes exactly like sibling blocks
+/// (ADR-B10), so each arm body — and each arm guard — must reference its own
+/// arm's binding rather than the previous arm's stale entry.
+@test
+function loweringSiblingMatchArmBindings(): void {
+  let rendered: String = loweringRender(
+    "function pick(value: u32): u32 {\n  return match (value) {\n    small if small < 10 -> small,\n    large -> large * 2,\n  };\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-sibling-match-arm-bindings", rendered.toStr());
+}
+
+@test
+function loweringLetElseBindingUsedAfterwards(): void {
+  let rendered: String = loweringRender(
+    "function read(value: u32): u32 {\n  let doubled = value * 2 else {\n    return 0;\n  };\n\n  return doubled;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-let-else-binding", rendered.toStr());
+}
+
+/// `if let` lowers to the oracle's two-arm boolean `Match`. The selfhost
+/// typechecker rejects let conditions outright ("unsupported: let
+/// conditions"), so this fixture skips the clean-analysis assertion; no
+/// expression type is recorded for the scrutinee either, which is why the
+/// match arms carry the `void` sentinel.
+@test
+function loweringIfLetDesugarsToBooleanMatch(): void {
+  let rendered: String = loweringRenderChecked(
+    "enum Slot {\n  EMPTY,\n  FILLED,\n}\n\nfunction read(slot: Slot): u32 {\n  if (let Slot::FILLED = slot) {\n    return 1;\n  }\n\n  return 0;\n}\n",
+    false,
+  );
+
+  Test::assertSnapshot("lowering-if-let-boolean-match", rendered.toStr());
+}
+
+/// Variant payload destructuring is lowered (`HirPattern::Variant` carries
+/// its argument patterns), but the body resolver still reports every payload
+/// pattern as an arity mismatch against a hardcoded arity of zero
+/// (TODO(variant-payload-arity) in `resolver_bodies.ign`) and answers
+/// `Unresolved`. With no variant behind the pattern the match cannot be
+/// lowered without guessing, so it takes the `Error` fallback. This pins that
+/// behaviour until the resolver reports real payload arity.
+@test
+function loweringVariantDestructureBlockedByResolverArity(): void {
+  let rendered: String = loweringRenderChecked(
+    "enum Shape {\n  CIRCLE(u32),\n  EMPTY,\n}\n\nfunction area(shape: Shape): u32 {\n  return match (shape) {\n    Shape::CIRCLE(radius) -> radius,\n    _ -> 0,\n  };\n}\n",
+    false,
+  );
+
+  Test::assertSnapshot("lowering-variant-destructure-blocked", rendered.toStr());
 }
 
 @test
