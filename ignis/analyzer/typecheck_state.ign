@@ -953,6 +953,33 @@ export namespace Analyzer {
       return referentResolved.typeId;
     }
 
+    /// Mutability of the receiver's reference layer, when it has one.
+    ///
+    /// `SOME(true)` for `&mut T`, `SOME(false)` for `&T`, `NONE` when the
+    /// receiver is not a reference (after alias resolution). Mut-self checks
+    /// consult this before the binding: a reference receiver's mutability
+    /// lives in the reference type, not in the local binding that holds it.
+    function receiverReferenceMutability(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Option<boolean> {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      if (resolved.cycleAlias.isSome()) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(resolvedNode) = typeStore.get(resolved.typeId) else {
+        return Option::NONE;
+      };
+
+      return match (resolvedNode) {
+        Analyzer::Type::Reference(reference) -> Option::SOME(reference.mutable),
+        _ -> Option::NONE,
+      };
+    }
+
     function requireNonGenericRecordDefId(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
