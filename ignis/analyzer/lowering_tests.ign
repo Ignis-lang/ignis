@@ -234,21 +234,17 @@ function loweringIfLetDesugarsToBooleanMatch(): void {
   Test::assertSnapshot("lowering-if-let-boolean-match", rendered.toStr());
 }
 
-/// Variant payload destructuring is lowered (`HirPattern::Variant` carries
-/// its argument patterns), but the body resolver still reports every payload
-/// pattern as an arity mismatch against a hardcoded arity of zero
-/// (TODO(variant-payload-arity) in `resolver_bodies.ign`) and answers
-/// `Unresolved`. With no variant behind the pattern the match cannot be
-/// lowered without guessing, so it takes the `Error` fallback. This pins that
-/// behaviour until the resolver reports real payload arity.
+/// Variant payload destructuring lowers to `HirPattern::Variant` carrying one
+/// `Binding` argument, and the arm body resolves that binding: the body
+/// resolver gives the payload sub-pattern a `LocalId`, which lowering maps to
+/// the `Definition::Variable` it allocates for the binding site.
 @test
-function loweringVariantDestructureBlockedByResolverArity(): void {
-  let rendered: String = loweringRenderChecked(
+function loweringVariantDestructureBindsPayload(): void {
+  let rendered: String = loweringRender(
     "enum Shape {\n  CIRCLE(u32),\n  EMPTY,\n}\n\nfunction area(shape: Shape): u32 {\n  return match (shape) {\n    Shape::CIRCLE(radius) -> radius,\n    _ -> 0,\n  };\n}\n",
-    false,
   );
 
-  Test::assertSnapshot("lowering-variant-destructure-blocked", rendered.toStr());
+  Test::assertSnapshot("lowering-variant-destructure-binds-payload", rendered.toStr());
 }
 
 @test

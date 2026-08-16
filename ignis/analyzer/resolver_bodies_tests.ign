@@ -1501,6 +1501,133 @@ function resolveBodiesEmitsPatternArityMismatch(): void {
   Test::assertEq<u64>(output.diagnostics.length(), 1);
 }
 
+/// Declare `enum E { A(u32) }` at module root: one variant carrying
+/// `payloadCount` payload slots, each modelled the way the parser models them
+/// (a `_`-named binding whose annotation holds the payload type).
+function addSinglePayloadVariantEnum(module: &mut Ast::Module, payloadCount: u64): void {
+  let mut payloadSlots: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let mut slotIndex: u64 = 0;
+
+  while (slotIndex < payloadCount) {
+    let payloadTypeId: Ast::TypeId = addPathType(module, "u32");
+    payloadSlots.push(addAnnotatedBinding(module, "_", payloadTypeId));
+    slotIndex += 1;
+  }
+
+  let mut variantSegments: Vector<String> = Vector::new<String>();
+  variantSegments.push(String::create("A"));
+
+  let mut variantRef: &mut Ast::Module = module;
+  let variantPatternId: Ast::PatternId = variantRef.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+    span: bodiesDummySpan(),
+    segments: variantSegments,
+    arguments: payloadSlots,
+  }));
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(variantPatternId);
+
+  let mut moduleRef: &mut Ast::Module = module;
+  moduleRef.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: bodiesDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Scenario: a variant pattern whose argument count matches the variant's
+/// declared payload arity resolves to the variant, and its payload
+/// sub-pattern gets a `LocalId` like any other binding. IGN-126.
+@test
+function resolveBodiesVariantPayloadPatternBindsPayload(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  addSinglePayloadVariantEnum(&mut module, 1);
+
+  // function f(): void { match 0 { E::A(x) => {} } }
+  let xSubPat: Ast::PatternId = addBinding(&mut module, "x");
+  let mut argPats: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  argPats.push(xSubPat);
+  let armPat: Ast::PatternId = addPathPattern2(&mut module, "E", "A", argPats);
+  addMatchArmFunction(&mut module, "f", armPat);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
+  let Option::SOME(patRef) = patResult else {
+    @panic("resolveBodiesVariantPayloadPatternBindsPayload: E::A(x) pattern ref not found");
+  };
+  let _variantDefId: Analyzer::DefinitionId = assertResolvesToVariant(&mut defStore, patRef);
+
+  let _payloadLocal: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, xSubPat);
+}
+
+/// Scenario: a bare variant pattern against a variant declared with one
+/// payload slot is an arity mismatch reported against the real arity. IGN-126.
+@test
+function resolveBodiesVariantPayloadPatternRejectsMissingArgument(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  addSinglePayloadVariantEnum(&mut module, 1);
+
+  // function f(): void { match 0 { E::A => {} } }
+  let armPat: Ast::PatternId = addPathPattern2(&mut module, "E", "A", Vector::new<Ast::PatternId>());
+  addMatchArmFunction(&mut module, "f", armPat);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticMessage(&output, "pattern expects 1 arguments, found 0");
+}
+
+/// Scenario: a variant pattern with more arguments than the variant declares
+/// is an arity mismatch reported against the real arity. IGN-126.
+@test
+function resolveBodiesVariantPayloadPatternRejectsExtraArgument(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  addSinglePayloadVariantEnum(&mut module, 1);
+
+  // function f(): void { match 0 { E::A(x, y) => {} } }
+  let mut argPats: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  argPats.push(addBinding(&mut module, "x"));
+  argPats.push(addBinding(&mut module, "y"));
+  let armPat: Ast::PatternId = addPathPattern2(&mut module, "E", "A", argPats);
+  addMatchArmFunction(&mut module, "f", armPat);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticMessage(&output, "pattern expects 1 arguments, found 2");
+}
+
 // ============================================================
 // Phase 5: Statement walker — scope discipline
 // ============================================================
