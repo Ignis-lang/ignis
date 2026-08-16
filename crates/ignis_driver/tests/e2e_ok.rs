@@ -979,6 +979,132 @@ function main(): i32 {
   );
 }
 
+#[test]
+fn e2e_record_field_assign_on_local() {
+  e2e_test(
+    "record_field_assign_on_local",
+    r#"
+record Point {
+    public x: i32;
+    public y: i32;
+}
+
+function main(): i32 {
+    let mut p: Point = Point { x: 1, y: 2 };
+    p.x = 40;
+    return p.x + p.y - 42;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_record_field_compound_assign_on_local() {
+  e2e_test(
+    "record_field_compound_assign_on_local",
+    r#"
+record Point {
+    public x: i32;
+    public y: i32;
+}
+
+function main(): i32 {
+    let mut p: Point = Point { x: 1, y: 2 };
+    p.x += 39;
+    return p.x + p.y - 42;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_record_nested_field_assign_on_local() {
+  e2e_test(
+    "record_nested_field_assign_on_local",
+    r#"
+record Inner {
+    public value: i32;
+}
+
+record Outer {
+    public inner: Inner;
+}
+
+function main(): i32 {
+    let mut o: Outer = Outer { inner: Inner { value: 1 } };
+    o.inner.value = 42;
+    return o.inner.value - 42;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_record_option_field_assign_on_local() {
+  e2e_test(
+    "record_option_field_assign_on_local",
+    r#"
+enum Option<S> {
+    SOME(S),
+    NONE,
+}
+
+record Store {
+    public entryPoint: Option<i32>;
+}
+
+function main(): i32 {
+    let mut store: Store = Store { entryPoint: Option::NONE };
+    store.entryPoint = Option::SOME(7);
+
+    let Option::SOME(value) = store.entryPoint else {
+        return 1;
+    };
+
+    return value - 7;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_closure_field_assign_on_captured_record() {
+  e2e_test(
+    "closure_field_assign_on_captured_record",
+    r#"
+record Point {
+    public x: i32;
+}
+
+function main(): i32 {
+    let mut p: Point = Point { x: 1 };
+    let bump = (): void -> { p.x = 41; };
+    bump();
+
+    if (p.x == 41) {
+        return 0;
+    }
+
+    return p.x;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_fixed_array_element_assign_on_local() {
+  e2e_test(
+    "fixed_array_element_assign_on_local",
+    r#"
+function main(): i32 {
+    let mut arr: i32[3] = [1, 2, 3];
+    arr[1] = 40;
+    return arr[0] + arr[1] + arr[2] - 44;
+}
+"#,
+  );
+}
+
 // ============================================================================
 // Enum Tests
 // ============================================================================
