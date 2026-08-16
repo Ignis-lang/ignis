@@ -1,0 +1,83 @@
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+
+import _ from "./value";
+
+export namespace Hir {
+  /// Payload wrapper for `HirPattern::Variant`, mirroring the Rust
+  /// `HIRPattern::Variant { enum_def, variant_tag, args }` field set.
+  record VariantPattern {
+    public enumDef: Analyzer::DefinitionId;
+    public variantTag: u32;
+    public args: Vector<Hir::HirPattern>;
+  }
+
+  /// Mirrors `ignis_hir::pattern::HIRPattern` (all 7 variants).
+  ///
+  /// Unlike the AST, patterns are directly recursive through `Vector` instead
+  /// of going through a pattern store, matching the Rust model.
+  enum HirPattern {
+    Wildcard,
+    Literal(Hir::LiteralValue),
+    Binding(Analyzer::DefinitionId),
+    Variant(Hir::VariantPattern),
+    Tuple(Vector<Hir::HirPattern>),
+    Or(Vector<Hir::HirPattern>),
+    Constant(Analyzer::DefinitionId),
+
+    /// Renders this pattern like Rust's derived `Debug` on `HIRPattern`, the
+    /// form golden HIR snapshots embed (`Wildcard`,
+    /// `Literal { value: Int32(40) }`). Definition ids render as `Id(N)`
+    /// instead of Rust's derived `Id { index, _phantom }` noise.
+    public debugFormat(&self): String {
+      return match (self) {
+        Hir::HirPattern::Wildcard -> String::create("Wildcard"),
+        Hir::HirPattern::Literal(value) -> String::create("Literal { value: ")
+          .concat(value.debugFormat())
+          .concat(" }"),
+        Hir::HirPattern::Binding(defId) -> String::create("Binding { def_id: Id(")
+          .concat(defId.raw())
+          .concat(") }"),
+        Hir::HirPattern::Variant(variant) -> String::create("Variant { enum_def: Id(")
+          .concat(variant.enumDef.raw())
+          .concat("), variant_tag: ")
+          .concat(variant.variantTag)
+          .concat(", args: ")
+          .concat(Hir::debugFormatPatternList(&variant.args))
+          .concat(" }"),
+        Hir::HirPattern::Tuple(elements) -> String::create("Tuple { elements: ")
+          .concat(Hir::debugFormatPatternList(&elements))
+          .concat(" }"),
+        Hir::HirPattern::Or(patterns) -> String::create("Or { patterns: ")
+          .concat(Hir::debugFormatPatternList(&patterns))
+          .concat(" }"),
+        Hir::HirPattern::Constant(defId) -> String::create("Constant { def_id: Id(")
+          .concat(defId.raw())
+          .concat(") }"),
+      };
+    }
+  }
+
+  /// Renders a pattern list like Rust's `Debug` for `Vec` (`[a, b]`).
+  function debugFormatPatternList(patterns: &Vector<Hir::HirPattern>): String {
+    let mut output: String = String::create("[");
+    let mut index: u64 = 0;
+
+    while (index < patterns.length()) {
+      if (index > 0) {
+        output.pushStr(", ");
+      }
+
+      if (let Option::SOME(pattern) = patterns.get(index)) {
+        let rendered: String = pattern.debugFormat();
+        output.pushStr(rendered.toStr());
+      }
+
+      index += 1;
+    }
+
+    output.pushStr("]");
+    return output;
+  }
+}
