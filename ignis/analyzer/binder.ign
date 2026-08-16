@@ -58,6 +58,7 @@ export namespace Analyzer {
     record BinderState {
       public nodeIds: Vector<u32>;
       public defIds: Vector<Analyzer::DefinitionId>;
+      public declScopeKeys: Vector<u64>;
       public diagnostics: DiagnosticBag;
       public scopeKeys: Vector<u64>;
       public scopeSyms: Vector<Analyzer::SymbolId>;
@@ -71,6 +72,14 @@ export namespace Analyzer {
     /// and always have the same length; they remain the ordered iteration source
     /// (see `directIndexAppendOutput`).
     ///
+    /// `declScopeKeys[i]` is the scope key of the namespace item enclosing
+    /// entry `i`: `enclosing namespace ItemId.raw() + 1`, or 0 for top level.
+    /// The +1 shift keeps 0 unambiguous even when a namespace itself is
+    /// ItemId 0. It is co-indexed with `nodeIds`/`defIds` — every push into
+    /// those vectors must push a scope key too, or the three desynchronize.
+    /// The body resolver uses it to validate written namespace prefixes on
+    /// qualified paths (IGN-77).
+    ///
     /// `index` mirrors the same entries as a `HashMap<u32, DefinitionId>` for
     /// O(1) `findDef` lookups. It is built once from `nodeIds`/`defIds` and MUST
     /// NOT be relied on for iteration order.
@@ -79,6 +88,7 @@ export namespace Analyzer {
     record BinderOutput {
       public nodeIds: Vector<u32>;
       public defIds: Vector<Analyzer::DefinitionId>;
+      public declScopeKeys: Vector<u64>;
       public index: HashMap<u32, Analyzer::DefinitionId>;
       public diagnostics: DiagnosticBag;
     }
@@ -320,18 +330,20 @@ export namespace Analyzer {
         let mut stateRef: &mut Analyzer::Binder::BinderState = state;
         stateRef.nodeIds.push(itemId.raw());
         stateRef.defIds.push(defId);
+        stateRef.declScopeKeys.push(scopeKey);
       } else {
         let defId: Analyzer::DefinitionId = allocateRecordPlaceholder(defStore, typeStore, sym);
         let mut stateRef: &mut Analyzer::Binder::BinderState = state;
         stateRef.nodeIds.push(itemId.raw());
         stateRef.defIds.push(defId);
+        stateRef.declScopeKeys.push(scopeKey);
       }
 
       recordScopeEntry(state, scopeKey, sym, span);
     }
 
     /// Dispatch a single item to the appropriate predeclaration handler.
-    /// `scopeKey` is the raw id of the enclosing namespace, or 0 for global scope.
+    /// `scopeKey` is `enclosing namespace ItemId.raw() + 1`, or 0 for global scope.
     ///
     /// Silently skips: Function, Variable, Constant, Import, Extern.
     /// Extern is treated as a leaf: the selfhost `Ast::Item::Extern` has no
@@ -375,6 +387,7 @@ export namespace Analyzer {
               let mut stateRef: &mut Analyzer::Binder::BinderState = state;
               stateRef.nodeIds.push(itemId.raw());
               stateRef.defIds.push(defId);
+              stateRef.declScopeKeys.push(scopeKey);
               recordScopeEntry(state, scopeKey, sym, a.span);
             }
           },
@@ -398,6 +411,7 @@ export namespace Analyzer {
               let mut stateRef: &mut Analyzer::Binder::BinderState = state;
               stateRef.nodeIds.push(itemId.raw());
               stateRef.defIds.push(defId);
+              stateRef.declScopeKeys.push(scopeKey);
               recordScopeEntry(state, scopeKey, sym, t.span);
             }
           },
@@ -405,8 +419,9 @@ export namespace Analyzer {
             // Allocate a placeholder for the namespace node itself (spec §namespace-recursion).
             predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &ns.name, ns.span, scopeKey, false);
 
-            // Recurse into children using itemId.raw() as the child scope key.
-            let childScopeKey: u64 = itemId.raw() as u64;
+            // Child scope key is itemId.raw() + 1: 0 stays the top-level
+            // sentinel even when the namespace itself is ItemId 0.
+            let childScopeKey: u64 = (itemId.raw() as u64) + 1;
             let mut childIndex: u64 = 0;
 
             while (childIndex < ns.items.length()) {
@@ -1002,6 +1017,10 @@ export namespace Analyzer {
     }
 
     /// Allocate a `Definition::Method` for an owner-local function item.
+    ///
+    /// `nsScopeKey` is the scope key of the namespace enclosing the owner
+    /// declaration; it feeds `declScopeKeys` to keep the output vectors
+    /// co-indexed.
     function bindMethod(
       state: &mut Analyzer::Binder::BinderState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1012,6 +1031,7 @@ export namespace Analyzer {
       fn_: &Ast::Item::Function,
       owner: Analyzer::DefinitionId,
       isStatic: boolean,
+      nsScopeKey: u64,
     ): Analyzer::DefinitionId {
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let sym: Analyzer::SymbolId = symbolsRef.intern(fn_.name.toStr());
@@ -1054,6 +1074,7 @@ export namespace Analyzer {
       let mut stateRef: &mut Analyzer::Binder::BinderState = state;
       stateRef.nodeIds.push(itemId.raw());
       stateRef.defIds.push(defId);
+      stateRef.declScopeKeys.push(nsScopeKey);
 
       return defId;
     }
@@ -1068,6 +1089,7 @@ export namespace Analyzer {
       methodIds: &Vector<Ast::ItemId>,
       owner: Analyzer::DefinitionId,
       noSelfMeansStatic: boolean,
+      nsScopeKey: u64,
     ): Analyzer::Binder::OwnerMethodTables {
       let mut instanceMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
       let mut staticMethods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
@@ -1107,6 +1129,7 @@ export namespace Analyzer {
                 &fn_,
                 owner,
                 isStatic,
+                nsScopeKey,
               );
 
               if (isStatic) {
@@ -1145,6 +1168,7 @@ export namespace Analyzer {
       ast: &Ast::Module,
       methodIds: &Vector<Ast::ItemId>,
       owner: Analyzer::DefinitionId,
+      nsScopeKey: u64,
     ): Vector<Analyzer::DefinitionId> {
       let mut validateIndex: u64 = 0;
       while (validateIndex < methodIds.length()) {
@@ -1180,6 +1204,7 @@ export namespace Analyzer {
         methodIds,
         owner,
         false,
+        nsScopeKey,
       );
 
       let mut methods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
@@ -1215,6 +1240,7 @@ export namespace Analyzer {
       ast: &Ast::Module,
       itemId: Ast::ItemId,
       rec: &Ast::Item::Record,
+      scopeKey: u64,
       pass1: &Analyzer::Binder::BinderOutput,
     ): void {
       let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());
@@ -1259,6 +1285,7 @@ export namespace Analyzer {
         &rec.methods,
         defId,
         true,
+        scopeKey,
       );
 
       let mut typesRef: &mut Analyzer::TypeStore = typeStore;
@@ -1289,6 +1316,7 @@ export namespace Analyzer {
       ast: &Ast::Module,
       itemId: Ast::ItemId,
       en: &Ast::Item::Enum,
+      scopeKey: u64,
       pass1: &Analyzer::Binder::BinderOutput,
     ): void {
       let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());
@@ -1331,6 +1359,7 @@ export namespace Analyzer {
         &en.methods,
         defId,
         true,
+        scopeKey,
       );
 
       let mut typesRef: &mut Analyzer::TypeStore = typeStore;
@@ -1444,6 +1473,7 @@ export namespace Analyzer {
       ast: &Ast::Module,
       itemId: Ast::ItemId,
       trait_: &Ast::Item::Trait,
+      scopeKey: u64,
       pass1: &Analyzer::Binder::BinderOutput,
     ): void {
       let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());
@@ -1467,6 +1497,7 @@ export namespace Analyzer {
             ast,
             &trait_.methods,
             defId,
+            scopeKey,
           );
 
           let updated: Analyzer::TraitDef = Analyzer::TraitDef {
@@ -1568,6 +1599,7 @@ export namespace Analyzer {
       let mut stateRef: &mut Analyzer::Binder::BinderState = state;
       stateRef.nodeIds.push(itemId.raw());
       stateRef.defIds.push(defId);
+      stateRef.declScopeKeys.push(scopeKey);
     }
 
     /// Bind a `Definition::Variable` (with `mutable = false`) for a module-level constant.
@@ -1609,6 +1641,7 @@ export namespace Analyzer {
       let mut stateRef: &mut Analyzer::Binder::BinderState = state;
       stateRef.nodeIds.push(itemId.raw());
       stateRef.defIds.push(defId);
+      stateRef.declScopeKeys.push(scopeKey);
     }
 
     /// Dispatch pass-2 completion for a single item.
@@ -1617,7 +1650,7 @@ export namespace Analyzer {
     /// Function, Constant, Namespace (recursing into children), and Export
     /// (unwrapping the inner declaration). Silently skips Import and Extern.
     ///
-    /// `scopeKey` is the raw u64 of the enclosing namespace item, or 0 for global scope.
+    /// `scopeKey` is `enclosing namespace ItemId.raw() + 1`, or 0 for global scope.
     function completeItem(
       state: &mut Analyzer::Binder::BinderState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1633,16 +1666,16 @@ export namespace Analyzer {
       if (let Option::SOME(node) = nodeOpt) {
         match (node) {
           Ast::Item::Node::Record(r) -> {
-            completeRecord(state, defStore, typeStore, symbols, ast, itemId, &r, pass1);
+            completeRecord(state, defStore, typeStore, symbols, ast, itemId, &r, scopeKey, pass1);
           },
           Ast::Item::Node::Enum(e) -> {
-            completeEnum(state, defStore, typeStore, symbols, ast, itemId, &e, pass1);
+            completeEnum(state, defStore, typeStore, symbols, ast, itemId, &e, scopeKey, pass1);
           },
           Ast::Item::Node::TypeAlias(a) -> {
             completeTypeAlias(state, defStore, typeStore, symbols, itemId, &a, pass1);
           },
           Ast::Item::Node::Trait(t) -> {
-            completeTrait(state, defStore, typeStore, symbols, ast, itemId, &t, pass1);
+            completeTrait(state, defStore, typeStore, symbols, ast, itemId, &t, scopeKey, pass1);
           },
           Ast::Item::Node::Function(f) -> {
             bindFunction(state, defStore, typeStore, symbols, ast, itemId, &f, scopeKey);
@@ -1651,7 +1684,8 @@ export namespace Analyzer {
             bindConstant(state, defStore, typeStore, symbols, itemId, &c, scopeKey);
           },
           Ast::Item::Node::Namespace(ns) -> {
-            let childScopeKey: u64 = itemId.raw() as u64;
+            // Same +1 encoding as pass-1: 0 stays the top-level sentinel.
+            let childScopeKey: u64 = (itemId.raw() as u64) + 1;
             let mut childIndex: u64 = 0;
 
             while (childIndex < ns.items.length()) {
@@ -1687,6 +1721,7 @@ export namespace Analyzer {
     ): Analyzer::Binder::BinderOutput {
       let nodeIds: Vector<u32> = Vector::new<u32>();
       let defIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let declScopeKeys: Vector<u64> = Vector::new<u64>();
       let diagnostics: DiagnosticBag = DiagnosticBag::init();
       let scopeKeys: Vector<u64> = Vector::new<u64>();
       let scopeSyms: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
@@ -1695,6 +1730,7 @@ export namespace Analyzer {
       let mut state: Analyzer::Binder::BinderState = Analyzer::Binder::BinderState {
         nodeIds: nodeIds,
         defIds: defIds,
+        declScopeKeys: declScopeKeys,
         diagnostics: diagnostics,
         scopeKeys: scopeKeys,
         scopeSyms: scopeSyms,
@@ -1720,6 +1756,7 @@ export namespace Analyzer {
       let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::BinderOutput {
         nodeIds: state.nodeIds,
         defIds: state.defIds,
+        declScopeKeys: state.declScopeKeys,
         index: nodeDefIndex,
         diagnostics: state.diagnostics,
       };
@@ -1753,6 +1790,7 @@ export namespace Analyzer {
       // resolver's responsibility.
       let nodeIds: Vector<u32> = Vector::new<u32>();
       let defIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let declScopeKeys: Vector<u64> = Vector::new<u64>();
       let diagnostics: DiagnosticBag = DiagnosticBag::init();
       let scopeKeys: Vector<u64> = Vector::new<u64>();
       let scopeSyms: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
@@ -1761,6 +1799,7 @@ export namespace Analyzer {
       let mut state: Analyzer::Binder::BinderState = Analyzer::Binder::BinderState {
         nodeIds: nodeIds,
         defIds: defIds,
+        declScopeKeys: declScopeKeys,
         diagnostics: diagnostics,
         scopeKeys: scopeKeys,
         scopeSyms: scopeSyms,
@@ -1781,6 +1820,7 @@ export namespace Analyzer {
       return Analyzer::Binder::BinderOutput {
         nodeIds: state.nodeIds,
         defIds: state.defIds,
+        declScopeKeys: state.declScopeKeys,
         index: nodeDefIndex,
         diagnostics: state.diagnostics,
       };

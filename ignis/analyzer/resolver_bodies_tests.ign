@@ -3023,11 +3023,12 @@ function resolveBodiesRecordStaticMethodResolves(): void {
   let _methodDefId: Analyzer::DefinitionId = assertResolvesToMethod(&mut defStore, ref_);
 }
 
-/// Scenario: `Namespace::Type::staticMethod` (3 segments) resolves via
-/// last-two-segments lookup; the leading `Namespace` segment is unvalidated
-/// (TODO(namespace-path-validation)). REQ-M2 "namespaced static call".
+/// Scenario: `Namespace::Owner::staticMethod` (3 segments) where `Owner` is a
+/// TOP-LEVEL record — the written `Namespace` prefix names no enclosing
+/// namespace, so prefix validation (IGN-77) rejects the path with one
+/// UNDECLARED_VARIABLE carrying the full written path.
 @test
-function resolveBodiesNamespacedStaticMethodResolves(): void {
+function resolveBodiesUndeclaredNamespacePrefixIsRejected(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -3046,6 +3047,59 @@ function resolveBodiesNamespacedStaticMethodResolves(): void {
     genericParameters: Vector::new<Ast::GenericParam>(),
     fields: Vector::new<Ast::PatternId>(),
     methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { Namespace::Owner::staticMethod; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr3(&mut module, "Namespace", "Owner", "staticMethod");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticMessage(&output, "undeclared name in path: `Namespace::Owner::staticMethod`");
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  assertUnresolved(ref_);
+}
+
+/// Scenario: `Namespace::Owner::staticMethod` (3 segments) where `Owner` is
+/// declared inside `namespace Namespace` — the written prefix matches the
+/// owner's actual namespace chain, so the method resolves with no
+/// diagnostics. REQ-M2 "namespaced static call" + IGN-77.
+@test
+function resolveBodiesNamespacedStaticMethodResolves(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // namespace Namespace { record Owner { staticMethod(): void { return; } } }
+  let mut staticBody: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  staticBody.push(addReturn(&mut module));
+  let staticMethodId: Ast::ItemId = addMethodItem(&mut module, "staticMethod", Vector::new<Ast::PatternId>(), staticBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(staticMethodId);
+
+  let ownerId: Ast::ItemId = module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("Owner"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut nsItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItems.push(ownerId);
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create("Namespace"),
+    items: nsItems,
     metadata: Ast::emptyMetadata(),
   }));
 
@@ -3421,8 +3475,9 @@ function resolveBodiesQualifiedRecordTypeFallbackPattern(): void {
   let _did: Analyzer::DefinitionId = assertDefinitionRef(patRef);
 }
 
-/// Scenario: a 3-segment variant pattern (`Ns::E::A`) resolves via
-/// last-two-segments lookup. REQ-P2 "qualified variant pattern".
+/// Scenario: a 3-segment variant pattern (`Ns::E::A`) with `E` declared
+/// inside `namespace Ns` resolves via last-two-segments lookup, passing
+/// namespace-prefix validation (IGN-77). REQ-P2 "qualified variant pattern".
 @test
 function resolveBodiesThreeSegmentVariantPatternResolves(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
@@ -3430,15 +3485,24 @@ function resolveBodiesThreeSegmentVariantPatternResolves(): void {
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
   let mut module: Ast::Module = Ast::Module::init();
 
-  // enum E { A }
+  // namespace Ns { enum E { A } }
   let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
   variants.push(addBinding(&mut module, "A"));
-  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+  let enumId: Ast::ItemId = module.addItem(Ast::Item::Node::Enum(Ast::Item::Enum {
     span: bodiesDummySpan(),
     name: String::create("E"),
     genericParameters: Vector::new<Ast::GenericParam>(),
     variants: variants,
     methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut nsItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItems.push(enumId);
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create("Ns"),
+    items: nsItems,
     metadata: Ast::emptyMetadata(),
   }));
 
@@ -3463,7 +3527,8 @@ function resolveBodiesThreeSegmentVariantPatternResolves(): void {
 }
 
 /// Scenario: a 3-segment variant pattern with a mismatched payload arity
-/// (`Ns::E::A(x)` against a 0-payload variant) still enforces arity. REQ-P2.
+/// (`Ns::E::A(x)` against a 0-payload variant, `E` declared inside
+/// `namespace Ns`) still enforces arity. REQ-P2.
 @test
 function resolveBodiesThreeSegmentVariantPatternArityMismatch(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
@@ -3471,15 +3536,24 @@ function resolveBodiesThreeSegmentVariantPatternArityMismatch(): void {
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
   let mut module: Ast::Module = Ast::Module::init();
 
-  // enum E { A }
+  // namespace Ns { enum E { A } }
   let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
   variants.push(addBinding(&mut module, "A"));
-  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+  let enumId: Ast::ItemId = module.addItem(Ast::Item::Node::Enum(Ast::Item::Enum {
     span: bodiesDummySpan(),
     name: String::create("E"),
     genericParameters: Vector::new<Ast::GenericParam>(),
     variants: variants,
     methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut nsItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItems.push(enumId);
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create("Ns"),
+    items: nsItems,
     metadata: Ast::emptyMetadata(),
   }));
 
@@ -3727,6 +3801,10 @@ function emptyResolverBodiesState(): Analyzer::ResolverBodies::ResolverBodiesSta
     diagnostics: DiagnosticBag::init(),
     globalNameSyms: Vector::new<Analyzer::SymbolId>(),
     globalNameDefs: Vector::new<Analyzer::DefinitionId>(),
+    globalNameScopeKeys: Vector::new<u64>(),
+    scopeItemKeys: Vector::new<u64>(),
+    scopeItemNameSyms: Vector::new<Analyzer::SymbolId>(),
+    scopeItemParentKeys: Vector::new<u64>(),
     importSyms: Vector::new<Analyzer::SymbolId>(),
     importDefs: Vector::new<Analyzer::DefinitionId>(),
     currentFunction: sentinel,
@@ -3795,4 +3873,305 @@ function bodyResolutionMapDistinguishesExprAndPatternKeysAndMissesUnknownId(): v
     Option::SOME(_) -> @panic("expected findPatternRef to miss an unrecorded id"),
     Option::NONE -> {},
   };
+}
+
+/// Add (as a non-root item) a record named `name` with one static method
+/// `staticMethod` whose body is a single `return;`. IGN-77 fixtures.
+function addNamespacedOwnerRecord(module: &mut Ast::Module, name: str): Ast::ItemId {
+  let mut staticBody: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  staticBody.push(addReturn(module));
+  let staticMethodId: Ast::ItemId = addMethodItem(module, "staticMethod", Vector::new<Ast::PatternId>(), staticBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(staticMethodId);
+
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Add (as a non-root item) a `namespace <name> { ...items }`. IGN-77 fixtures.
+function addNamespaceItem(
+  module: &mut Ast::Module,
+  name: str,
+  items: Vector<Ast::ItemId>
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create(name),
+    items: items,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Add a 4-segment Path expression. IGN-77 nested-namespace fixtures.
+function addPathExpr4(
+  module: &mut Ast::Module,
+  seg0: str,
+  seg1: str,
+  seg2: str,
+  seg3: str
+): Ast::ExpressionId {
+  let mut segs: Vector<String> = Vector::new<String>();
+  segs.push(String::create(seg0));
+  segs.push(String::create(seg1));
+  segs.push(String::create(seg2));
+  segs.push(String::create(seg3));
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Path(Ast::Expression::Path {
+    span: bodiesDummySpan(),
+    segments: segs,
+  }));
+}
+
+/// Scenario: `WrongNs::Owner::staticMethod` where `Owner` actually lives in
+/// `RightNs` and `WrongNs` is a different, existing namespace — the written
+/// prefix does not match the owner's namespace chain, so validation (IGN-77)
+/// rejects the path with one full-path UNDECLARED_VARIABLE.
+@test
+function resolveBodiesWrongNamespacePrefixIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // namespace RightNs { record Owner { staticMethod } }
+  let ownerId: Ast::ItemId = addNamespacedOwnerRecord(&mut module, "Owner");
+  let mut rightItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  rightItems.push(ownerId);
+  let rightNsId: Ast::ItemId = addNamespaceItem(&mut module, "RightNs", rightItems);
+  module.roots.push(rightNsId);
+
+  // namespace WrongNs {}
+  let wrongNsId: Ast::ItemId = addNamespaceItem(&mut module, "WrongNs", Vector::new<Ast::ItemId>());
+  module.roots.push(wrongNsId);
+
+  // function f(): void { WrongNs::Owner::staticMethod; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr3(&mut module, "WrongNs", "Owner", "staticMethod");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticMessage(&output, "undeclared name in path: `WrongNs::Owner::staticMethod`");
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  assertUnresolved(ref_);
+}
+
+/// Scenario: `Outer::Inner::Owner::staticMethod` (4 segments) with the owner
+/// declared under `namespace Outer { namespace Inner { ... } }` — the written
+/// prefix matches the full namespace chain, so the method resolves with no
+/// diagnostics (IGN-77).
+@test
+function resolveBodiesNestedNamespacePathResolves(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // namespace Outer { namespace Inner { record Owner { staticMethod } } }
+  let ownerId: Ast::ItemId = addNamespacedOwnerRecord(&mut module, "Owner");
+  let mut innerItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  innerItems.push(ownerId);
+  let innerNsId: Ast::ItemId = addNamespaceItem(&mut module, "Inner", innerItems);
+  let mut outerItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  outerItems.push(innerNsId);
+  let outerNsId: Ast::ItemId = addNamespaceItem(&mut module, "Outer", outerItems);
+  module.roots.push(outerNsId);
+
+  // function f(): void { Outer::Inner::Owner::staticMethod; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr4(&mut module, "Outer", "Inner", "Owner", "staticMethod");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  let _methodDefId: Analyzer::DefinitionId = assertResolvesToMethod(&mut defStore, ref_);
+}
+
+/// Scenario: `Outer::WrongInner::Owner::staticMethod` (4 segments) where the
+/// owner's actual chain is `Outer::Inner` — the innermost written prefix
+/// segment mismatches, so validation (IGN-77) rejects with one full-path
+/// UNDECLARED_VARIABLE.
+@test
+function resolveBodiesNestedNamespaceWrongInnerPrefixIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // namespace Outer { namespace Inner { record Owner { staticMethod } } }
+  let ownerId: Ast::ItemId = addNamespacedOwnerRecord(&mut module, "Owner");
+  let mut innerItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  innerItems.push(ownerId);
+  let innerNsId: Ast::ItemId = addNamespaceItem(&mut module, "Inner", innerItems);
+  let mut outerItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  outerItems.push(innerNsId);
+  let outerNsId: Ast::ItemId = addNamespaceItem(&mut module, "Outer", outerItems);
+  module.roots.push(outerNsId);
+
+  // function f(): void { Outer::WrongInner::Owner::staticMethod; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr4(&mut module, "Outer", "WrongInner", "Owner", "staticMethod");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticMessage(&output, "undeclared name in path: `Outer::WrongInner::Owner::staticMethod`");
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  assertUnresolved(ref_);
+}
+
+/// Scenario: a 3-segment variant pattern `Bogus::E::A` where `E` actually
+/// lives in `namespace Ns` — pattern position runs the same namespace-prefix
+/// validation (IGN-77) and rejects with one full-path UNDECLARED_VARIABLE.
+@test
+function resolveBodiesPatternWrongNamespacePrefixIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // namespace Ns { enum E { A } }
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(addBinding(&mut module, "A"));
+  let enumId: Ast::ItemId = module.addItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: bodiesDummySpan(),
+    name: String::create("E"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+  let mut nsItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItems.push(enumId);
+  let nsId: Ast::ItemId = addNamespaceItem(&mut module, "Ns", nsItems);
+  module.roots.push(nsId);
+
+  // function f(): void { match 0 { Bogus::E::A => {} } }
+  let armPat: Ast::PatternId = addPathPattern3(&mut module, "Bogus", "E", "A", Vector::new<Ast::PatternId>());
+  addMatchArmFunction(&mut module, "f", armPat);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticMessage(&output, "undeclared name in path: `Bogus::E::A`");
+
+  let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
+  let Option::SOME(patRef) = patResult else {
+    @panic("resolveBodiesPatternWrongNamespacePrefixIsRejected: Bogus::E::A pattern ref not found");
+  };
+  assertUnresolved(patRef);
+}
+
+/// Build a module whose FIRST item (ItemId 0) is
+/// `namespace Ns { record Owner { staticMethod } }`. Regression fixture for
+/// the ItemId-0 scope-key collision: with unshifted keys, `Owner`'s
+/// declScopeKey would be 0 and indistinguishable from top level (IGN-77).
+///
+/// The namespace must be allocated first, so its child item ids are planned
+/// with `Id::fromRaw` and then asserted against the actual allocations.
+function addFirstItemNamespaceFixture(module: &mut Ast::Module): void {
+  let plannedOwnerId: Ast::ItemId = Id::fromRaw<Ast::ItemTag>(2);
+  let mut nsItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItems.push(plannedOwnerId);
+
+  let mut moduleRef: &mut Ast::Module = module;
+  let nsId: Ast::ItemId = moduleRef.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create("Ns"),
+    items: nsItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+  Test::assertEq<u32>(nsId.raw(), 0);
+
+  // Method function item lands at ItemId 1, the owner record at ItemId 2.
+  let ownerId: Ast::ItemId = addNamespacedOwnerRecord(module, "Owner");
+  Test::assertEq<u32>(ownerId.raw(), plannedOwnerId.raw());
+}
+
+/// Scenario: the namespace is the FIRST item of the module (ItemId 0) —
+/// with the `+ 1` scope-key encoding its children still carry a non-zero
+/// scope key, so `Ns::Owner::staticMethod` resolves with no diagnostics.
+/// Regression for the ItemId-0 collision with the top-level sentinel.
+@test
+function resolveBodiesFirstItemNamespacePathResolves(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  addFirstItemNamespaceFixture(&mut module);
+
+  // function f(): void { Ns::Owner::staticMethod; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr3(&mut module, "Ns", "Owner", "staticMethod");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  let _methodDefId: Analyzer::DefinitionId = assertResolvesToMethod(&mut defStore, ref_);
+}
+
+/// Scenario: same first-item namespace (ItemId 0), but the written prefix
+/// names a different namespace — rejection still works under the `+ 1`
+/// scope-key encoding.
+@test
+function resolveBodiesFirstItemNamespaceWrongPrefixIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  addFirstItemNamespaceFixture(&mut module);
+
+  // function f(): void { Bogus::Owner::staticMethod; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr3(&mut module, "Bogus", "Owner", "staticMethod");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticMessage(&output, "undeclared name in path: `Bogus::Owner::staticMethod`");
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  assertUnresolved(ref_);
 }
