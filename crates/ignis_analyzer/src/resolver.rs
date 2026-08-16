@@ -310,10 +310,6 @@ impl<'a> Analyzer<'a> {
   ) {
     match expr {
       ASTExpression::Variable(var_expr) => {
-        if self.is_builtin_name(&var_expr.name) {
-          return;
-        }
-
         let symbol_entry = self.scopes.lookup(&var_expr.name);
         match symbol_entry {
           Some(SymbolEntry::Single(def_id)) => {
@@ -325,6 +321,13 @@ impl<'a> Analyzer<'a> {
           },
           Some(SymbolEntry::Overload(_)) => {},
           None => {
+            // Bare builtin names (typeOf, sizeOf, ...) are only meaningful in callee
+            // position, where lowering handles them without a definition. A local
+            // binding with the same name shadows the builtin via the lookup above.
+            if self.in_callee_context && self.is_builtin_name(&var_expr.name) {
+              return;
+            }
+
             if !self.resolve_suppress_errors {
               self.add_diagnostic(
                 DiagnosticMessage::UndeclaredVariable {
@@ -390,8 +393,12 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::Path(path) => {
-        // Skip resolution for builtin type constructors (e.g., Rc::new)
-        if !path.segments.is_empty() && self.is_builtin_name(&path.segments[0].name) {
+        // A path rooted at a builtin name has no definition to resolve, unless a
+        // local binding shadows that name.
+        if !path.segments.is_empty()
+          && self.is_builtin_name(&path.segments[0].name)
+          && self.scopes.lookup(&path.segments[0].name).is_none()
+        {
           return;
         }
 

@@ -421,11 +421,13 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Path(_) => {},
       ASTExpression::Unit { .. } => {},
       ASTExpression::Variable(var) => {
-        if self.is_builtin_name(&var.name) {
-          return;
-        }
-
         if self.scopes.lookup(&var.name).is_none() {
+          // Bare builtin names without a shadowing binding are validated by the
+          // resolver, which knows whether they appear in callee position.
+          if self.is_builtin_name(&var.name) {
+            return;
+          }
+
           self.add_diagnostic(
             DiagnosticMessage::UndeclaredVariable {
               name: self.get_symbol_name(&var.name),
