@@ -292,6 +292,114 @@ function parityTryUnwrapsOkPayload(): void {
   );
 }
 
+/// Origin: golden_ok::mutable_variable.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityMutableVariable(): void {
+  parityAcceptsSource(
+    "function main(): void {\n    let mut x: i32 = 1;\n    x = 2;\n    return;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::if_statement.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityIfStatement(): void {
+  parityAcceptsSource(
+    "function check(x: i32): i32 {\n    if (x > 0) {\n        return 1;\n    } else {\n        return 0;\n    }\n}\n",
+  );
+}
+
+/// Origin: golden_ok::while_loop.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityWhileLoop(): void {
+  parityAcceptsSource(
+    "function count(): i32 {\n    let mut i: i32 = 0;\n    while (i < 10) {\n        i = i + 1;\n    }\n    return i;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::multiple_functions.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityMultipleFunctions(): void {
+  parityAcceptsSource(
+    "function helper(x: i32): i32 {\n    return x * 2;\n}\n\nfunction main(): i32 {\n    return helper(21);\n}\n",
+  );
+}
+
+/// Origin: diagnostics::match_guard_can_use_pattern_binding.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityMatchGuardCanUsePatternBinding(): void {
+  parityAcceptsSource(
+    "function main(): i32 {\n    let x: i32 = 3;\n    return match (x) {\n        value if value > 2 -> value,\n        _ -> 0,\n    };\n}\n",
+  );
+}
+
+/// Origin: diagnostics::for_of_over_drop_bearing_record_by_ref_is_clean.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityForOfOverDropBearingRecordByRef(): void {
+  parityAcceptsSource(
+    "@implements(Drop)\nrecord Owned {\n    public id: i32;\n    drop(&mut self): void { return; }\n}\n\nrecord Wrapper {\n    public inner: Owned;\n}\n\nfunction consume(items: Wrapper[2]): void {\n    for (let item: &Wrapper of items) {\n        return;\n    }\n}\n\nfunction main(): i32 {\n    return 0;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::move_in_diverging_branch_is_not_inconsistent.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityMoveInDivergingBranch(): void {
+  parityAcceptsSource(
+    "@implements(Drop)\nrecord Owned {\n    public id: i32;\n    drop(&mut self): void { return; }\n}\n\nfunction consume(s: Owned): void {\n    return;\n}\n\nfunction useIt(x: Owned, flag: boolean): i32 {\n    if (flag) {\n        consume(x);\n        return 1;\n    }\n\n    return 2;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::move_when_both_branches_diverge_is_not_inconsistent.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityMoveWhenBothBranchesDiverge(): void {
+  parityAcceptsSource(
+    "@implements(Drop)\nrecord Owned {\n    public id: i32;\n    drop(&mut self): void { return; }\n}\n\nfunction consume(s: Owned): i32 {\n    return 1;\n}\n\nfunction useIt(x: Owned, flag: boolean): i32 {\n    if (flag) {\n        return consume(x);\n    } else {\n        return consume(x);\n    }\n}\n",
+  );
+}
+
+/// Origin: golden_ok::borrow_taken_inside_a_let_else_else_block_does_not_escape_it.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityBorrowInsideLetElseElseBlock(): void {
+  parityAcceptsSource(
+    "enum Maybe {\n    Some(i32),\n    None,\n}\n\nfunction run(input: Maybe): i32 {\n    let mut owned: i32 = 1;\n\n    let Maybe::Some(v) = input else {\n        let r: &mut i32 = &mut owned;\n        return *r;\n    };\n\n    owned = 5;\n    return v + owned;\n}\n",
+  );
+}
+
+/// Origin: test_cases/analyzer/borrows/valid_borrows.ign.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityValidBorrows(): void {
+  parityAcceptsSource(
+    "// Test: Valid borrowing patterns\n\nfunction modify(x: &mut i32): void {\n    *x == *x + 1;\n    return;\n}\n\nfunction read(x: &i32): i32 {\n    return *x;\n}\n\nfunction main(): void {\n    let mut value: i32 = 10;\n    modify(&mut value);\n    let result: i32 = read(&value);\n    return;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::widening_implicit_u8_to_u32.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityWideningImplicitU8ToU32(): void {
+  parityAcceptsSource(
+    "function main(): void {\n    let a: u8 = 10;\n    let b: u32 = a;  // Widening u8 -> u32\n    return;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::arithmetic_u8_plus_u32.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityArithmeticU8PlusU32(): void {
+  parityAcceptsSource(
+    "function main(): u32 {\n    let a: u8 = 10;\n    let b: u32 = 20;\n    let c: u32 = a + b;  // Should widen u8 to u32\n    return c;\n}\n",
+  );
+}
+
 // ===========================================================================
 // Rejected fixtures: the host rejects these and so does the selfhost, with
 // the code named below. Where the two code spaces disagree the host code is
@@ -597,30 +705,49 @@ function parityInconsistentMoveInBranches(): void {
   );
 }
 
+/// Origin: test_cases/analyzer/borrows/borrow_conflict_mut.ign.
+/// Host expectation: A0038.
+@test
+function parityBorrowConflictMut(): void {
+  parityRejectsSource(
+    "// Test: Multiple mutable borrows should produce error\n\nfunction main(): void {\n    let mut x: i32 = 1;\n    let a: &mut i32 = &mut x;\n    let b: &mut i32 = &mut x;  // Error: Cannot borrow mutably while already borrowed\n    *a == 2;\n    return;\n}\n",
+    DiagnosticCode::BORROW_MUTABLE_WHILE_MUTABLE,
+    1,
+  );
+}
+
+/// Origin: test_cases/analyzer/borrows/mutate_while_borrowed.ign.
+/// Host expectation: A0047.
+@test
+function parityMutateWhileBorrowed(): void {
+  parityRejectsSource(
+    "// Test: Cannot mutate a variable while it is borrowed\n\nfunction main(): void {\n    let mut x: i32 = 1;\n    let r: &i32 = &x;       // Borrow x immutably\n    x = 2;                   // Error: cannot assign while borrowed\n    return;\n}\n",
+    DiagnosticCode::MUTATED_WHILE_BORROWED,
+    1,
+  );
+}
+
 // ===========================================================================
 // Gap inventory
 //
-// 33 of the 74 curated fixtures are not gates yet. Each one is listed with
+// 19 of the 74 curated fixtures are not gates yet. Each one is listed with
 // its host origin, the host expectation, and what the selfhost pipeline
 // actually does today (observed, not predicted). Nothing here is a weakened
 // expectation: these fixtures are absent from the gates on purpose.
 //
 // Root-cause buckets:
 //
-//   B1 (18) — Untyped integer literals default to `u32` and no expected type reaches them
-//     An unsuffixed integer literal is typed `u32` unconditionally. The expected
-//     type reaches a `let` annotation and a call argument, but not a `return`
-//     value, an assignment right side, a binary operand, or a comparison operand.
-//     Isolated: `function f(): u32 { return 1; }` is clean, `function f(): i32 {
-//     return 1; }` reports I0031; `let mut x: u32 = 1; x = 2;` is clean, the same
-//     with `i32` reports I0031; `a + 1` and `a > 0` report I0031 for `a: i32` and
-//     are clean for `a: u32`. Every fixture below uses `i32`, so it never reaches
-//     the behaviour the host test was written to cover.
-//
-//   B2 (2) — No implicit numeric widening
-//     Assigning a narrower integer to a wider annotated binding reports I0031.
-//     Isolated: `let a: u8 = 10; let b: u32 = a;` reports I0031, which rules out
-//     B1 as the cause (both sides are unsigned and the literal is annotated).
+//   B1 (6) — An unsuffixed integer literal defaults to `u32` where no expected type applies
+//     The expected type now reaches a `return` value, an assignment right side
+//     and a binary/comparison operand, so those fixtures are gates above. What
+//     remains is the default itself: with no expectation in reach, an unsuffixed
+//     literal is `u32` while the host's is `i32`. Three positions supply no
+//     expectation — an unannotated `let` initializer, a unary operand, and a
+//     vector literal element. Isolated: `let x = 42; return x;` in a function
+//     returning `i32` reports `I0031 expected i32, found u32`, and so does
+//     `return -1;`; `const PRIMES: i32[4] = [2, 3, 5, 7];` reports
+//     `I0031 expected i32[4], found u32[4]`. Changing the default is a language
+//     decision, not a propagation fix, so it is not made here.
 //
 //   B3 (1) — Deferred local inference is unsupported
 //     An unannotated `let mut x;` completed by a later assignment.
@@ -668,32 +795,14 @@ function parityInconsistentMoveInBranches(): void {
 //   borrowCheckingContinuesAfterLetElse [B1]
 //     origin:   diagnostics::borrow_checking_continues_after_a_let_else
 //     host:     rejected with A0047
-//     selfhost: analyzer: I0031 x2
-//
-//   borrowConflictMut [B1]
-//     origin:   test_cases/analyzer/borrows/borrow_conflict_mut.ign
-//     host:     rejected with A0038
-//     selfhost: analyzer: I0031; the same fixture with `u32` reports exactly A0038 from the borrow checker
-//
-//   borrowInsideLetElseElseBlock [B1]
-//     origin:   golden_ok::borrow_taken_inside_a_let_else_else_block_does_not_escape_it
-//     host:     accepted
-//     selfhost: analyzer: I0031
+//     selfhost: analyzer: I0031 (`return -1` in the else block); the borrow checker then
+//               reports exactly A0047, so only the literal default blocks this gate
 //
 //   constArray [B1]
 //     origin:   golden_ok::const_array
 //     host:     accepted
-//     selfhost: analyzer: I0031 (the `i32[4]` initializer elements)
-//
-//   forOfOverDropBearingRecordByRef [B1]
-//     origin:   diagnostics::for_of_over_drop_bearing_record_by_ref_is_clean
-//     host:     accepted
-//     selfhost: analyzer: I0031 (`main(): i32` returning `0`); the `for..of` body itself analyzes clean
-//
-//   ifStatement [B1]
-//     origin:   golden_ok::if_statement
-//     host:     accepted
-//     selfhost: analyzer: I0031 x3 (`x > 0`, `return 1`, `return 0`)
+//     selfhost: analyzer: I0031 expected `i32[4]`, found `u32[4]` — no expected type
+//               reaches a vector literal element, so every element keeps the default
 //
 //   inferFromInitializer [B1]
 //     origin:   golden_ok::infer_from_initializer
@@ -705,65 +814,16 @@ function parityInconsistentMoveInBranches(): void {
 //     host:     accepted
 //     selfhost: analyzer: I0031
 //
-//   matchGuardCanUsePatternBinding [B1]
-//     origin:   diagnostics::match_guard_can_use_pattern_binding
-//     host:     accepted
-//     selfhost: analyzer: I0031 + A0058
-//
-//   moveInDivergingBranch [B1]
-//     origin:   golden_ok::move_in_diverging_branch_is_not_inconsistent
-//     host:     accepted
-//     selfhost: analyzer: I0031 x2; the ownership behaviour itself is correct — the same fixture with `u32` analyzes and borrow-checks clean
-//
 //   moveInLetElseDoesNotHideLaterDoubleMove [B1]
 //     origin:   diagnostics::move_in_a_let_else_else_block_does_not_hide_a_later_double_move
 //     host:     rejected with O0001
-//     selfhost: analyzer: I0031 x2
+//     selfhost: analyzer: I0031 (`return -1` in the else block); the borrow checker then
+//               reports exactly O0001, so only the literal default blocks this gate
 //
 //   moveInsideLetElseElseBlock [B1]
 //     origin:   golden_ok::move_inside_a_let_else_else_block_does_not_escape_it
 //     host:     accepted
-//     selfhost: analyzer: I0031 x2
-//
-//   moveWhenBothBranchesDiverge [B1]
-//     origin:   golden_ok::move_when_both_branches_diverge_is_not_inconsistent
-//     host:     accepted
-//     selfhost: analyzer: I0031
-//
-//   multipleFunctions [B1]
-//     origin:   golden_ok::multiple_functions
-//     host:     accepted
-//     selfhost: analyzer: I0031 (`x * 2`)
-//
-//   mutableVariable [B1]
-//     origin:   golden_ok::mutable_variable
-//     host:     accepted
-//     selfhost: analyzer: I0031 (`x = 2`)
-//
-//   mutateWhileBorrowed [B1]
-//     origin:   test_cases/analyzer/borrows/mutate_while_borrowed.ign
-//     host:     rejected with A0047
-//     selfhost: analyzer: I0031; the same fixture with `u32` reports exactly A0047 from the borrow checker
-//
-//   validBorrows [B1]
-//     origin:   test_cases/analyzer/borrows/valid_borrows.ign
-//     host:     accepted
-//     selfhost: analyzer: I0031; the same fixture with `u32` analyzes and borrow-checks clean
-//
-//   whileLoop [B1]
-//     origin:   golden_ok::while_loop
-//     host:     accepted
-//     selfhost: analyzer: I0031 x2
-//
-//   arithmeticU8PlusU32 [B2]
-//     origin:   golden_ok::arithmetic_u8_plus_u32
-//     host:     accepted
-//     selfhost: analyzer: I0031
-//
-//   wideningImplicitU8ToU32 [B2]
-//     origin:   golden_ok::widening_implicit_u8_to_u32
-//     host:     accepted
-//     selfhost: analyzer: I0031
+//     selfhost: analyzer: I0031 (`return -1` in the else block)
 //
 //   inferDeferredFromAssignment [B3]
 //     origin:   golden_ok::infer_deferred_from_assignment

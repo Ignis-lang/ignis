@@ -1257,6 +1257,138 @@ export namespace Analyzer {
       };
     }
 
+    /// Width rank of an integer type node, ordered so that a same-sign
+    /// widening is exactly a move to a strictly higher rank. `0` means the
+    /// node is not an integer primitive.
+    function integerWideningRankOfNode(typeNode: &Analyzer::Type): u32 {
+      return match (typeNode) {
+        Analyzer::Type::I8 | Analyzer::Type::U8 -> 1,
+        Analyzer::Type::I16 | Analyzer::Type::U16 -> 2,
+        Analyzer::Type::I32 | Analyzer::Type::U32 -> 3,
+        Analyzer::Type::I64 | Analyzer::Type::U64 -> 4,
+        _ -> 0,
+      };
+    }
+
+    /// Whether an alias-resolved type node names a signed integer primitive.
+    function isSignedIntegerTypeNode(typeNode: &Analyzer::Type): boolean {
+      return match (typeNode) {
+        Analyzer::Type::I8 | Analyzer::Type::I16 | Analyzer::Type::I32 | Analyzer::Type::I64 -> true,
+        _ -> false,
+      };
+    }
+
+    /// Resolves `typeId` through its alias chain and reports its integer width
+    /// rank, or `0` when it is not an integer. Returning a scalar keeps the
+    /// type store borrow local, so two types can be classified in sequence.
+    function integerWideningRank(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): u32 {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (resolved.cycleAlias.isSome()) {
+        return 0;
+      }
+
+      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+        return 0;
+      };
+
+      return Analyzer::Typecheck::integerWideningRankOfNode(typeNode);
+    }
+
+    /// Resolves `typeId` through its alias chain and reports whether it is a
+    /// signed integer primitive.
+    function isSignedIntegerType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (resolved.cycleAlias.isSome()) {
+        return false;
+      }
+
+      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+        return false;
+      };
+
+      return Analyzer::Typecheck::isSignedIntegerTypeNode(typeNode);
+    }
+
+    /// Whether a value of `source` implicitly widens to `target`.
+    ///
+    /// Mirrors the reference analyzer's `TypeStore::is_implicit_widening`:
+    /// only a same-sign integer conversion to a strictly wider type is
+    /// implicit. Narrowing and any signed/unsigned crossing stay explicit.
+    function isImplicitWidening(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      target: Analyzer::TypeId,
+      source: Analyzer::TypeId,
+    ): boolean {
+      let targetRank: u32 = Analyzer::Typecheck::integerWideningRank(defStore, typeStore, target);
+      let sourceRank: u32 = Analyzer::Typecheck::integerWideningRank(defStore, typeStore, source);
+
+      if (targetRank == 0 || sourceRank == 0 || targetRank <= sourceRank) {
+        return false;
+      }
+
+      let targetSigned: boolean = Analyzer::Typecheck::isSignedIntegerType(defStore, typeStore, target);
+      let sourceSigned: boolean = Analyzer::Typecheck::isSignedIntegerType(defStore, typeStore, source);
+
+      return targetSigned == sourceSigned;
+    }
+
+    /// The type two integer operands share, or `Option::NONE` when they share
+    /// none.
+    ///
+    /// Mirrors the integer half of the reference analyzer's
+    /// `integer_common_type`: same-sign integers widen to the wider operand.
+    /// A mixed signed/unsigned pair has no common type, and a float operand is
+    /// not handled here, so both keep reporting a mismatch.
+    function commonIntegerType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      left: Analyzer::TypeId,
+      right: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      if (Analyzer::Typecheck::isImplicitWidening(defStore, typeStore, left, right)) {
+        return Option::SOME(left);
+      }
+
+      if (Analyzer::Typecheck::isImplicitWidening(defStore, typeStore, right, left)) {
+        return Option::SOME(right);
+      }
+
+      return Option::NONE;
+    }
+
+    /// Whether `typeId` resolves to a numeric primitive without reporting a
+    /// cyclic alias. The binary arms report such a cycle once through
+    /// `isSupportedNumericType`, so this pre-pass must stay silent.
+    function isNumericTypeQuiet(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (resolved.cycleAlias.isSome()) {
+        return false;
+      }
+
+      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+        return false;
+      };
+
+      if (Analyzer::Typecheck::isIntegerTypeNode(typeNode)) {
+        return true;
+      }
+
+      return Analyzer::Typecheck::isFloatTypeNode(typeNode);
+    }
+
     /// Whether a signed literal value fits the integer type node. Mirrors the
     /// Rust `signed_fits_in_type`.
     function signedLiteralFits(typeNode: &Analyzer::Type, value: i64): boolean {
