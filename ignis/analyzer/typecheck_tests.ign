@@ -526,6 +526,32 @@ function typecheckAddForStatement(
   }));
 }
 
+function typecheckAddForOfStatement(
+  module: &mut Ast::Module,
+  pattern: Ast::PatternId,
+  iterable: Ast::ExpressionId,
+  body: Ast::StatementId,
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::ForOf(Ast::Statement::ForOf {
+    span: typecheckDummySpan(),
+    pattern: pattern,
+    iterable: iterable,
+    body: body,
+  }));
+}
+
+function typecheckAddDeferStatement(
+  module: &mut Ast::Module,
+  statement: Ast::StatementId,
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Defer(Ast::Statement::Defer {
+    span: typecheckDummySpan(),
+    statement: statement,
+  }));
+}
+
 function typecheckAddBreakStatement(
   module: &mut Ast::Module,
   value: Option<Ast::ExpressionId>,
@@ -2162,6 +2188,370 @@ function typecheckRejectsNonBooleanForConditionAndBreakValues(): void {
     @panic("typecheckRejectsNonBooleanForConditionAndBreakValues: missing second diagnostic");
   };
   Test::assertEq<str>(secondDiagnostic.messageText(), "typecheck does not support break values");
+}
+
+/// Scenario: `for (let item of arr)` over a fixed-array local with a Copy
+/// element binds `item` by value inside the loop scope.
+/// Spec: IGN-29 — for-of statements.
+@test
+function typecheckForOfOverFixedArrayBindsCopyElement(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let arrayTypeId: Ast::TypeId = typecheckAddFixedArrayType(&mut module, i32TypeId, 3);
+  let arrayPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "arr", arrayTypeId);
+  let arrayStmt: Ast::StatementId = typecheckAddUninitializedLetStmt(&mut module, arrayPattern, Option::SOME(arrayTypeId));
+
+  let itemPattern: Ast::PatternId = typecheckAddBinding(&mut module, "item");
+  let itemUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "item");
+  let itemUseStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, itemUse);
+  let mut loopBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  loopBodyStmts.push(itemUseStmt);
+  let loopBody: Ast::StatementId = typecheckAddBlock(&mut module, loopBodyStmts);
+
+  let iterableExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "arr");
+  let forOfStmt: Ast::StatementId = typecheckAddForOfStatement(&mut module, itemPattern, iterableExpr, loopBody);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(arrayStmt);
+  bodyStmts.push(forOfStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("forOfFixedArray"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, itemUse, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: `for (let item of values)` over a `i32[]` slice parameter binds
+/// `item` to the element type.
+/// Spec: IGN-29 — for-of statements.
+@test
+function typecheckForOfOverSliceParameterBindsElement(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let sliceTypeId: Ast::TypeId = typecheckAddSliceType(&mut module, i32TypeId);
+  let valuesParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "values", sliceTypeId);
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(valuesParam);
+
+  let itemPattern: Ast::PatternId = typecheckAddBinding(&mut module, "item");
+  let itemUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "item");
+  let itemUseStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, itemUse);
+  let mut loopBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  loopBodyStmts.push(itemUseStmt);
+  let loopBody: Ast::StatementId = typecheckAddBlock(&mut module, loopBodyStmts);
+
+  let iterableExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "values");
+  let forOfStmt: Ast::StatementId = typecheckAddForOfStatement(&mut module, itemPattern, iterableExpr, loopBody);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(forOfStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("forOfSlice"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, itemUse, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: a record with `data: *i32` and `length: u64` satisfies the
+/// iterable-record protocol, so `for..of` yields the `data` pointee.
+/// Spec: IGN-29 — for-of statements.
+@test
+function typecheckForOfOverIterableRecordBindsPointeeElement(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let u64TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "u64");
+  let dataTypeId: Ast::TypeId = typecheckAddPointerType(&mut module, i32TypeId, false);
+  let mut recordFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  recordFields.push(typecheckAddAnnotatedField(&mut module, "data", dataTypeId));
+  recordFields.push(typecheckAddAnnotatedField(&mut module, "length", u64TypeId));
+  let _recordItem: Ast::ItemId = typecheckAddRecordItem(&mut module, "Buffer", Vector::new<Ast::GenericParam>(), recordFields);
+
+  let bufferTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "Buffer");
+  let bufferPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "buffer", bufferTypeId);
+  let bufferStmt: Ast::StatementId = typecheckAddUninitializedLetStmt(&mut module, bufferPattern, Option::SOME(bufferTypeId));
+
+  let itemPattern: Ast::PatternId = typecheckAddBinding(&mut module, "item");
+  let itemUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "item");
+  let itemUseStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, itemUse);
+  let mut loopBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  loopBodyStmts.push(itemUseStmt);
+  let loopBody: Ast::StatementId = typecheckAddBlock(&mut module, loopBodyStmts);
+
+  let iterableExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "buffer");
+  let forOfStmt: Ast::StatementId = typecheckAddForOfStatement(&mut module, itemPattern, iterableExpr, loopBody);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(bufferStmt);
+  bodyStmts.push(forOfStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("forOfRecord"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, itemUse, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: iterating a plain `i32` local is rejected with the vector-type
+/// diagnostic on the iterable.
+/// Spec: IGN-29 — for-of statements.
+@test
+function typecheckForOfOverNonVectorProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let localPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", i32TypeId);
+  let localStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, localPattern, i32TypeId, typecheckAddIntLiteral(&mut module, 1));
+
+  let itemPattern: Ast::PatternId = typecheckAddBinding(&mut module, "item");
+  let loopBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let iterableExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "x");
+  let forOfStmt: Ast::StatementId = typecheckAddForOfStatement(&mut module, itemPattern, iterableExpr, loopBody);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(localStmt);
+  bodyStmts.push(forOfStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("forOfNonVector"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::FOR_OF_EXPECTS_VECTOR, "for-of expects vector type, got 'i32'");
+}
+
+/// Scenario: a `&i32` annotated binding over an `i32` fixed array is accepted
+/// and the binding types as the reference, not the element.
+/// Spec: IGN-29 — for-of statements.
+@test
+function typecheckForOfReferenceBindingTypesAsReference(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let arrayTypeId: Ast::TypeId = typecheckAddFixedArrayType(&mut module, i32TypeId, 2);
+  let arrayPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "arr", arrayTypeId);
+  let arrayStmt: Ast::StatementId = typecheckAddUninitializedLetStmt(&mut module, arrayPattern, Option::SOME(arrayTypeId));
+
+  let referenceTypeId: Ast::TypeId = typecheckAddReferenceType(&mut module, false, i32TypeId);
+  let itemPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "item", referenceTypeId);
+  let itemUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "item");
+  let itemUseStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, itemUse);
+  let mut loopBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  loopBodyStmts.push(itemUseStmt);
+  let loopBody: Ast::StatementId = typecheckAddBlock(&mut module, loopBodyStmts);
+
+  let iterableExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "arr");
+  let forOfStmt: Ast::StatementId = typecheckAddForOfStatement(&mut module, itemPattern, iterableExpr, loopBody);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(arrayStmt);
+  bodyStmts.push(forOfStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("forOfReference"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  let elementTypeId: Analyzer::TypeId = typeStore.intern(Analyzer::Type::I32);
+  let expectedTypeId: Analyzer::TypeId = typeStore.reference(elementTypeId);
+  assertExprType(&output, itemUse, expectedTypeId);
+}
+
+/// Scenario: a `&mut i32` binding over an immutable iterable place is
+/// rejected; the loop otherwise typechecks.
+/// Spec: IGN-29 — for-of statements.
+@test
+function typecheckForOfMutRefOverImmutableIterableProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let arrayTypeId: Ast::TypeId = typecheckAddFixedArrayType(&mut module, i32TypeId, 2);
+  let arrayPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "arr", arrayTypeId);
+  let arrayStmt: Ast::StatementId = typecheckAddUninitializedLetStmt(&mut module, arrayPattern, Option::SOME(arrayTypeId));
+
+  let mutReferenceTypeId: Ast::TypeId = typecheckAddReferenceType(&mut module, true, i32TypeId);
+  let itemPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "item", mutReferenceTypeId);
+  let loopBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+
+  let iterableExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "arr");
+  let forOfStmt: Ast::StatementId = typecheckAddForOfStatement(&mut module, itemPattern, iterableExpr, loopBody);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(arrayStmt);
+  bodyStmts.push(forOfStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("forOfMutRef"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::FOR_OF_MUT_REQUIRES_MUTABLE_ITER, "cannot take mutable reference in for-of over immutable vector");
+}
+
+/// Scenario: `defer cleanup();` over a `void` call is accepted.
+/// Spec: IGN-29 — defer statements.
+@test
+function typecheckDeferVoidCallIsAccepted(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let helperRet: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut helperBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  helperBodyStmts.push(helperRet);
+  let helperBody: Ast::StatementId = typecheckAddBlock(&mut module, helperBodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("cleanup"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: helperBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let callee: Ast::ExpressionId = typecheckAddVariable(&mut module, "cleanup");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, callee, Vector::new<Ast::ExpressionId>());
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let deferStmt: Ast::StatementId = typecheckAddDeferStatement(&mut module, callStmt);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(deferStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("deferVoid"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: deferring a non-`void` expression is rejected with the exact
+/// oracle wording.
+/// Spec: IGN-29 — defer statements.
+@test
+function typecheckDeferNonVoidExpressionProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let literalExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let literalStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, literalExpr);
+  let deferStmt: Ast::StatementId = typecheckAddDeferStatement(&mut module, literalStmt);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(deferStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("deferNonVoid"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::DEFER_EXPRESSION_MUST_BE_VOID, "deferred expression must be of type 'void', found 'i32'");
 }
 
 @test
