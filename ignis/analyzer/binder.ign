@@ -514,6 +514,78 @@ export namespace Analyzer {
       return false;
     }
 
+    /// Whether the item's attributes carry `@deprecated`, with or without a
+    /// message argument. Follows `implementsLangTrait` in matching the
+    /// attribute by raw name text.
+    function hasDeprecatedAttribute(metadata: &Ast::Metadata): boolean {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (attribute.name.equals("deprecated")) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// The `@deprecated("...")` message, if the item carries one.
+    ///
+    /// Attribute arguments arrive from the parser as raw lexeme text, so a
+    /// string-literal argument still carries its surrounding quotes; they are
+    /// stripped here. `NONE` when the item is not deprecated or `@deprecated`
+    /// has no argument.
+    function deprecatedAttributeMessage(metadata: &Ast::Metadata): Option<String> {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (!attribute.name.equals("deprecated")) {
+          index += 1;
+          continue;
+        }
+
+        if (attribute.arguments.length() != 1) {
+          return Option::NONE;
+        }
+
+        let Option::SOME(argument) = attribute.arguments.get(0) else {
+          return Option::NONE;
+        };
+
+        let length: u64 = argument.length();
+        if (length >= 2) {
+          let firstIsQuote: boolean = match (argument.byteAt(0)) {
+            Option::SOME(byte) -> byte == '"' as u8,
+            Option::NONE -> false,
+          };
+          let lastIsQuote: boolean = match (argument.byteAt(length - 1)) {
+            Option::SOME(byte) -> byte == '"' as u8,
+            Option::NONE -> false,
+          };
+
+          if (firstIsQuote && lastIsQuote) {
+            return Option::SOME(argument.substringBytes(1, length - 1));
+          }
+        }
+
+        return Option::SOME(argument.clone());
+      }
+
+      return Option::NONE;
+    }
+
     /// The try capability an enum's attributes ask for, if any.
     ///
     /// `@lang(try)` is what makes `?` work on an enum. The two variants are taken in
@@ -1091,6 +1163,8 @@ export namespace Analyzer {
         returnType: sentinelId,
         isStatic: isStatic,
         selfMutable: false,
+        isDeprecated: false,
+        deprecatedMessage: Option::NONE,
       };
 
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
@@ -1109,6 +1183,8 @@ export namespace Analyzer {
         returnType: sentinelId,
         isStatic: isStatic,
         selfMutable: selfMutable,
+        isDeprecated: Analyzer::Binder::hasDeprecatedAttribute(&fn_.metadata),
+        deprecatedMessage: Analyzer::Binder::deprecatedAttributeMessage(&fn_.metadata),
       };
 
       let mut patchRef: &mut Analyzer::DefinitionStore = defStore;
@@ -1624,6 +1700,8 @@ export namespace Analyzer {
         typeParams: Vector::new<Analyzer::DefinitionId>(),
         params: Vector::new<Analyzer::DefinitionId>(),
         returnType: sentinelId,
+        isDeprecated: false,
+        deprecatedMessage: Option::NONE,
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       let defId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Function(placeholderFn));
@@ -1638,6 +1716,8 @@ export namespace Analyzer {
         typeParams: typeParams,
         params: params,
         returnType: sentinelId,
+        isDeprecated: Analyzer::Binder::hasDeprecatedAttribute(&fn_.metadata),
+        deprecatedMessage: Analyzer::Binder::deprecatedAttributeMessage(&fn_.metadata),
       };
       let mut defsRef2: &mut Analyzer::DefinitionStore = defStore;
       defsRef2.replace(defId, Analyzer::Definition::Function(newFn));

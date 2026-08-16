@@ -1,0 +1,453 @@
+import
+  SourceSpan,
+  Diagnostic,
+  DiagnosticBag,
+  Severity,
+  DiagnosticCode,
+  LabelKind,
+from "@compiler::diagnostics";
+
+import Ast from "@compiler::ast";
+import Id from "@compiler::ids";
+import Vector from "std::vector";
+
+/// Lint phase for the Ignis selfhost compiler.
+///
+/// Port of `crates/ignis_analyzer/src/lint.rs`, first slice. Runs after the
+/// extra-checks phase. Both lints are emitted as WARNINGs, matching the Rust
+/// default lint level (`Warn`).
+///
+/// Ported lints:
+///   - unused import (A0123): an entry of the current module's direct-import
+///     overlay whose definition is never referenced by the module. The Rust
+///     oracle checks `referenced_defs`, which every resolution site feeds
+///     (expressions, patterns, and type annotations). The selfhost
+///     equivalent combines three sources: `ResolvedRef::Definition` entries
+///     under expression keys and pattern keys of `bodyResolution`, one
+///     owner hop for member refs (a `Vec::create` path records the static
+///     method's def, so its owner — the imported record — counts as used,
+///     mirroring the oracle's owner marking at resolution time), and a
+///     syntactic scan of type-annotation paths (the selfhost type resolver
+///     keeps no use side-table, so an import used only as a type is matched
+///     by its local name in head position of a `Type::Path`).
+///   - deprecated call (A0124): an expression reference to a function or
+///     method definition carrying `@deprecated`. Mirrors the Rust
+///     `lint_deprecated_calls` wording and its `(def, span.start)` dedup.
+///     Instance method calls (`value.method()`) are resolved by the
+///     typechecker without a `bodyResolution` entry (ADR-B7), so deprecation
+///     covers functions and methods referenced through paths (static calls);
+///     deprecated instance-method receivers are a follow-up.
+///
+/// Scoped out relative to the Rust oracle:
+///   - unused variable (A0122): sound binding identity needs a scope-stack
+///     AST walk — `LocalId` indexes are reused across sibling scopes
+///     (ADR-B10) — so it cannot be read off `bodyResolution`; follow-up,
+///   - unused mut (A0127): needs a mutation side-table only the typechecker
+///     can record; follow-up,
+///   - `@allow`/`@warn`/`@deny` directive modulation: follow-up; the
+///     unconditional WARNING here matches the Rust default level.
+export namespace Analyzer {
+  namespace Lint {
+    /// Output of the lint phase.
+    record LintOutput {
+      public diagnostics: DiagnosticBag;
+    }
+
+    function emitWarning(
+      diagnostics: &mut DiagnosticBag,
+      span: SourceSpan,
+      code: str,
+      message: str,
+      labelMessage: str,
+    ): void {
+      let mut diagnostic: Diagnostic = Diagnostic::new(
+        Severity::WARNING,
+        code,
+        message,
+        span,
+      );
+      diagnostic.addLabel(LabelKind::PRIMARY, span, labelMessage);
+
+      let mut bag: &mut DiagnosticBag = diagnostics;
+      bag.push(diagnostic);
+    }
+
+    function usedContains(used: &Vector<u32>, defRaw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < used.length()) {
+        let Option::SOME(existing) = used.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (*existing == defRaw) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    function markUsed(used: &mut Vector<u32>, defRaw: u32): void {
+      let mut index: u64 = 0;
+
+      while (index < used.length()) {
+        let Option::SOME(existing) = used.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (*existing == defRaw) {
+          return;
+        }
+
+        index += 1;
+      }
+
+      let mut usedRef: &mut Vector<u32> = used;
+      usedRef.push(defRaw);
+    }
+
+    /// Mark a resolved definition as referenced. Member definitions also mark
+    /// their owner: a `Owner::member` path records only the member's def in
+    /// `bodyResolution`, while the Rust resolver marks the owner referenced
+    /// when it resolves the qualifier.
+    function markResolvedDefUsed(
+      used: &mut Vector<u32>,
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): void {
+      Analyzer::Lint::markUsed(used, defId.raw());
+
+      let Option::SOME(def) = defStore.get(defId) else {
+        return;
+      };
+
+      match (def) {
+        Analyzer::Definition::Method(method) -> {
+          Analyzer::Lint::markUsed(used, method.owner.raw());
+        },
+        Analyzer::Definition::Variant(variant) -> {
+          Analyzer::Lint::markUsed(used, variant.owner.raw());
+        },
+        Analyzer::Definition::Field(field) -> {
+          Analyzer::Lint::markUsed(used, field.owner.raw());
+        },
+        Analyzer::Definition::TypeParam(typeParam) -> {
+          Analyzer::Lint::markUsed(used, typeParam.owner.raw());
+        },
+        _ -> {},
+      };
+    }
+
+    /// Raw definition ids referenced by the module's bodies: every
+    /// `ResolvedRef::Definition` under an expression key or a pattern key of
+    /// `bodyResolution`, plus one owner hop per member ref.
+    function collectUsedDefs(
+      defStore: &mut Analyzer::DefinitionStore,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+    ): Vector<u32> {
+      let mut used: Vector<u32> = Vector::new<u32>();
+
+      let mut exprIndex: u64 = 0;
+      while (exprIndex < module.expressions.length()) {
+        let exprRef: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findExprRef(
+          &resolvedBodies.bodyResolution,
+          exprIndex as u32,
+        );
+
+        if (let Option::SOME(resolvedRef) = exprRef) {
+          if (let Analyzer::ResolverBodies::ResolvedRef::Definition(defId) = &resolvedRef) {
+            Analyzer::Lint::markResolvedDefUsed(&mut used, defStore, defId);
+          }
+        }
+
+        exprIndex += 1;
+      }
+
+      let mut patternIndex: u64 = 0;
+      while (patternIndex < module.patterns.length()) {
+        let patternRef: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(
+          &resolvedBodies.bodyResolution,
+          patternIndex as u32,
+        );
+
+        if (let Option::SOME(resolvedRef) = patternRef) {
+          if (let Analyzer::ResolverBodies::ResolvedRef::Definition(defId) = &resolvedRef) {
+            Analyzer::Lint::markResolvedDefUsed(&mut used, defStore, defId);
+          }
+        }
+
+        patternIndex += 1;
+      }
+
+      return used;
+    }
+
+    /// Whether any type annotation in the module names `name` in head
+    /// position of a `Type::Path`. Composite types (`Generic`, `Reference`,
+    /// `Slice`, ...) store their inner types as separate nodes in the same
+    /// store, so scanning `Path` nodes alone covers every spelling.
+    function nameUsedInTypePosition(module: &Ast::Module, name: str): boolean {
+      let mut index: u64 = 0;
+
+      while (index < module.types.length()) {
+        let typeId: Ast::TypeId = Id::fromRaw<Ast::TypeTag>(index as u32);
+        let Option::SOME(typeNode) = module.types.get(typeId) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Ast::Type::Node::Path(path) = typeNode) {
+          if (let Option::SOME(headSegment) = path.segments.get(0)) {
+            if (headSegment.equals(name)) {
+              return true;
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Unused-import lint (A0123). Iterates the current module's overlay
+    /// only — imports owned by other modules are never reported here,
+    /// mirroring the Rust per-module `imported_defs` iteration.
+    function lintUnusedImports(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      overlay: &Analyzer::Imports::ImportOverlay,
+    ): void {
+      let used: Vector<u32> = Analyzer::Lint::collectUsedDefs(defStore, module, resolvedBodies);
+      let mut index: u64 = 0;
+
+      while (index < overlay.syms.length()) {
+        let Option::SOME(defId) = overlay.defs.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (Analyzer::Lint::usedContains(&used, defId.raw())) {
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(sym) = overlay.syms.get(index) else {
+          index += 1;
+          continue;
+        };
+        let name: str = match (symbols.resolve(*sym)) {
+          Option::SOME(resolved) -> resolved,
+          Option::NONE -> "<unknown>",
+        };
+
+        if (Analyzer::Lint::nameUsedInTypePosition(module, name)) {
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(importSpan) = overlay.spans.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let message: String = String::create("unused import '").concat(name).concat("'");
+        Analyzer::Lint::emitWarning(
+          diagnostics,
+          *importSpan,
+          DiagnosticCode::UNUSED_IMPORT,
+          message.toStr(),
+          message.toStr(),
+        );
+
+        index += 1;
+      }
+    }
+
+    /// Whether the definition is a function or method marked `@deprecated`.
+    function defIsDeprecated(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): boolean {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return false;
+      };
+
+      return match (def) {
+        Analyzer::Definition::Function(function_) -> function_.isDeprecated,
+        Analyzer::Definition::Method(method) -> method.isDeprecated,
+        _ -> false,
+      };
+    }
+
+    /// The deprecation message of a deprecated function or method; empty when
+    /// `@deprecated` carries no argument (mirrors the Rust
+    /// `unwrap_or_default`).
+    function defDeprecationMessage(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): String {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return String::new();
+      };
+
+      match (def) {
+        Analyzer::Definition::Function(function_) -> {
+          if (let Option::SOME(message) = &function_.deprecatedMessage) {
+            return message.clone();
+          }
+        },
+        Analyzer::Definition::Method(method) -> {
+          if (let Option::SOME(message) = &method.deprecatedMessage) {
+            return message.clone();
+          }
+        },
+        _ -> {},
+      };
+
+      return String::new();
+    }
+
+    function deprecatedSeen(
+      seenDefs: &Vector<u32>,
+      seenStarts: &Vector<u64>,
+      defRaw: u32,
+      start: u64,
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < seenDefs.length()) {
+        let Option::SOME(existingDef) = seenDefs.get(index) else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(existingStart) = seenStarts.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (*existingDef == defRaw && *existingStart == start) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Deprecated-call lint (A0124). One warning per `(definition,
+    /// span.start)` pair, mirroring the Rust dedup of callee and call-site
+    /// entries.
+    function lintDeprecatedCalls(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+    ): void {
+      let mut seenDefs: Vector<u32> = Vector::new<u32>();
+      let mut seenStarts: Vector<u64> = Vector::new<u64>();
+      let mut exprIndex: u64 = 0;
+
+      while (exprIndex < module.expressions.length()) {
+        let exprRef: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findExprRef(
+          &resolvedBodies.bodyResolution,
+          exprIndex as u32,
+        );
+
+        let Option::SOME(resolvedRef) = exprRef else {
+          exprIndex += 1;
+          continue;
+        };
+        let Analyzer::ResolverBodies::ResolvedRef::Definition(defId) = resolvedRef else {
+          exprIndex += 1;
+          continue;
+        };
+
+        if (!Analyzer::Lint::defIsDeprecated(defStore, defId)) {
+          exprIndex += 1;
+          continue;
+        }
+
+        let exprId: Ast::ExpressionId = Id::fromRaw<Ast::ExpressionTag>(exprIndex as u32);
+        let Option::SOME(expression) = module.expressions.get(exprId) else {
+          exprIndex += 1;
+          continue;
+        };
+        let span: SourceSpan = Ast::Serializer::expressionSpan(expression);
+
+        if (Analyzer::Lint::deprecatedSeen(&seenDefs, &seenStarts, defId.raw(), span.start)) {
+          exprIndex += 1;
+          continue;
+        }
+        seenDefs.push(defId.raw());
+        seenStarts.push(span.start);
+
+        let mut name: str = "<unknown>";
+        if (let Option::SOME(def) = defStore.get(defId)) {
+          if (let Option::SOME(resolved) = symbols.resolve(def.name())) {
+            name = resolved;
+          }
+        }
+
+        let deprecationMessage: String = Analyzer::Lint::defDeprecationMessage(defStore, defId);
+        let message: String = String::create("use of deprecated function '")
+          .concat(name)
+          .concat("': ")
+          .concat(&deprecationMessage);
+
+        Analyzer::Lint::emitWarning(
+          diagnostics,
+          span,
+          DiagnosticCode::DEPRECATED_CALL,
+          message.toStr(),
+          message.toStr(),
+        );
+
+        exprIndex += 1;
+      }
+    }
+
+    /// Lint phase entry point. `overlay` must be the current module's own
+    /// direct-import overlay.
+    function lintModule(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      overlay: &Analyzer::Imports::ImportOverlay,
+    ): Analyzer::Lint::LintOutput {
+      let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+
+      Analyzer::Lint::lintUnusedImports(
+        &mut diagnostics,
+        defStore,
+        symbols,
+        module,
+        resolvedBodies,
+        overlay,
+      );
+      Analyzer::Lint::lintDeprecatedCalls(
+        &mut diagnostics,
+        defStore,
+        symbols,
+        module,
+        resolvedBodies,
+      );
+
+      return Analyzer::Lint::LintOutput {
+        diagnostics: diagnostics,
+      };
+    }
+  }
+}

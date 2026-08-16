@@ -601,6 +601,16 @@ export namespace Analyzer {
       return out;
     }
 
+    /// Copies an optional deprecation message out of a borrowed definition so
+    /// the rebuilt definition for `DefinitionStore::replace` does not move
+    /// from the borrowed entry (same rationale as `copyDefinitionIdVector`).
+    function copyOptionalMessage(source: &Option<String>): Option<String> {
+      return match (source) {
+        Option::SOME(message) -> Option::SOME(message.clone()),
+        Option::NONE -> Option::NONE,
+      };
+    }
+
     /// Patch `FunctionDef.returnType` at `fnDefId` via `DefinitionStore::replace`.
     function patchReturnType(
       defStore: &mut Analyzer::DefinitionStore,
@@ -619,6 +629,8 @@ export namespace Analyzer {
             typeParams: Analyzer::Resolver::copyDefinitionIdVector(&fn_.typeParams),
             params: Analyzer::Resolver::copyDefinitionIdVector(&fn_.params),
             returnType: typeId,
+            isDeprecated: fn_.isDeprecated,
+            deprecatedMessage: Analyzer::Resolver::copyOptionalMessage(&fn_.deprecatedMessage),
           };
           let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
           defsRef.replace(fnDefId, Analyzer::Definition::Function(updated));
@@ -656,6 +668,8 @@ export namespace Analyzer {
             returnType: typeId,
             isStatic: method.isStatic,
             selfMutable: method.selfMutable,
+            isDeprecated: method.isDeprecated,
+            deprecatedMessage: Analyzer::Resolver::copyOptionalMessage(&method.deprecatedMessage),
           };
           let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
           defsRef.replace(methodDefId, Analyzer::Definition::Method(updated));

@@ -1,0 +1,434 @@
+import Test from "std::test";
+
+import DiagnosticBag, DiagnosticCode, SourceSpan from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+
+function lintDummySpan(): SourceSpan {
+  return SourceSpan::new("lint_tests.ign", 0, 0);
+}
+
+function lintSpan(start: u64, end: u64): SourceSpan {
+  return SourceSpan::new("lint_tests.ign", start, end);
+}
+
+function lintModuleInfo(index: u64, path: str): Analyzer::Imports::ModuleInfo {
+  return Analyzer::Imports::ModuleInfo {
+    index: index,
+    pathText: String::create(path),
+    kind: Analyzer::Imports::ModuleKind::PROJECT,
+  };
+}
+
+function lintAddReturn(module: &mut Ast::Module): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: lintDummySpan(),
+    value: Option::NONE,
+  }));
+}
+
+function lintAddBlock(
+  module: &mut Ast::Module,
+  statements: Vector<Ast::StatementId>,
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: lintDummySpan(),
+    statements: statements,
+    tail: Option::NONE,
+  }));
+}
+
+function lintAddEmptyBody(module: &mut Ast::Module): Ast::StatementId {
+  let ret: Ast::StatementId = lintAddReturn(module);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(ret);
+  return lintAddBlock(module, statements);
+}
+
+function lintAddFunction(
+  module: &mut Ast::Module,
+  name: str,
+  body: Ast::StatementId,
+  metadata: Ast::Metadata,
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: lintDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: metadata,
+  }));
+}
+
+/// `@deprecated` metadata; `argumentText` arrives exactly as the parser
+/// stores attribute arguments (raw lexeme text, so a string literal keeps
+/// its quotes).
+function lintDeprecatedMetadata(argumentText: Option<String>): Ast::Metadata {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  if (let Option::SOME(text) = argumentText) {
+    arguments.push(text.clone());
+  }
+
+  let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  attributes.push(Ast::Attribute {
+    span: lintDummySpan(),
+    name: String::create("deprecated"),
+    arguments: arguments,
+  });
+
+  return Ast::Metadata {
+    attributes: attributes,
+    modifiers: Vector::new<Ast::Modifier>(),
+  };
+}
+
+function lintAddVariableAt(
+  module: &mut Ast::Module,
+  name: str,
+  start: u64,
+  end: u64,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Variable(Ast::Expression::Variable {
+    span: lintSpan(start, end),
+    name: String::create(name),
+  }));
+}
+
+function lintAddCallStmt(module: &mut Ast::Module, callee: Ast::ExpressionId): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  let callExpr: Ast::ExpressionId = moduleRef.addExpression(Ast::Expression::Node::Call(Ast::Expression::Call {
+    span: lintDummySpan(),
+    callee: callee,
+    typeArguments: Vector::new<Ast::TypeId>(),
+    arguments: Vector::new<Ast::ExpressionId>(),
+  }));
+
+  return moduleRef.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: lintDummySpan(),
+    expression: callExpr,
+  }));
+}
+
+function lintNamedBinding(name: str, start: u64, end: u64): Ast::ImportBinding {
+  return Ast::ImportBinding {
+    span: lintSpan(start, end),
+    kind: Ast::ImportBindingKind::Named,
+    name: Option::SOME(String::create(name)),
+    alias: Option::NONE,
+  };
+}
+
+function lintModuleWithImport(source: str, bindings: Vector<Ast::ImportBinding>): Ast::Module {
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut moduleRef: &mut Ast::Module = &mut module;
+  moduleRef.addRootItem(Ast::Item::Node::Import(Ast::Item::Import {
+    span: lintDummySpan(),
+    items: bindings,
+    source: String::create(source),
+    sourceSpan: lintDummySpan(),
+    metadata: Ast::emptyMetadata(),
+  }));
+  return module;
+}
+
+/// Module `a.ign`: `function helper(): void { return; }`.
+function lintHelperModule(): Ast::Module {
+  let mut module: Ast::Module = Ast::Module::init();
+  let body: Ast::StatementId = lintAddEmptyBody(&mut module);
+  lintAddFunction(&mut module, "helper", body, Ast::emptyMetadata());
+  return module;
+}
+
+function lintAnalyzeTwoModules(
+  first: Ast::Module,
+  second: Ast::Module,
+): Vector<Analyzer::ModuleAnalysisRecord> {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(first);
+  modules.push(second);
+
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  infos.push(lintModuleInfo(0, "a.ign"));
+  infos.push(lintModuleInfo(1, "b.ign"));
+
+  return Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+  );
+}
+
+function lintAnalyzeModule(module: &Ast::Module): Analyzer::AnalyzerOutput {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  return Analyzer::analyzeModule(&mut defStore, &mut typeStore, &mut symbols, module);
+}
+
+function lintAssertSingleLint(diagnostics: &DiagnosticBag, code: str): void {
+  Test::assertEq<u64>(diagnostics.length(), 1);
+
+  let Option::SOME(diagnostic) = diagnostics.get(0) else {
+    @panic("lintAssertSingleLint: missing diagnostic");
+  };
+
+  Test::assertEq<str>(diagnostic.code, code);
+}
+
+/// Scenario: module B imports `helper` from A and never references it — one
+/// unused-import warning at the binding span.
+@test
+function lintUnusedImportWarnsAtImportSpan(): void {
+  let first: Ast::Module = lintHelperModule();
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(lintNamedBinding("helper", 7, 13));
+  let second: Ast::Module = lintModuleWithImport("a.ign", bindings);
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = lintAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+
+  lintAssertSingleLint(&importingRecord.output.lints.diagnostics, DiagnosticCode::UNUSED_IMPORT);
+
+  let Option::SOME(diagnostic) = importingRecord.output.lints.diagnostics.get(0) else {
+    @panic("missing unused-import diagnostic");
+  };
+  Test::assertEq<str>(diagnostic.messageText(), "unused import 'helper'");
+  Test::assertEq<u64>(diagnostic.primarySpan.start, 7);
+}
+
+/// Scenario: module B imports `helper` and calls it — clean.
+@test
+function lintUsedImportIsClean(): void {
+  let first: Ast::Module = lintHelperModule();
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(lintNamedBinding("helper", 7, 13));
+  let mut second: Ast::Module = lintModuleWithImport("a.ign", bindings);
+
+  let callee: Ast::ExpressionId = lintAddVariableAt(&mut second, "helper", 20, 26);
+  let callStmt: Ast::StatementId = lintAddCallStmt(&mut second, callee);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(callStmt);
+  let body: Ast::StatementId = lintAddBlock(&mut second, statements);
+  lintAddFunction(&mut second, "main", body, Ast::emptyMetadata());
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = lintAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+
+  Test::assertEq<u64>(importingRecord.output.lints.diagnostics.length(), 0);
+}
+
+/// Scenario: module B imports record `Data` and uses it only as a field
+/// type annotation — clean via the type-position scan.
+@test
+function lintImportUsedOnlyAsTypeIsClean(): void {
+  let mut first: Ast::Module = Ast::Module::init();
+  first.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: lintDummySpan(),
+    name: String::create("Data"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(lintNamedBinding("Data", 7, 11));
+  let mut second: Ast::Module = lintModuleWithImport("a.ign", bindings);
+
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create("Data"));
+  let fieldType: Ast::TypeId = second.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: lintDummySpan(),
+    segments: segments,
+  }));
+  let field: Ast::PatternId = second.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: lintDummySpan(),
+    name: String::create("value"),
+    annotation: Option::SOME(fieldType),
+    metadata: Ast::emptyMetadata(),
+  }));
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(field);
+  second.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: lintDummySpan(),
+    name: String::create("Holder"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = lintAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+
+  Test::assertEq<u64>(importingRecord.output.lints.diagnostics.length(), 0);
+}
+
+/// Scenario: calling `@deprecated("use replacement instead")` function
+/// `old` reports A0124 with the stripped message.
+@test
+function lintDeprecatedFunctionCallWarnsWithMessage(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let oldBody: Ast::StatementId = lintAddEmptyBody(&mut module);
+  lintAddFunction(
+    &mut module,
+    "old",
+    oldBody,
+    lintDeprecatedMetadata(Option::SOME(String::create("\"use replacement instead\""))),
+  );
+
+  let callee: Ast::ExpressionId = lintAddVariableAt(&mut module, "old", 30, 33);
+  let callStmt: Ast::StatementId = lintAddCallStmt(&mut module, callee);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(callStmt);
+  let mainBody: Ast::StatementId = lintAddBlock(&mut module, statements);
+  lintAddFunction(&mut module, "main", mainBody, Ast::emptyMetadata());
+
+  let output: Analyzer::AnalyzerOutput = lintAnalyzeModule(&module);
+
+  lintAssertSingleLint(&output.lints.diagnostics, DiagnosticCode::DEPRECATED_CALL);
+
+  let Option::SOME(diagnostic) = output.lints.diagnostics.get(0) else {
+    @panic("missing deprecated-call diagnostic");
+  };
+  Test::assertEq<str>(diagnostic.messageText(), "use of deprecated function 'old': use replacement instead");
+}
+
+/// Scenario: `@deprecated` with no message keeps the Rust wording with an
+/// empty trailing message (`unwrap_or_default` parity).
+@test
+function lintDeprecatedFunctionCallWarnsWithoutMessage(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let oldBody: Ast::StatementId = lintAddEmptyBody(&mut module);
+  lintAddFunction(&mut module, "old", oldBody, lintDeprecatedMetadata(Option::NONE));
+
+  let callee: Ast::ExpressionId = lintAddVariableAt(&mut module, "old", 30, 33);
+  let callStmt: Ast::StatementId = lintAddCallStmt(&mut module, callee);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(callStmt);
+  let mainBody: Ast::StatementId = lintAddBlock(&mut module, statements);
+  lintAddFunction(&mut module, "main", mainBody, Ast::emptyMetadata());
+
+  let output: Analyzer::AnalyzerOutput = lintAnalyzeModule(&module);
+
+  lintAssertSingleLint(&output.lints.diagnostics, DiagnosticCode::DEPRECATED_CALL);
+
+  let Option::SOME(diagnostic) = output.lints.diagnostics.get(0) else {
+    @panic("missing deprecated-call diagnostic");
+  };
+  Test::assertEq<str>(diagnostic.messageText(), "use of deprecated function 'old': ");
+}
+
+/// Scenario: calling a function without `@deprecated` stays clean.
+@test
+function lintNonDeprecatedCallIsClean(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let helperBody: Ast::StatementId = lintAddEmptyBody(&mut module);
+  lintAddFunction(&mut module, "helper", helperBody, Ast::emptyMetadata());
+
+  let callee: Ast::ExpressionId = lintAddVariableAt(&mut module, "helper", 30, 36);
+  let callStmt: Ast::StatementId = lintAddCallStmt(&mut module, callee);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(callStmt);
+  let mainBody: Ast::StatementId = lintAddBlock(&mut module, statements);
+  lintAddFunction(&mut module, "main", mainBody, Ast::emptyMetadata());
+
+  let output: Analyzer::AnalyzerOutput = lintAnalyzeModule(&module);
+
+  Test::assertEq<u64>(output.lints.diagnostics.length(), 0);
+}
+
+/// Scenario: `R::m()` where static method `m` is `@deprecated` reports
+/// A0124 — static methods reach the lint through path-expression refs.
+@test
+function lintDeprecatedStaticMethodCallWarns(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let methodBody: Ast::StatementId = lintAddEmptyBody(&mut module);
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: lintDummySpan(),
+    name: String::create("m"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: methodBody,
+    metadata: lintDeprecatedMetadata(Option::NONE),
+  }));
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: lintDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create("R"));
+  segments.push(String::create("m"));
+  let callee: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Path(Ast::Expression::Path {
+    span: lintSpan(40, 44),
+    segments: segments,
+  }));
+  let callStmt: Ast::StatementId = lintAddCallStmt(&mut module, callee);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(callStmt);
+  let mainBody: Ast::StatementId = lintAddBlock(&mut module, statements);
+  lintAddFunction(&mut module, "main", mainBody, Ast::emptyMetadata());
+
+  let output: Analyzer::AnalyzerOutput = lintAnalyzeModule(&module);
+
+  lintAssertSingleLint(&output.lints.diagnostics, DiagnosticCode::DEPRECATED_CALL);
+}
+
+/// Scenario: two calls to `old` at distinct span starts report two
+/// warnings; a second reference at the same span start is deduped.
+@test
+function lintDeprecatedCallDedupsBySpanStart(): void {
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let oldBody: Ast::StatementId = lintAddEmptyBody(&mut module);
+  lintAddFunction(&mut module, "old", oldBody, lintDeprecatedMetadata(Option::NONE));
+
+  let firstCallee: Ast::ExpressionId = lintAddVariableAt(&mut module, "old", 30, 33);
+  let firstCall: Ast::StatementId = lintAddCallStmt(&mut module, firstCallee);
+  let duplicateCallee: Ast::ExpressionId = lintAddVariableAt(&mut module, "old", 30, 33);
+  let duplicateCall: Ast::StatementId = lintAddCallStmt(&mut module, duplicateCallee);
+  let secondCallee: Ast::ExpressionId = lintAddVariableAt(&mut module, "old", 60, 63);
+  let secondCall: Ast::StatementId = lintAddCallStmt(&mut module, secondCallee);
+
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(firstCall);
+  statements.push(duplicateCall);
+  statements.push(secondCall);
+  let mainBody: Ast::StatementId = lintAddBlock(&mut module, statements);
+  lintAddFunction(&mut module, "main", mainBody, Ast::emptyMetadata());
+
+  let output: Analyzer::AnalyzerOutput = lintAnalyzeModule(&module);
+
+  Test::assertEq<u64>(output.lints.diagnostics.length(), 2);
+}
