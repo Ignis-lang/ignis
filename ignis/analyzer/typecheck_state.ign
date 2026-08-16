@@ -273,6 +273,57 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, message.toStr());
     }
 
+    function emitForOfExpectsVector(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      got: Analyzer::TypeId,
+    ): void {
+      let message: String = String::create("for-of expects vector type, got '")
+        .concat(typeStore.nameOf(got).toStr())
+        .concat("'");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::FOR_OF_EXPECTS_VECTOR, message.toStr());
+    }
+
+    function emitForOfRequiresCopyOrRef(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      elementType: Analyzer::TypeId,
+    ): void {
+      let name: String = typeStore.nameOf(elementType);
+      let message: String = String::create("for-of by value requires Copy element type; '")
+        .concat(name.toStr())
+        .concat("' is not Copy, use '&")
+        .concat(name.toStr())
+        .concat("'");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::FOR_OF_REQUIRES_COPY_OR_REF, message.toStr());
+    }
+
+    function emitForOfMutRequiresMutableIter(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::FOR_OF_MUT_REQUIRES_MUTABLE_ITER,
+        "cannot take mutable reference in for-of over immutable vector",
+      );
+    }
+
+    function emitDeferExpressionMustBeVoid(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      foundType: Analyzer::TypeId,
+    ): void {
+      let message: String = String::create("deferred expression must be of type 'void', found '")
+        .concat(typeStore.nameOf(foundType).toStr())
+        .concat("'");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::DEFER_EXPRESSION_MUST_BE_VOID, message.toStr());
+    }
+
     function emitVectorIndexNonInteger(
       state: &mut Analyzer::Typecheck::TypecheckState,
       typeStore: &mut Analyzer::TypeStore,
@@ -706,6 +757,125 @@ export namespace Analyzer {
         Analyzer::Type::BOOLEAN -> true,
         _ -> false,
       };
+    }
+
+    /// Whether a type has Copy semantics. Mirrors the Rust
+    /// `TypeStore::is_copy`: primitives, pointers, references, slices, and
+    /// function types copy; fixed arrays, tuples, and generic instances copy
+    /// when their components do; records and enums are Copy by default;
+    /// unresolved type parameters conservatively are not.
+    function isCopyType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (let Option::SOME(aliasDefId) = resolved.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return false;
+      }
+
+      let Option::SOME(type_) = typeStore.get(resolved.typeId) else {
+        return false;
+      };
+
+      // Compound kinds defer their answer to their component types, gathered
+      // first so the store borrow ends before the recursive calls.
+      let mut directAnswer: Option<boolean> = Option::NONE;
+      let mut components: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+      match (type_) {
+        Analyzer::Type::I8
+        | Analyzer::Type::I16
+        | Analyzer::Type::I32
+        | Analyzer::Type::I64
+        | Analyzer::Type::U8
+        | Analyzer::Type::U16
+        | Analyzer::Type::U32
+        | Analyzer::Type::U64
+        | Analyzer::Type::F32
+        | Analyzer::Type::F64
+        | Analyzer::Type::BOOLEAN
+        | Analyzer::Type::CHAR
+        | Analyzer::Type::STR
+        | Analyzer::Type::VOID
+        | Analyzer::Type::NEVER -> {
+          directAnswer = Option::SOME(true);
+        },
+        Analyzer::Type::Pointer(_) -> {
+          directAnswer = Option::SOME(true);
+        },
+        Analyzer::Type::Reference(_) -> {
+          directAnswer = Option::SOME(true);
+        },
+        Analyzer::Type::Slice(_) -> {
+          directAnswer = Option::SOME(true);
+        },
+        Analyzer::Type::Function(_) -> {
+          directAnswer = Option::SOME(true);
+        },
+        Analyzer::Type::Record(_) -> {
+          directAnswer = Option::SOME(true);
+        },
+        Analyzer::Type::Enum(_) -> {
+          directAnswer = Option::SOME(true);
+        },
+        Analyzer::Type::Param(_) -> {
+          directAnswer = Option::SOME(false);
+        },
+        Analyzer::Type::Alias(_) -> {
+          directAnswer = Option::SOME(false);
+        },
+        Analyzer::Type::FixedArray(element, _) -> {
+          components.push(element);
+        },
+        Analyzer::Type::Tuple(tuple) -> {
+          let mut elementIndex: u64 = 0;
+          while (elementIndex < tuple.elements.length()) {
+            let Option::SOME(elementId) = tuple.elements.get(elementIndex) else {
+              elementIndex += 1;
+              continue;
+            };
+
+            components.push(*elementId);
+            elementIndex += 1;
+          }
+        },
+        Analyzer::Type::Instance(instance) -> {
+          let mut argumentIndex: u64 = 0;
+          while (argumentIndex < instance.typeArguments.length()) {
+            let Option::SOME(argumentId) = instance.typeArguments.get(argumentIndex) else {
+              argumentIndex += 1;
+              continue;
+            };
+
+            components.push(*argumentId);
+            argumentIndex += 1;
+          }
+        },
+      };
+
+      if (let Option::SOME(answer) = directAnswer) {
+        return answer;
+      }
+
+      let mut componentIndex: u64 = 0;
+      while (componentIndex < components.length()) {
+        let Option::SOME(component) = components.get(componentIndex) else {
+          componentIndex += 1;
+          continue;
+        };
+
+        if (!Analyzer::Typecheck::isCopyType(state, defStore, typeStore, span, *component)) {
+          return false;
+        }
+
+        componentIndex += 1;
+      }
+
+      return true;
     }
 
     function requireBooleanType(

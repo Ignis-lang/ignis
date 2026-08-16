@@ -4406,6 +4406,349 @@ export namespace Analyzer {
       return Option::SOME(paramType);
     }
 
+    /// The iterable-record protocol behind `for..of`: a record iterates when
+    /// it declares a `data` field of pointer type and a `length` field of
+    /// type `u64`; the element type is the `data` pointee. Mirrors the Rust
+    /// `extract_record_iterable_element_type`.
+    function recordIterableElementType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      defId: Analyzer::DefinitionId,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return Option::NONE;
+      };
+
+      let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      match (def) {
+        Analyzer::Definition::Record(recordDef) -> {
+          let mut fieldIndex: u64 = 0;
+          while (fieldIndex < recordDef.fields.length()) {
+            let Option::SOME(fieldDefId) = recordDef.fields.get(fieldIndex) else {
+              fieldIndex += 1;
+              continue;
+            };
+
+            fields.push(*fieldDefId);
+            fieldIndex += 1;
+          }
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let dataSymbol: Analyzer::SymbolId = symbolsRef.intern("data");
+      let lengthSymbol: Analyzer::SymbolId = symbolsRef.intern("length");
+
+      let mut dataElementType: Option<Analyzer::TypeId> = Option::NONE;
+      let mut hasLength: boolean = false;
+
+      let mut index: u64 = 0;
+      while (index < fields.length()) {
+        let Option::SOME(fieldDefId) = fields.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(fieldDefNode) = defStore.get(*fieldDefId) else {
+          index += 1;
+          continue;
+        };
+
+        match (fieldDefNode) {
+          Analyzer::Definition::Field(fieldDef) -> {
+            if (fieldDef.name.raw() == dataSymbol.raw()) {
+              if (let Option::SOME(fieldTypeNode) = typeStore.get(fieldDef.fieldType)) {
+                if (let Analyzer::Type::Pointer(pointer) = fieldTypeNode) {
+                  dataElementType = Option::SOME(pointer.pointee);
+                }
+              }
+            } else if (fieldDef.name.raw() == lengthSymbol.raw()) {
+              if (let Option::SOME(fieldTypeNode) = typeStore.get(fieldDef.fieldType)) {
+                if (let Analyzer::Type::U64 = fieldTypeNode) {
+                  hasLength = true;
+                }
+              }
+            }
+          },
+          _ -> {},
+        };
+
+        index += 1;
+      }
+
+      if (!hasLength) {
+        return Option::NONE;
+      }
+
+      return dataElementType;
+    }
+
+    /// Extract the element type a `for..of` iterable yields, or emit
+    /// `FOR_OF_EXPECTS_VECTOR`. Slices and fixed arrays yield their element;
+    /// records qualify through the iterable-record protocol.
+    function forOfElementType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      span: SourceSpan,
+      iterableType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, iterableType);
+      if (let Option::SOME(aliasDefId) = resolved.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return Option::NONE;
+      }
+
+      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+        return Option::NONE;
+      };
+
+      let mut elementTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
+      let mut recordDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      match (typeNode) {
+        Analyzer::Type::Slice(element) -> {
+          elementTypeOpt = Option::SOME(element);
+        },
+        Analyzer::Type::FixedArray(element, _) -> {
+          elementTypeOpt = Option::SOME(element);
+        },
+        Analyzer::Type::Record(defId) -> {
+          recordDefId = Option::SOME(defId);
+        },
+        _ -> {},
+      };
+
+      if (let Option::SOME(defId) = recordDefId) {
+        elementTypeOpt = Analyzer::Typecheck::recordIterableElementType(defStore, typeStore, symbols, defId);
+      }
+
+      let Option::SOME(elementType) = elementTypeOpt else {
+        Analyzer::Typecheck::emitForOfExpectsVector(state, typeStore, span, iterableType);
+        return Option::NONE;
+      };
+
+      return Option::SOME(elementType);
+    }
+
+    /// Mirror of the Rust `resolve_for_of_binding_type`: an unannotated
+    /// binding takes the element by value and requires it to be Copy; a
+    /// reference annotation must name the element type and binds `&T` /
+    /// `&mut T`, with `&mut` additionally requiring the iterable to be a
+    /// mutable place; a by-value annotation must name the element type and
+    /// also requires Copy. `NONE` means no binding should be introduced.
+    function resolveForOfBindingType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      patternId: Ast::PatternId,
+      elementType: Analyzer::TypeId,
+      iterableExprId: Ast::ExpressionId,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(pattern) = module.patterns.get(patternId) else {
+        return Option::SOME(elementType);
+      };
+
+      let Ast::Pattern::Node::Binding(binding) = pattern else {
+        return Option::SOME(elementType);
+      };
+
+      let bindingSpan: SourceSpan = binding.span;
+
+      let Option::SOME(annotationId) = binding.annotation else {
+        if (Analyzer::Typecheck::isCopyType(state, defStore, typeStore, bindingSpan, elementType)) {
+          return Option::SOME(elementType);
+        }
+
+        Analyzer::Typecheck::emitForOfRequiresCopyOrRef(state, typeStore, bindingSpan, elementType);
+        return Option::NONE;
+      };
+
+      let Option::SOME(annotationNode) = module.types.get(annotationId) else {
+        return Option::SOME(elementType);
+      };
+
+      if (let Ast::Type::Node::Reference(reference) = annotationNode) {
+        let referentTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::resolveLocalAnnotation(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          reference.target,
+        );
+        let Option::SOME(referentType) = referentTypeOpt else {
+          Analyzer::Typecheck::emitUnsupported(state, bindingSpan, "unsupported local annotation type");
+          return Option::NONE;
+        };
+
+        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, bindingSpan, referentType, elementType)) {
+          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, bindingSpan, elementType, referentType);
+        }
+
+        if (reference.mutable && !Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, iterableExprId)) {
+          Analyzer::Typecheck::emitForOfMutRequiresMutableIter(state, bindingSpan);
+        }
+
+        let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        if (reference.mutable) {
+          return Option::SOME(typeStoreRef.mutableReference(elementType));
+        }
+
+        return Option::SOME(typeStoreRef.reference(elementType));
+      }
+
+      let annotatedTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::resolveLocalAnnotation(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        annotationId,
+      );
+      let Option::SOME(annotatedType) = annotatedTypeOpt else {
+        Analyzer::Typecheck::emitUnsupported(state, bindingSpan, "unsupported local annotation type");
+        return Option::NONE;
+      };
+
+      if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, bindingSpan, annotatedType, elementType)) {
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, bindingSpan, elementType, annotatedType);
+      }
+
+      if (!Analyzer::Typecheck::isCopyType(state, defStore, typeStore, bindingSpan, elementType)) {
+        Analyzer::Typecheck::emitForOfRequiresCopyOrRef(state, typeStore, bindingSpan, elementType);
+      }
+
+      return Option::SOME(elementType);
+    }
+
+    /// Typecheck a `for..of` statement: iterable first, element extraction,
+    /// binding-type resolution, then the body inside the loop scope. Unlike
+    /// the Rust checker, the body is still walked when the iterable is not
+    /// iterable so its own errors surface; the binding is simply skipped.
+    function checkForOfStmt(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      forOfStmt: &Ast::Statement::ForOf,
+    ): void {
+      Analyzer::Typecheck::pushScope(state);
+
+      let iterableTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        forOfStmt.iterable,
+      );
+
+      let iterableSpan: SourceSpan = match (module.expressions.get(forOfStmt.iterable)) {
+        Option::SOME(node) -> Ast::Serializer::expressionSpan(node),
+        Option::NONE -> forOfStmt.span,
+      };
+
+      let mut elementTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
+      if (let Option::SOME(iterableType) = iterableTypeOpt) {
+        elementTypeOpt = Analyzer::Typecheck::forOfElementType(state, defStore, typeStore, symbols, iterableSpan, iterableType);
+      }
+
+      if (let Option::SOME(elementType) = elementTypeOpt) {
+        let bindingTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::resolveForOfBindingType(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          forOfStmt.pattern,
+          elementType,
+          forOfStmt.iterable,
+        );
+
+        if (let Option::SOME(bindingType) = bindingTypeOpt) {
+          Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, forOfStmt.pattern, bindingType, false, forOfStmt.span);
+        }
+      }
+
+      Analyzer::Typecheck::enterLoop(state);
+      Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, forOfStmt.body);
+      Analyzer::Typecheck::exitLoop(state);
+
+      Analyzer::Typecheck::popScope(state);
+    }
+
+    /// Typecheck a `defer` statement. The parser wraps the deferred
+    /// expression in an `Expression` statement; its type must be `void`
+    /// (`never` and failed expressions are exempt), mirroring the Rust
+    /// `Defer` arm. Any other wrapped statement form is walked as-is.
+    function checkDeferStmt(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      deferStmt: &Ast::Statement::Defer,
+    ): void {
+      let Option::SOME(innerStmt) = module.statements.get(deferStmt.statement) else {
+        return;
+      };
+
+      let Ast::Statement::Node::Expression(expressionStmt) = innerStmt else {
+        Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, deferStmt.statement);
+        return;
+      };
+
+      let expressionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        expressionStmt.expression,
+      );
+      let Option::SOME(expressionType) = expressionTypeOpt else {
+        return;
+      };
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expressionType);
+      if (let Option::SOME(aliasDefId) = resolved.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, deferStmt.span, aliasDefId);
+        return;
+      }
+
+      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+        return;
+      };
+
+      let mut isExempt: boolean = false;
+      match (typeNode) {
+        Analyzer::Type::VOID -> {
+          isExempt = true;
+        },
+        Analyzer::Type::NEVER -> {
+          isExempt = true;
+        },
+        _ -> {},
+      };
+
+      if (!isExempt) {
+        Analyzer::Typecheck::emitDeferExpressionMustBeVoid(state, typeStore, deferStmt.span, expressionType);
+      }
+    }
+
     function checkStmt(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -4570,8 +4913,7 @@ export namespace Analyzer {
           Analyzer::Typecheck::popScope(state);
         },
         Ast::Statement::Node::ForOf(value) -> {
-          let _iterableType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.iterable);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "for-of statements");
+          Analyzer::Typecheck::checkForOfStmt(state, defStore, typeStore, symbols, module, resolvedBodies, &value);
         },
         Ast::Statement::Node::Break(value) -> {
           if (state.loopDepth == 0) {
@@ -4590,7 +4932,7 @@ export namespace Analyzer {
           }
         },
         Ast::Statement::Node::Defer(value) -> {
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "defer statements");
+          Analyzer::Typecheck::checkDeferStmt(state, defStore, typeStore, symbols, module, resolvedBodies, &value);
         },
         Ast::Statement::Node::Item(value) -> {
           Analyzer::Typecheck::emitUnsupported(state, value.span, "nested item statements");
