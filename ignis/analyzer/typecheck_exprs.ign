@@ -1865,21 +1865,41 @@ export namespace Analyzer {
           return Option::NONE;
         },
         Ast::Expression::Node::Tuple(value) -> {
+          let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut allElementsTyped: boolean = true;
           let mut index: u64 = 0;
+
           while (index < value.elements.length()) {
             let Option::SOME(elementId) = value.elements.get(index) else {
               index += 1;
               continue;
             };
-            let _elementType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *elementId);
+
+            let elementTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *elementId);
+            let Option::SOME(elementType) = elementTypeOpt else {
+              allElementsTyped = false;
+              index += 1;
+              continue;
+            };
+
+            elements.push(elementType);
             index += 1;
           }
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "tuple expressions");
-          return Option::NONE;
+
+          if (!allElementsTyped) {
+            return Option::NONE;
+          }
+
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          let tupleType: Analyzer::TypeId = typeStoreRef.tuple(elements);
+          Analyzer::Typecheck::recordExprType(state, exprId, tupleType);
+          return Option::SOME(tupleType);
         },
-        Ast::Expression::Node::Unit(value) -> {
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "unit expressions");
-          return Option::NONE;
+        Ast::Expression::Node::Unit(_) -> {
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          let unitType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::VOID);
+          Analyzer::Typecheck::recordExprType(state, exprId, unitType);
+          return Option::SOME(unitType);
         },
         Ast::Expression::Node::LetCondition(value) -> {
           let _valueType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.value);
@@ -1945,23 +1965,92 @@ export namespace Analyzer {
           return Option::SOME(matchType);
         },
         Ast::Expression::Node::Vector(value) -> {
+          let mut firstElementTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
+          let mut allElementsTyped: boolean = true;
+          let mut allElementsMatch: boolean = true;
           let mut index: u64 = 0;
+
           while (index < value.elements.length()) {
             let Option::SOME(elementId) = value.elements.get(index) else {
               index += 1;
               continue;
             };
-            let _elementType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *elementId);
+
+            let elementTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *elementId);
+            let Option::SOME(elementType) = elementTypeOpt else {
+              allElementsTyped = false;
+              index += 1;
+              continue;
+            };
+
+            if (let Option::SOME(firstElementType) = firstElementTypeOpt) {
+              if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, firstElementType, elementType)) {
+                Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, firstElementType, elementType);
+                allElementsMatch = false;
+              }
+            } else {
+              firstElementTypeOpt = Option::SOME(elementType);
+            }
+
             index += 1;
           }
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "vector literals");
-          return Option::NONE;
+
+          if (value.elements.length() == 0) {
+            Analyzer::Typecheck::emitCannotInferVectorLiteral(state, value.span);
+            return Option::NONE;
+          }
+
+          if (!allElementsTyped || !allElementsMatch) {
+            return Option::NONE;
+          }
+
+          let Option::SOME(elementType) = firstElementTypeOpt else {
+            return Option::NONE;
+          };
+
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          let vectorType: Analyzer::TypeId = typeStoreRef.fixedArray(elementType, value.elements.length());
+          Analyzer::Typecheck::recordExprType(state, exprId, vectorType);
+          return Option::SOME(vectorType);
         },
         Ast::Expression::Node::VectorAccess(value) -> {
-          let _vectorType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.vector);
-          let _indexType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.index);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "vector access");
-          return Option::NONE;
+          let baseTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.vector);
+          let indexTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.index);
+
+          if (let Option::SOME(indexType) = indexTypeOpt) {
+            if (!Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, value.span, indexType)) {
+              Analyzer::Typecheck::emitVectorIndexNonInteger(state, typeStore, value.span, indexType);
+            }
+          }
+
+          let Option::SOME(baseType) = baseTypeOpt else {
+            return Option::NONE;
+          };
+
+          let resolvedBase: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, baseType);
+          if (let Option::SOME(aliasDefId) = resolvedBase.cycleAlias) {
+            Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, value.span, aliasDefId);
+            return Option::NONE;
+          }
+
+          let Option::SOME(baseTypeNode) = typeStore.get(resolvedBase.typeId) else {
+            return Option::NONE;
+          };
+
+          let elementTypeOpt: Option<Analyzer::TypeId> = match (baseTypeNode) {
+            Analyzer::Type::Slice(element) -> Option::SOME(element),
+            Analyzer::Type::FixedArray(element, _) -> Option::SOME(element),
+            Analyzer::Type::Pointer(pointer) -> Option::SOME(pointer.pointee),
+            _ -> Option::NONE,
+          };
+
+          let Option::SOME(elementType) = elementTypeOpt else {
+            Analyzer::Typecheck::emitAccessNonVector(state, typeStore, value.span, baseType);
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, elementType);
+          return Option::SOME(elementType);
         },
         Ast::Expression::Node::PostfixIncrement(value) -> {
           let _operandType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
