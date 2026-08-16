@@ -7489,6 +7489,21 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_builtin_name_shadowed_closure_called_in_callee_position() {
+  e2e_test(
+    "builtin_name_shadowed_closure_called_in_callee_position",
+    r#"
+function main(): i32 {
+    let sizeOf: () -> i32 = (): i32 -> 7;
+    let typeOf: (i32) -> i32 = (x: i32): i32 -> x + 1;
+
+    return sizeOf() + typeOf(2);
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_builtin_name_shadowed_binding_member_access() {
   // A local record binding named like a builtin must resolve through the normal
   // path machinery for member access as well.
