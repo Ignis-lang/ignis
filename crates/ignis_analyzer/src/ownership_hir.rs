@@ -709,8 +709,17 @@ impl<'a> HirOwnershipChecker<'a> {
       } => {
         self.check_node(value);
 
+        // The else block of a let-else always diverges, so it never reaches the
+        // code that follows the binding: like a diverging `if` branch in
+        // `check_if`, its moves must not be merged into the state the fall-through
+        // path observes. Restoring the pre-else state keeps them local to that
+        // path, while the diagnostics it produced are already recorded.
         let saved_reachable = self.reachable;
+        let pre_else_states = self.states.clone();
+
         self.check_node(else_block);
+
+        self.states = pre_else_states;
         self.reachable = saved_reachable;
 
         // If the LetElse pattern moves an owned payload out of the scrutinee,

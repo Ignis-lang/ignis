@@ -7556,3 +7556,39 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_let_else_else_block_move_does_not_affect_the_fall_through_path() {
+  e2e_workspace_std_test(
+    "let_else_else_block_move_does_not_affect_the_fall_through_path",
+    r#"
+import String from "std::string";
+
+function maybe(n: i32): Option<i32> {
+  if (n == 0) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(n);
+}
+
+function consume(value: String): i32 {
+  return value.length() as i32;
+}
+
+function run(n: i32): i32 {
+  let label: String = String::create("alpha");
+
+  let Option::SOME(found) = maybe(n) else {
+    return consume(label);
+  };
+
+  return found + consume(label);
+}
+
+function main(): i32 {
+  return run(1) + run(0);
+}
+"#,
+  );
+}

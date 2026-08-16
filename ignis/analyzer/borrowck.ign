@@ -1840,10 +1840,9 @@ export namespace Borrowck {
     let thenBorrows: Borrowck::BorrowSnapshot = state.snapshotBorrows();
     let thenReachable: boolean = state.reachable;
 
-    // The no-else join is handled in a diverging branch rather than in a
-    // `let ... else`: an else block's moves stay visible to the code that
-    // follows it, so consuming the snapshots there would leave them moved for
-    // the else-branch path below.
+    // The no-else join returns from here rather than sharing a tail with the
+    // else-branch path below: both paths consume `preMoves` and `thenMoves`,
+    // and each snapshot may only be moved once per path.
     if (ifNode.elseBranch.isNone()) {
       let mut mergeRef: &mut Borrowck::State = state;
       mergeRef.mergeBorrowsWith(&preBorrows);
@@ -1914,11 +1913,18 @@ export namespace Borrowck {
   ): void {
     Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, letElse.value);
 
+    // The else block always diverges, so nothing it does reaches the code that
+    // follows the binding: like a diverging `if` branch, its moves and borrows
+    // must not survive it. The diagnostics it produced are already recorded.
     let savedReachable: boolean = state.reachable;
+    let savedMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
+    let savedBorrows: Borrowck::BorrowSnapshot = state.snapshotBorrows();
 
     Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, letElse.elseBlock);
 
     let mut restoreRef: &mut Borrowck::State = state;
+    restoreRef.restoreMoves(&savedMoves);
+    restoreRef.restoreBorrows(&savedBorrows);
     restoreRef.setReachable(savedReachable);
 
     let mut bindings: Vector<u32> = Vector::new<u32>();

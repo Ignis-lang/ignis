@@ -370,3 +370,16 @@ function borrowckExcludesDivergingBranchFromJoin(): void {
 
   Test::assertEq<u64>(diagnostics.length(), 0);
 }
+
+/// Scenario: a value moved inside the else block of a `let ... else` is read
+/// after the binding. The else block always diverges, so the move never
+/// reaches that read.
+/// Spec: IGN-129 — a let-else else block contributes no state to what follows.
+@test
+function borrowckExcludesLetElseElseBlockFromFallThrough(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(u32),\n  NONE,\n}\n\nfunction consume(value: Owned): u32 {\n  return value.id;\n}\n\nfunction run(input: Maybe): u32 {\n  let value: Owned = Owned { id: 1 };\n\n  let Maybe::SOME(found) = input else {\n    return consume(value);\n  };\n\n  return found + consume(value);\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}

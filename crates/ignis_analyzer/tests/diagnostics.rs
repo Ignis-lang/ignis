@@ -1248,3 +1248,67 @@ function main(): i32 {
     3,
   );
 }
+
+#[test]
+fn move_in_a_let_else_else_block_does_not_hide_a_later_double_move() {
+  // Line 27: the second `consume(other)`, a genuine use after move.
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function consume(value: Owned): i32 {
+    return 1;
+}
+
+function run(input: Maybe): i32 {
+    let owned: Owned = Owned { id: 1 };
+    let other: Owned = Owned { id: 2 };
+
+    let Maybe::Some(v) = input else {
+        consume(owned);
+        return -1;
+    };
+
+    consume(other);
+    consume(other);
+    return v;
+}"#,
+    "O0001", // UseAfterMove
+    27,
+  );
+}
+
+#[test]
+fn borrow_checking_continues_after_a_let_else() {
+  // Line 15: `owned = 5` while `r` still borrows it.
+  common::assert_diagnostic_at_line(
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function run(input: Maybe): i32 {
+    let mut owned: i32 = 1;
+
+    let Maybe::Some(v) = input else {
+        return -1;
+    };
+
+    let r: &mut i32 = &mut owned;
+    owned = 5;
+    return v + *r;
+}"#,
+    "A0047", // MutatedWhileBorrowed
+    15,
+  );
+}
