@@ -1,0 +1,178 @@
+import Test from "std::test";
+
+import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import ParseOutput, Parser from "@compiler::parser";
+import Lowering from "./lowering";
+
+function loweringCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// Parses and analyzes `source`, asserts the pipeline produced no errors,
+/// runs the slice-B lowering, and renders the resulting HIR store with the
+/// display printer.
+function loweringRender(source: str): String {
+  let file: SourceFile = SourceFile::create("lowering_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(loweringCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(loweringCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(loweringCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  return Hir::Display::printHir(&hir, &typeStore, &defStore, &symbols);
+}
+
+@test
+function loweringLetArithmeticReturn(): void {
+  let rendered: String = loweringRender(
+    "function main(): u32 {\n  let x: u32 = 10;\n  let y: u32 = x + 32;\n  return y;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-let-arithmetic-return", rendered.toStr());
+}
+
+@test
+function loweringIfElseBranches(): void {
+  let rendered: String = loweringRender(
+    "function pick(flag: boolean): u32 {\n  if (flag) {\n    return 1;\n  } else {\n    return 0;\n  }\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-if-else-branches", rendered.toStr());
+}
+
+@test
+function loweringWhileWithAssignment(): void {
+  let rendered: String = loweringRender(
+    "function count(): u32 {\n  let mut total: u32 = 0;\n  let mut i: u32 = 0;\n  while (i < 3) {\n    total = total + i;\n    i = i + 1;\n  }\n  return total;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-while-with-assignment", rendered.toStr());
+}
+
+@test
+function loweringCallBetweenFunctions(): void {
+  let rendered: String = loweringRender(
+    "function double(value: u32): u32 {\n  return value * 2;\n}\n\nfunction main(): u32 {\n  return double(21);\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-call-between-functions", rendered.toStr());
+}
+
+@test
+function loweringLiteralKinds(): void {
+  let rendered: String = loweringRender(
+    "function literals(): boolean {\n  let a: i32 = 1;\n  let b: u64 = 2;\n  let c: f64 = 1.5;\n  let d: boolean = true;\n  let e: char = 'x';\n  let f: str = \"hi\";\n  return d;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-literal-kinds", rendered.toStr());
+}
+
+@test
+function loweringUnaryAndGrouping(): void {
+  let rendered: String = loweringRender(
+    "function negate(value: i32): i32 {\n  let flipped: i32 = -(value + value);\n  return flipped;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-unary-and-grouping", rendered.toStr());
+}
+
+@test
+function loweringSetsEntryPointForMain(): void {
+  let file: SourceFile = SourceFile::create(
+    "lowering_tests.ign",
+    "function main(): u32 {\n  return 0;\n}\n",
+  );
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  Test::assertEq<boolean>(hir.entryPoint.isSome(), true);
+  Test::assertEq<u64>(hir.items.length(), 1);
+  Test::assertEq<u64>(hir.functionBodies.length(), 1);
+}
+
+@test
+function loweringOutOfScopeConstructFallsBackToError(): void {
+  let rendered: String = loweringRender(
+    "function widen(value: i32): i64 {\n  let wide: i64 = value as i64;\n  return wide;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-out-of-scope-error-fallback", rendered.toStr());
+}
+
+/// Sibling scopes reuse `LocalId` indexes (ADR-B10), so a reference in the
+/// second branch must resolve to that branch's own binding, not the stale
+/// entry the first branch registered under the same index.
+@test
+function loweringSiblingScopeLocalIndexReuse(): void {
+  let rendered: String = loweringRender(
+    "function pickName(flag: boolean): u32 {\n  if (flag) {\n    let first: u32 = 1;\n    return first;\n  } else {\n    let second: u32 = 2;\n    return second;\n  }\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-sibling-scope-local-index-reuse", rendered.toStr());
+}
+
+@test
+function loweringStatementLevelConstructFallsBackToError(): void {
+  let rendered: String = loweringRender(
+    "function cleanup(): void {\n  return;\n}\n\nfunction work(): u32 {\n  defer cleanup();\n  return 1;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-statement-error-fallback", rendered.toStr());
+}
