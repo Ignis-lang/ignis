@@ -1068,6 +1068,40 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_field_assign_then_move_record_by_value_no_double_free() {
+  // The pre-fix lowering spilled the record to a copy for the field
+  // assignment, so the copy's heap-owning field aliased the original and
+  // was dropped a second time after the callee consumed the record.
+  e2e_workspace_std_test(
+    "field_assign_then_move_record_by_value_no_double_free",
+    r#"
+import Vector from "std::vector";
+
+record Holder {
+    public items: Vector<i32>;
+    public entry: u64;
+}
+
+function consume(holder: Holder): i32 {
+    let moved: Vector<i32> = holder.items;
+
+    return (holder.entry as i32) + (moved.length() as i32);
+}
+
+function main(): i32 {
+    let mut holder: Holder = Holder { items: Vector::new<i32>(), entry: 0 };
+    holder.items.push(1);
+    holder.items.push(2);
+
+    holder.entry = 5;
+
+    return consume(holder);
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_closure_field_assign_on_captured_record() {
   e2e_test(
     "closure_field_assign_on_captured_record",
