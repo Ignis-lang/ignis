@@ -1,0 +1,832 @@
+import Test from "std::test";
+
+import DiagnosticBag, DiagnosticCode, Severity, SourceFile from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import ParseOutput, Parser from "@compiler::parser";
+import Lowering from "./lowering";
+import Borrowck from "./borrowck";
+
+// ===========================================================================
+// IGN-40 slice A — analyzer parity harness and curated corpus
+//
+// Every fixture below is copied verbatim from a host suite
+// (`crates/ignis_analyzer/tests/`) or from a `test_cases/analyzer/` file, and
+// each test names its origin. The corpus is classified against what the
+// selfhost analyzer actually does: the fixtures the selfhost already agrees
+// with are permanent gates here, and the ones it does not are inventoried in
+// the gap list at the bottom of this file rather than weakened into passing.
+//
+// Parity is defined on the OUTCOME, not on the literal error code. The
+// selfhost owns its own code space (see `ignis/diagnostics/codes.ign`), which
+// deliberately renumbers most of the `A####` family, so a reject fixture names
+// the selfhost code and records the host code it corresponds to.
+// ===========================================================================
+
+function parityCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function parityCountCode(bag: &DiagnosticBag, code: str): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (String::create(diagnostic.code).equals(code)) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// Runs `source` through the whole selfhost pipeline — parse, `analyzeModule`,
+/// `Lowering::lowerModule`, `Borrowck::checkModule` — and asserts that every
+/// stage stays silent.
+///
+/// The assertion is on the full bag, not on the error count: a fixture the
+/// host accepts without complaint must not acquire a selfhost warning either,
+/// because a warning here is the shape a future false positive takes.
+function parityAcceptsSource(source: str): void {
+  let file: SourceFile = SourceFile::create("parity_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &hir,
+  );
+
+  Test::assertEq<u64>(checked.diagnostics.length(), 0);
+}
+
+/// Runs `source` through the same pipeline and asserts that `code` is reported
+/// exactly `expectedCount` times.
+///
+/// Only the named code is asserted. Several of these fixtures also draw
+/// cascade diagnostics the host does not emit; those are recorded in the gap
+/// list instead of being frozen here, so that removing one does not fail a
+/// gate that is about a different diagnostic.
+///
+/// Parse errors are always rejected: a fixture the parser cannot read never
+/// reaches the phase under test.
+function parityRejectsSource(source: str, code: str, expectedCount: u64): void {
+  let file: SourceFile = SourceFile::create("parity_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parityCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(parityCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  if (parityCountErrors(&output.diagnostics) > 0) {
+    Test::assertEq<u64>(parityCountCode(&output.diagnostics, code), expectedCount);
+    return;
+  }
+
+  Test::assertEq<u64>(parityCountCode(&output.diagnostics, code), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &hir,
+  );
+
+  Test::assertEq<u64>(parityCountCode(&checked.diagnostics, code), expectedCount);
+}
+
+// ===========================================================================
+// Accepted fixtures: the host accepts these and the selfhost pipeline is
+// silent end to end.
+// ===========================================================================
+
+/// Origin: golden_ok::basic_function.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityBasicFunction(): void {
+  parityAcceptsSource(
+    "function main(): void {\n    return;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::function_with_params.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityFunctionWithParams(): void {
+  parityAcceptsSource(
+    "function add(a: i32, b: i32): i32 {\n    return a + b;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::extern_function.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityExternFunction(): void {
+  parityAcceptsSource(
+    "extern C {\n    function puts(s: str): i32;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::numeric_cast.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityNumericCast(): void {
+  parityAcceptsSource(
+    "function convert(): f64 {\n    let x: i32 = 42;\n    return x as f64;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::literal_adapts_to_expected_type.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityLiteralAdaptsToExpectedType(): void {
+  parityAcceptsSource(
+    "function test(): i8 {\n    let x: i8 = 42;\n    let y: i16 = 1000;\n    let z: f32 = 3.14;\n    return x;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::type_alias_basic.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityTypeAliasBasic(): void {
+  parityAcceptsSource(
+    "type Int = i32;\n\nfunction main(): void {\n    let x: Int = 42;\n    return;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::type_alias_in_function.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityTypeAliasInFunction(): void {
+  parityAcceptsSource(
+    "type Number = i32;\n\nfunction add(a: Number, b: Number): Number {\n    return a + b;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::slice_and_fixed_array_annotations_remain_distinct.
+/// Host expectation: accepted with no diagnostics.
+@test
+function paritySliceAndFixedArrayAnnotations(): void {
+  parityAcceptsSource(
+    "function project(window: i32[], fixed: i32[4]): void {\n    return;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::record_basic.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityRecordBasic(): void {
+  parityAcceptsSource(
+    "record Point {\n    x: i32;\n    y: i32;\n}\n\nfunction main(): void {\n    return;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::record_field_access.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityRecordFieldAccess(): void {
+  parityAcceptsSource(
+    "record Point {\n    public x: i32;\n    public y: i32;\n}\n\nfunction main(): i32 {\n    let p: Point = Point { x: 10, y: 20 };\n    return p.x + p.y;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::record_static_method.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityRecordStaticMethod(): void {
+  parityAcceptsSource(
+    "record Point {\n    public x: i32;\n    public y: i32;\n\n    public static origin(): Point {\n        return Point { x: 0, y: 0 };\n    }\n}\n\nfunction main(): i32 {\n    let p: Point = Point::origin();\n    return p.x;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::enum_unit_variants.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityEnumUnitVariants(): void {
+  parityAcceptsSource(
+    "enum Color {\n    Red,\n    Green,\n    Blue,\n}\n\nfunction main(): Color {\n    return Color::Red;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::enum_with_payload.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityEnumWithPayload(): void {
+  parityAcceptsSource(
+    "enum Option {\n    Some(i32),\n    None,\n}\n\nfunction main(): Option {\n    return Option::Some(42);\n}\n",
+  );
+}
+
+/// Origin: IGN-127 selfhost try surface (host golden_ok analogue).
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityTryUnwrapsOkPayload(): void {
+  parityAcceptsSource(
+    "@lang(try)\nenum Res {\n    OK(u32),\n    ERROR(u32),\n}\n\nfunction outer(input: Res): Res {\n    let unwrapped: u32 = input!;\n    return input;\n}\n",
+  );
+}
+
+// ===========================================================================
+// Rejected fixtures: the host rejects these and so does the selfhost, with
+// the code named below. Where the two code spaces disagree the host code is
+// recorded alongside the selfhost one.
+// ===========================================================================
+
+/// Origin: golden_err::undeclared_identifier.
+/// Host expectation: I0033.
+@test
+function parityUndeclaredIdentifier(): void {
+  parityRejectsSource(
+    "function main(): void {\n    let x: i32 = unknown_var;\n    return;\n}\n",
+    DiagnosticCode::UNDECLARED_VARIABLE,
+    1,
+  );
+}
+
+/// Origin: golden_err::immutable_assignment.
+/// Host expectation: A0013.
+@test
+function parityImmutableAssignment(): void {
+  parityRejectsSource(
+    "function main(): void {\n    let x: i32 = 1;\n    x = 2;\n    return;\n}\n",
+    DiagnosticCode::MUTABILITY_VIOLATION,
+    1,
+  );
+}
+
+/// Origin: diagnostics::mutable_reference_to_immutable_at_correct_line.
+/// Host expectation: A0014.
+@test
+function parityMutableReferenceToImmutable(): void {
+  parityRejectsSource(
+    "function main(): void {\n    let x: i32 = 1;\n    let y: &mut i32 = &mut x;\n    return;\n}\n",
+    DiagnosticCode::MUTABLE_REFERENCE_TO_IMMUTABLE,
+    1,
+  );
+}
+
+/// Origin: golden_err::break_outside_loop.
+/// Host expectation: A0040.
+@test
+function parityBreakOutsideLoop(): void {
+  parityRejectsSource(
+    "function main(): void {\n    break;\n}\n",
+    DiagnosticCode::CONTROL_FLOW_OUTSIDE_LOOP,
+    1,
+  );
+}
+
+/// Origin: golden_err::continue_outside_loop.
+/// Host expectation: A0041.
+@test
+function parityContinueOutsideLoop(): void {
+  parityRejectsSource(
+    "function main(): void {\n    continue;\n}\n",
+    DiagnosticCode::CONTROL_FLOW_OUTSIDE_LOOP,
+    1,
+  );
+}
+
+/// Origin: golden_err::assignment_type_mismatch.
+/// Host expectation: A0045.
+@test
+function parityAssignmentTypeMismatch(): void {
+  parityRejectsSource(
+    "function main(): void {\n    let x: i32 = \"hello\";\n    return;\n}\n",
+    DiagnosticCode::TYPE_MISMATCH,
+    1,
+  );
+}
+
+/// Origin: golden_err::dereference_non_pointer.
+/// Host expectation: A0021.
+@test
+function parityDereferenceNonPointer(): void {
+  parityRejectsSource(
+    "function main(): void {\n    let x: i32 = 1;\n    let y: i32 = *x;\n    return;\n}\n",
+    DiagnosticCode::DEREFERENCE_NON_POINTER,
+    1,
+  );
+}
+
+/// Origin: golden_err::integer_overflow.
+/// Host expectation: A0046.
+@test
+function parityIntegerOverflow(): void {
+  parityRejectsSource(
+    "function main(): void {\n    let x: i8 = 256;\n    return;\n}\n",
+    DiagnosticCode::INTEGER_OVERFLOW,
+    1,
+  );
+}
+
+/// Origin: diagnostics::argument_count_mismatch_at_call_site.
+/// Host expectation: A0017.
+@test
+function parityArgumentCountMismatch(): void {
+  parityRejectsSource(
+    "function add(a: i32, b: i32): i32 {\n    return a + b;\n}\n\nfunction main(): void {\n    let x: i32 = add(1);\n    return;\n}\n",
+    DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS,
+    1,
+  );
+}
+
+/// Origin: golden_err::unreachable_code.
+/// Host expectation: A0025.
+/// Divergence: the host reports this as a WARNING, the selfhost as an ERROR.
+@test
+function parityUnreachableCode(): void {
+  parityRejectsSource(
+    "function main(): void {\n    return;\n    let x: i32 = 1;\n}\n",
+    DiagnosticCode::UNREACHABLE_CODE,
+    1,
+  );
+}
+
+/// Origin: diagnostics::type_already_defined.
+/// Host expectation: A0052.
+@test
+function parityTypeAlreadyDefined(): void {
+  parityRejectsSource(
+    "record Point {\n    x: i32;\n}\n\nrecord Point {\n    y: i32;\n}\n\nfunction main(): void {\n    return;\n}\n",
+    DiagnosticCode::TYPE_ALREADY_DEFINED,
+    1,
+  );
+}
+
+/// Origin: diagnostics::field_not_found_on_record.
+/// Host expectation: A0054.
+@test
+function parityFieldNotFoundOnRecord(): void {
+  parityRejectsSource(
+    "record Point {\n    x: i32;\n    y: i32;\n}\n\nfunction main(): i32 {\n    let p: Point = Point { x: 1, y: 2 };\n    return p.z;\n}\n",
+    DiagnosticCode::UNKNOWN_MEMBER,
+    1,
+  );
+}
+
+/// Origin: diagnostics::unknown_field_in_init.
+/// Host expectation: A0056.
+@test
+function parityUnknownFieldInInit(): void {
+  parityRejectsSource(
+    "record Point {\n    x: i32;\n    y: i32;\n}\n\nfunction main(): Point {\n    return Point { z: 1, x: 0, y: 0 };\n}\n",
+    DiagnosticCode::UNKNOWN_MEMBER,
+    1,
+  );
+}
+
+/// Origin: diagnostics::duplicate_field_init.
+/// Host expectation: A0064.
+@test
+function parityDuplicateFieldInit(): void {
+  parityRejectsSource(
+    "record Point {\n    x: i32;\n    y: i32;\n}\n\nfunction main(): Point {\n    return Point { x: 1, x: 2, y: 0 };\n}\n",
+    DiagnosticCode::DUPLICATE_RECORD_FIELD_INIT,
+    1,
+  );
+}
+
+/// Origin: diagnostics::missing_field_init.
+/// Host expectation: A0055.
+@test
+function parityMissingFieldInit(): void {
+  parityRejectsSource(
+    "record Point {\n    x: i32;\n    y: i32;\n}\n\nfunction main(): Point {\n    return Point { x: 1 };\n}\n",
+    DiagnosticCode::MISSING_RECORD_FIELD_INIT,
+    1,
+  );
+}
+
+/// Origin: diagnostics::match_bindings_are_scoped_to_arm.
+/// Host expectation: I0033.
+@test
+function parityMatchBindingsScopedToArm(): void {
+  parityRejectsSource(
+    "function main(): i32 {\n    let x: i32 = 1;\n    let y: i32 = match (x) {\n        value -> value,\n    };\n\n    return value;\n}\n",
+    DiagnosticCode::UNDECLARED_VARIABLE,
+    1,
+  );
+}
+
+/// Origin: diagnostics::heterogeneous_vector_literal_at_correct_line.
+/// Host expectation: I0031.
+@test
+function parityHeterogeneousVectorLiteral(): void {
+  parityRejectsSource(
+    "function main(): void {\n    let a: i32[3] = [1, true, 3];\n    return;\n}\n",
+    DiagnosticCode::TYPE_MISMATCH,
+    1,
+  );
+}
+
+/// Origin: diagnostics::unknown_builtin_at_correct_line.
+/// Host expectation: A0110.
+@test
+function parityUnknownBuiltin(): void {
+  parityRejectsSource(
+    "function main(): void {\n    @bogus();\n}\n",
+    DiagnosticCode::UNKNOWN_BUILTIN,
+    1,
+  );
+}
+
+/// Origin: golden_err::pipe_multiple_placeholders.
+/// Host expectation: A0174.
+@test
+function parityPipeMultiplePlaceholders(): void {
+  parityRejectsSource(
+    "function f(a: i32, b: i32): i32 {\n    return a + b;\n}\n\nfunction main(): void {\n    let x: i32 = 1 |> f(_, _);\n    return;\n}\n",
+    DiagnosticCode::PIPE_MULTIPLE_PLACEHOLDERS,
+    1,
+  );
+}
+
+/// Origin: golden_err::let_else_requires_diverging_else.
+/// Host expectation: A0168.
+@test
+function parityLetElseRequiresDivergingElse(): void {
+  parityRejectsSource(
+    "enum Maybe {\n    Some(i32),\n    None,\n}\n\nfunction maybePositive(value: i32): Maybe {\n    if (value > 0) {\n        return Maybe::Some(value);\n    }\n    return Maybe::None;\n}\n\nfunction main(): i32 {\n    let Maybe::Some(v) = maybePositive(2) else {\n        let fallback: i32 = 0;\n    };\n\n    return v;\n}\n",
+    DiagnosticCode::LET_ELSE_MUST_DIVERGE,
+    1,
+  );
+}
+
+/// Origin: diagnostics::match_arm_types_must_unify.
+/// Host expectation: A0163.
+@test
+function parityMatchArmTypesMustUnify(): void {
+  parityRejectsSource(
+    "function main(): i32 {\n    let x: i32 = 1;\n    return match (x) {\n        1 -> 1,\n        _ -> true,\n    };\n}\n",
+    DiagnosticCode::ARM_OR_BRANCH_TYPE_MISMATCH,
+    1,
+  );
+}
+
+/// Origin: diagnostics::match_non_exhaustive_reports_warning_diagnostic.
+/// Host expectation: A0158.
+@test
+function parityMatchNonExhaustive(): void {
+  parityRejectsSource(
+    "function main(): i32 {\n    let x: boolean = true;\n    return match (x) {\n        true -> 1,\n    };\n}\n",
+    DiagnosticCode::NON_EXHAUSTIVE_MATCH,
+    1,
+  );
+}
+
+/// Origin: diagnostics::for_of_over_drop_bearing_record_requires_ref_at_correct_line.
+/// Host expectation: A0070.
+@test
+function parityForOfRequiresCopyOrRef(): void {
+  parityRejectsSource(
+    "@implements(Drop)\nrecord Owned {\n    public id: i32;\n    drop(&mut self): void { return; }\n}\n\nrecord Wrapper {\n    public inner: Owned;\n}\n\nfunction consume(items: Wrapper[2]): void {\n    for (let item of items) {\n        return;\n    }\n}\n\nfunction main(): i32 {\n    return 0;\n}\n",
+    DiagnosticCode::FOR_OF_REQUIRES_COPY_OR_REF,
+    1,
+  );
+}
+
+/// Origin: test_cases/analyzer/missing_return/missing_return.ign.
+/// Host expectation: A0039.
+/// Divergence: the host reports this as a WARNING, the selfhost as an ERROR.
+@test
+function parityMissingReturnStatement(): void {
+  parityRejectsSource(
+    "// Test: Missing return in non-void function should produce A0039 (warning)\n\nfunction getValue(): i32 {\n    let x: i32 = 42;\n    // Warning: Function may not return a value\n}\n",
+    DiagnosticCode::MISSING_RETURN_STATEMENT,
+    1,
+  );
+}
+
+/// Origin: golden_err::use_after_move.
+/// Host expectation: O0001.
+@test
+function parityUseAfterMove(): void {
+  parityRejectsSource(
+    "@implements(Drop)\nrecord Owned {\n    public id: i32;\n    drop(&mut self): void { return; }\n}\n\nfunction main(): void {\n    let a: Owned = Owned { id: 1 };\n    let b: Owned = a;\n    let c: Owned = a;\n    return;\n}\n",
+    DiagnosticCode::USE_AFTER_MOVE,
+    1,
+  );
+}
+
+/// Origin: golden_err::move_in_function_call.
+/// Host expectation: O0001.
+@test
+function parityMoveInFunctionCall(): void {
+  parityRejectsSource(
+    "@implements(Drop)\nrecord Owned {\n    public id: i32;\n    drop(&mut self): void { return; }\n}\n\nfunction consume(s: Owned): void {\n    return;\n}\n\nfunction main(): void {\n    let a: Owned = Owned { id: 1 };\n    consume(a);\n    consume(a);\n    return;\n}\n",
+    DiagnosticCode::USE_AFTER_MOVE,
+    1,
+  );
+}
+
+/// Origin: golden_err::inconsistent_move_in_branches.
+/// Host expectation: O0003.
+@test
+function parityInconsistentMoveInBranches(): void {
+  parityRejectsSource(
+    "@implements(Drop)\nrecord Owned {\n    public id: i32;\n    drop(&mut self): void { return; }\n}\n\nfunction consume(s: Owned): void {\n    return;\n}\n\nfunction main(): void {\n    let a: Owned = Owned { id: 1 };\n    let cond: boolean = true;\n\n    if (cond) {\n        consume(a);\n    } else {\n        let x: i32 = 1;\n    }\n\n    return;\n}\n",
+    DiagnosticCode::INCONSISTENT_MOVE_IN_BRANCHES,
+    1,
+  );
+}
+
+// ===========================================================================
+// Gap inventory
+//
+// 33 of the 74 curated fixtures are not gates yet. Each one is listed with
+// its host origin, the host expectation, and what the selfhost pipeline
+// actually does today (observed, not predicted). Nothing here is a weakened
+// expectation: these fixtures are absent from the gates on purpose.
+//
+// Root-cause buckets:
+//
+//   B1 (18) — Untyped integer literals default to `u32` and no expected type reaches them
+//     An unsuffixed integer literal is typed `u32` unconditionally. The expected
+//     type reaches a `let` annotation and a call argument, but not a `return`
+//     value, an assignment right side, a binary operand, or a comparison operand.
+//     Isolated: `function f(): u32 { return 1; }` is clean, `function f(): i32 {
+//     return 1; }` reports I0031; `let mut x: u32 = 1; x = 2;` is clean, the same
+//     with `i32` reports I0031; `a + 1` and `a > 0` report I0031 for `a: i32` and
+//     are clean for `a: u32`. Every fixture below uses `i32`, so it never reaches
+//     the behaviour the host test was written to cover.
+//
+//   B2 (2) — No implicit numeric widening
+//     Assigning a narrower integer to a wider annotated binding reports I0031.
+//     Isolated: `let a: u8 = 10; let b: u32 = a;` reports I0031, which rules out
+//     B1 as the cause (both sides are unsigned and the literal is annotated).
+//
+//   B3 (1) — Deferred local inference is unsupported
+//     An unannotated `let mut x;` completed by a later assignment.
+//
+//   B4 (2) — A method body may not use `self` without an explicit self parameter
+//     Isolated: the same record with `public get(&self): i32` analyzes clean, and
+//     with `public get(): i32` reports I0033 + A0053 + A0066.
+//
+//   B5 (1) — C-style `for (init; condition; step)` is not in the selfhost grammar
+//     Only `for..of` exists; the host header shape is a parse error.
+//
+//   B6 (1) — Function overloading is unsupported
+//     The binder reports the second signature as a redefinition.
+//
+//   B7 (1) — Traits are unsupported
+//
+//   B8 (1) — `@extension` methods are unsupported
+//     Isolated: an all-`u32` extension fixture still reports I0031, so this is not B1.
+//
+//   B9 (1) — Generic enum variant inference is unsupported
+//
+//   B10 (2) — No equivalent of the host's CannotMoveOutOfBorrowedValue (A0186)
+//     The selfhost code space has no ownership code for moving out of borrowed
+//     storage. The fixtures are still rejected, but as a plain type mismatch
+//     (the binding is typed `&Payload`), which is a different contract: it
+//     disappears the moment the binding is annotated as a reference.
+//
+//   B11 (1) — A cyclic type alias is never reported
+//     A0060 CYCLIC_TYPE_ALIAS exists and is emitted from alias chasing, but only
+//     when the alias is used in a checked position. A declaration-only cycle is
+//     accepted silently. Isolated: both `type A = A;` and `type A = B; type B =
+//     A;` analyze with zero diagnostics.
+//
+//   B12 (1) — Field access on a non-record reports a type mismatch
+//     Isolated: `let x: u32 = 42; return x.field;` reports I0031 rather than a
+//     member-access code, so this is not B1.
+//
+//   B13 (1) — Assignment through a reference is rejected
+//     Isolated: `function modify(x: &mut u32): void { x = 42; }` reports A0067 and
+//     `*x = 42` reports I0009, because the typechecker requires an assignment
+//     target to resolve to a plain local binding.
+//
+// Fixtures:
+//
+//   borrowCheckingContinuesAfterLetElse [B1]
+//     origin:   diagnostics::borrow_checking_continues_after_a_let_else
+//     host:     rejected with A0047
+//     selfhost: analyzer: I0031 x2
+//
+//   borrowConflictMut [B1]
+//     origin:   test_cases/analyzer/borrows/borrow_conflict_mut.ign
+//     host:     rejected with A0038
+//     selfhost: analyzer: I0031; the same fixture with `u32` reports exactly A0038 from the borrow checker
+//
+//   borrowInsideLetElseElseBlock [B1]
+//     origin:   golden_ok::borrow_taken_inside_a_let_else_else_block_does_not_escape_it
+//     host:     accepted
+//     selfhost: analyzer: I0031
+//
+//   constArray [B1]
+//     origin:   golden_ok::const_array
+//     host:     accepted
+//     selfhost: analyzer: I0031 (the `i32[4]` initializer elements)
+//
+//   forOfOverDropBearingRecordByRef [B1]
+//     origin:   diagnostics::for_of_over_drop_bearing_record_by_ref_is_clean
+//     host:     accepted
+//     selfhost: analyzer: I0031 (`main(): i32` returning `0`); the `for..of` body itself analyzes clean
+//
+//   ifStatement [B1]
+//     origin:   golden_ok::if_statement
+//     host:     accepted
+//     selfhost: analyzer: I0031 x3 (`x > 0`, `return 1`, `return 0`)
+//
+//   inferFromInitializer [B1]
+//     origin:   golden_ok::infer_from_initializer
+//     host:     accepted
+//     selfhost: analyzer: I0031 (`let x = 42` infers u32, the function returns i32)
+//
+//   inferMultipleVariables [B1]
+//     origin:   golden_ok::infer_multiple_variables
+//     host:     accepted
+//     selfhost: analyzer: I0031
+//
+//   matchGuardCanUsePatternBinding [B1]
+//     origin:   diagnostics::match_guard_can_use_pattern_binding
+//     host:     accepted
+//     selfhost: analyzer: I0031 + A0058
+//
+//   moveInDivergingBranch [B1]
+//     origin:   golden_ok::move_in_diverging_branch_is_not_inconsistent
+//     host:     accepted
+//     selfhost: analyzer: I0031 x2; the ownership behaviour itself is correct — the same fixture with `u32` analyzes and borrow-checks clean
+//
+//   moveInLetElseDoesNotHideLaterDoubleMove [B1]
+//     origin:   diagnostics::move_in_a_let_else_else_block_does_not_hide_a_later_double_move
+//     host:     rejected with O0001
+//     selfhost: analyzer: I0031 x2
+//
+//   moveInsideLetElseElseBlock [B1]
+//     origin:   golden_ok::move_inside_a_let_else_else_block_does_not_escape_it
+//     host:     accepted
+//     selfhost: analyzer: I0031 x2
+//
+//   moveWhenBothBranchesDiverge [B1]
+//     origin:   golden_ok::move_when_both_branches_diverge_is_not_inconsistent
+//     host:     accepted
+//     selfhost: analyzer: I0031
+//
+//   multipleFunctions [B1]
+//     origin:   golden_ok::multiple_functions
+//     host:     accepted
+//     selfhost: analyzer: I0031 (`x * 2`)
+//
+//   mutableVariable [B1]
+//     origin:   golden_ok::mutable_variable
+//     host:     accepted
+//     selfhost: analyzer: I0031 (`x = 2`)
+//
+//   mutateWhileBorrowed [B1]
+//     origin:   test_cases/analyzer/borrows/mutate_while_borrowed.ign
+//     host:     rejected with A0047
+//     selfhost: analyzer: I0031; the same fixture with `u32` reports exactly A0047 from the borrow checker
+//
+//   validBorrows [B1]
+//     origin:   test_cases/analyzer/borrows/valid_borrows.ign
+//     host:     accepted
+//     selfhost: analyzer: I0031; the same fixture with `u32` analyzes and borrow-checks clean
+//
+//   whileLoop [B1]
+//     origin:   golden_ok::while_loop
+//     host:     accepted
+//     selfhost: analyzer: I0031 x2
+//
+//   arithmeticU8PlusU32 [B2]
+//     origin:   golden_ok::arithmetic_u8_plus_u32
+//     host:     accepted
+//     selfhost: analyzer: I0031
+//
+//   wideningImplicitU8ToU32 [B2]
+//     origin:   golden_ok::widening_implicit_u8_to_u32
+//     host:     accepted
+//     selfhost: analyzer: I0031
+//
+//   inferDeferredFromAssignment [B3]
+//     origin:   golden_ok::infer_deferred_from_assignment
+//     host:     accepted
+//     selfhost: analyzer: A0076 + I0009 + A0053
+//
+//   methodMustBeCalled [B4]
+//     origin:   diagnostics::method_must_be_called
+//     host:     rejected with A0061
+//     selfhost: analyzer: I0033 + A0053 + A0066, instead of the host's A0061 for the uncalled method reference
+//
+//   recordInstanceMethod [B4]
+//     origin:   golden_ok::record_instance_method
+//     host:     accepted
+//     selfhost: analyzer: I0033 + A0053 + A0066
+//
+//   forLoop [B5]
+//     origin:   golden_ok::for_loop
+//     host:     accepted
+//     selfhost: parser: I0001 x2
+//
+//   namespacedOverloads [B6]
+//     origin:   golden_ok::overloaded_write_shapes_resolve_without_type_suffixes
+//     host:     accepted
+//     selfhost: analyzer: A0052 + I0033 x2 + A0053 x4
+//
+//   traitBasicRequiredMethod [B7]
+//     origin:   golden_ok::trait_basic_required_method
+//     host:     accepted
+//     selfhost: analyzer: I0020 + I0033 x2 + A0053 x2 + A0066
+//
+//   extensionMethodBasic [B8]
+//     origin:   golden_ok::extension_method_basic
+//     host:     accepted
+//     selfhost: analyzer: I0031 x2
+//
+//   matchArmInferencePropagates [B9]
+//     origin:   diagnostics::match_arm_inference_propagates_expected_type_to_generic_enum_variants
+//     host:     accepted
+//     selfhost: analyzer: A0053 x4
+//
+//   cannotMoveBorrowedBindingFromLetElse [B10]
+//     origin:   diagnostics::cannot_move_borrowed_binding_from_let_else
+//     host:     rejected with A0186
+//     selfhost: analyzer: I0031 x2 + A0053; rejected, but never as an ownership error
+//
+//   cannotMoveBorrowedBindingIntoLet [B10]
+//     origin:   diagnostics::cannot_move_borrowed_binding_into_let
+//     host:     rejected with A0186
+//     selfhost: analyzer: I0031 x3 + A0053 + A0061; rejected, but never as an ownership error
+//
+//   typeAliasCycle [B11]
+//     origin:   golden_err::type_alias_cycle
+//     host:     rejected with A0066
+//     selfhost: analyzer: no diagnostic at all — the cycle is accepted
+//
+//   dotAccessOnNonRecord [B12]
+//     origin:   diagnostics::dot_access_on_non_record
+//     host:     rejected with A0060
+//     selfhost: analyzer: I0031 instead of the host's A0060
+//
+//   mutableReference [B13]
+//     origin:   golden_ok::mutable_reference
+//     host:     accepted
+//     selfhost: analyzer: A0067
+// ===========================================================================
