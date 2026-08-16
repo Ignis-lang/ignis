@@ -2141,10 +2141,19 @@ function typecheckLoopControlDiagnosticsRespectLoopDepth(): void {
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
   let mut module: Ast::Module = Ast::Module::init();
 
+  // break/continue statements are terminators for the extra-checks phase, so
+  // each one is guarded by an `if` to keep its successors reachable; the
+  // typechecker still visits the branches with the same loop depth.
   let nestedBreak: Ast::StatementId = typecheckAddBreakStatement(&mut module, Option::NONE);
+  let nestedBreakIf: Ast::StatementId = typecheckAddIfStatement(
+    &mut module,
+    typecheckAddBoolLiteral(&mut module, true),
+    nestedBreak,
+    Option::NONE,
+  );
   let nestedContinue: Ast::StatementId = typecheckAddContinueStatement(&mut module);
   let mut whileBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
-  whileBodyStmts.push(nestedBreak);
+  whileBodyStmts.push(nestedBreakIf);
   whileBodyStmts.push(nestedContinue);
   let whileBody: Ast::StatementId = typecheckAddBlock(&mut module, whileBodyStmts);
   let whileStmt: Ast::StatementId = typecheckAddWhileStatement(
@@ -2153,12 +2162,24 @@ function typecheckLoopControlDiagnosticsRespectLoopDepth(): void {
     whileBody,
   );
   let outsideBreak: Ast::StatementId = typecheckAddBreakStatement(&mut module, Option::NONE);
+  let outsideBreakIf: Ast::StatementId = typecheckAddIfStatement(
+    &mut module,
+    typecheckAddBoolLiteral(&mut module, true),
+    outsideBreak,
+    Option::NONE,
+  );
   let outsideContinue: Ast::StatementId = typecheckAddContinueStatement(&mut module);
+  let outsideContinueIf: Ast::StatementId = typecheckAddIfStatement(
+    &mut module,
+    typecheckAddBoolLiteral(&mut module, true),
+    outsideContinue,
+    Option::NONE,
+  );
   let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
   let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
   bodyStmts.push(whileStmt);
-  bodyStmts.push(outsideBreak);
-  bodyStmts.push(outsideContinue);
+  bodyStmts.push(outsideBreakIf);
+  bodyStmts.push(outsideContinueIf);
   bodyStmts.push(retStmt);
   let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
 
@@ -7993,9 +8014,20 @@ function typecheckDivergingBuiltinsHappyPath(): void {
     expression: builtinExpr,
   }));
 
+  // Each diverging builtin lives in its own function: any statement after a
+  // `NEVER`-typed expression statement would now trip the extra-checks
+  // unreachable-code diagnostic (A0025).
+  let mut trapStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  trapStmts.push(trapStmt);
+  let trapBody: Ast::StatementId = typecheckAddBlock(&mut module, trapStmts);
+  typecheckAddFunctionItem(&mut module, "trapFn", Option::SOME(voidTypeId), trapBody);
+
+  let mut unreachableStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  unreachableStmts.push(unreachableStmt);
+  let unreachableBody: Ast::StatementId = typecheckAddBlock(&mut module, unreachableStmts);
+  typecheckAddFunctionItem(&mut module, "unreachableFn", Option::SOME(voidTypeId), unreachableBody);
+
   let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
-  bodyStmts.push(trapStmt);
-  bodyStmts.push(unreachableStmt);
   bodyStmts.push(exprStmt);
   typecheckAddMainFunction(&mut module, bodyStmts, voidTypeId);
 
