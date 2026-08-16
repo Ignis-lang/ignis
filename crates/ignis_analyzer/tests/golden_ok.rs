@@ -1922,3 +1922,65 @@ function useIt(x: Owned, flag: boolean): i32 {
 "#,
   );
 }
+
+#[test]
+fn move_inside_a_let_else_else_block_does_not_escape_it() {
+  // The else block of a let-else always diverges, so a move performed there is
+  // never observable on the path that falls through the binding.
+  common::assert_ok(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function consume(value: Owned): i32 {
+    return 1;
+}
+
+function run(input: Maybe): i32 {
+    let owned: Owned = Owned { id: 1 };
+
+    let Maybe::Some(v) = input else {
+        consume(owned);
+        return -1;
+    };
+
+    consume(owned);
+    return v;
+}
+"#,
+  );
+}
+
+#[test]
+fn borrow_taken_inside_a_let_else_else_block_does_not_escape_it() {
+  // The borrow lives and dies inside the diverging else block, so the code that
+  // follows the binding may still mutate the borrowed variable.
+  common::assert_ok(
+    r#"
+enum Maybe {
+    Some(i32),
+    None,
+}
+
+function run(input: Maybe): i32 {
+    let mut owned: i32 = 1;
+
+    let Maybe::Some(v) = input else {
+        let r: &mut i32 = &mut owned;
+        return *r;
+    };
+
+    owned = 5;
+    return v + owned;
+}
+"#,
+  );
+}

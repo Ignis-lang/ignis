@@ -288,7 +288,18 @@ impl<'a> HirBorrowChecker<'a> {
 
       HIRKind::LetElse { value, else_block, .. } => {
         self.check_node(value);
+
+        // The else block of a let-else always diverges, so nothing it does is
+        // visible on the path that falls through the binding. Leaving its state
+        // in place would mark the rest of the enclosing block unreachable and
+        // silently stop checking it, and would keep any borrow it took alive.
+        let pre_else_reachable = self.reachable;
+        let pre_else_state = self.borrow_state.clone();
+
         self.check_node(else_block);
+
+        self.borrow_state = pre_else_state;
+        self.reachable = pre_else_reachable;
       },
 
       HIRKind::Loop { condition, body } => {
