@@ -446,6 +446,36 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::MUTABLE_REFERENCE_TO_IMMUTABLE, message.toStr());
     }
 
+    /// Display symbol for a shift/bitwise operator in diagnostics.
+    function shiftOrBitwiseOperatorSymbol(operator: Ast::Expression::BinaryOperator): str {
+      return match (operator) {
+        Ast::Expression::BinaryOperator::BitAnd -> "&",
+        Ast::Expression::BinaryOperator::BitOr -> "|",
+        Ast::Expression::BinaryOperator::BitXor -> "^",
+        Ast::Expression::BinaryOperator::ShiftLeft -> "<<",
+        Ast::Expression::BinaryOperator::ShiftRight -> ">>",
+        _ -> "?",
+      };
+    }
+
+    function emitInvalidBinaryOperandType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      operator: Ast::Expression::BinaryOperator,
+      leftType: Analyzer::TypeId,
+      rightType: Analyzer::TypeId,
+    ): void {
+      let message: String = String::create("Binary operator '")
+        .concat(Analyzer::Typecheck::shiftOrBitwiseOperatorSymbol(operator))
+        .concat("' cannot be applied to types '")
+        .concat(typeStore.nameOf(leftType).toStr())
+        .concat("' and '")
+        .concat(typeStore.nameOf(rightType).toStr())
+        .concat("'");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_BINARY_OPERAND_TYPE, message.toStr());
+    }
+
     function emitInvalidUnaryOperandType(
       state: &mut Analyzer::Typecheck::TypecheckState,
       typeStore: &mut Analyzer::TypeStore,
@@ -1187,6 +1217,17 @@ export namespace Analyzer {
       return match (operator) {
         Ast::Expression::BinaryOperator::And
         | Ast::Expression::BinaryOperator::Or -> true,
+        _ -> false,
+      };
+    }
+
+    function isShiftOrBitwiseBinaryOperator(operator: Ast::Expression::BinaryOperator): boolean {
+      return match (operator) {
+        Ast::Expression::BinaryOperator::BitAnd
+        | Ast::Expression::BinaryOperator::BitOr
+        | Ast::Expression::BinaryOperator::BitXor
+        | Ast::Expression::BinaryOperator::ShiftLeft
+        | Ast::Expression::BinaryOperator::ShiftRight -> true,
         _ -> false,
       };
     }

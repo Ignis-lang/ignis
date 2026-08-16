@@ -77,30 +77,6 @@ export namespace Analyzer {
         b.right,
       );
 
-      match (b.operator) {
-        Ast::Expression::BinaryOperator::BitAnd -> {
-          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
-          return Option::NONE;
-        },
-        Ast::Expression::BinaryOperator::BitOr -> {
-          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
-          return Option::NONE;
-        },
-        Ast::Expression::BinaryOperator::BitXor -> {
-          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
-          return Option::NONE;
-        },
-        Ast::Expression::BinaryOperator::ShiftLeft -> {
-          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
-          return Option::NONE;
-        },
-        Ast::Expression::BinaryOperator::ShiftRight -> {
-          Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
-          return Option::NONE;
-        },
-        _ -> {},
-      };
-
       let Option::SOME(leftType) = leftTypeOpt else {
         return Option::NONE;
       };
@@ -150,6 +126,27 @@ export namespace Analyzer {
         }
 
         return Option::NONE;
+      }
+
+      if (Analyzer::Typecheck::isShiftOrBitwiseBinaryOperator(b.operator)) {
+        let leftIsInteger: boolean = Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, b.span, leftType);
+        let rightIsInteger: boolean = Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, b.span, rightType);
+
+        if (!leftIsInteger || !rightIsInteger) {
+          Analyzer::Typecheck::emitInvalidBinaryOperandType(state, typeStore, b.span, b.operator, leftType, rightType);
+          return Option::NONE;
+        }
+
+        // The reference analyzer widens mixed integer operands through its
+        // common-type machinery; the selfhost has none, so both sides must
+        // name the same type, matching every other binary arm here.
+        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType)) {
+          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
+          return Option::NONE;
+        }
+
+        Analyzer::Typecheck::recordExprType(state, exprId, leftType);
+        return Option::SOME(leftType);
       }
 
       Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");

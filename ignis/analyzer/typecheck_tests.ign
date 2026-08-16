@@ -1574,8 +1574,10 @@ function typecheckUnannotatedConstantInfersDeclaredTypeFromValue(): void {
   };
 }
 
+/// Scenario: `1 << 2` returned from an `i32` function typechecks as `i32`.
+/// Spec: IGN-30 — shift/bitwise binary operators.
 @test
-function typecheckUnsupportedBinaryExpressionProducesDiagnostic(): void {
+function typecheckShiftLeftOnIntegersUsesOperandType(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -1612,7 +1614,8 @@ function typecheckUnsupportedBinaryExpressionProducesDiagnostic(): void {
     &module,
   );
 
-  assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support binary expressions");
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, binaryExpr, typeStore.intern(Analyzer::Type::I32));
 }
 
 @test
@@ -11052,4 +11055,129 @@ function typecheckMutSelfThroughMutableReferenceLocalSucceeds(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: `1 & 2` and `1 | 2` and `1 ^ 2` type as the operand type.
+/// Spec: IGN-30 — shift/bitwise binary operators.
+@test
+function typecheckBitwiseOperatorsOnIntegersUseOperandType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let andExpr: Ast::ExpressionId = typecheckAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::BitAnd,
+    typecheckAddIntLiteral(&mut module, 1),
+    typecheckAddIntLiteral(&mut module, 2),
+  );
+  let orExpr: Ast::ExpressionId = typecheckAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::BitOr,
+    typecheckAddIntLiteral(&mut module, 1),
+    typecheckAddIntLiteral(&mut module, 2),
+  );
+  let xorExpr: Ast::ExpressionId = typecheckAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::BitXor,
+    typecheckAddIntLiteral(&mut module, 1),
+    typecheckAddIntLiteral(&mut module, 2),
+  );
+
+  let mut stmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  stmts.push(typecheckAddExprStmt(&mut module, andExpr));
+  stmts.push(typecheckAddExprStmt(&mut module, orExpr));
+  stmts.push(typecheckAddExprStmt(&mut module, xorExpr));
+  typecheckAddSingleExprFunction(&mut module, "bitwiseOps", stmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, andExpr, typeStore.intern(Analyzer::Type::I32));
+  assertExprType(&output, orExpr, typeStore.intern(Analyzer::Type::I32));
+  assertExprType(&output, xorExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: `true & false` applies a bitwise operator to booleans and is
+/// rejected with `INVALID_BINARY_OPERAND_TYPE` (integers only, mirroring the
+/// reference analyzer — there is no non-short-circuit boolean `&`).
+/// Spec: IGN-30 — shift/bitwise binary operators.
+@test
+function typecheckBitwiseOnBooleansProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let bitAndExpr: Ast::ExpressionId = typecheckAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::BitAnd,
+    typecheckAddBoolLiteral(&mut module, true),
+    typecheckAddBoolLiteral(&mut module, false),
+  );
+
+  let mut stmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  stmts.push(typecheckAddExprStmt(&mut module, bitAndExpr));
+  typecheckAddSingleExprFunction(&mut module, "boolBitAnd", stmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::INVALID_BINARY_OPERAND_TYPE, "Binary operator '&' cannot be applied to types 'boolean' and 'boolean'");
+}
+
+/// Scenario: shifting a float (`1.5 << 2`) is rejected with
+/// `INVALID_BINARY_OPERAND_TYPE`.
+/// Spec: IGN-30 — shift/bitwise binary operators.
+@test
+function typecheckShiftOnFloatProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let shiftExpr: Ast::ExpressionId = typecheckAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::ShiftLeft,
+    typecheckAddFloatLiteral(&mut module, 1.5),
+    typecheckAddIntLiteral(&mut module, 2),
+  );
+
+  let mut stmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  stmts.push(typecheckAddExprStmt(&mut module, shiftExpr));
+  typecheckAddSingleExprFunction(&mut module, "floatShift", stmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_BINARY_OPERAND_TYPE);
+}
+
+/// Scenario: `1 << (1 as u64)` with an `i32` lhs and a `u64` rhs is rejected with
+/// `TYPE_MISMATCH`: the selfhost has no integer widening, so shift/bitwise
+/// operands must name the same type like every other binary arm.
+/// Spec: IGN-30 — shift/bitwise binary operators.
+@test
+function typecheckShiftOnMixedIntegerTypesProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u64TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "u64");
+  let castExpr: Ast::ExpressionId = typecheckAddCastExpr(&mut module, typecheckAddIntLiteral(&mut module, 1), u64TypeId);
+
+  let shiftExpr: Ast::ExpressionId = typecheckAddBinary(
+    &mut module,
+    Ast::Expression::BinaryOperator::ShiftLeft,
+    typecheckAddIntLiteral(&mut module, 1),
+    castExpr,
+  );
+
+  let mut stmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  stmts.push(typecheckAddExprStmt(&mut module, shiftExpr));
+  typecheckAddSingleExprFunction(&mut module, "mixedShift", stmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
 }
