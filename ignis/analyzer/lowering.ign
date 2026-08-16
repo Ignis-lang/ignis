@@ -4,22 +4,28 @@ import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import Vector from "std::vector";
 
-/// AST -> HIR lowering for the Ignis selfhost compiler (IGN-37, slice B).
+/// AST -> HIR lowering for the Ignis selfhost compiler (IGN-37, slices B
+/// and C).
 ///
 /// Port of the item/statement/expression subset of
-/// `crates/ignis_analyzer/src/lowering.rs` that this slice covers:
+/// `crates/ignis_analyzer/src/lowering.rs` that these slices cover:
 ///   - items: free functions (declaration + body), namespaces and exports
 ///     recursed into for the functions they contain,
 ///   - statements: let (annotated or inferred), assignment, expression
 ///     statement, block, if/else, while, return, break, continue,
+///     `let ... else`,
 ///   - expressions: literals, variable references, binary ops, unary ops,
 ///     grouping (transparent), calls to free functions, block expressions,
-///     if expressions, unit.
+///     if expressions, unit, `match`, and `if let` / `while let` conditions,
+///   - patterns: wildcard, binding, literal, enum variant (with nested
+///     destructuring), tuple, and or-patterns.
 ///
-/// Everything else (match, patterns beyond simple bindings, method calls,
-/// pipes, try, closures, for/for-of, defer, builtins, vectors, tuples,
-/// casts, references, record init, ...) lowers to a single explicit
-/// `HirKind::Error` fallback, mirroring the Rust oracle's error nodes.
+/// Everything else (method calls, pipes, try, closures, for/for-of, defer,
+/// builtins, vectors, casts, references, record init, record destructuring
+/// patterns, ...) lowers to a single explicit `HirKind::Error` fallback,
+/// mirroring the Rust oracle's error nodes. A pattern outside the supported
+/// set sends its whole enclosing construct to that fallback rather than
+/// lowering partially, because `HirPattern` has no error form.
 ///
 /// Deviations from the Rust oracle, rooted in selfhost model gaps:
 ///   - The selfhost `Type` enum has no error type, so `Error` fallback nodes
@@ -128,6 +134,11 @@ export namespace Lowering {
   function voidType(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
     let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
     return typeStoreRef.intern(Analyzer::Type::VOID);
+  }
+
+  function booleanType(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    return typeStoreRef.intern(Analyzer::Type::BOOLEAN);
   }
 
   function neverType(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
@@ -298,6 +309,306 @@ export namespace Lowering {
   }
 
   // =========================================================================
+  // Patterns
+  // =========================================================================
+
+  /// Owned copy of the variant data a `Variant` pattern needs, taken before
+  /// sub-pattern lowering pushes new `Variable` definitions into the store.
+  record VariantPatternInfo {
+    public enumDef: Analyzer::DefinitionId;
+    public variantTag: u32;
+    public payload: Vector<Analyzer::TypeId>;
+  }
+
+  function variantPatternInfo(
+    defStore: &mut Analyzer::DefinitionStore,
+    variantDef: Analyzer::DefinitionId,
+  ): Option<Lowering::VariantPatternInfo> {
+    let Option::SOME(definition) = defStore.get(variantDef) else {
+      return Option::NONE;
+    };
+
+    let Analyzer::Definition::Variant(variant) = definition else {
+      return Option::NONE;
+    };
+
+    let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < variant.payload.length()) {
+      if (let Option::SOME(payloadType) = variant.payload.get(index)) {
+        payload.push(*payloadType);
+      }
+
+      index += 1;
+    }
+
+    return Option::SOME(Lowering::VariantPatternInfo {
+      enumDef: variant.owner,
+      variantTag: variant.tagValue,
+      payload: payload,
+    });
+  }
+
+  /// Element types of a tuple type, or an empty vector for anything else.
+  /// Missing entries make the corresponding sub-pattern fall back to `void`,
+  /// the same sentinel unknown types use everywhere in this module.
+  function tupleElementTypes(
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Vector<Analyzer::TypeId> {
+    let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return elements;
+    };
+
+    let Analyzer::Type::Tuple(tupleType) = typeNode else {
+      return elements;
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < tupleType.elements.length()) {
+      if (let Option::SOME(elementType) = tupleType.elements.get(index)) {
+        elements.push(*elementType);
+      }
+
+      index += 1;
+    }
+
+    return elements;
+  }
+
+  /// Allocates the `Definition::Variable` for one pattern binding site and
+  /// registers it in the `LocalMap` under the body resolver's `LocalId`, so
+  /// references in guards, arm bodies, and the statements after a `let else`
+  /// resolve to this binding.
+  function declarePatternBinding(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    patternId: Ast::PatternId,
+    name: str,
+    declaredType: Analyzer::TypeId,
+  ): Analyzer::DefinitionId {
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let nameSym: Analyzer::SymbolId = symbolsRef.intern(name);
+
+    let mut defStoreRef: &mut Analyzer::DefinitionStore = defStore;
+    let defId: Analyzer::DefinitionId = defStoreRef.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
+      name: nameSym,
+      visibility: Analyzer::Visibility::PRIVATE,
+      declaredType: declaredType,
+      mutable: false,
+    }));
+
+    if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(localId)) = Analyzer::ResolverBodies::findPatternRef(
+      &output.resolvedBodies.bodyResolution,
+      patternId.raw(),
+    )) {
+      Lowering::registerLocal(locals, localId, defId);
+    }
+
+    return defId;
+  }
+
+  /// Lowers one AST pattern. `NONE` means the pattern is outside this slice,
+  /// which makes the whole enclosing construct fall back to `Error` instead
+  /// of lowering partially: `HirPattern` has no error form.
+  ///
+  /// `expectedType` is the checked type of the value the pattern matches
+  /// against, and becomes the declared type of a binding at this level. The
+  /// selfhost `TypecheckOutput` records expression types only, so nested
+  /// binding types are derived structurally from the variant payload and
+  /// tuple element types instead of being read back from the checker.
+  function lowerPattern(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    patternId: Ast::PatternId,
+    expectedType: Analyzer::TypeId,
+  ): Option<Hir::HirPattern> {
+    let Option::SOME(pattern) = module.patterns.get(patternId) else {
+      return Option::NONE;
+    };
+
+    match (pattern) {
+      Ast::Pattern::Node::Wildcard(_) -> {
+        return Option::SOME(Hir::HirPattern::Wildcard);
+      },
+      Ast::Pattern::Node::Binding(binding) -> {
+        let defId: Analyzer::DefinitionId = Lowering::declarePatternBinding(
+          defStore,
+          symbols,
+          output,
+          locals,
+          patternId,
+          binding.name.toStr(),
+          expectedType,
+        );
+
+        return Option::SOME(Hir::HirPattern::Binding(defId));
+      },
+      Ast::Pattern::Node::Literal(literal) -> {
+        let Option::SOME(expression) = module.expressions.get(literal.expression) else {
+          return Option::NONE;
+        };
+
+        let Ast::Expression::Node::Literal(literalExpr) = expression else {
+          return Option::NONE;
+        };
+
+        let literalType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, literal.expression);
+
+        return Option::SOME(Hir::HirPattern::Literal(Lowering::literalKind(typeStore, &literalExpr.value, literalType)));
+      },
+      Ast::Pattern::Node::Path(path) -> {
+        return Lowering::lowerVariantPattern(defStore, typeStore, symbols, module, output, locals, patternId, &path);
+      },
+      Ast::Pattern::Node::Tuple(tuple) -> {
+        let elementTypes: Vector<Analyzer::TypeId> = Lowering::tupleElementTypes(typeStore, expectedType);
+        let Option::SOME(elements) = Lowering::lowerPatternList(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          output,
+          locals,
+          &tuple.elements,
+          &elementTypes,
+        ) else {
+          return Option::NONE;
+        };
+
+        return Option::SOME(Hir::HirPattern::Tuple(elements));
+      },
+      Ast::Pattern::Node::Or(orPattern) -> {
+        // Every alternative matches the same value, so they all share the
+        // scrutinee's type rather than taking a positional one.
+        let mut alternativeTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+        let mut index: u64 = 0;
+
+        while (index < orPattern.alternatives.length()) {
+          alternativeTypes.push(expectedType);
+          index += 1;
+        }
+
+        let Option::SOME(alternatives) = Lowering::lowerPatternList(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          output,
+          locals,
+          &orPattern.alternatives,
+          &alternativeTypes,
+        ) else {
+          return Option::NONE;
+        };
+
+        return Option::SOME(Hir::HirPattern::Or(alternatives));
+      },
+    };
+
+    return Option::NONE;
+  }
+
+  /// Lowers a sequence of sub-patterns, pairing each with its expected type
+  /// by position. `NONE` if any sub-pattern is outside this slice.
+  function lowerPatternList(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    patternIds: &Vector<Ast::PatternId>,
+    expectedTypes: &Vector<Analyzer::TypeId>,
+  ): Option<Vector<Hir::HirPattern>> {
+    let mut lowered: Vector<Hir::HirPattern> = Vector::new<Hir::HirPattern>();
+    let mut index: u64 = 0;
+
+    while (index < patternIds.length()) {
+      let Option::SOME(subPatternId) = patternIds.get(index) else {
+        return Option::NONE;
+      };
+
+      let mut expectedType: Analyzer::TypeId = Lowering::voidType(typeStore);
+      if (let Option::SOME(positional) = expectedTypes.get(index)) {
+        expectedType = *positional;
+      }
+
+      let Option::SOME(subPattern) = Lowering::lowerPattern(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output,
+        locals,
+        *subPatternId,
+        expectedType,
+      ) else {
+        return Option::NONE;
+      };
+
+      lowered.push(subPattern);
+      index += 1;
+    }
+
+    return Option::SOME(lowered);
+  }
+
+  /// Lowers a `Path` pattern that resolves to an enum variant. Record
+  /// patterns and unresolved paths have no `HirPattern` counterpart and
+  /// return `NONE`, unlike the Rust oracle's silent `Wildcard` fallback:
+  /// a wildcard would change which values the pattern accepts.
+  function lowerVariantPattern(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    patternId: Ast::PatternId,
+    path: &Ast::Pattern::Path,
+  ): Option<Hir::HirPattern> {
+    let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(variantDef)) = Analyzer::ResolverBodies::findPatternRef(
+      &output.resolvedBodies.bodyResolution,
+      patternId.raw(),
+    ) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(info) = Lowering::variantPatternInfo(defStore, variantDef) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(args) = Lowering::lowerPatternList(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      output,
+      locals,
+      &path.arguments,
+      &info.payload,
+    ) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(Hir::HirPattern::Variant(Hir::VariantPattern {
+      enumDef: info.enumDef,
+      variantTag: info.variantTag,
+      args: args,
+    }));
+  }
+
+  // =========================================================================
   // Expressions
   // =========================================================================
 
@@ -448,13 +759,13 @@ export namespace Lowering {
         return Lowering::errorNode(hir, typeStore, tuple.span);
       },
       Ast::Expression::Node::LetCondition(letCondition) -> {
-        return Lowering::errorNode(hir, typeStore, letCondition.span);
+        return Lowering::lowerLetCondition(defStore, typeStore, symbols, module, output, locals, hir, &letCondition);
       },
       Ast::Expression::Node::Reference(reference) -> {
         return Lowering::errorNode(hir, typeStore, reference.span);
       },
       Ast::Expression::Node::Match(matchExpr) -> {
-        return Lowering::errorNode(hir, typeStore, matchExpr.span);
+        return Lowering::lowerMatchExpr(defStore, typeStore, symbols, module, output, locals, hir, exprId, &matchExpr);
       },
       Ast::Expression::Node::Vector(vectorLiteral) -> {
         return Lowering::errorNode(hir, typeStore, vectorLiteral.span);
@@ -639,6 +950,145 @@ export namespace Lowering {
     });
   }
 
+  /// Lowers a `match` to `HirKind::Match`. Each arm lowers its pattern
+  /// first, so the bindings it introduces are registered before the guard
+  /// and body that reference them. An arm whose pattern is outside this
+  /// slice sends the whole match to `Error`.
+  function lowerMatchExpr(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+    matchExpr: &Ast::Expression::Match,
+  ): Hir::HirId {
+    let scrutinee: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, matchExpr.scrutinee);
+    let scrutineeType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, matchExpr.scrutinee);
+
+    let mut arms: Vector<Hir::HirMatchArm> = Vector::new<Hir::HirMatchArm>();
+    let mut index: u64 = 0;
+
+    while (index < matchExpr.arms.length()) {
+      let Option::SOME(arm) = matchExpr.arms.get(index) else {
+        return Lowering::errorNode(hir, typeStore, matchExpr.span);
+      };
+
+      let Option::SOME(pattern) = Lowering::lowerPattern(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output,
+        locals,
+        arm.pattern,
+        scrutineeType,
+      ) else {
+        return Lowering::errorNode(hir, typeStore, matchExpr.span);
+      };
+
+      let mut guard: Option<Hir::HirId> = Option::NONE;
+      if (let Option::SOME(guardId) = arm.guard) {
+        guard = Option::SOME(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, guardId));
+      }
+
+      let body: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, arm.body);
+
+      arms.push(Hir::HirMatchArm {
+        pattern: pattern,
+        guard: guard,
+        body: body,
+      });
+
+      index += 1;
+    }
+
+    let matchType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Match(Hir::HirMatch {
+        scrutinee: scrutinee,
+        arms: arms,
+      }),
+      span: matchExpr.span,
+      typeId: matchType,
+    });
+  }
+
+  /// Lowers an `if let` / `while let` condition to the two-arm boolean
+  /// `Match` the Rust oracle desugars it into: the pattern arm yields
+  /// `true`, a trailing wildcard arm yields `false`, and the enclosing
+  /// `If`/`Loop` consumes that boolean.
+  ///
+  /// The selfhost typechecker rejects let conditions outright, so no
+  /// expression type is ever recorded for this node; the boolean type is
+  /// interned directly, exactly like the oracle does.
+  function lowerLetCondition(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    letCondition: &Ast::Expression::LetCondition,
+  ): Hir::HirId {
+    let scrutinee: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, letCondition.value);
+    let scrutineeType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, letCondition.value);
+
+    let Option::SOME(pattern) = Lowering::lowerPattern(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      output,
+      locals,
+      letCondition.pattern,
+      scrutineeType,
+    ) else {
+      return Lowering::errorNode(hir, typeStore, letCondition.span);
+    };
+
+    let booleanTypeId: Analyzer::TypeId = Lowering::booleanType(typeStore);
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    let trueNode: Hir::HirId = hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Literal(Hir::LiteralValue::Boolean(true)),
+      span: letCondition.span,
+      typeId: booleanTypeId,
+    });
+    let falseNode: Hir::HirId = hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Literal(Hir::LiteralValue::Boolean(false)),
+      span: letCondition.span,
+      typeId: booleanTypeId,
+    });
+
+    let mut arms: Vector<Hir::HirMatchArm> = Vector::new<Hir::HirMatchArm>();
+    arms.push(Hir::HirMatchArm {
+      pattern: pattern,
+      guard: Option::NONE,
+      body: trueNode,
+    });
+    arms.push(Hir::HirMatchArm {
+      pattern: Hir::HirPattern::Wildcard,
+      guard: Option::NONE,
+      body: falseNode,
+    });
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Match(Hir::HirMatch {
+        scrutinee: scrutinee,
+        arms: arms,
+      }),
+      span: letCondition.span,
+      typeId: booleanTypeId,
+    });
+  }
+
   // =========================================================================
   // Statements
   // =========================================================================
@@ -772,6 +1222,69 @@ export namespace Lowering {
         value: init,
       }),
       span: span,
+      typeId: Lowering::voidType(typeStore),
+    });
+  }
+
+  /// Lowers a `let ... else` to `HirKind::LetElse`. The value and the else
+  /// block are lowered before the pattern, so the bindings are registered
+  /// after the block that cannot see them and before the statements that
+  /// can, mirroring the Rust oracle's order.
+  ///
+  /// The annotated shorthand (`let x: T = optional else { ... }`, which the
+  /// oracle desugars through the scrutinee's try-capable ok variant) stays
+  /// on the `Error` fallback: the selfhost analyzer binds the annotation
+  /// type to the pattern directly and exposes no ok-variant resolution, so
+  /// there is nothing to derive the unwrapping pattern from.
+  function lowerLetElse(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    letElse: &Ast::Statement::LetElse,
+  ): Hir::HirId {
+    let mut isShorthand: boolean = false;
+
+    if (letElse.annotation.isSome()) {
+      if (let Option::SOME(pattern) = module.patterns.get(letElse.pattern)) {
+        if (let Ast::Pattern::Node::Binding(_) = pattern) {
+          isShorthand = true;
+        }
+      }
+    }
+
+    if (isShorthand) {
+      return Lowering::errorNode(hir, typeStore, letElse.span);
+    }
+
+    let value: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, letElse.value);
+    let elseBlock: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, letElse.elseBranch);
+    let valueType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, letElse.value);
+
+    let Option::SOME(pattern) = Lowering::lowerPattern(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      output,
+      locals,
+      letElse.pattern,
+      valueType,
+    ) else {
+      return Lowering::errorNode(hir, typeStore, letElse.span);
+    };
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::LetElse(Hir::HirLetElse {
+        pattern: pattern,
+        value: value,
+        elseBlock: elseBlock,
+      }),
+      span: letElse.span,
       typeId: Lowering::voidType(typeStore),
     });
   }
@@ -916,7 +1429,7 @@ export namespace Lowering {
         });
       },
       Ast::Statement::Node::LetElse(letElse) -> {
-        return Lowering::errorNode(hir, typeStore, letElse.span);
+        return Lowering::lowerLetElse(defStore, typeStore, symbols, module, output, locals, hir, &letElse);
       },
       Ast::Statement::Node::For(forStmt) -> {
         return Lowering::errorNode(hir, typeStore, forStmt.span);
