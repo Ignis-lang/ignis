@@ -27,6 +27,12 @@ import Vector from "std::vector";
 ///     branch join that reports an inconsistent move, and the two-pass loop
 ///     body walk (O0001, O0003).
 ///
+/// The same walk also produces the drop schedules (IGN-39) that
+/// `ownership_hir.rs` records alongside its diagnostics: which locals a scope
+/// end, an early exit, a match arm end, or an overwrite must drop, and in what
+/// order. That output is `BorrowckOutput::dropSchedules`, and it is what LIR
+/// lowering reads on the Rust side to place drop emissions.
+///
 /// Both oracles run over the same HIR in the Rust pipeline and share the same
 /// walk shape, so they are fused into one traversal here instead of two.
 /// Where the two disagree on how to treat a node, each rule keeps its own
@@ -43,9 +49,6 @@ import Vector from "std::vector";
 ///   - Closures and captures: the selfhost `HirKind` has no `Closure`
 ///     variant, so `try_record_closure_capture_borrows` and the by-value
 ///     capture consumption have nothing to walk.
-///   - Drop schedules (IGN-39): the ownership oracle produces `DropSchedules`
-///     alongside its diagnostics. Nothing here records a schedule; only the
-///     diagnostics are ported.
 ///   - Manual `.drop()`, `deallocate`, pointer aliasing, and the interprocedural
 ///     `&mut`-parameter drop summaries, together with the `Dropped`/`Freed`
 ///     states and the diagnostics that depend on them (double free, use after
@@ -74,6 +77,14 @@ import Vector from "std::vector";
 ///     Rust type model has no alias variant at this point, so there is nothing
 ///     to mirror; leaving aliases opaque would silently stop tracking an
 ///     aliased owned record.
+///   - Drop schedules cover every construct the selfhost HIR lowers today, but
+///     three oracle inputs to them are missing with the states behind them:
+///     the field-owner drop suppression (`drop_suppressed_vars`), which needs
+///     the move-out-of-field bookkeeping; the `Dropped`/`Freed` states, whose
+///     locals the oracle also leaves out of a drop list; and closure
+///     environments, which the selfhost `HirKind` has no variant for. Each one
+///     can only add drops that should have been suppressed, never drop
+///     something the oracle keeps.
 ///   - `match` consumes a moved scrutinee variable unconditionally. The
 ///     oracle first asks whether an arm pattern moves an owned payload out and
 ///     splits into a borrowed-base rejection, a field-owner drop suppression,
@@ -93,9 +104,11 @@ export namespace Borrowck {
   const BORROW_MUT: u32 = 1;
   const BORROW_SHARED_BASE: u32 = 1;
 
-  /// Diagnostics produced by one module walk, in emission order.
+  /// What one module walk produces: the diagnostics in emission order, and
+  /// the drop schedules the same walk recorded.
   record BorrowckOutput {
     public diagnostics: DiagnosticBag;
+    public dropSchedules: Hir::DropSchedules;
   }
 
   /// Copy of the move map, taken around branches and loop bodies.
@@ -138,6 +151,25 @@ export namespace Borrowck {
     heldMutable: Vector<u32>;
     scopeStarts: Vector<u64>;
 
+    /// Owned-local scope stack, mirroring the ownership oracle's `ScopeEntry`
+    /// and pushed at exactly the same three places: the function root, every
+    /// block, and the marker scope of every loop.
+    ///
+    /// `scopeBlocks[i]` is the raw `HirId` of the block that opened scope `i`,
+    /// meaningful only when `scopeHasBlock[i]` is set; the root and loop marker
+    /// scopes have none and therefore never receive a scope-end schedule.
+    /// `ownedStarts[i]` is where scope `i` begins inside the flat `ownedVars`
+    /// stack, which holds every owned local in declaration order.
+    scopeBlocks: Vector<u32>;
+    scopeHasBlock: Vector<u32>;
+    scopeIsLoop: Vector<u32>;
+    ownedStarts: Vector<u64>;
+    ownedVars: Vector<u32>;
+
+    /// Deferred bodies registered per scope, laid out like `ownedVars`.
+    deferStarts: Vector<u64>;
+    deferBodies: Vector<u32>;
+
     /// One entry per enclosing loop, set when a `continue` was seen in it.
     loopContinue: Vector<u32>;
 
@@ -157,6 +189,13 @@ export namespace Borrowck {
         heldTargets: Vector::new<u32>(),
         heldMutable: Vector::new<u32>(),
         scopeStarts: Vector::new<u64>(),
+        scopeBlocks: Vector::new<u32>(),
+        scopeHasBlock: Vector::new<u32>(),
+        scopeIsLoop: Vector::new<u32>(),
+        ownedStarts: Vector::new<u64>(),
+        ownedVars: Vector::new<u32>(),
+        deferStarts: Vector::new<u64>(),
+        deferBodies: Vector::new<u32>(),
         loopContinue: Vector::new<u32>(),
         reachable: true,
         inDefer: false,
@@ -338,8 +377,176 @@ export namespace Borrowck {
       }
     }
 
-    public pushScope(&mut self): void {
+    /// Opens a scope. `blockRaw` is only read when `hasBlock` is true, and
+    /// `isLoop` marks the loop marker scope that `break` and `continue`
+    /// unwind to.
+    public pushScope(&mut self, blockRaw: u32, hasBlock: boolean, isLoop: boolean): void {
       self.scopeStarts.push(self.heldTargets.length());
+      self.scopeBlocks.push(blockRaw);
+      self.scopeHasBlock.push(Borrowck::boolAsFlag(hasBlock));
+      self.scopeIsLoop.push(Borrowck::boolAsFlag(isLoop));
+      self.ownedStarts.push(self.ownedVars.length());
+      self.deferStarts.push(self.deferBodies.length());
+    }
+
+    /// Registers a local as owned by the innermost scope, which is what makes
+    /// it a drop candidate when that scope exits.
+    public pushOwned(&mut self, defRaw: u32): void {
+      self.ownedVars.push(defRaw);
+    }
+
+    public pushDeferBody(&mut self, bodyRaw: u32): void {
+      self.deferBodies.push(bodyRaw);
+    }
+
+    public scopeDepth(&self): u64 {
+      return self.ownedStarts.length();
+    }
+
+    /// Block that opened the innermost scope, or `NONE` for the function root
+    /// and the loop marker scopes.
+    public currentScopeBlock(&self): Option<u32> {
+      if (self.ownedStarts.isEmpty()) {
+        return Option::NONE;
+      }
+
+      let last: u64 = self.ownedStarts.length() - 1;
+
+      if (let Option::SOME(flag) = self.scopeHasBlock.get(last)) {
+        if (*flag == 0) {
+          return Option::NONE;
+        }
+      }
+
+      if (let Option::SOME(blockRaw) = self.scopeBlocks.get(last)) {
+        return Option::SOME(*blockRaw);
+      }
+
+      return Option::NONE;
+    }
+
+    /// Index of the innermost loop marker scope, mirroring
+    /// `find_loop_scope_idx`.
+    public loopScopeIndex(&self): Option<u64> {
+      let mut index: u64 = self.scopeIsLoop.length();
+
+      while (index > 0) {
+        index -= 1;
+
+        if (let Option::SOME(flag) = self.scopeIsLoop.get(index)) {
+          if (*flag == 1) {
+            return Option::SOME(index);
+          }
+        }
+      }
+
+      return Option::NONE;
+    }
+
+    /// A local is a drop candidate while its move state is `Valid`, which the
+    /// oracle spells as `Some(Valid) | None`: a local it never tracked is live.
+    public isMoveValid(&self, defRaw: u32): boolean {
+      return match (self.moveValue(defRaw)) {
+        Option::SOME(value) -> value == Borrowck::MOVE_VALID,
+        Option::NONE -> true,
+      };
+    }
+
+    /// Where the owned locals of scope `scopeIndex` end inside `ownedVars`.
+    public ownedEnd(&self, scopeIndex: u64): u64 {
+      if (scopeIndex + 1 < self.ownedStarts.length()) {
+        if (let Option::SOME(next) = self.ownedStarts.get(scopeIndex + 1)) {
+          return *next;
+        }
+      }
+
+      return self.ownedVars.length();
+    }
+
+    public deferEnd(&self, scopeIndex: u64): u64 {
+      if (scopeIndex + 1 < self.deferStarts.length()) {
+        if (let Option::SOME(next) = self.deferStarts.get(scopeIndex + 1)) {
+          return *next;
+        }
+      }
+
+      return self.deferBodies.length();
+    }
+
+    /// Locals to drop when unwinding every scope from the innermost down to
+    /// `toScopeIndex`, inclusive. Inner scopes come first, and within one scope
+    /// the order is reverse declaration. Mirrors `calculate_exit_drops`.
+    public exitDrops(&self, toScopeIndex: u64): Vector<u32> {
+      let mut drops: Vector<u32> = Vector::new<u32>();
+      let mut scopeIndex: u64 = self.ownedStarts.length();
+
+      while (scopeIndex > toScopeIndex) {
+        scopeIndex -= 1;
+
+        let Option::SOME(startValue) = self.ownedStarts.get(scopeIndex) else {
+          continue;
+        };
+
+        let start: u64 = *startValue;
+        let mut position: u64 = self.ownedEnd(scopeIndex);
+
+        while (position > start) {
+          position -= 1;
+
+          if (let Option::SOME(defRaw) = self.ownedVars.get(position)) {
+            if (self.isMoveValid(*defRaw)) {
+              drops.push(*defRaw);
+            }
+          }
+        }
+      }
+
+      return drops;
+    }
+
+    /// Deferred bodies to run when unwinding to `toScopeIndex`, in LIFO order.
+    /// Mirrors `calculate_exit_defers`.
+    public exitDefers(&self, toScopeIndex: u64): Vector<u32> {
+      let mut defers: Vector<u32> = Vector::new<u32>();
+      let mut scopeIndex: u64 = self.deferStarts.length();
+
+      while (scopeIndex > toScopeIndex) {
+        scopeIndex -= 1;
+
+        let Option::SOME(startValue) = self.deferStarts.get(scopeIndex) else {
+          continue;
+        };
+
+        let start: u64 = *startValue;
+        let mut position: u64 = self.deferEnd(scopeIndex);
+
+        while (position > start) {
+          position -= 1;
+
+          if (let Option::SOME(bodyRaw) = self.deferBodies.get(position)) {
+            defers.push(*bodyRaw);
+          }
+        }
+      }
+
+      return defers;
+    }
+
+    /// Drops owed by the innermost scope alone, mirroring `exit_block_scope`.
+    public currentScopeDrops(&self): Vector<u32> {
+      if (self.ownedStarts.isEmpty()) {
+        return Vector::new<u32>();
+      }
+
+      return self.exitDrops(self.ownedStarts.length() - 1);
+    }
+
+    public currentScopeDefers(&self): Vector<u32> {
+      if (self.deferStarts.isEmpty()) {
+        return Vector::new<u32>();
+      }
+
+      return self.exitDefers(self.deferStarts.length() - 1);
     }
 
     public recordHeldBorrow(&mut self, target: u32, mutable: boolean): void {
@@ -347,8 +554,29 @@ export namespace Borrowck {
       self.heldMutable.push(Borrowck::boolAsFlag(mutable));
     }
 
-    /// Pops the innermost scope and releases every borrow registered in it.
+    /// Pops the innermost scope, releasing every borrow registered in it and
+    /// discarding the owned locals and deferred bodies it declared.
+    ///
+    /// The drops those locals owe are read out by `Borrowck::exitScope` before
+    /// this runs, exactly as the oracle computes them inside `exit_block_scope`
+    /// before popping.
     public popScopeReleasing(&mut self): void {
+      let _discardedBlock: Option<u32> = self.scopeBlocks.pop();
+      let _discardedHasBlock: Option<u32> = self.scopeHasBlock.pop();
+      let _discardedIsLoop: Option<u32> = self.scopeIsLoop.pop();
+
+      if (let Option::SOME(ownedStart) = self.ownedStarts.pop()) {
+        while (self.ownedVars.length() > ownedStart) {
+          let _discardedOwned: Option<u32> = self.ownedVars.pop();
+        }
+      }
+
+      if (let Option::SOME(deferStart) = self.deferStarts.pop()) {
+        while (self.deferBodies.length() > deferStart) {
+          let _discardedDefer: Option<u32> = self.deferBodies.pop();
+        }
+      }
+
       let Option::SOME(start) = self.scopeStarts.pop() else {
         return;
       };
@@ -1183,9 +1411,233 @@ export namespace Borrowck {
     stateRef.setMoveValue(defId.raw(), Borrowck::MOVE_MOVED);
   }
 
+  /// Declares a local as owned by the innermost scope. Mirrors
+  /// `declare_owned`: the local becomes live and joins the scope's drop list.
   function declareOwned(state: &mut Borrowck::State, defId: Analyzer::DefinitionId): void {
     let mut stateRef: &mut Borrowck::State = state;
     stateRef.setMoveValue(defId.raw(), Borrowck::MOVE_VALID);
+    stateRef.pushOwned(defId.raw());
+  }
+
+  // --- drop schedule production ------------------------------------------------------
+
+  function definitionIdsFromRaw(raws: &Vector<u32>): Vector<Analyzer::DefinitionId> {
+    let mut result: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < raws.length()) {
+      if (let Option::SOME(raw) = raws.get(index)) {
+        result.push(Id::fromRaw<Analyzer::DefinitionTag>(*raw));
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function hirIdsFromRaw(raws: &Vector<u32>): Vector<Hir::HirId> {
+    let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < raws.length()) {
+      if (let Option::SOME(raw) = raws.get(index)) {
+        result.push(Id::fromRaw<Hir::NodeTag>(*raw));
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// Records the drops and deferred bodies the innermost scope owes, then pops
+  /// it. Mirrors `exit_block_scope`, including its choice to write nothing for
+  /// a scope with no block of its own: the function root and the loop marker
+  /// scope are unwound by the exits that leave them, not by a block end.
+  function exitScope(state: &mut Borrowck::State, schedules: &mut Hir::DropSchedules): void {
+    let drops: Vector<u32> = state.currentScopeDrops();
+    let defers: Vector<u32> = state.currentScopeDefers();
+
+    if (let Option::SOME(blockRaw) = state.currentScopeBlock()) {
+      let block: Hir::HirId = Id::fromRaw<Hir::NodeTag>(blockRaw);
+
+      if (!drops.isEmpty()) {
+        let mut scheduleRef: &mut Hir::DropSchedules = schedules;
+        scheduleRef.setScopeEnd(block, Borrowck::definitionIdsFromRaw(&drops));
+      }
+
+      if (!defers.isEmpty()) {
+        let mut deferRef: &mut Hir::DropSchedules = schedules;
+        deferRef.setScopeEndDefers(block, Borrowck::hirIdsFromRaw(&defers));
+      }
+    }
+
+    let mut stateRef: &mut Borrowck::State = state;
+    stateRef.popScopeReleasing();
+  }
+
+  /// Records the drops and deferred bodies an early exit owes when it unwinds
+  /// every scope down to `toScopeIndex`. Mirrors the shared body of
+  /// `check_return`, `check_break`, and `check_continue`.
+  function recordExitSchedule(
+    state: &mut Borrowck::State,
+    schedules: &mut Hir::DropSchedules,
+    key: &Hir::ExitKey,
+    toScopeIndex: u64,
+  ): void {
+    let drops: Vector<u32> = state.exitDrops(toScopeIndex);
+    let defers: Vector<u32> = state.exitDefers(toScopeIndex);
+
+    if (!drops.isEmpty()) {
+      let mut scheduleRef: &mut Hir::DropSchedules = schedules;
+      scheduleRef.setExit(Hir::copyExitKey(key), Borrowck::definitionIdsFromRaw(&drops));
+    }
+
+    if (!defers.isEmpty()) {
+      let mut deferRef: &mut Hir::DropSchedules = schedules;
+      deferRef.setExitDefers(Hir::copyExitKey(key), Borrowck::hirIdsFromRaw(&defers));
+    }
+  }
+
+  /// Records what a `break` or a `continue` owes: everything between here and
+  /// the loop marker scope, which itself stays open. A jump with no enclosing
+  /// loop schedules nothing, exactly as the oracle leaves it to the earlier
+  /// semantic check to report.
+  function recordLoopExitSchedule(
+    state: &mut Borrowck::State,
+    schedules: &mut Hir::DropSchedules,
+    key: Hir::ExitKey,
+  ): void {
+    let Option::SOME(loopIndex) = state.loopScopeIndex() else {
+      return;
+    };
+
+    Borrowck::recordExitSchedule(state, schedules, &key, loopIndex + 1);
+  }
+
+  /// Whether a match scrutinee names storage that belongs to something else: a
+  /// field, an element, a dereference, a static. Its payload bindings borrow
+  /// those bytes instead of owning them, so the base's own schedule frees them.
+  /// Mirrors `scrutinee_aliases_external_storage`.
+  function aliasesExternalStorage(hir: &Hir::HirStore, scrutinee: Hir::HirId): boolean {
+    let Option::SOME(node) = hir.get(scrutinee) else {
+      return false;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::FieldAccess(_) -> true,
+      Hir::HirKind::Index(_) -> true,
+      Hir::HirKind::Dereference(_) -> true,
+      Hir::HirKind::StaticAccess(_) -> true,
+      _ -> false,
+    };
+  }
+
+  /// Whether destructuring this scrutinee binds payloads that still live in
+  /// borrowed storage. Ported from `scrutinee_binds_borrowed_payloads` down to
+  /// the two cases this slice can answer: a reference-typed scrutinee, and a
+  /// dereference of a reference. Its remaining cases need the borrowed-pattern
+  /// binding set and the field-base walk, neither of which is ported yet; both
+  /// are field or dereference shapes that `aliasesExternalStorage` already
+  /// suppresses.
+  function bindsBorrowedPayloads(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    scrutinee: Hir::HirId,
+  ): boolean {
+    let Option::SOME(node) = hir.get(scrutinee) else {
+      return false;
+    };
+
+    if (Borrowck::isReferenceType(typeStore, node.typeId)) {
+      return true;
+    }
+
+    let mut inner: Option<Hir::HirId> = Option::NONE;
+
+    match (&node.kind) {
+      Hir::HirKind::Dereference(target) -> {
+        inner = Option::SOME(target);
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(innerId) = inner else {
+      return false;
+    };
+
+    let Option::SOME(innerNode) = hir.get(innerId) else {
+      return false;
+    };
+
+    return Borrowck::isReferenceType(typeStore, innerNode.typeId);
+  }
+
+  function isReferenceType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    return match (type_) {
+      Analyzer::Type::Reference(_) -> true,
+      _ -> false,
+    };
+  }
+
+  /// Schedules the drops a match arm owes for its own pattern bindings, keyed
+  /// by the arm body so that the body's block schedule and this one stay
+  /// distinct. Mirrors the `on_match_arm_end` block of `check_match`, including
+  /// its three suppressions: a literal arm body (the `if let` desugaring, whose
+  /// binding is still live after the arm), a scrutinee that aliases storage it
+  /// does not own, and bindings that borrow their payloads.
+  function recordMatchArmDrops(
+    state: &mut Borrowck::State,
+    schedules: &mut Hir::DropSchedules,
+    hir: &Hir::HirStore,
+    bindings: &Vector<u32>,
+    body: Hir::HirId,
+    aliasesExternalStorage: boolean,
+    bindsBorrowedPayloads: boolean,
+  ): void {
+    if (aliasesExternalStorage || bindsBorrowedPayloads) {
+      return;
+    }
+
+    if (Borrowck::bodyIsLiteral(hir, body)) {
+      return;
+    }
+
+    let mut drops: Vector<u32> = Vector::new<u32>();
+    let mut position: u64 = bindings.length();
+
+    while (position > 0) {
+      position -= 1;
+
+      if (let Option::SOME(defRaw) = bindings.get(position)) {
+        if (state.isMoveValid(*defRaw)) {
+          drops.push(*defRaw);
+        }
+      }
+    }
+
+    if (drops.isEmpty()) {
+      return;
+    }
+
+    let mut scheduleRef: &mut Hir::DropSchedules = schedules;
+    scheduleRef.appendMatchArmEnd(body, Borrowck::definitionIdsFromRaw(&drops));
+  }
+
+  function bodyIsLiteral(hir: &Hir::HirStore, body: Hir::HirId): boolean {
+    let Option::SOME(node) = hir.get(body) else {
+      return false;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Literal(_) -> true,
+      _ -> false,
+    };
   }
 
   /// Joins the move states of several branches, reporting a local that some
@@ -1365,6 +1817,7 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
     nodeId: Hir::HirId,
   ): void {
     let Option::SOME(node) = hir.get(nodeId) else {
@@ -1391,72 +1844,72 @@ export namespace Borrowck {
       },
 
       Hir::HirKind::Binary(binaryNode) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, binaryNode.left);
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, binaryNode.right);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, binaryNode.left);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, binaryNode.right);
       },
       Hir::HirKind::Unary(unaryNode) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, unaryNode.operand);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, unaryNode.operand);
       },
       Hir::HirKind::Cast(cast) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, cast.expression);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, cast.expression);
       },
       Hir::HirKind::BitCast(cast) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, cast.expression);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, cast.expression);
       },
       Hir::HirKind::TypeOf(inner) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, inner);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, inner);
       },
       Hir::HirKind::Dereference(inner) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, inner);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, inner);
       },
       Hir::HirKind::FieldAccess(access) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, access.base);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, access.base);
       },
       Hir::HirKind::Index(indexNode) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, indexNode.base);
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, indexNode.index);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, indexNode.base);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, indexNode.index);
       },
       Hir::HirKind::MakeSlice(makeSlice) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, makeSlice.data);
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, makeSlice.len);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, makeSlice.data);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, makeSlice.len);
       },
       Hir::HirKind::BuiltinLoad(load) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, load.ptr);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, load.ptr);
       },
       Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, dropNode.ptr);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, dropNode.ptr);
       },
       Hir::HirKind::BuiltinStore(storeNode) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, storeNode.ptr);
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, storeNode.value);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, storeNode.ptr);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, storeNode.value);
       },
       Hir::HirKind::BuiltinHash(hashNode) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, hashNode.value);
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, hashNode.hasher);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, hashNode.value);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, hashNode.hasher);
       },
       Hir::HirKind::BuiltinEq(eqNode) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, eqNode.left);
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, eqNode.right);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, eqNode.left);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, eqNode.right);
       },
       Hir::HirKind::ExpressionStatement(expression) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, expression);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, expression);
       },
 
       Hir::HirKind::VectorLiteral(elements) -> {
-        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, &elements);
+        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &elements);
       },
       Hir::HirKind::TupleLiteral(elements) -> {
-        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, &elements);
+        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &elements);
       },
       Hir::HirKind::EnumVariant(variant) -> {
-        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, &variant.payload);
+        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &variant.payload);
       },
       Hir::HirKind::RecordInit(init) -> {
         let mut index: u64 = 0;
 
         while (index < init.fields.length()) {
           if (let Option::SOME(field) = init.fields.get(index)) {
-            Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, field.value);
+            Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, field.value);
 
             if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, field.value)) {
               Borrowck::tryConsume(state, source);
@@ -1468,7 +1921,7 @@ export namespace Borrowck {
       },
 
       Hir::HirKind::Reference(reference) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, reference.expression);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, reference.expression);
 
         if (let Option::SOME(target) = Borrowck::extractRootVariable(hir, reference.expression)) {
           Borrowck::tryBorrow(defStore, symbols, state, diagnostics, target, reference.mutable, span);
@@ -1484,46 +1937,46 @@ export namespace Borrowck {
       },
 
       Hir::HirKind::Call(call) -> {
-        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, &call.args, span);
+        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, span);
       },
       Hir::HirKind::CallClosure(call) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, call.callee);
-        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, &call.args, span);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, call.callee);
+        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, span);
       },
       Hir::HirKind::MethodCall(call) -> {
         if (let Option::SOME(receiver) = call.receiver) {
-          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, receiver);
+          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, receiver);
           Borrowck::checkReceiverBorrow(defStore, symbols, hir, state, diagnostics, receiver, call.method, span);
         }
 
-        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, &call.args, span);
+        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, span);
       },
 
       Hir::HirKind::Let(letNode) -> {
-        Borrowck::checkLet(defStore, typeStore, symbols, hir, state, diagnostics, &letNode, span);
+        Borrowck::checkLet(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &letNode, span);
       },
       Hir::HirKind::Assign(assign) -> {
-        Borrowck::checkAssign(defStore, typeStore, symbols, hir, state, diagnostics, &assign, span);
+        Borrowck::checkAssign(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &assign, nodeId, span);
       },
       Hir::HirKind::Block(block) -> {
-        Borrowck::checkBlock(defStore, typeStore, symbols, hir, state, diagnostics, &block);
+        Borrowck::checkBlock(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &block, nodeId);
       },
       Hir::HirKind::If(ifNode) -> {
-        Borrowck::checkIf(defStore, typeStore, symbols, hir, state, diagnostics, &ifNode, span);
+        Borrowck::checkIf(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &ifNode, span);
       },
       Hir::HirKind::LetElse(letElse) -> {
-        Borrowck::checkLetElse(defStore, typeStore, symbols, hir, state, diagnostics, &letElse);
+        Borrowck::checkLetElse(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &letElse);
       },
       Hir::HirKind::Loop(loopNode) -> {
-        Borrowck::checkLoop(defStore, typeStore, symbols, hir, state, diagnostics, &loopNode);
+        Borrowck::checkLoop(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &loopNode);
       },
       Hir::HirKind::Match(matchNode) -> {
-        Borrowck::checkMatch(defStore, typeStore, symbols, hir, state, diagnostics, &matchNode, span);
+        Borrowck::checkMatch(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &matchNode, span);
       },
 
       Hir::HirKind::Return(value) -> {
         if (let Option::SOME(returned) = value) {
-          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, returned);
+          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, returned);
 
           if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, returned)) {
             let mut returnRef: &mut Borrowck::State = state;
@@ -1531,20 +1984,29 @@ export namespace Borrowck {
           }
         }
 
+        // A return unwinds every open scope back to the function root, so it
+        // owes the drops of all of them. Mirrors `check_return`.
+        let returnKey: Hir::ExitKey = Hir::ExitKey::Return(nodeId);
+        Borrowck::recordExitSchedule(state, schedules, &returnKey, 0);
+
         let mut stateRef: &mut Borrowck::State = state;
         stateRef.setReachable(false);
       },
       Hir::HirKind::Break -> {
+        Borrowck::recordLoopExitSchedule(state, schedules, Hir::ExitKey::Break(nodeId));
+
         let mut stateRef: &mut Borrowck::State = state;
         stateRef.setReachable(false);
       },
       Hir::HirKind::Continue -> {
+        Borrowck::recordLoopExitSchedule(state, schedules, Hir::ExitKey::Continue(nodeId));
+
         let mut stateRef: &mut Borrowck::State = state;
         stateRef.markContinue();
         stateRef.setReachable(false);
       },
       Hir::HirKind::Panic(message) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, message);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, message);
 
         let mut stateRef: &mut Borrowck::State = state;
         stateRef.setReachable(false);
@@ -1562,9 +2024,10 @@ export namespace Borrowck {
         let saved: boolean = state.inDefer;
 
         let mut enterRef: &mut Borrowck::State = state;
+        enterRef.pushDeferBody(body.raw());
         enterRef.setInDefer(true);
 
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, body);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, body);
 
         let mut leaveRef: &mut Borrowck::State = state;
         leaveRef.setInDefer(saved);
@@ -1581,13 +2044,14 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
     operands: &Vector<Hir::HirId>,
   ): void {
     let mut index: u64 = 0;
 
     while (index < operands.length()) {
       if (let Option::SOME(operand) = operands.get(index)) {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, *operand);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, *operand);
 
         if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *operand)) {
           Borrowck::tryConsume(state, source);
@@ -1608,6 +2072,7 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
     args: &Vector<Hir::HirId>,
     span: SourceSpan,
   ): void {
@@ -1615,7 +2080,7 @@ export namespace Borrowck {
 
     while (index < args.length()) {
       if (let Option::SOME(argument) = args.get(index)) {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, *argument);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, *argument);
         Borrowck::checkTemporaryBorrow(defStore, symbols, hir, state, diagnostics, *argument, span);
 
         if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *argument)) {
@@ -1691,11 +2156,12 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
     letNode: &Hir::HirLet,
     span: SourceSpan,
   ): void {
     if (let Option::SOME(value) = letNode.value) {
-      Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, value);
+      Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, value);
 
       if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, value)) {
         Borrowck::tryConsume(state, source);
@@ -1745,10 +2211,12 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
     assign: &Hir::HirAssign,
+    nodeId: Hir::HirId,
     span: SourceSpan,
   ): void {
-    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, assign.value);
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, assign.value);
 
     if (let Option::SOME(target) = Borrowck::extractRootVariable(hir, assign.target)) {
       if (state.borrowValue(target.raw()) != Borrowck::BORROW_NONE) {
@@ -1765,6 +2233,14 @@ export namespace Borrowck {
       }
 
       if (Borrowck::definitionNeedsDrop(defStore, typeStore, target)) {
+        // Overwriting a local that still holds a value leaks it unless the old
+        // value is dropped first. Mirrors the `on_overwrite` arm of
+        // `check_assign`, which reads the state before the revival below.
+        if (state.isMoveValid(target.raw())) {
+          let mut overwriteRef: &mut Hir::DropSchedules = schedules;
+          overwriteRef.appendOverwrite(nodeId, target);
+        }
+
         if (let Option::SOME(value) = state.moveValue(target.raw())) {
           if (value == Borrowck::MOVE_MOVED) {
             let mut reviveRef: &mut Borrowck::State = state;
@@ -1786,10 +2262,12 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
     block: &Hir::HirBlock,
+    blockId: Hir::HirId,
   ): void {
     let mut enterRef: &mut Borrowck::State = state;
-    enterRef.pushScope();
+    enterRef.pushScope(blockId.raw(), true, false);
 
     let mut index: u64 = 0;
 
@@ -1799,7 +2277,7 @@ export namespace Borrowck {
       }
 
       if (let Option::SOME(statement) = block.statements.get(index)) {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, *statement);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, *statement);
       }
 
       index += 1;
@@ -1807,12 +2285,11 @@ export namespace Borrowck {
 
     if (let Option::SOME(tail) = block.expression) {
       if (state.reachable) {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, tail);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, tail);
       }
     }
 
-    let mut exitRef: &mut Borrowck::State = state;
-    exitRef.popScopeReleasing();
+    Borrowck::exitScope(state, schedules);
   }
 
   function checkIf(
@@ -1822,10 +2299,11 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
     ifNode: &Hir::HirIf,
     span: SourceSpan,
   ): void {
-    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, ifNode.condition);
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, ifNode.condition);
 
     let preReachable: boolean = state.reachable;
     let preMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
@@ -1834,7 +2312,7 @@ export namespace Borrowck {
     let mut thenRef: &mut Borrowck::State = state;
     thenRef.setReachable(preReachable);
 
-    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, ifNode.thenBranch);
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, ifNode.thenBranch);
 
     let thenMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
     let thenBorrows: Borrowck::BorrowSnapshot = state.snapshotBorrows();
@@ -1870,7 +2348,7 @@ export namespace Borrowck {
     elseRef.restoreBorrows(&preBorrows);
     elseRef.setReachable(preReachable);
 
-    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, elseBranch);
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, elseBranch);
 
     let elseMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
     let elseReachable: boolean = state.reachable;
@@ -1909,9 +2387,10 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
     letElse: &Hir::HirLetElse,
   ): void {
-    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, letElse.value);
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, letElse.value);
 
     // The else block always diverges, so nothing it does reaches the code that
     // follows the binding: like a diverging `if` branch, its moves and borrows
@@ -1920,7 +2399,7 @@ export namespace Borrowck {
     let savedMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
     let savedBorrows: Borrowck::BorrowSnapshot = state.snapshotBorrows();
 
-    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, letElse.elseBlock);
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, letElse.elseBlock);
 
     let mut restoreRef: &mut Borrowck::State = state;
     restoreRef.restoreMoves(&savedMoves);
@@ -1934,8 +2413,11 @@ export namespace Borrowck {
 
     while (index < bindings.length()) {
       if (let Option::SOME(defRaw) = bindings.get(index)) {
-        let mut declareRef: &mut Borrowck::State = state;
-        declareRef.setMoveValue(*defRaw, Borrowck::MOVE_VALID);
+        // Unlike a match arm binding, a let-else binding outlives the
+        // construct and belongs to the enclosing scope, so it is declared
+        // owned there and dropped at that scope's end. Mirrors
+        // `declare_owned_pattern_bindings`.
+        Borrowck::declareOwned(state, Id::fromRaw<Analyzer::DefinitionTag>(*defRaw));
       }
 
       index += 1;
@@ -1949,14 +2431,18 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
     matchNode: &Hir::HirMatch,
     span: SourceSpan,
   ): void {
-    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, matchNode.scrutinee);
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, matchNode.scrutinee);
 
     if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
       Borrowck::tryConsume(state, source);
     }
+
+    let aliasesExternalStorage: boolean = Borrowck::aliasesExternalStorage(hir, matchNode.scrutinee);
+    let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, matchNode.scrutinee);
 
     let preReachable: boolean = state.reachable;
     let preMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
@@ -1990,11 +2476,11 @@ export namespace Borrowck {
       }
 
       if (let Option::SOME(guard) = arm.guard) {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, guard);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, guard);
       }
 
       if (state.reachable) {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, arm.body);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, arm.body);
 
         if (let Option::SOME(result) = Borrowck::armResultBinding(hir, arm.body)) {
           if (Borrowck::containsRaw(&mut bindings, result.raw())) {
@@ -2002,6 +2488,16 @@ export namespace Borrowck {
           }
         }
       }
+
+      Borrowck::recordMatchArmDrops(
+        state,
+        schedules,
+        hir,
+        &bindings,
+        arm.body,
+        aliasesExternalStorage,
+        bindsBorrowedPayloads,
+      );
 
       let mut removeIndex: u64 = 0;
 
@@ -2044,6 +2540,7 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
     loopNode: &Hir::HirLoop,
   ): void {
     let mut update: Option<Hir::HirId> = Option::NONE;
@@ -2051,15 +2548,15 @@ export namespace Borrowck {
     match (&loopNode.condition) {
       Hir::LoopKind::Infinite -> {},
       Hir::LoopKind::While(condition) -> {
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, condition);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, condition);
       },
       Hir::LoopKind::For(forLoop) -> {
         if (let Option::SOME(init) = forLoop.init) {
-          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, init);
+          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, init);
         }
 
         if (let Option::SOME(condition) = forLoop.condition) {
-          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, condition);
+          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, condition);
         }
 
         update = forLoop.update;
@@ -2070,11 +2567,14 @@ export namespace Borrowck {
     let preLoopBorrows: Borrowck::BorrowSnapshot = state.snapshotBorrows();
     let preBodyReachable: boolean = state.reachable;
 
+    // The loop marker scope carries no block of its own, so it never receives
+    // a scope-end schedule; it exists so `break` and `continue` know how far
+    // to unwind. Mirrors the oracle's loop `ScopeEntry`.
     let mut enterRef: &mut Borrowck::State = state;
-    enterRef.pushScope();
+    enterRef.pushScope(0, false, true);
     enterRef.pushLoop();
 
-    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, loopNode.body);
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, loopNode.body);
 
     let bodyFallsThrough: boolean = state.reachable;
     let continueSeen: boolean = state.continueSeen();
@@ -2084,7 +2584,7 @@ export namespace Borrowck {
         let mut updateRef: &mut Borrowck::State = state;
         updateRef.setReachable(true);
 
-        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, updateId);
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, updateId);
       }
     }
 
@@ -2096,7 +2596,7 @@ export namespace Borrowck {
 
       let mut secondPass: DiagnosticBag = DiagnosticBag::init();
 
-      Borrowck::checkNode(defStore, typeStore, symbols, hir, state, &mut secondPass, loopNode.body);
+      Borrowck::checkNode(defStore, typeStore, symbols, hir, state, &mut secondPass, schedules, loopNode.body);
 
       let secondFallsThrough: boolean = state.reachable;
       let secondContinueSeen: boolean = state.continueSeen();
@@ -2106,7 +2606,7 @@ export namespace Borrowck {
           let mut updateRef: &mut Borrowck::State = state;
           updateRef.setReachable(true);
 
-          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, &mut secondPass, updateId);
+          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, &mut secondPass, schedules, updateId);
         }
       }
 
@@ -2115,7 +2615,8 @@ export namespace Borrowck {
 
     let mut exitRef: &mut Borrowck::State = state;
     exitRef.popLoop();
-    exitRef.popScopeReleasing();
+
+    Borrowck::exitScope(state, schedules);
 
     Borrowck::conservativeMergeMoves(state, &preLoopMoves);
 
@@ -2182,11 +2683,13 @@ export namespace Borrowck {
     symbols: &mut Analyzer::SymbolTable,
     hir: &Hir::HirStore,
     diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
+    functionId: Analyzer::DefinitionId,
     params: &Vector<Analyzer::DefinitionId>,
     bodyId: Hir::HirId,
   ): void {
     let mut state: Borrowck::State = Borrowck::State::init();
-    state.pushScope();
+    state.pushScope(0, false, false);
 
     let mut index: u64 = 0;
 
@@ -2200,13 +2703,20 @@ export namespace Borrowck {
       index += 1;
     }
 
-    Borrowck::checkNode(defStore, typeStore, symbols, hir, &mut state, diagnostics, bodyId);
+    Borrowck::checkNode(defStore, typeStore, symbols, hir, &mut state, diagnostics, schedules, bodyId);
+
+    // The synthetic return at the end of the body unwinds everything still
+    // open, which by now is the root scope alone. Mirrors the `FnEnd` block of
+    // `check_function`, computed before the root scope is popped.
+    let fnEnd: Hir::ExitKey = Hir::ExitKey::FnEnd(functionId);
+    Borrowck::recordExitSchedule(&mut state, schedules, &fnEnd, 0);
 
     state.popScopeReleasing();
   }
 
   /// Borrow-check entry point. Walks every function and method body the HIR
-  /// store carries, in item order, and returns the diagnostics they produced.
+  /// store carries, in item order, and returns the diagnostics they produced
+  /// together with the drop schedules the same walk recorded.
   ///
   /// Not wired into `Analyzer::analyzeModule`: callers run it explicitly after
   /// `Lowering::lowerModule`.
@@ -2217,6 +2727,7 @@ export namespace Borrowck {
     hir: &Hir::HirStore,
   ): Borrowck::BorrowckOutput {
     let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+    let mut schedules: Hir::DropSchedules = Hir::DropSchedules::init();
     let mut index: u64 = 0;
 
     while (index < hir.items.length()) {
@@ -2235,11 +2746,21 @@ export namespace Borrowck {
         continue;
       };
 
-      Borrowck::checkFunction(defStore, typeStore, symbols, hir, &mut diagnostics, &params, bodyId);
+      Borrowck::checkFunction(
+        defStore,
+        typeStore,
+        symbols,
+        hir,
+        &mut diagnostics,
+        &mut schedules,
+        *itemId,
+        &params,
+        bodyId,
+      );
 
       index += 1;
     }
 
-    return Borrowck::BorrowckOutput { diagnostics: diagnostics };
+    return Borrowck::BorrowckOutput { diagnostics: diagnostics, dropSchedules: schedules };
   }
 }
