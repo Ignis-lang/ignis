@@ -1,0 +1,1144 @@
+import SourceSpan from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import Vector from "std::vector";
+
+/// AST -> HIR lowering for the Ignis selfhost compiler (IGN-37, slice B).
+///
+/// Port of the item/statement/expression subset of
+/// `crates/ignis_analyzer/src/lowering.rs` that this slice covers:
+///   - items: free functions (declaration + body), namespaces and exports
+///     recursed into for the functions they contain,
+///   - statements: let (annotated or inferred), assignment, expression
+///     statement, block, if/else, while, return, break, continue,
+///   - expressions: literals, variable references, binary ops, unary ops,
+///     grouping (transparent), calls to free functions, block expressions,
+///     if expressions, unit.
+///
+/// Everything else (match, patterns beyond simple bindings, method calls,
+/// pipes, try, closures, for/for-of, defer, builtins, vectors, tuples,
+/// casts, references, record init, ...) lowers to a single explicit
+/// `HirKind::Error` fallback, mirroring the Rust oracle's error nodes.
+///
+/// Deviations from the Rust oracle, rooted in selfhost model gaps:
+///   - The selfhost `Type` enum has no error type, so `Error` fallback nodes
+///     and unknown types use the `VOID` sentinel instead of `types.error()`.
+///   - Statement nodes carry no checked type in `TypecheckOutput` (it is
+///     keyed by expression ids), so statement blocks and ifs type as `void`
+///     where the Rust oracle may show `never`.
+///   - Locals have no `DefinitionId` before lowering (the body resolver
+///     hands out per-function `LocalId`s), so lowering allocates a
+///     `Definition::Variable` per let binding site and threads a
+///     `LocalMap` from `LocalId` to that definition. The reverse scan finds
+///     the innermost live binding at the reference point, which resolves
+///     the ADR-B10 `LocalId` index reuse across sibling scopes because
+///     bindings are registered in source order during the same walk.
+export namespace Lowering {
+  /// Insertion-ordered map from body-resolver `LocalId`s to the `Variable`
+  /// definitions lowering allocated for them. Entries are never popped:
+  /// lookups reverse-scan so the innermost (latest) binding wins, exactly
+  /// like the resolver's own shadowing rules at the point of reference.
+  record LocalMap {
+    public fnRaws: Vector<u32>;
+    public indexes: Vector<u32>;
+    public defs: Vector<Analyzer::DefinitionId>;
+
+    public static init(): LocalMap {
+      return LocalMap {
+        fnRaws: Vector::new<u32>(),
+        indexes: Vector::new<u32>(),
+        defs: Vector::new<Analyzer::DefinitionId>(),
+      };
+    }
+  }
+
+  function registerLocal(
+    locals: &mut Lowering::LocalMap,
+    localId: Analyzer::ResolverBodies::LocalId,
+    defId: Analyzer::DefinitionId,
+  ): void {
+    let mut localsRef: &mut Lowering::LocalMap = locals;
+
+    localsRef.fnRaws.push(localId.enclosingFn.raw());
+    localsRef.indexes.push(localId.index);
+    localsRef.defs.push(defId);
+  }
+
+  function lookupLocal(
+    locals: &mut Lowering::LocalMap,
+    localId: Analyzer::ResolverBodies::LocalId,
+  ): Option<Analyzer::DefinitionId> {
+    let mut index: u64 = locals.fnRaws.length();
+
+    while (index > 0) {
+      index -= 1;
+
+      let Option::SOME(fnRaw) = locals.fnRaws.get(index) else {
+        continue;
+      };
+      let Option::SOME(localIndex) = locals.indexes.get(index) else {
+        continue;
+      };
+
+      if (*fnRaw != localId.enclosingFn.raw() || *localIndex != localId.index) {
+        continue;
+      }
+
+      let Option::SOME(defId) = locals.defs.get(index) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(*defId);
+    }
+
+    return Option::NONE;
+  }
+
+  /// Checked type of an expression, using the same last-write-wins reverse
+  /// scan as `Checks::exprIsNever` and the typechecker's own
+  /// `lookupRecordedExprType`.
+  function lookupExprType(
+    typecheck: &Analyzer::Typecheck::TypecheckOutput,
+    exprId: Ast::ExpressionId,
+  ): Option<Analyzer::TypeId> {
+    let mut index: u64 = typecheck.exprTypes.nodeIds.length();
+
+    while (index > 0) {
+      index -= 1;
+
+      let Option::SOME(nodeId) = typecheck.exprTypes.nodeIds.get(index) else {
+        continue;
+      };
+
+      if (*nodeId != exprId.raw()) {
+        continue;
+      }
+
+      let Option::SOME(typeId) = typecheck.exprTypes.typeIds.get(index) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(*typeId);
+    }
+
+    return Option::NONE;
+  }
+
+  function voidType(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    return typeStoreRef.intern(Analyzer::Type::VOID);
+  }
+
+  function neverType(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    return typeStoreRef.intern(Analyzer::Type::NEVER);
+  }
+
+  function exprTypeOrVoid(
+    typeStore: &mut Analyzer::TypeStore,
+    typecheck: &Analyzer::Typecheck::TypecheckOutput,
+    exprId: Ast::ExpressionId,
+  ): Analyzer::TypeId {
+    if (let Option::SOME(typeId) = Lowering::lookupExprType(typecheck, exprId)) {
+      return typeId;
+    }
+
+    return Lowering::voidType(typeStore);
+  }
+
+  /// Single fallback for every construct outside this slice. The selfhost
+  /// type model has no error type, so the node types as `void`.
+  function errorNode(
+    hir: &mut Hir::HirStore,
+    typeStore: &mut Analyzer::TypeStore,
+    span: SourceSpan,
+  ): Hir::HirId {
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Error,
+      span: span,
+      typeId: Lowering::voidType(typeStore),
+    });
+  }
+
+  function mapBinaryOperator(operator: Ast::Expression::BinaryOperator): Hir::BinaryOperation {
+    return match (operator) {
+      Ast::Expression::BinaryOperator::Add -> Hir::BinaryOperation::Add,
+      Ast::Expression::BinaryOperator::Subtract -> Hir::BinaryOperation::Sub,
+      Ast::Expression::BinaryOperator::Multiply -> Hir::BinaryOperation::Mul,
+      Ast::Expression::BinaryOperator::Divide -> Hir::BinaryOperation::Div,
+      Ast::Expression::BinaryOperator::Modulo -> Hir::BinaryOperation::Mod,
+      Ast::Expression::BinaryOperator::And -> Hir::BinaryOperation::And,
+      Ast::Expression::BinaryOperator::Or -> Hir::BinaryOperation::Or,
+      Ast::Expression::BinaryOperator::Equal -> Hir::BinaryOperation::Equal,
+      Ast::Expression::BinaryOperator::NotEqual -> Hir::BinaryOperation::NotEqual,
+      Ast::Expression::BinaryOperator::LessThan -> Hir::BinaryOperation::LessThan,
+      Ast::Expression::BinaryOperator::LessThanOrEqual -> Hir::BinaryOperation::LessEqual,
+      Ast::Expression::BinaryOperator::GreaterThan -> Hir::BinaryOperation::GreaterThan,
+      Ast::Expression::BinaryOperator::GreaterThanOrEqual -> Hir::BinaryOperation::GreaterEqual,
+      Ast::Expression::BinaryOperator::BitAnd -> Hir::BinaryOperation::BitAnd,
+      Ast::Expression::BinaryOperator::BitOr -> Hir::BinaryOperation::BitOr,
+      Ast::Expression::BinaryOperator::BitXor -> Hir::BinaryOperation::BitXor,
+      Ast::Expression::BinaryOperator::ShiftLeft -> Hir::BinaryOperation::BitShiftLeft,
+      Ast::Expression::BinaryOperator::ShiftRight -> Hir::BinaryOperation::BitShiftRight,
+    };
+  }
+
+  /// `NONE` for the postfix-style `Increment`/`Decrement` operators, which
+  /// are outside this slice and fall back to `Error`.
+  function mapUnaryOperator(operator: Ast::Expression::UnaryOperator): Option<Hir::UnaryOperation> {
+    return match (operator) {
+      Ast::Expression::UnaryOperator::Not -> Option::SOME(Hir::UnaryOperation::Not),
+      Ast::Expression::UnaryOperator::Negate -> Option::SOME(Hir::UnaryOperation::Neg),
+      Ast::Expression::UnaryOperator::BitNot -> Option::SOME(Hir::UnaryOperation::BitNot),
+      Ast::Expression::UnaryOperator::Increment -> Option::NONE,
+      Ast::Expression::UnaryOperator::Decrement -> Option::NONE,
+    };
+  }
+
+  /// `NONE` for plain `=`, mirroring the Rust `HIRKind::Assign` operation
+  /// payload for compound assignments.
+  function mapAssignmentOperator(
+    operator: Ast::Expression::AssignmentOperator,
+  ): Option<Hir::BinaryOperation> {
+    return match (operator) {
+      Ast::Expression::AssignmentOperator::Assign -> Option::NONE,
+      Ast::Expression::AssignmentOperator::AddAssign -> Option::SOME(Hir::BinaryOperation::Add),
+      Ast::Expression::AssignmentOperator::SubtractAssign -> Option::SOME(Hir::BinaryOperation::Sub),
+      Ast::Expression::AssignmentOperator::MultiplyAssign -> Option::SOME(Hir::BinaryOperation::Mul),
+      Ast::Expression::AssignmentOperator::DivideAssign -> Option::SOME(Hir::BinaryOperation::Div),
+      Ast::Expression::AssignmentOperator::ModuloAssign -> Option::SOME(Hir::BinaryOperation::Mod),
+      Ast::Expression::AssignmentOperator::ShiftLeftAssign -> Option::SOME(Hir::BinaryOperation::BitShiftLeft),
+      Ast::Expression::AssignmentOperator::ShiftRightAssign -> Option::SOME(Hir::BinaryOperation::BitShiftRight),
+      Ast::Expression::AssignmentOperator::BitAndAssign -> Option::SOME(Hir::BinaryOperation::BitAnd),
+      Ast::Expression::AssignmentOperator::BitOrAssign -> Option::SOME(Hir::BinaryOperation::BitOr),
+      Ast::Expression::AssignmentOperator::BitXorAssign -> Option::SOME(Hir::BinaryOperation::BitXor),
+      Ast::Expression::AssignmentOperator::AndAssign -> Option::SOME(Hir::BinaryOperation::And),
+      Ast::Expression::AssignmentOperator::OrAssign -> Option::SOME(Hir::BinaryOperation::Or),
+    };
+  }
+
+  /// Maps a width-less AST literal to the width-carrying HIR literal using
+  /// the checked type. The Rust oracle carries widths from parsing; the
+  /// selfhost parser does not, so the typechecker's verdict selects the
+  /// variant (with `i32`/`u64`/`f64` fallbacks matching the checker's own
+  /// literal defaults).
+  function literalKind(
+    typeStore: &mut Analyzer::TypeStore,
+    value: &Ast::Expression::LiteralValue,
+    typeId: Analyzer::TypeId,
+  ): Hir::LiteralValue {
+    return match (value) {
+      Ast::Expression::LiteralValue::Int(intValue) -> Lowering::intLiteralKind(typeStore, intValue, typeId),
+      Ast::Expression::LiteralValue::UInt(uintValue) -> Lowering::uintLiteralKind(typeStore, uintValue, typeId),
+      Ast::Expression::LiteralValue::Float(floatValue) -> Lowering::floatLiteralKind(typeStore, floatValue, typeId),
+      Ast::Expression::LiteralValue::Boolean(boolValue) -> Hir::LiteralValue::Boolean(boolValue),
+      Ast::Expression::LiteralValue::Character(charValue) -> Hir::LiteralValue::Char(charValue as u32),
+      Ast::Expression::LiteralValue::String(text) -> Hir::LiteralValue::String(text.clone()),
+      Ast::Expression::LiteralValue::Null -> Hir::LiteralValue::Null,
+    };
+  }
+
+  function intLiteralKind(
+    typeStore: &mut Analyzer::TypeStore,
+    value: i64,
+    typeId: Analyzer::TypeId,
+  ): Hir::LiteralValue {
+    if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+      return match (typeNode) {
+        Analyzer::Type::I8 -> Hir::LiteralValue::Int8(value as i8),
+        Analyzer::Type::I16 -> Hir::LiteralValue::Int16(value as i16),
+        Analyzer::Type::I64 -> Hir::LiteralValue::Int64(value),
+        Analyzer::Type::U8 -> Hir::LiteralValue::UnsignedInt8(value as u8),
+        Analyzer::Type::U16 -> Hir::LiteralValue::UnsignedInt16(value as u16),
+        Analyzer::Type::U32 -> Hir::LiteralValue::UnsignedInt32(value as u32),
+        Analyzer::Type::U64 -> Hir::LiteralValue::UnsignedInt64(value as u64),
+        _ -> Hir::LiteralValue::Int32(value as i32),
+      };
+    }
+
+    return Hir::LiteralValue::Int32(value as i32);
+  }
+
+  function uintLiteralKind(
+    typeStore: &mut Analyzer::TypeStore,
+    value: u64,
+    typeId: Analyzer::TypeId,
+  ): Hir::LiteralValue {
+    if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+      return match (typeNode) {
+        Analyzer::Type::U8 -> Hir::LiteralValue::UnsignedInt8(value as u8),
+        Analyzer::Type::U16 -> Hir::LiteralValue::UnsignedInt16(value as u16),
+        Analyzer::Type::U32 -> Hir::LiteralValue::UnsignedInt32(value as u32),
+        Analyzer::Type::I8 -> Hir::LiteralValue::Int8(value as i8),
+        Analyzer::Type::I16 -> Hir::LiteralValue::Int16(value as i16),
+        Analyzer::Type::I32 -> Hir::LiteralValue::Int32(value as i32),
+        Analyzer::Type::I64 -> Hir::LiteralValue::Int64(value as i64),
+        _ -> Hir::LiteralValue::UnsignedInt64(value),
+      };
+    }
+
+    return Hir::LiteralValue::UnsignedInt64(value);
+  }
+
+  function floatLiteralKind(
+    typeStore: &mut Analyzer::TypeStore,
+    value: f64,
+    typeId: Analyzer::TypeId,
+  ): Hir::LiteralValue {
+    if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+      if (let Analyzer::Type::F32 = typeNode) {
+        return Hir::LiteralValue::Float32(value as f32);
+      }
+    }
+
+    return Hir::LiteralValue::Float64(value);
+  }
+
+  // =========================================================================
+  // Expressions
+  // =========================================================================
+
+  function lowerExpr(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+  ): Hir::HirId {
+    let Option::SOME(expression) = module.expressions.get(exprId) else {
+      return Lowering::errorNode(hir, typeStore, SourceSpan::new("", 0, 0));
+    };
+
+    match (expression) {
+      Ast::Expression::Node::Literal(literal) -> {
+        let literalType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+        let kind: Hir::LiteralValue = Lowering::literalKind(typeStore, &literal.value, literalType);
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Literal(kind),
+          span: literal.span,
+          typeId: literalType,
+        });
+      },
+      Ast::Expression::Node::Variable(variable) -> {
+        return Lowering::lowerNameRef(defStore, typeStore, symbols, module, output, locals, hir, exprId, variable.span);
+      },
+      Ast::Expression::Node::Call(call) -> {
+        return Lowering::lowerCall(defStore, typeStore, symbols, module, output, locals, hir, exprId, &call);
+      },
+      Ast::Expression::Node::Binary(binaryExpr) -> {
+        let left: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, binaryExpr.left);
+        let right: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, binaryExpr.right);
+        let binaryType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Binary(Hir::HirBinary {
+            operation: Lowering::mapBinaryOperator(binaryExpr.operator),
+            left: left,
+            right: right,
+          }),
+          span: binaryExpr.span,
+          typeId: binaryType,
+        });
+      },
+      Ast::Expression::Node::Unary(unary) -> {
+        let Option::SOME(operation) = Lowering::mapUnaryOperator(unary.operator) else {
+          return Lowering::errorNode(hir, typeStore, unary.span);
+        };
+
+        let operand: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, unary.operand);
+        let unaryType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Unary(Hir::HirUnary {
+            operation: operation,
+            operand: operand,
+          }),
+          span: unary.span,
+          typeId: unaryType,
+        });
+      },
+      Ast::Expression::Node::Grouped(grouped) -> {
+        return Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, grouped.expression);
+      },
+      Ast::Expression::Node::Unit(unit) -> {
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Unit,
+          span: unit.span,
+          typeId: Lowering::voidType(typeStore),
+        });
+      },
+      Ast::Expression::Node::Assignment(assignment) -> {
+        let target: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.target);
+        let value: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.value);
+        let assignType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Assign(Hir::HirAssign {
+            target: target,
+            value: value,
+            operation: Lowering::mapAssignmentOperator(assignment.operator),
+          }),
+          span: assignment.span,
+          typeId: assignType,
+        });
+      },
+      Ast::Expression::Node::Block(block) -> {
+        let blockType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+        return Lowering::lowerBlockParts(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          output,
+          locals,
+          hir,
+          &block.statements,
+          &block.tail,
+          block.span,
+          blockType,
+        );
+      },
+      Ast::Expression::Node::If(ifExpr) -> {
+        let condition: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, ifExpr.condition);
+        let thenBranch: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, ifExpr.thenBranch);
+
+        let mut elseBranch: Option<Hir::HirId> = Option::NONE;
+        if (let Option::SOME(elseId) = ifExpr.elseBranch) {
+          elseBranch = Option::SOME(Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, elseId));
+        }
+
+        let ifType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::If(Hir::HirIf {
+            condition: condition,
+            thenBranch: thenBranch,
+            elseBranch: elseBranch,
+          }),
+          span: ifExpr.span,
+          typeId: ifType,
+        });
+      },
+      Ast::Expression::Node::Ternary(ternary) -> {
+        return Lowering::errorNode(hir, typeStore, ternary.span);
+      },
+      Ast::Expression::Node::Cast(cast) -> {
+        return Lowering::errorNode(hir, typeStore, cast.span);
+      },
+      Ast::Expression::Node::Path(path) -> {
+        return Lowering::lowerNameRef(defStore, typeStore, symbols, module, output, locals, hir, exprId, path.span);
+      },
+      Ast::Expression::Node::Dereference(dereference) -> {
+        return Lowering::errorNode(hir, typeStore, dereference.span);
+      },
+      Ast::Expression::Node::Tuple(tuple) -> {
+        return Lowering::errorNode(hir, typeStore, tuple.span);
+      },
+      Ast::Expression::Node::LetCondition(letCondition) -> {
+        return Lowering::errorNode(hir, typeStore, letCondition.span);
+      },
+      Ast::Expression::Node::Reference(reference) -> {
+        return Lowering::errorNode(hir, typeStore, reference.span);
+      },
+      Ast::Expression::Node::Match(matchExpr) -> {
+        return Lowering::errorNode(hir, typeStore, matchExpr.span);
+      },
+      Ast::Expression::Node::Vector(vectorLiteral) -> {
+        return Lowering::errorNode(hir, typeStore, vectorLiteral.span);
+      },
+      Ast::Expression::Node::VectorAccess(access) -> {
+        return Lowering::errorNode(hir, typeStore, access.span);
+      },
+      Ast::Expression::Node::PostfixIncrement(postfix) -> {
+        return Lowering::errorNode(hir, typeStore, postfix.span);
+      },
+      Ast::Expression::Node::PostfixDecrement(postfix) -> {
+        return Lowering::errorNode(hir, typeStore, postfix.span);
+      },
+      Ast::Expression::Node::MemberAccess(memberAccess) -> {
+        return Lowering::errorNode(hir, typeStore, memberAccess.span);
+      },
+      Ast::Expression::Node::RecordInit(recordInit) -> {
+        return Lowering::errorNode(hir, typeStore, recordInit.span);
+      },
+      Ast::Expression::Node::BuiltinCall(builtinCall) -> {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      },
+      Ast::Expression::Node::Lambda(lambda) -> {
+        return Lowering::errorNode(hir, typeStore, lambda.span);
+      },
+      Ast::Expression::Node::CaptureOverride(captureOverride) -> {
+        return Lowering::errorNode(hir, typeStore, captureOverride.span);
+      },
+      Ast::Expression::Node::Pipe(pipe) -> {
+        return Lowering::errorNode(hir, typeStore, pipe.span);
+      },
+      Ast::Expression::Node::PipePlaceholder(placeholder) -> {
+        return Lowering::errorNode(hir, typeStore, placeholder.span);
+      },
+      Ast::Expression::Node::Try(tryExpr) -> {
+        return Lowering::errorNode(hir, typeStore, tryExpr.span);
+      },
+    };
+
+    return Lowering::errorNode(hir, typeStore, SourceSpan::new("", 0, 0));
+  }
+
+  /// Lowers a name reference (a `Variable` expression, or the single-segment
+  /// `Path` the selfhost parser produces for bare identifiers) to
+  /// `HirKind::Variable`. Local references map through the `LocalMap`;
+  /// module-global references are limited to `Variable` and `Function`
+  /// definitions — variants, records, and every other path shape are
+  /// outside this slice and fall back to `Error`.
+  function lowerNameRef(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+    span: SourceSpan,
+  ): Hir::HirId {
+    let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(
+      &output.resolvedBodies.bodyResolution,
+      exprId.raw(),
+    ) else {
+      return Lowering::errorNode(hir, typeStore, span);
+    };
+
+    let defIdOpt: Option<Analyzer::DefinitionId> = match (resolved) {
+      Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> Lowering::lookupLocal(locals, localId),
+      Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> Option::SOME(defId),
+      Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> Option::NONE,
+      Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> Option::NONE,
+    };
+
+    let Option::SOME(defId) = defIdOpt else {
+      return Lowering::errorNode(hir, typeStore, span);
+    };
+
+    let mut isReferenceable: boolean = false;
+    let mut declaredType: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      match (definition) {
+        Analyzer::Definition::Variable(variableDef) -> {
+          isReferenceable = true;
+          declaredType = Option::SOME(variableDef.declaredType);
+        },
+        Analyzer::Definition::Function(_) -> {
+          isReferenceable = true;
+        },
+        _ -> {},
+      };
+    }
+
+    if (!isReferenceable) {
+      return Lowering::errorNode(hir, typeStore, span);
+    }
+
+    // Assignment targets are not recorded in `exprTypes`, so a missing entry
+    // falls back to the definition's declared type before the `void` sentinel.
+    let mut variableType: Analyzer::TypeId = Lowering::voidType(typeStore);
+
+    if (let Option::SOME(recordedType) = Lowering::lookupExprType(&output.typecheck, exprId)) {
+      variableType = recordedType;
+    } else if (let Option::SOME(fallbackType) = declaredType) {
+      variableType = fallbackType;
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Variable(defId),
+      span: span,
+      typeId: variableType,
+    });
+  }
+
+  /// Lowers a call whose callee resolves to a free `Function` definition.
+  /// Method calls, closure calls, path constructors, and generic explicit
+  /// type arguments are outside this slice and fall back to `Error`.
+  function lowerCall(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+    call: &Ast::Expression::Call,
+  ): Hir::HirId {
+    let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(
+      &output.resolvedBodies.bodyResolution,
+      call.callee.raw(),
+    ) else {
+      return Lowering::errorNode(hir, typeStore, call.span);
+    };
+
+    let Analyzer::ResolverBodies::ResolvedRef::Definition(calleeDef) = resolved else {
+      return Lowering::errorNode(hir, typeStore, call.span);
+    };
+
+    let mut calleeIsFunction: boolean = false;
+    let mut calleeReturnType: Analyzer::TypeId = Lowering::voidType(typeStore);
+
+    if (let Option::SOME(definition) = defStore.get(calleeDef)) {
+      if (let Analyzer::Definition::Function(functionDef) = definition) {
+        calleeIsFunction = true;
+        calleeReturnType = functionDef.returnType;
+      }
+    }
+
+    if (!calleeIsFunction) {
+      return Lowering::errorNode(hir, typeStore, call.span);
+    }
+
+    let mut args: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut argIndex: u64 = 0;
+
+    while (argIndex < call.arguments.length()) {
+      let Option::SOME(argId) = call.arguments.get(argIndex) else {
+        argIndex += 1;
+        continue;
+      };
+
+      args.push(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *argId));
+      argIndex += 1;
+    }
+
+    let callType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
+      Option::SOME(typeId) -> typeId,
+      Option::NONE -> calleeReturnType,
+    };
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Call(Hir::HirCall {
+        callee: calleeDef,
+        typeArgs: Vector::new<Analyzer::TypeId>(),
+        args: args,
+      }),
+      span: call.span,
+      typeId: callType,
+    });
+  }
+
+  // =========================================================================
+  // Statements
+  // =========================================================================
+
+  /// Shared lowering for statement blocks and expression blocks. Comments
+  /// are skipped instead of lowered: the Rust AST has no comment
+  /// statements, so a comment node would otherwise force a synthetic HIR
+  /// node with no oracle counterpart.
+  function lowerBlockParts(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    statements: &Vector<Ast::StatementId>,
+    tail: &Option<Ast::ExpressionId>,
+    span: SourceSpan,
+    blockType: Analyzer::TypeId,
+  ): Hir::HirId {
+    let mut loweredStatements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < statements.length()) {
+      let Option::SOME(stmtId) = statements.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut isComment: boolean = false;
+      if (let Option::SOME(stmt) = module.statements.get(*stmtId)) {
+        if (let Ast::Statement::Node::Comment(_) = stmt) {
+          isComment = true;
+        }
+      }
+
+      if (isComment) {
+        index += 1;
+        continue;
+      }
+
+      loweredStatements.push(Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, *stmtId));
+      index += 1;
+    }
+
+    let mut tailExpr: Option<Hir::HirId> = Option::NONE;
+    if (let Option::SOME(tailId) = tail) {
+      tailExpr = Option::SOME(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, tailId));
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Block(Hir::HirBlock {
+        statements: loweredStatements,
+        expression: tailExpr,
+      }),
+      span: span,
+      typeId: blockType,
+    });
+  }
+
+  /// Lowers a `let`/`let mut` with a simple `Binding` pattern: allocates a
+  /// `Definition::Variable` for the binding site, registers it in the
+  /// `LocalMap` after the initializer is lowered (the binding is not
+  /// visible inside its own initializer), and records the initializer in
+  /// `variablesInits` like the Rust oracle. Destructuring patterns are
+  /// outside this slice and fall back to `Error`.
+  function lowerLetLike(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    patternId: Ast::PatternId,
+    value: &Option<Ast::ExpressionId>,
+    mutable: boolean,
+  ): Hir::HirId {
+    let mut bindingName: String = String::create("");
+    let mut isBinding: boolean = false;
+
+    if (let Option::SOME(pattern) = module.patterns.get(patternId)) {
+      if (let Ast::Pattern::Node::Binding(binding) = pattern) {
+        bindingName = binding.name.clone();
+        isBinding = true;
+      }
+    }
+
+    if (!isBinding) {
+      return Lowering::errorNode(hir, typeStore, span);
+    }
+
+    let mut init: Option<Hir::HirId> = Option::NONE;
+    let mut bindingType: Analyzer::TypeId = Lowering::voidType(typeStore);
+
+    if (let Option::SOME(valueId) = value) {
+      init = Option::SOME(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, valueId));
+      bindingType = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, valueId);
+    }
+
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let nameSym: Analyzer::SymbolId = symbolsRef.intern(bindingName.toStr());
+
+    let mut defStoreRef: &mut Analyzer::DefinitionStore = defStore;
+    let defId: Analyzer::DefinitionId = defStoreRef.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
+      name: nameSym,
+      visibility: Analyzer::Visibility::PRIVATE,
+      declaredType: bindingType,
+      mutable: mutable,
+    }));
+
+    if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(localId)) = Analyzer::ResolverBodies::findPatternRef(
+      &output.resolvedBodies.bodyResolution,
+      patternId.raw(),
+    )) {
+      Lowering::registerLocal(locals, localId, defId);
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    if (let Option::SOME(initId) = init) {
+      hirRef.setVariableInit(defId, initId);
+    }
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Let(Hir::HirLet {
+        name: defId,
+        value: init,
+      }),
+      span: span,
+      typeId: Lowering::voidType(typeStore),
+    });
+  }
+
+  function lowerStmt(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    stmtId: Ast::StatementId,
+  ): Hir::HirId {
+    let Option::SOME(stmt) = module.statements.get(stmtId) else {
+      return Lowering::errorNode(hir, typeStore, SourceSpan::new("", 0, 0));
+    };
+
+    match (stmt) {
+      Ast::Statement::Node::Variable(variable) -> {
+        return Lowering::lowerLetLike(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          output,
+          locals,
+          hir,
+          variable.span,
+          variable.pattern,
+          &variable.value,
+          variable.mutable,
+        );
+      },
+      Ast::Statement::Node::Let(letStmt) -> {
+        return Lowering::lowerLetLike(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          output,
+          locals,
+          hir,
+          letStmt.span,
+          letStmt.pattern,
+          &letStmt.value,
+          false,
+        );
+      },
+      Ast::Statement::Node::Expression(exprStmt) -> {
+        let loweredExpr: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, exprStmt.expression);
+        let exprType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprStmt.expression);
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::ExpressionStatement(loweredExpr),
+          span: exprStmt.span,
+          typeId: exprType,
+        });
+      },
+      Ast::Statement::Node::Block(block) -> {
+        let mut blockType: Analyzer::TypeId = Lowering::voidType(typeStore);
+        if (let Option::SOME(tailId) = &block.tail) {
+          blockType = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, tailId);
+        }
+
+        return Lowering::lowerBlockParts(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          output,
+          locals,
+          hir,
+          &block.statements,
+          &block.tail,
+          block.span,
+          blockType,
+        );
+      },
+      Ast::Statement::Node::If(ifStmt) -> {
+        let condition: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, ifStmt.condition);
+        let thenBranch: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, ifStmt.thenBranch);
+
+        let mut elseBranch: Option<Hir::HirId> = Option::NONE;
+        if (let Option::SOME(elseId) = ifStmt.elseBranch) {
+          elseBranch = Option::SOME(Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, elseId));
+        }
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::If(Hir::HirIf {
+            condition: condition,
+            thenBranch: thenBranch,
+            elseBranch: elseBranch,
+          }),
+          span: ifStmt.span,
+          typeId: Lowering::voidType(typeStore),
+        });
+      },
+      Ast::Statement::Node::While(whileStmt) -> {
+        let condition: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, whileStmt.condition);
+        let body: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, whileStmt.body);
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Loop(Hir::HirLoop {
+            condition: Hir::LoopKind::While(condition),
+            body: body,
+          }),
+          span: whileStmt.span,
+          typeId: Lowering::voidType(typeStore),
+        });
+      },
+      Ast::Statement::Node::Return(returnStmt) -> {
+        let mut value: Option<Hir::HirId> = Option::NONE;
+        if (let Option::SOME(valueId) = returnStmt.value) {
+          value = Option::SOME(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, valueId));
+        }
+
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Return(value),
+          span: returnStmt.span,
+          typeId: Lowering::neverType(typeStore),
+        });
+      },
+      Ast::Statement::Node::Break(breakStmt) -> {
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Break,
+          span: breakStmt.span,
+          typeId: Lowering::neverType(typeStore),
+        });
+      },
+      Ast::Statement::Node::Continue(continueStmt) -> {
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Continue,
+          span: continueStmt.span,
+          typeId: Lowering::neverType(typeStore),
+        });
+      },
+      Ast::Statement::Node::LetElse(letElse) -> {
+        return Lowering::errorNode(hir, typeStore, letElse.span);
+      },
+      Ast::Statement::Node::For(forStmt) -> {
+        return Lowering::errorNode(hir, typeStore, forStmt.span);
+      },
+      Ast::Statement::Node::ForOf(forOf) -> {
+        return Lowering::errorNode(hir, typeStore, forOf.span);
+      },
+      Ast::Statement::Node::Defer(deferStmt) -> {
+        return Lowering::errorNode(hir, typeStore, deferStmt.span);
+      },
+      Ast::Statement::Node::Item(itemStmt) -> {
+        return Lowering::errorNode(hir, typeStore, itemStmt.span);
+      },
+      Ast::Statement::Node::Comment(comment) -> {
+        let mut hirRef: &mut Hir::HirStore = hir;
+        return hirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Unit,
+          span: comment.span,
+          typeId: Lowering::voidType(typeStore),
+        });
+      },
+    };
+
+    return Lowering::errorNode(hir, typeStore, SourceSpan::new("", 0, 0));
+  }
+
+  // =========================================================================
+  // Items
+  // =========================================================================
+
+  /// Owned copy of the signature data lowering needs from a `FunctionDef`,
+  /// taken up front so the `DefinitionStore` borrow ends before body
+  /// lowering pushes new `Variable` definitions into it.
+  record FunctionSignature {
+    public name: Analyzer::SymbolId;
+    public params: Vector<Analyzer::DefinitionId>;
+  }
+
+  function functionSignature(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): Option<Lowering::FunctionSignature> {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return Option::NONE;
+    };
+
+    let Analyzer::Definition::Function(functionDef) = definition else {
+      return Option::NONE;
+    };
+
+    let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < functionDef.params.length()) {
+      if (let Option::SOME(paramId) = functionDef.params.get(index)) {
+        params.push(*paramId);
+      }
+      index += 1;
+    }
+
+    return Option::SOME(Lowering::FunctionSignature {
+      name: functionDef.name,
+      params: params,
+    });
+  }
+
+  /// `DefinitionId` for an item, consulting binder pass 2 first and falling
+  /// back to pass 1, like `Checks::findItemDef`.
+  function findItemDef(
+    output: &Analyzer::AnalyzerOutput,
+    itemId: Ast::ItemId,
+  ): Option<Analyzer::DefinitionId> {
+    let pass2Result: Option<Analyzer::DefinitionId> = Analyzer::Binder::findDef(&output.pass2, itemId.raw());
+    if (pass2Result.isSome()) {
+      return pass2Result;
+    }
+
+    return Analyzer::Binder::findDef(&output.pass1, itemId.raw());
+  }
+
+  /// Registers the parameter bindings of a function in the `LocalMap`,
+  /// pairing the body resolver's parameter `LocalId`s (bound in declaration
+  /// order at function entry) with the binder's existing `Variable`
+  /// definitions from `FunctionDef.params`.
+  function registerParams(
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    parameters: &Vector<Ast::PatternId>,
+    paramDefs: &Vector<Analyzer::DefinitionId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < parameters.length()) {
+      let Option::SOME(patternId) = parameters.get(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(defId) = paramDefs.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(localId)) = Analyzer::ResolverBodies::findPatternRef(
+        &output.resolvedBodies.bodyResolution,
+        patternId.raw(),
+      )) {
+        Lowering::registerLocal(locals, localId, *defId);
+      }
+
+      index += 1;
+    }
+  }
+
+  function lowerFunctionItem(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    itemId: Ast::ItemId,
+    function_: &Ast::Item::Function,
+  ): void {
+    let Option::SOME(defId) = Lowering::findItemDef(output, itemId) else {
+      return;
+    };
+
+    let Option::SOME(signature) = Lowering::functionSignature(defStore, defId) else {
+      return;
+    };
+
+    Lowering::registerParams(module, output, locals, &function_.parameters, &signature.params);
+
+    let body: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, function_.body);
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    hirRef.setFunctionBody(defId, body);
+    hirRef.addItem(defId);
+
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let mainSym: Analyzer::SymbolId = symbolsRef.intern("main");
+
+    if (signature.name.raw() == mainSym.raw()) {
+      hirRef.setEntryPoint(defId);
+    }
+  }
+
+  /// Lowers one root item: functions get bodies, namespaces recurse, and
+  /// exports unwrap. Records, enums, constants, traits, aliases, imports,
+  /// and externs are outside this slice and are skipped without HIR output.
+  function lowerItem(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    itemId: Ast::ItemId,
+  ): void {
+    let Option::SOME(item) = module.items.get(itemId) else {
+      return;
+    };
+
+    match (item) {
+      Ast::Item::Node::Function(function_) -> {
+        Lowering::lowerFunctionItem(defStore, typeStore, symbols, module, output, locals, hir, itemId, &function_);
+      },
+      Ast::Item::Node::Namespace(namespaceItem) -> {
+        Lowering::lowerItems(defStore, typeStore, symbols, module, output, locals, hir, &namespaceItem.items);
+      },
+      Ast::Item::Node::Export(exportItem) -> {
+        if (let Option::SOME(innerItemId) = exportItem.declaration) {
+          Lowering::lowerItem(defStore, typeStore, symbols, module, output, locals, hir, innerItemId);
+        }
+      },
+      _ -> {},
+    };
+  }
+
+  function lowerItems(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    itemIds: &Vector<Ast::ItemId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < itemIds.length()) {
+      let Option::SOME(itemId) = itemIds.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      Lowering::lowerItem(defStore, typeStore, symbols, module, output, locals, hir, *itemId);
+      index += 1;
+    }
+  }
+
+  /// Lowering entry point. Consumes the post-typecheck analyzer output for
+  /// one module and produces the HIR store for its root items in
+  /// declaration order. Not wired into `Analyzer::analyzeModule`: callers
+  /// (tests today, the driver in a later slice) invoke it explicitly after
+  /// analysis.
+  function lowerModule(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+  ): Hir::HirStore {
+    let mut hir: Hir::HirStore = Hir::HirStore::init();
+    let mut locals: Lowering::LocalMap = Lowering::LocalMap::init();
+
+    Lowering::lowerItems(defStore, typeStore, symbols, module, output, &mut locals, &mut hir, &module.roots);
+
+    return hir;
+  }
+}
