@@ -1,0 +1,575 @@
+import Test from "std::test";
+
+import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+
+function checksDummySpan(): SourceSpan {
+  return SourceSpan::new("checks_tests.ign", 0, 0);
+}
+
+function checksAddPathType(module: &mut Ast::Module, name: str): Ast::TypeId {
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create(name));
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: checksDummySpan(),
+    segments: segments,
+  }));
+}
+
+function checksAddIntLiteral(module: &mut Ast::Module, value: i64): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: checksDummySpan(),
+    value: Ast::Expression::LiteralValue::Int(value),
+  }));
+}
+
+function checksAddBoolLiteral(module: &mut Ast::Module, value: boolean): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: checksDummySpan(),
+    value: Ast::Expression::LiteralValue::Boolean(value),
+  }));
+}
+
+function checksAddVariable(module: &mut Ast::Module, name: str): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Variable(Ast::Expression::Variable {
+    span: checksDummySpan(),
+    name: String::create(name),
+  }));
+}
+
+/// `@panic("boom")` — the canonical `NEVER`-typed expression.
+function checksAddPanicCall(module: &mut Ast::Module): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  let messageExpr: Ast::ExpressionId = moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: checksDummySpan(),
+    value: Ast::Expression::LiteralValue::String(String::create("boom")),
+  }));
+
+  let mut arguments: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  arguments.push(messageExpr);
+
+  let mut moduleRef2: &mut Ast::Module = module;
+  return moduleRef2.addExpression(Ast::Expression::Node::BuiltinCall(Ast::Expression::BuiltinCall {
+    span: checksDummySpan(),
+    name: String::create("panic"),
+    typeArguments: Vector::new<Ast::TypeId>(),
+    arguments: arguments,
+  }));
+}
+
+function checksAddTryExpr(
+  module: &mut Ast::Module,
+  expression: Ast::ExpressionId
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Try(Ast::Expression::Try {
+    span: checksDummySpan(),
+    expression: expression,
+  }));
+}
+
+function checksAddAnnotatedBinding(
+  module: &mut Ast::Module,
+  name: str,
+  annotation: Ast::TypeId,
+): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: checksDummySpan(),
+    name: String::create(name),
+    annotation: Option::SOME(annotation),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function checksAddReturnExpr(
+  module: &mut Ast::Module,
+  exprId: Ast::ExpressionId
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: checksDummySpan(),
+    value: Option::SOME(exprId),
+  }));
+}
+
+function checksAddReturn(module: &mut Ast::Module): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Return(Ast::Statement::Return {
+    span: checksDummySpan(),
+    value: Option::NONE,
+  }));
+}
+
+function checksAddExprStmt(module: &mut Ast::Module, exprId: Ast::ExpressionId): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: checksDummySpan(),
+    expression: exprId,
+  }));
+}
+
+function checksAddBlock(
+  module: &mut Ast::Module,
+  statements: Vector<Ast::StatementId>
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: checksDummySpan(),
+    statements: statements,
+    tail: Option::NONE,
+  }));
+}
+
+function checksAddEmptyBlock(module: &mut Ast::Module): Ast::StatementId {
+  return checksAddBlock(module, Vector::new<Ast::StatementId>());
+}
+
+function checksAddIfStatement(
+  module: &mut Ast::Module,
+  condition: Ast::ExpressionId,
+  thenBranch: Ast::StatementId,
+  elseBranch: Option<Ast::StatementId>,
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::If(Ast::Statement::If {
+    span: checksDummySpan(),
+    condition: condition,
+    thenBranch: thenBranch,
+    elseBranch: elseBranch,
+  }));
+}
+
+function checksAddLetElseStmt(
+  module: &mut Ast::Module,
+  pattern: Ast::PatternId,
+  annotation: Option<Ast::TypeId>,
+  value: Ast::ExpressionId,
+  elseBranch: Ast::StatementId,
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::LetElse(Ast::Statement::LetElse {
+    span: checksDummySpan(),
+    pattern: pattern,
+    annotation: annotation,
+    value: value,
+    elseBranch: elseBranch,
+  }));
+}
+
+function checksAddDeferStmt(
+  module: &mut Ast::Module,
+  statement: Ast::StatementId
+): Ast::StatementId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addStatement(Ast::Statement::Node::Defer(Ast::Statement::Defer {
+    span: checksDummySpan(),
+    statement: statement,
+  }));
+}
+
+function checksAddFunctionItem(
+  module: &mut Ast::Module,
+  name: str,
+  returnType: Option<Ast::TypeId>,
+  body: Ast::StatementId,
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: checksDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: returnType,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+function checksAnalyzeModule(
+  defStore: &mut Analyzer::DefinitionStore,
+  typeStore: &mut Analyzer::TypeStore,
+  symbols: &mut Analyzer::SymbolTable,
+  module: &Ast::Module,
+): Analyzer::AnalyzerOutput {
+  return Analyzer::analyzeModule(defStore, typeStore, symbols, module);
+}
+
+function checksAssertNoDiagnostics(output: &Analyzer::AnalyzerOutput): void {
+  Test::assertEq<u64>(output.checks.diagnostics.length(), 0);
+}
+
+function checksAssertSingleCode(output: &Analyzer::AnalyzerOutput, code: str): void {
+  Test::assertEq<u64>(output.checks.diagnostics.length(), 1);
+
+  let Option::SOME(diagnostic) = output.checks.diagnostics.get(0) else {
+    @panic("checksAssertSingleCode: missing diagnostic");
+  };
+
+  Test::assertEq<str>(diagnostic.code, code);
+}
+
+/// Scenario: `function f(): i32 {}` — a non-void function whose body never
+/// returns reports MISSING_RETURN_STATEMENT.
+@test
+function checksMissingReturnInNonVoidFunction(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = checksAddPathType(&mut module, "i32");
+  let body: Ast::StatementId = checksAddEmptyBlock(&mut module);
+  checksAddFunctionItem(&mut module, "f", Option::SOME(i32Type), body);
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertSingleCode(&output, DiagnosticCode::MISSING_RETURN_STATEMENT);
+}
+
+/// Scenario: `function f(): i32 { return 1; }` stays clean.
+@test
+function checksFunctionWithReturnIsClean(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = checksAddPathType(&mut module, "i32");
+  let retStmt: Ast::StatementId = checksAddReturnExpr(&mut module, checksAddIntLiteral(&mut module, 1));
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = checksAddBlock(&mut module, bodyStmts);
+  checksAddFunctionItem(&mut module, "f", Option::SOME(i32Type), body);
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertNoDiagnostics(&output);
+}
+
+/// Scenario: `if (true) { return 1; } else { return 2; }` as the whole body —
+/// both branches diverge, so the parallel merge is ALWAYS and no diagnostic
+/// is emitted.
+@test
+function checksIfElseBothReturningIsClean(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = checksAddPathType(&mut module, "i32");
+
+  let thenReturn: Ast::StatementId = checksAddReturnExpr(&mut module, checksAddIntLiteral(&mut module, 1));
+  let mut thenStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  thenStmts.push(thenReturn);
+  let thenBlock: Ast::StatementId = checksAddBlock(&mut module, thenStmts);
+
+  let elseReturn: Ast::StatementId = checksAddReturnExpr(&mut module, checksAddIntLiteral(&mut module, 2));
+  let mut elseStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  elseStmts.push(elseReturn);
+  let elseBlock: Ast::StatementId = checksAddBlock(&mut module, elseStmts);
+
+  let ifStmt: Ast::StatementId = checksAddIfStatement(
+    &mut module,
+    checksAddBoolLiteral(&mut module, true),
+    thenBlock,
+    Option::SOME(elseBlock),
+  );
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(ifStmt);
+  let body: Ast::StatementId = checksAddBlock(&mut module, bodyStmts);
+  checksAddFunctionItem(&mut module, "f", Option::SOME(i32Type), body);
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertNoDiagnostics(&output);
+}
+
+/// Scenario: `if (true) { return 1; }` without an `else` — an `if` with no
+/// else branch only SOMETIMES diverges, so the function is missing a return.
+@test
+function checksIfWithoutElseReportsMissingReturn(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = checksAddPathType(&mut module, "i32");
+
+  let thenReturn: Ast::StatementId = checksAddReturnExpr(&mut module, checksAddIntLiteral(&mut module, 1));
+  let mut thenStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  thenStmts.push(thenReturn);
+  let thenBlock: Ast::StatementId = checksAddBlock(&mut module, thenStmts);
+
+  let ifStmt: Ast::StatementId = checksAddIfStatement(
+    &mut module,
+    checksAddBoolLiteral(&mut module, true),
+    thenBlock,
+    Option::NONE,
+  );
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(ifStmt);
+  let body: Ast::StatementId = checksAddBlock(&mut module, bodyStmts);
+  checksAddFunctionItem(&mut module, "f", Option::SOME(i32Type), body);
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertSingleCode(&output, DiagnosticCode::MISSING_RETURN_STATEMENT);
+}
+
+/// Scenario: `function f(): i32 { @panic("boom"); }` — a `NEVER`-typed
+/// expression statement diverges, so no missing-return diagnostic.
+@test
+function checksBodyEndingInPanicIsClean(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = checksAddPathType(&mut module, "i32");
+  let panicStmt: Ast::StatementId = checksAddExprStmt(&mut module, checksAddPanicCall(&mut module));
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(panicStmt);
+  let body: Ast::StatementId = checksAddBlock(&mut module, bodyStmts);
+  checksAddFunctionItem(&mut module, "f", Option::SOME(i32Type), body);
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertNoDiagnostics(&output);
+}
+
+/// Scenario: an unannotated (void) function without a return stays clean —
+/// the binder's `VOID` sentinel exempts it.
+@test
+function checksVoidFunctionWithoutReturnIsClean(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let body: Ast::StatementId = checksAddEmptyBlock(&mut module);
+  checksAddFunctionItem(&mut module, "f", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertNoDiagnostics(&output);
+}
+
+/// Scenario: `let x: i32 = 1 else { return 0; }` — an else block that returns
+/// always diverges, so no diagnostic.
+@test
+function checksLetElseReturningElseIsClean(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = checksAddPathType(&mut module, "i32");
+  let pattern: Ast::PatternId = checksAddAnnotatedBinding(&mut module, "x", i32Type);
+
+  let elseReturn: Ast::StatementId = checksAddReturnExpr(&mut module, checksAddIntLiteral(&mut module, 0));
+  let mut elseStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  elseStmts.push(elseReturn);
+  let elseBlock: Ast::StatementId = checksAddBlock(&mut module, elseStmts);
+
+  let letElseStmt: Ast::StatementId = checksAddLetElseStmt(
+    &mut module,
+    pattern,
+    Option::SOME(i32Type),
+    checksAddIntLiteral(&mut module, 1),
+    elseBlock,
+  );
+  let retStmt: Ast::StatementId = checksAddReturnExpr(&mut module, checksAddVariable(&mut module, "x"));
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letElseStmt);
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = checksAddBlock(&mut module, bodyStmts);
+  checksAddFunctionItem(&mut module, "f", Option::SOME(i32Type), body);
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertNoDiagnostics(&output);
+}
+
+/// Scenario: `let x: i32 = 1 else {}` — an empty else block does not diverge
+/// and reports LET_ELSE_MUST_DIVERGE.
+@test
+function checksLetElseNotDivergingReportsDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = checksAddPathType(&mut module, "i32");
+  let pattern: Ast::PatternId = checksAddAnnotatedBinding(&mut module, "x", i32Type);
+  let elseBlock: Ast::StatementId = checksAddEmptyBlock(&mut module);
+
+  let letElseStmt: Ast::StatementId = checksAddLetElseStmt(
+    &mut module,
+    pattern,
+    Option::SOME(i32Type),
+    checksAddIntLiteral(&mut module, 1),
+    elseBlock,
+  );
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letElseStmt);
+  let body: Ast::StatementId = checksAddBlock(&mut module, bodyStmts);
+  checksAddFunctionItem(&mut module, "f", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertSingleCode(&output, DiagnosticCode::LET_ELSE_MUST_DIVERGE);
+}
+
+/// Scenario: `let x: i32 = 1 else { @panic("boom"); }` — an else block ending
+/// in a `NEVER`-typed expression statement diverges.
+@test
+function checksLetElseEndingInPanicIsClean(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = checksAddPathType(&mut module, "i32");
+  let pattern: Ast::PatternId = checksAddAnnotatedBinding(&mut module, "x", i32Type);
+
+  let panicStmt: Ast::StatementId = checksAddExprStmt(&mut module, checksAddPanicCall(&mut module));
+  let mut elseStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  elseStmts.push(panicStmt);
+  let elseBlock: Ast::StatementId = checksAddBlock(&mut module, elseStmts);
+
+  let letElseStmt: Ast::StatementId = checksAddLetElseStmt(
+    &mut module,
+    pattern,
+    Option::SOME(i32Type),
+    checksAddIntLiteral(&mut module, 1),
+    elseBlock,
+  );
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letElseStmt);
+  let body: Ast::StatementId = checksAddBlock(&mut module, bodyStmts);
+  checksAddFunctionItem(&mut module, "f", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertNoDiagnostics(&output);
+}
+
+/// Scenario: a statement after `return` reports UNREACHABLE_CODE.
+@test
+function checksUnreachableAfterReturnReportsDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let firstReturn: Ast::StatementId = checksAddReturn(&mut module);
+  let secondReturn: Ast::StatementId = checksAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(firstReturn);
+  bodyStmts.push(secondReturn);
+  let body: Ast::StatementId = checksAddBlock(&mut module, bodyStmts);
+  checksAddFunctionItem(&mut module, "f", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertSingleCode(&output, DiagnosticCode::UNREACHABLE_CODE);
+}
+
+/// Scenario: a statement after a `NEVER`-typed expression statement
+/// (`@panic`) reports UNREACHABLE_CODE.
+@test
+function checksUnreachableAfterPanicReportsDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let panicStmt: Ast::StatementId = checksAddExprStmt(&mut module, checksAddPanicCall(&mut module));
+  let retStmt: Ast::StatementId = checksAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(panicStmt);
+  bodyStmts.push(retStmt);
+  let body: Ast::StatementId = checksAddBlock(&mut module, bodyStmts);
+  checksAddFunctionItem(&mut module, "f", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertSingleCode(&output, DiagnosticCode::UNREACHABLE_CODE);
+}
+
+/// Scenario: `defer x!;` — a try operator anywhere inside a deferred
+/// statement reports TRY_OPERATOR_IN_DEFER. The typechecker separately
+/// rejects the operand type; only the checks bag is asserted here.
+@test
+function checksTryInsideDeferReportsDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tryExpr: Ast::ExpressionId = checksAddTryExpr(&mut module, checksAddIntLiteral(&mut module, 1));
+  let tryStmt: Ast::StatementId = checksAddExprStmt(&mut module, tryExpr);
+  let deferStmt: Ast::StatementId = checksAddDeferStmt(&mut module, tryStmt);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(deferStmt);
+  let body: Ast::StatementId = checksAddBlock(&mut module, bodyStmts);
+  checksAddFunctionItem(&mut module, "f", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertSingleCode(&output, DiagnosticCode::TRY_OPERATOR_IN_DEFER);
+}
+
+/// Scenario: `record R { m(self): i32 {} }` — a non-void method whose body
+/// never returns reports MISSING_RETURN_STATEMENT.
+@test
+function checksMethodMissingReturnReportsDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = checksAddPathType(&mut module, "i32");
+  let selfPattern: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: checksDummySpan(),
+    name: String::create("self"),
+    annotation: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+  let methodBody: Ast::StatementId = checksAddEmptyBlock(&mut module);
+
+  let mut parameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  parameters.push(selfPattern);
+
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: checksDummySpan(),
+    name: String::create("m"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: parameters,
+    returnType: Option::SOME(i32Type),
+    body: methodBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: checksDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = checksAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  checksAssertSingleCode(&output, DiagnosticCode::MISSING_RETURN_STATEMENT);
+}

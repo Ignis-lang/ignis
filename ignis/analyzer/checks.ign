@@ -1,0 +1,1008 @@
+import
+  SourceSpan,
+  Diagnostic,
+  DiagnosticBag,
+  Severity,
+  DiagnosticCode,
+  LabelKind,
+from "@compiler::diagnostics";
+
+import Ast from "@compiler::ast";
+import Vector from "std::vector";
+
+/// Extra-checks phase for the Ignis selfhost compiler.
+///
+/// Port of `crates/ignis_analyzer/src/checks.rs`. Runs after const-eval
+/// (mirroring the Rust phase order typecheck -> const_eval -> extra_checks)
+/// because divergence detection reads checked expression types from
+/// `TypecheckOutput.exprTypes`: an expression whose checked type is `NEVER`
+/// (today `@panic`/`@trap`/`@unreachable` and fully-diverging joins) always
+/// terminates.
+///
+/// Ported checks:
+///   - missing return (A0039): a function or record/enum method whose
+///     resolved return type is neither `void` nor `never` must have a body
+///     whose termination is `ALWAYS`,
+///   - `let else` must diverge (A0168): the else block's termination must be
+///     `ALWAYS`,
+///   - unreachable code (A0025): every statement after a terminator
+///     (`return`/`break`/`continue` or a `NEVER`-typed expression statement)
+///     inside a block, one diagnostic per unreachable statement like the
+///     Rust oracle,
+///   - try operator inside `defer` (A0184): a postfix `!` anywhere inside a
+///     deferred statement.
+///
+/// Scoped out relative to the Rust oracle:
+///   - break/continue outside a loop (the selfhost typechecker already emits
+///     `CONTROL_FLOW_OUTSIDE_LOOP` A0068; porting it here would
+///     double-diagnose),
+///   - the `UndeclaredVariable` re-check (the body resolver owns it),
+///   - `@test`/directive function-shape validation (the selfhost has no
+///     directive metadata on definitions),
+///   - extern-with-body and extern-const-initializer (the selfhost
+///     `Ast::Item::Extern` carries only a name; extern members are parsed
+///     signature-only, so neither shape is expressible),
+///   - static/enum field initializer checks (the Rust code A0065 collides
+///     with the selfhost `MISSING_RECORD_FIELD_INIT` A0065),
+///   - return outside a function (A0042) and defer outside a function
+///     (A0183): the selfhost grammar has no top-level statements — module
+///     roots are items — so neither shape is expressible; A0183 stays
+///     reserved in `DiagnosticCode` for numbering parity,
+///   - trait method missing-return: the selfhost parser accepts trait
+///     methods signature-only and synthesizes an empty block body, so there
+///     are no trait default bodies to check (checking them would flag every
+///     non-void trait signature),
+///   - the Rust `while (true)` handling: the oracle treats every loop as
+///     `SOMETIMES` terminating, and this port mirrors that.
+export namespace Analyzer {
+  namespace Checks {
+    /// Control-flow termination status. `ALWAYS` means every path through
+    /// the statement diverges (returns, breaks, continues, or panics).
+    enum Termination {
+      ALWAYS,
+      SOMETIMES,
+    }
+
+    /// Output of the extra-checks phase.
+    record ChecksOutput {
+      public diagnostics: DiagnosticBag;
+    }
+
+    /// Once a sequence has diverged it stays diverged.
+    function mergeSequential(
+      first: Analyzer::Checks::Termination,
+      second: Analyzer::Checks::Termination,
+    ): Analyzer::Checks::Termination {
+      if (first == Analyzer::Checks::Termination::ALWAYS) {
+        return Analyzer::Checks::Termination::ALWAYS;
+      }
+
+      return second;
+    }
+
+    /// Both branches must diverge for the parallel merge to diverge.
+    function mergeParallel(
+      first: Analyzer::Checks::Termination,
+      second: Analyzer::Checks::Termination,
+    ): Analyzer::Checks::Termination {
+      if (first == Analyzer::Checks::Termination::ALWAYS && second == Analyzer::Checks::Termination::ALWAYS) {
+        return Analyzer::Checks::Termination::ALWAYS;
+      }
+
+      return Analyzer::Checks::Termination::SOMETIMES;
+    }
+
+    function emitError(
+      diagnostics: &mut DiagnosticBag,
+      span: SourceSpan,
+      code: str,
+      message: str,
+      labelMessage: str,
+    ): void {
+      let mut diagnostic: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        code,
+        message,
+        span,
+      );
+      diagnostic.addLabel(LabelKind::PRIMARY, span, labelMessage);
+
+      let mut bag: &mut DiagnosticBag = diagnostics;
+      bag.push(diagnostic);
+    }
+
+    /// Whether an expression's checked type is `NEVER`, using the
+    /// last-write-wins lookup convention shared with `ConstEval` and the
+    /// typechecker's own `lookupRecordedExprType`.
+    function exprIsNever(
+      typeStore: &mut Analyzer::TypeStore,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprId: Ast::ExpressionId,
+    ): boolean {
+      let mut index: u64 = typecheck.exprTypes.nodeIds.length();
+
+      while (index > 0) {
+        index -= 1;
+
+        let Option::SOME(nodeId) = typecheck.exprTypes.nodeIds.get(index) else {
+          continue;
+        };
+
+        if (*nodeId != exprId.raw()) {
+          continue;
+        }
+
+        let Option::SOME(typeId) = typecheck.exprTypes.typeIds.get(index) else {
+          return false;
+        };
+        let Option::SOME(typeNode) = typeStore.get(*typeId) else {
+          return false;
+        };
+
+        return match (typeNode) {
+          Analyzer::Type::NEVER -> true,
+          _ -> false,
+        };
+      }
+
+      return false;
+    }
+
+    function stmtSpan(module: &Ast::Module, stmtId: Ast::StatementId): SourceSpan {
+      let Option::SOME(stmt) = module.statements.get(stmtId) else {
+        return SourceSpan::new("", 0, 0);
+      };
+
+      return Ast::Serializer::statementSpan(stmt);
+    }
+
+    /// Whether a statement is a terminator for the unreachable-code scan:
+    /// `return`/`break`/`continue`, or an expression statement whose checked
+    /// type is `NEVER` (mirroring the Rust `is_terminator`).
+    function stmtIsTerminator(
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      stmtId: Ast::StatementId,
+    ): boolean {
+      let Option::SOME(stmt) = module.statements.get(stmtId) else {
+        return false;
+      };
+
+      match (stmt) {
+        Ast::Statement::Node::Return(_) -> {
+          return true;
+        },
+        Ast::Statement::Node::Break(_) -> {
+          return true;
+        },
+        Ast::Statement::Node::Continue(_) -> {
+          return true;
+        },
+        Ast::Statement::Node::Expression(exprStmt) -> {
+          return Analyzer::Checks::exprIsNever(typeStore, typecheck, exprStmt.expression);
+        },
+        _ -> {},
+      };
+
+      return false;
+    }
+
+    /// Sequential fold over a block's statements. A `NEVER`-typed tail
+    /// expression also diverges: the Rust AST has no block tails, but a
+    /// diverging tail is the tail-position spelling of the oracle's
+    /// `NEVER`-typed expression statement.
+    function blockTermination(
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      statements: &Vector<Ast::StatementId>,
+      tail: &Option<Ast::ExpressionId>,
+    ): Analyzer::Checks::Termination {
+      let mut result: Analyzer::Checks::Termination = Analyzer::Checks::Termination::SOMETIMES;
+      let mut index: u64 = 0;
+
+      while (index < statements.length()) {
+        let Option::SOME(stmtId) = statements.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let term: Analyzer::Checks::Termination = Analyzer::Checks::stmtTermination(
+          typeStore,
+          module,
+          typecheck,
+          *stmtId,
+        );
+        result = Analyzer::Checks::mergeSequential(result, term);
+
+        if (result == Analyzer::Checks::Termination::ALWAYS) {
+          return Analyzer::Checks::Termination::ALWAYS;
+        }
+
+        index += 1;
+      }
+
+      if (let Option::SOME(tailId) = tail) {
+        if (Analyzer::Checks::exprIsNever(typeStore, typecheck, tailId)) {
+          return Analyzer::Checks::Termination::ALWAYS;
+        }
+      }
+
+      return result;
+    }
+
+    /// Mirrors the Rust `statement_termination` plus its `check_termination`
+    /// never-typed entry check: `return`/`break`/`continue` always diverge,
+    /// blocks fold sequentially, `if` merges branches in parallel (no `else`
+    /// is `SOMETIMES`), loops and everything else are `SOMETIMES`, and an
+    /// expression statement diverges exactly when its expression types
+    /// `NEVER`.
+    function stmtTermination(
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      stmtId: Ast::StatementId,
+    ): Analyzer::Checks::Termination {
+      let Option::SOME(stmt) = module.statements.get(stmtId) else {
+        return Analyzer::Checks::Termination::SOMETIMES;
+      };
+
+      match (stmt) {
+        Ast::Statement::Node::Return(_) -> {
+          return Analyzer::Checks::Termination::ALWAYS;
+        },
+        Ast::Statement::Node::Break(_) -> {
+          return Analyzer::Checks::Termination::ALWAYS;
+        },
+        Ast::Statement::Node::Continue(_) -> {
+          return Analyzer::Checks::Termination::ALWAYS;
+        },
+        Ast::Statement::Node::Block(block) -> {
+          return Analyzer::Checks::blockTermination(
+            typeStore,
+            module,
+            typecheck,
+            &block.statements,
+            &block.tail,
+          );
+        },
+        Ast::Statement::Node::If(ifStmt) -> {
+          let thenTerm: Analyzer::Checks::Termination = Analyzer::Checks::stmtTermination(
+            typeStore,
+            module,
+            typecheck,
+            ifStmt.thenBranch,
+          );
+
+          if (let Option::SOME(elseId) = ifStmt.elseBranch) {
+            let elseTerm: Analyzer::Checks::Termination = Analyzer::Checks::stmtTermination(
+              typeStore,
+              module,
+              typecheck,
+              elseId,
+            );
+
+            return Analyzer::Checks::mergeParallel(thenTerm, elseTerm);
+          }
+
+          return Analyzer::Checks::Termination::SOMETIMES;
+        },
+        Ast::Statement::Node::Expression(exprStmt) -> {
+          if (Analyzer::Checks::exprIsNever(typeStore, typecheck, exprStmt.expression)) {
+            return Analyzer::Checks::Termination::ALWAYS;
+          }
+
+          return Analyzer::Checks::Termination::SOMETIMES;
+        },
+        _ -> {},
+      };
+
+      return Analyzer::Checks::Termination::SOMETIMES;
+    }
+
+    // =========================================================================
+    // Walkers
+    // =========================================================================
+
+    /// Shared unreachable-code scan and recursion for statement blocks and
+    /// expression blocks. Emits one A0025 per statement after a terminator,
+    /// like the Rust oracle's per-statement loop.
+    function walkBlockParts(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      statements: &Vector<Ast::StatementId>,
+      tail: &Option<Ast::ExpressionId>,
+      inDefer: boolean,
+    ): void {
+      let mut foundTerminator: boolean = false;
+      let mut index: u64 = 0;
+
+      while (index < statements.length()) {
+        let Option::SOME(stmtId) = statements.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (foundTerminator) {
+          Analyzer::Checks::emitError(
+            diagnostics,
+            Analyzer::Checks::stmtSpan(module, *stmtId),
+            DiagnosticCode::UNREACHABLE_CODE,
+            "Unreachable code detected",
+            "Unreachable code detected",
+          );
+        }
+
+        Analyzer::Checks::walkStmt(
+          diagnostics,
+          defStore,
+          typeStore,
+          module,
+          pass1,
+          pass2,
+          typecheck,
+          *stmtId,
+          inDefer,
+        );
+
+        if (Analyzer::Checks::stmtIsTerminator(typeStore, module, typecheck, *stmtId)) {
+          foundTerminator = true;
+        }
+
+        index += 1;
+      }
+
+      if (let Option::SOME(tailId) = tail) {
+        Analyzer::Checks::walkExpr(
+          diagnostics,
+          defStore,
+          typeStore,
+          module,
+          pass1,
+          pass2,
+          typecheck,
+          tailId,
+          inDefer,
+        );
+      }
+    }
+
+    function walkOptionalExpr(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprIdOpt: &Option<Ast::ExpressionId>,
+      inDefer: boolean,
+    ): void {
+      if (let Option::SOME(exprId) = exprIdOpt) {
+        Analyzer::Checks::walkExpr(
+          diagnostics,
+          defStore,
+          typeStore,
+          module,
+          pass1,
+          pass2,
+          typecheck,
+          exprId,
+          inDefer,
+        );
+      }
+    }
+
+    function walkExprList(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprIds: &Vector<Ast::ExpressionId>,
+      inDefer: boolean,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < exprIds.length()) {
+        let Option::SOME(exprId) = exprIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        Analyzer::Checks::walkExpr(
+          diagnostics,
+          defStore,
+          typeStore,
+          module,
+          pass1,
+          pass2,
+          typecheck,
+          *exprId,
+          inDefer,
+        );
+
+        index += 1;
+      }
+    }
+
+    function walkStmt(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      stmtId: Ast::StatementId,
+      inDefer: boolean,
+    ): void {
+      let Option::SOME(stmt) = module.statements.get(stmtId) else {
+        return;
+      };
+
+      match (stmt) {
+        Ast::Statement::Node::Variable(variable) -> {
+          Analyzer::Checks::walkOptionalExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &variable.value, inDefer);
+        },
+        Ast::Statement::Node::Let(letStmt) -> {
+          Analyzer::Checks::walkOptionalExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &letStmt.value, inDefer);
+        },
+        Ast::Statement::Node::LetElse(letElse) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, letElse.value, inDefer);
+          Analyzer::Checks::walkStmt(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, letElse.elseBranch, inDefer);
+
+          let elseTerm: Analyzer::Checks::Termination = Analyzer::Checks::stmtTermination(
+            typeStore,
+            module,
+            typecheck,
+            letElse.elseBranch,
+          );
+
+          if (elseTerm != Analyzer::Checks::Termination::ALWAYS) {
+            Analyzer::Checks::emitError(
+              diagnostics,
+              Analyzer::Checks::stmtSpan(module, letElse.elseBranch),
+              DiagnosticCode::LET_ELSE_MUST_DIVERGE,
+              "`let else` requires an else block that always diverges",
+              "`let else` requires an else block that always diverges",
+            );
+          }
+        },
+        Ast::Statement::Node::Expression(exprStmt) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, exprStmt.expression, inDefer);
+        },
+        Ast::Statement::Node::Block(block) -> {
+          Analyzer::Checks::walkBlockParts(
+            diagnostics,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            typecheck,
+            &block.statements,
+            &block.tail,
+            inDefer,
+          );
+        },
+        Ast::Statement::Node::If(ifStmt) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, ifStmt.condition, inDefer);
+          Analyzer::Checks::walkStmt(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, ifStmt.thenBranch, inDefer);
+
+          if (let Option::SOME(elseId) = ifStmt.elseBranch) {
+            Analyzer::Checks::walkStmt(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, elseId, inDefer);
+          }
+        },
+        Ast::Statement::Node::While(whileStmt) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, whileStmt.condition, inDefer);
+          Analyzer::Checks::walkStmt(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, whileStmt.body, inDefer);
+        },
+        Ast::Statement::Node::For(forStmt) -> {
+          if (let Option::SOME(initializerId) = forStmt.initializer) {
+            Analyzer::Checks::walkStmt(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, initializerId, inDefer);
+          }
+
+          Analyzer::Checks::walkOptionalExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &forStmt.condition, inDefer);
+          Analyzer::Checks::walkOptionalExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &forStmt.update, inDefer);
+          Analyzer::Checks::walkStmt(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, forStmt.body, inDefer);
+        },
+        Ast::Statement::Node::ForOf(forOf) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, forOf.iterable, inDefer);
+          Analyzer::Checks::walkStmt(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, forOf.body, inDefer);
+        },
+        Ast::Statement::Node::Return(returnStmt) -> {
+          Analyzer::Checks::walkOptionalExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &returnStmt.value, inDefer);
+        },
+        Ast::Statement::Node::Break(breakStmt) -> {
+          Analyzer::Checks::walkOptionalExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &breakStmt.value, inDefer);
+        },
+        Ast::Statement::Node::Continue(_) -> {},
+        Ast::Statement::Node::Defer(deferStmt) -> {
+          Analyzer::Checks::walkStmt(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, deferStmt.statement, true);
+        },
+        Ast::Statement::Node::Item(itemStmt) -> {
+          Analyzer::Checks::checkItem(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, itemStmt.item);
+        },
+        Ast::Statement::Node::Comment(_) -> {},
+      };
+    }
+
+    function walkExpr(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprId: Ast::ExpressionId,
+      inDefer: boolean,
+    ): void {
+      let Option::SOME(expression) = module.expressions.get(exprId) else {
+        return;
+      };
+
+      match (expression) {
+        Ast::Expression::Node::Assignment(assignment) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, assignment.target, inDefer);
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, assignment.value, inDefer);
+        },
+        Ast::Expression::Node::Ternary(ternary) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, ternary.condition, inDefer);
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, ternary.thenBranch, inDefer);
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, ternary.elseBranch, inDefer);
+        },
+        Ast::Expression::Node::Cast(cast) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, cast.expression, inDefer);
+        },
+        Ast::Expression::Node::Literal(_) -> {},
+        Ast::Expression::Node::Path(_) -> {},
+        Ast::Expression::Node::Call(call) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, call.callee, inDefer);
+          Analyzer::Checks::walkExprList(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &call.arguments, inDefer);
+        },
+        Ast::Expression::Node::Binary(binaryExpr) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, binaryExpr.left, inDefer);
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, binaryExpr.right, inDefer);
+        },
+        Ast::Expression::Node::Dereference(dereference) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, dereference.operand, inDefer);
+        },
+        Ast::Expression::Node::Grouped(grouped) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, grouped.expression, inDefer);
+        },
+        Ast::Expression::Node::Tuple(tuple) -> {
+          Analyzer::Checks::walkExprList(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &tuple.elements, inDefer);
+        },
+        Ast::Expression::Node::Unit(_) -> {},
+        Ast::Expression::Node::LetCondition(letCondition) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, letCondition.value, inDefer);
+        },
+        Ast::Expression::Node::Reference(reference) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, reference.target, inDefer);
+        },
+        Ast::Expression::Node::Unary(unary) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, unary.operand, inDefer);
+        },
+        Ast::Expression::Node::Block(block) -> {
+          Analyzer::Checks::walkBlockParts(
+            diagnostics,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            typecheck,
+            &block.statements,
+            &block.tail,
+            inDefer,
+          );
+        },
+        Ast::Expression::Node::If(ifExpr) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, ifExpr.condition, inDefer);
+          Analyzer::Checks::walkStmt(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, ifExpr.thenBranch, inDefer);
+
+          if (let Option::SOME(elseId) = ifExpr.elseBranch) {
+            Analyzer::Checks::walkStmt(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, elseId, inDefer);
+          }
+        },
+        Ast::Expression::Node::Match(matchExpr) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, matchExpr.scrutinee, inDefer);
+
+          let mut armIndex: u64 = 0;
+          while (armIndex < matchExpr.arms.length()) {
+            let Option::SOME(arm) = matchExpr.arms.get(armIndex) else {
+              armIndex += 1;
+              continue;
+            };
+
+            Analyzer::Checks::walkOptionalExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &arm.guard, inDefer);
+            Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, arm.body, inDefer);
+            armIndex += 1;
+          }
+        },
+        Ast::Expression::Node::Variable(_) -> {},
+        Ast::Expression::Node::Vector(vectorLiteral) -> {
+          Analyzer::Checks::walkExprList(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &vectorLiteral.elements, inDefer);
+        },
+        Ast::Expression::Node::VectorAccess(access) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, access.vector, inDefer);
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, access.index, inDefer);
+        },
+        Ast::Expression::Node::PostfixIncrement(postfix) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, postfix.operand, inDefer);
+        },
+        Ast::Expression::Node::PostfixDecrement(postfix) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, postfix.operand, inDefer);
+        },
+        Ast::Expression::Node::MemberAccess(memberAccess) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, memberAccess.object, inDefer);
+        },
+        Ast::Expression::Node::RecordInit(recordInit) -> {
+          let mut fieldIndex: u64 = 0;
+          while (fieldIndex < recordInit.fields.length()) {
+            let Option::SOME(field) = recordInit.fields.get(fieldIndex) else {
+              fieldIndex += 1;
+              continue;
+            };
+
+            Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, field.value, inDefer);
+            fieldIndex += 1;
+          }
+        },
+        Ast::Expression::Node::BuiltinCall(builtinCall) -> {
+          Analyzer::Checks::walkExprList(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, &builtinCall.arguments, inDefer);
+        },
+        Ast::Expression::Node::Lambda(lambda) -> {
+          // A lambda body starts a fresh function context, so the defer flag
+          // resets exactly like the Rust oracle's lambda arm.
+          Analyzer::Checks::walkStmt(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, lambda.body, false);
+        },
+        Ast::Expression::Node::CaptureOverride(captureOverride) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, captureOverride.expression, inDefer);
+        },
+        Ast::Expression::Node::Pipe(pipe) -> {
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, pipe.left, inDefer);
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, pipe.right, inDefer);
+        },
+        Ast::Expression::Node::PipePlaceholder(_) -> {},
+        Ast::Expression::Node::Try(tryExpr) -> {
+          if (inDefer) {
+            Analyzer::Checks::emitError(
+              diagnostics,
+              tryExpr.span,
+              DiagnosticCode::TRY_OPERATOR_IN_DEFER,
+              "try operator `!` cannot be used inside a `defer` expression",
+              "try operator `!` cannot be used inside a `defer` expression",
+            );
+          }
+
+          Analyzer::Checks::walkExpr(diagnostics, defStore, typeStore, module, pass1, pass2, typecheck, tryExpr.expression, inDefer);
+        },
+      };
+    }
+
+    // =========================================================================
+    // Item walk
+    // =========================================================================
+
+    /// `DefinitionId` for an item, consulting binder pass 2 first (methods
+    /// and function completions live there) and falling back to pass 1.
+    function findItemDef(
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+    ): Option<Analyzer::DefinitionId> {
+      let pass2Result: Option<Analyzer::DefinitionId> = Analyzer::Binder::findDef(pass2, itemId.raw());
+      if (pass2Result.isSome()) {
+        return pass2Result;
+      }
+
+      return Analyzer::Binder::findDef(pass1, itemId.raw());
+    }
+
+    /// Resolved return type of a function or method definition.
+    function definitionReturnType(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return Option::NONE;
+      };
+
+      match (def) {
+        Analyzer::Definition::Function(functionDef) -> {
+          return Option::SOME(functionDef.returnType);
+        },
+        Analyzer::Definition::Method(methodDef) -> {
+          return Option::SOME(methodDef.returnType);
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      return Option::NONE;
+    }
+
+    /// Whether a resolved return type exempts its function from the
+    /// missing-return check: `void` never needs a return, and a `never`
+    /// function is not expected to reach one. An unannotated return type
+    /// keeps the binder's `VOID` sentinel and is therefore exempt too.
+    function returnTypeIsExempt(
+      typeStore: &mut Analyzer::TypeStore,
+      returnTypeId: Analyzer::TypeId,
+    ): boolean {
+      let Option::SOME(typeNode) = typeStore.get(returnTypeId) else {
+        return true;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::VOID -> true,
+        Analyzer::Type::NEVER -> true,
+        _ -> false,
+      };
+    }
+
+    /// Missing-return check plus body walk for a function or method item.
+    /// The diagnostic span is the whole item span — the closest selfhost
+    /// equivalent of the Rust signature span.
+    function checkFunction(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      itemId: Ast::ItemId,
+      function_: &Ast::Item::Function,
+    ): void {
+      if (let Option::SOME(defId) = Analyzer::Checks::findItemDef(pass1, pass2, itemId)) {
+        if (let Option::SOME(returnTypeId) = Analyzer::Checks::definitionReturnType(defStore, defId)) {
+          let exempt: boolean = Analyzer::Checks::returnTypeIsExempt(typeStore, returnTypeId);
+          let bodyTerm: Analyzer::Checks::Termination = Analyzer::Checks::stmtTermination(
+            typeStore,
+            module,
+            typecheck,
+            function_.body,
+          );
+
+          if (!exempt && bodyTerm != Analyzer::Checks::Termination::ALWAYS) {
+            Analyzer::Checks::emitError(
+              diagnostics,
+              function_.span,
+              DiagnosticCode::MISSING_RETURN_STATEMENT,
+              "Missing return statement",
+              "Function should return a value",
+            );
+          }
+        }
+      }
+
+      Analyzer::Checks::walkStmt(
+        diagnostics,
+        defStore,
+        typeStore,
+        module,
+        pass1,
+        pass2,
+        typecheck,
+        function_.body,
+        false,
+      );
+    }
+
+    /// Run `checkFunction` over an owner's method items (records and enums).
+    /// Trait methods are intentionally not visited: the selfhost parser is
+    /// signature-only for traits and synthesizes empty block bodies.
+    function checkMethods(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      methodItemIds: &Vector<Ast::ItemId>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < methodItemIds.length()) {
+        let Option::SOME(methodItemId) = methodItemIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(item) = module.items.get(*methodItemId) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Ast::Item::Node::Function(function_) = item) {
+          Analyzer::Checks::checkFunction(
+            diagnostics,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            typecheck,
+            *methodItemId,
+            &function_,
+          );
+        }
+
+        index += 1;
+      }
+    }
+
+    /// Check one item: functions and methods get the missing-return check
+    /// and body walk, namespaces recurse, exports unwrap, constants walk
+    /// their value, and everything else is skipped.
+    function checkItem(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      itemId: Ast::ItemId,
+    ): void {
+      let Option::SOME(item) = module.items.get(itemId) else {
+        return;
+      };
+
+      match (item) {
+        Ast::Item::Node::Function(function_) -> {
+          Analyzer::Checks::checkFunction(
+            diagnostics,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            typecheck,
+            itemId,
+            &function_,
+          );
+        },
+        Ast::Item::Node::Record(record_) -> {
+          Analyzer::Checks::checkMethods(
+            diagnostics,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            typecheck,
+            &record_.methods,
+          );
+        },
+        Ast::Item::Node::Enum(enum_) -> {
+          Analyzer::Checks::checkMethods(
+            diagnostics,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            typecheck,
+            &enum_.methods,
+          );
+        },
+        Ast::Item::Node::Namespace(namespaceItem) -> {
+          Analyzer::Checks::checkItems(
+            diagnostics,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            typecheck,
+            &namespaceItem.items,
+          );
+        },
+        Ast::Item::Node::Export(exportItem) -> {
+          if (let Option::SOME(innerItemId) = exportItem.declaration) {
+            Analyzer::Checks::checkItem(
+              diagnostics,
+              defStore,
+              typeStore,
+              module,
+              pass1,
+              pass2,
+              typecheck,
+              innerItemId,
+            );
+          }
+        },
+        Ast::Item::Node::Constant(constant) -> {
+          Analyzer::Checks::walkExpr(
+            diagnostics,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            typecheck,
+            constant.value,
+            false,
+          );
+        },
+        _ -> {},
+      };
+    }
+
+    function checkItems(
+      diagnostics: &mut DiagnosticBag,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      itemIds: &Vector<Ast::ItemId>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < itemIds.length()) {
+        let Option::SOME(itemId) = itemIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        Analyzer::Checks::checkItem(
+          diagnostics,
+          defStore,
+          typeStore,
+          module,
+          pass1,
+          pass2,
+          typecheck,
+          *itemId,
+        );
+
+        index += 1;
+      }
+    }
+
+    /// Extra-checks phase entry point. Walks the module's root items in
+    /// declaration order.
+    function checkModule(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+    ): Analyzer::Checks::ChecksOutput {
+      let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+
+      Analyzer::Checks::checkItems(
+        &mut diagnostics,
+        defStore,
+        typeStore,
+        module,
+        pass1,
+        pass2,
+        typecheck,
+        &module.roots,
+      );
+
+      return Analyzer::Checks::ChecksOutput {
+        diagnostics: diagnostics,
+      };
+    }
+  }
+}
