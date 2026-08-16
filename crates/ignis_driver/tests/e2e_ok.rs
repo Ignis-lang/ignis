@@ -7259,3 +7259,125 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_builtin_name_shadowed_by_match_binding() {
+  e2e_test(
+    "builtin_name_shadowed_by_match_binding",
+    r#"
+enum Box {
+    VALUE(u64),
+    EMPTY,
+}
+
+function main(): i32 {
+    let boxed: Box = Box::VALUE(9);
+
+    match (boxed) {
+        Box::VALUE(hash) -> {
+            return hash as i32;
+        },
+        Box::EMPTY -> {
+            return 1;
+        },
+    };
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_builtin_name_shadowed_by_if_let_binding() {
+  e2e_test(
+    "builtin_name_shadowed_by_if_let_binding",
+    r#"
+enum Box {
+    VALUE(u64),
+    EMPTY,
+}
+
+function main(): i32 {
+    let boxed: Box = Box::VALUE(3);
+
+    if (let Box::VALUE(eq) = boxed) {
+        return eq as i32;
+    }
+
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_builtin_name_shadowed_by_let_else_binding() {
+  e2e_test(
+    "builtin_name_shadowed_by_let_else_binding",
+    r#"
+enum Box {
+    VALUE(u64),
+    EMPTY,
+}
+
+function main(): i32 {
+    let boxed: Box = Box::VALUE(6);
+
+    let Box::VALUE(read) = boxed else {
+        return 1;
+    };
+
+    return read as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_builtin_name_shadowed_by_let_binding() {
+  e2e_test(
+    "builtin_name_shadowed_by_let_binding",
+    r#"
+function main(): i32 {
+    let write: i32 = 5;
+
+    return write;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_bare_builtin_call_without_at_prefix() {
+  // Bare (non-`@`) builtin callees resolve through the callee-position exemption in the
+  // resolver; this pins that shadowing support did not break them.
+  e2e_test(
+    "bare_builtin_call_without_at_prefix",
+    r#"
+function main(): i32 {
+    return sizeOf<i32>() as i32;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_builtin_name_shadowed_binding_member_access() {
+  // A local record binding named like a builtin must resolve through the normal
+  // path machinery for member access as well.
+  e2e_test(
+    "builtin_name_shadowed_binding_member_access",
+    r#"
+record Digest {
+    public bits: i32;
+}
+
+function main(): i32 {
+    let hash: Digest = Digest { bits: 8 };
+
+    return hash.bits;
+}
+"#,
+  );
+}

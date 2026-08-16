@@ -1235,3 +1235,16 @@ function main(): i32 {
 }"#,
   );
 }
+
+#[test]
+fn bare_builtin_name_outside_callee_position_is_undeclared() {
+  // Line 3: typeOf used as a value, not as a callee.
+  common::assert_diagnostic_at_line(
+    r#"
+function main(): i32 {
+    return typeOf as i32;
+}"#,
+    "I0033", // UndeclaredVariable
+    3,
+  );
+}
