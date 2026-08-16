@@ -1,0 +1,122 @@
+import Symbol from "@compiler::symbols";
+
+export namespace Hir {
+  /// Formats a float the way Rust's `Debug` does: integral values keep a
+  /// trailing `.0` so `10.0` never collapses to `10`. Exponents and non-finite
+  /// renderings pass through untouched.
+  function formatFloatDebug(value: f64): String {
+    let rendered: String = String::create(value);
+    let mut hasNonIntegerShape: boolean = false;
+    let mut index: u64 = 0;
+
+    while (index < rendered.length()) {
+      if (let Option::SOME(character) = rendered.charAt(index)) {
+        if (character == '.' || character == 'e' || character == 'E' || character == 'n' || character == 'i') {
+          hasNonIntegerShape = true;
+        }
+      }
+      index += 1;
+    }
+
+    if (hasNonIntegerShape) {
+      return rendered;
+    }
+
+    return rendered.concat(".0");
+  }
+
+  /// Escapes a string payload the way Rust's `Debug` for `String` does for the
+  /// escape set the HIR display format relies on.
+  function escapeStringDebug(value: &String): String {
+    let mut escaped: String = String::create("");
+    let mut index: u64 = 0;
+
+    while (index < value.length()) {
+      let Option::SOME(character) = value.charAt(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (character == '\\') {
+        escaped.pushStr("\\\\");
+      } else if (character == '"') {
+        escaped.pushStr("\\\"");
+      } else if (character == '\n') {
+        escaped.pushStr("\\n");
+      } else if (character == '\r') {
+        escaped.pushStr("\\r");
+      } else if (character == '\t') {
+        escaped.pushStr("\\t");
+      } else if (character == '\0') {
+        escaped.pushStr("\\0");
+      } else {
+        escaped.pushChar(character);
+      }
+
+      index += 1;
+    }
+
+    return escaped;
+  }
+
+  /// Literal payload for HIR nodes, mirroring `ignis_type::value::IgnisLiteralValue`.
+  ///
+  /// Lives in the hir module because the selfhost analyzer has no shared
+  /// literal-value model yet; it can move to a shared module once lowering
+  /// (IGN-37) needs to produce it from AST literals.
+  enum LiteralValue {
+    Int8(i8),
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    UnsignedInt8(u8),
+    UnsignedInt16(u16),
+    UnsignedInt32(u32),
+    UnsignedInt64(u64),
+    Float32(f32),
+    Float64(f64),
+    Boolean(boolean),
+    Char(u32),
+    String(String),
+    Atom(Symbol),
+    Hex(String),
+    Binary(String),
+    Null,
+
+    /// Renders this literal like Rust's derived `Debug` on `IgnisLiteralValue`,
+    /// which is the exact form golden HIR snapshots embed (`Int32(10)`,
+    /// `Float64(10.0)`, `Char(10084)`, `Boolean(false)`, `String("hi")`).
+    /// `Atom` renders its raw symbol index instead of Rust's derived
+    /// `Id { index, _phantom }` noise.
+    public debugFormat(&self): String {
+      return match (self) {
+        Hir::LiteralValue::Int8(value) -> String::create("Int8(").concat(value).concat(")"),
+        Hir::LiteralValue::Int16(value) -> String::create("Int16(").concat(value).concat(")"),
+        Hir::LiteralValue::Int32(value) -> String::create("Int32(").concat(value).concat(")"),
+        Hir::LiteralValue::Int64(value) -> String::create("Int64(").concat(value).concat(")"),
+        Hir::LiteralValue::UnsignedInt8(value) -> String::create("UnsignedInt8(").concat(value).concat(")"),
+        Hir::LiteralValue::UnsignedInt16(value) -> String::create("UnsignedInt16(").concat(value).concat(")"),
+        Hir::LiteralValue::UnsignedInt32(value) -> String::create("UnsignedInt32(").concat(value).concat(")"),
+        Hir::LiteralValue::UnsignedInt64(value) -> String::create("UnsignedInt64(").concat(value).concat(")"),
+        Hir::LiteralValue::Float32(value) -> String::create("Float32(")
+          .concat(Hir::formatFloatDebug(value as f64).toStr())
+          .concat(")"),
+        Hir::LiteralValue::Float64(value) -> String::create("Float64(")
+          .concat(Hir::formatFloatDebug(value).toStr())
+          .concat(")"),
+        Hir::LiteralValue::Boolean(value) -> match (value) {
+          true -> String::create("Boolean(true)"),
+          false -> String::create("Boolean(false)"),
+        },
+        Hir::LiteralValue::Char(value) -> String::create("Char(").concat(value).concat(")"),
+        Hir::LiteralValue::String(value) -> String::create("String(\"")
+          .concat(Hir::escapeStringDebug(&value).toStr())
+          .concat("\")"),
+        Hir::LiteralValue::Atom(symbol) -> String::create("Atom(").concat(symbol.raw()).concat(")"),
+        Hir::LiteralValue::Hex(value) -> String::create("Hex(\"").concat(value.toStr()).concat("\")"),
+        Hir::LiteralValue::Binary(value) -> String::create("Binary(\"").concat(value.toStr()).concat("\")"),
+        Hir::LiteralValue::Null -> String::create("Null"),
+      };
+    }
+  }
+}

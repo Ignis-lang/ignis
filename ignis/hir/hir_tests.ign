@@ -1,0 +1,809 @@
+import Test from "std::test";
+import Vector from "std::vector";
+
+import SourceSpan from "@compiler::diagnostics";
+import Id from "@compiler::ids";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+
+function hirId(raw: u32): Hir::HirId {
+  return Id::fromRaw<Hir::NodeTag>(raw);
+}
+
+function defId(raw: u32): Analyzer::DefinitionId {
+  return Id::fromRaw<Analyzer::DefinitionTag>(raw);
+}
+
+function typeId(raw: u32): Analyzer::TypeId {
+  return Id::fromRaw<Analyzer::TypeTag>(raw);
+}
+
+function makeNode(kind: Hir::HirKind, nodeType: Analyzer::TypeId): Hir::HirNode {
+  return Hir::HirNode {
+    kind: kind,
+    span: SourceSpan::new("", 0, 0),
+    typeId: nodeType,
+  };
+}
+
+function binaryKind(operation: Hir::BinaryOperation, left: u32, right: u32): Hir::HirKind {
+  return Hir::HirKind::Binary(Hir::HirBinary {
+    operation: operation,
+    left: hirId(left),
+    right: hirId(right),
+  });
+}
+
+function pushVariableDef(
+  defs: &mut Analyzer::DefinitionStore,
+  symbols: &mut Analyzer::SymbolTable,
+  name: str,
+  declaredType: Analyzer::TypeId,
+  mutable: boolean,
+): Analyzer::DefinitionId {
+  let mut defsRef: &mut Analyzer::DefinitionStore = defs;
+  let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+
+  return defsRef.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
+    name: symbolsRef.intern(name),
+    visibility: Analyzer::Visibility::PRIVATE,
+    declaredType: declaredType,
+    mutable: mutable,
+  }));
+}
+
+function pushFunctionDef(
+  defs: &mut Analyzer::DefinitionStore,
+  symbols: &mut Analyzer::SymbolTable,
+  name: str,
+  params: Vector<Analyzer::DefinitionId>,
+  returnType: Analyzer::TypeId,
+): Analyzer::DefinitionId {
+  let mut defsRef: &mut Analyzer::DefinitionStore = defs;
+  let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+
+  return defsRef.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+    name: symbolsRef.intern(name),
+    visibility: Analyzer::Visibility::PRIVATE,
+    typeParams: Vector::new<Analyzer::DefinitionId>(),
+    params: params,
+    returnType: returnType,
+    isDeprecated: false,
+    deprecatedMessage: Option::NONE,
+  }));
+}
+
+@test
+function hirStoreAllocAssignsSequentialIdsFromZero(): void {
+  let mut store: Hir::HirStore = Hir::HirStore::init();
+
+  Test::assertEq<u64>(store.length(), 0);
+
+  let first: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Unit, typeId(0)));
+  let second: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Trap, typeId(0)));
+
+  Test::assertEq<u32>(first.raw(), 0);
+  Test::assertEq<u32>(second.raw(), 1);
+  Test::assertEq<u64>(store.length(), 2);
+
+  let Option::SOME(node) = store.get(second) else {
+    @panic("expected node for allocated id");
+  };
+
+  Test::assert(match (&node.kind) {
+    Hir::HirKind::Trap -> true,
+    _ -> false,
+  });
+}
+
+@test
+function hirStoreGetReturnsNoneForUnknownId(): void {
+  let store: Hir::HirStore = Hir::HirStore::init();
+
+  Test::assert(match (store.get(hirId(7))) {
+    Option::SOME(_) -> false,
+    Option::NONE -> true,
+  });
+}
+
+@test
+function hirStoreFunctionBodyMapSetsGetsAndReplaces(): void {
+  let mut store: Hir::HirStore = Hir::HirStore::init();
+
+  store.setFunctionBody(defId(3), hirId(10));
+  store.setFunctionBody(defId(4), hirId(11));
+
+  let Option::SOME(firstBody) = store.functionBody(defId(3)) else {
+    @panic("expected body for def 3");
+  };
+  Test::assertEq<u32>(firstBody.raw(), 10);
+
+  store.setFunctionBody(defId(3), hirId(20));
+
+  let Option::SOME(replacedBody) = store.functionBody(defId(3)) else {
+    @panic("expected replaced body for def 3");
+  };
+  Test::assertEq<u32>(replacedBody.raw(), 20);
+  Test::assertEq<u64>(store.functionBodies.length(), 2);
+
+  Test::assert(match (store.functionBody(defId(9))) {
+    Option::SOME(_) -> false,
+    Option::NONE -> true,
+  });
+}
+
+@test
+function hirStoreVariableInitMapIsIndependentFromBodies(): void {
+  let mut store: Hir::HirStore = Hir::HirStore::init();
+
+  store.setVariableInit(defId(5), hirId(1));
+  store.setFunctionBody(defId(5), hirId(2));
+
+  let Option::SOME(init) = store.variableInit(defId(5)) else {
+    @panic("expected init for def 5");
+  };
+  let Option::SOME(body) = store.functionBody(defId(5)) else {
+    @panic("expected body for def 5");
+  };
+
+  Test::assertEq<u32>(init.raw(), 1);
+  Test::assertEq<u32>(body.raw(), 2);
+}
+
+@test
+function hirStoreTracksItemsAndMembership(): void {
+  let mut store: Hir::HirStore = Hir::HirStore::init();
+
+  store.addItem(defId(1));
+  store.addItem(defId(2));
+
+  Test::assert(store.containsItem(defId(1)));
+  Test::assert(store.containsItem(defId(2)));
+  Test::assert(!store.containsItem(defId(3)));
+}
+
+@test
+function offsetKindLeavesLeafVariantsUntouched(): void {
+  let offsetLiteral: Hir::HirKind = Hir::offsetKind(Hir::HirKind::Literal(Hir::LiteralValue::Int32(7)), 100);
+  Test::assert(match (&offsetLiteral) {
+    Hir::HirKind::Literal(value) -> value.debugFormat().equals("Int32(7)"),
+    _ -> false,
+  });
+
+  let offsetVariable: Hir::HirKind = Hir::offsetKind(Hir::HirKind::Variable(defId(4)), 100);
+  Test::assert(match (&offsetVariable) {
+    Hir::HirKind::Variable(variableDef) -> variableDef.raw() == 4,
+    _ -> false,
+  });
+
+  let offsetSizeOf: Hir::HirKind = Hir::offsetKind(Hir::HirKind::SizeOf(typeId(2)), 100);
+  Test::assert(match (&offsetSizeOf) {
+    Hir::HirKind::SizeOf(sizeType) -> sizeType.raw() == 2,
+    _ -> false,
+  });
+
+  let offsetBreak: Hir::HirKind = Hir::offsetKind(Hir::HirKind::Break, 100);
+  Test::assert(match (&offsetBreak) {
+    Hir::HirKind::Break -> true,
+    _ -> false,
+  });
+}
+
+@test
+function offsetKindOffsetsBinaryOperands(): void {
+  let offsetBinary: Hir::HirKind = Hir::offsetKind(binaryKind(Hir::BinaryOperation::Add, 1, 2), 10);
+
+  Test::assert(match (&offsetBinary) {
+    Hir::HirKind::Binary(binaryNode) -> binaryNode.left.raw() == 11 && binaryNode.right.raw() == 12,
+    _ -> false,
+  });
+}
+
+@test
+function offsetKindOffsetsCallArgsButNotCalleeOrTypeArgs(): void {
+  let mut args: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+  args.push(hirId(0));
+  args.push(hirId(3));
+
+  let mut typeArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  typeArgs.push(typeId(6));
+
+  let offsetCall: Hir::HirKind = Hir::offsetKind(
+    Hir::HirKind::Call(Hir::HirCall { callee: defId(9), typeArgs: typeArgs, args: args }),
+    5,
+  );
+
+  let Hir::HirKind::Call(call) = &offsetCall else {
+    @panic("expected Call kind");
+  };
+
+  Test::assertEq<u32>(call.callee.raw(), 9);
+
+  let Option::SOME(firstArg) = call.args.get(0) else {
+    @panic("missing first arg");
+  };
+  let Option::SOME(secondArg) = call.args.get(1) else {
+    @panic("missing second arg");
+  };
+  Test::assertEq<u32>(firstArg.raw(), 5);
+  Test::assertEq<u32>(secondArg.raw(), 8);
+
+  let Option::SOME(firstTypeArg) = call.typeArgs.get(0) else {
+    @panic("missing type arg");
+  };
+  Test::assertEq<u32>(firstTypeArg.raw(), 6);
+}
+
+@test
+function offsetKindOffsetsBlockStatementsAndTailExpression(): void {
+  let mut statements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+  statements.push(hirId(0));
+  statements.push(hirId(1));
+
+  let offsetBlock: Hir::HirKind = Hir::offsetKind(
+    Hir::HirKind::Block(Hir::HirBlock { statements: statements, expression: Option::SOME(hirId(2)) }),
+    7,
+  );
+
+  let Hir::HirKind::Block(block) = &offsetBlock else {
+    @panic("expected Block kind");
+  };
+
+  let Option::SOME(firstStatement) = block.statements.get(0) else {
+    @panic("missing first statement");
+  };
+  let Option::SOME(secondStatement) = block.statements.get(1) else {
+    @panic("missing second statement");
+  };
+  Test::assertEq<u32>(firstStatement.raw(), 7);
+  Test::assertEq<u32>(secondStatement.raw(), 8);
+
+  let Option::SOME(expression) = block.expression else {
+    @panic("missing tail expression");
+  };
+  Test::assertEq<u32>(expression.raw(), 9);
+}
+
+@test
+function offsetKindOffsetsIfBranchesIncludingOptionalElse(): void {
+  let offsetIf: Hir::HirKind = Hir::offsetKind(
+    Hir::HirKind::If(Hir::HirIf {
+      condition: hirId(0),
+      thenBranch: hirId(1),
+      elseBranch: Option::SOME(hirId(2)),
+    }),
+    3,
+  );
+
+  let Hir::HirKind::If(ifNode) = &offsetIf else {
+    @panic("expected If kind");
+  };
+
+  Test::assertEq<u32>(ifNode.condition.raw(), 3);
+  Test::assertEq<u32>(ifNode.thenBranch.raw(), 4);
+
+  let Option::SOME(elseBranch) = ifNode.elseBranch else {
+    @panic("missing else branch");
+  };
+  Test::assertEq<u32>(elseBranch.raw(), 5);
+
+  let offsetIfNoElse: Hir::HirKind = Hir::offsetKind(
+    Hir::HirKind::If(Hir::HirIf { condition: hirId(0), thenBranch: hirId(1), elseBranch: Option::NONE }),
+    3,
+  );
+
+  let Hir::HirKind::If(bareIf) = &offsetIfNoElse else {
+    @panic("expected If kind");
+  };
+  Test::assert(match (bareIf.elseBranch) {
+    Option::SOME(_) -> false,
+    Option::NONE -> true,
+  });
+}
+
+@test
+function offsetKindOffsetsMatchScrutineeGuardsAndBodies(): void {
+  let mut arms: Vector<Hir::HirMatchArm> = Vector::new<Hir::HirMatchArm>();
+  arms.push(Hir::HirMatchArm {
+    pattern: Hir::HirPattern::Wildcard,
+    guard: Option::SOME(hirId(1)),
+    body: hirId(2),
+  });
+  arms.push(Hir::HirMatchArm {
+    pattern: Hir::HirPattern::Literal(Hir::LiteralValue::Int32(1)),
+    guard: Option::NONE,
+    body: hirId(3),
+  });
+
+  let offsetMatch: Hir::HirKind = Hir::offsetKind(
+    Hir::HirKind::Match(Hir::HirMatch { scrutinee: hirId(0), arms: arms }),
+    10,
+  );
+
+  let Hir::HirKind::Match(matchNode) = &offsetMatch else {
+    @panic("expected Match kind");
+  };
+
+  Test::assertEq<u32>(matchNode.scrutinee.raw(), 10);
+  Test::assertEq<u64>(matchNode.arms.length(), 2);
+
+  let Option::SOME(firstArm) = matchNode.arms.get(0) else {
+    @panic("missing first arm");
+  };
+  let Option::SOME(guard) = firstArm.guard else {
+    @panic("missing guard");
+  };
+  Test::assertEq<u32>(guard.raw(), 11);
+  Test::assertEq<u32>(firstArm.body.raw(), 12);
+
+  let Option::SOME(secondArm) = matchNode.arms.get(1) else {
+    @panic("missing second arm");
+  };
+  Test::assertEq<u32>(secondArm.body.raw(), 13);
+  Test::assert(match (&secondArm.pattern) {
+    Hir::HirPattern::Literal(_) -> true,
+    _ -> false,
+  });
+}
+
+@test
+function offsetKindOffsetsForLoopConditionIdsAndBody(): void {
+  let offsetLoop: Hir::HirKind = Hir::offsetKind(
+    Hir::HirKind::Loop(Hir::HirLoop {
+      condition: Hir::LoopKind::For(Hir::ForLoop {
+        init: Option::SOME(hirId(0)),
+        condition: Option::SOME(hirId(1)),
+        update: Option::NONE,
+      }),
+      body: hirId(2),
+    }),
+    4,
+  );
+
+  let Hir::HirKind::Loop(loopNode) = &offsetLoop else {
+    @panic("expected Loop kind");
+  };
+
+  Test::assertEq<u32>(loopNode.body.raw(), 6);
+
+  let Hir::LoopKind::For(forLoop) = &loopNode.condition else {
+    @panic("expected For loop kind");
+  };
+
+  let Option::SOME(init) = forLoop.init else {
+    @panic("missing init");
+  };
+  let Option::SOME(condition) = forLoop.condition else {
+    @panic("missing condition");
+  };
+  Test::assertEq<u32>(init.raw(), 4);
+  Test::assertEq<u32>(condition.raw(), 5);
+  Test::assert(match (forLoop.update) {
+    Option::SOME(_) -> false,
+    Option::NONE -> true,
+  });
+}
+
+@test
+function offsetKindOffsetsLetInitAndLetElseTargets(): void {
+  let offsetLet: Hir::HirKind = Hir::offsetKind(
+    Hir::HirKind::Let(Hir::HirLet { name: defId(1), value: Option::SOME(hirId(0)) }),
+    9,
+  );
+
+  let Hir::HirKind::Let(letNode) = &offsetLet else {
+    @panic("expected Let kind");
+  };
+  Test::assertEq<u32>(letNode.name.raw(), 1);
+  let Option::SOME(letValue) = letNode.value else {
+    @panic("missing let value");
+  };
+  Test::assertEq<u32>(letValue.raw(), 9);
+
+  let offsetLetElse: Hir::HirKind = Hir::offsetKind(
+    Hir::HirKind::LetElse(Hir::HirLetElse {
+      pattern: Hir::HirPattern::Binding(defId(2)),
+      value: hirId(1),
+      elseBlock: hirId(2),
+    }),
+    9,
+  );
+
+  let Hir::HirKind::LetElse(letElse) = &offsetLetElse else {
+    @panic("expected LetElse kind");
+  };
+  Test::assertEq<u32>(letElse.value.raw(), 10);
+  Test::assertEq<u32>(letElse.elseBlock.raw(), 11);
+}
+
+@test
+function offsetKindOffsetsMethodCallReceiverAndEnumPayload(): void {
+  let mut methodArgs: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+  methodArgs.push(hirId(1));
+
+  let offsetMethodCall: Hir::HirKind = Hir::offsetKind(
+    Hir::HirKind::MethodCall(Hir::HirMethodCall {
+      receiver: Option::SOME(hirId(0)),
+      method: defId(7),
+      typeArgs: Vector::new<Analyzer::TypeId>(),
+      args: methodArgs,
+    }),
+    2,
+  );
+
+  let Hir::HirKind::MethodCall(methodCall) = &offsetMethodCall else {
+    @panic("expected MethodCall kind");
+  };
+
+  let Option::SOME(receiver) = methodCall.receiver else {
+    @panic("missing receiver");
+  };
+  Test::assertEq<u32>(receiver.raw(), 2);
+  Test::assertEq<u32>(methodCall.method.raw(), 7);
+
+  let mut payload: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+  payload.push(hirId(4));
+
+  let offsetVariant: Hir::HirKind = Hir::offsetKind(
+    Hir::HirKind::EnumVariant(Hir::HirEnumVariant {
+      enumDef: defId(3),
+      typeArgs: Vector::new<Analyzer::TypeId>(),
+      variantTag: 1,
+      payload: payload,
+    }),
+    2,
+  );
+
+  let Hir::HirKind::EnumVariant(variant) = &offsetVariant else {
+    @panic("expected EnumVariant kind");
+  };
+  let Option::SOME(payloadId) = variant.payload.get(0) else {
+    @panic("missing payload id");
+  };
+  Test::assertEq<u32>(payloadId.raw(), 6);
+  Test::assertEq<u32>(variant.enumDef.raw(), 3);
+}
+
+@test
+function mergeOffsetsNodesBodiesInitsAndDedupesItems(): void {
+  let mut target: Hir::HirStore = Hir::HirStore::init();
+  target.alloc(makeNode(Hir::HirKind::Unit, typeId(0)));
+  target.alloc(makeNode(Hir::HirKind::Unit, typeId(0)));
+  target.addItem(defId(1));
+
+  let mut other: Hir::HirStore = Hir::HirStore::init();
+  let leftId: Hir::HirId = other.alloc(makeNode(Hir::HirKind::Literal(Hir::LiteralValue::Int32(1)), typeId(0)));
+  let rightId: Hir::HirId = other.alloc(makeNode(Hir::HirKind::Literal(Hir::LiteralValue::Int32(2)), typeId(0)));
+  let binaryId: Hir::HirId = other.alloc(makeNode(
+    binaryKind(Hir::BinaryOperation::Add, leftId.raw(), rightId.raw()),
+    typeId(0),
+  ));
+
+  other.setFunctionBody(defId(2), binaryId);
+  other.setVariableInit(defId(3), leftId);
+  other.addItem(defId(1));
+  other.addItem(defId(2));
+  other.setEntryPoint(defId(2));
+
+  Hir::mergeStores(&mut target, other);
+
+  Test::assertEq<u64>(target.length(), 5);
+
+  let Option::SOME(mergedBinary) = target.get(hirId(4)) else {
+    @panic("missing merged binary node");
+  };
+  let Hir::HirKind::Binary(binaryNode) = &mergedBinary.kind else {
+    @panic("expected merged Binary kind");
+  };
+  Test::assertEq<u32>(binaryNode.left.raw(), 2);
+  Test::assertEq<u32>(binaryNode.right.raw(), 3);
+
+  let Option::SOME(mergedBody) = target.functionBody(defId(2)) else {
+    @panic("missing merged body");
+  };
+  Test::assertEq<u32>(mergedBody.raw(), 4);
+
+  let Option::SOME(mergedInit) = target.variableInit(defId(3)) else {
+    @panic("missing merged init");
+  };
+  Test::assertEq<u32>(mergedInit.raw(), 2);
+
+  Test::assertEq<u64>(target.items.length(), 2);
+  Test::assert(target.containsItem(defId(1)));
+  Test::assert(target.containsItem(defId(2)));
+
+  Test::assert(match (target.entryPoint) {
+    Option::SOME(_) -> false,
+    Option::NONE -> true,
+  });
+}
+
+@test
+function literalValueDebugFormatMatchesRustDebugShapes(): void {
+  Test::assertEq<str>(Hir::LiteralValue::Int32(10).debugFormat().toStr(), "Int32(10)");
+  Test::assertEq<str>(Hir::LiteralValue::Float64(10.0).debugFormat().toStr(), "Float64(10.0)");
+  Test::assertEq<str>(Hir::LiteralValue::Float64(3.14).debugFormat().toStr(), "Float64(3.14)");
+  Test::assertEq<str>(Hir::LiteralValue::Boolean(false).debugFormat().toStr(), "Boolean(false)");
+  Test::assertEq<str>(Hir::LiteralValue::Char(10084).debugFormat().toStr(), "Char(10084)");
+  Test::assertEq<str>(
+    Hir::LiteralValue::String(String::create("a\"b\n")).debugFormat().toStr(),
+    "String(\"a\\\"b\\n\")",
+  );
+  Test::assertEq<str>(Hir::LiteralValue::Null.debugFormat().toStr(), "Null");
+}
+
+@test
+function patternDebugFormatMirrorsRustDebugShapes(): void {
+  Test::assertEq<str>(Hir::HirPattern::Wildcard.debugFormat().toStr(), "Wildcard");
+  Test::assertEq<str>(
+    Hir::HirPattern::Literal(Hir::LiteralValue::Int32(40)).debugFormat().toStr(),
+    "Literal { value: Int32(40) }",
+  );
+
+  let mut args: Vector<Hir::HirPattern> = Vector::new<Hir::HirPattern>();
+  args.push(Hir::HirPattern::Wildcard);
+  args.push(Hir::HirPattern::Binding(defId(5)));
+
+  let variant: Hir::HirPattern = Hir::HirPattern::Variant(Hir::VariantPattern {
+    enumDef: defId(4),
+    variantTag: 1,
+    args: args,
+  });
+
+  Test::assertEq<str>(
+    variant.debugFormat().toStr(),
+    "Variant { enum_def: Id(4), variant_tag: 1, args: [Wildcard, Binding { def_id: Id(5) }] }",
+  );
+}
+
+@test
+function displayRendersFunctionBodyLikeRustGoldenSnapshot(): void {
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let booleanType: Analyzer::TypeId = types.intern(Analyzer::Type::BOOLEAN);
+  let voidType: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+  let neverType: Analyzer::TypeId = types.intern(Analyzer::Type::NEVER);
+
+  let aDef: Analyzer::DefinitionId = pushVariableDef(&mut defs, &mut symbols, "a", booleanType, false);
+  let bDef: Analyzer::DefinitionId = pushVariableDef(&mut defs, &mut symbols, "b", booleanType, false);
+  let eqDef: Analyzer::DefinitionId = pushVariableDef(&mut defs, &mut symbols, "eq", booleanType, false);
+
+  let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  params.push(aDef);
+  params.push(bDef);
+  let functionDef: Analyzer::DefinitionId = pushFunctionDef(&mut defs, &mut symbols, "compareBools", params, booleanType);
+
+  let mut store: Hir::HirStore = Hir::HirStore::init();
+  let varA: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Variable(aDef), booleanType));
+  let varB: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Variable(bDef), booleanType));
+  let equalNode: Hir::HirId = store.alloc(makeNode(
+    binaryKind(Hir::BinaryOperation::Equal, varA.raw(), varB.raw()),
+    booleanType,
+  ));
+  let letNode: Hir::HirId = store.alloc(makeNode(
+    Hir::HirKind::Let(Hir::HirLet { name: eqDef, value: Option::SOME(equalNode) }),
+    voidType,
+  ));
+  let varEq: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Variable(eqDef), booleanType));
+  let returnNode: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Return(Option::SOME(varEq)), neverType));
+
+  let mut statements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+  statements.push(letNode);
+  statements.push(returnNode);
+  let block: Hir::HirId = store.alloc(makeNode(
+    Hir::HirKind::Block(Hir::HirBlock { statements: statements, expression: Option::NONE }),
+    neverType,
+  ));
+
+  store.setFunctionBody(functionDef, block);
+  store.addItem(functionDef);
+  store.setEntryPoint(functionDef);
+
+  let rendered: String = Hir::Display::printHir(&store, &types, &defs, &symbols);
+
+  let mut expected: String = String::create("=== HIR ===\n\n");
+  expected.pushStr("Entry Point: compareBools\n");
+  expected.pushStr("\n--- Definitions ---\n");
+  expected.pushStr("\nfn compareBools(a: boolean, b: boolean): boolean\n");
+  expected.pushStr("  body:\n");
+  expected.pushStr("    Block : never\n");
+  expected.pushStr("      statements:\n");
+  expected.pushStr("        Let(eq) : void\n");
+  expected.pushStr("          init:\n");
+  expected.pushStr("            Binary(Equal) : boolean\n");
+  expected.pushStr("              left:\n");
+  expected.pushStr("                Variable(a) : boolean\n");
+  expected.pushStr("              right:\n");
+  expected.pushStr("                Variable(b) : boolean\n");
+  expected.pushStr("        Return : never\n");
+  expected.pushStr("          Variable(eq) : boolean\n");
+
+  Test::assertEq<str>(rendered.toStr(), expected.toStr());
+}
+
+@test
+function displayRendersMatchArmsWithPatternsAndGuards(): void {
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let i32Type: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+  let booleanType: Analyzer::TypeId = types.intern(Analyzer::Type::BOOLEAN);
+
+  let xDef: Analyzer::DefinitionId = pushVariableDef(&mut defs, &mut symbols, "x", i32Type, false);
+  let functionDef: Analyzer::DefinitionId = pushFunctionDef(
+    &mut defs,
+    &mut symbols,
+    "pick",
+    Vector::new<Analyzer::DefinitionId>(),
+    i32Type,
+  );
+
+  let mut store: Hir::HirStore = Hir::HirStore::init();
+  let scrutinee: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Variable(xDef), i32Type));
+  let armOneBody: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Literal(Hir::LiteralValue::Int32(1)), i32Type));
+  let guardNode: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Literal(Hir::LiteralValue::Boolean(true)), booleanType));
+  let armTwoBody: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Literal(Hir::LiteralValue::Int32(0)), i32Type));
+
+  let mut arms: Vector<Hir::HirMatchArm> = Vector::new<Hir::HirMatchArm>();
+  arms.push(Hir::HirMatchArm {
+    pattern: Hir::HirPattern::Literal(Hir::LiteralValue::Int32(40)),
+    guard: Option::NONE,
+    body: armOneBody,
+  });
+  arms.push(Hir::HirMatchArm {
+    pattern: Hir::HirPattern::Wildcard,
+    guard: Option::SOME(guardNode),
+    body: armTwoBody,
+  });
+
+  let matchNode: Hir::HirId = store.alloc(makeNode(
+    Hir::HirKind::Match(Hir::HirMatch { scrutinee: scrutinee, arms: arms }),
+    i32Type,
+  ));
+
+  store.setFunctionBody(functionDef, matchNode);
+
+  let rendered: String = Hir::Display::printHir(&store, &types, &defs, &symbols);
+
+  let mut expected: String = String::create("=== HIR ===\n\n");
+  expected.pushStr("\n--- Definitions ---\n");
+  expected.pushStr("\nfn pick(): i32\n");
+  expected.pushStr("  body:\n");
+  expected.pushStr("    Match : i32\n");
+  expected.pushStr("      scrutinee:\n");
+  expected.pushStr("        Variable(x) : i32\n");
+  expected.pushStr("      arm[0]:\n");
+  expected.pushStr("        pattern: Literal { value: Int32(40) }\n");
+  expected.pushStr("        body:\n");
+  expected.pushStr("          Literal(Int32(1)) : i32\n");
+  expected.pushStr("      arm[1]:\n");
+  expected.pushStr("        pattern: Wildcard\n");
+  expected.pushStr("        guard:\n");
+  expected.pushStr("          Literal(Boolean(true)) : boolean\n");
+  expected.pushStr("        body:\n");
+  expected.pushStr("          Literal(Int32(0)) : i32\n");
+
+  Test::assertEq<str>(rendered.toStr(), expected.toStr());
+}
+
+@test
+function displayRendersVariableInitializersSortedByName(): void {
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let i32Type: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+
+  let bVar: Analyzer::DefinitionId = pushVariableDef(&mut defs, &mut symbols, "b", i32Type, true);
+  let aVar: Analyzer::DefinitionId = pushVariableDef(&mut defs, &mut symbols, "a", i32Type, false);
+
+  let mut store: Hir::HirStore = Hir::HirStore::init();
+  let bInit: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Literal(Hir::LiteralValue::Int32(2)), i32Type));
+  let aInit: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Literal(Hir::LiteralValue::Int32(1)), i32Type));
+
+  store.setVariableInit(bVar, bInit);
+  store.setVariableInit(aVar, aInit);
+
+  let rendered: String = Hir::Display::printHir(&store, &types, &defs, &symbols);
+
+  let mut expected: String = String::create("=== HIR ===\n\n");
+  expected.pushStr("\n--- Variable Initializers ---\n\n");
+  expected.pushStr("a: i32 = Literal(Int32(1))\n");
+  expected.pushStr("b: i32 [mut] = Literal(Int32(2))\n");
+
+  Test::assertEq<str>(rendered.toStr(), expected.toStr());
+}
+
+@test
+function displayCompactFormatterRendersNestedCallsAndCasts(): void {
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let i32Type: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+  let i64Type: Analyzer::TypeId = types.intern(Analyzer::Type::I64);
+
+  let echoDef: Analyzer::DefinitionId = pushFunctionDef(
+    &mut defs,
+    &mut symbols,
+    "echo",
+    Vector::new<Analyzer::DefinitionId>(),
+    i32Type,
+  );
+  let chVar: Analyzer::DefinitionId = pushVariableDef(&mut defs, &mut symbols, "ch", i64Type, false);
+
+  let mut store: Hir::HirStore = Hir::HirStore::init();
+  let literalNode: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Literal(Hir::LiteralValue::Char(10084)), i32Type));
+
+  let mut callArgs: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+  callArgs.push(literalNode);
+  let callNode: Hir::HirId = store.alloc(makeNode(
+    Hir::HirKind::Call(Hir::HirCall {
+      callee: echoDef,
+      typeArgs: Vector::new<Analyzer::TypeId>(),
+      args: callArgs,
+    }),
+    i32Type,
+  ));
+  let castNode: Hir::HirId = store.alloc(makeNode(
+    Hir::HirKind::Cast(Hir::HirCast { expression: callNode, target: i64Type }),
+    i64Type,
+  ));
+
+  store.setVariableInit(chVar, castNode);
+
+  let rendered: String = Hir::Display::printHir(&store, &types, &defs, &symbols);
+
+  let mut expected: String = String::create("=== HIR ===\n\n");
+  expected.pushStr("\n--- Variable Initializers ---\n\n");
+  expected.pushStr("ch: i64 = Cast(Call(echo) { Literal(Char(10084)) } as i64)\n");
+
+  Test::assertEq<str>(rendered.toStr(), expected.toStr());
+}
+
+@test
+function displaySortsFunctionDefinitionsByName(): void {
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let voidType: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+
+  let zebraDef: Analyzer::DefinitionId = pushFunctionDef(
+    &mut defs,
+    &mut symbols,
+    "zebra",
+    Vector::new<Analyzer::DefinitionId>(),
+    voidType,
+  );
+  let alphaDef: Analyzer::DefinitionId = pushFunctionDef(
+    &mut defs,
+    &mut symbols,
+    "alpha",
+    Vector::new<Analyzer::DefinitionId>(),
+    voidType,
+  );
+
+  let mut store: Hir::HirStore = Hir::HirStore::init();
+  let zebraBody: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Unit, voidType));
+  let alphaBody: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Unit, voidType));
+
+  store.setFunctionBody(zebraDef, zebraBody);
+  store.setFunctionBody(alphaDef, alphaBody);
+
+  let rendered: String = Hir::Display::printHir(&store, &types, &defs, &symbols);
+
+  let mut expected: String = String::create("=== HIR ===\n\n");
+  expected.pushStr("\n--- Definitions ---\n");
+  expected.pushStr("\nfn alpha(): void\n");
+  expected.pushStr("  body:\n");
+  expected.pushStr("    Unit : void\n");
+  expected.pushStr("\nfn zebra(): void\n");
+  expected.pushStr("  body:\n");
+  expected.pushStr("    Unit : void\n");
+
+  Test::assertEq<str>(rendered.toStr(), expected.toStr());
+}

@@ -1,0 +1,686 @@
+import Vector from "std::vector";
+
+import SourceSpan from "@compiler::diagnostics";
+import Id from "@compiler::ids";
+import Analyzer from "@compiler::analyzer";
+
+import _ from "./ids";
+import _ from "./value";
+import _ from "./operation";
+import _ from "./statement";
+import _ from "./pattern";
+
+export namespace Hir {
+  /// Mirrors `ignis_hir::BuiltinEqKind`.
+  enum BuiltinEqKind {
+    Primitive,
+    Str,
+    Method(Analyzer::DefinitionId),
+    Pending,
+  }
+
+  /// Mirrors `ignis_hir::HIRMatchArm`.
+  record HirMatchArm {
+    public pattern: Hir::HirPattern;
+    public guard: Option<Hir::HirId>;
+    public body: Hir::HirId;
+  }
+
+  record HirBinary {
+    public operation: Hir::BinaryOperation;
+    public left: Hir::HirId;
+    public right: Hir::HirId;
+  }
+
+  record HirUnary {
+    public operation: Hir::UnaryOperation;
+    public operand: Hir::HirId;
+  }
+
+  record HirCall {
+    public callee: Analyzer::DefinitionId;
+    public typeArgs: Vector<Analyzer::TypeId>;
+    public args: Vector<Hir::HirId>;
+  }
+
+  record HirCallClosure {
+    public callee: Hir::HirId;
+    public args: Vector<Hir::HirId>;
+  }
+
+  /// Shared payload shape for `Cast` and `BitCast`, which carry identical
+  /// fields in the Rust model.
+  record HirCast {
+    public expression: Hir::HirId;
+    public target: Analyzer::TypeId;
+  }
+
+  record HirReference {
+    public expression: Hir::HirId;
+    public mutable: boolean;
+  }
+
+  record HirIndex {
+    public base: Hir::HirId;
+    public index: Hir::HirId;
+  }
+
+  record HirMakeSlice {
+    public data: Hir::HirId;
+    public len: Hir::HirId;
+    public elementType: Analyzer::TypeId;
+  }
+
+  record HirBuiltinLoad {
+    public ty: Analyzer::TypeId;
+    public ptr: Hir::HirId;
+  }
+
+  record HirBuiltinStore {
+    public ty: Analyzer::TypeId;
+    public ptr: Hir::HirId;
+    public value: Hir::HirId;
+  }
+
+  record HirBuiltinHash {
+    public ty: Analyzer::TypeId;
+    public value: Hir::HirId;
+    public hasher: Hir::HirId;
+  }
+
+  record HirBuiltinEq {
+    public ty: Analyzer::TypeId;
+    public left: Hir::HirId;
+    public right: Hir::HirId;
+    public kind: Hir::BuiltinEqKind;
+  }
+
+  record HirBuiltinDropInPlace {
+    public ty: Analyzer::TypeId;
+    public ptr: Hir::HirId;
+  }
+
+  record HirFieldAccess {
+    public base: Hir::HirId;
+    public fieldIndex: u32;
+  }
+
+  /// One `(field_index, value)` pair of a `RecordInit`, replacing the Rust
+  /// tuple payload with named fields.
+  record HirRecordField {
+    public fieldIndex: u32;
+    public value: Hir::HirId;
+  }
+
+  record HirRecordInit {
+    public recordDef: Analyzer::DefinitionId;
+    public typeArgs: Vector<Analyzer::TypeId>;
+    public fields: Vector<Hir::HirRecordField>;
+  }
+
+  record HirMethodCall {
+    /// `NONE` for static methods.
+    public receiver: Option<Hir::HirId>;
+    public method: Analyzer::DefinitionId;
+    public typeArgs: Vector<Analyzer::TypeId>;
+    public args: Vector<Hir::HirId>;
+  }
+
+  record HirEnumVariant {
+    public enumDef: Analyzer::DefinitionId;
+    public typeArgs: Vector<Analyzer::TypeId>;
+    public variantTag: u32;
+    public payload: Vector<Hir::HirId>;
+  }
+
+  record HirLet {
+    public name: Analyzer::DefinitionId;
+    public value: Option<Hir::HirId>;
+  }
+
+  record HirAssign {
+    public target: Hir::HirId;
+    public value: Hir::HirId;
+    public operation: Option<Hir::BinaryOperation>;
+  }
+
+  record HirBlock {
+    public statements: Vector<Hir::HirId>;
+    public expression: Option<Hir::HirId>;
+  }
+
+  record HirIf {
+    public condition: Hir::HirId;
+    public thenBranch: Hir::HirId;
+    public elseBranch: Option<Hir::HirId>;
+  }
+
+  record HirLetElse {
+    public pattern: Hir::HirPattern;
+    public value: Hir::HirId;
+    public elseBlock: Hir::HirId;
+  }
+
+  record HirLoop {
+    public condition: Hir::LoopKind;
+    public body: Hir::HirId;
+  }
+
+  record HirMatch {
+    public scrutinee: Hir::HirId;
+    public arms: Vector<Hir::HirMatchArm>;
+  }
+
+  /// Mirrors `ignis_hir::HIRKind` — all variants except `Closure`, which is
+  /// deferred to the closures epic together with `HIRCapture`/`CaptureMode`.
+  /// `CallClosure` stays because it only references a closure value.
+  enum HirKind {
+    Literal(Hir::LiteralValue),
+    Unit,
+    Variable(Analyzer::DefinitionId),
+    Binary(Hir::HirBinary),
+    Unary(Hir::HirUnary),
+    Call(Hir::HirCall),
+    CallClosure(Hir::HirCallClosure),
+    Cast(Hir::HirCast),
+    BitCast(Hir::HirCast),
+    Reference(Hir::HirReference),
+    Dereference(Hir::HirId),
+    Index(Hir::HirIndex),
+    VectorLiteral(Vector<Hir::HirId>),
+    TupleLiteral(Vector<Hir::HirId>),
+    MakeSlice(Hir::HirMakeSlice),
+
+    TypeOf(Hir::HirId),
+    SizeOf(Analyzer::TypeId),
+    AlignOf(Analyzer::TypeId),
+    MaxOf(Analyzer::TypeId),
+    MinOf(Analyzer::TypeId),
+    BuiltinLoad(Hir::HirBuiltinLoad),
+    BuiltinStore(Hir::HirBuiltinStore),
+    BuiltinHash(Hir::HirBuiltinHash),
+    BuiltinEq(Hir::HirBuiltinEq),
+    BuiltinDropInPlace(Hir::HirBuiltinDropInPlace),
+    BuiltinDropGlue(Analyzer::TypeId),
+    Panic(Hir::HirId),
+    Trap,
+    BuiltinUnreachable,
+
+    FieldAccess(Hir::HirFieldAccess),
+    RecordInit(Hir::HirRecordInit),
+    MethodCall(Hir::HirMethodCall),
+    EnumVariant(Hir::HirEnumVariant),
+    StaticAccess(Analyzer::DefinitionId),
+
+    Let(Hir::HirLet),
+    Assign(Hir::HirAssign),
+    Block(Hir::HirBlock),
+    If(Hir::HirIf),
+    LetElse(Hir::HirLetElse),
+    Loop(Hir::HirLoop),
+    Break,
+    Continue,
+    Return(Option<Hir::HirId>),
+    Defer(Hir::HirId),
+    ExpressionStatement(Hir::HirId),
+
+    Match(Hir::HirMatch),
+
+    Error,
+  }
+
+  /// Mirrors `ignis_hir::HIRNode`.
+  record HirNode {
+    public kind: Hir::HirKind;
+    public span: SourceSpan;
+    public typeId: Analyzer::TypeId;
+  }
+
+  function offsetHirIdVector(ids: Vector<Hir::HirId>, offset: u32): Vector<Hir::HirId> {
+    let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        result.push(Hir::offsetHirId(*id, offset));
+      }
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function offsetRecordFields(
+    fields: Vector<Hir::HirRecordField>,
+    offset: u32
+  ): Vector<Hir::HirRecordField> {
+    let mut result: Vector<Hir::HirRecordField> = Vector::new<Hir::HirRecordField>();
+    let mut index: u64 = 0;
+
+    while (index < fields.length()) {
+      if (let Option::SOME(field) = fields.get(index)) {
+        result.push(Hir::HirRecordField {
+          fieldIndex: field.fieldIndex,
+          value: Hir::offsetHirId(field.value, offset),
+        });
+      }
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function offsetMatchArms(arms: Vector<Hir::HirMatchArm>, offset: u32): Vector<Hir::HirMatchArm> {
+    let mut source: Vector<Hir::HirMatchArm> = arms;
+    let mut reversed: Vector<Hir::HirMatchArm> = Vector::new<Hir::HirMatchArm>();
+
+    while (!source.isEmpty()) {
+      let Option::SOME(arm) = source.pop() else {
+        break;
+      };
+
+      reversed.push(Hir::HirMatchArm {
+        pattern: arm.pattern,
+        guard: Hir::offsetOptionalHirId(arm.guard, offset),
+        body: Hir::offsetHirId(arm.body, offset),
+      });
+    }
+
+    let mut result: Vector<Hir::HirMatchArm> = Vector::new<Hir::HirMatchArm>();
+
+    while (!reversed.isEmpty()) {
+      let Option::SOME(arm) = reversed.pop() else {
+        break;
+      };
+
+      result.push(arm);
+    }
+
+    return result;
+  }
+
+  /// Offsets every `HirId` embedded in this kind by `offset`, mirroring
+  /// `HIRKind::offset_ids` variant by variant. Consumes and rebuilds the value
+  /// because the selfhost slice models id rewriting functionally.
+  ///
+  /// Exhaustive on purpose: adding a variant (e.g. the deferred `Closure`)
+  /// forces a compile error here instead of a silent monomorphization bug.
+  function offsetKind(kind: Hir::HirKind, offset: u32): Hir::HirKind {
+    return match (kind) {
+      Hir::HirKind::Literal(value) -> Hir::HirKind::Literal(value),
+      Hir::HirKind::Unit -> Hir::HirKind::Unit,
+      Hir::HirKind::Variable(defId) -> Hir::HirKind::Variable(defId),
+      Hir::HirKind::Binary(binaryNode) -> Hir::HirKind::Binary(Hir::HirBinary {
+        operation: binaryNode.operation,
+        left: Hir::offsetHirId(binaryNode.left, offset),
+        right: Hir::offsetHirId(binaryNode.right, offset),
+      }),
+      Hir::HirKind::Unary(unaryNode) -> Hir::HirKind::Unary(Hir::HirUnary {
+        operation: unaryNode.operation,
+        operand: Hir::offsetHirId(unaryNode.operand, offset),
+      }),
+      Hir::HirKind::Call(call) -> Hir::HirKind::Call(Hir::HirCall {
+        callee: call.callee,
+        typeArgs: call.typeArgs,
+        args: Hir::offsetHirIdVector(call.args, offset),
+      }),
+      Hir::HirKind::CallClosure(call) -> Hir::HirKind::CallClosure(Hir::HirCallClosure {
+        callee: Hir::offsetHirId(call.callee, offset),
+        args: Hir::offsetHirIdVector(call.args, offset),
+      }),
+      Hir::HirKind::Cast(cast) -> Hir::HirKind::Cast(Hir::HirCast {
+        expression: Hir::offsetHirId(cast.expression, offset),
+        target: cast.target,
+      }),
+      Hir::HirKind::BitCast(cast) -> Hir::HirKind::BitCast(Hir::HirCast {
+        expression: Hir::offsetHirId(cast.expression, offset),
+        target: cast.target,
+      }),
+      Hir::HirKind::Reference(reference) -> Hir::HirKind::Reference(Hir::HirReference {
+        expression: Hir::offsetHirId(reference.expression, offset),
+        mutable: reference.mutable,
+      }),
+      Hir::HirKind::Dereference(id) -> Hir::HirKind::Dereference(Hir::offsetHirId(id, offset)),
+      Hir::HirKind::Index(indexNode) -> Hir::HirKind::Index(Hir::HirIndex {
+        base: Hir::offsetHirId(indexNode.base, offset),
+        index: Hir::offsetHirId(indexNode.index, offset),
+      }),
+      Hir::HirKind::VectorLiteral(elements) -> Hir::HirKind::VectorLiteral(Hir::offsetHirIdVector(elements, offset)),
+      Hir::HirKind::TupleLiteral(elements) -> Hir::HirKind::TupleLiteral(Hir::offsetHirIdVector(elements, offset)),
+      Hir::HirKind::MakeSlice(makeSlice) -> Hir::HirKind::MakeSlice(Hir::HirMakeSlice {
+        data: Hir::offsetHirId(makeSlice.data, offset),
+        len: Hir::offsetHirId(makeSlice.len, offset),
+        elementType: makeSlice.elementType,
+      }),
+      Hir::HirKind::TypeOf(id) -> Hir::HirKind::TypeOf(Hir::offsetHirId(id, offset)),
+      Hir::HirKind::SizeOf(typeId) -> Hir::HirKind::SizeOf(typeId),
+      Hir::HirKind::AlignOf(typeId) -> Hir::HirKind::AlignOf(typeId),
+      Hir::HirKind::MaxOf(typeId) -> Hir::HirKind::MaxOf(typeId),
+      Hir::HirKind::MinOf(typeId) -> Hir::HirKind::MinOf(typeId),
+      Hir::HirKind::BuiltinLoad(load) -> Hir::HirKind::BuiltinLoad(Hir::HirBuiltinLoad {
+        ty: load.ty,
+        ptr: Hir::offsetHirId(load.ptr, offset),
+      }),
+      Hir::HirKind::BuiltinStore(store) -> Hir::HirKind::BuiltinStore(Hir::HirBuiltinStore {
+        ty: store.ty,
+        ptr: Hir::offsetHirId(store.ptr, offset),
+        value: Hir::offsetHirId(store.value, offset),
+      }),
+      Hir::HirKind::BuiltinHash(hashNode) -> Hir::HirKind::BuiltinHash(Hir::HirBuiltinHash {
+        ty: hashNode.ty,
+        value: Hir::offsetHirId(hashNode.value, offset),
+        hasher: Hir::offsetHirId(hashNode.hasher, offset),
+      }),
+      Hir::HirKind::BuiltinEq(eqNode) -> Hir::HirKind::BuiltinEq(Hir::HirBuiltinEq {
+        ty: eqNode.ty,
+        left: Hir::offsetHirId(eqNode.left, offset),
+        right: Hir::offsetHirId(eqNode.right, offset),
+        kind: eqNode.kind,
+      }),
+      Hir::HirKind::BuiltinDropInPlace(dropNode) -> Hir::HirKind::BuiltinDropInPlace(Hir::HirBuiltinDropInPlace {
+        ty: dropNode.ty,
+        ptr: Hir::offsetHirId(dropNode.ptr, offset),
+      }),
+      Hir::HirKind::BuiltinDropGlue(typeId) -> Hir::HirKind::BuiltinDropGlue(typeId),
+      Hir::HirKind::Panic(id) -> Hir::HirKind::Panic(Hir::offsetHirId(id, offset)),
+      Hir::HirKind::Trap -> Hir::HirKind::Trap,
+      Hir::HirKind::BuiltinUnreachable -> Hir::HirKind::BuiltinUnreachable,
+      Hir::HirKind::FieldAccess(access) -> Hir::HirKind::FieldAccess(Hir::HirFieldAccess {
+        base: Hir::offsetHirId(access.base, offset),
+        fieldIndex: access.fieldIndex,
+      }),
+      Hir::HirKind::RecordInit(init) -> Hir::HirKind::RecordInit(Hir::HirRecordInit {
+        recordDef: init.recordDef,
+        typeArgs: init.typeArgs,
+        fields: Hir::offsetRecordFields(init.fields, offset),
+      }),
+      Hir::HirKind::MethodCall(call) -> Hir::HirKind::MethodCall(Hir::HirMethodCall {
+        receiver: Hir::offsetOptionalHirId(call.receiver, offset),
+        method: call.method,
+        typeArgs: call.typeArgs,
+        args: Hir::offsetHirIdVector(call.args, offset),
+      }),
+      Hir::HirKind::EnumVariant(variant) -> Hir::HirKind::EnumVariant(Hir::HirEnumVariant {
+        enumDef: variant.enumDef,
+        typeArgs: variant.typeArgs,
+        variantTag: variant.variantTag,
+        payload: Hir::offsetHirIdVector(variant.payload, offset),
+      }),
+      Hir::HirKind::StaticAccess(defId) -> Hir::HirKind::StaticAccess(defId),
+      Hir::HirKind::Let(letNode) -> Hir::HirKind::Let(Hir::HirLet {
+        name: letNode.name,
+        value: Hir::offsetOptionalHirId(letNode.value, offset),
+      }),
+      Hir::HirKind::Assign(assign) -> Hir::HirKind::Assign(Hir::HirAssign {
+        target: Hir::offsetHirId(assign.target, offset),
+        value: Hir::offsetHirId(assign.value, offset),
+        operation: assign.operation,
+      }),
+      Hir::HirKind::Block(block) -> Hir::HirKind::Block(Hir::HirBlock {
+        statements: Hir::offsetHirIdVector(block.statements, offset),
+        expression: Hir::offsetOptionalHirId(block.expression, offset),
+      }),
+      Hir::HirKind::If(ifNode) -> Hir::HirKind::If(Hir::HirIf {
+        condition: Hir::offsetHirId(ifNode.condition, offset),
+        thenBranch: Hir::offsetHirId(ifNode.thenBranch, offset),
+        elseBranch: Hir::offsetOptionalHirId(ifNode.elseBranch, offset),
+      }),
+      Hir::HirKind::LetElse(letElse) -> Hir::HirKind::LetElse(Hir::HirLetElse {
+        pattern: letElse.pattern,
+        value: Hir::offsetHirId(letElse.value, offset),
+        elseBlock: Hir::offsetHirId(letElse.elseBlock, offset),
+      }),
+      Hir::HirKind::Loop(loopNode) -> Hir::HirKind::Loop(Hir::HirLoop {
+        condition: Hir::offsetLoopKind(loopNode.condition, offset),
+        body: Hir::offsetHirId(loopNode.body, offset),
+      }),
+      Hir::HirKind::Break -> Hir::HirKind::Break,
+      Hir::HirKind::Continue -> Hir::HirKind::Continue,
+      Hir::HirKind::Return(value) -> Hir::HirKind::Return(Hir::offsetOptionalHirId(value, offset)),
+      Hir::HirKind::Defer(body) -> Hir::HirKind::Defer(Hir::offsetHirId(body, offset)),
+      Hir::HirKind::ExpressionStatement(id) -> Hir::HirKind::ExpressionStatement(Hir::offsetHirId(id, offset)),
+      Hir::HirKind::Match(matchNode) -> Hir::HirKind::Match(Hir::HirMatch {
+        scrutinee: Hir::offsetHirId(matchNode.scrutinee, offset),
+        arms: Hir::offsetMatchArms(matchNode.arms, offset),
+      }),
+      Hir::HirKind::Error -> Hir::HirKind::Error,
+    };
+  }
+
+  /// Insertion-ordered `DefinitionId -> HirId` map backed by parallel vectors.
+  ///
+  /// Replaces the Rust `HashMap` fields of `HIR`: the selfhost store favors
+  /// deterministic iteration and needs no hashing for the small maps involved.
+  /// `set` replaces the entry when the key already exists, matching
+  /// `HashMap::insert` semantics.
+  record HirDefMap {
+    defs: Vector<Analyzer::DefinitionId>;
+    nodes: Vector<Hir::HirId>;
+
+    public static init(): HirDefMap {
+      return HirDefMap {
+        defs: Vector::new<Analyzer::DefinitionId>(),
+        nodes: Vector::new<Hir::HirId>(),
+      };
+    }
+
+    public set(&mut self, defId: Analyzer::DefinitionId, hirId: Hir::HirId): void {
+      let mut index: u64 = 0;
+
+      while (index < self.defs.length()) {
+        let mut found: boolean = false;
+
+        if (let Option::SOME(existing) = self.defs.get(index)) {
+          if (existing.equals(&defId)) {
+            found = true;
+          }
+        }
+
+        if (found) {
+          self.nodes.set(index, hirId);
+          return;
+        }
+
+        index += 1;
+      }
+
+      self.defs.push(defId);
+      self.nodes.push(hirId);
+    }
+
+    public get(&self, defId: Analyzer::DefinitionId): Option<Hir::HirId> {
+      let mut index: u64 = 0;
+
+      while (index < self.defs.length()) {
+        let mut found: boolean = false;
+
+        if (let Option::SOME(existing) = self.defs.get(index)) {
+          if (existing.equals(&defId)) {
+            found = true;
+          }
+        }
+
+        if (found) {
+          if (let Option::SOME(hirId) = self.nodes.get(index)) {
+            return Option::SOME(*hirId);
+          }
+          return Option::NONE;
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    public keyAt(&self, index: u64): Option<Analyzer::DefinitionId> {
+      if (let Option::SOME(defId) = self.defs.get(index)) {
+        return Option::SOME(*defId);
+      }
+      return Option::NONE;
+    }
+
+    public valueAt(&self, index: u64): Option<Hir::HirId> {
+      if (let Option::SOME(hirId) = self.nodes.get(index)) {
+        return Option::SOME(*hirId);
+      }
+      return Option::NONE;
+    }
+
+    public length(&self): u64 {
+      return self.defs.length();
+    }
+  }
+
+  /// Mirrors `ignis_hir::HIR`: the node store plus the function-body and
+  /// variable-initializer maps, item list, and optional entry point.
+  record HirStore {
+    public nodes: Vector<Hir::HirNode>;
+    public functionBodies: Hir::HirDefMap;
+    public variablesInits: Hir::HirDefMap;
+    public items: Vector<Analyzer::DefinitionId>;
+    public entryPoint: Option<Analyzer::DefinitionId>;
+
+    public static init(): HirStore {
+      return HirStore {
+        nodes: Vector::new<Hir::HirNode>(),
+        functionBodies: Hir::HirDefMap::init(),
+        variablesInits: Hir::HirDefMap::init(),
+        items: Vector::new<Analyzer::DefinitionId>(),
+        entryPoint: Option::NONE,
+      };
+    }
+
+    public alloc(&mut self, node: Hir::HirNode): Hir::HirId {
+      let index: u64 = self.nodes.length();
+
+      self.nodes.push(node);
+
+      return Id::fromRaw<Hir::NodeTag>(index as u32);
+    }
+
+    public get(&self, id: Hir::HirId): Option<&Hir::HirNode> {
+      return self.nodes.get(id.raw() as u64);
+    }
+
+    public getMut(&mut self, id: Hir::HirId): Option<&mut Hir::HirNode> {
+      return self.nodes.getMut(id.raw() as u64);
+    }
+
+    public length(&self): u64 {
+      return self.nodes.length();
+    }
+
+    public setFunctionBody(&mut self, defId: Analyzer::DefinitionId, body: Hir::HirId): void {
+      self.functionBodies.set(defId, body);
+    }
+
+    public functionBody(&self, defId: Analyzer::DefinitionId): Option<Hir::HirId> {
+      return self.functionBodies.get(defId);
+    }
+
+    public setVariableInit(&mut self, defId: Analyzer::DefinitionId, init: Hir::HirId): void {
+      self.variablesInits.set(defId, init);
+    }
+
+    public variableInit(&self, defId: Analyzer::DefinitionId): Option<Hir::HirId> {
+      return self.variablesInits.get(defId);
+    }
+
+    public addItem(&mut self, defId: Analyzer::DefinitionId): void {
+      self.items.push(defId);
+    }
+
+    /// Direct field assignment from outside the record is currently
+    /// miscompiled (the write is silently dropped), so entry-point updates go
+    /// through this setter.
+    public setEntryPoint(&mut self, defId: Analyzer::DefinitionId): void {
+      self.entryPoint = Option::SOME(defId);
+    }
+
+    public containsItem(&self, defId: Analyzer::DefinitionId): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.items.length()) {
+        if (let Option::SOME(item) = self.items.get(index)) {
+          if (item.equals(&defId)) {
+            return true;
+          }
+        }
+        index += 1;
+      }
+
+      return false;
+    }
+  }
+
+  /// Merge `other` into `target`, mirroring `HIR::merge`.
+  /// All `HirId`s from `other` are offset to avoid conflicts, and its
+  /// `entryPoint` is ignored (caller should set it). Items are appended
+  /// without duplicates.
+  ///
+  /// A namespace function instead of a `HirStore` method because a by-value
+  /// record parameter in method position is currently miscompiled: moving a
+  /// heap-owning field out of it double-frees on method exit. The same move
+  /// pattern in a free function is sound.
+  function mergeStores(target: &mut Hir::HirStore, other: Hir::HirStore): void {
+    let mut targetRef: &mut Hir::HirStore = target;
+    let offset: u32 = targetRef.nodes.length() as u32;
+
+    let mut otherNodes: Vector<Hir::HirNode> = other.nodes;
+    let mut reversed: Vector<Hir::HirNode> = Vector::new<Hir::HirNode>();
+
+    while (!otherNodes.isEmpty()) {
+      let Option::SOME(node) = otherNodes.pop() else {
+        break;
+      };
+
+      reversed.push(node);
+    }
+
+    while (!reversed.isEmpty()) {
+      let Option::SOME(node) = reversed.pop() else {
+        break;
+      };
+
+      targetRef.nodes.push(Hir::HirNode {
+        kind: Hir::offsetKind(node.kind, offset),
+        span: node.span,
+        typeId: node.typeId,
+      });
+    }
+
+    let mut bodyIndex: u64 = 0;
+
+    while (bodyIndex < other.functionBodies.length()) {
+      if (let Option::SOME(defId) = other.functionBodies.keyAt(bodyIndex)) {
+        if (let Option::SOME(hirId) = other.functionBodies.valueAt(bodyIndex)) {
+          targetRef.functionBodies.set(defId, Hir::offsetHirId(hirId, offset));
+        }
+      }
+      bodyIndex += 1;
+    }
+
+    let mut initIndex: u64 = 0;
+
+    while (initIndex < other.variablesInits.length()) {
+      if (let Option::SOME(defId) = other.variablesInits.keyAt(initIndex)) {
+        if (let Option::SOME(hirId) = other.variablesInits.valueAt(initIndex)) {
+          targetRef.variablesInits.set(defId, Hir::offsetHirId(hirId, offset));
+        }
+      }
+      initIndex += 1;
+    }
+
+    let mut itemIndex: u64 = 0;
+
+    while (itemIndex < other.items.length()) {
+      if (let Option::SOME(item) = other.items.get(itemIndex)) {
+        if (!targetRef.containsItem(*item)) {
+          targetRef.items.push(*item);
+        }
+      }
+      itemIndex += 1;
+    }
+  }
+}

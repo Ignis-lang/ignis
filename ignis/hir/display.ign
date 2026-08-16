@@ -1,0 +1,1002 @@
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+
+import _ from "./ids";
+import _ from "./value";
+import _ from "./operation";
+import _ from "./statement";
+import _ from "./pattern";
+import _ from "./node";
+
+export namespace Hir {
+  /// Textual HIR printer mirroring `ignis_hir::display::HIRPrinter` line by
+  /// line. This output is the golden-parity surface for the IGN-40 gates, so
+  /// indentation (two spaces per level), labels, and ordering follow the Rust
+  /// printer exactly.
+  ///
+  /// Known deviations from the Rust printer, all rooted in definition-model
+  /// gaps rather than printer logic:
+  /// - The `--- Declarations ---` section is never emitted: the selfhost
+  ///   `FunctionDef` has no `is_extern`/`is_variadic` flags and the store has
+  ///   no `Constant` definition kind yet.
+  /// - `Variable(...)`/`Call(...)` metadata never shows `[param]`, `[const]`,
+  ///   `[extern]`, or `[variadic]` for the same reason; `[mut]` and `[export]`
+  ///   are preserved.
+  /// - The deferred `Closure` variant has no arm; every ported variant prints.
+  namespace Display {
+    function formatBuiltinEqKind(kind: &Hir::BuiltinEqKind): String {
+      return match (kind) {
+        Hir::BuiltinEqKind::Primitive -> String::create("primitive"),
+        Hir::BuiltinEqKind::Str -> String::create("str"),
+        Hir::BuiltinEqKind::Method(methodDef) -> String::create("method(")
+          .concat(methodDef.raw())
+          .concat(")"),
+        Hir::BuiltinEqKind::Pending -> String::create("pending"),
+      };
+    }
+
+    function writeIndent(output: &mut String, indent: u64): void {
+      let mut out: &mut String = output;
+      let mut level: u64 = 0;
+
+      while (level < indent) {
+        out.pushStr("  ");
+        level += 1;
+      }
+    }
+
+    function resolveName(symbols: &Analyzer::SymbolTable, symbol: Analyzer::SymbolId): String {
+      return match (symbols.resolve(symbol)) {
+        Option::SOME(name) -> String::create(name),
+        Option::NONE -> String::create("<unknown-symbol>"),
+      };
+    }
+
+    function formatType(
+      types: &Analyzer::TypeStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      typeId: Analyzer::TypeId,
+    ): String {
+      return types.nameOfResolved(typeId, defs, symbols);
+    }
+
+    function definitionName(
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      defId: Analyzer::DefinitionId,
+    ): String {
+      let Option::SOME(definition) = defs.get(defId) else {
+        return String::create("<unknown-def>");
+      };
+
+      return Hir::Display::resolveName(symbols, definition.name());
+    }
+
+    /// Renders ` [mut]` when the definition is a mutable variable, mirroring
+    /// the Rust printer's variable metadata (minus `[param]`/`[const]`, which
+    /// the selfhost definition model cannot distinguish yet).
+    function variableMetadata(
+      defs: &Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId
+    ): str {
+      if (let Option::SOME(definition) = defs.get(defId)) {
+        if (let Analyzer::Definition::Variable(variableDef) = definition) {
+          if (variableDef.mutable) {
+            return " [mut]";
+          }
+        }
+      }
+
+      return "";
+    }
+
+    function formatParams(
+      types: &Analyzer::TypeStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      params: &Vector<Analyzer::DefinitionId>,
+    ): String {
+      let mut output: String = String::create("");
+      let mut index: u64 = 0;
+
+      while (index < params.length()) {
+        let Option::SOME(paramId) = params.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        let Option::SOME(definition) = defs.get(*paramId) else {
+          output.pushStr("<unknown-param>");
+          index += 1;
+          continue;
+        };
+
+        let paramName: String = Hir::Display::resolveName(symbols, definition.name());
+
+        if (let Analyzer::Definition::Variable(variableDef) = definition) {
+          if (variableDef.mutable) {
+            output.pushStr("mut ");
+          }
+
+          output.pushStr(paramName.toStr());
+          output.pushStr(": ");
+
+          let paramType: String = Hir::Display::formatType(types, defs, symbols, variableDef.declaredType);
+          output.pushStr(paramType.toStr());
+        } else {
+          output.pushStr(paramName.toStr());
+          output.pushStr(": <unknown-type>");
+        }
+
+        index += 1;
+      }
+
+      return output;
+    }
+
+    /// Single-line rendering used by the variable-initializers section,
+    /// mirroring `HIRPrinter::format_node_compact`.
+    function formatNodeCompact(
+      hir: &Hir::HirStore,
+      types: &Analyzer::TypeStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      id: Hir::HirId,
+    ): String {
+      let Option::SOME(node) = hir.get(id) else {
+        @panic("HIR display: unknown HirId");
+      };
+
+      let typeText: String = Hir::Display::formatType(types, defs, symbols, node.typeId);
+
+      return match (&node.kind) {
+        Hir::HirKind::Literal(value) -> String::create("Literal(").concat(value.debugFormat()).concat(")"),
+        Hir::HirKind::Unit -> String::create("Unit"),
+        Hir::HirKind::Variable(defId) -> String::create("Variable(")
+          .concat(Hir::Display::definitionName(defs, symbols, defId))
+          .concat(")"),
+        Hir::HirKind::Call(call) -> String::create("Call(")
+          .concat(Hir::Display::definitionName(defs, symbols, call.callee))
+          .concat(") { ")
+          .concat(Hir::Display::formatCompactList(hir, types, defs, symbols, &call.args))
+          .concat(" }"),
+        Hir::HirKind::CallClosure(call) -> String::create("CallClosure(")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, call.callee))
+          .concat(") { ")
+          .concat(Hir::Display::formatCompactList(hir, types, defs, symbols, &call.args))
+          .concat(" }"),
+        Hir::HirKind::Binary(binaryNode) -> String::create("Binary(")
+          .concat(binaryNode.operation.debugName())
+          .concat(", ")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, binaryNode.left))
+          .concat(", ")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, binaryNode.right))
+          .concat(")"),
+        Hir::HirKind::Unary(unaryNode) -> String::create("Unary(")
+          .concat(unaryNode.operation.debugName())
+          .concat(", ")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, unaryNode.operand))
+          .concat(")"),
+        Hir::HirKind::Reference(reference) -> Hir::Display::formatCompactReference(hir, types, defs, symbols, &reference),
+        Hir::HirKind::Dereference(expression) -> String::create("*(")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, expression))
+          .concat(")"),
+        Hir::HirKind::Cast(cast) -> String::create("Cast(")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, cast.expression))
+          .concat(" as ")
+          .concat(Hir::Display::formatType(types, defs, symbols, cast.target))
+          .concat(")"),
+        Hir::HirKind::BitCast(cast) -> String::create("BitCast(")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, cast.expression))
+          .concat(" as ")
+          .concat(Hir::Display::formatType(types, defs, symbols, cast.target))
+          .concat(")"),
+        Hir::HirKind::TypeOf(expression) -> String::create("typeOf(")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, expression))
+          .concat(")"),
+        Hir::HirKind::SizeOf(typeId) -> String::create("sizeOf(")
+          .concat(Hir::Display::formatType(types, defs, symbols, typeId))
+          .concat(")"),
+        Hir::HirKind::AlignOf(typeId) -> String::create("alignOf(")
+          .concat(Hir::Display::formatType(types, defs, symbols, typeId))
+          .concat(")"),
+        Hir::HirKind::MaxOf(typeId) -> String::create("maxOf<")
+          .concat(Hir::Display::formatType(types, defs, symbols, typeId))
+          .concat(">()"),
+        Hir::HirKind::MinOf(typeId) -> String::create("minOf<")
+          .concat(Hir::Display::formatType(types, defs, symbols, typeId))
+          .concat(">()"),
+        Hir::HirKind::BuiltinLoad(load) -> String::create("builtin_read<")
+          .concat(Hir::Display::formatType(types, defs, symbols, load.ty))
+          .concat(">(")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, load.ptr))
+          .concat(")"),
+        Hir::HirKind::BuiltinStore(storeNode) -> String::create("builtin_write<")
+          .concat(Hir::Display::formatType(types, defs, symbols, storeNode.ty))
+          .concat(">(")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, storeNode.ptr))
+          .concat(", ")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, storeNode.value))
+          .concat(")"),
+        Hir::HirKind::BuiltinHash(hashNode) -> String::create("builtin_hash<")
+          .concat(Hir::Display::formatType(types, defs, symbols, hashNode.ty))
+          .concat(">(")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, hashNode.value))
+          .concat(", ")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, hashNode.hasher))
+          .concat(")"),
+        Hir::HirKind::BuiltinEq(eqNode) -> String::create("builtin_eq<")
+          .concat(Hir::Display::formatType(types, defs, symbols, eqNode.ty))
+          .concat(">[")
+          .concat(Hir::Display::formatBuiltinEqKind(&eqNode.kind))
+          .concat("](")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, eqNode.left))
+          .concat(", ")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, eqNode.right))
+          .concat(")"),
+        Hir::HirKind::BuiltinDropInPlace(dropNode) -> String::create("builtin_drop_in_place<")
+          .concat(Hir::Display::formatType(types, defs, symbols, dropNode.ty))
+          .concat(">(")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, dropNode.ptr))
+          .concat(")"),
+        Hir::HirKind::BuiltinDropGlue(typeId) -> String::create("builtin_drop_glue<")
+          .concat(Hir::Display::formatType(types, defs, symbols, typeId))
+          .concat(">()"),
+        Hir::HirKind::MakeSlice(makeSlice) -> String::create("make_slice<")
+          .concat(Hir::Display::formatType(types, defs, symbols, makeSlice.elementType))
+          .concat(">(")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, makeSlice.data))
+          .concat(", ")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, makeSlice.len))
+          .concat(")"),
+        Hir::HirKind::Panic(message) -> String::create("@panic(")
+          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, message))
+          .concat(")"),
+        Hir::HirKind::Trap -> String::create("@trap()"),
+        Hir::HirKind::BuiltinUnreachable -> String::create("@unreachable()"),
+        _ -> String::create("<complex: ").concat(typeText.toStr()).concat(">"),
+      };
+    }
+
+    function formatCompactReference(
+      hir: &Hir::HirStore,
+      types: &Analyzer::TypeStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      reference: &Hir::HirReference,
+    ): String {
+      let prefix: str = match (reference.mutable) {
+        true -> "&mut",
+        false -> "&",
+      };
+
+      return String::create(prefix)
+        .concat("(")
+        .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, reference.expression))
+        .concat(")");
+    }
+
+    function formatCompactList(
+      hir: &Hir::HirStore,
+      types: &Analyzer::TypeStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      ids: &Vector<Hir::HirId>,
+    ): String {
+      let mut output: String = String::create("");
+      let mut index: u64 = 0;
+
+      while (index < ids.length()) {
+        if (index > 0) {
+          output.pushStr(", ");
+        }
+
+        if (let Option::SOME(id) = ids.get(index)) {
+          let rendered: String = Hir::Display::formatNodeCompact(hir, types, defs, symbols, *id);
+          output.pushStr(rendered.toStr());
+        }
+
+        index += 1;
+      }
+
+      return output;
+    }
+
+    function writeLabelLine(output: &mut String, indent: u64, label: str): void {
+      let mut out: &mut String = output;
+
+      Hir::Display::writeIndent(out, indent);
+      out.pushStr(label);
+      out.pushStr("\n");
+    }
+
+    /// Writes the standard `Head : type` node heading line at `indent`.
+    function writeHeading(
+      output: &mut String,
+      indent: u64,
+      head: &String,
+      typeText: &String,
+    ): void {
+      let mut out: &mut String = output;
+
+      Hir::Display::writeIndent(out, indent);
+      out.pushStr(head.toStr());
+      out.pushStr(" : ");
+      out.pushStr(typeText.toStr());
+      out.pushStr("\n");
+    }
+
+    function printIndexedChildren(
+      hir: &Hir::HirStore,
+      types: &Analyzer::TypeStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      ids: &Vector<Hir::HirId>,
+      indent: u64,
+      output: &mut String,
+    ): void {
+      let mut out: &mut String = output;
+      let mut index: u64 = 0;
+
+      while (index < ids.length()) {
+        let label: String = String::create("[").concat(index).concat("]:");
+        Hir::Display::writeLabelLine(out, indent, label.toStr());
+
+        if (let Option::SOME(id) = ids.get(index)) {
+          Hir::Display::printNode(hir, types, defs, symbols, *id, indent + 1, out);
+        }
+
+        index += 1;
+      }
+    }
+
+    /// Multi-line node rendering, mirroring `HIRPrinter::print_node` arm by
+    /// arm over every ported variant.
+    function printNode(
+      hir: &Hir::HirStore,
+      types: &Analyzer::TypeStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      id: Hir::HirId,
+      indent: u64,
+      output: &mut String,
+    ): void {
+      let mut out: &mut String = output;
+
+      let Option::SOME(node) = hir.get(id) else {
+        @panic("HIR display: unknown HirId");
+      };
+
+      let typeText: String = Hir::Display::formatType(types, defs, symbols, node.typeId);
+
+      match (&node.kind) {
+        Hir::HirKind::Literal(value) -> {
+          let head: String = String::create("Literal(").concat(value.debugFormat()).concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::Unit -> {
+          let head: String = String::create("Unit");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::Variable(defId) -> {
+          let head: String = String::create("Variable(")
+            .concat(Hir::Display::definitionName(defs, symbols, defId))
+            .concat(Hir::Display::variableMetadata(defs, defId))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::Binary(binaryNode) -> {
+          let head: String = String::create("Binary(").concat(binaryNode.operation.debugName()).concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::writeLabelLine(out, indent + 1, "left:");
+          Hir::Display::printNode(hir, types, defs, symbols, binaryNode.left, indent + 2, out);
+          Hir::Display::writeLabelLine(out, indent + 1, "right:");
+          Hir::Display::printNode(hir, types, defs, symbols, binaryNode.right, indent + 2, out);
+        },
+        Hir::HirKind::Unary(unaryNode) -> {
+          let head: String = String::create("Unary(").concat(unaryNode.operation.debugName()).concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, unaryNode.operand, indent + 1, out);
+        },
+        Hir::HirKind::Call(call) -> {
+          let head: String = String::create("Call(")
+            .concat(Hir::Display::definitionName(defs, symbols, call.callee))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+
+          if (!call.args.isEmpty()) {
+            Hir::Display::writeLabelLine(out, indent + 1, "args:");
+            Hir::Display::printIndexedChildren(hir, types, defs, symbols, &call.args, indent + 2, out);
+          }
+        },
+        Hir::HirKind::CallClosure(call) -> {
+          let head: String = String::create("CallClosure");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::writeLabelLine(out, indent + 1, "callee:");
+          Hir::Display::printNode(hir, types, defs, symbols, call.callee, indent + 2, out);
+
+          if (!call.args.isEmpty()) {
+            Hir::Display::writeLabelLine(out, indent + 1, "args:");
+            Hir::Display::printIndexedChildren(hir, types, defs, symbols, &call.args, indent + 2, out);
+          }
+        },
+        Hir::HirKind::Cast(cast) -> {
+          let head: String = String::create("Cast(-> ")
+            .concat(Hir::Display::formatType(types, defs, symbols, cast.target))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, cast.expression, indent + 1, out);
+        },
+        Hir::HirKind::BitCast(cast) -> {
+          let head: String = String::create("BitCast(-> ")
+            .concat(Hir::Display::formatType(types, defs, symbols, cast.target))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, cast.expression, indent + 1, out);
+        },
+        Hir::HirKind::Reference(reference) -> {
+          let refKind: str = match (reference.mutable) {
+            true -> "&mut",
+            false -> "&",
+          };
+          let head: String = String::create("Reference(").concat(refKind).concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, reference.expression, indent + 1, out);
+        },
+        Hir::HirKind::Dereference(expression) -> {
+          let head: String = String::create("Dereference(*)");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, expression, indent + 1, out);
+        },
+        Hir::HirKind::Index(indexNode) -> {
+          let head: String = String::create("Index");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::writeLabelLine(out, indent + 1, "base:");
+          Hir::Display::printNode(hir, types, defs, symbols, indexNode.base, indent + 2, out);
+          Hir::Display::writeLabelLine(out, indent + 1, "index:");
+          Hir::Display::printNode(hir, types, defs, symbols, indexNode.index, indent + 2, out);
+        },
+        Hir::HirKind::VectorLiteral(elements) -> {
+          let head: String = String::create("VectorLiteral");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printIndexedChildren(hir, types, defs, symbols, &elements, indent + 1, out);
+        },
+        Hir::HirKind::TupleLiteral(elements) -> {
+          let head: String = String::create("TupleLiteral");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printIndexedChildren(hir, types, defs, symbols, &elements, indent + 1, out);
+        },
+        Hir::HirKind::Let(letNode) -> {
+          let head: String = String::create("Let(")
+            .concat(Hir::Display::definitionName(defs, symbols, letNode.name))
+            .concat(Hir::Display::variableMetadata(defs, letNode.name))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+
+          if (let Option::SOME(value) = letNode.value) {
+            Hir::Display::writeLabelLine(out, indent + 1, "init:");
+            Hir::Display::printNode(hir, types, defs, symbols, value, indent + 2, out);
+          }
+        },
+        Hir::HirKind::Assign(assign) -> {
+          let operationText: String = match (&assign.operation) {
+            Option::SOME(operation) -> String::create(operation.debugName()).concat("="),
+            Option::NONE -> String::create("="),
+          };
+          let head: String = String::create("Assign(").concat(operationText).concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::writeLabelLine(out, indent + 1, "target:");
+          Hir::Display::printNode(hir, types, defs, symbols, assign.target, indent + 2, out);
+          Hir::Display::writeLabelLine(out, indent + 1, "value:");
+          Hir::Display::printNode(hir, types, defs, symbols, assign.value, indent + 2, out);
+        },
+        Hir::HirKind::Block(block) -> {
+          let head: String = String::create("Block");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+
+          if (!block.statements.isEmpty()) {
+            Hir::Display::writeLabelLine(out, indent + 1, "statements:");
+
+            let mut statementIndex: u64 = 0;
+            while (statementIndex < block.statements.length()) {
+              if (let Option::SOME(statement) = block.statements.get(statementIndex)) {
+                Hir::Display::printNode(hir, types, defs, symbols, *statement, indent + 2, out);
+              }
+              statementIndex += 1;
+            }
+          }
+
+          if (let Option::SOME(expression) = block.expression) {
+            Hir::Display::writeLabelLine(out, indent + 1, "expr:");
+            Hir::Display::printNode(hir, types, defs, symbols, expression, indent + 2, out);
+          }
+        },
+        Hir::HirKind::If(ifNode) -> {
+          let head: String = String::create("If");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::writeLabelLine(out, indent + 1, "cond:");
+          Hir::Display::printNode(hir, types, defs, symbols, ifNode.condition, indent + 2, out);
+          Hir::Display::writeLabelLine(out, indent + 1, "then:");
+          Hir::Display::printNode(hir, types, defs, symbols, ifNode.thenBranch, indent + 2, out);
+
+          if (let Option::SOME(elseBranch) = ifNode.elseBranch) {
+            Hir::Display::writeLabelLine(out, indent + 1, "else:");
+            Hir::Display::printNode(hir, types, defs, symbols, elseBranch, indent + 2, out);
+          }
+        },
+        Hir::HirKind::LetElse(letElse) -> {
+          let head: String = String::create("LetElse");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+
+          let patternLine: String = String::create("pattern: ").concat(letElse.pattern.debugFormat());
+          Hir::Display::writeLabelLine(out, indent + 1, patternLine.toStr());
+
+          Hir::Display::writeLabelLine(out, indent + 1, "value:");
+          Hir::Display::printNode(hir, types, defs, symbols, letElse.value, indent + 2, out);
+          Hir::Display::writeLabelLine(out, indent + 1, "else:");
+          Hir::Display::printNode(hir, types, defs, symbols, letElse.elseBlock, indent + 2, out);
+        },
+        Hir::HirKind::Loop(loopNode) -> {
+          let loopKind: str = match (&loopNode.condition) {
+            Hir::LoopKind::Infinite -> "infinite",
+            Hir::LoopKind::While(_) -> "while",
+            Hir::LoopKind::For(_) -> "for",
+          };
+          let head: String = String::create("Loop(").concat(loopKind).concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+
+          match (&loopNode.condition) {
+            Hir::LoopKind::While(condition) -> {
+              Hir::Display::writeLabelLine(out, indent + 1, "cond:");
+              Hir::Display::printNode(hir, types, defs, symbols, condition, indent + 2, out);
+            },
+            Hir::LoopKind::For(forLoop) -> {
+              if (let Option::SOME(init) = forLoop.init) {
+                Hir::Display::writeLabelLine(out, indent + 1, "init:");
+                Hir::Display::printNode(hir, types, defs, symbols, init, indent + 2, out);
+              }
+              if (let Option::SOME(condition) = forLoop.condition) {
+                Hir::Display::writeLabelLine(out, indent + 1, "cond:");
+                Hir::Display::printNode(hir, types, defs, symbols, condition, indent + 2, out);
+              }
+              if (let Option::SOME(update) = forLoop.update) {
+                Hir::Display::writeLabelLine(out, indent + 1, "update:");
+                Hir::Display::printNode(hir, types, defs, symbols, update, indent + 2, out);
+              }
+            },
+            Hir::LoopKind::Infinite -> {},
+          };
+
+          Hir::Display::writeLabelLine(out, indent + 1, "body:");
+          Hir::Display::printNode(hir, types, defs, symbols, loopNode.body, indent + 2, out);
+        },
+        Hir::HirKind::Break -> {
+          let head: String = String::create("Break");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::Continue -> {
+          let head: String = String::create("Continue");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::Return(value) -> {
+          let head: String = String::create("Return");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+
+          if (let Option::SOME(returned) = value) {
+            Hir::Display::printNode(hir, types, defs, symbols, returned, indent + 1, out);
+          }
+        },
+        Hir::HirKind::Defer(body) -> {
+          let head: String = String::create("Defer");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, body, indent + 1, out);
+        },
+        Hir::HirKind::ExpressionStatement(expression) -> {
+          let head: String = String::create("ExprStmt");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, expression, indent + 1, out);
+        },
+        Hir::HirKind::Error -> {
+          let head: String = String::create("Error");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::TypeOf(expression) -> {
+          let head: String = String::create("TypeOf");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, expression, indent + 1, out);
+        },
+        Hir::HirKind::SizeOf(typeId) -> {
+          let head: String = String::create("SizeOf(")
+            .concat(Hir::Display::formatType(types, defs, symbols, typeId))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::AlignOf(typeId) -> {
+          let head: String = String::create("AlignOf(")
+            .concat(Hir::Display::formatType(types, defs, symbols, typeId))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::MaxOf(typeId) -> {
+          let head: String = String::create("MaxOf(")
+            .concat(Hir::Display::formatType(types, defs, symbols, typeId))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::MinOf(typeId) -> {
+          let head: String = String::create("MinOf(")
+            .concat(Hir::Display::formatType(types, defs, symbols, typeId))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::BuiltinLoad(load) -> {
+          let head: String = String::create("BuiltinLoad(")
+            .concat(Hir::Display::formatType(types, defs, symbols, load.ty))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, load.ptr, indent + 1, out);
+        },
+        Hir::HirKind::BuiltinStore(storeNode) -> {
+          let head: String = String::create("BuiltinStore(")
+            .concat(Hir::Display::formatType(types, defs, symbols, storeNode.ty))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, storeNode.ptr, indent + 1, out);
+          Hir::Display::printNode(hir, types, defs, symbols, storeNode.value, indent + 1, out);
+        },
+        Hir::HirKind::BuiltinHash(hashNode) -> {
+          let head: String = String::create("BuiltinHash(")
+            .concat(Hir::Display::formatType(types, defs, symbols, hashNode.ty))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, hashNode.value, indent + 1, out);
+          Hir::Display::printNode(hir, types, defs, symbols, hashNode.hasher, indent + 1, out);
+        },
+        Hir::HirKind::BuiltinEq(eqNode) -> {
+          let head: String = String::create("BuiltinEq(")
+            .concat(Hir::Display::formatType(types, defs, symbols, eqNode.ty))
+            .concat(", ")
+            .concat(Hir::Display::formatBuiltinEqKind(&eqNode.kind))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, eqNode.left, indent + 1, out);
+          Hir::Display::printNode(hir, types, defs, symbols, eqNode.right, indent + 1, out);
+        },
+        Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
+          let head: String = String::create("BuiltinDropInPlace(")
+            .concat(Hir::Display::formatType(types, defs, symbols, dropNode.ty))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, dropNode.ptr, indent + 1, out);
+        },
+        Hir::HirKind::BuiltinDropGlue(typeId) -> {
+          let head: String = String::create("BuiltinDropGlue(")
+            .concat(Hir::Display::formatType(types, defs, symbols, typeId))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::MakeSlice(makeSlice) -> {
+          let head: String = String::create("MakeSlice(")
+            .concat(Hir::Display::formatType(types, defs, symbols, makeSlice.elementType))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, makeSlice.data, indent + 1, out);
+          Hir::Display::printNode(hir, types, defs, symbols, makeSlice.len, indent + 1, out);
+        },
+        Hir::HirKind::Panic(message) -> {
+          let head: String = String::create("Panic");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, message, indent + 1, out);
+        },
+        Hir::HirKind::Trap -> {
+          let head: String = String::create("Trap");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::BuiltinUnreachable -> {
+          let head: String = String::create("BuiltinUnreachable");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::FieldAccess(access) -> {
+          let head: String = String::create("FieldAccess(.").concat(access.fieldIndex).concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printNode(hir, types, defs, symbols, access.base, indent + 1, out);
+        },
+        Hir::HirKind::RecordInit(init) -> {
+          let head: String = String::create("RecordInit(")
+            .concat(Hir::Display::definitionName(defs, symbols, init.recordDef))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+
+          let mut fieldIndex: u64 = 0;
+          while (fieldIndex < init.fields.length()) {
+            if (let Option::SOME(field) = init.fields.get(fieldIndex)) {
+              let label: String = String::create("field[").concat(field.fieldIndex).concat("]:");
+              Hir::Display::writeLabelLine(out, indent + 1, label.toStr());
+              Hir::Display::printNode(hir, types, defs, symbols, field.value, indent + 2, out);
+            }
+            fieldIndex += 1;
+          }
+        },
+        Hir::HirKind::MethodCall(call) -> {
+          let head: String = String::create("MethodCall(")
+            .concat(Hir::Display::definitionName(defs, symbols, call.method))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+
+          if (let Option::SOME(receiver) = call.receiver) {
+            Hir::Display::writeLabelLine(out, indent + 1, "receiver:");
+            Hir::Display::printNode(hir, types, defs, symbols, receiver, indent + 2, out);
+          }
+
+          if (!call.args.isEmpty()) {
+            Hir::Display::writeLabelLine(out, indent + 1, "args:");
+            Hir::Display::printIndexedChildren(hir, types, defs, symbols, &call.args, indent + 2, out);
+          }
+        },
+        Hir::HirKind::EnumVariant(variant) -> {
+          let head: String = String::create("EnumVariant(")
+            .concat(Hir::Display::definitionName(defs, symbols, variant.enumDef))
+            .concat("::")
+            .concat(variant.variantTag)
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::printIndexedChildren(hir, types, defs, symbols, &variant.payload, indent + 1, out);
+        },
+        Hir::HirKind::StaticAccess(defId) -> {
+          let head: String = String::create("StaticAccess(")
+            .concat(Hir::Display::definitionName(defs, symbols, defId))
+            .concat(")");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+        },
+        Hir::HirKind::Match(matchNode) -> {
+          let head: String = String::create("Match");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+          Hir::Display::writeLabelLine(out, indent + 1, "scrutinee:");
+          Hir::Display::printNode(hir, types, defs, symbols, matchNode.scrutinee, indent + 2, out);
+
+          let mut armIndex: u64 = 0;
+          while (armIndex < matchNode.arms.length()) {
+            let Option::SOME(arm) = matchNode.arms.get(armIndex) else {
+              armIndex += 1;
+              continue;
+            };
+
+            let armLabel: String = String::create("arm[").concat(armIndex).concat("]:");
+            Hir::Display::writeLabelLine(out, indent + 1, armLabel.toStr());
+
+            let patternLine: String = String::create("pattern: ").concat(arm.pattern.debugFormat());
+            Hir::Display::writeLabelLine(out, indent + 2, patternLine.toStr());
+
+            if (let Option::SOME(guard) = arm.guard) {
+              Hir::Display::writeLabelLine(out, indent + 2, "guard:");
+              Hir::Display::printNode(hir, types, defs, symbols, guard, indent + 3, out);
+            }
+
+            Hir::Display::writeLabelLine(out, indent + 2, "body:");
+            Hir::Display::printNode(hir, types, defs, symbols, arm.body, indent + 3, out);
+
+            armIndex += 1;
+          }
+        },
+      };
+    }
+
+    /// Map indexes sorted by definition name, mirroring the Rust printer's
+    /// stable `sort_by_key` over resolved names.
+    function sortedMapIndexes(
+      map: &Hir::HirDefMap,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+    ): Vector<u64> {
+      let mut names: Vector<String> = Vector::new<String>();
+      let mut order: Vector<u64> = Vector::new<u64>();
+      let mut index: u64 = 0;
+
+      while (index < map.length()) {
+        let name: String = match (map.keyAt(index)) {
+          Option::SOME(defId) -> Hir::Display::definitionName(defs, symbols, defId),
+          Option::NONE -> String::create(""),
+        };
+
+        let mut insertAt: u64 = order.length();
+        let mut scan: u64 = 0;
+
+        while (scan < order.length()) {
+          let mut isGreater: boolean = false;
+
+          if (let Option::SOME(existing) = names.get(scan)) {
+            if (existing.compare(&name) > 0) {
+              isGreater = true;
+            }
+          }
+
+          if (isGreater) {
+            insertAt = scan;
+            break;
+          }
+
+          scan += 1;
+        }
+
+        let mut rebuiltNames: Vector<String> = Vector::new<String>();
+        let mut rebuiltOrder: Vector<u64> = Vector::new<u64>();
+        let mut copyIndex: u64 = 0;
+
+        while (copyIndex < order.length()) {
+          if (copyIndex == insertAt) {
+            rebuiltNames.push(name.clone());
+            rebuiltOrder.push(index);
+          }
+
+          if (let Option::SOME(existingName) = names.get(copyIndex)) {
+            rebuiltNames.push(existingName.clone());
+          }
+          if (let Option::SOME(existingIndex) = order.get(copyIndex)) {
+            rebuiltOrder.push(*existingIndex);
+          }
+
+          copyIndex += 1;
+        }
+
+        if (insertAt == order.length()) {
+          rebuiltNames.push(name.clone());
+          rebuiltOrder.push(index);
+        }
+
+        names = rebuiltNames;
+        order = rebuiltOrder;
+        index += 1;
+      }
+
+      return order;
+    }
+
+    function printDefinitions(
+      hir: &Hir::HirStore,
+      types: &Analyzer::TypeStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      output: &mut String,
+    ): void {
+      let mut out: &mut String = output;
+
+      if (hir.functionBodies.length() == 0) {
+        return;
+      }
+
+      out.pushStr("\n--- Definitions ---\n");
+
+      let order: Vector<u64> = Hir::Display::sortedMapIndexes(&hir.functionBodies, defs, symbols);
+      let mut position: u64 = 0;
+
+      while (position < order.length()) {
+        let Option::SOME(mapIndex) = order.get(position) else {
+          position += 1;
+          continue;
+        };
+        let Option::SOME(defId) = hir.functionBodies.keyAt(*mapIndex) else {
+          position += 1;
+          continue;
+        };
+        let Option::SOME(bodyId) = hir.functionBodies.valueAt(*mapIndex) else {
+          position += 1;
+          continue;
+        };
+        let Option::SOME(definition) = defs.get(defId) else {
+          position += 1;
+          continue;
+        };
+
+        if (let Analyzer::Definition::Function(functionDef) = definition) {
+          let name: String = Hir::Display::resolveName(symbols, functionDef.name);
+          let params: String = Hir::Display::formatParams(types, defs, symbols, &functionDef.params);
+          let returnType: String = Hir::Display::formatType(types, defs, symbols, functionDef.returnType);
+
+          let flags: str = match (functionDef.visibility) {
+            Analyzer::Visibility::PUBLIC -> "  [export]",
+            Analyzer::Visibility::PRIVATE -> "",
+          };
+
+          out.pushStr("\nfn ");
+          out.pushStr(name.toStr());
+          out.pushStr("(");
+          out.pushStr(params.toStr());
+          out.pushStr("): ");
+          out.pushStr(returnType.toStr());
+          out.pushStr(flags);
+          out.pushStr("\n  body:\n");
+
+          Hir::Display::printNode(hir, types, defs, symbols, bodyId, 2, out);
+        }
+
+        position += 1;
+      }
+    }
+
+    function printVariableInitializers(
+      hir: &Hir::HirStore,
+      types: &Analyzer::TypeStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      output: &mut String,
+    ): void {
+      let mut out: &mut String = output;
+
+      if (hir.variablesInits.length() == 0) {
+        return;
+      }
+
+      out.pushStr("\n--- Variable Initializers ---\n\n");
+
+      let order: Vector<u64> = Hir::Display::sortedMapIndexes(&hir.variablesInits, defs, symbols);
+      let mut position: u64 = 0;
+
+      while (position < order.length()) {
+        let Option::SOME(mapIndex) = order.get(position) else {
+          position += 1;
+          continue;
+        };
+        let Option::SOME(defId) = hir.variablesInits.keyAt(*mapIndex) else {
+          position += 1;
+          continue;
+        };
+        let Option::SOME(initId) = hir.variablesInits.valueAt(*mapIndex) else {
+          position += 1;
+          continue;
+        };
+        let Option::SOME(definition) = defs.get(defId) else {
+          position += 1;
+          continue;
+        };
+
+        if (let Analyzer::Definition::Variable(variableDef) = definition) {
+          let name: String = Hir::Display::resolveName(symbols, variableDef.name);
+          let typeText: String = Hir::Display::formatType(types, defs, symbols, variableDef.declaredType);
+          let mutText: str = match (variableDef.mutable) {
+            true -> " [mut]",
+            false -> "",
+          };
+          let initText: String = Hir::Display::formatNodeCompact(hir, types, defs, symbols, initId);
+
+          out.pushStr(name.toStr());
+          out.pushStr(": ");
+          out.pushStr(typeText.toStr());
+          out.pushStr(mutText);
+          out.pushStr(" = ");
+          out.pushStr(initText.toStr());
+          out.pushStr("\n");
+        }
+
+        position += 1;
+      }
+    }
+
+    /// Renders the whole HIR store, mirroring `ignis_hir::display::print_hir`.
+    function printHir(
+      hir: &Hir::HirStore,
+      types: &Analyzer::TypeStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+    ): String {
+      let mut output: String = String::create("=== HIR ===\n\n");
+
+      if (let Option::SOME(entry) = hir.entryPoint) {
+        let name: String = Hir::Display::definitionName(defs, symbols, entry);
+        output.pushStr("Entry Point: ");
+        output.pushStr(name.toStr());
+        output.pushStr("\n");
+      }
+
+      Hir::Display::printDefinitions(hir, types, defs, symbols, &mut output);
+      Hir::Display::printVariableInitializers(hir, types, defs, symbols, &mut output);
+
+      return output;
+    }
+  }
+}

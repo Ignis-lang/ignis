@@ -1,0 +1,46 @@
+import Id from "@compiler::ids";
+
+import _ from "./ids";
+
+export namespace Hir {
+  /// Payload wrapper for `LoopKind::For`, mirroring the field set of the Rust
+  /// `LoopKind::For { init, condition, update }` variant.
+  record ForLoop {
+    public init: Option<Hir::HirId>;
+    public condition: Option<Hir::HirId>;
+    public update: Option<Hir::HirId>;
+  }
+
+  /// Mirrors `ignis_hir::statement::LoopKind`.
+  enum LoopKind {
+    Infinite,
+    While(Hir::HirId),
+    For(Hir::ForLoop),
+  }
+
+  function offsetHirId(id: Hir::HirId, offset: u32): Hir::HirId {
+    return Id::fromRaw<Hir::NodeTag>(id.raw() + offset);
+  }
+
+  function offsetOptionalHirId(value: Option<Hir::HirId>, offset: u32): Option<Hir::HirId> {
+    return match (value) {
+      Option::SOME(id) -> Option::SOME(Hir::offsetHirId(id, offset)),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  /// Offsets every `HirId` referenced by a loop condition, mirroring
+  /// `LoopKind::offset_ids`. Consumes and rebuilds the value because the
+  /// selfhost slice models id rewriting functionally instead of in place.
+  function offsetLoopKind(kind: Hir::LoopKind, offset: u32): Hir::LoopKind {
+    return match (kind) {
+      Hir::LoopKind::Infinite -> Hir::LoopKind::Infinite,
+      Hir::LoopKind::While(condition) -> Hir::LoopKind::While(Hir::offsetHirId(condition, offset)),
+      Hir::LoopKind::For(forLoop) -> Hir::LoopKind::For(Hir::ForLoop {
+        init: Hir::offsetOptionalHirId(forLoop.init, offset),
+        condition: Hir::offsetOptionalHirId(forLoop.condition, offset),
+        update: Hir::offsetOptionalHirId(forLoop.update, offset),
+      }),
+    };
+  }
+}
