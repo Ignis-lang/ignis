@@ -1101,6 +1101,302 @@ export namespace Analyzer {
       }));
     }
 
+    /// Whether a type parameter is reachable from `typeId`.
+    ///
+    /// Inference only has something to learn from a parameter that mentions one: a
+    /// concrete parameter type is checked against the argument, never unified with it.
+    /// `Alias` is not followed, matching `substitute`'s own gap — a generic alias whose
+    /// aliased type carries a `Param` reads as concrete here too.
+    public containsTypeParam(&self, typeId: Analyzer::TypeId): boolean {
+      let Option::SOME(kind) = self.types.get(typeId) else {
+        return false;
+      };
+
+      match (kind) {
+        Analyzer::Type::Param(_) -> {
+          return true;
+        },
+        Analyzer::Type::Pointer(p) -> {
+          return self.containsTypeParam(p.pointee);
+        },
+        Analyzer::Type::Reference(r) -> {
+          return self.containsTypeParam(r.referent);
+        },
+        Analyzer::Type::Slice(element) -> {
+          return self.containsTypeParam(element);
+        },
+        Analyzer::Type::FixedArray(element, _) -> {
+          return self.containsTypeParam(element);
+        },
+        Analyzer::Type::Tuple(t) -> {
+          return self.anyContainsTypeParam(&t.elements);
+        },
+        Analyzer::Type::Function(f) -> {
+          if (self.anyContainsTypeParam(&f.params)) {
+            return true;
+          }
+
+          return self.containsTypeParam(f.returnType);
+        },
+        Analyzer::Type::Instance(instance) -> {
+          return self.anyContainsTypeParam(&instance.typeArguments);
+        },
+        _ -> {
+          return false;
+        },
+      };
+
+      @panic("unreachable: containsTypeParam match did not return");
+    }
+
+    /// Whether any entry of `typeIds` mentions a type parameter.
+    public anyContainsTypeParam(&self, typeIds: &Vector<Analyzer::TypeId>): boolean {
+      let mut index: u64 = 0;
+
+      while (index < typeIds.length()) {
+        let Option::SOME(typeId) = typeIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (self.containsTypeParam(*typeId)) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Structural unification for inference: walks `parameterType` against
+    /// `actualType`, binding each `Param(sym)` it meets to whatever concrete type sits
+    /// at the same position, and returns the bindings in `paramSymbols` order.
+    ///
+    /// `NONE` means the shapes disagree, a parameter was bound to two different types,
+    /// or some parameter was never reached — in every case there is nothing sound to
+    /// substitute, and the caller keeps the declared types. This is stricter than the
+    /// Rust reference, which fills unresolved parameters with an error type and carries
+    /// on; without an error type to name, refusing outright is the honest equivalent.
+    ///
+    /// Unification is structural, never coercive: a shared reference does not unify
+    /// with a mutable one, arrays must agree on length, and instances must name the
+    /// same definition. `Alias` is not followed, matching `substitute`.
+    public inferTypeArguments(
+      &self,
+      parameterType: Analyzer::TypeId,
+      actualType: Analyzer::TypeId,
+      paramSymbols: &Vector<Symbol>,
+    ): Option<Vector<Analyzer::TypeId>> {
+      let mut bindings: Vector<Option<Analyzer::TypeId>> = Vector::new<Option<Analyzer::TypeId>>();
+      let mut index: u64 = 0;
+
+      while (index < paramSymbols.length()) {
+        bindings.push(Option::NONE);
+        index += 1;
+      }
+
+      if (!self.unifyForInference(parameterType, actualType, paramSymbols, &mut bindings)) {
+        return Option::NONE;
+      }
+
+      let mut resolved: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut resolvedIndex: u64 = 0;
+
+      while (resolvedIndex < bindings.length()) {
+        let Option::SOME(binding) = bindings.get(resolvedIndex) else {
+          return Option::NONE;
+        };
+
+        let Option::SOME(boundType) = binding else {
+          return Option::NONE;
+        };
+
+        resolved.push(boundType);
+        resolvedIndex += 1;
+      }
+
+      return Option::SOME(resolved);
+    }
+
+    /// Walk of `inferTypeArguments`. Records what each parameter must be and reports
+    /// whether the two shapes stayed compatible the whole way down.
+    public unifyForInference(
+      &self,
+      parameterType: Analyzer::TypeId,
+      actualType: Analyzer::TypeId,
+      paramSymbols: &Vector<Symbol>,
+      bindings: &mut Vector<Option<Analyzer::TypeId>>,
+    ): boolean {
+      let Option::SOME(parameterKind) = self.types.get(parameterType) else {
+        return false;
+      };
+
+      if (let Analyzer::Type::Param(symbol) = parameterKind) {
+        return self.bindInferredParam(symbol, actualType, paramSymbols, bindings);
+      }
+
+      // Nothing to learn from a concrete parameter: whether it accepts the argument is
+      // the caller's own type check, not this walk's business.
+      if (!self.containsTypeParam(parameterType)) {
+        return true;
+      }
+
+      let Option::SOME(actualKind) = self.types.get(actualType) else {
+        return false;
+      };
+
+      match (parameterKind) {
+        Analyzer::Type::Pointer(p) -> {
+          let Analyzer::Type::Pointer(actualPointer) = actualKind else {
+            return false;
+          };
+
+          if (p.mutable != actualPointer.mutable) {
+            return false;
+          }
+
+          return self.unifyForInference(p.pointee, actualPointer.pointee, paramSymbols, bindings);
+        },
+        Analyzer::Type::Reference(r) -> {
+          let Analyzer::Type::Reference(actualReference) = actualKind else {
+            return false;
+          };
+
+          if (r.mutable != actualReference.mutable) {
+            return false;
+          }
+
+          return self.unifyForInference(r.referent, actualReference.referent, paramSymbols, bindings);
+        },
+        Analyzer::Type::Slice(element) -> {
+          let Analyzer::Type::Slice(actualElement) = actualKind else {
+            return false;
+          };
+
+          return self.unifyForInference(element, actualElement, paramSymbols, bindings);
+        },
+        Analyzer::Type::FixedArray(element, length) -> {
+          let Analyzer::Type::FixedArray(actualElement, actualLength) = actualKind else {
+            return false;
+          };
+
+          if (length != actualLength) {
+            return false;
+          }
+
+          return self.unifyForInference(element, actualElement, paramSymbols, bindings);
+        },
+        Analyzer::Type::Tuple(t) -> {
+          let Analyzer::Type::Tuple(actualTuple) = actualKind else {
+            return false;
+          };
+
+          return self.unifyEachForInference(&t.elements, &actualTuple.elements, paramSymbols, bindings);
+        },
+        Analyzer::Type::Function(f) -> {
+          let Analyzer::Type::Function(actualFunction) = actualKind else {
+            return false;
+          };
+
+          if (!self.unifyEachForInference(&f.params, &actualFunction.params, paramSymbols, bindings)) {
+            return false;
+          }
+
+          return self.unifyForInference(f.returnType, actualFunction.returnType, paramSymbols, bindings);
+        },
+        Analyzer::Type::Instance(instance) -> {
+          let Analyzer::Type::Instance(actualInstance) = actualKind else {
+            return false;
+          };
+
+          if (instance.definition.raw() != actualInstance.definition.raw()) {
+            return false;
+          }
+
+          return self.unifyEachForInference(&instance.typeArguments, &actualInstance.typeArguments, paramSymbols, bindings);
+        },
+        _ -> {
+          return false;
+        },
+      };
+
+      @panic("unreachable: unifyForInference match did not return");
+    }
+
+    /// Pairwise unification of two type lists. Differing lengths are a shape mismatch.
+    public unifyEachForInference(
+      &self,
+      parameterTypes: &Vector<Analyzer::TypeId>,
+      actualTypes: &Vector<Analyzer::TypeId>,
+      paramSymbols: &Vector<Symbol>,
+      bindings: &mut Vector<Option<Analyzer::TypeId>>,
+    ): boolean {
+      if (parameterTypes.length() != actualTypes.length()) {
+        return false;
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < parameterTypes.length()) {
+        let Option::SOME(parameterType) = parameterTypes.get(index) else {
+          return false;
+        };
+
+        let Option::SOME(actualType) = actualTypes.get(index) else {
+          return false;
+        };
+
+        if (!self.unifyForInference(*parameterType, *actualType, paramSymbols, bindings)) {
+          return false;
+        }
+
+        index += 1;
+      }
+
+      return true;
+    }
+
+    /// Bind one type parameter, or confirm it already stands for the same type.
+    ///
+    /// A parameter the caller never declared is not ours to bind: the walk reached a
+    /// `Param` from some other owner, and guessing would key a binding on a symbol that
+    /// means something else here.
+    public bindInferredParam(
+      &self,
+      symbol: Symbol,
+      actualType: Analyzer::TypeId,
+      paramSymbols: &Vector<Symbol>,
+      bindings: &mut Vector<Option<Analyzer::TypeId>>,
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < paramSymbols.length()) {
+        let Option::SOME(paramSymbol) = paramSymbols.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (paramSymbol.raw() != symbol.raw()) {
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(existing) = bindings.get(index) else {
+          return false;
+        };
+
+        if (let Option::SOME(alreadyBound) = existing) {
+          return alreadyBound.raw() == actualType.raw();
+        }
+
+        let mut bindingsRef: &mut Vector<Option<Analyzer::TypeId>> = bindings;
+        return bindingsRef.set(index, Option::SOME(actualType));
+      }
+
+      return false;
+    }
+
     /// Substitutes every `Param(sym)` occurrence reachable from `typeId` with the
     /// corresponding entry of `args`, matched positionally against `params`.
     ///

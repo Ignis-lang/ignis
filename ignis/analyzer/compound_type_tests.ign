@@ -1680,3 +1680,171 @@ function substituteScopingDoesNotCrossContaminateBetweenRecords(): void {
   Test::assertEq<u32>(wrapperResult.raw(), idStr.raw());
   Test::assertEq<u32>(wrapperResultAfterBox.raw(), idStr.raw());
 }
+
+// =========================================================================
+// Type-parameter detection and inference
+// =========================================================================
+
+/// Scenario: a concrete type mentions no type parameter, however deep it is.
+/// Spec: selfhost generic inference — containsTypeParam.
+@test
+function containsTypeParamIsFalseForFullyConcreteTypes(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let sliceOfI32: Analyzer::TypeId = store.slice(idI32);
+  let ptrOfSlice: Analyzer::TypeId = store.pointer(sliceOfI32);
+
+  Test::assertEq<boolean>(store.containsTypeParam(idI32), false);
+  Test::assertEq<boolean>(store.containsTypeParam(ptrOfSlice), false);
+}
+
+/// Scenario: a parameter buried under pointers, slices, tuples, functions and
+/// instances is still found — inference has something to learn from any of them.
+/// Spec: selfhost generic inference — containsTypeParam.
+@test
+function containsTypeParamFindsNestedOccurrences(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  Test::assertEq<boolean>(store.containsTypeParam(store.pointer(paramId)), true);
+  Test::assertEq<boolean>(store.containsTypeParam(store.slice(paramId)), true);
+  Test::assertEq<boolean>(store.containsTypeParam(store.reference(paramId)), true);
+
+  let mut tupleElements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  tupleElements.push(idI32);
+  tupleElements.push(paramId);
+  Test::assertEq<boolean>(store.containsTypeParam(store.tuple(tupleElements)), true);
+
+  let mut fnParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  fnParams.push(idI32);
+  Test::assertEq<boolean>(store.containsTypeParam(store.functionType(fnParams, paramId)), true);
+}
+
+/// Scenario: `T` against `i32` binds T to i32 — the shape inference exists for.
+/// Spec: selfhost generic inference — inferTypeArguments.
+@test
+function inferTypeArgumentsBindsBareParam(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut paramSymbols: Vector<Symbol> = Vector::new<Symbol>();
+  paramSymbols.push(tSymbol);
+
+  let Option::SOME(inferred) = store.inferTypeArguments(paramId, idI32, &paramSymbols) else {
+    @panic("inferTypeArgumentsBindsBareParam: expected an inference result");
+  };
+
+  Test::assertEq<u64>(inferred.length(), 1);
+  let Option::SOME(first) = inferred.get(0) else {
+    @panic("inferTypeArgumentsBindsBareParam: missing binding");
+  };
+  Test::assertEq<u32>(first.raw(), idI32.raw());
+}
+
+/// Scenario: `Vector<T>` against `Vector<i32>` reaches T through the instance's
+/// type arguments.
+/// Spec: selfhost generic inference — inferTypeArguments.
+@test
+function inferTypeArgumentsReachesThroughInstance(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let definition: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(3);
+
+  let mut genericArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  genericArgs.push(paramId);
+  let genericInstance: Analyzer::TypeId = store.instance(definition, genericArgs);
+
+  let mut concreteArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  concreteArgs.push(idI32);
+  let concreteInstance: Analyzer::TypeId = store.instance(definition, concreteArgs);
+
+  let mut paramSymbols: Vector<Symbol> = Vector::new<Symbol>();
+  paramSymbols.push(tSymbol);
+
+  let Option::SOME(inferred) = store.inferTypeArguments(genericInstance, concreteInstance, &paramSymbols) else {
+    @panic("inferTypeArgumentsReachesThroughInstance: expected an inference result");
+  };
+
+  let Option::SOME(first) = inferred.get(0) else {
+    @panic("inferTypeArgumentsReachesThroughInstance: missing binding");
+  };
+  Test::assertEq<u32>(first.raw(), idI32.raw());
+}
+
+/// Scenario: one parameter appearing twice must agree with itself. `(T, T)` against
+/// `(i32, i32)` binds; against `(i32, str)` it does not.
+/// Spec: selfhost generic inference — inferTypeArguments.
+@test
+function inferTypeArgumentsRejectsContradictoryBindings(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+  let idStr: Analyzer::TypeId = store.intern(Analyzer::Type::STR);
+
+  let mut genericElements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  genericElements.push(paramId);
+  genericElements.push(paramId);
+  let genericTuple: Analyzer::TypeId = store.tuple(genericElements);
+
+  let mut agreeingElements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  agreeingElements.push(idI32);
+  agreeingElements.push(idI32);
+  let agreeingTuple: Analyzer::TypeId = store.tuple(agreeingElements);
+
+  let mut clashingElements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  clashingElements.push(idI32);
+  clashingElements.push(idStr);
+  let clashingTuple: Analyzer::TypeId = store.tuple(clashingElements);
+
+  let mut paramSymbols: Vector<Symbol> = Vector::new<Symbol>();
+  paramSymbols.push(tSymbol);
+
+  Test::assertEq<boolean>(store.inferTypeArguments(genericTuple, agreeingTuple, &paramSymbols).isSome(), true);
+  Test::assertEq<boolean>(store.inferTypeArguments(genericTuple, clashingTuple, &paramSymbols).isSome(), false);
+}
+
+/// Scenario: unification is structural, not coercive. A shared reference does not
+/// unify with a mutable one, and a mismatched shape yields nothing at all.
+/// Spec: selfhost generic inference — inferTypeArguments.
+@test
+function inferTypeArgumentsRefusesMismatchedShapes(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let sharedRefOfParam: Analyzer::TypeId = store.reference(paramId);
+  let mutableRefOfI32: Analyzer::TypeId = store.mutableReference(idI32);
+  let sliceOfParam: Analyzer::TypeId = store.slice(paramId);
+
+  let mut paramSymbols: Vector<Symbol> = Vector::new<Symbol>();
+  paramSymbols.push(tSymbol);
+
+  Test::assertEq<boolean>(store.inferTypeArguments(sharedRefOfParam, mutableRefOfI32, &paramSymbols).isSome(), false);
+  Test::assertEq<boolean>(store.inferTypeArguments(sliceOfParam, idI32, &paramSymbols).isSome(), false);
+}
+
+/// Scenario: a parameter the walk never reaches leaves nothing to substitute, so the
+/// whole inference is refused rather than half-applied.
+/// Spec: selfhost generic inference — inferTypeArguments.
+@test
+function inferTypeArgumentsRefusesWhenAParamIsUnreached(): void {
+  let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let tSymbol: Symbol = Symbol::fromRaw(1);
+  let uSymbol: Symbol = Symbol::fromRaw(2);
+  let paramId: Analyzer::TypeId = store.param(tSymbol);
+  let idI32: Analyzer::TypeId = store.intern(Analyzer::Type::I32);
+
+  let mut paramSymbols: Vector<Symbol> = Vector::new<Symbol>();
+  paramSymbols.push(tSymbol);
+  paramSymbols.push(uSymbol);
+
+  Test::assertEq<boolean>(store.inferTypeArguments(paramId, idI32, &paramSymbols).isSome(), false);
+}
