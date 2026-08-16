@@ -1,0 +1,959 @@
+import DiagnosticBag from "@compiler::diagnostics";
+import Ast from "@compiler::ast";
+import Vector from "std::vector";
+
+/// Constant-evaluation phase for the Ignis selfhost compiler.
+///
+/// Port of `crates/ignis_analyzer/src/const_eval.rs`. Runs after typecheck
+/// because signed-versus-unsigned folding reads the checked type of the left
+/// operand from `TypecheckOutput.exprTypes` (mirroring the Rust
+/// `const_operand_is_unsigned`).
+///
+/// The binder binds module-level constants as immutable `Definition::Variable`
+/// (there is no `Definition::Constant` in the selfhost), so evaluated values
+/// live in a side map keyed by the constant's raw `DefinitionId` instead of on
+/// the definition itself.
+///
+/// Constants are evaluated in module declaration order, recursing into
+/// namespaces and unwrapping exports. A reference to a constant that has not
+/// been evaluated yet simply folds to not-const; like the Rust oracle, no
+/// cycle diagnostic is emitted, and failed folds (overflow, division by zero,
+/// out-of-range shifts) are silently not-const. The phase emits no
+/// diagnostics in its current scope; the bag exists for output-shape parity
+/// with the other phases.
+///
+/// Scoped out relative to the Rust oracle:
+///   - function-body and local-statement walking (selfhost constants are
+///     module-level only),
+///   - record/enum static fields and their A0068 diagnostic,
+///   - `ConstValue::Array` / `ConstValue::Tuple` and vector-index folding
+///     (nothing consumes const arrays in the selfhost yet),
+///   - enum tag evaluation, `configFlag`, and the A0048/A0074 typecheck
+///     integrations.
+export namespace Analyzer {
+  namespace ConstEval {
+    /// Compile-time constant value. `Int` stores the two's-complement bit
+    /// pattern of any integer type in an `i64`, exactly like the Rust
+    /// `ConstValue::Int`; unsigned semantics are recovered from the checked
+    /// expression type at fold time.
+    enum ConstValue {
+      Int(i64),
+      Float(f64),
+      Bool(boolean),
+      Char(char),
+      Str(String),
+      Null,
+    }
+
+    /// Side map from a constant's raw `DefinitionId` to its evaluated value.
+    /// Parallel vectors, following the `ExprTypeMap` pattern.
+    record ConstValueMap {
+      public defIdRaws: Vector<u32>;
+      public values: Vector<Analyzer::ConstEval::ConstValue>;
+    }
+
+    /// Output of the const-eval phase.
+    record ConstEvalOutput {
+      public diagnostics: DiagnosticBag;
+      public values: Analyzer::ConstEval::ConstValueMap;
+    }
+
+    function copyConstValue(
+      value: &Analyzer::ConstEval::ConstValue
+    ): Analyzer::ConstEval::ConstValue {
+      return match (value) {
+        Analyzer::ConstEval::ConstValue::Int(i) -> Analyzer::ConstEval::ConstValue::Int(i),
+        Analyzer::ConstEval::ConstValue::Float(f) -> Analyzer::ConstEval::ConstValue::Float(f),
+        Analyzer::ConstEval::ConstValue::Bool(b) -> Analyzer::ConstEval::ConstValue::Bool(b),
+        Analyzer::ConstEval::ConstValue::Char(c) -> Analyzer::ConstEval::ConstValue::Char(c),
+        Analyzer::ConstEval::ConstValue::Str(s) -> Analyzer::ConstEval::ConstValue::Str(s.clone()),
+        Analyzer::ConstEval::ConstValue::Null -> Analyzer::ConstEval::ConstValue::Null,
+      };
+    }
+
+    /// Look up the evaluated value for a constant's raw `DefinitionId`.
+    function findConstValue(
+      map: &mut Analyzer::ConstEval::ConstValueMap,
+      defIdRaw: u32,
+    ): Option<Analyzer::ConstEval::ConstValue> {
+      let mut index: u64 = map.defIdRaws.length();
+
+      while (index > 0) {
+        index -= 1;
+
+        let Option::SOME(candidate) = map.defIdRaws.get(index) else {
+          continue;
+        };
+
+        if (*candidate == defIdRaw) {
+          let Option::SOME(value) = map.values.get(index) else {
+            return Option::NONE;
+          };
+
+          return Option::SOME(Analyzer::ConstEval::copyConstValue(value));
+        }
+      }
+
+      return Option::NONE;
+    }
+
+    function insertConstValue(
+      map: &mut Analyzer::ConstEval::ConstValueMap,
+      defIdRaw: u32,
+      value: Analyzer::ConstEval::ConstValue,
+    ): void {
+      let mut mapRef: &mut Analyzer::ConstEval::ConstValueMap = map;
+      mapRef.defIdRaws.push(defIdRaw);
+      mapRef.values.push(value);
+    }
+
+    // =========================================================================
+    // Checked integer arithmetic
+    //
+    // Ignis has no `checked_*` builtins, so the Rust `i64::checked_*` /
+    // `u64::checked_*` semantics are mirrored with explicit bound checks that
+    // run before the operation, keeping the compiler itself free of overflow.
+    // =========================================================================
+
+    function checkedAddSigned(left: i64, right: i64): Option<i64> {
+      if (right > 0 && left > maxOf<i64>() - right) {
+        return Option::NONE;
+      }
+      if (right < 0 && left < minOf<i64>() - right) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(left + right);
+    }
+
+    function checkedSubSigned(left: i64, right: i64): Option<i64> {
+      if (right < 0 && left > maxOf<i64>() + right) {
+        return Option::NONE;
+      }
+      if (right > 0 && left < minOf<i64>() + right) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(left - right);
+    }
+
+    /// Overflow-checked `i64` multiplication. The `-1` factors are handled
+    /// first so the division-based bound checks below never divide `minOf` by
+    /// `-1`, which itself overflows.
+    function checkedMulSigned(left: i64, right: i64): Option<i64> {
+      if (left == 0 || right == 0) {
+        return Option::SOME(0);
+      }
+
+      if (left == -1) {
+        if (right == minOf<i64>()) {
+          return Option::NONE;
+        }
+        return Option::SOME(-right);
+      }
+
+      if (right == -1) {
+        if (left == minOf<i64>()) {
+          return Option::NONE;
+        }
+        return Option::SOME(-left);
+      }
+
+      if (left > 0 && right > 0 && left > maxOf<i64>() / right) {
+        return Option::NONE;
+      }
+      if (left > 0 && right < 0 && right < minOf<i64>() / left) {
+        return Option::NONE;
+      }
+      if (left < 0 && right > 0 && left < minOf<i64>() / right) {
+        return Option::NONE;
+      }
+      if (left < 0 && right < 0 && left < maxOf<i64>() / right) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(left * right);
+    }
+
+    /// Caller guarantees `right != 0`.
+    function checkedDivSigned(left: i64, right: i64): Option<i64> {
+      if (left == minOf<i64>() && right == -1) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(left / right);
+    }
+
+    /// Caller guarantees `right != 0`. Like Rust `checked_rem`,
+    /// `minOf % -1` is not-const even though its mathematical result is zero.
+    function checkedRemSigned(left: i64, right: i64): Option<i64> {
+      if (left == minOf<i64>() && right == -1) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(left % right);
+    }
+
+    function checkedAddUnsigned(left: u64, right: u64): Option<u64> {
+      if (left > maxOf<u64>() - right) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(left + right);
+    }
+
+    function checkedSubUnsigned(left: u64, right: u64): Option<u64> {
+      if (left < right) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(left - right);
+    }
+
+    function checkedMulUnsigned(left: u64, right: u64): Option<u64> {
+      if (right != 0 && left > maxOf<u64>() / right) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(left * right);
+    }
+
+    function intFromSigned(result: Option<i64>): Option<Analyzer::ConstEval::ConstValue> {
+      return match (result) {
+        Option::SOME(value) -> Option::SOME(Analyzer::ConstEval::ConstValue::Int(value)),
+        Option::NONE -> Option::NONE,
+      };
+    }
+
+    function intFromUnsigned(result: Option<u64>): Option<Analyzer::ConstEval::ConstValue> {
+      return match (result) {
+        Option::SOME(value) -> Option::SOME(Analyzer::ConstEval::ConstValue::Int(value as i64)),
+        Option::NONE -> Option::NONE,
+      };
+    }
+
+    // =========================================================================
+    // Folding
+    // =========================================================================
+
+    /// Finite check that is false for NaN and both infinities: a finite value
+    /// minus itself is exactly zero, while `inf - inf` and `NaN - NaN` are NaN.
+    function isFiniteFloat(value: f64): boolean {
+      return value - value == 0.0;
+    }
+
+    function finiteFloat(value: f64): Option<Analyzer::ConstEval::ConstValue> {
+      if (!Analyzer::ConstEval::isFiniteFloat(value)) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(Analyzer::ConstEval::ConstValue::Float(value));
+    }
+
+    /// Truncated float remainder, mirroring Rust's `%` on `f64` (fmod).
+    ///
+    /// The Ignis `%` operator does not support floats, so the remainder is
+    /// computed as `l - trunc(l / r) * r` with the truncation done through an
+    /// `i64` cast. Divergence from the oracle: when `|l / r|` exceeds the
+    /// `i64` range the fold answers not-const instead of folding, because the
+    /// truncation cannot be represented.
+    function floatRemainder(left: f64, right: f64): Option<Analyzer::ConstEval::ConstValue> {
+      let quotient: f64 = left / right;
+
+      if (!Analyzer::ConstEval::isFiniteFloat(quotient)) {
+        return Option::NONE;
+      }
+      if (quotient > maxOf<i64>() as f64 || quotient < minOf<i64>() as f64) {
+        return Option::NONE;
+      }
+
+      let truncated: f64 = (quotient as i64) as f64;
+      return Analyzer::ConstEval::finiteFloat(left - truncated * right);
+    }
+
+    /// Folds an integer binary operation over the two's-complement bit
+    /// patterns held by `ConstValue::Int`. Mirrors the Rust
+    /// `const_eval_int_binary`: `unsignedFold` comes from the left operand's
+    /// checked type, and only division, remainder, the ordering comparisons,
+    /// and a right shift branch on it — the other operations produce the same
+    /// bits either way. The caller has already rejected division and
+    /// remainder by zero.
+    function foldIntBinary(
+      operator: Ast::Expression::BinaryOperator,
+      left: i64,
+      right: i64,
+      unsignedFold: boolean,
+    ): Option<Analyzer::ConstEval::ConstValue> {
+      match (operator) {
+        Ast::Expression::BinaryOperator::Add -> {
+          if (unsignedFold) {
+            return Analyzer::ConstEval::intFromUnsigned(
+              Analyzer::ConstEval::checkedAddUnsigned(left as u64, right as u64),
+            );
+          }
+          return Analyzer::ConstEval::intFromSigned(Analyzer::ConstEval::checkedAddSigned(left, right));
+        },
+        Ast::Expression::BinaryOperator::Subtract -> {
+          if (unsignedFold) {
+            return Analyzer::ConstEval::intFromUnsigned(
+              Analyzer::ConstEval::checkedSubUnsigned(left as u64, right as u64),
+            );
+          }
+          return Analyzer::ConstEval::intFromSigned(Analyzer::ConstEval::checkedSubSigned(left, right));
+        },
+        Ast::Expression::BinaryOperator::Multiply -> {
+          if (unsignedFold) {
+            return Analyzer::ConstEval::intFromUnsigned(
+              Analyzer::ConstEval::checkedMulUnsigned(left as u64, right as u64),
+            );
+          }
+          return Analyzer::ConstEval::intFromSigned(Analyzer::ConstEval::checkedMulSigned(left, right));
+        },
+        Ast::Expression::BinaryOperator::Divide -> {
+          if (unsignedFold) {
+            return Analyzer::ConstEval::intFromUnsigned(Option::SOME((left as u64) / (right as u64)));
+          }
+          return Analyzer::ConstEval::intFromSigned(Analyzer::ConstEval::checkedDivSigned(left, right));
+        },
+        Ast::Expression::BinaryOperator::Modulo -> {
+          if (unsignedFold) {
+            return Analyzer::ConstEval::intFromUnsigned(Option::SOME((left as u64) % (right as u64)));
+          }
+          return Analyzer::ConstEval::intFromSigned(Analyzer::ConstEval::checkedRemSigned(left, right));
+        },
+        Ast::Expression::BinaryOperator::Equal -> {
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left == right));
+        },
+        Ast::Expression::BinaryOperator::NotEqual -> {
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left != right));
+        },
+        Ast::Expression::BinaryOperator::LessThan -> {
+          if (unsignedFold) {
+            return Option::SOME(Analyzer::ConstEval::ConstValue::Bool((left as u64) < (right as u64)));
+          }
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left < right));
+        },
+        Ast::Expression::BinaryOperator::LessThanOrEqual -> {
+          if (unsignedFold) {
+            return Option::SOME(Analyzer::ConstEval::ConstValue::Bool((left as u64) <= (right as u64)));
+          }
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left <= right));
+        },
+        Ast::Expression::BinaryOperator::GreaterThan -> {
+          if (unsignedFold) {
+            return Option::SOME(Analyzer::ConstEval::ConstValue::Bool((left as u64) > (right as u64)));
+          }
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left > right));
+        },
+        Ast::Expression::BinaryOperator::GreaterThanOrEqual -> {
+          if (unsignedFold) {
+            return Option::SOME(Analyzer::ConstEval::ConstValue::Bool((left as u64) >= (right as u64)));
+          }
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left >= right));
+        },
+        Ast::Expression::BinaryOperator::BitAnd -> {
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Int(left & right));
+        },
+        Ast::Expression::BinaryOperator::BitOr -> {
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Int(left | right));
+        },
+        Ast::Expression::BinaryOperator::BitXor -> {
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Int(left ^ right));
+        },
+        Ast::Expression::BinaryOperator::ShiftLeft -> {
+          if (right < 0 || right > 63) {
+            return Option::NONE;
+          }
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Int(left << right));
+        },
+        Ast::Expression::BinaryOperator::ShiftRight -> {
+          if (right < 0 || right > 63) {
+            return Option::NONE;
+          }
+          if (unsignedFold) {
+            return Option::SOME(Analyzer::ConstEval::ConstValue::Int(((left as u64) >> (right as u64)) as i64));
+          }
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Int(left >> right));
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      return Option::NONE;
+    }
+
+    function foldFloatBinary(
+      operator: Ast::Expression::BinaryOperator,
+      left: f64,
+      right: f64,
+    ): Option<Analyzer::ConstEval::ConstValue> {
+      match (operator) {
+        Ast::Expression::BinaryOperator::Add -> {
+          return Analyzer::ConstEval::finiteFloat(left + right);
+        },
+        Ast::Expression::BinaryOperator::Subtract -> {
+          return Analyzer::ConstEval::finiteFloat(left - right);
+        },
+        Ast::Expression::BinaryOperator::Multiply -> {
+          return Analyzer::ConstEval::finiteFloat(left * right);
+        },
+        Ast::Expression::BinaryOperator::Divide -> {
+          if (right == 0.0) {
+            return Option::NONE;
+          }
+          return Analyzer::ConstEval::finiteFloat(left / right);
+        },
+        Ast::Expression::BinaryOperator::Modulo -> {
+          if (right == 0.0) {
+            return Option::NONE;
+          }
+          return Analyzer::ConstEval::floatRemainder(left, right);
+        },
+        Ast::Expression::BinaryOperator::Equal -> {
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left == right));
+        },
+        Ast::Expression::BinaryOperator::NotEqual -> {
+          return Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left != right));
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      return Option::NONE;
+    }
+
+    function foldBoolBinary(
+      operator: Ast::Expression::BinaryOperator,
+      left: boolean,
+      right: boolean,
+    ): Option<Analyzer::ConstEval::ConstValue> {
+      return match (operator) {
+        Ast::Expression::BinaryOperator::And -> Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left && right)),
+        Ast::Expression::BinaryOperator::Or -> Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left || right)),
+        Ast::Expression::BinaryOperator::Equal -> Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left == right)),
+        Ast::Expression::BinaryOperator::NotEqual -> Option::SOME(Analyzer::ConstEval::ConstValue::Bool(left != right)),
+        _ -> Option::NONE,
+      };
+    }
+
+    /// Mirrors the Rust `const_eval_binary`: only same-shape operand pairs
+    /// fold, and integer division/remainder by zero is not-const before the
+    /// per-operator dispatch.
+    function foldBinary(
+      operator: Ast::Expression::BinaryOperator,
+      left: Option<Analyzer::ConstEval::ConstValue>,
+      right: Option<Analyzer::ConstEval::ConstValue>,
+      unsignedFold: boolean,
+    ): Option<Analyzer::ConstEval::ConstValue> {
+      let Option::SOME(leftValue) = left else {
+        return Option::NONE;
+      };
+      let Option::SOME(rightValue) = right else {
+        return Option::NONE;
+      };
+
+      let leftRef: &Analyzer::ConstEval::ConstValue = &leftValue;
+      let rightRef: &Analyzer::ConstEval::ConstValue = &rightValue;
+
+      match (leftRef) {
+        Analyzer::ConstEval::ConstValue::Int(l) -> {
+          match (rightRef) {
+            Analyzer::ConstEval::ConstValue::Int(r) -> {
+              let isDivision: boolean = match (operator) {
+                Ast::Expression::BinaryOperator::Divide
+                | Ast::Expression::BinaryOperator::Modulo -> true,
+                _ -> false,
+              };
+
+              if (isDivision && r == 0) {
+                return Option::NONE;
+              }
+
+              return Analyzer::ConstEval::foldIntBinary(operator, l, r, unsignedFold);
+            },
+            _ -> {
+              return Option::NONE;
+            },
+          };
+        },
+        Analyzer::ConstEval::ConstValue::Float(l) -> {
+          match (rightRef) {
+            Analyzer::ConstEval::ConstValue::Float(r) -> {
+              return Analyzer::ConstEval::foldFloatBinary(operator, l, r);
+            },
+            _ -> {
+              return Option::NONE;
+            },
+          };
+        },
+        Analyzer::ConstEval::ConstValue::Bool(l) -> {
+          match (rightRef) {
+            Analyzer::ConstEval::ConstValue::Bool(r) -> {
+              return Analyzer::ConstEval::foldBoolBinary(operator, l, r);
+            },
+            _ -> {
+              return Option::NONE;
+            },
+          };
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      return Option::NONE;
+    }
+
+    /// Mirrors the Rust `const_eval_unary`. Negating an unsigned value has no
+    /// meaning here; leaving it unfolded keeps a wrong constant out of the
+    /// program.
+    function foldUnary(
+      operator: Ast::Expression::UnaryOperator,
+      operand: Option<Analyzer::ConstEval::ConstValue>,
+      unsignedFold: boolean,
+    ): Option<Analyzer::ConstEval::ConstValue> {
+      let Option::SOME(operandValue) = operand else {
+        return Option::NONE;
+      };
+
+      let operandRef: &Analyzer::ConstEval::ConstValue = &operandValue;
+
+      match (operandRef) {
+        Analyzer::ConstEval::ConstValue::Int(i) -> {
+          match (operator) {
+            Ast::Expression::UnaryOperator::Negate -> {
+              if (unsignedFold) {
+                return Option::NONE;
+              }
+              if (i == minOf<i64>()) {
+                return Option::NONE;
+              }
+              return Option::SOME(Analyzer::ConstEval::ConstValue::Int(-i));
+            },
+            Ast::Expression::UnaryOperator::Not -> {
+              return Option::SOME(Analyzer::ConstEval::ConstValue::Bool(i == 0));
+            },
+            Ast::Expression::UnaryOperator::BitNot -> {
+              return Option::SOME(Analyzer::ConstEval::ConstValue::Int(~i));
+            },
+            _ -> {
+              return Option::NONE;
+            },
+          };
+        },
+        Analyzer::ConstEval::ConstValue::Float(f) -> {
+          match (operator) {
+            Ast::Expression::UnaryOperator::Negate -> {
+              return Analyzer::ConstEval::finiteFloat(-f);
+            },
+            _ -> {
+              return Option::NONE;
+            },
+          };
+        },
+        Analyzer::ConstEval::ConstValue::Bool(b) -> {
+          match (operator) {
+            Ast::Expression::UnaryOperator::Not -> {
+              return Option::SOME(Analyzer::ConstEval::ConstValue::Bool(!b));
+            },
+            _ -> {
+              return Option::NONE;
+            },
+          };
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      return Option::NONE;
+    }
+
+    // =========================================================================
+    // Expression evaluation
+    // =========================================================================
+
+    function constValueFromLiteral(
+      value: &Ast::Expression::LiteralValue
+    ): Analyzer::ConstEval::ConstValue {
+      return match (value) {
+        Ast::Expression::LiteralValue::Int(i) -> Analyzer::ConstEval::ConstValue::Int(i),
+        Ast::Expression::LiteralValue::UInt(u) -> Analyzer::ConstEval::ConstValue::Int(u as i64),
+        Ast::Expression::LiteralValue::Float(f) -> Analyzer::ConstEval::ConstValue::Float(f),
+        Ast::Expression::LiteralValue::Boolean(b) -> Analyzer::ConstEval::ConstValue::Bool(b),
+        Ast::Expression::LiteralValue::Character(c) -> Analyzer::ConstEval::ConstValue::Char(c),
+        Ast::Expression::LiteralValue::String(s) -> Analyzer::ConstEval::ConstValue::Str(s.clone()),
+        Ast::Expression::LiteralValue::Null -> Analyzer::ConstEval::ConstValue::Null,
+      };
+    }
+
+    /// Whether an expression's checked type is an unsigned integer, mirroring
+    /// the Rust `const_operand_is_unsigned` (no alias resolution, matching
+    /// `TypeStore::is_unsigned`).
+    function exprTypeIsUnsigned(
+      typeStore: &mut Analyzer::TypeStore,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprId: Ast::ExpressionId,
+    ): boolean {
+      let mut index: u64 = typecheck.exprTypes.nodeIds.length();
+
+      while (index > 0) {
+        index -= 1;
+
+        let Option::SOME(nodeId) = typecheck.exprTypes.nodeIds.get(index) else {
+          continue;
+        };
+
+        if (*nodeId != exprId.raw()) {
+          continue;
+        }
+
+        let Option::SOME(typeId) = typecheck.exprTypes.typeIds.get(index) else {
+          return false;
+        };
+        let Option::SOME(typeNode) = typeStore.get(*typeId) else {
+          return false;
+        };
+
+        return match (typeNode) {
+          Analyzer::Type::U8
+          | Analyzer::Type::U16
+          | Analyzer::Type::U32
+          | Analyzer::Type::U64 -> true,
+          _ -> false,
+        };
+      }
+
+      return false;
+    }
+
+    /// Value of a `Variable`/`Path` reference to an already-evaluated
+    /// constant. The body resolver records the resolved definition on the
+    /// expression itself, so both expression shapes resolve the same way; a
+    /// reference to anything but an immutable module-level `Variable`
+    /// definition is not const.
+    function referencedConstValue(
+      values: &mut Analyzer::ConstEval::ConstValueMap,
+      defStore: &mut Analyzer::DefinitionStore,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+    ): Option<Analyzer::ConstEval::ConstValue> {
+      let Option::SOME(resolvedRef) = Analyzer::ResolverBodies::findExprRef(
+        &resolvedBodies.bodyResolution,
+        exprId.raw(),
+      ) else {
+        return Option::NONE;
+      };
+
+      let Analyzer::ResolverBodies::ResolvedRef::Definition(defId) = resolvedRef else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(def) = defStore.get(defId) else {
+        return Option::NONE;
+      };
+
+      match (def) {
+        Analyzer::Definition::Variable(variable) -> {
+          if (variable.mutable) {
+            return Option::NONE;
+          }
+
+          return Analyzer::ConstEval::findConstValue(values, defId.raw());
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      return Option::NONE;
+    }
+
+    /// Mirrors the Rust `const_eval_expression_node` for the expression
+    /// shapes in scope: literals, references to earlier constants, binary and
+    /// unary folding, const-condition ternaries, and grouping. Everything
+    /// else is not const.
+    function evalExpression(
+      values: &mut Analyzer::ConstEval::ConstValueMap,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      exprId: Ast::ExpressionId,
+    ): Option<Analyzer::ConstEval::ConstValue> {
+      let Option::SOME(expression) = module.expressions.get(exprId) else {
+        return Option::NONE;
+      };
+
+      match (expression) {
+        Ast::Expression::Node::Literal(literal) -> {
+          return Option::SOME(Analyzer::ConstEval::constValueFromLiteral(&literal.value));
+        },
+        Ast::Expression::Node::Variable(_) -> {
+          return Analyzer::ConstEval::referencedConstValue(values, defStore, resolvedBodies, exprId);
+        },
+        Ast::Expression::Node::Path(_) -> {
+          return Analyzer::ConstEval::referencedConstValue(values, defStore, resolvedBodies, exprId);
+        },
+        Ast::Expression::Node::Binary(binaryExpr) -> {
+          let left: Option<Analyzer::ConstEval::ConstValue> = Analyzer::ConstEval::evalExpression(
+            values,
+            defStore,
+            typeStore,
+            module,
+            resolvedBodies,
+            typecheck,
+            binaryExpr.left,
+          );
+          let right: Option<Analyzer::ConstEval::ConstValue> = Analyzer::ConstEval::evalExpression(
+            values,
+            defStore,
+            typeStore,
+            module,
+            resolvedBodies,
+            typecheck,
+            binaryExpr.right,
+          );
+          let unsignedFold: boolean = Analyzer::ConstEval::exprTypeIsUnsigned(typeStore, typecheck, binaryExpr.left);
+
+          return Analyzer::ConstEval::foldBinary(binaryExpr.operator, left, right, unsignedFold);
+        },
+        Ast::Expression::Node::Ternary(ternary) -> {
+          let Option::SOME(condition) = Analyzer::ConstEval::evalExpression(
+            values,
+            defStore,
+            typeStore,
+            module,
+            resolvedBodies,
+            typecheck,
+            ternary.condition,
+          ) else {
+            return Option::NONE;
+          };
+
+          let conditionRef: &Analyzer::ConstEval::ConstValue = &condition;
+
+          match (conditionRef) {
+            Analyzer::ConstEval::ConstValue::Bool(flag) -> {
+              if (flag) {
+                return Analyzer::ConstEval::evalExpression(
+                  values,
+                  defStore,
+                  typeStore,
+                  module,
+                  resolvedBodies,
+                  typecheck,
+                  ternary.thenBranch,
+                );
+              }
+
+              return Analyzer::ConstEval::evalExpression(
+                values,
+                defStore,
+                typeStore,
+                module,
+                resolvedBodies,
+                typecheck,
+                ternary.elseBranch,
+              );
+            },
+            _ -> {
+              return Option::NONE;
+            },
+          };
+        },
+        Ast::Expression::Node::Unary(unary) -> {
+          let operand: Option<Analyzer::ConstEval::ConstValue> = Analyzer::ConstEval::evalExpression(
+            values,
+            defStore,
+            typeStore,
+            module,
+            resolvedBodies,
+            typecheck,
+            unary.operand,
+          );
+          let unsignedFold: boolean = Analyzer::ConstEval::exprTypeIsUnsigned(typeStore, typecheck, unary.operand);
+
+          return Analyzer::ConstEval::foldUnary(unary.operator, operand, unsignedFold);
+        },
+        Ast::Expression::Node::Grouped(grouped) -> {
+          return Analyzer::ConstEval::evalExpression(
+            values,
+            defStore,
+            typeStore,
+            module,
+            resolvedBodies,
+            typecheck,
+            grouped.expression,
+          );
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      return Option::NONE;
+    }
+
+    // =========================================================================
+    // Item walk
+    // =========================================================================
+
+    /// `DefinitionId` for a constant item. Constants are bound in binder
+    /// pass 2, so that index is consulted first.
+    function constantItemDef(
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      itemId: Ast::ItemId,
+    ): Option<Analyzer::DefinitionId> {
+      let pass2Result: Option<Analyzer::DefinitionId> = Analyzer::Binder::findDef(pass2, itemId.raw());
+      if (pass2Result.isSome()) {
+        return pass2Result;
+      }
+
+      return Analyzer::Binder::findDef(pass1, itemId.raw());
+    }
+
+    /// Evaluate one item: constants fold, namespaces recurse, exports unwrap,
+    /// everything else is skipped (mirroring the pass-2 binder walk).
+    function evalItem(
+      values: &mut Analyzer::ConstEval::ConstValueMap,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      itemId: Ast::ItemId,
+    ): void {
+      let Option::SOME(item) = module.items.get(itemId) else {
+        return;
+      };
+
+      match (item) {
+        Ast::Item::Node::Constant(constant) -> {
+          let Option::SOME(defId) = Analyzer::ConstEval::constantItemDef(pass1, pass2, itemId) else {
+            return;
+          };
+
+          let valueOpt: Option<Analyzer::ConstEval::ConstValue> = Analyzer::ConstEval::evalExpression(
+            values,
+            defStore,
+            typeStore,
+            module,
+            resolvedBodies,
+            typecheck,
+            constant.value,
+          );
+
+          if (let Option::SOME(value) = valueOpt) {
+            Analyzer::ConstEval::insertConstValue(values, defId.raw(), value);
+          }
+        },
+        Ast::Item::Node::Namespace(namespaceItem) -> {
+          Analyzer::ConstEval::evalItems(
+            values,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            resolvedBodies,
+            typecheck,
+            &namespaceItem.items,
+          );
+        },
+        Ast::Item::Node::Export(exportItem) -> {
+          if (let Option::SOME(innerItemId) = exportItem.declaration) {
+            Analyzer::ConstEval::evalItem(
+              values,
+              defStore,
+              typeStore,
+              module,
+              pass1,
+              pass2,
+              resolvedBodies,
+              typecheck,
+              innerItemId,
+            );
+          }
+        },
+        _ -> {},
+      };
+    }
+
+    function evalItems(
+      values: &mut Analyzer::ConstEval::ConstValueMap,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      itemIds: &Vector<Ast::ItemId>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < itemIds.length()) {
+        let Option::SOME(itemId) = itemIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        Analyzer::ConstEval::evalItem(
+          values,
+          defStore,
+          typeStore,
+          module,
+          pass1,
+          pass2,
+          resolvedBodies,
+          typecheck,
+          *itemId,
+        );
+
+        index += 1;
+      }
+    }
+
+    /// Const-eval phase entry point. Walks the module's root items in
+    /// declaration order; that ordering is the cycle protection, because a
+    /// reference to a not-yet-evaluated constant is simply not const.
+    function evalModule(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+    ): Analyzer::ConstEval::ConstEvalOutput {
+      let mut values: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap {
+        defIdRaws: Vector::new<u32>(),
+        values: Vector::new<Analyzer::ConstEval::ConstValue>(),
+      };
+
+      Analyzer::ConstEval::evalItems(
+        &mut values,
+        defStore,
+        typeStore,
+        module,
+        pass1,
+        pass2,
+        resolvedBodies,
+        typecheck,
+        &module.roots,
+      );
+
+      return Analyzer::ConstEval::ConstEvalOutput {
+        diagnostics: DiagnosticBag::init(),
+        values: values,
+      };
+    }
+  }
+}
