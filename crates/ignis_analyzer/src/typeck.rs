@@ -10501,7 +10501,7 @@ impl<'a> Analyzer<'a> {
   ) -> TypeId {
     match &binding.type_annotation {
       None => {
-        if self.types.is_copy(&element_type) {
+        if self.types.is_copy_with_defs(&element_type, &self.defs) {
           element_type
         } else {
           self.add_diagnostic(
@@ -10555,7 +10555,7 @@ impl<'a> Analyzer<'a> {
           );
         }
 
-        if !self.types.is_copy(&element_type) {
+        if !self.types.is_copy_with_defs(&element_type, &self.defs) {
           self.add_diagnostic(
             DiagnosticMessage::ForOfRequiresCopyOrRef {
               element_type: self.format_type_for_error(&element_type),

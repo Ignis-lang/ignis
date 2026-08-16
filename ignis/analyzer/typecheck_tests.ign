@@ -216,6 +216,41 @@ function typecheckAddFunctionItem(
   }));
 }
 
+function typecheckAddRecordItemWithMetadata(
+  module: &mut Ast::Module,
+  name: str,
+  fields: Vector<Ast::PatternId>,
+  metadata: Ast::Metadata,
+): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: metadata,
+  }));
+}
+
+/// Build `@implements(<traitName>)` metadata.
+function typecheckImplementsMetadata(traitName: str): Ast::Metadata {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create(traitName));
+
+  let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  attributes.push(Ast::Attribute {
+    span: typecheckDummySpan(),
+    name: String::create("implements"),
+    arguments: arguments,
+  });
+
+  return Ast::Metadata {
+    attributes: attributes,
+    modifiers: Vector::new<Ast::Modifier>(),
+  };
+}
+
 function typecheckAddTypeAliasItem(
   module: &mut Ast::Module,
   name: str,
@@ -2469,6 +2504,159 @@ function typecheckForOfMutRefOverImmutableIterableProducesDiagnostic(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
   assertSingleDiagnostic(&output, DiagnosticCode::FOR_OF_MUT_REQUIRES_MUTABLE_ITER, "cannot take mutable reference in for-of over immutable vector");
+}
+
+/// Wire `let arr: <recordName>[2]; for (item of arr) {}` into a function item
+/// on the module. When `byReference` the binding is annotated as
+/// `&<recordName>`, otherwise it is left unannotated.
+function typecheckAddForOfOverRecordArray(
+  module: &mut Ast::Module,
+  recordName: str,
+  byReference: boolean,
+): void {
+  let recordTypeId: Ast::TypeId = typecheckAddPathType(module, recordName);
+  let arrayTypeId: Ast::TypeId = typecheckAddFixedArrayType(module, recordTypeId, 2);
+  let arrayPattern: Ast::PatternId = typecheckAddAnnotatedBinding(module, "arr", arrayTypeId);
+  let arrayStmt: Ast::StatementId = typecheckAddUninitializedLetStmt(module, arrayPattern, Option::SOME(arrayTypeId));
+
+  let mut itemPattern: Ast::PatternId = typecheckAddBinding(module, "item");
+  if (byReference) {
+    let bindingRecordTypeId: Ast::TypeId = typecheckAddPathType(module, recordName);
+    let referenceTypeId: Ast::TypeId = typecheckAddReferenceType(module, false, bindingRecordTypeId);
+    itemPattern = typecheckAddAnnotatedBinding(module, "item", referenceTypeId);
+  }
+
+  let loopBody: Ast::StatementId = typecheckAddBlock(module, Vector::new<Ast::StatementId>());
+  let iterableExpr: Ast::ExpressionId = typecheckAddVariable(module, "arr");
+  let forOfStmt: Ast::StatementId = typecheckAddForOfStatement(module, itemPattern, iterableExpr, loopBody);
+  let retStmt: Ast::StatementId = typecheckAddReturn(module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(arrayStmt);
+  bodyStmts.push(forOfStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(module, bodyStmts);
+
+  let _funcItem: Ast::ItemId = typecheckAddFunctionItem(module, "forOfRecordArray", Option::NONE, bodyBlock);
+}
+
+/// Scenario: an unannotated binding over an array of a `@implements(Drop)`
+/// record is rejected: the element is not Copy.
+/// Spec: IGN-118 — copy-aware for-of.
+@test
+function typecheckForOfOverDropRecordArrayRequiresRef(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(typecheckAddAnnotatedField(&mut module, "id", i32TypeId));
+  let _recordItem: Ast::ItemId = typecheckAddRecordItemWithMetadata(&mut module, "Owned", fields, typecheckImplementsMetadata("Drop"));
+
+  typecheckAddForOfOverRecordArray(&mut module, "Owned", false);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::FOR_OF_REQUIRES_COPY_OR_REF);
+}
+
+/// Scenario: a `&Owned` binding over the same Drop-record array is accepted.
+/// Spec: IGN-118 — copy-aware for-of.
+@test
+function typecheckForOfOverDropRecordArrayByRefIsClean(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(typecheckAddAnnotatedField(&mut module, "id", i32TypeId));
+  let _recordItem: Ast::ItemId = typecheckAddRecordItemWithMetadata(&mut module, "Owned", fields, typecheckImplementsMetadata("Drop"));
+
+  typecheckAddForOfOverRecordArray(&mut module, "Owned", true);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: a record whose field is itself a Drop-marked record is
+/// transitively non-Copy, so the unannotated binding is rejected.
+/// Spec: IGN-118 — copy-aware for-of.
+@test
+function typecheckForOfOverRecordWithDropFieldRequiresRef(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let mut innerFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  innerFields.push(typecheckAddAnnotatedField(&mut module, "id", i32TypeId));
+  let _innerItem: Ast::ItemId = typecheckAddRecordItemWithMetadata(&mut module, "Inner", innerFields, typecheckImplementsMetadata("Drop"));
+
+  let innerTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "Inner");
+  let mut outerFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  outerFields.push(typecheckAddAnnotatedField(&mut module, "inner", innerTypeId));
+  let _outerItem: Ast::ItemId = typecheckAddRecordItem(&mut module, "Outer", Vector::new<Ast::GenericParam>(), outerFields);
+
+  typecheckAddForOfOverRecordArray(&mut module, "Outer", false);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::FOR_OF_REQUIRES_COPY_OR_REF);
+}
+
+/// Scenario: an iterable record whose `length` field is typed through an
+/// alias of `u64` still qualifies for the iterable-record protocol.
+/// Spec: IGN-118 — copy-aware for-of.
+@test
+function typecheckForOfIterableRecordWithAliasedLengthBindsElement(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u64TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "u64");
+  let _aliasItem: Ast::ItemId = typecheckAddTypeAliasItem(&mut module, "Len", u64TypeId);
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let dataTypeId: Ast::TypeId = typecheckAddPointerType(&mut module, i32TypeId, false);
+  let lenTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "Len");
+  let mut recordFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  recordFields.push(typecheckAddAnnotatedField(&mut module, "data", dataTypeId));
+  recordFields.push(typecheckAddAnnotatedField(&mut module, "length", lenTypeId));
+  let _recordItem: Ast::ItemId = typecheckAddRecordItem(&mut module, "Buffer", Vector::new<Ast::GenericParam>(), recordFields);
+
+  let bufferTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "Buffer");
+  let bufferPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "buffer", bufferTypeId);
+  let bufferStmt: Ast::StatementId = typecheckAddUninitializedLetStmt(&mut module, bufferPattern, Option::SOME(bufferTypeId));
+
+  let itemPattern: Ast::PatternId = typecheckAddBinding(&mut module, "item");
+  let itemUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "item");
+  let itemUseStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, itemUse);
+  let mut loopBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  loopBodyStmts.push(itemUseStmt);
+  let loopBody: Ast::StatementId = typecheckAddBlock(&mut module, loopBodyStmts);
+
+  let iterableExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "buffer");
+  let forOfStmt: Ast::StatementId = typecheckAddForOfStatement(&mut module, itemPattern, iterableExpr, loopBody);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(bufferStmt);
+  bodyStmts.push(forOfStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let _funcItem: Ast::ItemId = typecheckAddFunctionItem(&mut module, "forOfAliasedLength", Option::NONE, bodyBlock);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, itemUse, typeStore.intern(Analyzer::Type::I32));
 }
 
 /// Scenario: `defer cleanup();` over a `void` call is accepted.

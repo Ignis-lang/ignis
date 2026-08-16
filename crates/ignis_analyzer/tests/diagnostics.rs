@@ -1180,3 +1180,58 @@ function main(): void {
     3,
   );
 }
+
+#[test]
+fn for_of_over_drop_bearing_record_requires_ref_at_correct_line() {
+  // Line 13: unannotated binding over Wrapper[2] where Wrapper transitively contains a Drop type
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+record Wrapper {
+    public inner: Owned;
+}
+
+function consume(items: Wrapper[2]): void {
+    for (let item of items) {
+        return;
+    }
+}
+
+function main(): i32 {
+    return 0;
+}"#,
+    "A0070", // ForOfRequiresCopyOrRef
+    13,
+  );
+}
+
+#[test]
+fn for_of_over_drop_bearing_record_by_ref_is_clean() {
+  common::assert_ok(
+    r#"
+@implements(Drop)
+record Owned {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+record Wrapper {
+    public inner: Owned;
+}
+
+function consume(items: Wrapper[2]): void {
+    for (let item: &Wrapper of items) {
+        return;
+    }
+}
+
+function main(): i32 {
+    return 0;
+}"#,
+  );
+}

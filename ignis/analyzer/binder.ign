@@ -207,6 +207,8 @@ export namespace Analyzer {
         instanceMethods: Vector::new<Analyzer::DefinitionId>(),
         staticMethods: Vector::new<Analyzer::DefinitionId>(),
         typeId: sentinelId,
+        implementsCopy: false,
+        implementsDrop: false,
       };
       return defsRef.push(Analyzer::Definition::Record(placeholder));
     }
@@ -235,6 +237,8 @@ export namespace Analyzer {
         instanceMethods: Vector::new<Analyzer::DefinitionId>(),
         staticMethods: Vector::new<Analyzer::DefinitionId>(),
         typeId: sentinelId,
+        implementsCopy: false,
+        implementsDrop: false,
       };
       return defsRef.push(Analyzer::Definition::Enum(placeholder));
     }
@@ -469,6 +473,45 @@ export namespace Analyzer {
       diag.addLabel(LabelKind::PRIMARY, span, "second declaration here");
       let mut stateRef: &mut Analyzer::Binder::BinderState = state;
       stateRef.diagnostics.push(diag);
+    }
+
+    /// Whether the item's attributes carry `@implements(<traitName>)`.
+    ///
+    /// Attribute arguments arrive from the parser as raw lexeme text, so the
+    /// trait name is matched as a string rather than as a resolved name.
+    function implementsLangTrait(metadata: &Ast::Metadata, traitName: str): boolean {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let name: &String = &attribute.name;
+        if (!name.equals("implements")) {
+          index += 1;
+          continue;
+        }
+
+        if (attribute.arguments.length() != 1) {
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(argument) = attribute.arguments.get(0) else {
+          index += 1;
+          continue;
+        };
+
+        if (argument.equals(traitName)) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
     }
 
     /// The try capability an enum's attributes ask for, if any.
@@ -1299,6 +1342,8 @@ export namespace Analyzer {
         instanceMethods: methods.instanceMethods,
         staticMethods: methods.staticMethods,
         typeId: realTypeId,
+        implementsCopy: Analyzer::Binder::implementsLangTrait(&rec.metadata, "Copy"),
+        implementsDrop: Analyzer::Binder::implementsLangTrait(&rec.metadata, "Drop"),
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       defsRef.replace(defId, Analyzer::Definition::Record(newRec));
@@ -1381,6 +1426,8 @@ export namespace Analyzer {
         instanceMethods: methods.instanceMethods,
         staticMethods: methods.staticMethods,
         typeId: realTypeId,
+        implementsCopy: Analyzer::Binder::implementsLangTrait(&en.metadata, "Copy"),
+        implementsDrop: Analyzer::Binder::implementsLangTrait(&en.metadata, "Drop"),
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       defsRef.replace(defId, Analyzer::Definition::Enum(newEnum));
