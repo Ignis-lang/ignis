@@ -316,8 +316,8 @@ function loweringMemberAccessRead(): void {
 }
 
 /// Postfix `!` desugars to the oracle's two-arm `Match`: the ok arm yields the
-/// unwrapped payload, the err arm returns it re-wrapped. Payload types are
-/// ADR-R5 `VOID` sentinels, so both bindings type as `void`.
+/// unwrapped payload, the err arm returns it re-wrapped. Both bindings carry
+/// the variant's declared payload type.
 @test
 function loweringTryDesugarsToMatch(): void {
   let rendered: String = loweringRender(
@@ -529,14 +529,14 @@ function loweringCallWithExplicitTypeArgumentsFallsBackToError(): void {
   Test::assertSnapshot("lowering-call-type-arguments-error", rendered.toStr());
 }
 
-/// Enum variant construction has no lowering: the selfhost typechecker
-/// rejects it, so the call stays on the `Error` fallback.
+/// `Enum::Variant(args)` lowers to `EnumVariant` with the arguments as its
+/// payload, and a bare unit variant to the same node with an empty payload.
+/// Spec: IGN-127 — variant construction.
 @test
-function loweringEnumVariantConstructionFallsBackToError(): void {
-  let rendered: String = loweringRenderChecked(
-    "enum Shape {\n  CIRCLE(u32),\n  EMPTY,\n}\n\nfunction make(): Shape {\n  return Shape::CIRCLE(1);\n}\n",
-    false,
+function loweringEnumVariantConstruction(): void {
+  let rendered: String = loweringRender(
+    "enum Shape {\n  CIRCLE(u32),\n  EMPTY,\n}\n\nfunction make(): Shape {\n  return Shape::CIRCLE(1);\n}\n\nfunction empty(): Shape {\n  return Shape::EMPTY;\n}\n",
   );
 
-  Test::assertSnapshot("lowering-enum-variant-construction-error", rendered.toStr());
+  Test::assertSnapshot("lowering-enum-variant-construction", rendered.toStr());
 }

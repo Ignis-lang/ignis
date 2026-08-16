@@ -21,7 +21,7 @@ import HashMap from "std::collections";
 /// `DefinitionStore::replace` (ADR-R4).
 ///
 /// Supported items: Record (fields + method signatures), Enum (type params +
-/// method signatures; variant payloads deferred ADR-R5), Function
+/// variant payloads + method signatures), Function
 /// (params + return type), Constant (annotation), Trait (method signatures).
 /// Method signatures resolve with an owner-local `Self` entry mapped to the
 /// owner nominal type (or VOID for traits); see `resolveOwnerMethodSignatures`.
@@ -544,6 +544,42 @@ export namespace Analyzer {
       };
     }
 
+    /// Patch `VariantDef.payload` at `variantDefId` via `DefinitionStore::replace`.
+    ///
+    /// The binder allocates one VOID placeholder per declared payload slot; this
+    /// replaces the whole vector with the resolved slot types, keeping arity.
+    function patchVariantPayload(
+      defStore: &mut Analyzer::DefinitionStore,
+      variantDefId: Analyzer::DefinitionId,
+      payload: &Vector<Analyzer::TypeId>,
+    ): void {
+      let Option::SOME(existing) = defStore.get(variantDefId) else {
+        return;
+      };
+
+      match (existing) {
+        Analyzer::Definition::Variant(v) -> {
+          let updated: Analyzer::VariantDef = Analyzer::VariantDef {
+            name: v.name,
+            payload: Analyzer::Resolver::copyTypeIdVector(payload),
+            owner: v.owner,
+            tagValue: v.tagValue,
+          };
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.replace(variantDefId, Analyzer::Definition::Variant(updated));
+        },
+        Analyzer::Definition::Record(_) -> {},
+        Analyzer::Definition::Enum(_) -> {},
+        Analyzer::Definition::Function(_) -> {},
+        Analyzer::Definition::Variable(_) -> {},
+        Analyzer::Definition::Field(_) -> {},
+        Analyzer::Definition::TypeParam(_) -> {},
+        Analyzer::Definition::TypeAlias(_) -> {},
+        Analyzer::Definition::Trait(_) -> {},
+        Analyzer::Definition::Method(_) -> {},
+      };
+    }
+
     /// Patch `VariableDef.declaredType` at `varDefId` via `DefinitionStore::replace`.
     function patchVariableType(
       defStore: &mut Analyzer::DefinitionStore,
@@ -595,6 +631,25 @@ export namespace Analyzer {
         };
 
         out.push(*defId);
+        index += 1;
+      }
+
+      return out;
+    }
+
+    /// Copies a `Vector<TypeId>` element-by-element, for the same reason
+    /// `copyDefinitionIdVector` exists.
+    function copyTypeIdVector(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
+      let mut out: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < source.length()) {
+        let Option::SOME(typeId) = source.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        out.push(*typeId);
         index += 1;
       }
 
@@ -746,6 +801,69 @@ export namespace Analyzer {
       };
 
       @panic("unreachable: extractRecordFields match did not return");
+    }
+
+    /// Extract a copy of EnumDef.variants, releasing the immutable borrow.
+    function extractEnumVariants(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      let Analyzer::Definition::Enum(enumDef) = def else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+
+      while (index < enumDef.variants.length()) {
+        let Option::SOME(variantId) = enumDef.variants.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        out.push(*variantId);
+        index += 1;
+      }
+
+      return out;
+    }
+
+    /// Payload slot patterns of a variant declaration, in declaration order.
+    ///
+    /// The parser models a payload variant as a `Pattern::Path` whose arguments
+    /// are the declared slots; a unit variant is a `Pattern::Binding` and yields
+    /// no slots.
+    function variantPayloadSlotPatterns(
+      module: &Ast::Module,
+      variantPatternId: Ast::PatternId,
+    ): Vector<Ast::PatternId> {
+      let mut out: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+
+      let Option::SOME(pattern) = module.patterns.get(variantPatternId) else {
+        return out;
+      };
+
+      let Ast::Pattern::Node::Path(declaration) = pattern else {
+        return out;
+      };
+
+      let mut index: u64 = 0;
+
+      while (index < declaration.arguments.length()) {
+        let Option::SOME(slotPatternId) = declaration.arguments.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        out.push(*slotPatternId);
+        index += 1;
+      }
+
+      return out;
     }
 
     /// Extract a copy of FunctionDef.params, releasing the immutable borrow.
@@ -1357,10 +1475,12 @@ export namespace Analyzer {
 
     /// Resolve an Enum item.
     ///
-    /// Builds a TypeParamScope but does not resolve variant payload types —
-    /// selfhost AST has no payload type-annotation slot (ADR-R5). Instance and
-    /// static method signatures (with owner `Self`) are resolved via
-    /// `resolveOwnerMethodSignatures`.
+    /// Walks variants[i] (PatternId) positionally against EnumDef.variants[i]
+    /// (DefinitionId) per ADR-R1, resolving each declared payload slot's
+    /// annotation and replacing the binder's VOID placeholders with the real
+    /// types. A slot without an annotation keeps its placeholder so payload
+    /// arity is preserved. Instance and static method signatures (with owner
+    /// `Self`) are resolved via `resolveOwnerMethodSignatures`.
     function resolveEnum(
       state: &mut Analyzer::Resolver::ResolverState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1378,6 +1498,54 @@ export namespace Analyzer {
       };
 
       let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &e.genericParameters);
+      let variantDefIds: Vector<Analyzer::DefinitionId> = extractEnumVariants(defStore, defId);
+
+      let mut variantIndex: u64 = 0;
+
+      while (variantIndex < variantDefIds.length()) {
+        let Option::SOME(variantDefId) = variantDefIds.get(variantIndex) else {
+          variantIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(variantPatternId) = e.variants.get(variantIndex) else {
+          variantIndex += 1;
+          continue;
+        };
+
+        let slotPatternIds: Vector<Ast::PatternId> = variantPayloadSlotPatterns(module, *variantPatternId);
+
+        if (slotPatternIds.length() > 0) {
+          let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut slotIndex: u64 = 0;
+
+          while (slotIndex < slotPatternIds.length()) {
+            let Option::SOME(slotPatternId) = slotPatternIds.get(slotIndex) else {
+              slotIndex += 1;
+              continue;
+            };
+
+            let annotationOpt: Option<Ast::TypeId> = patternAnnotation(module, *slotPatternId);
+
+            match (annotationOpt) {
+              Option::SOME(annotationTypeId) -> {
+                payload.push(resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId));
+              },
+              Option::NONE -> {
+                let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+                payload.push(typesRef.intern(Analyzer::Type::VOID));
+              },
+            };
+
+            slotIndex += 1;
+          }
+
+          patchVariantPayload(defStore, *variantDefId, &payload);
+        }
+
+        variantIndex += 1;
+      }
+
       let selfTypeId: Analyzer::TypeId = selfTypeFor(typeStore, defId, &scope, true);
       resolveOwnerMethodSignatures(state, defStore, typeStore, symbols, module, pass1, pass2, &e.methods, &scope, selfTypeId);
     }
