@@ -6,6 +6,7 @@ import _ from "./binder";
 import _ from "./resolver";
 import _ from "./resolver_bodies";
 import _ from "./typecheck";
+import _ from "./const_eval";
 import _ from "./imports";
 
 import Diagnostic, DiagnosticBag, NoteKind, SourceSpan from "@compiler::diagnostics";
@@ -19,6 +20,7 @@ export namespace Analyzer {
     public resolvedTypes: Analyzer::Resolver::ResolverOutput;
     public resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput;
     public typecheck: Analyzer::Typecheck::TypecheckOutput;
+    public constValues: Analyzer::ConstEval::ConstEvalOutput;
     public diagnostics: DiagnosticBag;
   }
 
@@ -376,12 +378,23 @@ export namespace Analyzer {
       &resolvedBodies,
     );
 
+    let constValues: Analyzer::ConstEval::ConstEvalOutput = Analyzer::ConstEval::evalModule(
+      defStore,
+      typeStore,
+      module,
+      &pass1,
+      &pass2,
+      &resolvedBodies,
+      &typecheck,
+    );
+
     let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
     Analyzer::appendDiagnostics(&mut diagnostics, &pass1.diagnostics);
     Analyzer::appendDiagnostics(&mut diagnostics, &pass2.diagnostics);
     Analyzer::appendDiagnostics(&mut diagnostics, &resolvedTypes.diagnostics);
     Analyzer::appendDiagnostics(&mut diagnostics, &resolvedBodies.diagnostics);
     Analyzer::appendDiagnostics(&mut diagnostics, &typecheck.diagnostics);
+    Analyzer::appendDiagnostics(&mut diagnostics, &constValues.diagnostics);
 
     return Analyzer::AnalyzerOutput {
       pass1: pass1,
@@ -389,6 +402,7 @@ export namespace Analyzer {
       resolvedTypes: resolvedTypes,
       resolvedBodies: resolvedBodies,
       typecheck: typecheck,
+      constValues: constValues,
       diagnostics: diagnostics,
     };
   }
@@ -508,6 +522,16 @@ export namespace Analyzer {
         &resolvedBodies,
       );
 
+      let constValues: Analyzer::ConstEval::ConstEvalOutput = Analyzer::ConstEval::evalModule(
+        defStore,
+        typeStore,
+        module,
+        &pass1,
+        &pass2,
+        &resolvedBodies,
+        &typecheck,
+      );
+
       let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
       Analyzer::appendDiagnostics(&mut diagnostics, &pass1.diagnostics);
       Analyzer::appendDiagnostics(&mut diagnostics, &pass2.diagnostics);
@@ -515,6 +539,7 @@ export namespace Analyzer {
       Analyzer::appendDiagnostics(&mut diagnostics, &resolvedTypes.diagnostics);
       Analyzer::appendDiagnostics(&mut diagnostics, &resolvedBodies.diagnostics);
       Analyzer::appendDiagnostics(&mut diagnostics, &typecheck.diagnostics);
+      Analyzer::appendDiagnostics(&mut diagnostics, &constValues.diagnostics);
 
       let output: Analyzer::AnalyzerOutput = Analyzer::AnalyzerOutput {
         pass1: pass1,
@@ -522,6 +547,7 @@ export namespace Analyzer {
         resolvedTypes: resolvedTypes,
         resolvedBodies: resolvedBodies,
         typecheck: typecheck,
+        constValues: constValues,
         diagnostics: diagnostics,
       };
 
