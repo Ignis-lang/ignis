@@ -335,6 +335,31 @@ export namespace Analyzer {
         }
       }
 
+      // Branch 2b: `Enum::Variant(args)` — a constructor, not a callee. Handled
+      // before `checkExpr(callee)` so the bare-variant guard in
+      // `checkResolvedValueExpr` never sees an applied constructor.
+      let variantResolvedOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, call.callee);
+      if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(variantDefId)) = variantResolvedOpt) {
+        let constructorOpt: Option<Analyzer::Typecheck::VariantConstructor> = Analyzer::Typecheck::extractVariantConstructor(
+          defStore,
+          variantDefId,
+        );
+
+        if (let Option::SOME(constructor) = constructorOpt) {
+          return Analyzer::Typecheck::checkVariantConstructionCall(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            callExprId,
+            call,
+            &constructor,
+          );
+        }
+      }
+
       // Branch 3: existing flow, byte-for-byte.
       let _calleeType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
         state,
@@ -400,6 +425,77 @@ export namespace Analyzer {
         &signature,
         0,
       );
+    }
+
+    /// Typecheck `Enum::Variant(args)`.
+    ///
+    /// The variant's declared payload types play the role of parameter types:
+    /// arity comes from the payload length and the expression's type is the
+    /// owning enum. Generic enums are out of scope — their payload types are
+    /// still type parameters here and there is no inference to bind them.
+    function checkVariantConstructionCall(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+      constructor: &Analyzer::Typecheck::VariantConstructor,
+    ): Option<Analyzer::TypeId> {
+      if (constructor.generic) {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "generic enum variant construction");
+        return Option::NONE;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, call.callee, constructor.enumType);
+
+      let expectedArity: u64 = constructor.payload.length();
+
+      if (call.arguments.length() != expectedArity) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), expectedArity);
+        Analyzer::Typecheck::recordExprType(state, callExprId, constructor.enumType);
+        return Option::SOME(constructor.enumType);
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < expectedArity) {
+        let Option::SOME(argumentId) = call.arguments.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let expectedType: Option<Analyzer::TypeId> = match (constructor.payload.get(index)) {
+          Option::SOME(payloadType) -> Option::SOME(*payloadType),
+          Option::NONE -> Option::NONE,
+        };
+
+        let actualOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          *argumentId,
+          expectedType,
+        );
+
+        if (let Option::SOME(expected) = expectedType) {
+          if (let Option::SOME(actual) = actualOpt) {
+            if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, expected, actual)) {
+              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, expected, actual);
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, callExprId, constructor.enumType);
+      return Option::SOME(constructor.enumType);
     }
 
     /// Typecheck a call whose callee is a local holding a function value.

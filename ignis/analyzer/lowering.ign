@@ -51,10 +51,11 @@ import Vector from "std::vector";
 ///     are therefore re-derived here from the checked receiver type and the
 ///     definition store, following the same lookup order the typechecker
 ///     uses, instead of being read back from the checker.
-///   - Enum variant payload types are permanent `VOID` sentinels (ADR-R5:
-///     the selfhost AST has no payload type-annotation slot), so anything
-///     the oracle decides by "is this payload type void" is decided by
-///     payload arity here instead.
+///   - Enum variant payload types come from `VariantDef.payload`, which the
+///     resolver fills from the declaration. Where the oracle asks "is this
+///     payload type void", this module asks for payload arity instead: an
+///     unannotated slot still keeps a `VOID` placeholder, so arity is the
+///     reliable question.
 ///   - `for ... of` has no lowering at all. The oracle's desugar reads the
 ///     binding `DefinitionId` (and through it the by-value/by-ref binding
 ///     type) out of a `for_of_binding_defs` table the checker fills, plus the
@@ -615,8 +616,9 @@ export namespace Lowering {
   // Patterns
   // =========================================================================
 
-  /// Owned copy of the variant data a `Variant` pattern needs, taken before
-  /// sub-pattern lowering pushes new `Variable` definitions into the store.
+  /// Owned copy of the variant data a `Variant` pattern or an `EnumVariant`
+  /// construction needs, taken before sub-pattern lowering pushes new
+  /// `Variable` definitions into the store.
   record VariantPatternInfo {
     public enumDef: Analyzer::DefinitionId;
     public variantTag: u32;
@@ -1243,6 +1245,29 @@ export namespace Lowering {
       return Lowering::errorNode(hir, typeStore, span);
     };
 
+    // `Enum::UNIT_VARIANT` names a value, not a binding: it lowers to a
+    // payload-less `EnumVariant`, exactly like the oracle's `ResolvedPath::EnumVariant`
+    // arm. A variant with a payload is a constructor and only lowers when applied.
+    if (let Option::SOME(variantInfo) = Lowering::variantPatternInfo(defStore, defId)) {
+      if (variantInfo.payload.length() > 0) {
+        return Lowering::errorNode(hir, typeStore, span);
+      }
+
+      let variantType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+      let mut variantHirRef: &mut Hir::HirStore = hir;
+      return variantHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::EnumVariant(Hir::HirEnumVariant {
+          enumDef: variantInfo.enumDef,
+          typeArgs: Lowering::instanceTypeArguments(defStore, typeStore, variantType),
+          variantTag: variantInfo.variantTag,
+          payload: Vector::new<Hir::HirId>(),
+        }),
+        span: span,
+        typeId: variantType,
+      });
+    }
+
     let mut isReferenceable: boolean = false;
     let mut declaredType: Option<Analyzer::TypeId> = Option::NONE;
 
@@ -1318,12 +1343,10 @@ export namespace Lowering {
   /// `Dot` `MemberAccess`, so `Type::method(args)` and `Enum::Variant(args)`
   /// arrive as `Path` callees instead.
   ///
-  /// Closure calls, enum variant construction, and generic explicit type
-  /// arguments are outside this slice and fall back to `Error`. Variant
-  /// construction has nothing to lower against: the selfhost typechecker
-  /// rejects it outright ("calls through non-function definitions", because
-  /// `extractFunctionSignature` has no `Variant` case) and variant payload
-  /// types are ADR-R5 `VOID` sentinels, so no argument types exist either.
+  /// `Enum::Variant(args)` is a constructor rather than a call and lowers to
+  /// `EnumVariant`, mirroring the oracle's `try_lower_path_call` enum arm.
+  /// Closure calls and generic explicit type arguments are outside this slice
+  /// and fall back to `Error`.
   function lowerCall(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1401,6 +1424,33 @@ export namespace Lowering {
         }),
         span: call.span,
         typeId: staticType,
+      });
+    }
+
+    if (let Option::SOME(variantInfo) = Lowering::variantPatternInfo(defStore, calleeDef)) {
+      let payload: Vector<Hir::HirId> = Lowering::lowerExpressionList(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output,
+        locals,
+        hir,
+        &call.arguments,
+      );
+
+      let variantType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+      let mut variantHirRef: &mut Hir::HirStore = hir;
+      return variantHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::EnumVariant(Hir::HirEnumVariant {
+          enumDef: variantInfo.enumDef,
+          typeArgs: Lowering::instanceTypeArguments(defStore, typeStore, variantType),
+          variantTag: variantInfo.variantTag,
+          payload: payload,
+        }),
+        span: call.span,
+        typeId: variantType,
       });
     }
 
@@ -1997,11 +2047,9 @@ export namespace Lowering {
   /// the error re-wrapped in the same variant, propagating it to the caller.
   ///
   /// The oracle decides whether each arm binds a payload by asking whether
-  /// the payload type is `void`. Selfhost variant payload types are permanent
-  /// `VOID` sentinels (ADR-R5), so that question always answers "void" and
-  /// cannot discriminate; the decision is made on payload arity instead,
-  /// which is the same rule variant *patterns* already follow in this module.
-  /// The bindings therefore carry the `VOID` sentinel as their declared type.
+  /// the payload type is `void`; the decision is made on payload arity here
+  /// instead, which is the same rule variant *patterns* already follow in this
+  /// module. The bindings carry the resolved payload type.
   function lowerTryExpr(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,

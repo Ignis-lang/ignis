@@ -1785,119 +1785,6 @@ export namespace Analyzer {
       @panic("unreachable: recordFieldCount match did not return");
     }
 
-    /// Type annotation of the `index`-th payload slot of `variantName` inside an
-    /// enum declaration, or `NONE` when the variant or the slot is missing.
-    ///
-    /// The parser models each declared payload slot as a `Pattern::Binding`
-    /// named `_` whose annotation carries the payload type.
-    function astVariantPayloadAnnotationAt(
-      module: &Ast::Module,
-      enumItem: &Ast::Item::Enum,
-      variantName: str,
-      index: u64,
-    ): Option<Ast::TypeId> {
-      let mut variantIndex: u64 = 0;
-
-      while (variantIndex < enumItem.variants.length()) {
-        let Option::SOME(variantPatternId) = enumItem.variants.get(variantIndex) else {
-          variantIndex += 1;
-          continue;
-        };
-        let Option::SOME(variantPattern) = module.patterns.get(*variantPatternId) else {
-          variantIndex += 1;
-          continue;
-        };
-
-        if (let Ast::Pattern::Node::Path(declaration) = variantPattern) {
-          let segmentCount: u64 = declaration.segments.length();
-
-          if (segmentCount > 0) {
-            if (let Option::SOME(declaredName) = declaration.segments.get(segmentCount - 1)) {
-              if (declaredName.equals(variantName)) {
-                let Option::SOME(slotPatternId) = declaration.arguments.get(index) else {
-                  return Option::NONE;
-                };
-                let Option::SOME(slotPattern) = module.patterns.get(*slotPatternId) else {
-                  return Option::NONE;
-                };
-
-                if (let Ast::Pattern::Node::Binding(slot) = slotPattern) {
-                  return slot.annotation;
-                }
-
-                return Option::NONE;
-              }
-            }
-          }
-        }
-
-        variantIndex += 1;
-      }
-
-      return Option::NONE;
-    }
-
-    /// Declared type of the `index`-th payload slot of the variant a pattern
-    /// like `Shape::CIRCLE(radius)` names.
-    ///
-    /// `VariantDef.payload` only records payload *arity*: its entries are VOID
-    /// sentinels because variant payload types stay unresolved (ADR-R5). The
-    /// binding type is therefore read back from the enum declaration in the AST,
-    /// mirroring `astRecordFieldTypeAt`.
-    function astVariantPayloadTypeAt(
-      defStore: &mut Analyzer::DefinitionStore,
-      typeStore: &mut Analyzer::TypeStore,
-      symbols: &mut Analyzer::SymbolTable,
-      module: &Ast::Module,
-      pattern: &Ast::Pattern::Path,
-      index: u64,
-    ): Option<Analyzer::TypeId> {
-      let segmentCount: u64 = pattern.segments.length();
-
-      if (segmentCount < 2) {
-        return Option::NONE;
-      }
-
-      let Option::SOME(enumName) = pattern.segments.get(segmentCount - 2) else {
-        return Option::NONE;
-      };
-      let Option::SOME(variantName) = pattern.segments.get(segmentCount - 1) else {
-        return Option::NONE;
-      };
-
-      let mut rootIndex: u64 = 0;
-
-      while (rootIndex < module.roots.length()) {
-        let Option::SOME(itemId) = module.roots.get(rootIndex) else {
-          rootIndex += 1;
-          continue;
-        };
-        let Option::SOME(item) = module.items.get(*itemId) else {
-          rootIndex += 1;
-          continue;
-        };
-
-        if (let Ast::Item::Node::Enum(enumItem) = item) {
-          if (enumItem.name.equals(enumName.toStr())) {
-            let Option::SOME(annotationId) = Analyzer::Typecheck::astVariantPayloadAnnotationAt(
-              module,
-              &enumItem,
-              variantName.toStr(),
-              index,
-            ) else {
-              return Option::NONE;
-            };
-
-            return Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, annotationId);
-          }
-        }
-
-        rootIndex += 1;
-      }
-
-      return Option::NONE;
-    }
-
     function astRecordFieldTypeAt(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
@@ -2044,9 +1931,8 @@ export namespace Analyzer {
     /// `BodyResolutionMap`, so this function receives `variantDefId` directly
     /// instead of re-deriving it from `pattern`.
     ///
-    /// Payload sub-patterns are bound against the payload types read back from
-    /// the enum declaration (`astVariantPayloadTypeAt`), because `VariantDef`
-    /// stores payload arity but keeps the types as VOID sentinels (ADR-R5).
+    /// Payload sub-patterns are bound against `VariantDef.payload`, which the
+    /// resolver fills with the declared slot types.
     function collectEnumVariantPatternBindings(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -2108,20 +1994,12 @@ export namespace Analyzer {
           index += 1;
           continue;
         };
-        let payloadTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::astVariantPayloadTypeAt(
-          defStore,
-          typeStore,
-          symbols,
-          module,
-          pattern,
-          index,
-        );
-        let Option::SOME(payloadType) = payloadTypeOpt else {
+        let Option::SOME(payloadType) = variant.payload.get(index) else {
           Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "enum variant payload type is unavailable");
           return false;
         };
 
-        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *argPatternId, payloadType, mutable, span)) {
+        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *argPatternId, *payloadType, mutable, span)) {
           return false;
         }
 
@@ -2424,6 +2302,56 @@ export namespace Analyzer {
       };
 
       @panic("unreachable: extractFunctionSignature match did not return");
+    }
+
+    /// Everything `Enum::Variant` needs to be typed, whether it is used bare
+    /// (unit variant) or applied to arguments (payload variant): the declared
+    /// payload types, the owning enum's type, and whether that enum is generic.
+    record VariantConstructor {
+      public payload: Vector<Analyzer::TypeId>;
+      public enumType: Analyzer::TypeId;
+      public generic: boolean;
+    }
+
+    /// Variant constructor view of `defId`, or `NONE` when it is not a variant
+    /// (or its owner is not an enum, which the binder never produces).
+    function extractVariantConstructor(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Option<Analyzer::Typecheck::VariantConstructor> {
+      let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut ownerOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (let Option::SOME(def) = defStore.get(defId)) {
+        if (let Analyzer::Definition::Variant(variant) = def) {
+          payload = Analyzer::Typecheck::copyVariantPayloadTypeIds(&variant.payload);
+          ownerOpt = Option::SOME(variant.owner);
+        }
+      }
+
+      let Option::SOME(owner) = ownerOpt else {
+        return Option::NONE;
+      };
+
+      let mut enumTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
+      let mut generic: boolean = false;
+
+      if (let Option::SOME(ownerDef) = defStore.get(owner)) {
+        if (let Analyzer::Definition::Enum(enumDef) = ownerDef) {
+          enumTypeOpt = Option::SOME(enumDef.typeId);
+          generic = enumDef.typeParams.length() > 0;
+        }
+      }
+
+      let Option::SOME(enumType) = enumTypeOpt else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(Analyzer::Typecheck::VariantConstructor {
+        payload: payload,
+        enumType: enumType,
+        generic: generic,
+      });
     }
 
     record MethodCallInfo {
@@ -2844,6 +2772,24 @@ export namespace Analyzer {
           if (methodInfoOpt.isSome()) {
             Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, "method references are not values; call the method instead");
             return Option::NONE;
+          }
+
+          // `Enum::VARIANT` is a value only when the variant carries no payload;
+          // with a payload it is a constructor and must be applied, which
+          // `checkCallExpr` handles before the callee ever reaches here.
+          if (let Option::SOME(constructor) = Analyzer::Typecheck::extractVariantConstructor(defStore, defId)) {
+            if (constructor.generic) {
+              Analyzer::Typecheck::emitUnsupported(state, span, "generic enum variants in expression position");
+              return Option::NONE;
+            }
+
+            if (constructor.payload.length() > 0) {
+              Analyzer::Typecheck::emitInvalidNumberOfArguments(state, span, 0, constructor.payload.length());
+              return Option::NONE;
+            }
+
+            Analyzer::Typecheck::recordExprType(state, exprId, constructor.enumType);
+            return Option::SOME(constructor.enumType);
           }
 
           let defTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::definitionType(defStore, typeStore, defId);

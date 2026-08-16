@@ -829,7 +829,8 @@ export namespace Analyzer {
     ///
     /// Unit variants use a `Pattern::Binding` node (empty payload). Payload variants use a
     /// `Pattern::Path` node: the last path segment is the variant name and `arguments.length()`
-    /// VOID sentinels fill `payload`. Duplicate variant names emit a diagnostic. `tagValue`
+    /// VOID placeholders fill `payload`, which the resolver replaces with the resolved slot
+    /// types (`resolveEnum`). Duplicate variant names emit a diagnostic. `tagValue`
     /// is assigned sequentially starting at 0 for each successfully-allocated variant.
     function bindVariants(
       state: &mut Analyzer::Binder::BinderState,
@@ -919,7 +920,8 @@ export namespace Analyzer {
                 } else {
                   seenSyms.push(sym);
 
-                  // Build VOID-sentinel payload: one entry per argument.
+                  // Build the placeholder payload: one entry per argument, sized here and
+                  // typed by the resolver.
                   let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
                   let mut payloadIndex: u64 = 0;
                   while (payloadIndex < p.arguments.length()) {

@@ -1,8 +1,16 @@
 import Test from "std::test";
 
-import DiagnosticBag, DiagnosticCode, Severity, SourceSpan from "@compiler::diagnostics";
+import
+  DiagnosticBag,
+  DiagnosticCode,
+  Severity,
+  SourceFile,
+  SourceSpan,
+from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
+import Id from "@compiler::ids";
+import ParseOutput, Parser from "@compiler::parser";
 
 function typecheckDummySpan(): SourceSpan {
   return SourceSpan::new("typecheck_tests.ign", 0, 0);
@@ -11384,4 +11392,296 @@ function typecheckIntLiteralWithoutAnnotationKeepsDefaultType(): void {
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
   assertExprType(&output, literalExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+// ===========================================================================
+// IGN-127 — real variant payload types
+//
+// These tests go through the parser instead of building the AST by hand: a
+// variant payload annotation only exists in parsed source, and the whole
+// point of this slice is that the resolver reads it.
+// ===========================================================================
+
+function typecheckParseSource(source: str): ParseOutput {
+  let file: SourceFile = SourceFile::create("typecheck_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  return parsed;
+}
+
+function typecheckCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// The first diagnostic code in `bag`, or `"none"` when the bag is empty.
+function typecheckFirstDiagnosticCode(bag: &DiagnosticBag): str {
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    return "none";
+  };
+
+  return diagnostic.code;
+}
+
+function typecheckFindTryExpr(module: &Ast::Module): Option<Ast::ExpressionId> {
+  let mut index: u64 = 0;
+
+  while (index < module.expressions.length()) {
+    let exprId: Ast::ExpressionId = Id::fromRaw<Ast::ExpressionTag>(index as u32);
+
+    if (let Option::SOME(node) = module.expressions.get(exprId)) {
+      if (let Ast::Expression::Node::Try(_) = node) {
+        return Option::SOME(exprId);
+      }
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// Declared payload type of `variantName`'s first slot, as a type name.
+function typecheckVariantPayloadTypeName(
+  defStore: &Analyzer::DefinitionStore,
+  typeStore: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+  variantName: str,
+): String {
+  let mut index: u64 = 0;
+
+  while (index < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Variant(variant) = definition) {
+        if (let Option::SOME(name) = symbols.resolve(variant.name)) {
+          if (name.equals(variantName)) {
+            let Option::SOME(payloadType) = variant.payload.get(0) else {
+              return String::create("<no-payload>");
+            };
+
+            return typeStore.nameOfResolved(*payloadType, defStore, symbols);
+          }
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return String::create("<variant-not-found>");
+}
+
+/// The headline of IGN-127: `!` on a `@lang(try)` enum whose ok variant
+/// carries `u32` yields `u32`, so binding it to a `u32` local typechecks.
+/// Before payload types were resolved this reported `I0031 expected u32,
+/// found void`.
+/// Spec: IGN-127 — real variant payload types.
+@test
+function typecheckTryYieldsTheOkPayloadType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@lang(try)\nenum Res {\n  OK(u32),\n  ERROR(u32),\n}\n\nfunction outer(input: Res): Res {\n  let unwrapped: u32 = input!;\n  return input;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+
+  let Option::SOME(tryExpr) = typecheckFindTryExpr(&parsed.module) else {
+    @panic("typecheckTryYieldsTheOkPayloadType: no try expression parsed");
+  };
+
+  assertExprType(&output, tryExpr, typeStore.intern(Analyzer::Type::U32));
+}
+
+/// The resolver replaces the binder's placeholders with the declared slot
+/// types, including a slot whose type is another user record.
+/// Spec: IGN-127 — real variant payload types.
+@test
+function typecheckResolvesDeclaredVariantPayloadTypes(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Point {\n  public x: u32;\n}\n\nenum Shape {\n  CIRCLE(u32),\n  AT(Point),\n  EMPTY,\n}\n\nfunction go(): void {\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+  Test::assertEq<str>(typecheckVariantPayloadTypeName(&defStore, &typeStore, &symbols, "CIRCLE").toStr(), "u32");
+  Test::assertEq<str>(typecheckVariantPayloadTypeName(&defStore, &typeStore, &symbols, "AT").toStr(), "Point");
+  Test::assertEq<str>(typecheckVariantPayloadTypeName(&defStore, &typeStore, &symbols, "EMPTY").toStr(), "<no-payload>");
+}
+
+/// A forward reference works because binding predeclares every type before the
+/// resolver walks payload annotations.
+/// Spec: IGN-127 — real variant payload types.
+@test
+function typecheckResolvesVariantPayloadDeclaredLater(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Shape {\n  AT(Point),\n}\n\nrecord Point {\n  public x: u32;\n}\n\nfunction go(): void {\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+  Test::assertEq<str>(typecheckVariantPayloadTypeName(&defStore, &typeStore, &symbols, "AT").toStr(), "Point");
+}
+
+/// `Enum::Variant(args)` typechecks as a constructor: arity and argument types
+/// come from the resolved payload and the expression types as the enum.
+/// Spec: IGN-127 — variant construction.
+@test
+function typecheckVariantConstructionWithMatchingArguments(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Shape {\n  CIRCLE(u32),\n  EMPTY,\n}\n\nfunction make(): Shape {\n  return Shape::CIRCLE(1);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// A unit variant is a value, not a constructor, so it needs no call.
+/// Spec: IGN-127 — variant construction.
+@test
+function typecheckUnitVariantInExpressionPosition(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Shape {\n  CIRCLE(u32),\n  EMPTY,\n}\n\nfunction make(): Shape {\n  return Shape::EMPTY;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Too many arguments is an arity error against the declared payload.
+/// Spec: IGN-127 — variant construction.
+@test
+function typecheckVariantConstructionRejectsWrongArity(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Shape {\n  CIRCLE(u32),\n  EMPTY,\n}\n\nfunction make(): Shape {\n  return Shape::CIRCLE(1, 2);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 1);
+  Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+}
+
+/// A payload variant used bare is reported as a zero-argument application of a
+/// one-argument constructor.
+/// Spec: IGN-127 — variant construction.
+@test
+function typecheckPayloadVariantWithoutArgumentsIsRejected(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Shape {\n  CIRCLE(u32),\n  EMPTY,\n}\n\nfunction make(): Shape {\n  return Shape::CIRCLE;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+}
+
+/// An argument that does not satisfy the declared payload type is rejected —
+/// impossible to detect while every payload type was a `void` placeholder.
+/// Spec: IGN-127 — variant construction.
+@test
+function typecheckVariantConstructionRejectsWrongArgumentType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Shape {\n  CIRCLE(u32),\n  EMPTY,\n}\n\nfunction make(flag: boolean): Shape {\n  return Shape::CIRCLE(flag);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::INVALID_ARGUMENT_TYPE);
+}
+
+/// A generic enum's payload resolves to its type parameter, which construction
+/// has no way to bind: the typechecker has no explicit type arguments and no
+/// inference for them, so the constructor is reported as unsupported rather
+/// than silently typed as the uninstantiated enum. Pinned until generic enum
+/// instantiation lands.
+/// Spec: IGN-127 — variant construction.
+@test
+function typecheckGenericVariantConstructionIsUnsupported(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Box<T> {\n  SOME(T),\n}\n\nfunction make(): Box<u32> {\n  return Box::SOME(1);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::UNSUPPORTED_CONSTRUCT);
+  Test::assertEq<str>(typecheckVariantPayloadTypeName(&defStore, &typeStore, &symbols, "SOME").toStr(), "T");
+}
+
+/// Payload sub-patterns bind the declared payload type, read straight from the
+/// definition now that the AST read-back bridge is gone.
+/// Spec: IGN-127 — real variant payload types.
+@test
+function typecheckVariantPatternBindsDeclaredPayloadType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Shape {\n  CIRCLE(u32),\n  EMPTY,\n}\n\nfunction area(shape: Shape): u32 {\n  match (shape) {\n    Shape::CIRCLE(radius) -> {\n      return radius;\n    },\n    Shape::EMPTY -> {\n      return 0;\n    },\n  };\n\n  return 0;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }
