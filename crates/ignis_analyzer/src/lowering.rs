@@ -808,7 +808,9 @@ impl<'a> Analyzer<'a> {
         // Check for builtins BEFORE normal scope lookup
         let callee_node = self.ast.get(&call.callee);
 
-        if let ASTNode::Expression(ASTExpression::Variable(var)) = callee_node {
+        if let ASTNode::Expression(ASTExpression::Variable(var)) = callee_node
+          && self.lookup_def(&call.callee).is_none()
+        {
           let name = self.symbols.borrow().get(&var.name).to_string();
 
           match name.as_str() {

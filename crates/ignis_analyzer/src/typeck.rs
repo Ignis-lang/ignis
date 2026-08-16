@@ -3888,8 +3888,11 @@ impl<'a> Analyzer<'a> {
     ctx: &TypecheckContext,
     infer: &InferContext,
   ) -> TypeId {
-    // Check for builtins - they are handled specially
-    if let ASTNode::Expression(ASTExpression::Variable(var)) = self.ast.get(&call.callee) {
+    // Check for builtins - they are handled specially. A callee the resolver
+    // bound to a local definition is a user binding shadowing the builtin name.
+    if let ASTNode::Expression(ASTExpression::Variable(var)) = self.ast.get(&call.callee)
+      && self.lookup_def(&call.callee).is_none()
+    {
       let name = self.get_symbol_name(&var.name);
 
       match name.as_str() {
