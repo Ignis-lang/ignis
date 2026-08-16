@@ -11181,3 +11181,99 @@ function typecheckShiftOnMixedIntegerTypesProducesDiagnostic(): void {
 
   assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
 }
+
+/// Scenario: `let one: u64 = 1;` adopts the annotated integer type for the
+/// literal, mirroring the reference analyzer's literal coercion.
+/// Spec: IGN-120 — integer literal coercion against the expected type.
+@test
+function typecheckIntLiteralCoercesToAnnotatedIntegerType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u64TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "u64");
+  let literalExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let onePattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "one", u64TypeId);
+  let oneStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, onePattern, u64TypeId, literalExpr);
+
+  let mut stmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  stmts.push(oneStmt);
+  typecheckAddSingleExprFunction(&mut module, "coerceU64", stmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, literalExpr, typeStore.intern(Analyzer::Type::U64));
+}
+
+/// Scenario: `let tiny: u8 = 300;` overflows the annotated type and reports
+/// `INTEGER_OVERFLOW` instead of silently truncating.
+/// Spec: IGN-120 — integer literal coercion against the expected type.
+@test
+function typecheckIntLiteralOverflowingAnnotationProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u8TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "u8");
+  let literalExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 300);
+  let tinyPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "tiny", u8TypeId);
+  let tinyStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, tinyPattern, u8TypeId, literalExpr);
+
+  let mut stmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  stmts.push(tinyStmt);
+  typecheckAddSingleExprFunction(&mut module, "overflowU8", stmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::INTEGER_OVERFLOW, "Integer literal overflows type 'u8'");
+}
+
+/// Scenario: `let ratio: f32 = 1.5;` adopts the annotated float type; an
+/// unannotated float literal keeps its `f64` default elsewhere.
+/// Spec: IGN-120 — integer literal coercion against the expected type.
+@test
+function typecheckFloatLiteralCoercesToAnnotatedFloatType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let f32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "f32");
+  let literalExpr: Ast::ExpressionId = typecheckAddFloatLiteral(&mut module, 1.5);
+  let ratioPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "ratio", f32TypeId);
+  let ratioStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, ratioPattern, f32TypeId, literalExpr);
+
+  let mut stmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  stmts.push(ratioStmt);
+  typecheckAddSingleExprFunction(&mut module, "coerceF32", stmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, literalExpr, typeStore.intern(Analyzer::Type::F32));
+}
+
+/// Scenario: a bare integer literal with no expected type keeps the default
+/// `i32` — the coercion only fires when an expected type is supplied.
+/// Spec: IGN-120 — integer literal coercion against the expected type.
+@test
+function typecheckIntLiteralWithoutAnnotationKeepsDefaultType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let literalExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, literalExpr);
+  let mut stmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  stmts.push(exprStmt);
+  typecheckAddSingleExprFunction(&mut module, "defaultInt", stmts);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, literalExpr, typeStore.intern(Analyzer::Type::I32));
+}

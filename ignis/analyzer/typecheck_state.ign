@@ -446,6 +446,18 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::MUTABLE_REFERENCE_TO_IMMUTABLE, message.toStr());
     }
 
+    function emitIntegerOverflow(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      targetType: Analyzer::TypeId,
+    ): void {
+      let message: String = String::create("Integer literal overflows type '")
+        .concat(typeStore.nameOf(targetType).toStr())
+        .concat("'");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INTEGER_OVERFLOW, message.toStr());
+    }
+
     /// Display symbol for a shift/bitwise operator in diagnostics.
     function shiftOrBitwiseOperatorSymbol(operator: Ast::Expression::BinaryOperator): str {
       return match (operator) {
@@ -1217,6 +1229,62 @@ export namespace Analyzer {
       return match (operator) {
         Ast::Expression::BinaryOperator::And
         | Ast::Expression::BinaryOperator::Or -> true,
+        _ -> false,
+      };
+    }
+
+    /// Whether an alias-resolved type node names one of the eight integer
+    /// primitives.
+    function isIntegerTypeNode(typeNode: &Analyzer::Type): boolean {
+      return match (typeNode) {
+        Analyzer::Type::I8
+        | Analyzer::Type::I16
+        | Analyzer::Type::I32
+        | Analyzer::Type::I64
+        | Analyzer::Type::U8
+        | Analyzer::Type::U16
+        | Analyzer::Type::U32
+        | Analyzer::Type::U64 -> true,
+        _ -> false,
+      };
+    }
+
+    /// Whether an alias-resolved type node names a float primitive.
+    function isFloatTypeNode(typeNode: &Analyzer::Type): boolean {
+      return match (typeNode) {
+        Analyzer::Type::F32 | Analyzer::Type::F64 -> true,
+        _ -> false,
+      };
+    }
+
+    /// Whether a signed literal value fits the integer type node. Mirrors the
+    /// Rust `signed_fits_in_type`.
+    function signedLiteralFits(typeNode: &Analyzer::Type, value: i64): boolean {
+      return match (typeNode) {
+        Analyzer::Type::I8 -> value >= -128 && value <= 127,
+        Analyzer::Type::I16 -> value >= -32768 && value <= 32767,
+        Analyzer::Type::I32 -> value >= -2147483648 && value <= 2147483647,
+        Analyzer::Type::I64 -> true,
+        Analyzer::Type::U8 -> value >= 0 && value <= 255,
+        Analyzer::Type::U16 -> value >= 0 && value <= 65535,
+        Analyzer::Type::U32 -> value >= 0 && value <= 4294967295,
+        Analyzer::Type::U64 -> value >= 0,
+        _ -> false,
+      };
+    }
+
+    /// Whether an unsigned literal value fits the integer type node. Mirrors
+    /// the Rust `unsigned_fits_in_type`.
+    function unsignedLiteralFits(typeNode: &Analyzer::Type, value: u64): boolean {
+      return match (typeNode) {
+        Analyzer::Type::I8 -> value <= 127,
+        Analyzer::Type::I16 -> value <= 32767,
+        Analyzer::Type::I32 -> value <= 2147483647,
+        Analyzer::Type::I64 -> value <= 9223372036854775807,
+        Analyzer::Type::U8 -> value <= 255,
+        Analyzer::Type::U16 -> value <= 65535,
+        Analyzer::Type::U32 -> value <= 4294967295,
+        Analyzer::Type::U64 -> true,
         _ -> false,
       };
     }
