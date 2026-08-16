@@ -1855,14 +1855,28 @@ export namespace Analyzer {
           return Option::SOME(ternaryType);
         },
         Ast::Expression::Node::Cast(value) -> {
-          let _innerType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "cast expressions");
-          return Option::NONE;
+          return Analyzer::Typecheck::checkCastExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            &value,
+          );
         },
         Ast::Expression::Node::Dereference(value) -> {
-          let _innerType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "dereference expressions");
-          return Option::NONE;
+          return Analyzer::Typecheck::checkDereferenceExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            &value,
+          );
         },
         Ast::Expression::Node::Tuple(value) -> {
           let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
@@ -1907,14 +1921,28 @@ export namespace Analyzer {
           return Option::NONE;
         },
         Ast::Expression::Node::Reference(value) -> {
-          let _targetType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.target);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "reference expressions");
-          return Option::NONE;
+          return Analyzer::Typecheck::checkReferenceExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            &value,
+          );
         },
         Ast::Expression::Node::Unary(value) -> {
-          let _operandType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "unary expressions");
-          return Option::NONE;
+          return Analyzer::Typecheck::checkUnaryExpr(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            &value,
+          );
         },
         Ast::Expression::Node::Block(value) -> {
           let blockTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkBlockBody(
@@ -2444,6 +2472,476 @@ export namespace Analyzer {
       }
 
       return Analyzer::Typecheck::joinTypes(state, defStore, typeStore, value.span, &candidates, 2, Analyzer::Typecheck::JoinKind::Branches, expected);
+    }
+
+    function typeIdIsPointer(
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId
+    ): boolean {
+      let Option::SOME(typeNode) = typeStore.get(typeId) else {
+        return false;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::Pointer(_) -> true,
+        _ -> false,
+      };
+    }
+
+    function typeIdIsReference(
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId
+    ): boolean {
+      let Option::SOME(typeNode) = typeStore.get(typeId) else {
+        return false;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::Reference(_) -> true,
+        _ -> false,
+      };
+    }
+
+    function typeIdIsStr(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+      let Option::SOME(typeNode) = typeStore.get(typeId) else {
+        return false;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::STR -> true,
+        _ -> false,
+      };
+    }
+
+    function typeIdIsChar(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+      let Option::SOME(typeNode) = typeStore.get(typeId) else {
+        return false;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::CHAR -> true,
+        _ -> false,
+      };
+    }
+
+    /// Validates the `from as to` pair and emits `INVALID_CAST` when no
+    /// supported conversion exists. Mirrors the Rust `typecheck_cast` table:
+    /// numeric<->numeric, boolean<->integer, char<->integer,
+    /// pointer/reference<->pointer/reference, pointer<->integer,
+    /// pointer<->str, and identity as the fallback.
+    function checkCastValidity(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      fromType: Analyzer::TypeId,
+      toType: Analyzer::TypeId,
+    ): void {
+      let resolvedFrom: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, fromType);
+      if (let Option::SOME(aliasDefId) = resolvedFrom.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return;
+      }
+
+      let resolvedTo: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, toType);
+      if (let Option::SOME(aliasDefId) = resolvedTo.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return;
+      }
+
+      let fromId: Analyzer::TypeId = resolvedFrom.typeId;
+      let toId: Analyzer::TypeId = resolvedTo.typeId;
+
+      let fromIsNumeric: boolean = Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, span, fromId);
+      let toIsNumeric: boolean = Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, span, toId);
+      let fromIsInteger: boolean = Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, span, fromId);
+      let toIsInteger: boolean = Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, span, toId);
+      let fromIsBoolean: boolean = Analyzer::Typecheck::isBooleanType(state, defStore, typeStore, span, fromId);
+      let toIsBoolean: boolean = Analyzer::Typecheck::isBooleanType(state, defStore, typeStore, span, toId);
+      let fromIsChar: boolean = Analyzer::Typecheck::typeIdIsChar(typeStore, fromId);
+      let toIsChar: boolean = Analyzer::Typecheck::typeIdIsChar(typeStore, toId);
+      let fromIsPointer: boolean = Analyzer::Typecheck::typeIdIsPointer(typeStore, fromId);
+      let toIsPointer: boolean = Analyzer::Typecheck::typeIdIsPointer(typeStore, toId);
+      let fromIsReference: boolean = Analyzer::Typecheck::typeIdIsReference(typeStore, fromId);
+      let toIsReference: boolean = Analyzer::Typecheck::typeIdIsReference(typeStore, toId);
+      let fromIsStr: boolean = Analyzer::Typecheck::typeIdIsStr(typeStore, fromId);
+      let toIsStr: boolean = Analyzer::Typecheck::typeIdIsStr(typeStore, toId);
+
+      let mut valid: boolean = false;
+      if (fromIsNumeric && toIsNumeric) {
+        valid = true;
+      } else if (fromIsBoolean && toIsInteger) {
+        valid = true;
+      } else if (toIsBoolean && fromIsInteger) {
+        valid = true;
+      } else if (fromIsChar && toIsInteger) {
+        valid = true;
+      } else if (toIsChar && fromIsInteger) {
+        valid = true;
+      } else if (fromIsPointer && (toIsPointer || toIsReference)) {
+        valid = true;
+      } else if (fromIsReference && (toIsPointer || toIsReference)) {
+        valid = true;
+      } else if (fromIsPointer && toIsInteger) {
+        valid = true;
+      } else if (toIsPointer && fromIsInteger) {
+        valid = true;
+      } else if (fromIsPointer && toIsStr) {
+        valid = true;
+      } else if (toIsPointer && fromIsStr) {
+        valid = true;
+      } else {
+        valid = Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, fromId, toId);
+      }
+
+      if (!valid) {
+        Analyzer::Typecheck::emitInvalidCast(state, typeStore, span, fromType, toType);
+      }
+    }
+
+    function checkCastExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::Cast,
+    ): Option<Analyzer::TypeId> {
+      let operandTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression);
+
+      let targetTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::resolveLocalAnnotation(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        value.targetType,
+      );
+      let Option::SOME(targetType) = targetTypeOpt else {
+        Analyzer::Typecheck::emitUnsupported(state, value.span, "unsupported cast target type");
+        return Option::NONE;
+      };
+
+      // A failed operand already reported its own diagnostic; casting it would
+      // only cascade a second one.
+      let Option::SOME(operandType) = operandTypeOpt else {
+        return Option::NONE;
+      };
+
+      Analyzer::Typecheck::checkCastValidity(state, defStore, typeStore, value.span, operandType, targetType);
+
+      Analyzer::Typecheck::recordExprType(state, exprId, targetType);
+      return Option::SOME(targetType);
+    }
+
+    function checkDereferenceExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::Dereference,
+    ): Option<Analyzer::TypeId> {
+      let operandTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
+      let Option::SOME(operandType) = operandTypeOpt else {
+        return Option::NONE;
+      };
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, operandType);
+      if (let Option::SOME(aliasDefId) = resolved.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, value.span, aliasDefId);
+        return Option::NONE;
+      }
+
+      let Option::SOME(operandTypeNode) = typeStore.get(resolved.typeId) else {
+        return Option::NONE;
+      };
+
+      let pointeeTypeOpt: Option<Analyzer::TypeId> = match (operandTypeNode) {
+        Analyzer::Type::Pointer(pointer) -> Option::SOME(pointer.pointee),
+        Analyzer::Type::Reference(reference) -> Option::SOME(reference.referent),
+        _ -> Option::NONE,
+      };
+
+      let Option::SOME(pointeeType) = pointeeTypeOpt else {
+        Analyzer::Typecheck::emitDereferenceNonPointer(state, typeStore, value.span, operandType);
+        return Option::NONE;
+      };
+
+      Analyzer::Typecheck::recordExprType(state, exprId, pointeeType);
+      return Option::SOME(pointeeType);
+    }
+
+    /// Whether an expression names a place a reference can point at:
+    /// variables, paths, dereferences, index accesses, and member accesses.
+    /// Mirrors the Rust `is_lvalue`.
+    function isLvalueExpr(module: &Ast::Module, exprId: Ast::ExpressionId): boolean {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      return match (expr) {
+        Ast::Expression::Node::Variable(_) -> true,
+        Ast::Expression::Node::Path(_) -> true,
+        Ast::Expression::Node::Dereference(_) -> true,
+        Ast::Expression::Node::VectorAccess(_) -> true,
+        Ast::Expression::Node::MemberAccess(_) -> true,
+        _ -> false,
+      };
+    }
+
+    /// Whether an expression names a mutable place. Mirrors the Rust
+    /// `is_mutable_expression`: bindings answer from their declared
+    /// mutability, dereferences look through `&mut`/`*mut` operand types, and
+    /// index/member accesses recurse on their base.
+    function isMutablePlaceExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+    ): boolean {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      match (expr) {
+        Ast::Expression::Node::Variable(_) -> {
+          return Analyzer::Typecheck::resolvedRefIsMutableBinding(state, defStore, resolvedBodies, exprId);
+        },
+        Ast::Expression::Node::Path(_) -> {
+          return Analyzer::Typecheck::resolvedRefIsMutableBinding(state, defStore, resolvedBodies, exprId);
+        },
+        Ast::Expression::Node::Dereference(deref) -> {
+          if (let Option::SOME(operandType) = Analyzer::Typecheck::lookupRecordedExprType(state, deref.operand)) {
+            let Option::SOME(operandTypeNode) = typeStore.get(operandType) else {
+              return false;
+            };
+
+            match (operandTypeNode) {
+              Analyzer::Type::Reference(reference) -> {
+                return reference.mutable;
+              },
+              Analyzer::Type::Pointer(pointer) -> {
+                return pointer.mutable;
+              },
+              _ -> {},
+            };
+          }
+
+          return Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, deref.operand);
+        },
+        Ast::Expression::Node::VectorAccess(access) -> {
+          return Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, access.vector);
+        },
+        Ast::Expression::Node::MemberAccess(memberAccess) -> {
+          let Ast::Expression::AccessOperator::Dot = memberAccess.operator else {
+            return false;
+          };
+
+          if (let Option::SOME(objectType) = Analyzer::Typecheck::lookupRecordedExprType(state, memberAccess.object)) {
+            let Option::SOME(objectTypeNode) = typeStore.get(objectType) else {
+              return false;
+            };
+
+            match (objectTypeNode) {
+              Analyzer::Type::Reference(reference) -> {
+                return reference.mutable;
+              },
+              Analyzer::Type::Pointer(pointer) -> {
+                return pointer.mutable;
+              },
+              _ -> {},
+            };
+          }
+
+          return Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, memberAccess.object);
+        },
+        Ast::Expression::Node::Grouped(grouped) -> {
+          return Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, grouped.expression);
+        },
+        _ -> {
+          return false;
+        },
+      };
+
+      @panic("unreachable: isMutablePlaceExpr match did not return");
+    }
+
+    function resolvedRefIsMutableBinding(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+    ): boolean {
+      let Option::SOME(resolvedRef) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, exprId) else {
+        return false;
+      };
+
+      match (resolvedRef) {
+        Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> {
+          let Option::SOME(binding) = Analyzer::Typecheck::lookupLocalBinding(state, localId) else {
+            return false;
+          };
+
+          return binding.mutable;
+        },
+        Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> {
+          let Option::SOME(def) = defStore.get(defId) else {
+            return false;
+          };
+
+          return match (def) {
+            Analyzer::Definition::Variable(variable) -> variable.mutable,
+            _ -> false,
+          };
+        },
+        Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {
+          return false;
+        },
+        Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> {
+          return false;
+        },
+      };
+
+      @panic("unreachable: resolvedRefIsMutableBinding match did not return");
+    }
+
+    function referenceTargetName(module: &Ast::Module, exprId: Ast::ExpressionId): String {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return String::create("<expression>");
+      };
+
+      match (expr) {
+        Ast::Expression::Node::Variable(variable) -> {
+          return variable.name.clone();
+        },
+        Ast::Expression::Node::Path(path) -> {
+          if (path.segments.length() == 0) {
+            return String::create("<expression>");
+          }
+
+          let Option::SOME(lastSegment) = path.segments.get(path.segments.length() - 1) else {
+            return String::create("<expression>");
+          };
+
+          return lastSegment.clone();
+        },
+        _ -> {
+          return String::create("<expression>");
+        },
+      };
+
+      @panic("unreachable: referenceTargetName match did not return");
+    }
+
+    function checkReferenceExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::Reference,
+    ): Option<Analyzer::TypeId> {
+      let targetTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.target);
+
+      // A failed target already reported its own diagnostic; lvalue and
+      // mutability checks on it would only cascade more.
+      let Option::SOME(targetType) = targetTypeOpt else {
+        return Option::NONE;
+      };
+
+      if (!Analyzer::Typecheck::isLvalueExpr(module, value.target)) {
+        Analyzer::Typecheck::emitInvalidReferenceTarget(state, value.span);
+      }
+
+      if (value.mutable && !Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, value.target)) {
+        let targetName: String = Analyzer::Typecheck::referenceTargetName(module, value.target);
+        Analyzer::Typecheck::emitMutableReferenceToImmutable(state, value.span, targetName.toStr());
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let mut referenceType: Analyzer::TypeId = typeStoreRef.reference(targetType);
+      if (value.mutable) {
+        referenceType = typeStoreRef.mutableReference(targetType);
+      }
+
+      Analyzer::Typecheck::recordExprType(state, exprId, referenceType);
+      return Option::SOME(referenceType);
+    }
+
+    function checkUnaryExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::Unary,
+    ): Option<Analyzer::TypeId> {
+      let operandTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
+      let Option::SOME(operandType) = operandTypeOpt else {
+        return Option::NONE;
+      };
+
+      match (value.operator) {
+        Ast::Expression::UnaryOperator::Not -> {
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          let booleanType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::BOOLEAN);
+
+          if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, booleanType, operandType)) {
+            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, typeStore, value.span, "!", operandType);
+          }
+
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        },
+        Ast::Expression::UnaryOperator::Negate -> {
+          if (!Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, value.span, operandType)) {
+            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, typeStore, value.span, "-", operandType);
+            return Option::NONE;
+          }
+
+          Analyzer::Typecheck::recordExprType(state, exprId, operandType);
+          return Option::SOME(operandType);
+        },
+        Ast::Expression::UnaryOperator::BitNot -> {
+          if (!Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, value.span, operandType)) {
+            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, typeStore, value.span, "~", operandType);
+            return Option::NONE;
+          }
+
+          Analyzer::Typecheck::recordExprType(state, exprId, operandType);
+          return Option::SOME(operandType);
+        },
+        Ast::Expression::UnaryOperator::Increment -> {
+          if (!Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, value.span, operandType)) {
+            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, typeStore, value.span, "++", operandType);
+            return Option::NONE;
+          }
+
+          Analyzer::Typecheck::recordExprType(state, exprId, operandType);
+          return Option::SOME(operandType);
+        },
+        Ast::Expression::UnaryOperator::Decrement -> {
+          if (!Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, value.span, operandType)) {
+            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, typeStore, value.span, "--", operandType);
+            return Option::NONE;
+          }
+
+          Analyzer::Typecheck::recordExprType(state, exprId, operandType);
+          return Option::SOME(operandType);
+        },
+      };
+
+      @panic("unreachable: checkUnaryExpr match did not return");
     }
 
     function checkLetElse(
