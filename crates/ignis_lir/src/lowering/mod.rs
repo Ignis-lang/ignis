@@ -1276,6 +1276,19 @@ impl<'a> LoweringContext<'a> {
       // Simple variable: &var → AddrOfLocal
       HIRKind::Variable(def_id) => {
         if let Some(&local_id) = self.def_to_local.get(def_id) {
+          // ByMutRef captures: the local already holds a pointer to the
+          // original place, so load it instead of taking the local's address.
+          if self.byref_captures.contains(def_id) {
+            let ptr_ty = self.fn_builder().local_type(local_id);
+            let ptr_temp = self.fn_builder().alloc_temp(ptr_ty, span);
+            self.fn_builder().emit(Instr::Load {
+              dest: ptr_temp,
+              source: local_id,
+            });
+
+            return Some(Operand::Temp(ptr_temp));
+          }
+
           let dest = self.fn_builder().alloc_temp(ref_ty, span);
           self.fn_builder().emit(Instr::AddrOfLocal {
             dest,
@@ -1805,6 +1818,8 @@ impl<'a> LoweringContext<'a> {
         }
       },
       HIRKind::Index { base, index } => {
+        // Lowering a fixed-array local yields an alias, not a copy: array temps
+        // are element pointers in C, so GetElementPtr writes into the original.
         let base_op = self.lower_hir_node(*base);
         let index_op = self.lower_hir_node(*index);
 
@@ -1899,10 +1914,19 @@ impl<'a> LoweringContext<'a> {
               None => return,
             }
           } else {
-            // Base is a value - spill to local to get addressable storage
-            match self.spill_to_local_for_field_assign(*base, span.clone()) {
-              Some(op) => op,
-              None => return,
+            // Base is a value: take the address of the real place so the store
+            // lands in the original local, not a spilled copy. Spilling remains
+            // only for true rvalue bases (e.g. call results) where mutating a
+            // temporary is the only meaning.
+            let base_ptr_ty = self.types.pointer(base_ty, true);
+
+            if let Some(place_ptr) = self.lower_reference(*base, true, base_ptr_ty, span.clone()) {
+              place_ptr
+            } else {
+              match self.spill_to_local_for_field_assign(*base, span.clone()) {
+                Some(op) => op,
+                None => return,
+              }
             }
           }
         };
