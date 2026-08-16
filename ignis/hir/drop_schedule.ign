@@ -1,0 +1,404 @@
+import Vector from "std::vector";
+
+import Analyzer from "@compiler::analyzer";
+
+import _ from "./ids";
+
+export namespace Hir {
+  /// Mirrors `ignis_hir::drop_schedule::ExitKey`: the early exit a drop list
+  /// belongs to. `FnEnd` is the synthetic return at the end of a body, which
+  /// has no `Return` node to key on.
+  enum ExitKey {
+    Return(Hir::HirId),
+    Break(Hir::HirId),
+    Continue(Hir::HirId),
+    FnEnd(Analyzer::DefinitionId),
+  }
+
+  function exitKeyTag(key: &Hir::ExitKey): u32 {
+    return match (key) {
+      Hir::ExitKey::Return(_) -> 0,
+      Hir::ExitKey::Break(_) -> 1,
+      Hir::ExitKey::Continue(_) -> 2,
+      Hir::ExitKey::FnEnd(_) -> 3,
+    };
+  }
+
+  /// Raw id of whatever the key points at. Paired with `exitKeyTag` it gives
+  /// the structural equality the Rust `HashMap<ExitKey, _>` gets from `Eq`,
+  /// without a nested match over two values.
+  function exitKeyRaw(key: &Hir::ExitKey): u32 {
+    return match (key) {
+      Hir::ExitKey::Return(nodeId) -> nodeId.raw(),
+      Hir::ExitKey::Break(nodeId) -> nodeId.raw(),
+      Hir::ExitKey::Continue(nodeId) -> nodeId.raw(),
+      Hir::ExitKey::FnEnd(defId) -> defId.raw(),
+    };
+  }
+
+  /// Rebuilds an exit key from a borrow of one. The payloads are ids, so this
+  /// is a copy in every sense; it exists because an enum value cannot be read
+  /// out of a borrow without one.
+  function copyExitKey(key: &Hir::ExitKey): Hir::ExitKey {
+    return match (key) {
+      Hir::ExitKey::Return(nodeId) -> Hir::ExitKey::Return(nodeId),
+      Hir::ExitKey::Break(nodeId) -> Hir::ExitKey::Break(nodeId),
+      Hir::ExitKey::Continue(nodeId) -> Hir::ExitKey::Continue(nodeId),
+      Hir::ExitKey::FnEnd(defId) -> Hir::ExitKey::FnEnd(defId),
+    };
+  }
+
+  function exitKeysEqual(left: &Hir::ExitKey, right: &Hir::ExitKey): boolean {
+    if (Hir::exitKeyTag(left) != Hir::exitKeyTag(right)) {
+      return false;
+    }
+
+    return Hir::exitKeyRaw(left) == Hir::exitKeyRaw(right);
+  }
+
+  function copyDefinitionIds(
+    source: &Vector<Analyzer::DefinitionId>
+  ): Vector<Analyzer::DefinitionId> {
+    let mut result: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(defId) = source.get(index)) {
+        result.push(*defId);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function copyHirIds(source: &Vector<Hir::HirId>): Vector<Hir::HirId> {
+    let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(nodeId) = source.get(index)) {
+        result.push(*nodeId);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// One drop list keyed by a HIR node: a block for `onScopeEnd`, a match arm
+  /// body for `onMatchArmEnd`, an assignment for `onOverwrite`.
+  record NodeDropEntry {
+    public node: Hir::HirId;
+    public defs: Vector<Analyzer::DefinitionId>;
+  }
+
+  /// One drop list keyed by an early exit.
+  record ExitDropEntry {
+    public key: Hir::ExitKey;
+    public defs: Vector<Analyzer::DefinitionId>;
+  }
+
+  /// One deferred-body list keyed by a block.
+  record NodeDeferEntry {
+    public node: Hir::HirId;
+    public bodies: Vector<Hir::HirId>;
+  }
+
+  /// One deferred-body list keyed by an early exit.
+  record ExitDeferEntry {
+    public key: Hir::ExitKey;
+    public bodies: Vector<Hir::HirId>;
+  }
+
+  /// Mirrors `ignis_hir::drop_schedule::DropSchedules`, the output the Rust
+  /// ownership walk produces alongside its diagnostics and that LIR lowering
+  /// reads to place drop and defer emissions.
+  ///
+  /// The Rust type is six `HashMap`s; here each one is a vector of entries,
+  /// following the selfhost convention of avoiding hashing for small maps.
+  /// Lookup is linear and keyed structurally, which is what the Rust `Eq`
+  /// derives amount to.
+  ///
+  /// Every `defs` list is in drop order — reverse declaration, inner scope
+  /// before outer — and every `bodies` list is in LIFO order, exactly like the
+  /// Rust documentation states.
+  ///
+  /// Mutation lives in methods rather than in free functions because a direct
+  /// field write from outside a record is currently miscompiled for owning
+  /// fields.
+  record DropSchedules {
+    public onScopeEnd: Vector<Hir::NodeDropEntry>;
+    public onMatchArmEnd: Vector<Hir::NodeDropEntry>;
+    public onExit: Vector<Hir::ExitDropEntry>;
+    public onOverwrite: Vector<Hir::NodeDropEntry>;
+    public onScopeEndDefers: Vector<Hir::NodeDeferEntry>;
+    public onExitDefers: Vector<Hir::ExitDeferEntry>;
+
+    public static init(): DropSchedules {
+      return DropSchedules {
+        onScopeEnd: Vector::new<Hir::NodeDropEntry>(),
+        onMatchArmEnd: Vector::new<Hir::NodeDropEntry>(),
+        onExit: Vector::new<Hir::ExitDropEntry>(),
+        onOverwrite: Vector::new<Hir::NodeDropEntry>(),
+        onScopeEndDefers: Vector::new<Hir::NodeDeferEntry>(),
+        onExitDefers: Vector::new<Hir::ExitDeferEntry>(),
+      };
+    }
+
+    public isEmpty(&self): boolean {
+      return self.onScopeEnd.isEmpty() && self.onMatchArmEnd.isEmpty() && self.onExit.isEmpty() && self.onOverwrite.isEmpty() && self.onScopeEndDefers.isEmpty() && self.onExitDefers.isEmpty();
+    }
+
+    /// Replaces the drop list of a block, mirroring the Rust `HashMap::insert`
+    /// on `on_scope_end`. A loop body is walked twice, and the second walk must
+    /// supersede the first rather than add to it.
+    public setScopeEnd(&mut self, block: Hir::HirId, defs: Vector<Analyzer::DefinitionId>): void {
+      let existing: Option<u64> = Hir::findNodeEntry(&self.onScopeEnd, block);
+
+      if (let Option::SOME(index) = existing) {
+        self.onScopeEnd.set(index, Hir::NodeDropEntry { node: block, defs: defs });
+        return;
+      }
+
+      self.onScopeEnd.push(Hir::NodeDropEntry { node: block, defs: defs });
+    }
+
+    /// Appends to the drop list of a match arm body, mirroring the Rust
+    /// `entry(..).or_default().extend(..)` on `on_match_arm_end`.
+    public appendMatchArmEnd(
+      &mut self,
+      body: Hir::HirId,
+      defs: Vector<Analyzer::DefinitionId>
+    ): void {
+      let existing: Option<u64> = Hir::findNodeEntry(&self.onMatchArmEnd, body);
+
+      if (let Option::SOME(index) = existing) {
+        let mut merged: Vector<Analyzer::DefinitionId> = self.matchArmDrops(body);
+        let mut extra: Vector<Analyzer::DefinitionId> = defs;
+        let mut extraIndex: u64 = 0;
+
+        while (extraIndex < extra.length()) {
+          if (let Option::SOME(defId) = extra.get(extraIndex)) {
+            merged.push(*defId);
+          }
+
+          extraIndex += 1;
+        }
+
+        self.onMatchArmEnd.set(index, Hir::NodeDropEntry { node: body, defs: merged });
+        return;
+      }
+
+      self.onMatchArmEnd.push(Hir::NodeDropEntry { node: body, defs: defs });
+    }
+
+    /// Appends one local to the drop-before-overwrite list of an assignment,
+    /// mirroring the Rust `entry(..).or_default().push(..)`.
+    public appendOverwrite(&mut self, assign: Hir::HirId, defId: Analyzer::DefinitionId): void {
+      let existing: Option<u64> = Hir::findNodeEntry(&self.onOverwrite, assign);
+
+      if (let Option::SOME(index) = existing) {
+        let mut merged: Vector<Analyzer::DefinitionId> = self.overwriteDrops(assign);
+        merged.push(defId);
+
+        self.onOverwrite.set(index, Hir::NodeDropEntry { node: assign, defs: merged });
+        return;
+      }
+
+      let mut defs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      defs.push(defId);
+
+      self.onOverwrite.push(Hir::NodeDropEntry { node: assign, defs: defs });
+    }
+
+    public setExit(&mut self, key: Hir::ExitKey, defs: Vector<Analyzer::DefinitionId>): void {
+      let existing: Option<u64> = Hir::findExitDropEntry(&self.onExit, &key);
+
+      if (let Option::SOME(index) = existing) {
+        self.onExit.set(index, Hir::ExitDropEntry { key: key, defs: defs });
+        return;
+      }
+
+      self.onExit.push(Hir::ExitDropEntry { key: key, defs: defs });
+    }
+
+    public setScopeEndDefers(&mut self, block: Hir::HirId, bodies: Vector<Hir::HirId>): void {
+      let existing: Option<u64> = Hir::findNodeDeferEntry(&self.onScopeEndDefers, block);
+
+      if (let Option::SOME(index) = existing) {
+        self.onScopeEndDefers.set(index, Hir::NodeDeferEntry { node: block, bodies: bodies });
+        return;
+      }
+
+      self.onScopeEndDefers.push(Hir::NodeDeferEntry { node: block, bodies: bodies });
+    }
+
+    public setExitDefers(&mut self, key: Hir::ExitKey, bodies: Vector<Hir::HirId>): void {
+      let existing: Option<u64> = Hir::findExitDeferEntry(&self.onExitDefers, &key);
+
+      if (let Option::SOME(index) = existing) {
+        self.onExitDefers.set(index, Hir::ExitDeferEntry { key: key, bodies: bodies });
+        return;
+      }
+
+      self.onExitDefers.push(Hir::ExitDeferEntry { key: key, bodies: bodies });
+    }
+
+    /// Drop list of a block, empty when nothing is scheduled there. Returns a
+    /// copy so the caller can keep reading the schedules while it walks it.
+    public scopeEndDrops(&self, block: Hir::HirId): Vector<Analyzer::DefinitionId> {
+      return Hir::nodeEntryDrops(&self.onScopeEnd, block);
+    }
+
+    public matchArmDrops(&self, body: Hir::HirId): Vector<Analyzer::DefinitionId> {
+      return Hir::nodeEntryDrops(&self.onMatchArmEnd, body);
+    }
+
+    public overwriteDrops(&self, assign: Hir::HirId): Vector<Analyzer::DefinitionId> {
+      return Hir::nodeEntryDrops(&self.onOverwrite, assign);
+    }
+
+    public exitDrops(&self, key: &Hir::ExitKey): Vector<Analyzer::DefinitionId> {
+      let mut index: u64 = 0;
+
+      while (index < self.onExit.length()) {
+        if (let Option::SOME(entry) = self.onExit.get(index)) {
+          if (Hir::exitKeysEqual(&entry.key, key)) {
+            return Hir::copyDefinitionIds(&entry.defs);
+          }
+        }
+
+        index += 1;
+      }
+
+      return Vector::new<Analyzer::DefinitionId>();
+    }
+
+    public scopeEndDefers(&self, block: Hir::HirId): Vector<Hir::HirId> {
+      let mut index: u64 = 0;
+
+      while (index < self.onScopeEndDefers.length()) {
+        if (let Option::SOME(entry) = self.onScopeEndDefers.get(index)) {
+          if (entry.node.equals(&block)) {
+            return Hir::copyHirIds(&entry.bodies);
+          }
+        }
+
+        index += 1;
+      }
+
+      return Vector::new<Hir::HirId>();
+    }
+
+    public exitDefers(&self, key: &Hir::ExitKey): Vector<Hir::HirId> {
+      let mut index: u64 = 0;
+
+      while (index < self.onExitDefers.length()) {
+        if (let Option::SOME(entry) = self.onExitDefers.get(index)) {
+          if (Hir::exitKeysEqual(&entry.key, key)) {
+            return Hir::copyHirIds(&entry.bodies);
+          }
+        }
+
+        index += 1;
+      }
+
+      return Vector::new<Hir::HirId>();
+    }
+  }
+
+  function findNodeEntry(entries: &Vector<Hir::NodeDropEntry>, node: Hir::HirId): Option<u64> {
+    let mut index: u64 = 0;
+
+    while (index < entries.length()) {
+      if (let Option::SOME(entry) = entries.get(index)) {
+        if (entry.node.equals(&node)) {
+          return Option::SOME(index);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function nodeEntryDrops(
+    entries: &Vector<Hir::NodeDropEntry>,
+    node: Hir::HirId,
+  ): Vector<Analyzer::DefinitionId> {
+    let mut index: u64 = 0;
+
+    while (index < entries.length()) {
+      if (let Option::SOME(entry) = entries.get(index)) {
+        if (entry.node.equals(&node)) {
+          return Hir::copyDefinitionIds(&entry.defs);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Vector::new<Analyzer::DefinitionId>();
+  }
+
+  function findNodeDeferEntry(
+    entries: &Vector<Hir::NodeDeferEntry>,
+    node: Hir::HirId
+  ): Option<u64> {
+    let mut index: u64 = 0;
+
+    while (index < entries.length()) {
+      if (let Option::SOME(entry) = entries.get(index)) {
+        if (entry.node.equals(&node)) {
+          return Option::SOME(index);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function findExitDropEntry(
+    entries: &Vector<Hir::ExitDropEntry>,
+    key: &Hir::ExitKey
+  ): Option<u64> {
+    let mut index: u64 = 0;
+
+    while (index < entries.length()) {
+      if (let Option::SOME(entry) = entries.get(index)) {
+        if (Hir::exitKeysEqual(&entry.key, key)) {
+          return Option::SOME(index);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function findExitDeferEntry(
+    entries: &Vector<Hir::ExitDeferEntry>,
+    key: &Hir::ExitKey
+  ): Option<u64> {
+    let mut index: u64 = 0;
+
+    while (index < entries.length()) {
+      if (let Option::SOME(entry) = entries.get(index)) {
+        if (Hir::exitKeysEqual(&entry.key, key)) {
+          return Option::SOME(index);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+}

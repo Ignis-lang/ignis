@@ -383,3 +383,347 @@ function borrowckExcludesLetElseElseBlockFromFallThrough(): void {
 
   Test::assertEq<u64>(diagnostics.length(), 0);
 }
+
+// --- drop schedules (IGN-39) -----------------------------------------------
+
+function borrowckDefinitionName(
+  defStore: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+  defId: Analyzer::DefinitionId,
+): String {
+  let Option::SOME(definition) = defStore.get(defId) else {
+    return String::create("<unknown>");
+  };
+
+  return match (symbols.resolve(definition.name())) {
+    Option::SOME(text) -> String::create(text),
+    Option::NONE -> String::create("<unknown>"),
+  };
+}
+
+/// Renders one exit key: the kind alone for the three jump keys, and the
+/// function name for the synthetic end-of-body key, which is the only one that
+/// names a definition rather than a node.
+function borrowckRenderExitKey(
+  defStore: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+  key: &Hir::ExitKey,
+): String {
+  let label: String = match (key) {
+    Hir::ExitKey::Return(_) -> String::create("return"),
+    Hir::ExitKey::Break(_) -> String::create("break"),
+    Hir::ExitKey::Continue(_) -> String::create("continue"),
+    Hir::ExitKey::FnEnd(_) -> String::create("fn-end"),
+  };
+
+  let mut functionId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+  match (key) {
+    Hir::ExitKey::FnEnd(defId) -> {
+      functionId = Option::SOME(defId);
+    },
+    _ -> {},
+  };
+
+  let Option::SOME(defId) = functionId else {
+    return label;
+  };
+
+  let name: String = borrowckDefinitionName(defStore, symbols, defId);
+
+  return label.concat(" ").concat(name);
+}
+
+function borrowckRenderDefs(
+  defStore: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+  defs: &Vector<Analyzer::DefinitionId>,
+): String {
+  let mut rendered: String = String::create("");
+  let mut index: u64 = 0;
+
+  while (index < defs.length()) {
+    if (let Option::SOME(defId) = defs.get(index)) {
+      if (index > 0) {
+        rendered.pushStr(", ");
+      }
+
+      let name: String = borrowckDefinitionName(defStore, symbols, *defId);
+      rendered.pushStr(name.toStr());
+    }
+
+    index += 1;
+  }
+
+  return rendered;
+}
+
+/// Renders every schedule entry as one line, grouped by map and kept in the
+/// order the walk recorded them.
+///
+/// Node ids are deliberately left out: they are lowering-internal and would
+/// make every expectation churn with unrelated lowering changes, while the
+/// recording order already identifies the entries — scopes close innermost
+/// first, arms are visited in source order.
+function borrowckRenderSchedules(
+  defStore: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+  schedules: &Hir::DropSchedules,
+): String {
+  let mut rendered: String = String::create("");
+  let mut scopeIndex: u64 = 0;
+
+  while (scopeIndex < schedules.onScopeEnd.length()) {
+    if (let Option::SOME(entry) = schedules.onScopeEnd.get(scopeIndex)) {
+      let defs: String = borrowckRenderDefs(defStore, symbols, &entry.defs);
+
+      rendered.pushStr("scope-end: ");
+      rendered.pushStr(defs.toStr());
+      rendered.pushStr("\n");
+    }
+
+    scopeIndex += 1;
+  }
+
+  let mut armIndex: u64 = 0;
+
+  while (armIndex < schedules.onMatchArmEnd.length()) {
+    if (let Option::SOME(entry) = schedules.onMatchArmEnd.get(armIndex)) {
+      let defs: String = borrowckRenderDefs(defStore, symbols, &entry.defs);
+
+      rendered.pushStr("match-arm-end: ");
+      rendered.pushStr(defs.toStr());
+      rendered.pushStr("\n");
+    }
+
+    armIndex += 1;
+  }
+
+  let mut exitIndex: u64 = 0;
+
+  while (exitIndex < schedules.onExit.length()) {
+    if (let Option::SOME(entry) = schedules.onExit.get(exitIndex)) {
+      let key: String = borrowckRenderExitKey(defStore, symbols, &entry.key);
+      let defs: String = borrowckRenderDefs(defStore, symbols, &entry.defs);
+
+      rendered.pushStr("exit ");
+      rendered.pushStr(key.toStr());
+      rendered.pushStr(": ");
+      rendered.pushStr(defs.toStr());
+      rendered.pushStr("\n");
+    }
+
+    exitIndex += 1;
+  }
+
+  let mut overwriteIndex: u64 = 0;
+
+  while (overwriteIndex < schedules.onOverwrite.length()) {
+    if (let Option::SOME(entry) = schedules.onOverwrite.get(overwriteIndex)) {
+      let defs: String = borrowckRenderDefs(defStore, symbols, &entry.defs);
+
+      rendered.pushStr("overwrite: ");
+      rendered.pushStr(defs.toStr());
+      rendered.pushStr("\n");
+    }
+
+    overwriteIndex += 1;
+  }
+
+  let mut deferIndex: u64 = 0;
+
+  while (deferIndex < schedules.onScopeEndDefers.length()) {
+    if (let Option::SOME(entry) = schedules.onScopeEndDefers.get(deferIndex)) {
+      let count: String = String::create(entry.bodies.length());
+
+      rendered.pushStr("scope-end-defers: ");
+      rendered.pushStr(count.toStr());
+      rendered.pushStr("\n");
+    }
+
+    deferIndex += 1;
+  }
+
+  let mut exitDeferIndex: u64 = 0;
+
+  while (exitDeferIndex < schedules.onExitDefers.length()) {
+    if (let Option::SOME(entry) = schedules.onExitDefers.get(exitDeferIndex)) {
+      let key: String = borrowckRenderExitKey(defStore, symbols, &entry.key);
+      let count: String = String::create(entry.bodies.length());
+
+      rendered.pushStr("exit-defers ");
+      rendered.pushStr(key.toStr());
+      rendered.pushStr(": ");
+      rendered.pushStr(count.toStr());
+      rendered.pushStr("\n");
+    }
+
+    exitDeferIndex += 1;
+  }
+
+  return rendered;
+}
+
+/// Parses, analyzes and lowers `source`, then renders the drop schedules the
+/// borrow-check walk recorded over the resulting HIR.
+///
+/// Parse and analyzer errors are rejected for the same reason
+/// `borrowckDiagnostics` rejects them: a fixture the rest of the pipeline
+/// refuses lowers to something the schedules would describe meaninglessly.
+function borrowckSchedules(source: str): String {
+  let file: SourceFile = SourceFile::create("borrowck_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(borrowckCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(borrowckCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(borrowckCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &hir,
+  );
+
+  return borrowckRenderSchedules(&defStore, &symbols, &checked.dropSchedules);
+}
+
+/// Scenario: an owning local still live at the end of its block is dropped
+/// there, and again at the return that leaves the block early.
+/// Spec: IGN-39 — `on_scope_end` and `on_exit`, from the ownership oracle.
+@test
+function borrowckSchedulesScopeEndDrop(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(): u32 {\n  let value: Owned = Owned { id: 1 };\n\n  return value.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: value\nexit return: value\n");
+}
+
+/// Scenario: a local whose value was moved into a call owes no drop at all,
+/// while the callee's parameter owes one, because ownership moved with it.
+/// Spec: IGN-39 — a moved local leaves the drop list.
+@test
+function borrowckSchedulesOmitsMovedLocal(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction consume(value: Owned): u32 {\n  return value.id;\n}\n\nfunction run(): u32 {\n  let value: Owned = Owned { id: 1 };\n\n  return consume(value);\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "exit return: value\nexit fn-end consume: value\n");
+}
+
+/// Scenario: two returns leaving the same scope each own their drop list,
+/// keyed by their own node.
+/// Spec: IGN-39 — `on_exit` is keyed per exit, not per scope.
+@test
+function borrowckSchedulesEveryEarlyReturn(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(flag: boolean): u32 {\n  let value: Owned = Owned { id: 1 };\n\n  if (flag) {\n    return 0;\n  }\n\n  return value.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: value\nexit return: value\nexit return: value\n");
+}
+
+/// Scenario: a local moved inside one branch is dropped only on the path that
+/// still owns it, and the branch that took it drops its own binding instead.
+/// Spec: IGN-39 — the branch join decides who owes the drop.
+@test
+function borrowckSchedulesConditionalMove(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(flag: boolean): u32 {\n  let value: Owned = Owned { id: 1 };\n\n  if (flag) {\n    let taken: Owned = value;\n    return taken.id;\n  }\n\n  return value.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: taken\nscope-end: value\nexit return: taken\nexit return: value\n");
+}
+
+/// Scenario: a match arm binding that owns its payload is dropped at the end
+/// of that arm, under its own key rather than the arm body's scope.
+/// Spec: IGN-39 — `on_match_arm_end`.
+@test
+function borrowckSchedulesMatchArmBinding(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nfunction run(input: Maybe): u32 {\n  return match (input) {\n    Maybe::SOME(payload) -> payload.id,\n    Maybe::NONE -> 0,\n  };\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "match-arm-end: payload\n");
+}
+
+/// Scenario: a let-else binding belongs to the enclosing scope, so it is
+/// dropped at that scope's end and at every exit that leaves it, while the
+/// diverging else block only owes what was live before the binding existed.
+/// Spec: IGN-39 — let-else bindings are declared owned, not arm-scoped.
+@test
+function borrowckSchedulesLetElseBinding(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nfunction run(input: Maybe): u32 {\n  let Maybe::SOME(payload) = input else {\n    return 0;\n  };\n\n  return payload.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: payload\nexit return: input\nexit return: payload, input\nexit fn-end run: input\n");
+}
+
+/// Scenario: overwriting a local that still holds a value schedules a drop of
+/// the old value before the store.
+/// Spec: IGN-39 — `on_overwrite`.
+@test
+function borrowckSchedulesOverwrite(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(): u32 {\n  let mut value: Owned = Owned { id: 1 };\n  value = Owned { id: 2 };\n\n  return value.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: value\nexit return: value\noverwrite: value\n");
+}
+
+/// Scenario: a program whose locals are all Copy schedules nothing anywhere.
+/// Spec: IGN-39 — only drop-needing locals enter a schedule.
+@test
+function borrowckSchedulesNothingForCopyLocals(): void {
+  let rendered: String = borrowckSchedules(
+    "function run(): u32 {\n  let value: u32 = 1;\n\n  return value;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "");
+}
+
+/// Scenario: a local declared inside a loop body is dropped at the end of each
+/// iteration, and the two-pass body walk records that once rather than twice.
+/// Spec: IGN-39 — the second loop pass supersedes the first schedule.
+@test
+function borrowckSchedulesLoopIterationDrop(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(count: u32): u32 {\n  let mut total: u32 = 0;\n\n  while (total < count) {\n    let value: Owned = Owned { id: 1 };\n    total = total + value.id;\n  }\n\n  return total;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: value\n");
+}
+
+/// Scenario: a `break` unwinds every scope between it and the loop it leaves,
+/// so it owes the drops of the loop body it jumps out of.
+/// Spec: IGN-39 — `on_exit` for `Break`, bounded by the loop marker scope.
+@test
+function borrowckSchedulesBreakDrops(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(count: u32): u32 {\n  let mut total: u32 = 0;\n\n  while (total < count) {\n    let value: Owned = Owned { id: 1 };\n\n    if (total > 3) {\n      break;\n    }\n\n    total = total + value.id;\n  }\n\n  return total;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: value\nexit break: value\n");
+}
