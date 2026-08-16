@@ -10356,3 +10356,122 @@ function typecheckUnaryBitNotOnFloatProducesDiagnostic(): void {
 
   assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_UNARY_OPERAND_TYPE);
 }
+
+/// Scenario: `let mut r: &R = &value; r.mutate()` where `mutate` takes
+/// `&mut self` is rejected: the binding is mutable but the reference is
+/// shared, and a shared reference cannot produce the mutable borrow the
+/// callee needs.
+/// Spec: IGN-93 — mut-self through reference receivers.
+@test
+function typecheckMutSelfThroughSharedReferenceLocalIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let selfPat: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, true);
+  let mutateBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let mut mutateParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  mutateParams.push(selfPat);
+  let mutateMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "mutate", mutateParams, Option::NONE, mutateBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(mutateMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "R");
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, rPath, Vector::new<Ast::TypeId>(), Vector::new<Ast::Expression::RecordInitField>());
+  let valuePattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", recordType);
+  let valueStmt: Ast::StatementId = typecheckAddMutableVariableStmt(&mut module, valuePattern, recordType, initExpr);
+
+  let sharedRefType: Ast::TypeId = typecheckAddReferenceType(&mut module, false, recordType);
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let refExpr: Ast::ExpressionId = typecheckAddReferenceExpr(&mut module, false, valueExpr);
+  let rPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "r", sharedRefType);
+  let rStmt: Ast::StatementId = typecheckAddMutableVariableStmt(&mut module, rPattern, sharedRefType, refExpr);
+
+  let rExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "r");
+  let methodAccessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, rExpr, "mutate");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, methodAccessExpr, Vector::new<Ast::ExpressionId>());
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut mainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  mainBodyStmts.push(valueStmt);
+  mainBodyStmts.push(rStmt);
+  mainBodyStmts.push(callStmt);
+  mainBodyStmts.push(retStmt);
+  let mainBody: Ast::StatementId = typecheckAddBlock(&mut module, mainBodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, mainBody);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method through a shared reference");
+}
+
+/// Triangulates IGN-93: `let r: &mut R = &mut value; r.mutate()` succeeds —
+/// the binding is immutable but the reference itself is mutable, which is
+/// what the `&mut self` callee actually needs.
+/// Spec: IGN-93 — mut-self through reference receivers.
+@test
+function typecheckMutSelfThroughMutableReferenceLocalSucceeds(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let selfPat: Ast::PatternId = typecheckAddSelfReceiverPattern(&mut module, true);
+  let mutateBody: Ast::StatementId = typecheckAddBlock(&mut module, Vector::new<Ast::StatementId>());
+  let mut mutateParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  mutateParams.push(selfPat);
+  let mutateMethodId: Ast::ItemId = typecheckAddMethodItem(&mut module, "mutate", mutateParams, Option::NONE, mutateBody);
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(mutateMethodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+  let rPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "R");
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, rPath, Vector::new<Ast::TypeId>(), Vector::new<Ast::Expression::RecordInitField>());
+  let valuePattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", recordType);
+  let valueStmt: Ast::StatementId = typecheckAddMutableVariableStmt(&mut module, valuePattern, recordType, initExpr);
+
+  let mutableRefType: Ast::TypeId = typecheckAddReferenceType(&mut module, true, recordType);
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let refExpr: Ast::ExpressionId = typecheckAddReferenceExpr(&mut module, true, valueExpr);
+  let rPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "r", mutableRefType);
+  let rStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, rPattern, mutableRefType, refExpr);
+
+  let rExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "r");
+  let methodAccessExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, rExpr, "mutate");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, methodAccessExpr, Vector::new<Ast::ExpressionId>());
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut mainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  mainBodyStmts.push(valueStmt);
+  mainBodyStmts.push(rStmt);
+  mainBodyStmts.push(callStmt);
+  mainBodyStmts.push(retStmt);
+  let mainBody: Ast::StatementId = typecheckAddBlock(&mut module, mainBodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, mainBody);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}

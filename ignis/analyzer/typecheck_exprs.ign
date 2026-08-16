@@ -689,27 +689,39 @@ export namespace Analyzer {
       };
 
       if (info.selfMutable) {
-        let receiverRefOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, ma.object);
+        // A reference receiver carries its mutability in the reference type,
+        // not in the local binding: `let mut r: &R` still cannot reach a
+        // `mut self` method, while `let r: &mut R` can.
+        let referenceMutability: Option<boolean> = Analyzer::Typecheck::receiverReferenceMutability(defStore, typeStore, objectType);
 
-        if (let Option::SOME(receiverRef) = receiverRefOpt) {
-          match (receiverRef) {
-            Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> {
-              let bindingOpt: Option<Analyzer::Typecheck::LocalBindingInfo> = Analyzer::Typecheck::lookupLocalBinding(state, localId);
+        if (let Option::SOME(referenceMutable) = referenceMutability) {
+          if (!referenceMutable) {
+            Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method through a shared reference");
+            return Option::NONE;
+          }
+        } else {
+          let receiverRefOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, ma.object);
 
-              if (let Option::SOME(binding) = bindingOpt) {
-                if (!binding.mutable) {
-                  Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method on immutable receiver");
-                  return Option::NONE;
+          if (let Option::SOME(receiverRef) = receiverRefOpt) {
+            match (receiverRef) {
+              Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> {
+                let bindingOpt: Option<Analyzer::Typecheck::LocalBindingInfo> = Analyzer::Typecheck::lookupLocalBinding(state, localId);
+
+                if (let Option::SOME(binding) = bindingOpt) {
+                  if (!binding.mutable) {
+                    Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method on immutable receiver");
+                    return Option::NONE;
+                  }
                 }
-              }
-            },
-            // TODO(receiver-place-mutability): non-Local receiver places (record
-            // fields, call results, etc.) are not checked for mutability here —
-            // accepted debt for this slice (ADR D7).
-            Analyzer::ResolverBodies::ResolvedRef::Definition(_) -> {},
-            Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {},
-            Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> {},
-          };
+              },
+              // TODO(receiver-place-mutability): non-Local receiver places (record
+              // fields, call results, etc.) are not checked for mutability here —
+              // accepted debt for this slice (ADR D7).
+              Analyzer::ResolverBodies::ResolvedRef::Definition(_) -> {},
+              Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {},
+              Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> {},
+            };
+          }
         }
       }
 
@@ -3910,7 +3922,16 @@ export namespace Analyzer {
       let info: Analyzer::Typecheck::MethodCallInfo = Analyzer::Typecheck::lookupMethodDefInfo(defStore, methodDefId)!;
 
       if (info.selfMutable) {
-        if (!Analyzer::Typecheck::pipeReceiverIsMutable(state, resolvedBodies, ma.object)) {
+        // Same reference-first rule as the direct call path: the reference
+        // type's mutability decides before the binding's.
+        let referenceMutability: Option<boolean> = Analyzer::Typecheck::receiverReferenceMutability(defStore, typeStore, objectType);
+
+        if (let Option::SOME(referenceMutable) = referenceMutability) {
+          if (!referenceMutable) {
+            Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method through a shared reference");
+            return Option::NONE;
+          }
+        } else if (!Analyzer::Typecheck::pipeReceiverIsMutable(state, resolvedBodies, ma.object)) {
           Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method on immutable receiver");
           return Option::NONE;
         }
