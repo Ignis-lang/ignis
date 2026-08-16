@@ -255,3 +255,114 @@ function loweringStatementLevelConstructFallsBackToError(): void {
 
   Test::assertSnapshot("lowering-statement-error-fallback", rendered.toStr());
 }
+
+/// An instance method on a reference receiver passes the object straight
+/// through: `p` is already `&Point`, so no `Reference` node is inserted.
+@test
+function loweringInstanceMethodCallOnReferenceReceiver(): void {
+  let rendered: String = loweringRender(
+    "record Point {\n  public x: u32;\n\n  public getX(&self): u32 {\n    return self.x;\n  }\n}\n\nfunction readX(p: &Point): u32 {\n  return p.getX();\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-instance-method-reference-receiver", rendered.toStr());
+}
+
+/// A value receiver is wrapped in a `Reference` node, mutable exactly when
+/// the method binds `&mut self`.
+@test
+function loweringInstanceMethodCallOnValueReceiver(): void {
+  let rendered: String = loweringRender(
+    "record Counter {\n  public n: u32;\n\n  public read(&self): u32 {\n    return self.n;\n  }\n\n  public bump(&mut self): u32 {\n    return self.n;\n  }\n}\n\nfunction go(): u32 {\n  let mut counter: Counter = Counter { n: 1 };\n  return counter.read() + counter.bump();\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-instance-method-value-receiver", rendered.toStr());
+}
+
+/// Arguments are lowered after the receiver, in source order.
+@test
+function loweringInstanceMethodCallArguments(): void {
+  let rendered: String = loweringRender(
+    "record Adder {\n  public base: u32;\n\n  public plus(&self, left: u32, right: u32): u32 {\n    return self.base + left + right;\n  }\n}\n\nfunction go(adder: &Adder): u32 {\n  return adder.plus(1, 2);\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-instance-method-arguments", rendered.toStr());
+}
+
+/// `Type::method(args)` resolves to a static `Definition::Method`, which
+/// lowers to a receiver-less `MethodCall`.
+@test
+function loweringStaticMethodCallThroughPath(): void {
+  let rendered: String = loweringRender(
+    "record Adder {\n  public base: u32;\n\n  public static make(value: u32): u32 {\n    return value;\n  }\n}\n\nfunction go(): u32 {\n  return Adder::make(3);\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-static-method-call", rendered.toStr());
+}
+
+/// A field read through a reference inserts the single `Dereference` the
+/// oracle's auto-deref inserts before the `FieldAccess`.
+@test
+function loweringMemberAccessRead(): void {
+  let rendered: String = loweringRender(
+    "record Inner {\n  public value: u32;\n}\n\nrecord Outer {\n  public first: u32;\n  public inner: Inner;\n}\n\nfunction go(outer: &Outer): u32 {\n  return outer.inner.value + outer.first;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-member-access-read", rendered.toStr());
+}
+
+/// Postfix `!` desugars to the oracle's two-arm `Match`: the ok arm yields the
+/// unwrapped payload, the err arm returns it re-wrapped. Payload types are
+/// ADR-R5 `VOID` sentinels, so both bindings type as `void`.
+@test
+function loweringTryDesugarsToMatch(): void {
+  let rendered: String = loweringRender(
+    "@lang(try)\nenum Res {\n  OK(u32),\n  ERROR(u32),\n}\n\nfunction outer(input: Res): Res {\n  let unwrapped = input!;\n  return input;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-try-desugar", rendered.toStr());
+}
+
+/// A try-capable enum whose variants carry no payload takes the arity-zero
+/// path: the ok arm yields `Unit` and the err arm re-wraps nothing.
+@test
+function loweringTryWithoutPayload(): void {
+  let rendered: String = loweringRender(
+    "@lang(try)\nenum Flag {\n  OK,\n  ERROR,\n}\n\nfunction outer(input: Flag): Flag {\n  let unwrapped = input!;\n  return input;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-try-without-payload", rendered.toStr());
+}
+
+/// A bare-name pipe calls the free function with the piped value alone; a
+/// pipe into a call prepends it to the arguments already written.
+@test
+function loweringPipeIntoFreeFunction(): void {
+  let rendered: String = loweringRender(
+    "function double(value: u32): u32 {\n  return value * 2;\n}\n\nfunction add(left: u32, right: u32): u32 {\n  return left + right;\n}\n\nfunction go(): u32 {\n  let doubled = 21 |> double;\n  return doubled |> add(1);\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-pipe-into-free-function", rendered.toStr());
+}
+
+/// A `_` placeholder puts the piped value at the position it names instead of
+/// prepending it, and the placeholder node itself is never lowered.
+@test
+function loweringPipeWithPlaceholder(): void {
+  let rendered: String = loweringRender(
+    "function subtract(left: u32, right: u32): u32 {\n  return left - right;\n}\n\nfunction go(): u32 {\n  return 1 |> subtract(9, _);\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-pipe-with-placeholder", rendered.toStr());
+}
+
+/// Enum variant construction has no lowering: the selfhost typechecker
+/// rejects it, so the call stays on the `Error` fallback.
+@test
+function loweringEnumVariantConstructionFallsBackToError(): void {
+  let rendered: String = loweringRenderChecked(
+    "enum Shape {\n  CIRCLE(u32),\n  EMPTY,\n}\n\nfunction make(): Shape {\n  return Shape::CIRCLE(1);\n}\n",
+    false,
+  );
+
+  Test::assertSnapshot("lowering-enum-variant-construction-error", rendered.toStr());
+}
