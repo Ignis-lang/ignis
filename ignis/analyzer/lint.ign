@@ -13,9 +13,9 @@ import Vector from "std::vector";
 
 /// Lint phase for the Ignis selfhost compiler.
 ///
-/// Port of `crates/ignis_analyzer/src/lint.rs`, first slice. Runs after the
-/// extra-checks phase. Both lints are emitted as WARNINGs, matching the Rust
-/// default lint level (`Warn`).
+/// Port of `crates/ignis_analyzer/src/lint.rs`. Runs after the extra-checks
+/// phase, and reports in the oracle's order: unused variable, unused `mut`,
+/// unused import, deprecated call.
 ///
 /// Ported lints:
 ///   - unused import (A0123): an entry of the current module's direct-import
@@ -37,20 +37,78 @@ import Vector from "std::vector";
 ///     typechecker without a `bodyResolution` entry (ADR-B7), so deprecation
 ///     covers functions and methods referenced through paths (static calls);
 ///     deprecated instance-method receivers are a follow-up.
+///   - unused variable (A0122): a local binding that is never read. Local
+///     bindings are not definitions in the selfhost analyzer, so the
+///     declaration log and the read set both come from the typechecker's
+///     `LocalBindingUses` side-table, keyed by binding-site `PatternId`
+///     because `LocalId` indexes are reused across sibling scopes (ADR-B10).
+///     Parameters are excluded here rather than at the recording site: they
+///     are syntactically identifiable (an item's `parameters` vector, a
+///     lambda's `parameters` vector), and the oracle models them as
+///     `DefinitionKind::Parameter`, which neither unused lint looks at.
+///   - unused mut (A0127): a `mut` local binding that is never the root of a
+///     mutation. The mutation set is recorded by the typechecker, the only
+///     phase that sees assignment targets, `&mut` borrows and `mut self`
+///     receivers.
+///
+/// Lint levels come from module-flat `@allow`/`@warn`/`@deny` directives on
+/// top-level functions (including exported ones), matching the Rust
+/// `collect_lint_directives`: the overrides are collected into one flat list
+/// and the effective level is the last matching entry, defaulting to `WARN`.
+/// Scoped overrides are deliberately not implemented — the oracle has none.
 ///
 /// Scoped out relative to the Rust oracle:
-///   - unused variable (A0122): sound binding identity needs a scope-stack
-///     AST walk — `LocalId` indexes are reused across sibling scopes
-///     (ADR-B10) — so it cannot be read off `bodyResolution`; follow-up,
-///   - unused mut (A0127): needs a mutation side-table only the typechecker
-///     can record; follow-up,
-///   - `@allow`/`@warn`/`@deny` directive modulation: follow-up; the
-///     unconditional WARNING here matches the Rust default level.
+///   - prefix `++`/`--` are not mutation sites in the oracle either, and the
+///     selfhost typechecker rejects the postfix forms outright, so neither
+///     feeds the mutation set.
 export namespace Analyzer {
   namespace Lint {
     /// Output of the lint phase.
     record LintOutput {
       public diagnostics: DiagnosticBag;
+    }
+
+    /// The lints a directive can name, spelled as in the Rust `LintId`.
+    enum LintKind {
+      UNUSED_VARIABLE,
+      UNUSED_IMPORT,
+      UNUSED_MUT,
+      DEPRECATED,
+    }
+
+    /// Reporting level for one lint. `ALLOW` suppresses the lint entirely.
+    enum LintLevel {
+      ALLOW,
+      WARN,
+      DENY,
+    }
+
+    /// Module-flat lint level overrides, in source order (ADR-1 parallel
+    /// vectors). `effectiveLevel` scans them backwards, so a later directive
+    /// wins over an earlier one.
+    record LintOverrides {
+      public kinds: Vector<Analyzer::Lint::LintKind>;
+      public levels: Vector<Analyzer::Lint::LintLevel>;
+    }
+
+    function emitLint(
+      diagnostics: &mut DiagnosticBag,
+      severity: Severity,
+      span: SourceSpan,
+      code: str,
+      message: str,
+      labelMessage: str,
+    ): void {
+      let mut diagnostic: Diagnostic = Diagnostic::new(
+        severity,
+        code,
+        message,
+        span,
+      );
+      diagnostic.addLabel(LabelKind::PRIMARY, span, labelMessage);
+
+      let mut bag: &mut DiagnosticBag = diagnostics;
+      bag.push(diagnostic);
     }
 
     function emitWarning(
@@ -60,16 +118,192 @@ export namespace Analyzer {
       message: str,
       labelMessage: str,
     ): void {
-      let mut diagnostic: Diagnostic = Diagnostic::new(
-        Severity::WARNING,
-        code,
-        message,
-        span,
-      );
-      diagnostic.addLabel(LabelKind::PRIMARY, span, labelMessage);
+      Analyzer::Lint::emitLint(diagnostics, Severity::WARNING, span, code, message, labelMessage);
+    }
 
-      let mut bag: &mut DiagnosticBag = diagnostics;
-      bag.push(diagnostic);
+    /// The reporting severity for an enabled lint. `ALLOW` never reaches here:
+    /// callers return before emitting anything.
+    function levelSeverity(level: Analyzer::Lint::LintLevel): Severity {
+      return match (level) {
+        Analyzer::Lint::LintLevel::ALLOW -> Severity::WARNING,
+        Analyzer::Lint::LintLevel::WARN -> Severity::WARNING,
+        Analyzer::Lint::LintLevel::DENY -> Severity::ERROR,
+      };
+    }
+
+    /// The level in force for `kind`: the last matching override, or `WARN`.
+    function effectiveLevel(
+      overrides: &Analyzer::Lint::LintOverrides,
+      kind: Analyzer::Lint::LintKind,
+    ): Analyzer::Lint::LintLevel {
+      let mut index: u64 = overrides.kinds.length();
+
+      while (index > 0) {
+        index -= 1;
+
+        let Option::SOME(candidate) = overrides.kinds.get(index) else {
+          continue;
+        };
+
+        if (*candidate != kind) {
+          continue;
+        }
+
+        let Option::SOME(level) = overrides.levels.get(index) else {
+          continue;
+        };
+
+        return *level;
+      }
+
+      return Analyzer::Lint::LintLevel::WARN;
+    }
+
+    /// The level an attribute name selects, or `NONE` when the attribute is
+    /// not a lint directive.
+    function directiveLevel(name: &String): Option<Analyzer::Lint::LintLevel> {
+      if (name.equals("allow")) {
+        return Option::SOME(Analyzer::Lint::LintLevel::ALLOW);
+      }
+      if (name.equals("warn")) {
+        return Option::SOME(Analyzer::Lint::LintLevel::WARN);
+      }
+      if (name.equals("deny")) {
+        return Option::SOME(Analyzer::Lint::LintLevel::DENY);
+      }
+
+      return Option::NONE;
+    }
+
+    /// The lint a directive argument names, or `NONE` when it names none.
+    function directiveLintKind(argument: &String): Option<Analyzer::Lint::LintKind> {
+      if (argument.equals("unused_variable")) {
+        return Option::SOME(Analyzer::Lint::LintKind::UNUSED_VARIABLE);
+      }
+      if (argument.equals("unused_import")) {
+        return Option::SOME(Analyzer::Lint::LintKind::UNUSED_IMPORT);
+      }
+      if (argument.equals("unused_mut")) {
+        return Option::SOME(Analyzer::Lint::LintKind::UNUSED_MUT);
+      }
+      if (argument.equals("deprecated")) {
+        return Option::SOME(Analyzer::Lint::LintKind::DEPRECATED);
+      }
+
+      return Option::NONE;
+    }
+
+    /// Read the lint directives of one attribute list into `overrides`.
+    ///
+    /// Mirrors the Rust `bind_lint_directives`: a directive must carry exactly
+    /// one argument, and that argument must name a known lint; both failures
+    /// are errors and the directive is dropped.
+    function collectAttributeDirectives(
+      diagnostics: &mut DiagnosticBag,
+      overrides: &mut Analyzer::Lint::LintOverrides,
+      attributes: &Vector<Ast::Attribute>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < attributes.length()) {
+        let Option::SOME(attribute) = attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(level) = Analyzer::Lint::directiveLevel(&attribute.name) else {
+          index += 1;
+          continue;
+        };
+
+        if (attribute.arguments.length() != 1) {
+          let message: String = String::create("@")
+            .concat(attribute.name.toStr())
+            .concat(" expects 1 argument(s), got ")
+            .concat(attribute.arguments.length());
+          Analyzer::Lint::emitLint(
+            diagnostics,
+            Severity::ERROR,
+            attribute.span,
+            DiagnosticCode::ATTRIBUTE_ARG_COUNT,
+            message.toStr(),
+            message.toStr(),
+          );
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(argument) = attribute.arguments.get(0) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(kind) = Analyzer::Lint::directiveLintKind(argument) else {
+          let message: String = String::create("unknown lint '").concat(argument.toStr()).concat("'");
+          Analyzer::Lint::emitLint(
+            diagnostics,
+            Severity::ERROR,
+            attribute.span,
+            DiagnosticCode::UNKNOWN_LINT,
+            message.toStr(),
+            message.toStr(),
+          );
+          index += 1;
+          continue;
+        };
+
+        let mut overridesRef: &mut Analyzer::Lint::LintOverrides = overrides;
+        overridesRef.kinds.push(kind);
+        overridesRef.levels.push(level);
+        index += 1;
+      }
+    }
+
+    /// Collect the module's lint directives from top-level function
+    /// attributes, including functions wrapped in an `export` declaration.
+    /// The result is flat: the Rust oracle pushes every directive it finds
+    /// into one module-wide list without ever popping it.
+    function collectLintDirectives(
+      diagnostics: &mut DiagnosticBag,
+      module: &Ast::Module,
+    ): Analyzer::Lint::LintOverrides {
+      let mut overrides: Analyzer::Lint::LintOverrides = Analyzer::Lint::LintOverrides {
+        kinds: Vector::new<Analyzer::Lint::LintKind>(),
+        levels: Vector::new<Analyzer::Lint::LintLevel>(),
+      };
+
+      let mut index: u64 = 0;
+
+      while (index < module.roots.length()) {
+        let Option::SOME(rootId) = module.roots.get(index) else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(item) = module.items.get(*rootId) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Ast::Item::Node::Function(function_) = item) {
+          Analyzer::Lint::collectAttributeDirectives(diagnostics, &mut overrides, &function_.metadata.attributes);
+          index += 1;
+          continue;
+        }
+
+        if (let Ast::Item::Node::Export(exported) = item) {
+          if (let Option::SOME(declarationId) = exported.declaration) {
+            if (let Option::SOME(declaration) = module.items.get(declarationId)) {
+              if (let Ast::Item::Node::Function(function_) = declaration) {
+                Analyzer::Lint::collectAttributeDirectives(diagnostics, &mut overrides, &function_.metadata.attributes);
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return overrides;
     }
 
     function usedContains(used: &Vector<u32>, defRaw: u32): boolean {
@@ -216,6 +450,217 @@ export namespace Analyzer {
       return false;
     }
 
+    /// Raw `PatternId`s of every function, method and lambda parameter in the
+    /// module. Parameters are bound as locals by the typechecker but the Rust
+    /// oracle stores them as `DefinitionKind::Parameter`, which neither the
+    /// unused-variable nor the unused-mut lint inspects.
+    function collectParameterPatterns(module: &Ast::Module): Vector<u32> {
+      let mut patterns: Vector<u32> = Vector::new<u32>();
+
+      let mut itemIndex: u64 = 0;
+      while (itemIndex < module.items.length()) {
+        let itemId: Ast::ItemId = Id::fromRaw<Ast::ItemTag>(itemIndex as u32);
+        let Option::SOME(item) = module.items.get(itemId) else {
+          itemIndex += 1;
+          continue;
+        };
+
+        if (let Ast::Item::Node::Function(function_) = item) {
+          Analyzer::Lint::appendPatternRaws(&mut patterns, &function_.parameters);
+        }
+
+        itemIndex += 1;
+      }
+
+      let mut exprIndex: u64 = 0;
+      while (exprIndex < module.expressions.length()) {
+        let exprId: Ast::ExpressionId = Id::fromRaw<Ast::ExpressionTag>(exprIndex as u32);
+        let Option::SOME(expression) = module.expressions.get(exprId) else {
+          exprIndex += 1;
+          continue;
+        };
+
+        if (let Ast::Expression::Node::Lambda(lambda) = expression) {
+          Analyzer::Lint::appendPatternRaws(&mut patterns, &lambda.parameters);
+        }
+
+        exprIndex += 1;
+      }
+
+      return patterns;
+    }
+
+    function appendPatternRaws(
+      target: &mut Vector<u32>,
+      patternIds: &Vector<Ast::PatternId>,
+    ): void {
+      let mut index: u64 = 0;
+      let mut targetRef: &mut Vector<u32> = target;
+
+      while (index < patternIds.length()) {
+        let Option::SOME(patternId) = patternIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        targetRef.push(patternId.raw());
+        index += 1;
+      }
+    }
+
+    /// The declared name of a binding pattern, or `NONE` when the id does not
+    /// name a `Pattern::Binding`.
+    function bindingPatternName(module: &Ast::Module, patternRaw: u32): Option<String> {
+      let patternId: Ast::PatternId = Id::fromRaw<Ast::PatternTag>(patternRaw);
+      let Option::SOME(pattern) = module.patterns.get(patternId) else {
+        return Option::NONE;
+      };
+
+      if (let Ast::Pattern::Node::Binding(binding) = pattern) {
+        return Option::SOME(binding.name.clone());
+      }
+
+      return Option::NONE;
+    }
+
+    /// Whether a binding name opts out of the unused lints by starting with
+    /// `_`, mirroring the oracle's `name.starts_with('_')`.
+    function nameIsUnderscorePrefixed(name: &String): boolean {
+      return match (name.byteAt(0)) {
+        Option::SOME(byte) -> byte == '_' as u8,
+        Option::NONE -> false,
+      };
+    }
+
+    /// Unused-variable lint (A0122). Reports every logged local binding that
+    /// is not a parameter, does not start with `_`, and was never read.
+    function lintUnusedVariables(
+      diagnostics: &mut DiagnosticBag,
+      module: &Ast::Module,
+      localUses: &Analyzer::Typecheck::LocalBindingUses,
+      parameterPatterns: &Vector<u32>,
+      severity: Severity,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < localUses.patterns.length()) {
+        let Option::SOME(patternRaw) = localUses.patterns.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (Analyzer::Lint::usedContains(parameterPatterns, *patternRaw)) {
+          index += 1;
+          continue;
+        }
+
+        if (Analyzer::Lint::usedContains(&localUses.referenced, *patternRaw)) {
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(name) = Analyzer::Lint::bindingPatternName(module, *patternRaw) else {
+          index += 1;
+          continue;
+        };
+
+        if (Analyzer::Lint::nameIsUnderscorePrefixed(&name)) {
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(span) = localUses.spans.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let message: String = String::create("unused variable '").concat(name.toStr()).concat("'");
+        Analyzer::Lint::emitLint(
+          diagnostics,
+          severity,
+          *span,
+          DiagnosticCode::UNUSED_VARIABLE,
+          message.toStr(),
+          message.toStr(),
+        );
+
+        index += 1;
+      }
+    }
+
+    /// Unused-mut lint (A0127). Reports every logged `mut` local binding that
+    /// is never the root of a mutation.
+    ///
+    /// `self` is exempt like in the oracle: `&mut self` describes what the
+    /// caller must hold, not whether the receiver is reassigned in the body.
+    function lintUnusedMut(
+      diagnostics: &mut DiagnosticBag,
+      module: &Ast::Module,
+      localUses: &Analyzer::Typecheck::LocalBindingUses,
+      parameterPatterns: &Vector<u32>,
+      severity: Severity,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < localUses.patterns.length()) {
+        let Option::SOME(patternRaw) = localUses.patterns.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(mutable) = localUses.mutableFlags.get(index) else {
+          index += 1;
+          continue;
+        };
+        if (!*mutable) {
+          index += 1;
+          continue;
+        }
+
+        if (Analyzer::Lint::usedContains(parameterPatterns, *patternRaw)) {
+          index += 1;
+          continue;
+        }
+
+        if (Analyzer::Lint::usedContains(&localUses.mutated, *patternRaw)) {
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(name) = Analyzer::Lint::bindingPatternName(module, *patternRaw) else {
+          index += 1;
+          continue;
+        };
+
+        if (name.equals("self")) {
+          index += 1;
+          continue;
+        }
+
+        if (Analyzer::Lint::nameIsUnderscorePrefixed(&name)) {
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(span) = localUses.spans.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let message: String = String::create("variable '").concat(name.toStr()).concat("' does not need to be mutable");
+        Analyzer::Lint::emitLint(
+          diagnostics,
+          severity,
+          *span,
+          DiagnosticCode::UNUSED_MUT,
+          message.toStr(),
+          message.toStr(),
+        );
+
+        index += 1;
+      }
+    }
+
     /// Unused-import lint (A0123). Iterates the current module's overlay
     /// only — imports owned by other modules are never reported here,
     /// mirroring the Rust per-module `imported_defs` iteration.
@@ -226,6 +671,7 @@ export namespace Analyzer {
       module: &Ast::Module,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       overlay: &Analyzer::Imports::ImportOverlay,
+      severity: Severity,
     ): void {
       let used: Vector<u32> = Analyzer::Lint::collectUsedDefs(defStore, module, resolvedBodies);
       let mut index: u64 = 0;
@@ -261,8 +707,9 @@ export namespace Analyzer {
         };
 
         let message: String = String::create("unused import '").concat(name).concat("'");
-        Analyzer::Lint::emitWarning(
+        Analyzer::Lint::emitLint(
           diagnostics,
+          severity,
           *importSpan,
           DiagnosticCode::UNUSED_IMPORT,
           message.toStr(),
@@ -354,6 +801,7 @@ export namespace Analyzer {
       symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      severity: Severity,
     ): void {
       let mut seenDefs: Vector<u32> = Vector::new<u32>();
       let mut seenStarts: Vector<u64> = Vector::new<u64>();
@@ -406,8 +854,9 @@ export namespace Analyzer {
           .concat("': ")
           .concat(&deprecationMessage);
 
-        Analyzer::Lint::emitWarning(
+        Analyzer::Lint::emitLint(
           diagnostics,
+          severity,
           span,
           DiagnosticCode::DEPRECATED_CALL,
           message.toStr(),
@@ -420,30 +869,79 @@ export namespace Analyzer {
 
     /// Lint phase entry point. `overlay` must be the current module's own
     /// direct-import overlay.
+    ///
+    /// Lint order mirrors the Rust `lint_phase`: unused variables, unused
+    /// `mut`, unused imports, deprecated calls.
     function lintModule(
       defStore: &mut Analyzer::DefinitionStore,
       symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
       overlay: &Analyzer::Imports::ImportOverlay,
     ): Analyzer::Lint::LintOutput {
       let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+      let overrides: Analyzer::Lint::LintOverrides = Analyzer::Lint::collectLintDirectives(&mut diagnostics, module);
+      let parameterPatterns: Vector<u32> = Analyzer::Lint::collectParameterPatterns(module);
 
-      Analyzer::Lint::lintUnusedImports(
-        &mut diagnostics,
-        defStore,
-        symbols,
-        module,
-        resolvedBodies,
-        overlay,
+      let unusedVariableLevel: Analyzer::Lint::LintLevel = Analyzer::Lint::effectiveLevel(
+        &overrides,
+        Analyzer::Lint::LintKind::UNUSED_VARIABLE,
       );
-      Analyzer::Lint::lintDeprecatedCalls(
-        &mut diagnostics,
-        defStore,
-        symbols,
-        module,
-        resolvedBodies,
+      if (unusedVariableLevel != Analyzer::Lint::LintLevel::ALLOW) {
+        Analyzer::Lint::lintUnusedVariables(
+          &mut diagnostics,
+          module,
+          &typecheck.localUses,
+          &parameterPatterns,
+          Analyzer::Lint::levelSeverity(unusedVariableLevel),
+        );
+      }
+
+      let unusedMutLevel: Analyzer::Lint::LintLevel = Analyzer::Lint::effectiveLevel(
+        &overrides,
+        Analyzer::Lint::LintKind::UNUSED_MUT,
       );
+      if (unusedMutLevel != Analyzer::Lint::LintLevel::ALLOW) {
+        Analyzer::Lint::lintUnusedMut(
+          &mut diagnostics,
+          module,
+          &typecheck.localUses,
+          &parameterPatterns,
+          Analyzer::Lint::levelSeverity(unusedMutLevel),
+        );
+      }
+
+      let unusedImportLevel: Analyzer::Lint::LintLevel = Analyzer::Lint::effectiveLevel(
+        &overrides,
+        Analyzer::Lint::LintKind::UNUSED_IMPORT,
+      );
+      if (unusedImportLevel != Analyzer::Lint::LintLevel::ALLOW) {
+        Analyzer::Lint::lintUnusedImports(
+          &mut diagnostics,
+          defStore,
+          symbols,
+          module,
+          resolvedBodies,
+          overlay,
+          Analyzer::Lint::levelSeverity(unusedImportLevel),
+        );
+      }
+
+      let deprecatedLevel: Analyzer::Lint::LintLevel = Analyzer::Lint::effectiveLevel(
+        &overrides,
+        Analyzer::Lint::LintKind::DEPRECATED,
+      );
+      if (deprecatedLevel != Analyzer::Lint::LintLevel::ALLOW) {
+        Analyzer::Lint::lintDeprecatedCalls(
+          &mut diagnostics,
+          defStore,
+          symbols,
+          module,
+          resolvedBodies,
+          Analyzer::Lint::levelSeverity(deprecatedLevel),
+        );
+      }
 
       return Analyzer::Lint::LintOutput {
         diagnostics: diagnostics,
