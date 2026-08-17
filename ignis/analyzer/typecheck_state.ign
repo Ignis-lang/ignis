@@ -679,18 +679,19 @@ export namespace Analyzer {
       };
     }
 
+    /// Cycle diagnostics are owned by the resolver's declaration pass, which
+    /// reports every alias cycle exactly once at the declaration the chain
+    /// starts from, mirroring the reference analyzer. Use-site chasing stays
+    /// silent on a cycle: emitting here would double-report every used cyclic
+    /// alias. The hook is kept so every call site preserves its poisoned
+    /// control flow unchanged.
     function emitCyclicTypeAlias(
       state: &mut Analyzer::Typecheck::TypecheckState,
       typeStore: &mut Analyzer::TypeStore,
       span: SourceSpan,
       aliasDefId: Analyzer::DefinitionId,
     ): void {
-      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
-      let aliasTypeId: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::Alias(aliasDefId));
-      let message: String = String::create("cyclic type alias `")
-        .concat(typeStore.nameOf(aliasTypeId).toStr())
-        .concat("`");
-      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::CYCLIC_TYPE_ALIAS, message.toStr());
+      return;
     }
 
     function typesEqual(

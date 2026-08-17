@@ -400,6 +400,15 @@ function parityArithmeticU8PlusU32(): void {
   );
 }
 
+/// Origin: golden_ok::mutable_reference.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityMutableReference(): void {
+  parityAcceptsSource(
+    "function modify(x: &mut i32): void {\n    x = 42;\n    return;\n}\n",
+  );
+}
+
 // ===========================================================================
 // Rejected fixtures: the host rejects these and so does the selfhost, with
 // the code named below. Where the two code spaces disagree the host code is
@@ -727,10 +736,32 @@ function parityMutateWhileBorrowed(): void {
   );
 }
 
+/// Origin: golden_err::type_alias_cycle.
+/// Host expectation: A0066.
+@test
+function parityTypeAliasCycle(): void {
+  parityRejectsSource(
+    "type A = A;\n\nfunction main(): void {\n    return;\n}\n",
+    DiagnosticCode::CYCLIC_TYPE_ALIAS,
+    1,
+  );
+}
+
+/// Origin: diagnostics::dot_access_on_non_record.
+/// Host expectation: A0060.
+@test
+function parityDotAccessOnNonRecord(): void {
+  parityRejectsSource(
+    "function main(): i32 {\n    let x: i32 = 42;\n    return x.field;\n}\n",
+    DiagnosticCode::MEMBER_ACCESS_ON_NON_RECORD,
+    1,
+  );
+}
+
 // ===========================================================================
 // Gap inventory
 //
-// 19 of the 74 curated fixtures are not gates yet. Each one is listed with
+// 16 of the 74 curated fixtures are not gates yet. Each one is listed with
 // its host origin, the host expectation, and what the selfhost pipeline
 // actually does today (observed, not predicted). Nothing here is a weakened
 // expectation: these fixtures are absent from the gates on purpose.
@@ -774,21 +805,6 @@ function parityMutateWhileBorrowed(): void {
 //     storage. The fixtures are still rejected, but as a plain type mismatch
 //     (the binding is typed `&Payload`), which is a different contract: it
 //     disappears the moment the binding is annotated as a reference.
-//
-//   B11 (1) — A cyclic type alias is never reported
-//     A0060 CYCLIC_TYPE_ALIAS exists and is emitted from alias chasing, but only
-//     when the alias is used in a checked position. A declaration-only cycle is
-//     accepted silently. Isolated: both `type A = A;` and `type A = B; type B =
-//     A;` analyze with zero diagnostics.
-//
-//   B12 (1) — Field access on a non-record reports a type mismatch
-//     Isolated: `let x: u32 = 42; return x.field;` reports I0031 rather than a
-//     member-access code, so this is not B1.
-//
-//   B13 (1) — Assignment through a reference is rejected
-//     Isolated: `function modify(x: &mut u32): void { x = 42; }` reports A0067 and
-//     `*x = 42` reports I0009, because the typechecker requires an assignment
-//     target to resolve to a plain local binding.
 //
 // Fixtures:
 //
@@ -874,19 +890,4 @@ function parityMutateWhileBorrowed(): void {
 //     origin:   diagnostics::cannot_move_borrowed_binding_into_let
 //     host:     rejected with A0186
 //     selfhost: analyzer: I0031 x3 + A0053 + A0061; rejected, but never as an ownership error
-//
-//   typeAliasCycle [B11]
-//     origin:   golden_err::type_alias_cycle
-//     host:     rejected with A0066
-//     selfhost: analyzer: no diagnostic at all — the cycle is accepted
-//
-//   dotAccessOnNonRecord [B12]
-//     origin:   diagnostics::dot_access_on_non_record
-//     host:     rejected with A0060
-//     selfhost: analyzer: I0031 instead of the host's A0060
-//
-//   mutableReference [B13]
-//     origin:   golden_ok::mutable_reference
-//     host:     accepted
-//     selfhost: analyzer: A0067
 // ===========================================================================
