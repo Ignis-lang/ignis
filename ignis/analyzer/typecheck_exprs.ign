@@ -204,6 +204,22 @@ export namespace Analyzer {
         return Option::NONE;
       }
 
+      // A place target (`*x`, `obj.field`, `v[i]`) carries no resolver ref of
+      // its own, so it is typechecked as an expression and its mutability
+      // comes from the place walk instead of a local binding.
+      if (Analyzer::Typecheck::isPlaceAssignmentTarget(module, value.target)) {
+        return Analyzer::Typecheck::checkPlaceAssignment(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          exprId,
+          value,
+        );
+      }
+
       let resolvedOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, value.target);
       let Option::SOME(resolved) = resolvedOpt else {
         Analyzer::Typecheck::emitDiagnostic(
@@ -257,7 +273,19 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      if (!localBinding.mutable) {
+      // `x = v` where `x: &mut T` assigns through the reference: the target
+      // type is the referent and the binding's own mutability is irrelevant,
+      // mirroring the reference analyzer's implicit mutable-reference
+      // assignment target.
+      let mut targetType: Analyzer::TypeId = localBinding.typeId;
+      let mut targetIsMutable: boolean = localBinding.mutable;
+
+      if (let Option::SOME(referent) = Analyzer::Typecheck::mutableReferenceReferent(defStore, typeStore, localBinding.typeId)) {
+        targetType = referent;
+        targetIsMutable = true;
+      }
+
+      if (!targetIsMutable) {
         Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot assign to immutable local");
         return Option::NONE;
       }
@@ -272,19 +300,128 @@ export namespace Analyzer {
         module,
         resolvedBodies,
         value.value,
-        Option::SOME(localBinding.typeId),
+        Option::SOME(targetType),
       );
       let Option::SOME(actualType) = actualTypeOpt else {
         return Option::NONE;
       };
 
-      if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, localBinding.typeId, actualType)) {
-        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, localBinding.typeId, actualType);
+      if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, targetType, actualType)) {
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, targetType, actualType);
         return Option::NONE;
       }
 
-      Analyzer::Typecheck::recordExprType(state, exprId, localBinding.typeId);
-      return Option::SOME(localBinding.typeId);
+      Analyzer::Typecheck::recordExprType(state, exprId, targetType);
+      return Option::SOME(targetType);
+    }
+
+    /// Whether `exprId` is an assignment target that names a place rather than
+    /// a binding: a dereference, a `.field` access, or an index.
+    function isPlaceAssignmentTarget(module: &Ast::Module, exprId: Ast::ExpressionId): boolean {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      return match (expr) {
+        Ast::Expression::Node::Dereference(_) -> true,
+        Ast::Expression::Node::VectorAccess(_) -> true,
+        Ast::Expression::Node::MemberAccess(_) -> true,
+        _ -> false,
+      };
+    }
+
+    /// The referent of `typeId` when it is a `&mut T`, NONE otherwise.
+    function mutableReferenceReferent(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      if (resolved.cycleAlias.isSome()) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(resolvedNode) = typeStore.get(resolved.typeId) else {
+        return Option::NONE;
+      };
+
+      let mut referentOpt: Option<Analyzer::TypeId> = Option::NONE;
+
+      match (resolvedNode) {
+        Analyzer::Type::Reference(reference) -> {
+          if (reference.mutable) {
+            referentOpt = Option::SOME(reference.referent);
+          }
+        },
+        _ -> {},
+      };
+
+      return referentOpt;
+    }
+
+    /// Typechecks an assignment whose target names a place: `*x = v`,
+    /// `obj.field = v`, `v[i] = v`.
+    ///
+    /// The target is checked as an expression — which owns every diagnostic
+    /// about the place itself (a dereference of a non-pointer, an unknown
+    /// field, a non-record receiver) — and its mutability comes from
+    /// `isMutablePlaceExpr`, mirroring the reference analyzer's
+    /// `is_mutable_expression` gate in `typecheck_assignment_expr`.
+    function checkPlaceAssignment(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      value: &Ast::Expression::Assignment,
+    ): Option<Analyzer::TypeId> {
+      let targetTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        value.target,
+      );
+      let Option::SOME(targetType) = targetTypeOpt else {
+        return Option::NONE;
+      };
+
+      if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, value.target)) {
+        Analyzer::Typecheck::emitDiagnostic(
+          state,
+          value.span,
+          DiagnosticCode::MUTABILITY_VIOLATION,
+          "cannot assign to an immutable place",
+        );
+        return Option::NONE;
+      }
+
+      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        value.value,
+        Option::SOME(targetType),
+      );
+      let Option::SOME(actualType) = actualTypeOpt else {
+        return Option::NONE;
+      };
+
+      if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, targetType, actualType)) {
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, targetType, actualType);
+        return Option::NONE;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, exprId, targetType);
+      return Option::SOME(targetType);
     }
 
     function checkCallExpr(
@@ -1253,11 +1390,15 @@ export namespace Analyzer {
       let peeked: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, receiverType);
 
       let mut isInstanceReceiver: boolean = false;
+      let mut isRecordReceiver: boolean = false;
       if (peeked.cycleAlias.isNone()) {
         if (let Option::SOME(peekedType) = typeStore.get(peeked.typeId)) {
           match (peekedType) {
             Analyzer::Type::Instance(_) -> {
               isInstanceReceiver = true;
+            },
+            Analyzer::Type::Record(_) -> {
+              isRecordReceiver = true;
             },
             _ -> {},
           };
@@ -1266,6 +1407,20 @@ export namespace Analyzer {
 
       if (isInstanceReceiver) {
         return Analyzer::Typecheck::checkMemberAccessOnInstanceReceiver(state, defStore, typeStore, symbols, exprId, value, receiverType);
+      }
+
+      // A receiver that holds no fields at all is a member-access error, not a
+      // type mismatch: the reference analyzer reports its own
+      // `DotAccessOnNonRecord`/`DotAccessOnEnum` here. Only a cyclic alias and
+      // a `Type::Record` receiver fall through to `requireNonGenericRecord`,
+      // which keeps owning the cycle and generic-record rejections unchanged.
+      if (peeked.cycleAlias.isNone() && !isRecordReceiver) {
+        let receiverName: String = typeStore.nameOf(peeked.typeId);
+        let message: String = String::create("cannot access a field of non-record type `")
+          .concat(receiverName.toStr())
+          .concat("`");
+        Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::MEMBER_ACCESS_ON_NON_RECORD, message.toStr());
+        return Option::NONE;
       }
 
       let recordDefOpt: Option<Analyzer::Typecheck::RequiredRecordDef> = Analyzer::Typecheck::requireNonGenericRecord(

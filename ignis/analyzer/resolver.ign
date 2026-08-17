@@ -1880,6 +1880,198 @@ export namespace Analyzer {
       };
     }
 
+    /// Whether `defIds` already holds `defId`.
+    ///
+    /// Takes `&mut` only because Ignis has no `&mut` to `&` reborrow: every
+    /// caller holds the vector mutably.
+    function containsDefinitionId(
+      defIds: &mut Vector<Analyzer::DefinitionId>,
+      defId: Analyzer::DefinitionId
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < defIds.length()) {
+        let Option::SOME(candidate) = defIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (candidate.raw() == defId.raw()) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Follow the alias chain that starts at `aliasDefId`, pushing every alias
+    /// definition it reaches into `visited`.
+    ///
+    /// Returns the alias the chain closes back on when it cycles, and NONE
+    /// when the chain ends in a concrete type. Runs after the whole type walk,
+    /// so every `TypeAliasDef.aliasedType` is already patched and the chase is
+    /// independent of declaration order.
+    function findAliasCycle(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      aliasDefId: Analyzer::DefinitionId,
+      visited: &mut Vector<Analyzer::DefinitionId>,
+    ): Option<Analyzer::DefinitionId> {
+      let mut currentAlias: Analyzer::DefinitionId = aliasDefId;
+
+      while (true) {
+        if (containsDefinitionId(visited, currentAlias)) {
+          return Option::SOME(currentAlias);
+        }
+
+        let mut visitedRef: &mut Vector<Analyzer::DefinitionId> = visited;
+        visitedRef.push(currentAlias);
+
+        let Option::SOME(def) = defStore.get(currentAlias) else {
+          return Option::NONE;
+        };
+
+        let mut aliasedTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
+
+        match (def) {
+          Analyzer::Definition::TypeAlias(alias) -> {
+            aliasedTypeOpt = Option::SOME(alias.aliasedType);
+          },
+          _ -> {},
+        };
+
+        let Option::SOME(aliasedType) = aliasedTypeOpt else {
+          return Option::NONE;
+        };
+
+        let Option::SOME(aliasedTypeNode) = typeStore.get(aliasedType) else {
+          return Option::NONE;
+        };
+
+        let mut nextAliasOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+        match (aliasedTypeNode) {
+          Analyzer::Type::Alias(nextAlias) -> {
+            nextAliasOpt = Option::SOME(nextAlias);
+          },
+          _ -> {},
+        };
+
+        let Option::SOME(nextAlias) = nextAliasOpt else {
+          return Option::NONE;
+        };
+
+        currentAlias = nextAlias;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Report a cyclic alias declaration, naming the alias the chain closes
+    /// back on at the span of the declaration the walk started from.
+    ///
+    /// Mirrors the Rust oracle's `typecheck_type_alias`, which reports one
+    /// diagnostic per cycle: the alias whose resolution re-enters the
+    /// in-progress set, spanned at the declaration that began the resolution.
+    function emitCyclicTypeAliasDeclaration(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      span: SourceSpan,
+      closingAlias: Analyzer::DefinitionId,
+    ): void {
+      let mut name: String = String::create("<alias>");
+
+      if (let Option::SOME(def) = defStore.get(closingAlias)) {
+        match (def) {
+          Analyzer::Definition::TypeAlias(alias) -> {
+            if (let Option::SOME(resolved) = symbols.resolve(alias.name)) {
+              name = String::create(resolved);
+            }
+          },
+          _ -> {},
+        };
+      }
+
+      let message: String = String::create("cyclic type alias `").concat(name.toStr()).concat("`");
+      emitUndefinedType(state, span, DiagnosticCode::CYCLIC_TYPE_ALIAS, message.toStr());
+    }
+
+    /// Walk `itemId` looking for TypeAlias declarations whose alias chain
+    /// cycles, recursing into namespaces and exports like `resolveItem`.
+    ///
+    /// `reported` carries every alias already implicated in a reported cycle,
+    /// so each cycle yields exactly one diagnostic no matter how many
+    /// declarations it runs through.
+    function reportAliasCyclesInItem(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      reported: &mut Vector<Analyzer::DefinitionId>,
+      itemId: Ast::ItemId,
+    ): void {
+      let Option::SOME(node) = module.items.get(itemId) else {
+        return;
+      };
+
+      match (node) {
+        Ast::Item::Node::Namespace(ns) -> {
+          let mut childIndex: u64 = 0;
+
+          while (childIndex < ns.items.length()) {
+            let Option::SOME(childId) = ns.items.get(childIndex) else {
+              childIndex += 1;
+              continue;
+            };
+
+            reportAliasCyclesInItem(state, defStore, typeStore, symbols, module, pass1, pass2, reported, *childId);
+            childIndex += 1;
+          }
+        },
+        Ast::Item::Node::Export(ex) -> {
+          if (let Option::SOME(innerItemId) = ex.declaration) {
+            reportAliasCyclesInItem(state, defStore, typeStore, symbols, module, pass1, pass2, reported, innerItemId);
+          }
+        },
+        Ast::Item::Node::TypeAlias(a) -> {
+          let Option::SOME(defId) = lookupDef(pass1, pass2, itemId.raw()) else {
+            return;
+          };
+
+          if (containsDefinitionId(reported, defId)) {
+            return;
+          }
+
+          let mut visited: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+          let closingOpt: Option<Analyzer::DefinitionId> = findAliasCycle(defStore, typeStore, defId, &mut visited);
+          let Option::SOME(closingAlias) = closingOpt else {
+            return;
+          };
+
+          emitCyclicTypeAliasDeclaration(state, defStore, symbols, a.span, closingAlias);
+
+          let mut visitedIndex: u64 = 0;
+          while (visitedIndex < visited.length()) {
+            let Option::SOME(visitedAlias) = visited.get(visitedIndex) else {
+              visitedIndex += 1;
+              continue;
+            };
+
+            let mut reportedRef: &mut Vector<Analyzer::DefinitionId> = reported;
+            reportedRef.push(*visitedAlias);
+            visitedIndex += 1;
+          }
+        },
+        _ -> {},
+      };
+    }
+
     /// Populate `state.importNameIndex` from the direct-import overlay.
     /// Insert-if-absent so the first overlay entry for a name wins, matching
     /// the previous linear-scan `importLookup` first-hit-wins behavior.
@@ -1942,6 +2134,32 @@ export namespace Analyzer {
 
         resolveItem(&mut state, defStore, typeStore, symbols, module, pass1, pass2, *itemId);
         index += 1;
+      }
+
+      // Alias cycles are only visible once every alias body is patched: a
+      // two-hop cycle reaches an unresolved partner while the walk above is
+      // still running.
+      let mut reportedCycleAliases: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut cycleIndex: u64 = 0;
+
+      while (cycleIndex < module.roots.length()) {
+        let Option::SOME(itemId) = module.roots.get(cycleIndex) else {
+          cycleIndex += 1;
+          continue;
+        };
+
+        reportAliasCyclesInItem(
+          &mut state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          pass1,
+          pass2,
+          &mut reportedCycleAliases,
+          *itemId,
+        );
+        cycleIndex += 1;
       }
 
       return Analyzer::Resolver::ResolverOutput { diagnostics: state.diagnostics };

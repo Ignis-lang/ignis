@@ -1946,7 +1946,8 @@ function typecheckAliasCycleProducesDiagnostic(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnosticCode(&output, DiagnosticCode::CYCLIC_TYPE_ALIAS);
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::CYCLIC_TYPE_ALIAS), 1);
 }
 
 @test
@@ -1986,7 +1987,8 @@ function typecheckMutualAliasCycleProducesDiagnostic(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnosticCode(&output, DiagnosticCode::CYCLIC_TYPE_ALIAS);
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::CYCLIC_TYPE_ALIAS), 1);
 }
 
 @test
@@ -3749,7 +3751,11 @@ function typecheckMemberAccessRejectsNonRecord(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "member access target must be a non-generic record");
+  assertSingleDiagnostic(
+    &output,
+    DiagnosticCode::MEMBER_ACCESS_ON_NON_RECORD,
+    "cannot access a field of non-record type `i32`",
+  );
 }
 
 /// Scenario (S2 preserved-rejection pin, design D5): a member-access receiver
@@ -3875,12 +3881,12 @@ function typecheckMemberAccessOnInstanceReceiverReturnsSubstitutedFieldType(): v
 }
 
 /// Scenario (S2 regression): a member-access receiver typed through a
-/// self-referential cyclic alias (`type A = A;`) still emits exactly one
-/// `CYCLIC_TYPE_ALIAS` diagnostic, proving the D5 non-emitting shape peek
+/// self-referential cyclic alias (`type A = A;`) still yields exactly one
+/// `CYCLIC_TYPE_ALIAS` diagnostic across the whole run. The resolver's
+/// declaration pass owns the report; the D5 non-emitting shape peek
 /// (`resolveAliasChainChecked`, called once before dispatch to detect the
-/// `Instance` shape) does not itself emit, and that `requireNonGenericRecord`
-/// — invoked on the original, unpeeked `receiverType` for every non-`Instance`
-/// shape including a cyclic alias — remains the single diagnostic owner.
+/// `Instance` shape) and the typecheck-phase cyclic paths stay silent, so
+/// the typecheck bag holds nothing for the cycle.
 /// Spec: generic-record-init design D5 risk register — "S2 peek double-emits
 /// on the cyclic-alias path".
 @test
@@ -3918,7 +3924,8 @@ function typecheckMemberAccessOnCyclicAliasReceiverEmitsExactlyOneDiagnostic(): 
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnosticCode(&output, DiagnosticCode::CYCLIC_TYPE_ALIAS);
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::CYCLIC_TYPE_ALIAS), 1);
 }
 
 @test
@@ -12040,4 +12047,256 @@ function typecheckMixedWidthArithmeticRecordsTheWiderType(): void {
   };
 
   assertExprType(&output, binaryExpr, typeStore.intern(Analyzer::Type::U32));
+}
+
+// ===========================================================================
+// IGN-133 — declaration-site alias cycles, assignment through references, and
+// member access on a non-record
+// ===========================================================================
+
+/// How many diagnostics in `bag` carry `code`.
+function typecheckCountDiagnosticCode(bag: &DiagnosticBag, code: str): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (String::create(diagnostic.code).equals(code)) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// A self-referential alias is reported where it is declared, with no use of
+/// the alias anywhere. Before this the declaration was accepted in silence and
+/// `A0060` only ever came from chasing an alias in a checked position.
+/// Spec: IGN-133 — B11 alias cycles.
+@test
+function typecheckSelfReferentialAliasIsReportedAtItsDeclaration(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "type A = A;\n\nfunction main(): void {\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 1);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::CYCLIC_TYPE_ALIAS), 1);
+}
+
+/// A two-hop cycle reports exactly once, at the declaration the chase started
+/// from, mirroring the Rust oracle: the second alias in the cycle is already
+/// implicated and stays silent.
+/// Spec: IGN-133 — B11 alias cycles.
+@test
+function typecheckTwoHopAliasCycleIsReportedOnce(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "type A = B;\ntype B = A;\n\nfunction main(): void {\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 1);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::CYCLIC_TYPE_ALIAS), 1);
+}
+
+/// An alias chain that ends in a concrete type is not a cycle, however many
+/// hops it takes.
+/// Spec: IGN-133 — B11 alias cycles.
+@test
+function typecheckAliasChainWithoutACycleStaysClean(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "type A = B;\ntype B = u32;\n\nfunction main(): u32 {\n  let value: A = 1;\n  return value;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// `x = v` on a `&mut T` parameter assigns through the reference: the target
+/// type is the referent and the parameter's own mutability does not gate it.
+/// Before this it reported `A0067`.
+/// Spec: IGN-133 — B13 assignment through a reference.
+@test
+function typecheckAssignmentThroughMutableReferenceParameterIsAccepted(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function modify(x: &mut u32): void {\n  x = 42;\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// `*x = v` through a `&mut T` is accepted. Before this it reported `I0009`,
+/// because an assignment target had to resolve to a plain local binding.
+/// Spec: IGN-133 — B13 assignment through a reference.
+@test
+function typecheckDereferenceAssignmentThroughMutableReferenceIsAccepted(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function modify(x: &mut u32): void {\n  *x = 42;\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// `*x = v` through a shared `&T` is a mutability error, not an
+/// invalid-target error: the place exists, it just cannot be written.
+/// Spec: IGN-133 — B13 assignment through a reference.
+@test
+function typecheckDereferenceAssignmentThroughSharedReferenceIsRejected(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function modify(x: &u32): void {\n  *x = 42;\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 1);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::MUTABILITY_VIOLATION), 1);
+}
+
+/// A field assignment through a `&mut self` receiver is accepted: the field is
+/// a place and the receiver makes it mutable.
+/// Spec: IGN-133 — B13 assignment through a reference.
+@test
+function typecheckFieldAssignmentThroughMutableSelfIsAccepted(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Counter {\n  public value: u32;\n\n  public bump(&mut self): void {\n    self.value = 1;\n    return;\n  }\n}\n\nfunction main(): void {\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// A field assignment whose base is an immutable local is a mutability error.
+/// Spec: IGN-133 — B13 assignment through a reference.
+@test
+function typecheckFieldAssignmentOnImmutableLocalIsRejected(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Counter {\n  public value: u32;\n}\n\nfunction main(): void {\n  let counter: Counter = Counter { value: 1 };\n  counter.value = 2;\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 1);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::MUTABILITY_VIOLATION), 1);
+}
+
+/// A field assignment whose base is a mutable local is accepted.
+/// Spec: IGN-133 — B13 assignment through a reference.
+@test
+function typecheckFieldAssignmentOnMutableLocalIsAccepted(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Counter {\n  public value: u32;\n}\n\nfunction main(): void {\n  let mut counter: Counter = Counter { value: 1 };\n  counter.value = 2;\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// `.field` on a primitive is a member-access error, not the generic type
+/// mismatch it used to fall into.
+/// Spec: IGN-133 — B12 member access on a non-record.
+@test
+function typecheckMemberAccessOnPrimitiveReportsTheMemberCode(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): u32 {\n  let x: u32 = 42;\n  return x.field;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::MEMBER_ACCESS_ON_NON_RECORD), 1);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::TYPE_MISMATCH), 0);
+}
+
+/// A record receiver with a field that does not exist keeps reporting the
+/// unknown-member code: the non-record classification does not swallow it.
+/// Spec: IGN-133 — B12 member access on a non-record.
+@test
+function typecheckMemberAccessOnRecordWithUnknownFieldStillReportsUnknownMember(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Point {\n  public x: u32;\n}\n\nfunction main(): u32 {\n  let point: Point = Point { x: 1 };\n  return point.y;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::UNKNOWN_MEMBER), 1);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::MEMBER_ACCESS_ON_NON_RECORD), 0);
+}
+
+/// A cyclic alias that is also used in a checked position reports exactly one
+/// `CYCLIC_TYPE_ALIAS` across the whole run: the resolver owns the report at
+/// the declaration and use-site chasing stays silent, matching the reference
+/// analyzer's single diagnostic on the same source.
+/// Spec: IGN-133 — B11 alias cycles.
+@test
+function typecheckUsedCyclicAliasIsReportedExactlyOnce(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "type A = A;\n\nfunction main(): void {\n  let x: A = 1;\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::CYCLIC_TYPE_ALIAS), 1);
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
 }
