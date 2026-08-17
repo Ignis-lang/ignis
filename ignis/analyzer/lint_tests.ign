@@ -1,8 +1,15 @@
 import Test from "std::test";
 
-import DiagnosticBag, DiagnosticCode, SourceSpan from "@compiler::diagnostics";
+import
+  DiagnosticBag,
+  DiagnosticCode,
+  Severity,
+  SourceFile,
+  SourceSpan,
+from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
+import ParseOutput, Parser from "@compiler::parser";
 
 function lintDummySpan(): SourceSpan {
   return SourceSpan::new("lint_tests.ign", 0, 0);
@@ -431,4 +438,266 @@ function lintDeprecatedCallDedupsBySpanStart(): void {
   let output: Analyzer::AnalyzerOutput = lintAnalyzeModule(&module);
 
   Test::assertEq<u64>(output.lints.diagnostics.length(), 2);
+}
+
+// ===========================================================================
+// IGN-121 — unused variable (A0122), unused mut (A0127) and lint directives
+//
+// These fixtures go through the real parser instead of a hand-built AST: the
+// lints read a typecheck side-table keyed by binding-site PatternId, so the
+// binding shapes the parser produces are the ones worth pinning.
+// ===========================================================================
+
+/// Parses `source` and runs the whole analyzer over it.
+function lintAnalyzeSource(source: str): Analyzer::AnalyzerOutput {
+  let file: SourceFile = SourceFile::create("lint_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  return Analyzer::analyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+}
+
+/// Asserts that `source` draws exactly one lint carrying `code`, `severity`
+/// and `message`, and nothing else.
+function lintAssertSingleLintFromSource(
+  source: str,
+  code: str,
+  severity: Severity,
+  message: str,
+): void {
+  let output: Analyzer::AnalyzerOutput = lintAnalyzeSource(source);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 1);
+
+  let Option::SOME(diagnostic) = output.diagnostics.get(0) else {
+    @panic("lintAssertSingleLintFromSource: missing diagnostic");
+  };
+
+  Test::assertEq<str>(diagnostic.code, code);
+  Test::assertEq<str>(diagnostic.messageText(), message);
+  Test::assertEq<boolean>(diagnostic.severity == severity, true);
+}
+
+/// Asserts that `source` draws no diagnostic at all.
+function lintAssertSourceIsClean(source: str): void {
+  let output: Analyzer::AnalyzerOutput = lintAnalyzeSource(source);
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: a local that is never read reports A0122 at its declaration.
+@test
+function lintUnusedVariableWarnsAtDeclaration(): void {
+  lintAssertSingleLintFromSource(
+    "function main(): void {\n  let value: i32 = 1;\n  return;\n}\n",
+    DiagnosticCode::UNUSED_VARIABLE,
+    Severity::WARNING,
+    "unused variable 'value'",
+  );
+}
+
+/// Scenario: a `_`-prefixed name opts out of the unused-variable lint.
+@test
+function lintUnderscorePrefixedVariableIsClean(): void {
+  lintAssertSourceIsClean("function main(): void {\n  let _value: i32 = 1;\n  return;\n}\n");
+}
+
+/// Scenario: a local that is read is not reported.
+@test
+function lintReadVariableIsClean(): void {
+  lintAssertSourceIsClean("function main(): i32 {\n  let value: i32 = 1;\n  return value;\n}\n");
+}
+
+/// Scenario: a parameter that is never read is not reported — the oracle
+/// stores parameters as `DefinitionKind::Parameter`, which A0122 never scans.
+@test
+function lintUnusedParameterIsClean(): void {
+  lintAssertSourceIsClean("function takes(value: i32): void {\n  return;\n}\n");
+}
+
+/// Scenario: an unused binding introduced by a `match` arm is reported like
+/// any other local.
+@test
+function lintUnusedMatchArmBindingWarns(): void {
+  lintAssertSingleLintFromSource(
+    "enum Shape {\n  DOT(i32),\n  LINE,\n}\n\nfunction main(): void {\n  let shape: Shape = Shape::LINE;\n  match (shape) {\n    Shape::DOT(size) -> {},\n    Shape::LINE -> {},\n  };\n  return;\n}\n",
+    DiagnosticCode::UNUSED_VARIABLE,
+    Severity::WARNING,
+    "unused variable 'size'",
+  );
+}
+
+/// Scenario: a `mut` local that is read but never mutated reports A0127.
+@test
+function lintUnusedMutWarnsOnNeverMutatedLocal(): void {
+  lintAssertSingleLintFromSource(
+    "function main(): i32 {\n  let mut count: i32 = 1;\n  return count;\n}\n",
+    DiagnosticCode::UNUSED_MUT,
+    Severity::WARNING,
+    "variable 'count' does not need to be mutable",
+  );
+}
+
+/// Scenario: a completely unused `mut` local draws both lints, matching the
+/// oracle — A0127 does not consult the read set.
+@test
+function lintUnusedMutAndUnusedVariableBothFire(): void {
+  let output: Analyzer::AnalyzerOutput = lintAnalyzeSource(
+    "function main(): void {\n  let mut count: i32 = 1;\n  return;\n}\n",
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 2);
+
+  let Option::SOME(first) = output.diagnostics.get(0) else {
+    @panic("missing unused-variable diagnostic");
+  };
+  let Option::SOME(second) = output.diagnostics.get(1) else {
+    @panic("missing unused-mut diagnostic");
+  };
+
+  Test::assertEq<str>(first.code, DiagnosticCode::UNUSED_VARIABLE);
+  Test::assertEq<str>(second.code, DiagnosticCode::UNUSED_MUT);
+}
+
+/// Scenario: a direct assignment clears A0127 and counts as a read.
+@test
+function lintAssignedMutableLocalIsClean(): void {
+  lintAssertSourceIsClean("function main(): void {\n  let mut count: i32 = 1;\n  count = 2;\n  return;\n}\n");
+}
+
+/// Scenario: writing a field peels down to the record binding, so the binding
+/// is mutated.
+@test
+function lintFieldAssignmentClearsUnusedMut(): void {
+  lintAssertSourceIsClean(
+    "record Point {\n  x: i32;\n}\n\nfunction main(): void {\n  let mut point: Point = Point { x: 0 };\n  point.x = 1;\n  return;\n}\n",
+  );
+}
+
+/// Scenario: assigning through a dereference peels to the binding underneath.
+@test
+function lintDereferenceAssignmentClearsUnusedMut(): void {
+  lintAssertSourceIsClean(
+    "function main(): void {\n  let mut value: i32 = 1;\n  let slot: &mut i32 = &mut value;\n  *slot = 2;\n  return;\n}\n",
+  );
+}
+
+/// Scenario: taking a `&mut` borrow of a local mutates it; a shared borrow
+/// does not.
+@test
+function lintMutableBorrowClearsUnusedMutButSharedBorrowDoesNot(): void {
+  lintAssertSourceIsClean(
+    "function takeMut(slot: &mut i32): void {\n  return;\n}\n\nfunction main(): void {\n  let mut value: i32 = 1;\n  takeMut(&mut value);\n  return;\n}\n",
+  );
+
+  lintAssertSingleLintFromSource(
+    "function takeShared(slot: &i32): void {\n  return;\n}\n\nfunction main(): void {\n  let mut value: i32 = 1;\n  takeShared(&value);\n  return;\n}\n",
+    DiagnosticCode::UNUSED_MUT,
+    Severity::WARNING,
+    "variable 'value' does not need to be mutable",
+  );
+}
+
+/// Scenario: calling a `&mut self` method mutates the receiver binding.
+@test
+function lintMutableMethodCallClearsUnusedMut(): void {
+  lintAssertSourceIsClean(
+    "record Counter {\n  value: i32;\n\n  bump(&mut self): void {\n    self.value = 1;\n    return;\n  }\n}\n\nfunction main(): void {\n  let mut counter: Counter = Counter { value: 0 };\n  counter.bump();\n  return;\n}\n",
+  );
+}
+
+/// Scenario: a `&mut self` receiver that the body never reassigns is exempt —
+/// `&mut self` describes what the caller must hold, not a reassignment.
+@test
+function lintMutableSelfReceiverIsNotReportedUnusedMut(): void {
+  lintAssertSourceIsClean(
+    "record Counter {\n  value: i32;\n\n  read(&mut self): i32 {\n    return self.value;\n  }\n}\n\nfunction main(): void {\n  return;\n}\n",
+  );
+}
+
+/// Scenario: `@allow(unused_variable)` silences A0122 for the whole module,
+/// not just the function carrying it — the oracle's overrides are module-flat.
+@test
+function lintAllowDirectiveSilencesUnusedVariableModuleWide(): void {
+  lintAssertSourceIsClean(
+    "@allow(unused_variable)\nfunction first(): void {\n  let a: i32 = 1;\n  return;\n}\n\nfunction second(): void {\n  let b: i32 = 1;\n  return;\n}\n",
+  );
+}
+
+/// Scenario: `@deny(unused_variable)` promotes A0122 to an error.
+@test
+function lintDenyDirectivePromotesUnusedVariableToError(): void {
+  lintAssertSingleLintFromSource(
+    "@deny(unused_variable)\nfunction main(): void {\n  let value: i32 = 1;\n  return;\n}\n",
+    DiagnosticCode::UNUSED_VARIABLE,
+    Severity::ERROR,
+    "unused variable 'value'",
+  );
+}
+
+/// Scenario: `@allow(unused_mut)` silences A0127 while leaving A0122 alone.
+@test
+function lintAllowDirectiveSilencesUnusedMutOnly(): void {
+  lintAssertSingleLintFromSource(
+    "@allow(unused_mut)\nfunction main(): void {\n  let mut count: i32 = 1;\n  return;\n}\n",
+    DiagnosticCode::UNUSED_VARIABLE,
+    Severity::WARNING,
+    "unused variable 'count'",
+  );
+}
+
+/// Scenario: the last directive for a lint wins, mirroring the oracle's
+/// reverse scan over the flat override list.
+@test
+function lintLastDirectiveWinsForTheSameLint(): void {
+  lintAssertSourceIsClean(
+    "@deny(unused_variable)\nfunction first(): void {\n  return;\n}\n\n@allow(unused_variable)\nfunction second(): void {\n  let value: i32 = 1;\n  return;\n}\n",
+  );
+}
+
+/// Scenario: a directive naming no known lint is an error and changes no
+/// level, so the default warning still fires.
+@test
+function lintUnknownLintArgumentIsReported(): void {
+  let output: Analyzer::AnalyzerOutput = lintAnalyzeSource(
+    "@allow(bogus_lint)\nfunction main(): void {\n  let value: i32 = 1;\n  return;\n}\n",
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 2);
+
+  let Option::SOME(first) = output.diagnostics.get(0) else {
+    @panic("missing unknown-lint diagnostic");
+  };
+
+  Test::assertEq<str>(first.code, DiagnosticCode::UNKNOWN_LINT);
+  Test::assertEq<str>(first.messageText(), "unknown lint 'bogus_lint'");
+  Test::assertEq<boolean>(first.severity == Severity::ERROR, true);
+
+  let Option::SOME(second) = output.diagnostics.get(1) else {
+    @panic("missing unused-variable diagnostic");
+  };
+  Test::assertEq<str>(second.code, DiagnosticCode::UNUSED_VARIABLE);
+}
+
+/// Scenario: a directive with the wrong argument count is an error and is
+/// dropped.
+@test
+function lintDirectiveWithTwoArgumentsIsReported(): void {
+  let output: Analyzer::AnalyzerOutput = lintAnalyzeSource(
+    "@allow(unused_variable, unused_mut)\nfunction main(): void {\n  let value: i32 = 1;\n  return;\n}\n",
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 2);
+
+  let Option::SOME(first) = output.diagnostics.get(0) else {
+    @panic("missing argument-count diagnostic");
+  };
+
+  Test::assertEq<str>(first.code, DiagnosticCode::ATTRIBUTE_ARG_COUNT);
+  Test::assertEq<str>(first.messageText(), "@allow expects 1 argument(s), got 2");
 }

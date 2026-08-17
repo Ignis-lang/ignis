@@ -273,6 +273,8 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
+      Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, value.target);
+
       // `x = v` where `x: &mut T` assigns through the reference: the target
       // type is the referent and the binding's own mutability is irrelevant,
       // mirroring the reference analyzer's implicit mutable-reference
@@ -400,6 +402,8 @@ export namespace Analyzer {
         );
         return Option::NONE;
       }
+
+      Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, value.target);
 
       let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
         state,
@@ -953,6 +957,8 @@ export namespace Analyzer {
       };
 
       if (info.selfMutable) {
+        Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, ma.object);
+
         // A reference receiver carries its mutability in the reference type,
         // not in the local binding: `let mut r: &R` still cannot reach a
         // `mut self` method, while `let r: &mut R` can.
@@ -3212,6 +3218,10 @@ export namespace Analyzer {
         Analyzer::Typecheck::emitMutableReferenceToImmutable(state, value.span, targetName.toStr());
       }
 
+      if (value.mutable) {
+        Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, value.target);
+      }
+
       let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
       let mut referenceType: Analyzer::TypeId = typeStoreRef.reference(targetType);
       if (value.mutable) {
@@ -4256,6 +4266,8 @@ export namespace Analyzer {
       let info: Analyzer::Typecheck::MethodCallInfo = Analyzer::Typecheck::lookupMethodDefInfo(defStore, methodDefId)!;
 
       if (info.selfMutable) {
+        Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, ma.object);
+
         // Same reference-first rule as the direct call path: the reference
         // type's mutability decides before the binding's.
         let referenceMutability: Option<boolean> = Analyzer::Typecheck::receiverReferenceMutability(defStore, typeStore, objectType);

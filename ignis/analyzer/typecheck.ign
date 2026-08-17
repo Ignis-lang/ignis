@@ -4,7 +4,7 @@ import _ from "./typecheck_stmts";
 import _ from "./typecheck_exprs";
 import _ from "./typecheck_items";
 
-import DiagnosticBag from "@compiler::diagnostics";
+import DiagnosticBag, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Id from "@compiler::ids";
 import Vector from "std::vector";
@@ -39,6 +39,11 @@ export namespace Analyzer {
         localIndexes: Vector::new<u32>(),
         localTypeIds: Vector::new<Analyzer::TypeId>(),
         localMutableFlags: Vector::new<boolean>(),
+        declaredBindings: Vector::new<u32>(),
+        declaredBindingSpans: Vector::new<SourceSpan>(),
+        declaredBindingMutable: Vector::new<boolean>(),
+        referencedBindings: Vector::new<u32>(),
+        mutatedBindings: Vector::new<u32>(),
         pipeValueTypes: Vector::new<Analyzer::TypeId>(),
       };
 
@@ -67,6 +72,13 @@ export namespace Analyzer {
       return Analyzer::Typecheck::TypecheckOutput {
         diagnostics: state.diagnostics,
         exprTypes: state.exprTypes,
+        localUses: Analyzer::Typecheck::LocalBindingUses {
+          patterns: state.declaredBindings,
+          spans: state.declaredBindingSpans,
+          mutableFlags: state.declaredBindingMutable,
+          referenced: state.referencedBindings,
+          mutated: state.mutatedBindings,
+        },
       };
     }
   }

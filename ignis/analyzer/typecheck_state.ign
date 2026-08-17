@@ -18,9 +18,40 @@ export namespace Analyzer {
       public typeIds: Vector<Analyzer::TypeId>;
     }
 
+    /// Declaration and use log for local bindings, produced by typecheck and
+    /// consumed by the lint phase.
+    ///
+    /// Bindings are identified by the raw value of their binding-site
+    /// `PatternId`. `LocalId.index` is reused across sibling scopes (ADR-B10),
+    /// so it cannot serve as a canonical binding identity; the binding-site
+    /// PatternId can.
+    ///
+    /// The Rust oracle reads the same information off `DefinitionStore` —
+    /// locals are `DefinitionKind::Variable` definitions there — plus the
+    /// `referenced_defs` / `mutated_defs` sets. The selfhost binder creates no
+    /// definitions for locals, so typecheck records them here instead.
+    record LocalBindingUses {
+      /// One entry per binding site, in declaration order. Function and lambda
+      /// parameters are logged as well; the lint phase filters them out, since
+      /// the oracle models them as `DefinitionKind::Parameter` and never
+      /// reports them.
+      public patterns: Vector<u32>;
+      /// Declaration span of the entry at the same index — the whole `let`
+      /// statement for a local, mirroring the oracle's `def.span`.
+      public spans: Vector<SourceSpan>;
+      /// Whether the entry at the same index was declared `mut`.
+      public mutableFlags: Vector<boolean>;
+      /// Binding sites whose value is read at least once.
+      public referenced: Vector<u32>;
+      /// Binding sites that are the mutation root of an assignment, a `&mut`
+      /// borrow, or a `mut self` method receiver.
+      public mutated: Vector<u32>;
+    }
+
     record TypecheckOutput {
       public diagnostics: DiagnosticBag;
       public exprTypes: Analyzer::Typecheck::ExprTypeMap;
+      public localUses: Analyzer::Typecheck::LocalBindingUses;
     }
 
     record TypecheckState {
@@ -35,6 +66,14 @@ export namespace Analyzer {
       public localIndexes: Vector<u32>;
       public localTypeIds: Vector<Analyzer::TypeId>;
       public localMutableFlags: Vector<boolean>;
+      /// Binding-site log feeding `LocalBindingUses`. Unlike the `local*`
+      /// scope stack above, these five vectors are never reset per function:
+      /// the lint phase reports module-wide.
+      public declaredBindings: Vector<u32>;
+      public declaredBindingSpans: Vector<SourceSpan>;
+      public declaredBindingMutable: Vector<boolean>;
+      public referencedBindings: Vector<u32>;
+      public mutatedBindings: Vector<u32>;
       /// Type of the piped value for each pipe currently being checked, innermost last.
       ///
       /// A `_` placeholder has no declaration to resolve against, so it reads its type from
@@ -1512,14 +1551,202 @@ export namespace Analyzer {
         };
 
         if (functionId.raw() == localId.enclosingFn.raw() && *localIndex == localId.index) {
-          return Option::SOME(Analyzer::Typecheck::LocalBindingInfo {
+          let info: Analyzer::Typecheck::LocalBindingInfo = Analyzer::Typecheck::LocalBindingInfo {
             typeId: *typeId,
             mutable: *mutable,
-          });
+          };
+
+          // Every consultation of a binding is a use: the oracle marks a
+          // definition referenced at name-resolution time, which covers reads,
+          // assignment targets and method receivers alike.
+          let mut referencedRaw: u32 = 0;
+          let mut hasReferenced: boolean = false;
+          if (let Option::SOME(patternId) = state.localPatternIds.get(index)) {
+            referencedRaw = patternId.raw();
+            hasReferenced = true;
+          }
+
+          if (hasReferenced) {
+            Analyzer::Typecheck::markBindingReferenced(state, referencedRaw);
+          }
+
+          return Option::SOME(info);
         }
       }
 
       return Option::NONE;
+    }
+
+    /// Record a binding site as read at least once. Idempotent.
+    function markBindingReferenced(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      bindingRaw: u32,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < state.referencedBindings.length()) {
+        let Option::SOME(existing) = state.referencedBindings.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (*existing == bindingRaw) {
+          return;
+        }
+
+        index += 1;
+      }
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.referencedBindings.push(bindingRaw);
+    }
+
+    /// Record a binding site as mutated. Idempotent.
+    function markBindingMutated(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      bindingRaw: u32,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < state.mutatedBindings.length()) {
+        let Option::SOME(existing) = state.mutatedBindings.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (*existing == bindingRaw) {
+          return;
+        }
+
+        index += 1;
+      }
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.mutatedBindings.push(bindingRaw);
+    }
+
+    /// Log a binding site with its declaration span and declared mutability.
+    /// Idempotent, so a binding reached twice is reported once.
+    function markBindingDeclared(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      bindingRaw: u32,
+      span: SourceSpan,
+      mutable: boolean,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < state.declaredBindings.length()) {
+        let Option::SOME(existing) = state.declaredBindings.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (*existing == bindingRaw) {
+          return;
+        }
+
+        index += 1;
+      }
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.declaredBindings.push(bindingRaw);
+      stateRef.declaredBindingSpans.push(span);
+      stateRef.declaredBindingMutable.push(mutable);
+    }
+
+    /// Mark the binding at the root of a mutated place as mutated.
+    ///
+    /// Mirrors the oracle's `def_id_of_mutable_root`: peel `.field`, `[index]`,
+    /// `*deref` and grouping down to the base name, and record it only when
+    /// that base is a local declared `mut`. A `&mut T` binding that is not
+    /// itself `mut` is deliberately left unmarked — it can never be reported
+    /// by the unused-mut lint, so marking it would change nothing.
+    function markMutationTarget(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+    ): void {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return;
+      };
+
+      match (expr) {
+        Ast::Expression::Node::Variable(_) -> {
+          Analyzer::Typecheck::markMutationRootRef(state, resolvedBodies, exprId);
+        },
+        Ast::Expression::Node::Path(_) -> {
+          Analyzer::Typecheck::markMutationRootRef(state, resolvedBodies, exprId);
+        },
+        Ast::Expression::Node::MemberAccess(memberAccess) -> {
+          if (memberAccess.operator == Ast::Expression::AccessOperator::Dot) {
+            Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, memberAccess.object);
+          }
+        },
+        Ast::Expression::Node::VectorAccess(access) -> {
+          Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, access.vector);
+        },
+        Ast::Expression::Node::Dereference(deref) -> {
+          Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, deref.operand);
+        },
+        Ast::Expression::Node::Grouped(grouped) -> {
+          Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, grouped.expression);
+        },
+        _ -> {},
+      };
+    }
+
+    /// Record the binding a name expression resolves to as mutated, when that
+    /// binding is a local declared `mut`.
+    function markMutationRootRef(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+    ): void {
+      let Option::SOME(resolved) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, exprId) else {
+        return;
+      };
+      let Analyzer::ResolverBodies::ResolvedRef::Local(localId) = resolved else {
+        return;
+      };
+
+      let count: u64 = state.localPatternIds.length();
+      let mut index: u64 = count;
+
+      while (index > 0) {
+        index -= 1;
+
+        let Option::SOME(functionId) = state.localFunctionIds.get(index) else {
+          continue;
+        };
+        let Option::SOME(localIndex) = state.localIndexes.get(index) else {
+          continue;
+        };
+
+        if (functionId.raw() != localId.enclosingFn.raw() || *localIndex != localId.index) {
+          continue;
+        }
+
+        let Option::SOME(mutable) = state.localMutableFlags.get(index) else {
+          return;
+        };
+        if (!*mutable) {
+          return;
+        }
+
+        let mut bindingRaw: u32 = 0;
+        let mut hasBinding: boolean = false;
+        if (let Option::SOME(patternId) = state.localPatternIds.get(index)) {
+          bindingRaw = patternId.raw();
+          hasBinding = true;
+        }
+
+        if (hasBinding) {
+          Analyzer::Typecheck::markBindingMutated(state, bindingRaw);
+        }
+
+        return;
+      }
     }
 
     function truncateLocalBindings(
@@ -1549,6 +1776,8 @@ export namespace Analyzer {
         Analyzer::Typecheck::emitUnsupported(state, span, "unresolved local binding");
         return false;
       };
+
+      Analyzer::Typecheck::markBindingDeclared(state, patternId.raw(), span, mutable);
 
       let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
       stateRef.localPatternIds.push(patternId);

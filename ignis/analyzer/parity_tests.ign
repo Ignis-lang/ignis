@@ -108,6 +108,52 @@ function parityAcceptsSource(source: str): void {
   Test::assertEq<u64>(checked.diagnostics.length(), 0);
 }
 
+/// Runs `source` through the whole selfhost pipeline and asserts that the only
+/// diagnostics it draws are `expectedCount` warnings carrying `code`.
+///
+/// Used by fixtures the host compiles without errors but still lints: the host
+/// reports the same warning on the same source, so emitting it here is parity,
+/// not a false positive. Anything beyond that exact count still fails.
+function parityAcceptsSourceWithLint(source: str, code: str, expectedCount: u64): void {
+  let file: SourceFile = SourceFile::create("parity_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(parityCountErrors(&output.diagnostics), 0);
+  Test::assertEq<u64>(output.diagnostics.length(), expectedCount);
+  Test::assertEq<u64>(parityCountCode(&output.diagnostics, code), expectedCount);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &hir,
+  );
+
+  Test::assertEq<u64>(checked.diagnostics.length(), 0);
+}
+
 /// Runs `source` through the same pipeline and asserts that `code` is reported
 /// exactly `expectedCount` times.
 ///
@@ -203,20 +249,24 @@ function parityNumericCast(): void {
 }
 
 /// Origin: golden_ok::literal_adapts_to_expected_type.
-/// Host expectation: accepted with no diagnostics.
+/// Host expectation: compiles; the host also warns that `y` and `z` are unused.
 @test
 function parityLiteralAdaptsToExpectedType(): void {
-  parityAcceptsSource(
+  parityAcceptsSourceWithLint(
     "function test(): i8 {\n    let x: i8 = 42;\n    let y: i16 = 1000;\n    let z: f32 = 3.14;\n    return x;\n}\n",
+    DiagnosticCode::UNUSED_VARIABLE,
+    2,
   );
 }
 
 /// Origin: golden_ok::type_alias_basic.
-/// Host expectation: accepted with no diagnostics.
+/// Host expectation: compiles; the host also warns that `x` is unused.
 @test
 function parityTypeAliasBasic(): void {
-  parityAcceptsSource(
+  parityAcceptsSourceWithLint(
     "type Int = i32;\n\nfunction main(): void {\n    let x: Int = 42;\n    return;\n}\n",
+    DiagnosticCode::UNUSED_VARIABLE,
+    1,
   );
 }
 
@@ -284,11 +334,13 @@ function parityEnumWithPayload(): void {
 }
 
 /// Origin: IGN-127 selfhost try surface (host golden_ok analogue).
-/// Host expectation: accepted with no diagnostics.
+/// Host expectation: compiles; the host also warns that `unwrapped` is unused.
 @test
 function parityTryUnwrapsOkPayload(): void {
-  parityAcceptsSource(
+  parityAcceptsSourceWithLint(
     "@lang(try)\nenum Res {\n    OK(u32),\n    ERROR(u32),\n}\n\nfunction outer(input: Res): Res {\n    let unwrapped: u32 = input!;\n    return input;\n}\n",
+    DiagnosticCode::UNUSED_VARIABLE,
+    1,
   );
 }
 
@@ -338,11 +390,13 @@ function parityMatchGuardCanUsePatternBinding(): void {
 }
 
 /// Origin: diagnostics::for_of_over_drop_bearing_record_by_ref_is_clean.
-/// Host expectation: accepted with no diagnostics.
+/// Host expectation: compiles; the host also warns that `item` is unused.
 @test
 function parityForOfOverDropBearingRecordByRef(): void {
-  parityAcceptsSource(
+  parityAcceptsSourceWithLint(
     "@implements(Drop)\nrecord Owned {\n    public id: i32;\n    drop(&mut self): void { return; }\n}\n\nrecord Wrapper {\n    public inner: Owned;\n}\n\nfunction consume(items: Wrapper[2]): void {\n    for (let item: &Wrapper of items) {\n        return;\n    }\n}\n\nfunction main(): i32 {\n    return 0;\n}\n",
+    DiagnosticCode::UNUSED_VARIABLE,
+    1,
   );
 }
 
@@ -377,17 +431,21 @@ function parityBorrowInsideLetElseElseBlock(): void {
 /// Host expectation: accepted with no diagnostics.
 @test
 function parityValidBorrows(): void {
-  parityAcceptsSource(
+  parityAcceptsSourceWithLint(
     "// Test: Valid borrowing patterns\n\nfunction modify(x: &mut i32): void {\n    *x == *x + 1;\n    return;\n}\n\nfunction read(x: &i32): i32 {\n    return *x;\n}\n\nfunction main(): void {\n    let mut value: i32 = 10;\n    modify(&mut value);\n    let result: i32 = read(&value);\n    return;\n}\n",
+    DiagnosticCode::UNUSED_VARIABLE,
+    1,
   );
 }
 
 /// Origin: golden_ok::widening_implicit_u8_to_u32.
-/// Host expectation: accepted with no diagnostics.
+/// Host expectation: compiles; the host also warns that `b` is unused.
 @test
 function parityWideningImplicitU8ToU32(): void {
-  parityAcceptsSource(
+  parityAcceptsSourceWithLint(
     "function main(): void {\n    let a: u8 = 10;\n    let b: u32 = a;  // Widening u8 -> u32\n    return;\n}\n",
+    DiagnosticCode::UNUSED_VARIABLE,
+    1,
   );
 }
 
