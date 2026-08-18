@@ -437,6 +437,7 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       callExprId: Ast::ExpressionId,
       call: &Ast::Expression::Call,
+      expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
       // Branch 1: `expr.method(args)` — dispatches on the callee's AST shape
       // alone (MemberAccess nodes never carry a resolver ref, ADR-B7), so this
@@ -542,6 +543,7 @@ export namespace Analyzer {
             callExprId,
             call,
             &constructor,
+            expected,
           );
         }
       }
@@ -613,12 +615,66 @@ export namespace Analyzer {
       );
     }
 
+    /// The type arguments a generic enum's variant construction is built with,
+    /// inferred from the expected type.
+    ///
+    /// Only an `expected` that alias-resolves to a `Type::Instance` naming this exact
+    /// enum contributes anything; every other case yields no arguments and leaves the
+    /// payload types unsubstituted, which the ordinary per-argument comparison then
+    /// reports. This mirrors the reference analyzer, which infers variant type
+    /// arguments from the expected type and from nowhere else.
+    function inferVariantTypeArguments(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      constructor: &Analyzer::Typecheck::VariantConstructor,
+      expected: Option<Analyzer::TypeId>,
+    ): Vector<Analyzer::TypeId> {
+      if (constructor.typeParamSymbols.length() == 0) {
+        return Vector::new<Analyzer::TypeId>();
+      }
+
+      let Option::SOME(expectedType) = expected else {
+        return Vector::new<Analyzer::TypeId>();
+      };
+
+      let resolvedExpected: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
+      if (resolvedExpected.cycleAlias.isSome()) {
+        return Vector::new<Analyzer::TypeId>();
+      }
+
+      let Option::SOME(resolvedExpectedNode) = typeStore.get(resolvedExpected.typeId) else {
+        return Vector::new<Analyzer::TypeId>();
+      };
+
+      match (resolvedExpectedNode) {
+        Analyzer::Type::Instance(instance) -> {
+          if (instance.definition.raw() != constructor.enumDefId.raw()) {
+            return Vector::new<Analyzer::TypeId>();
+          }
+
+          if (instance.typeArguments.length() != constructor.typeParamSymbols.length()) {
+            return Vector::new<Analyzer::TypeId>();
+          }
+
+          return Analyzer::Typecheck::copyTypeIdVector(&instance.typeArguments);
+        },
+        _ -> {
+          return Vector::new<Analyzer::TypeId>();
+        },
+      };
+
+      @panic("unreachable: inferVariantTypeArguments match did not return");
+    }
+
     /// Typecheck `Enum::Variant(args)`.
     ///
-    /// The variant's declared payload types play the role of parameter types:
-    /// arity comes from the payload length and the expression's type is the
-    /// owning enum. Generic enums are out of scope — their payload types are
-    /// still type parameters here and there is no inference to bind them.
+    /// The variant's declared payload types play the role of parameter types: arity
+    /// comes from the payload length and the expression's type is the owning enum.
+    /// For a generic enum the payload types still mention the enum's type parameters,
+    /// so they are substituted with whatever the expected type supplies before the
+    /// arguments are compared, and the construction produces the corresponding
+    /// instance. With nothing to infer from, the payload types stay as written and a
+    /// concrete argument is reported against them, which is what the reference does.
     function checkVariantConstructionCall(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -629,25 +685,34 @@ export namespace Analyzer {
       callExprId: Ast::ExpressionId,
       call: &Ast::Expression::Call,
       constructor: &Analyzer::Typecheck::VariantConstructor,
+      expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
-      if (constructor.generic) {
-        Analyzer::Typecheck::emitUnsupported(state, call.span, "generic enum variant construction");
-        return Option::NONE;
-      }
-
       if (call.typeArguments.length() > 0) {
         Analyzer::Typecheck::emitUnsupported(state, call.span, "type arguments on enum variant construction");
         return Option::NONE;
       }
 
-      Analyzer::Typecheck::recordExprType(state, call.callee, constructor.enumType);
+      let typeArguments: Vector<Analyzer::TypeId> = Analyzer::Typecheck::inferVariantTypeArguments(
+        defStore,
+        typeStore,
+        constructor,
+        expected,
+      );
+
+      let mut constructedType: Analyzer::TypeId = constructor.enumType;
+      if (typeArguments.length() > 0) {
+        let mut typeStoreInstanceRef: &mut Analyzer::TypeStore = typeStore;
+        constructedType = typeStoreInstanceRef.instance(constructor.enumDefId, Analyzer::Typecheck::copyTypeIdVector(&typeArguments));
+      }
+
+      Analyzer::Typecheck::recordExprType(state, call.callee, constructedType);
 
       let expectedArity: u64 = constructor.payload.length();
 
       if (call.arguments.length() != expectedArity) {
         Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), expectedArity);
-        Analyzer::Typecheck::recordExprType(state, callExprId, constructor.enumType);
-        return Option::SOME(constructor.enumType);
+        Analyzer::Typecheck::recordExprType(state, callExprId, constructedType);
+        return Option::SOME(constructedType);
       }
 
       let mut index: u64 = 0;
@@ -658,10 +723,11 @@ export namespace Analyzer {
           continue;
         };
 
-        let expectedType: Option<Analyzer::TypeId> = match (constructor.payload.get(index)) {
-          Option::SOME(payloadType) -> Option::SOME(*payloadType),
-          Option::NONE -> Option::NONE,
-        };
+        let mut expectedType: Option<Analyzer::TypeId> = Option::NONE;
+        if (let Option::SOME(payloadType) = constructor.payload.get(index)) {
+          let mut typeStoreSubstituteRef: &mut Analyzer::TypeStore = typeStore;
+          expectedType = Option::SOME(typeStoreSubstituteRef.substitute(*payloadType, &constructor.typeParamSymbols, &typeArguments));
+        }
 
         let actualOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
           state,
@@ -674,10 +740,10 @@ export namespace Analyzer {
           expectedType,
         );
 
-        if (let Option::SOME(expected) = expectedType) {
+        if (let Option::SOME(expectedPayload) = expectedType) {
           if (let Option::SOME(actual) = actualOpt) {
-            if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, expected, actual)) {
-              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, expected, actual);
+            if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, expectedPayload, actual)) {
+              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, expectedPayload, actual);
             }
           }
         }
@@ -685,8 +751,8 @@ export namespace Analyzer {
         index += 1;
       }
 
-      Analyzer::Typecheck::recordExprType(state, callExprId, constructor.enumType);
-      return Option::SOME(constructor.enumType);
+      Analyzer::Typecheck::recordExprType(state, callExprId, constructedType);
+      return Option::SOME(constructedType);
     }
 
     /// Typecheck a call whose callee is a local holding a function value.
@@ -2395,6 +2461,7 @@ export namespace Analyzer {
             resolvedBodies,
             exprId,
             &call,
+            expected,
           );
         },
         Ast::Expression::Node::Binary(b) -> {

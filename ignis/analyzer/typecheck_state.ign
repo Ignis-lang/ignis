@@ -2964,6 +2964,43 @@ export namespace Analyzer {
       public payload: Vector<Analyzer::TypeId>;
       public enumType: Analyzer::TypeId;
       public generic: boolean;
+      /// The owning enum, needed to build the `Type::Instance` a generic
+      /// construction produces.
+      public enumDefId: Analyzer::DefinitionId;
+      /// Interned names of the owning enum's type parameters, in declaration
+      /// order. Empty for a non-generic enum.
+      public typeParamSymbols: Vector<Analyzer::SymbolId>;
+    }
+
+    /// Interned names of an enum's declared type parameters, in declaration order.
+    ///
+    /// Lives here rather than beside the callee-side equivalent in `typecheck_exprs`
+    /// because `typecheck.ign` merges the typecheck files in import order and this file
+    /// comes first, so it cannot reach anything declared there.
+    function enumTypeParamSymbols(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeParams: &Vector<Analyzer::DefinitionId>,
+    ): Vector<Analyzer::SymbolId> {
+      let mut symbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut index: u64 = 0;
+
+      while (index < typeParams.length()) {
+        let Option::SOME(typeParamDefId) = typeParams.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        match (defStore.get(*typeParamDefId)) {
+          Option::SOME(Analyzer::Definition::TypeParam(typeParam)) -> {
+            symbols.push(typeParam.name);
+          },
+          _ -> {},
+        };
+
+        index += 1;
+      }
+
+      return symbols;
     }
 
     /// Variant constructor view of `defId`, or `NONE` when it is not a variant
@@ -2988,11 +3025,13 @@ export namespace Analyzer {
 
       let mut enumTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
       let mut generic: boolean = false;
+      let mut typeParamSymbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
 
       if (let Option::SOME(ownerDef) = defStore.get(owner)) {
         if (let Analyzer::Definition::Enum(enumDef) = ownerDef) {
           enumTypeOpt = Option::SOME(enumDef.typeId);
           generic = enumDef.typeParams.length() > 0;
+          typeParamSymbols = Analyzer::Typecheck::enumTypeParamSymbols(defStore, &enumDef.typeParams);
         }
       }
 
@@ -3004,6 +3043,8 @@ export namespace Analyzer {
         payload: payload,
         enumType: enumType,
         generic: generic,
+        enumDefId: owner,
+        typeParamSymbols: typeParamSymbols,
       });
     }
 
