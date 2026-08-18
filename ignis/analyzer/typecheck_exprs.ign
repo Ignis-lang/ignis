@@ -804,6 +804,49 @@ export namespace Analyzer {
       return Option::SOME(returnType);
     }
 
+    /// Resolve the type arguments written at a call site or a record initializer.
+    ///
+    /// `NONE` means one of them names something this pass cannot resolve to a type, and
+    /// is reported before returning. The reference analyzer substitutes its error type
+    /// for such an argument and carries on; with no error type to name, refusing outright
+    /// is the honest equivalent, the same choice `inferTypeArguments` already documents.
+    function resolveWrittenTypeArguments(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      span: SourceSpan,
+      typeArgumentIds: &Vector<Ast::TypeId>,
+    ): Option<Vector<Analyzer::TypeId>> {
+      let mut resolvedArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < typeArgumentIds.length()) {
+        let Option::SOME(annotationId) = typeArgumentIds.get(index) else {
+          Analyzer::Typecheck::emitUnsupported(state, span, "unresolved type arguments");
+          return Option::NONE;
+        };
+
+        let resolvedOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::resolveLocalAnnotation(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          *annotationId,
+        );
+        let Option::SOME(resolved) = resolvedOpt else {
+          Analyzer::Typecheck::emitUnsupported(state, span, "unsupported type argument");
+          return Option::NONE;
+        };
+
+        resolvedArguments.push(resolved);
+        index += 1;
+      }
+
+      return Option::SOME(resolvedArguments);
+    }
+
     /// Resolve the call site's explicit type arguments and substitute them through a
     /// callee's declared signature.
     ///
@@ -821,30 +864,17 @@ export namespace Analyzer {
       paramSymbols: &Vector<Analyzer::SymbolId>,
       signature: &Analyzer::Typecheck::FunctionSignature,
     ): Option<Analyzer::Typecheck::CalleeSignature> {
-      let mut typeArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
-      let mut typeArgIndex: u64 = 0;
-
-      while (typeArgIndex < call.typeArguments.length()) {
-        let Option::SOME(annotationId) = call.typeArguments.get(typeArgIndex) else {
-          Analyzer::Typecheck::emitUnsupported(state, call.span, "unresolved type arguments");
-          return Option::NONE;
-        };
-
-        let resolvedOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::resolveLocalAnnotation(
-          defStore,
-          typeStore,
-          symbols,
-          module,
-          *annotationId,
-        );
-        let Option::SOME(resolved) = resolvedOpt else {
-          Analyzer::Typecheck::emitUnsupported(state, call.span, "unsupported type argument");
-          return Option::NONE;
-        };
-
-        typeArguments.push(resolved);
-        typeArgIndex += 1;
-      }
+      let Option::SOME(typeArguments) = Analyzer::Typecheck::resolveWrittenTypeArguments(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        call.span,
+        &call.typeArguments,
+      ) else {
+        return Option::NONE;
+      };
 
       let mut specializedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
       let mut paramIndex: u64 = 0;
@@ -1763,6 +1793,59 @@ export namespace Analyzer {
     /// an empty result without emitting any diagnostic; a resulting arity
     /// mismatch is left to `TypeStore.substitute`'s own passthrough and the
     /// ordinary per-field type comparison.
+    /// The type arguments a record initializer is built with: the ones written at the
+    /// initializer when there are any, otherwise the ones inferred from the expected type.
+    ///
+    /// `NONE` means a written argument could not be resolved and was reported; the
+    /// initializer has no type to produce.
+    ///
+    /// Two deliberate divergences from the reference analyzer, both of which stop a
+    /// malformed `Type::Instance` from being built. Written arguments on a record that
+    /// declares no type parameters are ignored, matching how a call ignores them on a
+    /// non-generic callee; the reference instead builds an instance of a record that has
+    /// no parameters to fill. A count that disagrees with the declared parameters is
+    /// reported and the written arguments are dropped in favour of inference; the
+    /// reference builds an instance with the wrong number of arguments and leaves the
+    /// consequences to substitution's passthrough.
+    function recordInitTypeArguments(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      value: &Ast::Expression::RecordInit,
+      recordDef: &Analyzer::Typecheck::RequiredRecordDef,
+      expected: Option<Analyzer::TypeId>,
+    ): Option<Vector<Analyzer::TypeId>> {
+      if (value.typeArguments.length() == 0 || recordDef.typeParamSymbols.length() == 0) {
+        return Option::SOME(Analyzer::Typecheck::inferRecordInitTypeArguments(defStore, typeStore, recordDef, expected));
+      }
+
+      let Option::SOME(writtenArguments) = Analyzer::Typecheck::resolveWrittenTypeArguments(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        value.span,
+        &value.typeArguments,
+      ) else {
+        return Option::NONE;
+      };
+
+      if (writtenArguments.length() != recordDef.typeParamSymbols.length()) {
+        Analyzer::Typecheck::emitTypeArgumentCountMismatch(
+          state,
+          value.span,
+          writtenArguments.length(),
+          recordDef.typeParamSymbols.length(),
+        );
+        return Option::SOME(Analyzer::Typecheck::inferRecordInitTypeArguments(defStore, typeStore, recordDef, expected));
+      }
+
+      return Option::SOME(writtenArguments);
+    }
+
     function inferRecordInitTypeArguments(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
@@ -1813,11 +1896,6 @@ export namespace Analyzer {
       value: &Ast::Expression::RecordInit,
       expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
-      if (value.typeArguments.length() > 0) {
-        Analyzer::Typecheck::emitUnsupported(state, value.span, "generic record initializers");
-        return Option::NONE;
-      }
-
       let pathTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
         state,
         defStore,
@@ -1843,7 +1921,19 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      let typeArgs: Vector<Analyzer::TypeId> = Analyzer::Typecheck::inferRecordInitTypeArguments(defStore, typeStore, &recordDef, expected);
+      let typeArgsOpt: Option<Vector<Analyzer::TypeId>> = Analyzer::Typecheck::recordInitTypeArguments(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        value,
+        &recordDef,
+        expected,
+      );
+      let Option::SOME(typeArgs) = typeArgsOpt else {
+        return Option::NONE;
+      };
 
       let mut seenFieldNames: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
       let mut fieldIndex: u64 = 0;

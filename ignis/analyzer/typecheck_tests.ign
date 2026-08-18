@@ -3160,8 +3160,13 @@ function typecheckRecordInitRejectsMismatchedFieldType(): void {
   assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `boolean`, found `i32`");
 }
 
+/// Scenario: `Box<i32> { value: 1 }` on `record Box<T> { value: T }` in
+/// statement position, where no expected type exists. The written type argument
+/// binds `T`, so the field is checked against `i32` and the initializer knows
+/// what it built without any expectation to infer from.
+/// Spec: IGN-135 — explicit record initializer type arguments.
 @test
-function typecheckRecordInitRejectsExplicitTypeArguments(): void {
+function typecheckRecordInitAcceptsExplicitTypeArguments(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -3179,7 +3184,8 @@ function typecheckRecordInitRejectsExplicitTypeArguments(): void {
   let mut typeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
   typeArguments.push(typecheckAddPathType(&mut module, "i32"));
   let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
-  initFields.push(typecheckRecordInitField("value", typecheckAddIntLiteral(&mut module, 1)));
+  let fieldValue: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  initFields.push(typecheckRecordInitField("value", fieldValue));
   let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, boxPath, typeArguments, initFields);
   let exprStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, initExpr);
   let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
@@ -3200,7 +3206,8 @@ function typecheckRecordInitRejectsExplicitTypeArguments(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support generic record initializers");
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, fieldValue, typeStore.intern(Analyzer::Type::I32));
 }
 
 /// Scenario: a generic record initializer with no explicit type arguments
@@ -3524,14 +3531,12 @@ function typecheckRecordInitWithMismatchedExpectedRecordFallsBackToEmptyArgs(): 
   assertExprType(&output, initExpr, boxPathType);
 }
 
-/// Scenario: explicit type-argument syntax (`value.typeArguments.length() >
-/// 0`) remains rejected with the unchanged Wall A diagnostic even when a
-/// call argument position also supplies a real `expected` type — the check
-/// runs before `expected` is consulted at all.
-/// Spec: generic-record-init — "Explicit type arguments still rejected
-/// regardless of generic-ness".
+/// Scenario: `Box<i32> { value: 1 }` passed where `Box<i32>` is expected. The
+/// written type arguments are used instead of the expectation, and the instance
+/// they build satisfies the parameter type, so nothing is reported.
+/// Spec: IGN-135 — explicit record initializer type arguments.
 @test
-function typecheckRecordInitExplicitTypeArgumentsStillRejectedWithExpectedPresent(): void {
+function typecheckRecordInitExplicitTypeArgumentsAgreeWithExpectedType(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -3594,7 +3599,7 @@ function typecheckRecordInitExplicitTypeArgumentsStillRejectedWithExpectedPresen
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support generic record initializers");
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
 }
 
 /// Scenario (S5 trap): a record-init field value that mismatches the
@@ -13000,4 +13005,100 @@ function typecheckExplicitCallTypeArgumentOnNonGenericCalleeIsIgnored(): void {
 
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
   assertExprType(&output, callExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: two type arguments written for a record that declares one is
+/// reported, and the written arguments are dropped so no instance is built with
+/// the wrong number of them.
+/// Spec: IGN-135 — explicit record initializer type arguments.
+@test
+function typecheckWrittenRecordInitTypeArgumentCountMismatchIsReported(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let mut boxFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  boxFields.push(typecheckAddAnnotatedField(&mut module, "value", tTypeId));
+  let mut boxGenerics: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  boxGenerics.push(typecheckGenericParam("T"));
+  typecheckAddRecordItem(&mut module, "Box", boxGenerics, boxFields);
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let booleanTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let boxPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Box");
+  let fieldValue: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("value", fieldValue));
+
+  let mut initTypeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  initTypeArguments.push(i32TypeId);
+  initTypeArguments.push(booleanTypeId);
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, boxPath, initTypeArguments, initFields);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, initExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::TYPE_ARGUMENT_COUNT_MISMATCH);
+}
+
+/// Scenario: a type argument written on a record that declares none has nothing
+/// to bind, so it is ignored and the initializer keeps the plain record type
+/// rather than becoming an instance of a record with no parameters to fill.
+/// Spec: IGN-135 — explicit record initializer type arguments.
+@test
+function typecheckWrittenRecordInitTypeArgumentOnNonGenericRecordIsIgnored(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let mut pointFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  pointFields.push(typecheckAddAnnotatedField(&mut module, "x", i32TypeId));
+  typecheckAddRecordItem(&mut module, "Point", Vector::new<Ast::GenericParam>(), pointFields);
+
+  let pointPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "Point");
+  let fieldValue: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("x", fieldValue));
+
+  let mut initTypeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  initTypeArguments.push(i32TypeId);
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(&mut module, pointPath, initTypeArguments, initFields);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, initExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, fieldValue, typeStore.intern(Analyzer::Type::I32));
 }
