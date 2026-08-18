@@ -12300,3 +12300,228 @@ function typecheckUsedCyclicAliasIsReportedExactlyOnce(): void {
   Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::CYCLIC_TYPE_ALIAS), 1);
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
 }
+
+function typecheckAddCallWithTypeArguments(
+  module: &mut Ast::Module,
+  callee: Ast::ExpressionId,
+  typeArguments: Vector<Ast::TypeId>,
+  args: Vector<Ast::ExpressionId>,
+): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Call(Ast::Expression::Call {
+    span: typecheckDummySpan(),
+    callee: callee,
+    typeArguments: typeArguments,
+    arguments: args,
+  }));
+}
+
+/// Scenario: `identity<i32>(1)` on `function identity<T>(value: T): T` binds `T`
+/// to the written type argument, so the call types as `i32` and the argument is
+/// checked against the substituted parameter.
+/// Spec: IGN-135 — explicit call type arguments.
+@test
+function typecheckExplicitCallTypeArgumentSpecializesSignature(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", tTypeId);
+  let mut identityParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  identityParams.push(valueParam);
+
+  let valueUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let identityReturn: Ast::StatementId = typecheckAddReturnExpr(&mut module, valueUse);
+  let mut identityBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  identityBodyStmts.push(identityReturn);
+  let identityBody: Ast::StatementId = typecheckAddBlock(&mut module, identityBodyStmts);
+
+  let mut identityGenerics: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  identityGenerics.push(typecheckGenericParam("T"));
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("identity"),
+    genericParameters: identityGenerics,
+    parameters: identityParams,
+    returnType: Option::SOME(tTypeId),
+    body: identityBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let calleeExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "identity");
+  let argumentExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+
+  let mut callTypeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  callTypeArguments.push(i32TypeId);
+  let mut callArguments: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArguments.push(argumentExpr);
+
+  let callExpr: Ast::ExpressionId = typecheckAddCallWithTypeArguments(
+    &mut module,
+    calleeExpr,
+    callTypeArguments,
+    callArguments,
+  );
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let mainReturn: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut mainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  mainBodyStmts.push(callStmt);
+  mainBodyStmts.push(mainReturn);
+  let mainBody: Ast::StatementId = typecheckAddBlock(&mut module, mainBodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: mainBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, callExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: two type arguments written for a callee that declares one is
+/// reported once, and the arguments are left unchecked so a single mistake does
+/// not also produce a mismatch per argument.
+/// Spec: IGN-135 — explicit call type arguments.
+@test
+function typecheckExplicitCallTypeArgumentCountMismatchIsReported(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let tTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", tTypeId);
+  let mut identityParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  identityParams.push(valueParam);
+
+  let valueUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let identityReturn: Ast::StatementId = typecheckAddReturnExpr(&mut module, valueUse);
+  let mut identityBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  identityBodyStmts.push(identityReturn);
+  let identityBody: Ast::StatementId = typecheckAddBlock(&mut module, identityBodyStmts);
+
+  let mut identityGenerics: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  identityGenerics.push(typecheckGenericParam("T"));
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("identity"),
+    genericParameters: identityGenerics,
+    parameters: identityParams,
+    returnType: Option::SOME(tTypeId),
+    body: identityBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let booleanTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let calleeExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "identity");
+  let argumentExpr: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+
+  let mut callTypeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  callTypeArguments.push(i32TypeId);
+  callTypeArguments.push(booleanTypeId);
+  let mut callArguments: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArguments.push(argumentExpr);
+
+  let callExpr: Ast::ExpressionId = typecheckAddCallWithTypeArguments(
+    &mut module,
+    calleeExpr,
+    callTypeArguments,
+    callArguments,
+  );
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let mainReturn: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut mainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  mainBodyStmts.push(callStmt);
+  mainBodyStmts.push(mainReturn);
+  let mainBody: Ast::StatementId = typecheckAddBlock(&mut module, mainBodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: mainBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::TYPE_ARGUMENT_COUNT_MISMATCH);
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+}
+
+/// Scenario: type arguments written for a callee that declares none have nothing
+/// to bind, and the reference analyzer ignores them rather than reporting, so the
+/// call still checks as an ordinary one.
+/// Spec: IGN-135 — explicit call type arguments.
+@test
+function typecheckExplicitCallTypeArgumentOnNonGenericCalleeIsIgnored(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let plainLiteral: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 7);
+  let plainReturn: Ast::StatementId = typecheckAddReturnExpr(&mut module, plainLiteral);
+  let mut plainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  plainBodyStmts.push(plainReturn);
+  let plainBody: Ast::StatementId = typecheckAddBlock(&mut module, plainBodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("plain"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(i32TypeId),
+    body: plainBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let calleeExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "plain");
+
+  let mut callTypeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  callTypeArguments.push(i32TypeId);
+
+  let callExpr: Ast::ExpressionId = typecheckAddCallWithTypeArguments(
+    &mut module,
+    calleeExpr,
+    callTypeArguments,
+    Vector::new<Ast::ExpressionId>(),
+  );
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+  let mainReturn: Ast::StatementId = typecheckAddReturn(&mut module);
+  let mut mainBodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  mainBodyStmts.push(callStmt);
+  mainBodyStmts.push(mainReturn);
+  let mainBody: Ast::StatementId = typecheckAddBlock(&mut module, mainBodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: mainBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, callExpr, typeStore.intern(Analyzer::Type::I32));
+}

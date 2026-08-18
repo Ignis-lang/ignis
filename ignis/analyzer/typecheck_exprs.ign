@@ -438,17 +438,20 @@ export namespace Analyzer {
       callExprId: Ast::ExpressionId,
       call: &Ast::Expression::Call,
     ): Option<Analyzer::TypeId> {
-      if (call.typeArguments.length() > 0) {
-        Analyzer::Typecheck::emitUnsupported(state, call.span, "generic call type arguments");
-        return Option::NONE;
-      }
-
       // Branch 1: `expr.method(args)` — dispatches on the callee's AST shape
       // alone (MemberAccess nodes never carry a resolver ref, ADR-B7), so this
       // never falls through to `checkExpr(callee)`/`checkMemberAccessExpr`.
       if (let Option::SOME(calleeExpr) = module.expressions.get(call.callee)) {
         if (let Ast::Expression::Node::MemberAccess(ma) = calleeExpr) {
           if (ma.operator == Ast::Expression::AccessOperator::Dot) {
+            // Type arguments written on a method call may belong to the method
+            // or to a generic owner, and telling the two apart needs the
+            // owner's type parameters, which this path never resolves.
+            if (call.typeArguments.length() > 0) {
+              Analyzer::Typecheck::emitUnsupported(state, call.span, "type arguments on method calls");
+              return Option::NONE;
+            }
+
             return Analyzer::Typecheck::checkInstanceMethodCallExpr(
               state,
               defStore,
@@ -483,6 +486,14 @@ export namespace Analyzer {
 
           if (!methodInfo.isStatic) {
             Analyzer::Typecheck::emitDiagnostic(state, call.span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, "instance method calls require a receiver");
+            return Option::NONE;
+          }
+
+          // `Type::staticMethod<T>()` may be specializing the method or its
+          // owning record, and this path carries neither set of type
+          // parameters.
+          if (call.typeArguments.length() > 0) {
+            Analyzer::Typecheck::emitUnsupported(state, call.span, "type arguments on static method calls");
             return Option::NONE;
           }
 
@@ -588,7 +599,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      return Analyzer::Typecheck::checkCallArgumentsAgainstSignature(
+      return Analyzer::Typecheck::checkResolvedFunctionCall(
         state,
         defStore,
         typeStore,
@@ -597,8 +608,8 @@ export namespace Analyzer {
         resolvedBodies,
         callExprId,
         call,
+        functionDefId,
         &signature,
-        0,
       );
     }
 
@@ -621,6 +632,11 @@ export namespace Analyzer {
     ): Option<Analyzer::TypeId> {
       if (constructor.generic) {
         Analyzer::Typecheck::emitUnsupported(state, call.span, "generic enum variant construction");
+        return Option::NONE;
+      }
+
+      if (call.typeArguments.length() > 0) {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "type arguments on enum variant construction");
         return Option::NONE;
       }
 
@@ -688,6 +704,13 @@ export namespace Analyzer {
       call: &Ast::Expression::Call,
       localId: Analyzer::ResolverBodies::LocalId,
     ): Option<Analyzer::TypeId> {
+      // A local holds a concrete function type with no type parameters left to
+      // specialize, so type arguments have nothing to bind to.
+      if (call.typeArguments.length() > 0) {
+        Analyzer::Typecheck::emitUnsupported(state, call.span, "type arguments on calls through local values");
+        return Option::NONE;
+      }
+
       let Option::SOME(binding) = Analyzer::Typecheck::lookupLocalBinding(state, localId) else {
         Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through local values");
         return Option::NONE;
@@ -703,7 +726,40 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      let expectedArity: u64 = signature.params.length();
+      return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        callExprId,
+        call,
+        &signature.params,
+        signature.returnType,
+      );
+    }
+
+    /// Typechecks `call.arguments` against parameter types already flattened to
+    /// `TypeId`s, and records `callExprId`'s type as `returnType`.
+    ///
+    /// Used where the callee's parameters are no longer definitions: a local holding a
+    /// function value, and a generic callee whose signature was specialized from
+    /// explicit type arguments. An arity mismatch is reported and the arguments are
+    /// still checked, so a wrong count does not hide a wrong type as well.
+    function checkCallArgumentsAgainstTypes(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+      paramTypes: &Vector<Analyzer::TypeId>,
+      returnType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let expectedArity: u64 = paramTypes.length();
 
       if (call.arguments.length() != expectedArity) {
         Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), expectedArity);
@@ -717,7 +773,7 @@ export namespace Analyzer {
           continue;
         };
 
-        let expectedParam: Option<Analyzer::TypeId> = match (signature.params.get(argIndex)) {
+        let expectedParam: Option<Analyzer::TypeId> = match (paramTypes.get(argIndex)) {
           Option::SOME(paramType) -> Option::SOME(*paramType),
           Option::NONE -> Option::NONE,
         };
@@ -744,8 +800,180 @@ export namespace Analyzer {
         argIndex += 1;
       }
 
-      Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
-      return Option::SOME(signature.returnType);
+      Analyzer::Typecheck::recordExprType(state, callExprId, returnType);
+      return Option::SOME(returnType);
+    }
+
+    /// Resolve the call site's explicit type arguments and substitute them through a
+    /// callee's declared signature.
+    ///
+    /// `paramSymbols` are the callee's type parameters and must already agree in number
+    /// with `call.typeArguments`. `NONE` means some part of the signature could not be
+    /// specialized — a type argument this pass cannot resolve to a type, or a parameter
+    /// that is not an ordinary variable — and is always reported before returning.
+    function instantiateCallSignature(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      call: &Ast::Expression::Call,
+      paramSymbols: &Vector<Analyzer::SymbolId>,
+      signature: &Analyzer::Typecheck::FunctionSignature,
+    ): Option<Analyzer::Typecheck::CalleeSignature> {
+      let mut typeArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut typeArgIndex: u64 = 0;
+
+      while (typeArgIndex < call.typeArguments.length()) {
+        let Option::SOME(annotationId) = call.typeArguments.get(typeArgIndex) else {
+          Analyzer::Typecheck::emitUnsupported(state, call.span, "unresolved type arguments");
+          return Option::NONE;
+        };
+
+        let resolvedOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::resolveLocalAnnotation(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          *annotationId,
+        );
+        let Option::SOME(resolved) = resolvedOpt else {
+          Analyzer::Typecheck::emitUnsupported(state, call.span, "unsupported type argument");
+          return Option::NONE;
+        };
+
+        typeArguments.push(resolved);
+        typeArgIndex += 1;
+      }
+
+      let mut specializedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < signature.params.length()) {
+        let Option::SOME(paramDefId) = signature.params.get(paramIndex) else {
+          Analyzer::Typecheck::emitUnsupported(state, call.span, "unresolved function parameters");
+          return Option::NONE;
+        };
+
+        let Option::SOME(paramDef) = defStore.get(*paramDefId) else {
+          Analyzer::Typecheck::emitUnsupported(state, call.span, "unresolved function parameters");
+          return Option::NONE;
+        };
+
+        let declaredTypeOpt: Option<Analyzer::TypeId> = match (paramDef) {
+          Analyzer::Definition::Variable(parameter) -> Option::SOME(parameter.declaredType),
+          _ -> Option::NONE,
+        };
+        let Option::SOME(declaredType) = declaredTypeOpt else {
+          Analyzer::Typecheck::emitUnsupported(state, call.span, "non-variable function parameters");
+          return Option::NONE;
+        };
+
+        let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+        specializedParams.push(typeStoreParamRef.substitute(declaredType, paramSymbols, &typeArguments));
+
+        paramIndex += 1;
+      }
+
+      let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
+      let specializedReturn: Analyzer::TypeId = typeStoreReturnRef.substitute(signature.returnType, paramSymbols, &typeArguments);
+
+      return Option::SOME(Analyzer::Typecheck::CalleeSignature {
+        paramTypes: specializedParams,
+        returnType: specializedReturn,
+      });
+    }
+
+    /// Typecheck a direct call to a resolved function, specializing its signature first
+    /// when the call site wrote explicit type arguments.
+    ///
+    /// Type arguments on a callee that declares none are ignored rather than reported,
+    /// matching the reference analyzer. A count that disagrees with the declared type
+    /// parameters is reported and the arguments are left unchecked: every parameter type
+    /// still mentions those type parameters, so checking against them would add one
+    /// mismatch per argument on top of the real mistake. The call still types as the
+    /// declared return type, so the surrounding expression keeps checking.
+    function checkResolvedFunctionCall(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+      functionDefId: Analyzer::DefinitionId,
+      signature: &Analyzer::Typecheck::FunctionSignature,
+    ): Option<Analyzer::TypeId> {
+      if (call.typeArguments.length() == 0) {
+        return Analyzer::Typecheck::checkCallArgumentsAgainstSignature(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          callExprId,
+          call,
+          signature,
+          0,
+        );
+      }
+
+      let paramSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, functionDefId);
+
+      if (paramSymbols.length() == 0) {
+        return Analyzer::Typecheck::checkCallArgumentsAgainstSignature(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          callExprId,
+          call,
+          signature,
+          0,
+        );
+      }
+
+      if (call.typeArguments.length() != paramSymbols.length()) {
+        Analyzer::Typecheck::emitTypeArgumentCountMismatch(
+          state,
+          call.span,
+          call.typeArguments.length(),
+          paramSymbols.length(),
+        );
+        Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
+        return Option::SOME(signature.returnType);
+      }
+
+      let specializedOpt: Option<Analyzer::Typecheck::CalleeSignature> = Analyzer::Typecheck::instantiateCallSignature(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        call,
+        &paramSymbols,
+        signature,
+      );
+      let Option::SOME(specialized) = specializedOpt else {
+        return Option::NONE;
+      };
+
+      return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        callExprId,
+        call,
+        &specialized.paramTypes,
+        specialized.returnType,
+      );
     }
 
     /// Typechecks `call.arguments` against `signature.params[firstParamIndex..]`
@@ -3821,9 +4049,10 @@ export namespace Analyzer {
     /// A callee's parameter types and result, flattened out of whichever form it came in.
     ///
     /// A resolved function carries its parameters as definitions and a local holding a
-    /// function value carries them as types; the pipe cares about neither distinction, so
-    /// both are reduced to the same shape before arity and types are checked.
-    record PipeSignature {
+    /// function value carries them as types; neither the pipe nor explicit type-argument
+    /// specialization cares about that distinction, so both are reduced to the same shape
+    /// before arity and types are checked.
+    record CalleeSignature {
       public paramTypes: Vector<Analyzer::TypeId>;
       public returnType: Analyzer::TypeId;
     }
@@ -3884,7 +4113,7 @@ export namespace Analyzer {
       paramTypes: &Vector<Analyzer::TypeId>,
       returnType: Analyzer::TypeId,
       leftType: Analyzer::TypeId,
-    ): Option<Analyzer::Typecheck::PipeSignature> {
+    ): Option<Analyzer::Typecheck::CalleeSignature> {
       let paramSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, defId);
 
       if (paramSymbols.length() == 0) {
@@ -3924,7 +4153,7 @@ export namespace Analyzer {
       let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
       let specializedReturn: Analyzer::TypeId = typeStoreReturnRef.substitute(returnType, &paramSymbols, &typeArguments);
 
-      return Option::SOME(Analyzer::Typecheck::PipeSignature {
+      return Option::SOME(Analyzer::Typecheck::CalleeSignature {
         paramTypes: specializedParams,
         returnType: specializedReturn,
       });
@@ -3944,7 +4173,7 @@ export namespace Analyzer {
       span: SourceSpan,
       calleeExprId: Ast::ExpressionId,
       leftType: Analyzer::TypeId,
-    ): Option<Analyzer::Typecheck::PipeSignature> {
+    ): Option<Analyzer::Typecheck::CalleeSignature> {
       let Option::SOME(resolved) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, calleeExprId) else {
         return Option::NONE;
       };
@@ -4000,7 +4229,7 @@ export namespace Analyzer {
             return Option::SOME(specialized);
           }
 
-          return Option::SOME(Analyzer::Typecheck::PipeSignature {
+          return Option::SOME(Analyzer::Typecheck::CalleeSignature {
             paramTypes: paramTypes,
             returnType: signature.returnType,
           });
@@ -4031,7 +4260,7 @@ export namespace Analyzer {
             paramIndex += 1;
           }
 
-          return Option::SOME(Analyzer::Typecheck::PipeSignature {
+          return Option::SOME(Analyzer::Typecheck::CalleeSignature {
             paramTypes: paramTypes,
             returnType: functionType.returnType,
           });
