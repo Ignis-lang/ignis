@@ -183,6 +183,20 @@ export namespace Analyzer {
       public localStack: Analyzer::ResolverBodies::LocalStack;
       public typeParamScope: Analyzer::Resolver::TypeParamScope;
 
+      /// Or-pattern binding merge region (ADR-B10).
+      ///
+      /// `orMergeDepth` counts the enclosing `Pattern::Node::Or` nodes currently being
+      /// walked; `orMergeMark` is the `localStack.names` length captured when the
+      /// *outermost* of them was entered. While the depth is non-zero, a `Binding` whose
+      /// name is already bound at or above the mark reuses that binding's `LocalId`
+      /// instead of allocating a new one, so `Ok(x) | Err(x)` yields one `x`.
+      ///
+      /// The mark is the outermost or's, not the innermost's, so `A(x) | (B(x) | C(x))`
+      /// still merges every `x`. Bindings below the mark belong to an enclosing scope or
+      /// to an earlier position in the same pattern and are never merged into.
+      public orMergeDepth: u64;
+      public orMergeMark: u64;
+
       /// Lambdas currently being walked, outermost first. Parallel vectors: the expression
       /// that opened the frame, the local count at that moment, and where the frame's
       /// captures start in `pendingCaptures`.
@@ -507,6 +521,61 @@ export namespace Analyzer {
       return lid;
     }
 
+    /// Bind `sym` for a pattern binding site, merging with the enclosing or-pattern.
+    ///
+    /// Outside an or-pattern this is plain `bindLocal`. Inside one, a name a previous
+    /// alternative already introduced resolves to that same `LocalId` and no second
+    /// entry is pushed, which is what makes `Ok(x) | Err(x)` one binding rather than
+    /// two. Bindings below `orMergeMark` are out of the region and are shadowed as
+    /// usual instead of merged.
+    function bindPatternLocal(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      sym: Analyzer::SymbolId,
+    ): Analyzer::ResolverBodies::LocalId {
+      if (state.orMergeDepth == 0) {
+        return Analyzer::ResolverBodies::bindLocal(state, sym);
+      }
+
+      let existing: Option<Analyzer::ResolverBodies::LocalId> = Analyzer::ResolverBodies::lookupLocalSince(
+        &state.localStack,
+        sym,
+        state.orMergeMark,
+      );
+
+      if (let Option::SOME(lid) = existing) {
+        return lid;
+      }
+
+      return Analyzer::ResolverBodies::bindLocal(state, sym);
+    }
+
+    /// Enter an or-pattern binding merge region.
+    ///
+    /// Only the outermost or-pattern sets the mark: a nested one keeps the outer mark so
+    /// `A(x) | (B(x) | C(x))` merges every `x` into a single binding.
+    function enterOrMergeRegion(state: &mut Analyzer::ResolverBodies::ResolverBodiesState): void {
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+
+      if (stateRef.orMergeDepth == 0) {
+        stateRef.orMergeMark = stateRef.localStack.names.length();
+      }
+
+      stateRef.orMergeDepth += 1;
+    }
+
+    /// Leave an or-pattern binding merge region opened by `enterOrMergeRegion`.
+    function exitOrMergeRegion(state: &mut Analyzer::ResolverBodies::ResolverBodiesState): void {
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+
+      if (stateRef.orMergeDepth > 0) {
+        stateRef.orMergeDepth -= 1;
+      }
+
+      if (stateRef.orMergeDepth == 0) {
+        stateRef.orMergeMark = 0;
+      }
+    }
+
     /// Open a capture frame for the lambda `exprId` is on.
     ///
     /// Call after `pushScope` and before the parameters are bound, so parameters land above
@@ -702,6 +771,41 @@ export namespace Analyzer {
       let mut i: u64 = n;
 
       while (i > 0) {
+        i -= 1;
+
+        let Option::SOME(stored) = stack.names.get(i) else {
+          continue;
+        };
+
+        if (stored.raw() == sym.raw()) {
+          let Option::SOME(lid) = stack.locals.get(i) else {
+            continue;
+          };
+
+          return Option::SOME(Analyzer::ResolverBodies::LocalId {
+            enclosingFn: lid.enclosingFn,
+            index: lid.index,
+          });
+        }
+      }
+
+      return Option::NONE;
+    }
+
+    /// Reverse scan of the local stack for `sym`, stopping at `mark`.
+    ///
+    /// Only entries at index `mark` or above are considered, so a hit is guaranteed to
+    /// come from the region the caller opened rather than from an enclosing scope. Used
+    /// by the or-pattern binding merge to decide whether an alternative re-binds a name
+    /// a previous alternative already introduced.
+    function lookupLocalSince(
+      stack: &Analyzer::ResolverBodies::LocalStack,
+      sym: Analyzer::SymbolId,
+      mark: u64,
+    ): Option<Analyzer::ResolverBodies::LocalId> {
+      let mut i: u64 = stack.names.length();
+
+      while (i > mark) {
         i -= 1;
 
         let Option::SOME(stored) = stack.names.get(i) else {
@@ -1679,13 +1783,15 @@ export namespace Analyzer {
 
     /// Resolve a single pattern node, introducing bindings into the current scope.
     ///
-    /// - `Binding`: interns the name, allocates a LocalId, records in side-table.
+    /// - `Binding`: interns the name, allocates a LocalId, records in side-table. Inside
+    ///   an or-pattern it reuses the LocalId a previous alternative gave the same name.
     /// - `Wildcard`: no-op.
     /// - `Literal`: no-op (constant value, not a name lookup — REQ-C3).
     /// - `Path`: resolve constructor (1-seg → Unresolved; 2-seg → Enum::Variant).
     /// - `Tuple`: recurse into each element.
-    /// - `Or`: walk each alternative independently, resetting bindings between arms.
-    ///   TODO(or-pattern-binding-merge).
+    /// - `Or`: walk every alternative into one merge region, so a name bound by more
+    ///   than one alternative resolves to a single binding and stays visible after the
+    ///   pattern. See `orMergeDepth` / `orMergeMark` on `ResolverBodiesState`.
     function walkPattern(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1701,7 +1807,7 @@ export namespace Analyzer {
         Ast::Pattern::Node::Binding(b) -> {
           let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
           let sym: Analyzer::SymbolId = symbolsRef.intern(b.name.toStr());
-          let lid: Analyzer::ResolverBodies::LocalId = Analyzer::ResolverBodies::bindLocal(state, sym);
+          let lid: Analyzer::ResolverBodies::LocalId = Analyzer::ResolverBodies::bindPatternLocal(state, sym);
           Analyzer::ResolverBodies::recordPatternRef(
             state,
             patId,
@@ -1737,11 +1843,11 @@ export namespace Analyzer {
           }
         },
         Ast::Pattern::Node::Or(o) -> {
-          // Walk each alternative independently. Bindings introduced by one
-          // alternative are reset before walking the next (best-effort: typecheck
-          // must enforce binding name parity across arms).
-          // TODO(or-pattern-binding-merge).
-          let mark: u64 = state.localStack.names.length();
+          // Every alternative binds into one merge region rather than into a scratch
+          // frame that is thrown away: a name introduced by one alternative keeps its
+          // LocalId in the others and stays visible in the arm body and guard.
+          Analyzer::ResolverBodies::enterOrMergeRegion(state);
+
           let mut altIndex: u64 = 0;
 
           while (altIndex < o.alternatives.length()) {
@@ -1751,9 +1857,10 @@ export namespace Analyzer {
             };
 
             Analyzer::ResolverBodies::walkPattern(state, defStore, symbols, module, *altPatId);
-            Analyzer::ResolverBodies::truncateLocalStack(&mut state.localStack, mark);
             altIndex += 1;
           }
+
+          Analyzer::ResolverBodies::exitOrMergeRegion(state);
         },
       };
     }
@@ -2887,6 +2994,8 @@ export namespace Analyzer {
           syms: Vector::new<Analyzer::SymbolId>(),
           typeIds: Vector::new<Analyzer::TypeId>(),
         },
+        orMergeDepth: 0,
+        orMergeMark: 0,
         lambdaExprs: Vector::new<u32>(),
         lambdaBoundaries: Vector::new<u32>(),
         lambdaCaptureStarts: Vector::new<u64>(),
