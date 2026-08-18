@@ -11635,14 +11635,13 @@ function typecheckVariantConstructionRejectsWrongArgumentType(): void {
   Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::INVALID_ARGUMENT_TYPE);
 }
 
-/// A generic enum's payload resolves to its type parameter, which construction
-/// has no way to bind: the typechecker has no explicit type arguments and no
-/// inference for them, so the constructor is reported as unsupported rather
-/// than silently typed as the uninstantiated enum. Pinned until generic enum
-/// instantiation lands.
-/// Spec: IGN-127 — variant construction.
+/// A generic enum's payload is declared as its type parameter, and the return
+/// type supplies what that parameter stands for, so the construction binds it
+/// and the payload argument is checked against `u32` rather than against `T`.
+/// The declared payload stays `T`: only the construction is specialized.
+/// Spec: IGN-135 — generic enum variant construction.
 @test
-function typecheckGenericVariantConstructionIsUnsupported(): void {
+function typecheckGenericVariantConstructionBindsFromExpectedType(): void {
   let parsed: ParseOutput = typecheckParseSource(
     "enum Box<T> {\n  SOME(T),\n}\n\nfunction make(): Box<u32> {\n  return Box::SOME(1);\n}\n",
   );
@@ -11653,8 +11652,48 @@ function typecheckGenericVariantConstructionIsUnsupported(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
-  Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::UNSUPPORTED_CONSTRUCT);
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
   Test::assertEq<str>(typecheckVariantPayloadTypeName(&defStore, &typeStore, &symbols, "SOME").toStr(), "T");
+}
+
+/// The payload argument is checked against the *substituted* payload type, so a
+/// value that does not fit what the expected type bound is reported. Without
+/// substitution the comparison would be against the bare type parameter and this
+/// would pass.
+/// Spec: IGN-135 — generic enum variant construction.
+@test
+function typecheckGenericVariantConstructionRejectsMismatchedPayload(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Box<T> {\n  SOME(T),\n}\n\nfunction make(): Box<u32> {\n  return Box::SOME(true);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::INVALID_ARGUMENT_TYPE);
+}
+
+/// With no expected type there is nothing to bind the enum's type parameter to,
+/// so the payload type stays as declared and a concrete argument is reported
+/// against it. This mirrors the reference, which infers variant type arguments
+/// from the expected type and from nowhere else — notably not from the argument.
+/// Spec: IGN-135 — generic enum variant construction.
+@test
+function typecheckGenericVariantConstructionWithoutExpectedKeepsDeclaredPayload(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Box<T> {\n  SOME(T),\n}\n\nfunction make(): void {\n  Box::SOME(1);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::INVALID_ARGUMENT_TYPE);
 }
 
 /// Payload sub-patterns bind the declared payload type, read straight from the
