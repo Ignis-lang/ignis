@@ -1,0 +1,175 @@
+import Test from "std::test";
+
+import DiagnosticBag, SourceFile from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import ParseOutput, Parser from "@compiler::parser";
+
+// ===========================================================================
+// IGN-119 — structural validation behind `@implements(Copy)`
+//
+// The Rust oracle validates a `@implements(Copy)` annotation against the
+// annotated type's components in the typecheck phase
+// (`Typecheck::validate_lang_trait_methods` ->
+// `validate_copy_structural{,_enum}` in `crates/ignis_analyzer/src/typeck.rs`),
+// reporting A0148 per non-Copy record field and A0149 per non-Copy enum
+// variant payload slot. These tests gate the selfhost mirror of that check.
+// ===========================================================================
+
+/// Runs `source` through parse + `analyzeModule` and returns the analyzer bag.
+function copyValidationAnalyze(source: str): DiagnosticBag {
+  let file: SourceFile = SourceFile::create("typecheck_items_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  return output.diagnostics;
+}
+
+/// Number of diagnostics in `bag` carrying `code`.
+function copyValidationCountCode(bag: &DiagnosticBag, code: str): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (String::create(diagnostic.code).equals(code)) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// Message text of the first diagnostic in `bag` carrying `code`.
+function copyValidationFirstMessage(bag: &DiagnosticBag, code: str): String {
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (String::create(diagnostic.code).equals(code)) {
+      return String::create(diagnostic.messageText());
+    }
+
+    index += 1;
+  }
+
+  return String::create("<no-diagnostic>");
+}
+
+/// Scenario: `@implements(Copy)` record with a `@implements(Drop)` field.
+/// Spec: oracle fixture `test_cases/analyzer/lang_traits/copy_noncopy_field.ign`
+/// reports one A0148 naming the offending field.
+@test
+function copyOnRecordWithDropFieldIsRejected(): void {
+  let bag: DiagnosticBag = copyValidationAnalyze(
+    "@implements(Drop)\nrecord Owned {\n  public id: i32;\n}\n\n@implements(Copy)\nrecord Handle {\n  public inner: Owned;\n  public id: i32;\n}\n",
+  );
+
+  Test::assertEq<u64>(copyValidationCountCode(&bag, "A0148"), 1);
+  Test::assertEq<str>(
+    copyValidationFirstMessage(&bag, "A0148").toStr(),
+    "type 'Handle' declares @implements(Copy) but field 'inner' has non-Copy type 'Owned'",
+  );
+}
+
+/// Scenario: `@implements(Copy)` record whose field is a plain record that is
+/// itself structurally non-Copy.
+/// Spec: the oracle answers through `is_copy_with_defs`, which recurses into
+/// nested record fields, so the annotation is rejected transitively.
+@test
+function copyOnRecordWithTransitivelyNonCopyFieldIsRejected(): void {
+  let bag: DiagnosticBag = copyValidationAnalyze(
+    "@implements(Drop)\nrecord Owned {\n  public id: i32;\n}\n\nrecord Wrapper {\n  public inner: Owned;\n}\n\n@implements(Copy)\nrecord Handle {\n  public wrapped: Wrapper;\n}\n",
+  );
+
+  Test::assertEq<u64>(copyValidationCountCode(&bag, "A0148"), 1);
+  Test::assertEq<str>(
+    copyValidationFirstMessage(&bag, "A0148").toStr(),
+    "type 'Handle' declares @implements(Copy) but field 'wrapped' has non-Copy type 'Wrapper'",
+  );
+}
+
+/// Scenario: `@implements(Copy)` record with two non-Copy fields.
+/// Spec: the oracle loops over every field and reports one A0148 each rather
+/// than stopping at the first.
+@test
+function copyOnRecordReportsEveryNonCopyField(): void {
+  let bag: DiagnosticBag = copyValidationAnalyze(
+    "@implements(Drop)\nrecord Owned {\n  public id: i32;\n}\n\n@implements(Copy)\nrecord Handle {\n  public first: Owned;\n  public second: Owned;\n}\n",
+  );
+
+  Test::assertEq<u64>(copyValidationCountCode(&bag, "A0148"), 2);
+}
+
+/// Scenario: `@implements(Copy)` record whose fields are all primitives.
+/// Spec: oracle fixture `test_cases/analyzer/lang_traits/copy_explicit.ign`
+/// accepts the annotation.
+@test
+function copyOnRecordWithPrimitiveFieldsIsAccepted(): void {
+  let bag: DiagnosticBag = copyValidationAnalyze(
+    "@implements(Copy)\nrecord Point {\n  public x: i32;\n  public y: i32;\n}\n",
+  );
+
+  Test::assertEq<u64>(copyValidationCountCode(&bag, "A0148"), 0);
+}
+
+/// Scenario: non-Copy field on a record that carries no `@implements(Copy)`.
+/// Spec: the check is gated on the annotation, so an unannotated record with
+/// the same field stays silent.
+@test
+function nonCopyFieldWithoutCopyAnnotationIsAccepted(): void {
+  let bag: DiagnosticBag = copyValidationAnalyze(
+    "@implements(Drop)\nrecord Owned {\n  public id: i32;\n}\n\nrecord Handle {\n  public inner: Owned;\n}\n",
+  );
+
+  Test::assertEq<u64>(copyValidationCountCode(&bag, "A0148"), 0);
+}
+
+/// Scenario: `@implements(Copy)` enum with a non-Copy variant payload.
+/// Spec: the oracle's `validate_copy_structural_enum` reports A0149 naming the
+/// variant and the zero-based payload slot.
+@test
+function copyOnEnumWithDropPayloadIsRejected(): void {
+  let bag: DiagnosticBag = copyValidationAnalyze(
+    "@implements(Drop)\nrecord Owned {\n  public id: i32;\n}\n\n@implements(Copy)\nenum Slot {\n  EMPTY,\n  FILLED(Owned),\n}\n",
+  );
+
+  Test::assertEq<u64>(copyValidationCountCode(&bag, "A0149"), 1);
+  Test::assertEq<str>(
+    copyValidationFirstMessage(&bag, "A0149").toStr(),
+    "type 'Slot' declares @implements(Copy) but variant 'FILLED' payload 0 has non-Copy type 'Owned'",
+  );
+}
+
+/// Scenario: `@implements(Copy)` enum whose payloads are all primitives.
+/// Spec: the annotation is structurally satisfied, so nothing is reported.
+@test
+function copyOnEnumWithPrimitivePayloadIsAccepted(): void {
+  let bag: DiagnosticBag = copyValidationAnalyze(
+    "@implements(Copy)\nenum Slot {\n  EMPTY,\n  FILLED(i32),\n}\n",
+  );
+
+  Test::assertEq<u64>(copyValidationCountCode(&bag, "A0149"), 0);
+}
