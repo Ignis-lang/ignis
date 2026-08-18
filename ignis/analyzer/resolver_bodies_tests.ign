@@ -2503,6 +2503,464 @@ function resolveBodiesResolvesOrPattern(): void {
 }
 
 // ============================================================
+// IGN-15: or-pattern binding merge
+// ============================================================
+
+/// Declare `enum R { OK(u32), ERR(u32) }` at module root, modelling each
+/// single-slot payload the way the parser does (a `_`-named binding whose
+/// annotation carries the payload type).
+function addResultLikeEnum(module: &mut Ast::Module): void {
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let mut variantIndex: u64 = 0;
+
+  while (variantIndex < 2) {
+    let payloadTypeId: Ast::TypeId = addPathType(module, "u32");
+
+    let mut payloadSlots: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+    payloadSlots.push(addAnnotatedBinding(module, "_", payloadTypeId));
+
+    let mut variantSegments: Vector<String> = Vector::new<String>();
+
+    if (variantIndex == 0) {
+      variantSegments.push(String::create("OK"));
+    } else {
+      variantSegments.push(String::create("ERR"));
+    }
+
+    let mut variantRef: &mut Ast::Module = module;
+    variants.push(variantRef.addPattern(Ast::Pattern::Node::Path(Ast::Pattern::Path {
+      span: bodiesDummySpan(),
+      segments: variantSegments,
+      arguments: payloadSlots,
+    })));
+
+    variantIndex += 1;
+  }
+
+  let mut moduleRef: &mut Ast::Module = module;
+  moduleRef.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: bodiesDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Add a Tuple pattern over the given element sub-patterns.
+function addTuplePattern(
+  module: &mut Ast::Module,
+  elements: Vector<Ast::PatternId>
+): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Tuple(Ast::Pattern::Tuple {
+    span: bodiesDummySpan(),
+    elements: elements,
+  }));
+}
+
+/// Add an Or pattern over the given alternatives.
+function addOrPattern(
+  module: &mut Ast::Module,
+  alternatives: Vector<Ast::PatternId>
+): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Or(Ast::Pattern::Or {
+    span: bodiesDummySpan(),
+    alternatives: alternatives,
+  }));
+}
+
+/// Build `function <fnName>(): void { match 0 { <armPat> -> { <armStmts> } } }`.
+///
+/// Sibling of `addMatchArmFunction`, which always uses an empty arm body. This
+/// one takes the arm body statements so a test can observe how a name used
+/// inside the arm resolves.
+function addMatchArmFunctionWithArmBody(
+  module: &mut Ast::Module,
+  fnName: str,
+  armPat: Ast::PatternId,
+  armStmts: Vector<Ast::StatementId>,
+): void {
+  let scrutinee: Ast::ExpressionId = addIntLiteral(module, 0);
+
+  let mut armBodyRef: &mut Ast::Module = module;
+  let armBodyExpr: Ast::ExpressionId = armBodyRef.addExpression(Ast::Expression::Node::Block(Ast::Expression::Block {
+    span: bodiesDummySpan(),
+    statements: armStmts,
+    tail: Option::NONE,
+  }));
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: armPat,
+    guard: Option::NONE,
+    body: armBodyExpr,
+  });
+
+  let mut matchExprRef: &mut Ast::Module = module;
+  let matchExpr: Ast::ExpressionId = matchExprRef.addExpression(Ast::Expression::Node::Match(Ast::Expression::Match {
+    span: bodiesDummySpan(),
+    scrutinee: scrutinee,
+    arms: arms,
+  }));
+
+  let mut matchStmtRef: &mut Ast::Module = module;
+  let matchStmt: Ast::StatementId = matchStmtRef.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: matchExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(matchStmt);
+  let bodyBlock: Ast::StatementId = addBlock(module, bodyStmts);
+
+  let mut moduleRef: &mut Ast::Module = module;
+  moduleRef.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create(fnName),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Scenario: `R::OK(x) | R::ERR(x)` binds one `x`, shared by both alternatives
+/// and still visible in the arm body.
+///
+/// Spec: IGN-15. Before the merge, each alternative was walked into a scratch
+/// region that was truncated away, so `x` never survived the pattern and the
+/// use in the arm body was reported as an undeclared variable.
+@test
+function resolveBodiesMergesOrPatternBindingIntoOneLocal(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  addResultLikeEnum(&mut module);
+
+  // function f(): void { match 0 { R::OK(x) | R::ERR(x) -> { return x; } } }
+  let okBindPat: Ast::PatternId = addBinding(&mut module, "x");
+  let mut okArgs: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  okArgs.push(okBindPat);
+  let okPat: Ast::PatternId = addPathPattern2(&mut module, "R", "OK", okArgs);
+
+  let errBindPat: Ast::PatternId = addBinding(&mut module, "x");
+  let mut errArgs: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  errArgs.push(errBindPat);
+  let errPat: Ast::PatternId = addPathPattern2(&mut module, "R", "ERR", errArgs);
+
+  let mut alternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  alternatives.push(okPat);
+  alternatives.push(errPat);
+  let orPat: Ast::PatternId = addOrPattern(&mut module, alternatives);
+
+  let xUse: Ast::ExpressionId = addVariable(&mut module, "x");
+  let mut armStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  armStmts.push(addReturnExpr(&mut module, xUse));
+
+  addMatchArmFunctionWithArmBody(&mut module, "f", orPat, armStmts);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let okLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, okBindPat);
+  let errLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, errBindPat);
+  Test::assertEq<u32>(okLid.index, errLid.index);
+  Test::assertEq<u32>(okLid.enclosingFn.raw(), errLid.enclosingFn.raw());
+
+  // The use in the arm body resolves to that same binding.
+  let useLid: Analyzer::ResolverBodies::LocalId = assertLocal(assertExprRef(&output.bodyResolution, xUse));
+  Test::assertEq<u32>(useLid.index, okLid.index);
+  Test::assertEq<u32>(useLid.enclosingFn.raw(), okLid.enclosingFn.raw());
+}
+
+/// Scenario: `(a, x) | (x, b)` merges `x` even though it sits at a different
+/// position in each alternative, and leaves `a` and `b` as their own bindings.
+///
+/// Spec: IGN-15. This is the case the old truncate-per-alternative walk got
+/// silently wrong rather than merely dropping: `x` took the LocalId index of
+/// whichever slot it happened to occupy in each alternative.
+@test
+function resolveBodiesMergesOrPatternBindingAcrossPositions(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { match 0 { (a, x) | (x, b) -> {} } }
+  let aPat: Ast::PatternId = addBinding(&mut module, "a");
+  let xFirstPat: Ast::PatternId = addBinding(&mut module, "x");
+  let mut leftElems: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  leftElems.push(aPat);
+  leftElems.push(xFirstPat);
+  let leftPat: Ast::PatternId = addTuplePattern(&mut module, leftElems);
+
+  let xSecondPat: Ast::PatternId = addBinding(&mut module, "x");
+  let bPat: Ast::PatternId = addBinding(&mut module, "b");
+  let mut rightElems: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  rightElems.push(xSecondPat);
+  rightElems.push(bPat);
+  let rightPat: Ast::PatternId = addTuplePattern(&mut module, rightElems);
+
+  let mut alternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  alternatives.push(leftPat);
+  alternatives.push(rightPat);
+  let orPat: Ast::PatternId = addOrPattern(&mut module, alternatives);
+
+  addMatchArmFunctionWithArmBody(&mut module, "f", orPat, Vector::new<Ast::StatementId>());
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let xFirstLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, xFirstPat);
+  let xSecondLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, xSecondPat);
+  Test::assertEq<u32>(xFirstLid.index, xSecondLid.index);
+
+  let aLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, aPat);
+  let bLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, bPat);
+  Test::assertEq<boolean>(aLid.index != xFirstLid.index, true);
+  Test::assertEq<boolean>(bLid.index != xFirstLid.index, true);
+  Test::assertEq<boolean>(aLid.index != bLid.index, true);
+}
+
+/// Scenario: `(a, x) | ((x, b) | (c, x))` merges every `x` into one binding.
+///
+/// Spec: IGN-15. Pins that the merge region is bounded by the *outermost*
+/// enclosing or-pattern. A region opened per nested or would leave the inner
+/// alternatives unable to see the outer alternative's `x` and bind a second one.
+@test
+function resolveBodiesMergesNestedOrPatternBindings(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let aPat: Ast::PatternId = addBinding(&mut module, "a");
+  let xOuterPat: Ast::PatternId = addBinding(&mut module, "x");
+  let mut outerElems: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  outerElems.push(aPat);
+  outerElems.push(xOuterPat);
+  let outerAlt: Ast::PatternId = addTuplePattern(&mut module, outerElems);
+
+  let xInnerFirstPat: Ast::PatternId = addBinding(&mut module, "x");
+  let bPat: Ast::PatternId = addBinding(&mut module, "b");
+  let mut innerFirstElems: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  innerFirstElems.push(xInnerFirstPat);
+  innerFirstElems.push(bPat);
+  let innerFirstAlt: Ast::PatternId = addTuplePattern(&mut module, innerFirstElems);
+
+  let cPat: Ast::PatternId = addBinding(&mut module, "c");
+  let xInnerSecondPat: Ast::PatternId = addBinding(&mut module, "x");
+  let mut innerSecondElems: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  innerSecondElems.push(cPat);
+  innerSecondElems.push(xInnerSecondPat);
+  let innerSecondAlt: Ast::PatternId = addTuplePattern(&mut module, innerSecondElems);
+
+  let mut innerAlternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  innerAlternatives.push(innerFirstAlt);
+  innerAlternatives.push(innerSecondAlt);
+  let innerOrPat: Ast::PatternId = addOrPattern(&mut module, innerAlternatives);
+
+  let mut outerAlternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  outerAlternatives.push(outerAlt);
+  outerAlternatives.push(innerOrPat);
+  let orPat: Ast::PatternId = addOrPattern(&mut module, outerAlternatives);
+
+  addMatchArmFunctionWithArmBody(&mut module, "f", orPat, Vector::new<Ast::StatementId>());
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let xOuterLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, xOuterPat);
+  let xInnerFirstLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, xInnerFirstPat);
+  let xInnerSecondLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, xInnerSecondPat);
+
+  Test::assertEq<u32>(xInnerFirstLid.index, xOuterLid.index);
+  Test::assertEq<u32>(xInnerSecondLid.index, xOuterLid.index);
+}
+
+/// Scenario: `(x) | (y)` keeps both names bound after the pattern.
+///
+/// Spec: IGN-15. Names that only one alternative introduces still survive the
+/// merge region — the resolver records the union and leaves parity enforcement
+/// to typecheck, matching the Rust reference resolver.
+@test
+function resolveBodiesOrPatternKeepsBindingsFromEveryAlternative(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { match 0 { (x) | (y) -> { return x; return y; } } }
+  let xPat: Ast::PatternId = addBinding(&mut module, "x");
+  let mut leftElems: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  leftElems.push(xPat);
+  let leftPat: Ast::PatternId = addTuplePattern(&mut module, leftElems);
+
+  let yPat: Ast::PatternId = addBinding(&mut module, "y");
+  let mut rightElems: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  rightElems.push(yPat);
+  let rightPat: Ast::PatternId = addTuplePattern(&mut module, rightElems);
+
+  let mut alternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  alternatives.push(leftPat);
+  alternatives.push(rightPat);
+  let orPat: Ast::PatternId = addOrPattern(&mut module, alternatives);
+
+  let xUse: Ast::ExpressionId = addVariable(&mut module, "x");
+  let yUse: Ast::ExpressionId = addVariable(&mut module, "y");
+  let mut armStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  armStmts.push(addReturnExpr(&mut module, xUse));
+  armStmts.push(addReturnExpr(&mut module, yUse));
+
+  addMatchArmFunctionWithArmBody(&mut module, "f", orPat, armStmts);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let xLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, xPat);
+  let yLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, yPat);
+  Test::assertEq<boolean>(xLid.index != yLid.index, true);
+
+  let xUseLid: Analyzer::ResolverBodies::LocalId = assertLocal(assertExprRef(&output.bodyResolution, xUse));
+  let yUseLid: Analyzer::ResolverBodies::LocalId = assertLocal(assertExprRef(&output.bodyResolution, yUse));
+  Test::assertEq<u32>(xUseLid.index, xLid.index);
+  Test::assertEq<u32>(yUseLid.index, yLid.index);
+}
+
+/// Scenario: an or-pattern binding shadows an enclosing local of the same name
+/// instead of merging into it.
+///
+/// Spec: IGN-15 / ADR-B10. The merge only reaches bindings introduced inside
+/// the or-pattern itself, so `let x` outside the match keeps its own LocalId
+/// and the arm sees the pattern's `x`.
+@test
+function resolveBodiesOrPatternBindingShadowsEnclosingLocal(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // function f(): void { let x = 0; match 0 { (x) | (x) -> { return x; } } }
+  let outerXPat: Ast::PatternId = addBinding(&mut module, "x");
+  let outerInit: Ast::ExpressionId = addIntLiteral(&mut module, 0);
+  let letStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: bodiesDummySpan(),
+    pattern: outerXPat,
+    annotation: Option::NONE,
+    value: Option::SOME(outerInit),
+  }));
+
+  let leftXPat: Ast::PatternId = addBinding(&mut module, "x");
+  let mut leftElems: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  leftElems.push(leftXPat);
+  let leftPat: Ast::PatternId = addTuplePattern(&mut module, leftElems);
+
+  let rightXPat: Ast::PatternId = addBinding(&mut module, "x");
+  let mut rightElems: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  rightElems.push(rightXPat);
+  let rightPat: Ast::PatternId = addTuplePattern(&mut module, rightElems);
+
+  let mut alternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  alternatives.push(leftPat);
+  alternatives.push(rightPat);
+  let orPat: Ast::PatternId = addOrPattern(&mut module, alternatives);
+
+  let xUse: Ast::ExpressionId = addVariable(&mut module, "x");
+  let mut armStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  armStmts.push(addReturnExpr(&mut module, xUse));
+
+  let armBodyExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Block(Ast::Expression::Block {
+    span: bodiesDummySpan(),
+    statements: armStmts,
+    tail: Option::NONE,
+  }));
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: orPat,
+    guard: Option::NONE,
+    body: armBodyExpr,
+  });
+
+  let scrutinee: Ast::ExpressionId = addIntLiteral(&mut module, 0);
+  let matchExpr: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::Match(Ast::Expression::Match {
+    span: bodiesDummySpan(),
+    scrutinee: scrutinee,
+    arms: arms,
+  }));
+  let matchStmt: Ast::StatementId = module.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: matchExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(matchStmt);
+  let bodyBlock: Ast::StatementId = addBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create("f"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let outerLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, outerXPat);
+  let leftLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, leftXPat);
+  let rightLid: Analyzer::ResolverBodies::LocalId = assertPatternLocal(&output.bodyResolution, rightXPat);
+
+  // Both alternatives share one binding, distinct from the enclosing `let x`.
+  Test::assertEq<u32>(leftLid.index, rightLid.index);
+  Test::assertEq<boolean>(leftLid.index != outerLid.index, true);
+
+  // The arm body sees the pattern's binding, not the enclosing one.
+  let useLid: Analyzer::ResolverBodies::LocalId = assertLocal(assertExprRef(&output.bodyResolution, xUse));
+  Test::assertEq<u32>(useLid.index, leftLid.index);
+}
+
+// ============================================================
 // W-01: SC-06 — Record destructure in let
 // ============================================================
 
@@ -3944,6 +4402,8 @@ function emptyResolverBodiesState(): Analyzer::ResolverBodies::ResolverBodiesSta
       syms: Vector::new<Analyzer::SymbolId>(),
       typeIds: Vector::new<Analyzer::TypeId>(),
     },
+    orMergeDepth: 0,
+    orMergeMark: 0,
     lambdaExprs: Vector::new<u32>(),
     lambdaBoundaries: Vector::new<u32>(),
     lambdaCaptureStarts: Vector::new<u64>(),
