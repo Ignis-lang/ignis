@@ -2254,77 +2254,7 @@ export namespace Analyzer {
 
       match (expr) {
         Ast::Expression::Node::Literal(literal) -> {
-          match (&literal.value) {
-            Ast::Expression::LiteralValue::Null -> {
-              let Option::SOME(expectedType) = expected else {
-                Analyzer::Typecheck::emitCannotInferNullLiteral(state, literal.span);
-                return Option::NONE;
-              };
-
-              let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
-              let Option::SOME(resolvedNode) = typeStore.get(resolved.typeId) else {
-                Analyzer::Typecheck::emitInvalidNullLiteral(state, typeStore, literal.span, expectedType);
-                return Option::NONE;
-              };
-
-              let Analyzer::Type::Pointer(_) = resolvedNode else {
-                Analyzer::Typecheck::emitInvalidNullLiteral(state, typeStore, literal.span, expectedType);
-                return Option::NONE;
-              };
-
-              Analyzer::Typecheck::recordExprType(state, exprId, expectedType);
-              return Option::SOME(expectedType);
-            },
-            _ -> {},
-          };
-
-          // An integer or float literal adopts the expected type when one is
-          // supplied and the value fits, mirroring the reference analyzer's
-          // coerce_signed/unsigned/float_literal; otherwise the default
-          // literal type stands.
-          if (let Option::SOME(expectedType) = expected) {
-            let resolvedExpected: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
-
-            if (resolvedExpected.cycleAlias.isNone()) {
-              if (let Option::SOME(expectedNode) = typeStore.get(resolvedExpected.typeId)) {
-                match (&literal.value) {
-                  Ast::Expression::LiteralValue::Int(value) -> {
-                    if (Analyzer::Typecheck::isIntegerTypeNode(expectedNode)) {
-                      if (!Analyzer::Typecheck::signedLiteralFits(expectedNode, value)) {
-                        Analyzer::Typecheck::emitIntegerOverflow(state, typeStore, literal.span, expectedType);
-                        return Option::NONE;
-                      }
-
-                      Analyzer::Typecheck::recordExprType(state, exprId, expectedType);
-                      return Option::SOME(expectedType);
-                    }
-                  },
-                  Ast::Expression::LiteralValue::UInt(value) -> {
-                    if (Analyzer::Typecheck::isIntegerTypeNode(expectedNode)) {
-                      if (!Analyzer::Typecheck::unsignedLiteralFits(expectedNode, value)) {
-                        Analyzer::Typecheck::emitIntegerOverflow(state, typeStore, literal.span, expectedType);
-                        return Option::NONE;
-                      }
-
-                      Analyzer::Typecheck::recordExprType(state, exprId, expectedType);
-                      return Option::SOME(expectedType);
-                    }
-                  },
-                  Ast::Expression::LiteralValue::Float(_) -> {
-                    if (Analyzer::Typecheck::isFloatTypeNode(expectedNode)) {
-                      Analyzer::Typecheck::recordExprType(state, exprId, expectedType);
-                      return Option::SOME(expectedType);
-                    }
-                  },
-                  _ -> {},
-                };
-              }
-            }
-          }
-
-          let typeId: Analyzer::TypeId = Analyzer::Typecheck::literalType(typeStore, &literal);
-          Analyzer::Typecheck::recordExprType(state, exprId, typeId);
-          return Option::SOME(typeId);
+          return Analyzer::Typecheck::checkLiteralExprExpected(state, defStore, typeStore, exprId, &literal, expected);
         },
         Ast::Expression::Node::Variable(variable) -> {
           return Analyzer::Typecheck::checkResolvedValueExpr(

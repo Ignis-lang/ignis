@@ -141,6 +141,36 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
     }
 
+    /// Reports a pattern whose shape cannot describe the scrutinee type.
+    /// `got` is a shape description rather than a type name, because the
+    /// pattern side of the comparison has no type of its own.
+    function emitPatternTypeMismatch(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      expected: Analyzer::TypeId,
+      got: str,
+    ): void {
+      let message: String = String::create("pattern type mismatch: expected `")
+        .concat(typeStore.nameOf(expected).toStr())
+        .concat("`, got `")
+        .concat(got)
+        .concat("`");
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
+    }
+
+    function emitOrPatternBindingsDisallowed(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+    ): void {
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::OR_PATTERN_BINDINGS_DISALLOWED,
+        "bindings are not allowed in OR patterns",
+      );
+    }
+
     function emitMatchArmTypeMismatch(
       state: &mut Analyzer::Typecheck::TypecheckState,
       typeStore: &mut Analyzer::TypeStore,
@@ -2384,6 +2414,230 @@ export namespace Analyzer {
       return true;
     }
 
+    /// Reports whether `patternId` introduces any binding. Mirrors the
+    /// reference analyzer's `pattern_has_bindings`; the selfhost AST spells a
+    /// binding as its own `Pattern::Node::Binding`, so unlike the reference
+    /// analyzer no name resolution is needed to tell a binding apart from a
+    /// payload-less enum-variant path.
+    function patternHasBindings(module: &Ast::Module, patternId: Ast::PatternId): boolean {
+      let Option::SOME(pattern) = module.patterns.get(patternId) else {
+        return false;
+      };
+
+      match (pattern) {
+        Ast::Pattern::Node::Binding(_) -> {
+          return true;
+        },
+        Ast::Pattern::Node::Wildcard(_) -> {
+          return false;
+        },
+        Ast::Pattern::Node::Literal(_) -> {
+          return false;
+        },
+        Ast::Pattern::Node::Path(path) -> {
+          return Analyzer::Typecheck::anyPatternHasBindings(module, &path.arguments);
+        },
+        Ast::Pattern::Node::Tuple(tuple) -> {
+          return Analyzer::Typecheck::anyPatternHasBindings(module, &tuple.elements);
+        },
+        Ast::Pattern::Node::Or(orPattern) -> {
+          return Analyzer::Typecheck::anyPatternHasBindings(module, &orPattern.alternatives);
+        },
+      };
+
+      @panic("unreachable: patternHasBindings match did not return");
+    }
+
+    function anyPatternHasBindings(
+      module: &Ast::Module,
+      patterns: &Vector<Ast::PatternId>,
+    ): boolean {
+      let mut index: u64 = 0;
+      while (index < patterns.length()) {
+        let Option::SOME(patternId) = patterns.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (Analyzer::Typecheck::patternHasBindings(module, *patternId)) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Typechecks a literal pattern against the scrutinee type. A literal
+    /// pattern binds nothing, so its only obligation is that its value could
+    /// have the scrutinee's type.
+    ///
+    /// The literal itself goes through `checkLiteralExprExpected`, the same
+    /// path expression position uses, so a literal pattern adopts an integer
+    /// or float scrutinee type and reports overflow exactly as the reference
+    /// analyzer does. The remaining comparison is symmetric — neither side is
+    /// a value being supplied to the other — so it stays on `typesEqual`.
+    function collectLiteralPatternBindings(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pattern: &Ast::Pattern::Literal,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let Option::SOME(expression) = module.expressions.get(pattern.expression) else {
+        return true;
+      };
+
+      // The parser only ever builds a literal pattern around a literal
+      // expression, so anything else is a malformed module rather than a
+      // language construct that needs its own diagnostic.
+      let Ast::Expression::Node::Literal(literal) = expression else {
+        Analyzer::Typecheck::emitUnsupported(state, pattern.span, "non-literal expressions in literal patterns");
+        return false;
+      };
+
+      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkLiteralExprExpected(
+        state,
+        defStore,
+        typeStore,
+        pattern.expression,
+        &literal,
+        Option::SOME(typeId),
+      );
+
+      // A rejected literal (integer overflow, or `null` against a non-pointer)
+      // already reported itself; a second diagnostic would only repeat it.
+      let Option::SOME(actualType) = actualTypeOpt else {
+        return false;
+      };
+
+      if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, pattern.span, typeId, actualType)) {
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, pattern.span, typeId, actualType);
+        return false;
+      }
+
+      return true;
+    }
+
+    /// Typechecks a tuple pattern against the scrutinee type: the scrutinee
+    /// must be a tuple of the same arity, and each sub-pattern binds against
+    /// the element type in the same position.
+    function collectTuplePatternBindings(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      module: &Ast::Module,
+      pattern: &Ast::Pattern::Tuple,
+      typeId: Analyzer::TypeId,
+      mutable: boolean,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+      // Element types are copied out first so the store borrow ends before the
+      // recursive calls, which need the store mutably.
+      let mut elementTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut scrutineeIsTuple: boolean = false;
+
+      if (let Option::SOME(resolvedNode) = typeStore.get(resolved.typeId)) {
+        if (let Analyzer::Type::Tuple(tupleType) = resolvedNode) {
+          scrutineeIsTuple = true;
+
+          let mut elementIndex: u64 = 0;
+          while (elementIndex < tupleType.elements.length()) {
+            let Option::SOME(elementTypeId) = tupleType.elements.get(elementIndex) else {
+              elementIndex += 1;
+              continue;
+            };
+
+            elementTypes.push(*elementTypeId);
+            elementIndex += 1;
+          }
+        }
+      }
+
+      if (!scrutineeIsTuple) {
+        Analyzer::Typecheck::emitPatternTypeMismatch(state, typeStore, pattern.span, typeId, "tuple");
+        return false;
+      }
+
+      if (pattern.elements.length() != elementTypes.length()) {
+        let got: String = String::create("tuple with ").concat(pattern.elements.length()).concat(" elements");
+        Analyzer::Typecheck::emitPatternTypeMismatch(state, typeStore, pattern.span, typeId, got.toStr());
+        return false;
+      }
+
+      let mut index: u64 = 0;
+      while (index < elementTypes.length()) {
+        let Option::SOME(elementPatternId) = pattern.elements.get(index) else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(elementType) = elementTypes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *elementPatternId, *elementType, mutable, pattern.span)) {
+          return false;
+        }
+
+        index += 1;
+      }
+
+      return true;
+    }
+
+    /// Typechecks an or-pattern: every alternative is checked against the same
+    /// scrutinee type.
+    ///
+    /// Alternatives that introduce bindings are rejected. Matching an
+    /// alternative that binds requires the resolver to merge the binding sets
+    /// of every alternative into one, which it does not do yet (IGN-15): it
+    /// walks each alternative and truncates its locals before the next. The
+    /// reference analyzer draws the same line for the same reason, so
+    /// accepting them here would bind names that no alternative can be
+    /// guaranteed to have produced.
+    function collectOrPatternBindings(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      module: &Ast::Module,
+      pattern: &Ast::Pattern::Or,
+      typeId: Analyzer::TypeId,
+      mutable: boolean,
+    ): boolean {
+      let mut accepted: boolean = true;
+
+      if (Analyzer::Typecheck::anyPatternHasBindings(module, &pattern.alternatives)) {
+        Analyzer::Typecheck::emitOrPatternBindingsDisallowed(state, pattern.span);
+        accepted = false;
+      }
+
+      // Every alternative is still checked after a rejected binding set, so a
+      // type error in a later alternative is not hidden by the first problem.
+      let mut index: u64 = 0;
+      while (index < pattern.alternatives.length()) {
+        let Option::SOME(alternativeId) = pattern.alternatives.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *alternativeId, typeId, mutable, pattern.span)) {
+          accepted = false;
+        }
+
+        index += 1;
+      }
+
+      return accepted;
+    }
+
     function collectPatternBindings(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -2443,17 +2697,41 @@ export namespace Analyzer {
             span,
           );
         },
-        Ast::Pattern::Node::Literal(_) -> {
-          Analyzer::Typecheck::emitUnsupported(state, span, "literal patterns");
-          return false;
+        Ast::Pattern::Node::Literal(literal) -> {
+          return Analyzer::Typecheck::collectLiteralPatternBindings(
+            state,
+            defStore,
+            typeStore,
+            module,
+            &literal,
+            typeId,
+          );
         },
-        Ast::Pattern::Node::Tuple(_) -> {
-          Analyzer::Typecheck::emitUnsupported(state, span, "tuple patterns");
-          return false;
+        Ast::Pattern::Node::Tuple(tuple) -> {
+          return Analyzer::Typecheck::collectTuplePatternBindings(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            resolvedBodies,
+            module,
+            &tuple,
+            typeId,
+            mutable,
+          );
         },
-        Ast::Pattern::Node::Or(_) -> {
-          Analyzer::Typecheck::emitUnsupported(state, span, "or patterns");
-          return false;
+        Ast::Pattern::Node::Or(orPattern) -> {
+          return Analyzer::Typecheck::collectOrPatternBindings(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            resolvedBodies,
+            module,
+            &orPattern,
+            typeId,
+            mutable,
+          );
         },
       };
 
@@ -3115,6 +3393,91 @@ export namespace Analyzer {
       };
 
       @panic("unreachable: literalType match did not return");
+    }
+
+    /// Types a literal against an optional expected type and records the
+    /// result for `exprId`.
+    ///
+    /// Shared by expression position (`checkExprExpected`) and literal
+    /// patterns, which the reference analyzer also puts under the same rules:
+    /// an integer or float literal adopts the expected type when the value
+    /// fits, `null` needs a pointer expectation, and everything else keeps its
+    /// default literal type.
+    function checkLiteralExprExpected(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      exprId: Ast::ExpressionId,
+      literal: &Ast::Expression::Literal,
+      expected: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
+      match (&literal.value) {
+        Ast::Expression::LiteralValue::Null -> {
+          let Option::SOME(expectedType) = expected else {
+            Analyzer::Typecheck::emitCannotInferNullLiteral(state, literal.span);
+            return Option::NONE;
+          };
+
+          let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
+          let Option::SOME(resolvedNode) = typeStore.get(resolved.typeId) else {
+            Analyzer::Typecheck::emitInvalidNullLiteral(state, typeStore, literal.span, expectedType);
+            return Option::NONE;
+          };
+
+          let Analyzer::Type::Pointer(_) = resolvedNode else {
+            Analyzer::Typecheck::emitInvalidNullLiteral(state, typeStore, literal.span, expectedType);
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, expectedType);
+          return Option::SOME(expectedType);
+        },
+        _ -> {},
+      };
+
+      if (let Option::SOME(expectedType) = expected) {
+        let resolvedExpected: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
+
+        if (resolvedExpected.cycleAlias.isNone()) {
+          if (let Option::SOME(expectedNode) = typeStore.get(resolvedExpected.typeId)) {
+            match (&literal.value) {
+              Ast::Expression::LiteralValue::Int(value) -> {
+                if (Analyzer::Typecheck::isIntegerTypeNode(expectedNode)) {
+                  if (!Analyzer::Typecheck::signedLiteralFits(expectedNode, value)) {
+                    Analyzer::Typecheck::emitIntegerOverflow(state, typeStore, literal.span, expectedType);
+                    return Option::NONE;
+                  }
+
+                  Analyzer::Typecheck::recordExprType(state, exprId, expectedType);
+                  return Option::SOME(expectedType);
+                }
+              },
+              Ast::Expression::LiteralValue::UInt(value) -> {
+                if (Analyzer::Typecheck::isIntegerTypeNode(expectedNode)) {
+                  if (!Analyzer::Typecheck::unsignedLiteralFits(expectedNode, value)) {
+                    Analyzer::Typecheck::emitIntegerOverflow(state, typeStore, literal.span, expectedType);
+                    return Option::NONE;
+                  }
+
+                  Analyzer::Typecheck::recordExprType(state, exprId, expectedType);
+                  return Option::SOME(expectedType);
+                }
+              },
+              Ast::Expression::LiteralValue::Float(_) -> {
+                if (Analyzer::Typecheck::isFloatTypeNode(expectedNode)) {
+                  Analyzer::Typecheck::recordExprType(state, exprId, expectedType);
+                  return Option::SOME(expectedType);
+                }
+              },
+              _ -> {},
+            };
+          }
+        }
+      }
+
+      let typeId: Analyzer::TypeId = Analyzer::Typecheck::literalType(typeStore, literal);
+      Analyzer::Typecheck::recordExprType(state, exprId, typeId);
+      return Option::SOME(typeId);
     }
 
     function checkResolvedValueExpr(
