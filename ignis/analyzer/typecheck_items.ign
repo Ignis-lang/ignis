@@ -1,8 +1,224 @@
+import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Vector from "std::vector";
 
 export namespace Analyzer {
   namespace Typecheck {
+    /// Resolve a definition name for diagnostics, falling back to a stable
+    /// placeholder when the symbol is not in the table.
+    function copyCheckSymbolText(
+      symbols: &Analyzer::SymbolTable,
+      name: Analyzer::SymbolId
+    ): String {
+      return match (symbols.resolve(name)) {
+        Option::SOME(text) -> String::create(text),
+        Option::NONE -> String::create("<unknown>"),
+      };
+    }
+
+    /// Structural check behind `@implements(Copy)` on a record: every field
+    /// type must itself be Copy. Mirrors the Rust
+    /// `Typecheck::validate_copy_structural`
+    /// (`crates/ignis_analyzer/src/typeck.rs`), which reports one A0148 per
+    /// offending field at the record's declaration span.
+    function checkRecordCopyStructural(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      defId: Analyzer::DefinitionId,
+      span: SourceSpan,
+    ): void {
+      let mut implementsCopy: boolean = false;
+      let mut typeName: String = String::create("");
+      let mut fieldDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(definition) = defStore.get(defId)) {
+        if (let Analyzer::Definition::Record(recordDef) = definition) {
+          implementsCopy = recordDef.implementsCopy;
+          typeName = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, recordDef.name);
+
+          let mut fieldIndex: u64 = 0;
+          while (fieldIndex < recordDef.fields.length()) {
+            let Option::SOME(fieldDefId) = recordDef.fields.get(fieldIndex) else {
+              fieldIndex += 1;
+              continue;
+            };
+
+            fieldDefIds.push(*fieldDefId);
+            fieldIndex += 1;
+          }
+        }
+      }
+
+      if (!implementsCopy) {
+        return;
+      }
+
+      let mut index: u64 = 0;
+      while (index < fieldDefIds.length()) {
+        let Option::SOME(fieldDefId) = fieldDefIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut fieldNameOption: Option<Analyzer::SymbolId> = Option::NONE;
+        let mut fieldTypeOption: Option<Analyzer::TypeId> = Option::NONE;
+
+        if (let Option::SOME(fieldDefinition) = defStore.get(*fieldDefId)) {
+          if (let Analyzer::Definition::Field(fieldDef) = fieldDefinition) {
+            fieldNameOption = Option::SOME(fieldDef.name);
+            fieldTypeOption = Option::SOME(fieldDef.fieldType);
+          }
+        }
+
+        let Option::SOME(fieldName) = fieldNameOption else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(fieldType) = fieldTypeOption else {
+          index += 1;
+          continue;
+        };
+
+        if (Analyzer::Typecheck::isCopyType(state, defStore, typeStore, span, fieldType)) {
+          index += 1;
+          continue;
+        }
+
+        let fieldNameText: String = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, fieldName);
+        let fieldTypeName: String = typeStore.nameOfResolved(fieldType, &*defStore, &*symbols);
+
+        let message: String = String::create("type '")
+          .concat(typeName.toStr())
+          .concat("' declares @implements(Copy) but field '")
+          .concat(fieldNameText.toStr())
+          .concat("' has non-Copy type '")
+          .concat(fieldTypeName.toStr())
+          .concat("'");
+
+        Analyzer::Typecheck::emitDiagnostic(
+          state,
+          span,
+          DiagnosticCode::COPY_ON_NON_COPY_FIELD,
+          message.toStr(),
+        );
+
+        index += 1;
+      }
+    }
+
+    /// Structural check behind `@implements(Copy)` on an enum: every variant
+    /// payload type must itself be Copy. Mirrors the Rust
+    /// `Typecheck::validate_copy_structural_enum`
+    /// (`crates/ignis_analyzer/src/typeck.rs`), which reports one A0149 per
+    /// offending payload slot and names its zero-based index.
+    function checkEnumCopyStructural(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      defId: Analyzer::DefinitionId,
+      span: SourceSpan,
+    ): void {
+      let mut implementsCopy: boolean = false;
+      let mut typeName: String = String::create("");
+      let mut variantDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(definition) = defStore.get(defId)) {
+        if (let Analyzer::Definition::Enum(enumDef) = definition) {
+          implementsCopy = enumDef.implementsCopy;
+          typeName = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, enumDef.name);
+
+          let mut variantIndex: u64 = 0;
+          while (variantIndex < enumDef.variants.length()) {
+            let Option::SOME(variantDefId) = enumDef.variants.get(variantIndex) else {
+              variantIndex += 1;
+              continue;
+            };
+
+            variantDefIds.push(*variantDefId);
+            variantIndex += 1;
+          }
+        }
+      }
+
+      if (!implementsCopy) {
+        return;
+      }
+
+      let mut index: u64 = 0;
+      while (index < variantDefIds.length()) {
+        let Option::SOME(variantDefId) = variantDefIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut variantNameOption: Option<Analyzer::SymbolId> = Option::NONE;
+        let mut payloadTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+        if (let Option::SOME(variantDefinition) = defStore.get(*variantDefId)) {
+          if (let Analyzer::Definition::Variant(variantDef) = variantDefinition) {
+            variantNameOption = Option::SOME(variantDef.name);
+
+            let mut payloadIndex: u64 = 0;
+            while (payloadIndex < variantDef.payload.length()) {
+              let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex) else {
+                payloadIndex += 1;
+                continue;
+              };
+
+              payloadTypes.push(*payloadType);
+              payloadIndex += 1;
+            }
+          }
+        }
+
+        let Option::SOME(variantName) = variantNameOption else {
+          index += 1;
+          continue;
+        };
+        let variantNameText: String = Analyzer::Typecheck::copyCheckSymbolText(&*symbols, variantName);
+
+        let mut slotIndex: u64 = 0;
+        while (slotIndex < payloadTypes.length()) {
+          let Option::SOME(payloadType) = payloadTypes.get(slotIndex) else {
+            slotIndex += 1;
+            continue;
+          };
+          let payloadTypeId: Analyzer::TypeId = *payloadType;
+
+          if (Analyzer::Typecheck::isCopyType(state, defStore, typeStore, span, payloadTypeId)) {
+            slotIndex += 1;
+            continue;
+          }
+
+          let payloadTypeName: String = typeStore.nameOfResolved(payloadTypeId, &*defStore, &*symbols);
+
+          let message: String = String::create("type '")
+            .concat(typeName.toStr())
+            .concat("' declares @implements(Copy) but variant '")
+            .concat(variantNameText.toStr())
+            .concat("' payload ")
+            .concat(String::create(slotIndex).toStr())
+            .concat(" has non-Copy type '")
+            .concat(payloadTypeName.toStr())
+            .concat("'");
+
+          Analyzer::Typecheck::emitDiagnostic(
+            state,
+            span,
+            DiagnosticCode::COPY_ON_NON_COPY_VARIANT_PAYLOAD,
+            message.toStr(),
+          );
+
+          slotIndex += 1;
+        }
+
+        index += 1;
+      }
+    }
+
     function checkFunctionItem(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -278,6 +494,17 @@ export namespace Analyzer {
           );
         },
         Ast::Item::Node::Record(record_) -> {
+          if (let Option::SOME(recordDefId) = Analyzer::Typecheck::lookupItemDef(pass1, pass2, itemId)) {
+            Analyzer::Typecheck::checkRecordCopyStructural(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              recordDefId,
+              record_.span,
+            );
+          }
+
           Analyzer::Typecheck::checkOwnerMethods(
             state,
             defStore,
@@ -291,6 +518,17 @@ export namespace Analyzer {
           );
         },
         Ast::Item::Node::Enum(enum_) -> {
+          if (let Option::SOME(enumDefId) = Analyzer::Typecheck::lookupItemDef(pass1, pass2, itemId)) {
+            Analyzer::Typecheck::checkEnumCopyStructural(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              enumDefId,
+              enum_.span,
+            );
+          }
+
           Analyzer::Typecheck::checkOwnerMethods(
             state,
             defStore,
