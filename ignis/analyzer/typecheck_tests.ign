@@ -110,6 +110,17 @@ function typecheckAddTuplePattern(
   }));
 }
 
+function typecheckAddOrPattern(
+  module: &mut Ast::Module,
+  alternatives: Vector<Ast::PatternId>,
+): Ast::PatternId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addPattern(Ast::Pattern::Node::Or(Ast::Pattern::Or {
+    span: typecheckDummySpan(),
+    alternatives: alternatives,
+  }));
+}
+
 function typecheckAddAnnotatedBinding(
   module: &mut Ast::Module,
   name: str,
@@ -4139,8 +4150,12 @@ function typecheckRecordDestructureRejectsFieldArityMismatch(): void {
   assertSingleDiagnosticCode(&output, DiagnosticCode::PATTERN_ARITY_MISMATCH);
 }
 
+/// Scenario: `let (x): i32 = 1;` destructures a non-tuple scrutinee. A tuple
+/// pattern can only describe a tuple type, so the shape mismatch is reported
+/// against the annotation.
+/// Spec: IGN-136 — typecheck tuple patterns.
 @test
-function typecheckTuplePatternStaysExplicitlyUnsupported(): void {
+function typecheckTuplePatternAgainstNonTupleScrutineeIsRejected(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -4159,7 +4174,7 @@ function typecheckTuplePatternStaysExplicitlyUnsupported(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support tuple patterns");
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "pattern type mismatch: expected `i32`, got `tuple`");
 }
 
 // Phase 9: Method body typecheck traversal (selfhost-methods-binder PR6)
@@ -6005,19 +6020,10 @@ function typecheckMatchStatementBoolMissingFalseArmWarns(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  // Literal patterns are still walled by `collectPatternBindings`
-  // ("literal patterns" unsupported) independently of exhaustiveness — that
-  // wall fires during the arm-binding loop, before exhaustiveness runs.
-  // Since S3 lifted the match wall, only these two diagnostics remain.
-  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
-  let Option::SOME(bindDiagnostic) = output.typecheck.diagnostics.get(0) else {
-    @panic("typecheckMatchStatementBoolMissingFalseArmWarns: missing pattern-bind diagnostic");
-  };
-  Test::assertEq<Severity>(bindDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(bindDiagnostic.code, DiagnosticCode::UNSUPPORTED_CONSTRUCT);
-  Test::assertEq<str>(bindDiagnostic.messageText(), "typecheck does not support literal patterns");
-
-  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
+  // The `true` literal pattern types cleanly against the `boolean` scrutinee
+  // (IGN-136), so the exhaustiveness verdict is the only diagnostic.
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckMatchStatementBoolMissingFalseArmWarns: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
@@ -6062,24 +6068,9 @@ function typecheckMatchStatementBoolBothLiteralsCoveredEmitsNoExhaustivenessDiag
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  // Both arms are literal patterns, so each independently trips the
-  // pre-existing "literal patterns" bind-time wall; exhaustiveness itself
-  // stays silent (bool coverage is complete). Since S3 lifted the match
-  // wall, only these two bind diagnostics remain.
-  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
-  let Option::SOME(firstBindDiagnostic) = output.typecheck.diagnostics.get(0) else {
-    @panic("typecheckMatchStatementBoolBothLiteralsCoveredEmitsNoExhaustivenessDiagnostic: missing first pattern-bind diagnostic");
-  };
-  Test::assertEq<Severity>(firstBindDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(firstBindDiagnostic.code, DiagnosticCode::UNSUPPORTED_CONSTRUCT);
-  Test::assertEq<str>(firstBindDiagnostic.messageText(), "typecheck does not support literal patterns");
-
-  let Option::SOME(secondBindDiagnostic) = output.typecheck.diagnostics.get(1) else {
-    @panic("typecheckMatchStatementBoolBothLiteralsCoveredEmitsNoExhaustivenessDiagnostic: missing second pattern-bind diagnostic");
-  };
-  Test::assertEq<Severity>(secondBindDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(secondBindDiagnostic.code, DiagnosticCode::UNSUPPORTED_CONSTRUCT);
-  Test::assertEq<str>(secondBindDiagnostic.messageText(), "typecheck does not support literal patterns");
+  // Both literal patterns type cleanly against the `boolean` scrutinee
+  // (IGN-136) and together cover the closed domain, so nothing is reported.
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
 }
 
 /// Scenario: a wildcard arm satisfies coverage for an open-domain (`i32`)
@@ -6158,19 +6149,10 @@ function typecheckMatchExpressionNonExhaustiveIsError(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  // The literal `0` pattern independently trips the pre-existing "literal
-  // patterns" bind-time wall before exhaustiveness runs. Since S3 lifted the
-  // match wall, only these two diagnostics remain — the sole arm's `i32`
-  // body type still joins cleanly against `expected`.
-  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
-  let Option::SOME(bindDiagnostic) = output.typecheck.diagnostics.get(0) else {
-    @panic("typecheckMatchExpressionNonExhaustiveIsError: missing pattern-bind diagnostic");
-  };
-  Test::assertEq<Severity>(bindDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(bindDiagnostic.code, DiagnosticCode::UNSUPPORTED_CONSTRUCT);
-  Test::assertEq<str>(bindDiagnostic.messageText(), "typecheck does not support literal patterns");
-
-  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
+  // The literal `0` pattern types cleanly against the `i32` scrutinee
+  // (IGN-136), so the exhaustiveness verdict is the only diagnostic.
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckMatchExpressionNonExhaustiveIsError: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::ERROR);
@@ -6257,20 +6239,11 @@ function typecheckGroupedMatchStatementTakesExpressionPositionPath(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  // The literal `0` pattern independently trips the pre-existing "literal
-  // patterns" bind-time wall before exhaustiveness runs. Since S3 lifted the
-  // match wall, only these two diagnostics remain — the sole arm's `i32`
-  // body type joins cleanly (no annotated `expected` reaches the inner
-  // match here, since the statement's own `checkExpr` call passes `NONE`).
-  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
-  let Option::SOME(bindDiagnostic) = output.typecheck.diagnostics.get(0) else {
-    @panic("typecheckGroupedMatchStatementTakesExpressionPositionPath: missing pattern-bind diagnostic");
-  };
-  Test::assertEq<Severity>(bindDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(bindDiagnostic.code, DiagnosticCode::UNSUPPORTED_CONSTRUCT);
-  Test::assertEq<str>(bindDiagnostic.messageText(), "typecheck does not support literal patterns");
-
-  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
+  // The literal `0` pattern types cleanly against the `i32` scrutinee
+  // (IGN-136), so the exhaustiveness verdict is the only diagnostic: an `i32`
+  // scrutinee is an open domain and a single literal arm never covers it.
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
+  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckGroupedMatchStatementTakesExpressionPositionPath: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::ERROR);
@@ -12298,6 +12271,509 @@ function typecheckUsedCyclicAliasIsReportedExactlyOnce(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
   Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::CYCLIC_TYPE_ALIAS), 1);
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+}
+
+// IGN-136: literal, tuple, and or patterns
+// ============================================================
+
+/// Scenario: `match (0) { 0 -> 1, _ -> 2 }` in statement position. A literal
+/// pattern binds nothing and its value is an `i32` like the scrutinee, so the
+/// arm is accepted and nothing is reported.
+/// Spec: IGN-136 — typecheck literal patterns.
+@test
+function typecheckLiteralPatternMatchingTheScrutineeTypeIsAccepted(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let scrutinee: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 0);
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddLiteralPattern(&mut module, typecheckAddIntLiteral(&mut module, 0)),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddWildcardPattern(&mut module),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, scrutinee, arms);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, matchExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+}
+
+/// Scenario: a `str` literal pattern against a `boolean` scrutinee. The
+/// literal's type cannot be the scrutinee's, which is a type error rather than
+/// a silently accepted arm.
+/// Spec: IGN-136 — typecheck literal patterns.
+@test
+function typecheckLiteralPatternOfTheWrongTypeIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let scrutinee: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddLiteralPattern(&mut module, typecheckAddStringLiteral(&mut module, "nope")),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddWildcardPattern(&mut module),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, scrutinee, arms);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, matchExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `boolean`, found `str`");
+}
+
+/// Scenario: a `u8` scrutinee with an integer literal pattern. The literal
+/// adopts the scrutinee's integer type exactly as it would in expression
+/// position, so `1` is a `u8` here and not the default `i32`.
+/// Spec: IGN-136 — typecheck literal patterns.
+@test
+function typecheckLiteralPatternAdoptsTheIntegerScrutineeType(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u8Type: Ast::TypeId = typecheckAddPathType(&mut module, "u8");
+  let nPattern: Ast::PatternId = typecheckAddBinding(&mut module, "n");
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, nPattern, u8Type, typecheckAddIntLiteral(&mut module, 1));
+
+  let patternLiteral: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddLiteralPattern(&mut module, patternLiteral),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddWildcardPattern(&mut module),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, typecheckAddVariable(&mut module, "n"), arms);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddExprStmt(&mut module, matchExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, patternLiteral, typeStore.intern(Analyzer::Type::U8));
+}
+
+/// Scenario: a `u8` scrutinee with a literal pattern the type cannot hold.
+/// Adopting the scrutinee type also means inheriting its range check, so the
+/// out-of-range literal is reported as an overflow rather than a mismatch.
+/// Spec: IGN-136 — typecheck literal patterns.
+@test
+function typecheckLiteralPatternOverflowingTheScrutineeTypeIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let u8Type: Ast::TypeId = typecheckAddPathType(&mut module, "u8");
+  let nPattern: Ast::PatternId = typecheckAddBinding(&mut module, "n");
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, nPattern, u8Type, typecheckAddIntLiteral(&mut module, 1));
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddLiteralPattern(&mut module, typecheckAddIntLiteral(&mut module, 300)),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddWildcardPattern(&mut module),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, typecheckAddVariable(&mut module, "n"), arms);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddExprStmt(&mut module, matchExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::INTEGER_OVERFLOW, "Integer literal overflows type 'u8'");
+}
+
+/// Scenario: `let (_a, b): (i32, boolean) = (1, true); b;` binds each element
+/// sub-pattern to the tuple element type in the same position — `b` is a
+/// `boolean`, not the tuple type.
+/// Spec: IGN-136 — typecheck tuple patterns.
+@test
+function typecheckTuplePatternBindsElementTypesByPosition(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let booleanType: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let mut annotationElements: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  annotationElements.push(i32Type);
+  annotationElements.push(booleanType);
+  let tupleAnnotation: Ast::TypeId = typecheckAddTupleType(&mut module, annotationElements);
+
+  let mut valueElements: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  valueElements.push(typecheckAddIntLiteral(&mut module, 1));
+  valueElements.push(typecheckAddBoolLiteral(&mut module, true));
+  let tupleValue: Ast::ExpressionId = typecheckAddTupleExpr(&mut module, valueElements);
+
+  let mut elements: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  elements.push(typecheckAddBinding(&mut module, "_a"));
+  elements.push(typecheckAddBinding(&mut module, "b"));
+  let tuplePattern: Ast::PatternId = typecheckAddTuplePattern(&mut module, elements);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, tuplePattern, tupleAnnotation, tupleValue);
+
+  let bExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "b");
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddExprStmt(&mut module, bExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, bExpr, typeStore.intern(Analyzer::Type::BOOLEAN));
+}
+
+/// Scenario: a one-element tuple pattern against a two-element tuple type.
+/// Arity is part of the tuple's shape, so the pattern cannot describe the
+/// scrutinee at all.
+/// Spec: IGN-136 — typecheck tuple patterns.
+@test
+function typecheckTuplePatternArityMismatchIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let booleanType: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let mut annotationElements: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  annotationElements.push(i32Type);
+  annotationElements.push(booleanType);
+  let tupleAnnotation: Ast::TypeId = typecheckAddTupleType(&mut module, annotationElements);
+
+  let mut valueElements: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  valueElements.push(typecheckAddIntLiteral(&mut module, 1));
+  valueElements.push(typecheckAddBoolLiteral(&mut module, true));
+  let tupleValue: Ast::ExpressionId = typecheckAddTupleExpr(&mut module, valueElements);
+
+  let mut elements: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  elements.push(typecheckAddBinding(&mut module, "_a"));
+  let tuplePattern: Ast::PatternId = typecheckAddTuplePattern(&mut module, elements);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, tuplePattern, tupleAnnotation, tupleValue);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(
+    &output,
+    DiagnosticCode::TYPE_MISMATCH,
+    "pattern type mismatch: expected `(i32, boolean)`, got `tuple with 1 elements`",
+  );
+}
+
+/// Scenario: a tuple element sub-pattern whose own type disagrees with the
+/// element type it is bound against — a `boolean` literal in the `i32` slot.
+/// Sub-patterns recurse with the element type, so the inner mismatch is
+/// reported rather than swallowed by the outer shape check.
+/// Spec: IGN-136 — typecheck tuple patterns.
+@test
+function typecheckTuplePatternElementTypeMismatchIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let booleanType: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let mut annotationElements: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  annotationElements.push(i32Type);
+  annotationElements.push(booleanType);
+  let tupleAnnotation: Ast::TypeId = typecheckAddTupleType(&mut module, annotationElements);
+
+  let mut valueElements: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  valueElements.push(typecheckAddIntLiteral(&mut module, 1));
+  valueElements.push(typecheckAddBoolLiteral(&mut module, true));
+  let tupleValue: Ast::ExpressionId = typecheckAddTupleExpr(&mut module, valueElements);
+
+  let mut elements: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  elements.push(typecheckAddLiteralPattern(&mut module, typecheckAddBoolLiteral(&mut module, true)));
+  elements.push(typecheckAddBinding(&mut module, "_b"));
+  let tuplePattern: Ast::PatternId = typecheckAddTuplePattern(&mut module, elements);
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, tuplePattern, tupleAnnotation, tupleValue);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `i32`, found `boolean`");
+}
+
+/// Scenario: `match (b) { true | false -> 1 }`. Both alternatives are
+/// binding-free literals of the scrutinee's type, and together they cover the
+/// closed `boolean` domain, so the arm is accepted and the match is
+/// exhaustive.
+/// Spec: IGN-136 — typecheck or patterns.
+@test
+function typecheckOrPatternWithBindingFreeAlternativesIsAccepted(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut alternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  alternatives.push(typecheckAddLiteralPattern(&mut module, typecheckAddBoolLiteral(&mut module, true)));
+  alternatives.push(typecheckAddLiteralPattern(&mut module, typecheckAddBoolLiteral(&mut module, false)));
+  let orPattern: Ast::PatternId = typecheckAddOrPattern(&mut module, alternatives);
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: orPattern,
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, typecheckAddBoolLiteral(&mut module, true), arms);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, matchExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+}
+
+/// Scenario: `match (c) { Color::Red | Color::Green -> 1 }` over a two-variant
+/// enum. Each alternative credits its own variant toward coverage, so the
+/// single or-pattern arm covers the enum and no exhaustiveness diagnostic is
+/// emitted.
+/// Spec: IGN-136 — typecheck or patterns, exhaustiveness crediting.
+@test
+function typecheckOrPatternCreditsEveryAlternativeVariantTowardCoverage(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(&mut module, "Red"));
+  variants.push(typecheckAddBinding(&mut module, "Green"));
+  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("Color"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let colorType: Ast::TypeId = typecheckAddPathType(&mut module, "Color");
+  let cParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "c", colorType);
+  let cExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "c");
+
+  let mut alternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  alternatives.push(typecheckAddPathPattern2(&mut module, "Color", "Red", Vector::new<Ast::PatternId>()));
+  alternatives.push(typecheckAddPathPattern2(&mut module, "Color", "Green", Vector::new<Ast::PatternId>()));
+  let orPattern: Ast::PatternId = typecheckAddOrPattern(&mut module, alternatives);
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: orPattern,
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, cExpr, arms);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, matchExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(cParam);
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("useColor"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+}
+
+/// Scenario: an or-pattern whose alternatives include a binding. Matching a
+/// binding through an or-pattern needs the resolver to merge the binding sets
+/// of every alternative, which it does not do yet (IGN-15), so only
+/// binding-free alternatives are accepted.
+/// Spec: IGN-136 — typecheck or patterns.
+@test
+function typecheckOrPatternWithABindingAlternativeIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut alternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  alternatives.push(typecheckAddLiteralPattern(&mut module, typecheckAddIntLiteral(&mut module, 0)));
+  alternatives.push(typecheckAddBinding(&mut module, "_x"));
+  let orPattern: Ast::PatternId = typecheckAddOrPattern(&mut module, alternatives);
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: orPattern,
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddWildcardPattern(&mut module),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, typecheckAddIntLiteral(&mut module, 0), arms);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, matchExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(
+    &output,
+    DiagnosticCode::OR_PATTERN_BINDINGS_DISALLOWED,
+    "bindings are not allowed in OR patterns",
+  );
+}
+
+/// Scenario: an or-pattern alternative whose type disagrees with the
+/// scrutinee. Every alternative is checked against the same scrutinee type, so
+/// the `i32` literal alternative is reported against the `boolean` scrutinee.
+/// Spec: IGN-136 — typecheck or patterns.
+@test
+function typecheckOrPatternAlternativeOfTheWrongTypeIsRejected(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut alternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  alternatives.push(typecheckAddLiteralPattern(&mut module, typecheckAddBoolLiteral(&mut module, true)));
+  alternatives.push(typecheckAddLiteralPattern(&mut module, typecheckAddStringLiteral(&mut module, "nope")));
+  let orPattern: Ast::PatternId = typecheckAddOrPattern(&mut module, alternatives);
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: orPattern,
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  arms.push(Ast::Expression::MatchArm {
+    pattern: typecheckAddWildcardPattern(&mut module),
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 2),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, typecheckAddBoolLiteral(&mut module, true), arms);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, matchExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `boolean`, found `str`");
+}
+
+/// Scenario: `match (n) { _ | _ -> 1 }` over an open `i32` domain. An
+/// or-pattern is irrefutable only when every alternative is a wildcard, which
+/// this one is, so the match is exhaustive without a separate catch-all arm.
+/// Spec: IGN-136 — typecheck or patterns, exhaustiveness crediting.
+@test
+function typecheckOrPatternOfOnlyWildcardsIsIrrefutable(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut alternatives: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  alternatives.push(typecheckAddWildcardPattern(&mut module));
+  alternatives.push(typecheckAddWildcardPattern(&mut module));
+  let orPattern: Ast::PatternId = typecheckAddOrPattern(&mut module, alternatives);
+
+  let mut arms: Vector<Ast::Expression::MatchArm> = Vector::new<Ast::Expression::MatchArm>();
+  arms.push(Ast::Expression::MatchArm {
+    pattern: orPattern,
+    guard: Option::NONE,
+    body: typecheckAddIntLiteral(&mut module, 1),
+  });
+  let matchExpr: Ast::ExpressionId = typecheckAddMatchExpr(&mut module, typecheckAddIntLiteral(&mut module, 0), arms);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(typecheckAddExprStmt(&mut module, matchExpr));
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+  typecheckAddFunctionItem(&mut module, "main", Option::NONE, body);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
 }
 
