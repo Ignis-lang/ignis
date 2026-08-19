@@ -33,7 +33,7 @@ jobs:
   rust:
     name: Rust gates
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -55,10 +55,21 @@ jobs:
 
       # `.cargo/config.toml` selects mold for the Linux targets, so it has to be
       # present before any cargo invocation links.
+      #
+      # This used to be `apt-get update && apt-get install -y mold`, which hung for
+      # 55 minutes on an unresponsive Ubuntu mirror and burned the job's budget before
+      # a single crate compiled. The upstream release tarball is one request to a host
+      # the workflow already depends on, and the version is pinned rather than being
+      # whatever the distribution happens to carry.
       - name: Install mold
+        timeout-minutes: 3
+        env:
+          MOLD_VERSION: 2.42.0
         run: |
-          sudo apt-get update
-          sudo apt-get install -y mold
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-x86_64-linux.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local
+          mold --version
 
       # `std/runtime/libignis_rt.a` is a build artifact excluded by .gitignore, so a
       # clean checkout does not have it. Anything that links Ignis output needs it,
@@ -97,7 +108,7 @@ jobs:
     # introduced by the change being tested is a real outcome. Without a cap it
     # would hold a runner for six hours, and on a pull request anyone can
     # trigger that. The budget is roughly double the slowest observed run.
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -118,10 +129,21 @@ jobs:
 
       # `.cargo/config.toml` selects mold for the Linux targets, so it has to be
       # present before any cargo invocation links.
+      #
+      # This used to be `apt-get update && apt-get install -y mold`, which hung for
+      # 55 minutes on an unresponsive Ubuntu mirror and burned the job's budget before
+      # a single crate compiled. The upstream release tarball is one request to a host
+      # the workflow already depends on, and the version is pinned rather than being
+      # whatever the distribution happens to carry.
       - name: Install mold
+        timeout-minutes: 3
+        env:
+          MOLD_VERSION: 2.42.0
         run: |
-          sudo apt-get update
-          sudo apt-get install -y mold
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-x86_64-linux.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local
+          mold --version
 
       - name: Build the C runtime archive
         run: make -C std/runtime
