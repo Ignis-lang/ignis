@@ -3417,6 +3417,14 @@ export namespace Analyzer {
             };
 
             if (def.name().raw() == symbol.raw()) {
+              // A declaration's own type parameter is a type inside its body, and the
+              // only one `definitionType` cannot answer for: it has no declared type,
+              // it stands for whatever instantiates it.
+              if (let Analyzer::Definition::TypeParam(typeParam) = def) {
+                let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+                return Option::SOME(typeStoreParamRef.param(typeParam.name));
+              }
+
               return Analyzer::Typecheck::definitionType(defStore, typeStore, defId);
             }
 
