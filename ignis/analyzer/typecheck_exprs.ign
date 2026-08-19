@@ -445,14 +445,6 @@ export namespace Analyzer {
       if (let Option::SOME(calleeExpr) = module.expressions.get(call.callee)) {
         if (let Ast::Expression::Node::MemberAccess(ma) = calleeExpr) {
           if (ma.operator == Ast::Expression::AccessOperator::Dot) {
-            // Type arguments written on a method call may belong to the method
-            // or to a generic owner, and telling the two apart needs the
-            // owner's type parameters, which this path never resolves.
-            if (call.typeArguments.length() > 0) {
-              Analyzer::Typecheck::emitUnsupported(state, call.span, "type arguments on method calls");
-              return Option::NONE;
-            }
-
             return Analyzer::Typecheck::checkInstanceMethodCallExpr(
               state,
               defStore,
@@ -490,14 +482,6 @@ export namespace Analyzer {
             return Option::NONE;
           }
 
-          // `Type::staticMethod<T>()` may be specializing the method or its
-          // owning record, and this path carries neither set of type
-          // parameters.
-          if (call.typeArguments.length() > 0) {
-            Analyzer::Typecheck::emitUnsupported(state, call.span, "type arguments on static method calls");
-            return Option::NONE;
-          }
-
           let staticSignatureOpt: Option<Analyzer::Typecheck::FunctionSignature> = Analyzer::Typecheck::extractFunctionSignature(
             defStore,
             staticDefId,
@@ -506,6 +490,48 @@ export namespace Analyzer {
             Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through non-function definitions");
             return Option::NONE;
           };
+
+          if (call.typeArguments.length() > 0) {
+            let staticParamTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(
+              defStore,
+              &staticSignature,
+              true,
+            );
+
+            if (let Option::SOME(specialized) = Analyzer::Typecheck::specializeMethodCallSignature(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              call,
+              staticDefId,
+              &staticParamTypes,
+              staticSignature.returnType,
+            )) {
+              return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+                state,
+                defStore,
+                typeStore,
+                symbols,
+                module,
+                resolvedBodies,
+                callExprId,
+                call,
+                &specialized.paramTypes,
+                specialized.returnType,
+              );
+            }
+
+            // Either nothing was generic to specialize, in which case the written
+            // arguments bind nothing and the declared signature stands, or the
+            // count was wrong and already reported. Reporting the arguments too
+            // would add one mismatch per argument on top of one mistake.
+            if (Analyzer::Typecheck::methodCallTypeParamSymbols(defStore, staticDefId).length() > 0) {
+              Analyzer::Typecheck::recordExprType(state, callExprId, staticSignature.returnType);
+              return Option::SOME(staticSignature.returnType);
+            }
+          }
 
           return Analyzer::Typecheck::checkCallArgumentsAgainstSignature(
             state,
@@ -636,10 +662,9 @@ export namespace Analyzer {
       constructor: &Analyzer::Typecheck::VariantConstructor,
       expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
-      if (call.typeArguments.length() > 0) {
-        Analyzer::Typecheck::emitUnsupported(state, call.span, "type arguments on enum variant construction");
-        return Option::NONE;
-      }
+      // Type arguments written here bind nothing: the reference infers a variant's
+      // arguments from the expected type and never reads the written list, so
+      // reporting them would reject a construction it accepts.
 
       let typeArguments: Vector<Analyzer::TypeId> = Analyzer::Typecheck::inferVariantTypeArguments(
         defStore,
@@ -1363,21 +1388,63 @@ export namespace Analyzer {
         paramIndex += 1;
       }
 
-      // An instantiated receiver says what the owner's type parameters stand for, so
-      // the method's declared types are specialized before the member access is typed
-      // and before any argument is compared.
+      // An instantiated receiver says what the owner's type parameters stand for, and
+      // type arguments written at the call site say what the method's own stand for.
+      // Both are applied, in that order, before the member access is typed and before
+      // any argument is compared.
+      let mut effective: Analyzer::Typecheck::CalleeSignature = Analyzer::Typecheck::CalleeSignature {
+        paramTypes: Analyzer::Typecheck::copyTypeIdVector(&paramTypes),
+        returnType: signature.returnType,
+      };
+      let mut specialized: boolean = false;
+
       if (owner.typeArguments.length() > 0) {
-        let specialized: Analyzer::Typecheck::CalleeSignature = Analyzer::Typecheck::substituteOwnerTypeArguments(
+        effective = Analyzer::Typecheck::substituteOwnerTypeArguments(
           typeStore,
           &owner,
-          &paramTypes,
-          signature.returnType,
+          &effective.paramTypes,
+          effective.returnType,
+        );
+        specialized = true;
+      }
+
+      if (call.typeArguments.length() > 0) {
+        let writtenOpt: Option<Analyzer::Typecheck::CalleeSignature> = Analyzer::Typecheck::specializeMethodCallSignature(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          call,
+          methodDefId,
+          &effective.paramTypes,
+          effective.returnType,
         );
 
+        if (let Option::SOME(written) = writtenOpt) {
+          effective = written;
+          specialized = true;
+        } else if (Analyzer::Typecheck::methodCallTypeParamSymbols(defStore, methodDefId).length() > 0) {
+          // The count was wrong and has been reported. Every parameter type still
+          // mentions the type parameters it was meant to bind, so the arguments are
+          // left unchecked and the call keeps the method's declared return type.
+          let mut typeStoreReportedRef: &mut Analyzer::TypeStore = typeStore;
+          let reportedMemberType: Analyzer::TypeId = typeStoreReportedRef.functionType(
+            Analyzer::Typecheck::copyTypeIdVector(&effective.paramTypes),
+            effective.returnType,
+          );
+          Analyzer::Typecheck::recordExprType(state, memberExprId, reportedMemberType);
+          Analyzer::Typecheck::recordExprType(state, callExprId, effective.returnType);
+
+          return Option::SOME(effective.returnType);
+        }
+      }
+
+      if (specialized) {
         let mut typeStoreSpecializedRef: &mut Analyzer::TypeStore = typeStore;
         let specializedMemberType: Analyzer::TypeId = typeStoreSpecializedRef.functionType(
-          Analyzer::Typecheck::copyTypeIdVector(&specialized.paramTypes),
-          specialized.returnType,
+          Analyzer::Typecheck::copyTypeIdVector(&effective.paramTypes),
+          effective.returnType,
         );
         Analyzer::Typecheck::recordExprType(state, memberExprId, specializedMemberType);
 
@@ -1390,8 +1457,8 @@ export namespace Analyzer {
           resolvedBodies,
           callExprId,
           call,
-          &specialized.paramTypes,
-          specialized.returnType,
+          &effective.paramTypes,
+          effective.returnType,
         );
       }
 
@@ -1410,6 +1477,94 @@ export namespace Analyzer {
         call,
         &signature,
         1,
+      );
+    }
+
+    /// The type parameters a written type-argument list on a method call binds.
+    ///
+    /// The method's own when it declares any; otherwise its owner's, which is what
+    /// `Type::staticMethod<T>()` on a generic declaration specializes. Empty when
+    /// neither is generic: the arguments then bind nothing, and the reference ignores
+    /// them rather than making the call fail.
+    function methodCallTypeParamSymbols(
+      defStore: &mut Analyzer::DefinitionStore,
+      methodDefId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::SymbolId> {
+      let ownSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, methodDefId);
+      if (ownSymbols.length() > 0) {
+        return ownSymbols;
+      }
+
+      let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(methodDefId) else {
+        return Vector::new<Analyzer::SymbolId>();
+      };
+
+      let ownerDefId: Analyzer::DefinitionId = method.owner;
+
+      let Option::SOME(ownerDef) = defStore.get(ownerDefId) else {
+        return Vector::new<Analyzer::SymbolId>();
+      };
+
+      match (ownerDef) {
+        Analyzer::Definition::Record(record_) -> {
+          return Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &record_.typeParams);
+        },
+        Analyzer::Definition::Enum(enum_) -> {
+          return Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &enum_.typeParams);
+        },
+        _ -> {
+          return Vector::new<Analyzer::SymbolId>();
+        },
+      };
+
+      @panic("unreachable: methodCallTypeParamSymbols match did not return");
+    }
+
+    /// Specialize a method's flattened signature from the type arguments written at
+    /// the call site.
+    ///
+    /// `NONE` means nothing was specialized, and says nothing about whether that was
+    /// reported: a callee with no type parameters at all binds nothing and is silently
+    /// left as declared, while a wrong argument count is reported here before
+    /// returning. The caller tells the two apart by asking for the symbols itself.
+    function specializeMethodCallSignature(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      call: &Ast::Expression::Call,
+      methodDefId: Analyzer::DefinitionId,
+      paramTypes: &Vector<Analyzer::TypeId>,
+      returnType: Analyzer::TypeId,
+    ): Option<Analyzer::Typecheck::CalleeSignature> {
+      let paramSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::methodCallTypeParamSymbols(defStore, methodDefId);
+
+      if (paramSymbols.length() == 0) {
+        return Option::NONE;
+      }
+
+      if (call.typeArguments.length() != paramSymbols.length()) {
+        Analyzer::Typecheck::emitTypeArgumentCountMismatch(
+          state,
+          call.span,
+          call.typeArguments.length(),
+          paramSymbols.length(),
+        );
+        return Option::NONE;
+      }
+
+      return Analyzer::Typecheck::specializeSignatureFromWrittenTypeArguments(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        call.span,
+        &call.typeArguments,
+        &paramSymbols,
+        paramTypes,
+        returnType,
       );
     }
 
