@@ -13813,3 +13813,100 @@ function typecheckMethodCallOnGenericReceiverChecksSubstitutedParameters(): void
 
   assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_ARGUMENT_TYPE);
 }
+
+/// Scenario: `Box::SOME<i32>(1)` writes type arguments on a variant
+/// construction. The reference ignores them — its `EnumVariant` call arm infers
+/// from the expected type and never reads the written list — so this is accepted
+/// and the expected type is what decides the instance.
+/// Spec: IGN-135 — type arguments on enum variant construction.
+@test
+function typecheckVariantConstructionIgnoresWrittenTypeArguments(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Box<T> {\n  SOME(T),\n}\n\nfunction make(): Box<i32> {\n  return Box::SOME<i32>(1);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: `Holder::make<i32>(1)` on a static method whose owner is generic
+/// and which declares no type parameters of its own. The written arguments bind
+/// the owner's parameters, so the call checks against the substituted signature.
+/// Spec: IGN-135 — type arguments on static method calls.
+@test
+function typecheckStaticMethodTypeArgumentsBindOwnerParameters(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Holder<T> {\n  public value: T;\n\n  public static echo(v: T): T {\n    return v;\n  }\n}\n\nfunction main(): void {\n  Holder::echo<i32>(1);\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: the same static call with an argument the written type argument
+/// rules out is reported, so the substitution reaches the parameters.
+/// Spec: IGN-135 — type arguments on static method calls.
+@test
+function typecheckStaticMethodTypeArgumentsCheckSubstitutedParameters(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Holder<T> {\n  public value: T;\n\n  public static echo(v: T): T {\n    return v;\n  }\n}\n\nfunction main(): void {\n  Holder::echo<i32>(\"nope\");\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::INVALID_ARGUMENT_TYPE);
+}
+
+/// Scenario: `h.echo<i32>(2)` on a method that declares its own type parameter.
+/// The written argument binds the method's parameter, not the owner's.
+/// Spec: IGN-135 — type arguments on method calls.
+@test
+function typecheckMethodTypeArgumentsBindMethodParameters(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Holder<T> {\n  public value: T;\n\n  public echo<U>(&self, v: U): U {\n    return v;\n  }\n}\n\nfunction use(h: Holder<i32>): i32 {\n  return h.echo<i32>(2);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: two type arguments written for a method that declares one is
+/// reported once, and the arguments are left unchecked. The reference reports
+/// the count and then also reports every argument against the unsubstituted
+/// parameter; this keeps the direct call path's convention instead, so one
+/// mistake produces one diagnostic.
+/// Spec: IGN-135 — type arguments on method calls.
+@test
+function typecheckMethodTypeArgumentCountMismatchIsReportedOnce(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Holder<T> {\n  public value: T;\n\n  public echo<U>(&self, v: U): U {\n    return v;\n  }\n}\n\nfunction use(h: Holder<i32>): void {\n  h.echo<i32, i32>(2);\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 1);
+  Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::TYPE_ARGUMENT_COUNT_MISMATCH);
+}
