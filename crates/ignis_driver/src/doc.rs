@@ -23,7 +23,19 @@ use crate::context::CompilationContext;
 pub struct DocPackage {
   /// The entry the documentation was produced from.
   pub entry: String,
+  /// The modules the items belong to, with their own `//!` documentation.
+  pub modules: Vec<DocModule>,
   pub items: Vec<DocItem>,
+}
+
+/// A module and what it says about itself.
+#[derive(Debug, Clone, Serialize)]
+pub struct DocModule {
+  /// Import path: `std::io`.
+  pub name: String,
+  /// The `//!` block at the top of the file.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub doc: Option<String>,
 }
 
 /// A single documented declaration.
@@ -119,12 +131,25 @@ pub fn document_project(
     .map(|(id, module)| (id, module_display_name(&module.path, project_root.as_deref())))
     .collect::<HashMap<_, _>>();
 
-  Ok(collect(&output, &module_names, entry_path))
+  let mut modules = ctx
+    .module_graph
+    .modules
+    .iter()
+    .map(|(id, module)| DocModule {
+      name: module_names.get(&id).cloned().unwrap_or_default(),
+      doc: module.doc.clone(),
+    })
+    .collect::<Vec<_>>();
+
+  modules.sort_by(|a, b| a.name.cmp(&b.name));
+
+  Ok(collect(&output, &module_names, modules, entry_path))
 }
 
 fn collect(
   output: &AnalyzerOutput,
   module_names: &HashMap<ModuleId, String>,
+  modules: Vec<DocModule>,
   entry_path: &str,
 ) -> DocPackage {
   let symbols = output.symbols.borrow();
@@ -162,6 +187,7 @@ fn collect(
 
   DocPackage {
     entry: entry_path.to_string(),
+    modules,
     items,
   }
 }

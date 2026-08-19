@@ -42,6 +42,8 @@ pub struct IgnisParser {
   pending_doc: Option<String>,
   /// Pending inner doc comment (`//!`) to be attached to the enclosing item.
   pending_inner_doc: Option<String>,
+  /// `//!` block at the top of the file, before any declaration.
+  module_doc: Option<String>,
   /// Pending attributes (`@packed`, `@aligned(n)`, etc.) to be attached to the next declaration.
   pending_attrs: Vec<ASTAttribute>,
 
@@ -76,6 +78,7 @@ impl IgnisParser {
       pending_greater_span: None,
       pending_doc: None,
       pending_inner_doc: None,
+      module_doc: None,
       pending_attrs: Vec::new(),
       compilation_ctx,
     };
@@ -549,6 +552,15 @@ impl IgnisParser {
   }
 
   /// Take the pending inner doc comment, clearing it.
+  /// The module's own documentation, once the program has been parsed.
+  ///
+  /// A `//!` block at the top of a file documents the module. The same syntax after a
+  /// namespace's opening brace documents that namespace, and the two are taken at
+  /// different points so neither swallows the other.
+  pub fn module_doc(&self) -> Option<&str> {
+    self.module_doc.as_deref()
+  }
+
   fn take_pending_inner_doc(&mut self) -> Option<String> {
     self.pending_inner_doc.take()
   }

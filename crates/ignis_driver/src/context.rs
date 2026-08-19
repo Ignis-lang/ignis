@@ -29,6 +29,8 @@ pub(crate) struct ParsedModule {
   pub nodes: Store<ASTNode>,
   pub roots: Vec<NodeId>,
   pub import_paths: Vec<(Vec<SymbolId>, String, ignis_type::span::Span)>,
+  /// The module's `//!` documentation, kept for the documentation extractor.
+  pub doc: Option<String>,
 }
 
 pub(crate) struct ModuleSemanticData {
@@ -471,7 +473,8 @@ impl CompilationContext {
     let file_id = parsed.file_id;
     let import_paths = parsed.import_paths.clone();
 
-    let module = Module::new(file_id, module_path.clone());
+    let mut module = Module::new(file_id, module_path.clone());
+    module.doc = parsed.doc.clone();
     let module_id = self.module_graph.register(module);
     self.insert_module_path_aliases(module_name, &module_path, module_id);
     self.parsed_modules.insert(module_id, parsed);
@@ -527,7 +530,8 @@ impl CompilationContext {
     let file_id = parsed.file_id;
     let import_paths = parsed.import_paths.clone();
 
-    let module = Module::new(file_id, module_path.clone());
+    let mut module = Module::new(file_id, module_path.clone());
+    module.doc = parsed.doc.clone();
     let module_id = self.module_graph.register(module);
     self.remove_module_path_aliases(placeholder_keys, placeholder_id);
     self.insert_module_path_aliases(path, &module_path, module_id);
@@ -612,6 +616,7 @@ impl CompilationContext {
       nodes,
       roots,
       import_paths,
+      doc: parser.module_doc().map(str::to_string),
     })
   }
 
@@ -714,7 +719,8 @@ impl CompilationContext {
     let file_id = parsed.file_id;
     let import_paths = parsed.import_paths.clone();
 
-    let module = Module::new(file_id, module_path.clone());
+    let mut module = Module::new(file_id, module_path.clone());
+    module.doc = parsed.doc.clone();
     let module_id = self.module_graph.register(module);
     self.remove_module_path_aliases(placeholder_keys, placeholder_id);
     self.insert_module_path_aliases(path, &module_path, module_id);
@@ -780,6 +786,7 @@ impl CompilationContext {
         nodes: Store::new(),
         roots: Vec::new(),
         import_paths: Vec::new(),
+        doc: None,
       });
     }
 
@@ -802,6 +809,7 @@ impl CompilationContext {
           nodes: Store::new(),
           roots: Vec::new(),
           import_paths: Vec::new(),
+          doc: None,
         });
       },
     };
@@ -823,6 +831,7 @@ impl CompilationContext {
       nodes,
       roots,
       import_paths,
+      doc: parser.module_doc().map(str::to_string),
     })
   }
 
@@ -850,7 +859,8 @@ impl CompilationContext {
     let file_id = parsed.file_id;
     let import_paths = parsed.import_paths.clone();
 
-    let module = Module::new(file_id, module_path.clone());
+    let mut module = Module::new(file_id, module_path.clone());
+    module.doc = parsed.doc.clone();
     let module_id = self.module_graph.register(module);
     self.insert_module_path_aliases(module_name, &module_path, module_id);
     self.parsed_modules.insert(module_id, parsed);

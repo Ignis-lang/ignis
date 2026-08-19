@@ -312,6 +312,8 @@ pub struct Module {
   pub imports: Vec<ImportInfo>,
   /// State for cycle detection
   pub state: ModuleState,
+  /// The module's own `//!` documentation.
+  pub doc: Option<String>,
 }
 
 impl Module {
@@ -325,6 +327,7 @@ impl Module {
       exports: Vec::new(),
       imports: Vec::new(),
       state: ModuleState::Unprocessed,
+      doc: None,
     }
   }
 }

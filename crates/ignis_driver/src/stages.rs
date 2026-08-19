@@ -456,6 +456,7 @@ mod tests {
         nodes: Store::new(),
         roots: Vec::new(),
         import_paths: Vec::new(),
+        doc: None,
       },
     );
 
