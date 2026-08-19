@@ -993,6 +993,86 @@ function typecheckWrongReturnTypeProducesDiagnostic(): void {
   assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
 }
 
+/// Build a non-root function item whose body returns `true` while the annotated
+/// return type is `i32`, so nesting it anywhere must still report a mismatch.
+function typecheckAddNestedBadReturnFunction(module: &mut Ast::Module, name: str): Ast::ItemId {
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(module, "i32");
+  let boolExpr: Ast::ExpressionId = typecheckAddBoolLiteral(module, true);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(module, boolExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(module, bodyStmts);
+
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(i32TypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+@test
+function typecheckDescendsIntoNamespaceItems(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let innerItemId: Ast::ItemId = typecheckAddNestedBadReturnFunction(&mut module, "badReturn");
+
+  let mut namespaceItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  namespaceItems.push(innerItemId);
+
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: typecheckDummySpan(),
+    name: String::create("Outer"),
+    items: namespaceItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
+}
+
+@test
+function typecheckDescendsIntoExportedDeclaration(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let innerItemId: Ast::ItemId = typecheckAddNestedBadReturnFunction(&mut module, "badReturn");
+
+  module.addRootItem(Ast::Item::Node::Export(Ast::Item::Export {
+    span: typecheckDummySpan(),
+    declaration: Option::SOME(innerItemId),
+    items: Vector::new<Ast::ImportBinding>(),
+    source: Option::NONE,
+    sourceSpan: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
+}
+
 @test
 function typecheckWrongLetInitializerTypeProducesDiagnostic(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
