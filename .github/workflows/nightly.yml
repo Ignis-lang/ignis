@@ -96,6 +96,25 @@ jobs:
       - name: Generate checksum
         run: sha256sum ignis-nightly-linux-amd64.tar.gz > ignis-nightly-linux-amd64.tar.gz.sha256
 
+      # The nightly carries documentation for the same reason a release does, and it
+      # is the only bundle that exists until the next release: without it the website
+      # has guides but no API reference for anything.
+      - name: Build documentation bundle
+        run: |
+          mkdir -p docs-pkg
+
+          cp -r docs/web docs-pkg/guides
+
+          # The standard library has no root module. Any std entry makes the driver
+          # discover every module in the manifest, so documenting one documents all.
+          ./target/release/ignis doc std/io/mod.ign --std-path std --output docs-pkg/api.json
+
+      - name: Create documentation archive
+        run: tar -czf ignis-docs.tar.gz -C docs-pkg .
+
+      - name: Generate documentation checksum
+        run: sha256sum ignis-docs.tar.gz > ignis-docs.tar.gz.sha256
+
       - name: Compose release body
         run: |
           SHORT_SHA=$(git rev-parse --short HEAD)
@@ -153,3 +172,5 @@ jobs:
           files: |
             ignis-nightly-linux-amd64.tar.gz
             ignis-nightly-linux-amd64.tar.gz.sha256
+            ignis-docs.tar.gz
+            ignis-docs.tar.gz.sha256
