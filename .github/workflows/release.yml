@@ -39,6 +39,18 @@ jobs:
           cache-targets: true
           cache-on-failure: true
 
+      # `.cargo/config.toml` selects mold for the Linux targets, so the release build
+      # needs it just as CI does. This workflow never installed it.
+      - name: Install mold
+        timeout-minutes: 3
+        env:
+          MOLD_VERSION: 2.42.0
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-x86_64-linux.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local
+          mold --version
+
       - name: Build Ignis
         run: cargo build --release --locked -p ignis
 
