@@ -443,6 +443,43 @@ export namespace Analyzer {
       }
     }
 
+    /// Typecheck every item in a container's item list. Used for the children of
+    /// namespaces, which hold most of the real declaration surface.
+    function checkItems(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      itemIds: &Vector<Ast::ItemId>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < itemIds.length()) {
+        let Option::SOME(itemId) = itemIds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        Analyzer::Typecheck::checkItem(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          pass1,
+          pass2,
+          resolvedBodies,
+          *itemId,
+        );
+
+        index += 1;
+      }
+    }
+
     function checkItem(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -541,10 +578,36 @@ export namespace Analyzer {
             &enum_.methods,
           );
         },
-        Ast::Item::Node::Namespace(_) -> {},
+        Ast::Item::Node::Namespace(namespace_) -> {
+          Analyzer::Typecheck::checkItems(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            pass1,
+            pass2,
+            resolvedBodies,
+            &namespace_.items,
+          );
+        },
         Ast::Item::Node::Import(_) -> {},
         Ast::Item::Node::Extern(_) -> {},
-        Ast::Item::Node::Export(_) -> {},
+        Ast::Item::Node::Export(export_) -> {
+          if (let Option::SOME(innerItemId) = export_.declaration) {
+            Analyzer::Typecheck::checkItem(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              pass1,
+              pass2,
+              resolvedBodies,
+              innerItemId,
+            );
+          }
+        },
         Ast::Item::Node::TypeAlias(_) -> {},
         Ast::Item::Node::Trait(trait_) -> {
           Analyzer::Typecheck::checkOwnerMethods(
