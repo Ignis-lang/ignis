@@ -2031,6 +2031,13 @@ export namespace Analyzer {
       public typeId: Analyzer::TypeId;
       public instanceMethods: Vector<Analyzer::DefinitionId>;
       public staticMethods: Vector<Analyzer::DefinitionId>;
+      /// Interned names of the owner's declared type parameters, in declaration
+      /// order. Empty for a non-generic owner.
+      public typeParamSymbols: Vector<Analyzer::SymbolId>;
+      /// What the receiver instantiates those parameters with. Empty when the
+      /// receiver names the declaration itself rather than an instance of it,
+      /// in which case the method's declared types are used as written.
+      public typeArguments: Vector<Analyzer::TypeId>;
     }
 
     /// Copies a `Vector<DefinitionId>` element-by-element. `Vector` has no
@@ -2084,7 +2091,7 @@ export namespace Analyzer {
     /// modified, its record-init/destructuring callers rely on its record-only
     /// rejection). Accepts non-generic Record OR Enum owners for method-call
     /// resolution, copying their `instanceMethods`/`staticMethods` tables.
-    function requireNonGenericMethodOwner(
+    function requireMethodOwner(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
@@ -2123,6 +2130,8 @@ export namespace Analyzer {
                 typeId: record_.typeId,
                 instanceMethods: Analyzer::Typecheck::copyDefinitionIdVector(&record_.instanceMethods),
                 staticMethods: Analyzer::Typecheck::copyDefinitionIdVector(&record_.staticMethods),
+                typeParamSymbols: Vector::new<Analyzer::SymbolId>(),
+                typeArguments: Vector::new<Analyzer::TypeId>(),
               });
             },
             _ -> {
@@ -2149,6 +2158,8 @@ export namespace Analyzer {
                 typeId: enum_.typeId,
                 instanceMethods: Analyzer::Typecheck::copyDefinitionIdVector(&enum_.instanceMethods),
                 staticMethods: Analyzer::Typecheck::copyDefinitionIdVector(&enum_.staticMethods),
+                typeParamSymbols: Vector::new<Analyzer::SymbolId>(),
+                typeArguments: Vector::new<Analyzer::TypeId>(),
               });
             },
             _ -> {
@@ -2157,9 +2168,46 @@ export namespace Analyzer {
             },
           };
         },
-        Analyzer::Type::Instance(_) -> {
-          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, genericMessage);
-          return Option::NONE;
+        // An instantiated owner carries what its type parameters stand for, so the
+        // method's declared types can be substituted before anything is compared.
+        // Only the bare declaration, matched above, still has nothing to bind them to.
+        Analyzer::Type::Instance(instance) -> {
+          let instanceDefId: Analyzer::DefinitionId = instance.definition;
+          let Option::SOME(def) = defStore.get(instanceDefId) else {
+            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
+            return Option::NONE;
+          };
+
+          match (def) {
+            Analyzer::Definition::Record(record_) -> {
+              let typeParamSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &record_.typeParams);
+
+              return Option::SOME(Analyzer::Typecheck::RequiredMethodOwner {
+                defId: instanceDefId,
+                typeId: resolvedType.typeId,
+                instanceMethods: Analyzer::Typecheck::copyDefinitionIdVector(&record_.instanceMethods),
+                staticMethods: Analyzer::Typecheck::copyDefinitionIdVector(&record_.staticMethods),
+                typeParamSymbols: typeParamSymbols,
+                typeArguments: Analyzer::Typecheck::copyVariantPayloadTypeIds(&instance.typeArguments),
+              });
+            },
+            Analyzer::Definition::Enum(enum_) -> {
+              let typeParamSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &enum_.typeParams);
+
+              return Option::SOME(Analyzer::Typecheck::RequiredMethodOwner {
+                defId: instanceDefId,
+                typeId: resolvedType.typeId,
+                instanceMethods: Analyzer::Typecheck::copyDefinitionIdVector(&enum_.instanceMethods),
+                staticMethods: Analyzer::Typecheck::copyDefinitionIdVector(&enum_.staticMethods),
+                typeParamSymbols: typeParamSymbols,
+                typeArguments: Analyzer::Typecheck::copyVariantPayloadTypeIds(&instance.typeArguments),
+              });
+            },
+            _ -> {
+              Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
+              return Option::NONE;
+            },
+          };
         },
         _ -> {
           Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
@@ -2167,7 +2215,7 @@ export namespace Analyzer {
         },
       };
 
-      @panic("unreachable: requireNonGenericMethodOwner match did not return");
+      @panic("unreachable: requireMethodOwner match did not return");
     }
 
     function recordFieldCount(
@@ -3023,12 +3071,13 @@ export namespace Analyzer {
       public typeParamSymbols: Vector<Analyzer::SymbolId>;
     }
 
-    /// Interned names of an enum's declared type parameters, in declaration order.
+    /// Interned names of a declaration's type parameters, in declaration order.
+    /// Takes the parameter list itself, so it serves records and enums alike.
     ///
     /// Lives here rather than beside the callee-side equivalent in `typecheck_exprs`
     /// because `typecheck.ign` merges the typecheck files in import order and this file
     /// comes first, so it cannot reach anything declared there.
-    function enumTypeParamSymbols(
+    function ownerTypeParamSymbols(
       defStore: &mut Analyzer::DefinitionStore,
       typeParams: &Vector<Analyzer::DefinitionId>,
     ): Vector<Analyzer::SymbolId> {
@@ -3082,7 +3131,7 @@ export namespace Analyzer {
         if (let Analyzer::Definition::Enum(enumDef) = ownerDef) {
           enumTypeOpt = Option::SOME(enumDef.typeId);
           generic = enumDef.typeParams.length() > 0;
-          typeParamSymbols = Analyzer::Typecheck::enumTypeParamSymbols(defStore, &enumDef.typeParams);
+          typeParamSymbols = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &enumDef.typeParams);
         }
       }
 

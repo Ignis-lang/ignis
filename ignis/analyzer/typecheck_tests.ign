@@ -5147,10 +5147,11 @@ function typecheckInstanceMethodCallMutSelfOnMutableLocalSucceeds(): void {
   Test::assertEq<u64>(output.diagnostics.length(), 0);
 }
 
-/// Scenario (REQ-M4): a receiver whose owner record has type parameters is
-/// rejected — `requireNonGenericMethodOwner` is not widened to accept
-/// `Type::Instance`/generic owners, mirroring `requireNonGenericRecord`.
-/// Spec: selfhost-method-call-resolution — Requirement: requireNonGenericMethodOwner helper.
+/// Scenario (REQ-M4): a receiver annotated with the bare name of a generic
+/// record is still rejected. `requireMethodOwner` accepts a `Type::Instance`
+/// receiver (IGN-143), which carries what the type parameters stand for, but the
+/// declaration on its own carries nothing to bind them to.
+/// Spec: selfhost-method-call-resolution — Requirement: requireMethodOwner helper.
 @test
 function typecheckInstanceMethodCallGenericReceiverRejected(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
@@ -13648,4 +13649,167 @@ function typecheckGenericRecordAnnotationOnLocalResolves(): void {
   };
 
   Test::assertEq<u32>(bindingType.raw(), initType.raw());
+}
+
+/// Build `record Box<T> { public value: T; public echo(self, v: T): T { return v; } }`
+/// as a root item. The method never touches `self`, so a test using it exercises
+/// the receiver's type arguments and nothing else.
+function typecheckAddGenericBoxWithEchoMethod(module: &mut Ast::Module): void {
+  let fieldType: Ast::TypeId = typecheckAddPathType(module, "T");
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(typecheckAddAnnotatedField(module, "value", fieldType));
+
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(module, "v");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(module, valueExpr);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let methodBody: Ast::StatementId = typecheckAddBlock(module, bodyStmts);
+
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(typecheckAddBinding(module, "self"));
+  params.push(typecheckAddAnnotatedBinding(module, "v", typecheckAddPathType(module, "T")));
+
+  let methodReturnType: Ast::TypeId = typecheckAddPathType(module, "T");
+  let mut moduleRef: &mut Ast::Module = module;
+  let methodId: Ast::ItemId = moduleRef.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("echo"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: params,
+    returnType: Option::SOME(methodReturnType),
+    body: methodBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  let mut genericParameters: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParameters.push(typecheckGenericParam("T"));
+
+  let mut moduleRootRef: &mut Ast::Module = module;
+  moduleRootRef.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("Box"),
+    genericParameters: genericParameters,
+    fields: fields,
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Add `let boxed: Box<i32> = Box { value: 1 };` and return its statement id.
+function typecheckAddBoxedI32Local(module: &mut Ast::Module): Ast::StatementId {
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(module, "i32");
+  let boxBase: Ast::TypeId = typecheckAddPathType(module, "Box");
+  let mut boxArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  boxArguments.push(i32TypeId);
+  let boxOfI32: Ast::TypeId = typecheckAddGenericType(module, boxBase, boxArguments);
+
+  let mut initFields: Vector<Ast::Expression::RecordInitField> = Vector::new<Ast::Expression::RecordInitField>();
+  initFields.push(typecheckRecordInitField("value", typecheckAddIntLiteral(module, 1)));
+  let boxPath: Ast::ExpressionId = typecheckAddVariable(module, "Box");
+  let initExpr: Ast::ExpressionId = typecheckAddRecordInit(
+    module,
+    boxPath,
+    Vector::new<Ast::TypeId>(),
+    initFields,
+  );
+
+  let boxedPattern: Ast::PatternId = typecheckAddAnnotatedBinding(module, "boxed", boxOfI32);
+  let mut moduleRef: &mut Ast::Module = module;
+
+  return moduleRef.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+    span: typecheckDummySpan(),
+    pattern: boxedPattern,
+    annotation: Option::SOME(boxOfI32),
+    value: Option::SOME(initExpr),
+  }));
+}
+
+/// Scenario: `boxed.echo(1)` on a `Box<i32>` receiver substitutes the owner's
+/// type parameter, so the call types as `i32` instead of being refused for
+/// having a generic receiver.
+/// Spec: IGN-143 — method calls on generic receivers.
+@test
+function typecheckMethodCallOnGenericReceiverSubstitutesOwnerTypeArguments(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddGenericBoxWithEchoMethod(&mut module);
+
+  let letStmt: Ast::StatementId = typecheckAddBoxedI32Local(&mut module);
+
+  let receiverExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "boxed");
+  let memberExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, receiverExpr, "echo");
+  let mut callArguments: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArguments.push(typecheckAddIntLiteral(&mut module, 1));
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, memberExpr, callArguments);
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(callStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  assertExprType(&output, callExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: the same call with a `str` argument is reported against the
+/// substituted parameter type, so the receiver's type arguments reach the
+/// arguments and not only the result.
+/// Spec: IGN-143 — method calls on generic receivers.
+@test
+function typecheckMethodCallOnGenericReceiverChecksSubstitutedParameters(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddGenericBoxWithEchoMethod(&mut module);
+
+  let letStmt: Ast::StatementId = typecheckAddBoxedI32Local(&mut module);
+
+  let receiverExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "boxed");
+  let memberExpr: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, receiverExpr, "echo");
+  let mut callArguments: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+  callArguments.push(typecheckAddStringLiteral(&mut module, "nope"));
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, memberExpr, callArguments);
+  let callStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, callExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(callStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_ARGUMENT_TYPE);
 }

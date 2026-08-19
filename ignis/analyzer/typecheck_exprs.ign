@@ -1205,7 +1205,7 @@ export namespace Analyzer {
     }
 
     /// Typechecks `expr.method(args)` where `call.callee` is a `MemberAccess`
-    /// with `Dot`. Resolves the receiver's owner via `requireNonGenericMethodOwner`,
+    /// with `Dot`. Resolves the receiver's owner via `requireMethodOwner`,
     /// looks the member up in `instanceMethods` (falling back to `staticMethods`
     /// for the static-through-instance diagnostic, ADR D10), enforces the
     /// mut-self check (ADR D7, Local-only), then typechecks the call arguments
@@ -1239,7 +1239,7 @@ export namespace Analyzer {
 
       let receiverType: Analyzer::TypeId = Analyzer::Typecheck::derefReceiverType(defStore, typeStore, objectType);
 
-      let ownerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = Analyzer::Typecheck::requireNonGenericMethodOwner(
+      let ownerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = Analyzer::Typecheck::requireMethodOwner(
         state,
         defStore,
         typeStore,
@@ -1363,6 +1363,38 @@ export namespace Analyzer {
         paramIndex += 1;
       }
 
+      // An instantiated receiver says what the owner's type parameters stand for, so
+      // the method's declared types are specialized before the member access is typed
+      // and before any argument is compared.
+      if (owner.typeArguments.length() > 0) {
+        let specialized: Analyzer::Typecheck::CalleeSignature = Analyzer::Typecheck::substituteOwnerTypeArguments(
+          typeStore,
+          &owner,
+          &paramTypes,
+          signature.returnType,
+        );
+
+        let mut typeStoreSpecializedRef: &mut Analyzer::TypeStore = typeStore;
+        let specializedMemberType: Analyzer::TypeId = typeStoreSpecializedRef.functionType(
+          Analyzer::Typecheck::copyTypeIdVector(&specialized.paramTypes),
+          specialized.returnType,
+        );
+        Analyzer::Typecheck::recordExprType(state, memberExprId, specializedMemberType);
+
+        return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          callExprId,
+          call,
+          &specialized.paramTypes,
+          specialized.returnType,
+        );
+      }
+
       let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
       let memberAccessType: Analyzer::TypeId = typeStoreRef.functionType(paramTypes, signature.returnType);
       Analyzer::Typecheck::recordExprType(state, memberExprId, memberAccessType);
@@ -1379,6 +1411,50 @@ export namespace Analyzer {
         &signature,
         1,
       );
+    }
+
+    /// Specialize a method's flattened signature with the receiver's type arguments.
+    ///
+    /// The owner's type parameters are what a method on a generic declaration writes,
+    /// and the receiver instance is what says which types they stand for. An owner
+    /// whose arguments do not match its parameters in number substitutes nothing, so
+    /// the declared types are compared as written rather than half-specialized.
+    function substituteOwnerTypeArguments(
+      typeStore: &mut Analyzer::TypeStore,
+      owner: &Analyzer::Typecheck::RequiredMethodOwner,
+      paramTypes: &Vector<Analyzer::TypeId>,
+      returnType: Analyzer::TypeId,
+    ): Analyzer::Typecheck::CalleeSignature {
+      if (owner.typeArguments.length() != owner.typeParamSymbols.length()) {
+        return Analyzer::Typecheck::CalleeSignature {
+          paramTypes: Analyzer::Typecheck::copyTypeIdVector(paramTypes),
+          returnType: returnType,
+        };
+      }
+
+      let mut specializedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < paramTypes.length()) {
+        let Option::SOME(paramType) = paramTypes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let declaredType: Analyzer::TypeId = *paramType;
+        let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+        specializedParams.push(typeStoreParamRef.substitute(declaredType, &owner.typeParamSymbols, &owner.typeArguments));
+
+        index += 1;
+      }
+
+      let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
+      let specializedReturn: Analyzer::TypeId = typeStoreReturnRef.substitute(returnType, &owner.typeParamSymbols, &owner.typeArguments);
+
+      return Analyzer::Typecheck::CalleeSignature {
+        paramTypes: specializedParams,
+        returnType: specializedReturn,
+      };
     }
 
     record RequiredRecordDef {
@@ -4646,7 +4722,7 @@ export namespace Analyzer {
 
       let receiverType: Analyzer::TypeId = Analyzer::Typecheck::derefReceiverType(defStore, typeStore, objectType);
 
-      let owner: Analyzer::Typecheck::RequiredMethodOwner = Analyzer::Typecheck::requireNonGenericMethodOwner(
+      let owner: Analyzer::Typecheck::RequiredMethodOwner = Analyzer::Typecheck::requireMethodOwner(
         state,
         defStore,
         typeStore,
@@ -4698,16 +4774,26 @@ export namespace Analyzer {
 
       let signature: Analyzer::Typecheck::FunctionSignature = Analyzer::Typecheck::extractFunctionSignature(defStore, methodDefId)!;
 
-      let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(defStore, &signature, info.isStatic);
+      let declaredParamTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(defStore, &signature, info.isStatic);
+
+      // Same specialization as the direct method call path: an instantiated receiver
+      // decides what the owner's type parameters stand for before the piped value is
+      // compared against the first one.
+      let specialized: Analyzer::Typecheck::CalleeSignature = Analyzer::Typecheck::substituteOwnerTypeArguments(
+        typeStore,
+        &owner,
+        &declaredParamTypes,
+        signature.returnType,
+      );
 
       // A wrong count is reported and the pipe still takes the method's return type, the
       // same way `checkPipePrepend` treats a miscounted call: the method is known, so
       // stripping the type would hide every later mistake behind one recompile.
-      Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, &paramTypes, leftType);
+      Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, &specialized.paramTypes, leftType);
 
-      Analyzer::Typecheck::recordExprType(state, pipe.right, signature.returnType);
+      Analyzer::Typecheck::recordExprType(state, pipe.right, specialized.returnType);
 
-      return Option::SOME(signature.returnType);
+      return Option::SOME(specialized.returnType);
     }
 
     /// Whether the receiver place a piped method call mutates is a mutable binding.
