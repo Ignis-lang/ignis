@@ -807,3 +807,121 @@ function displaySortsFunctionDefinitionsByName(): void {
 
   Test::assertEq<str>(rendered.toStr(), expected.toStr());
 }
+
+/// Build a closure kind whose body is `bodyRaw`, with one by-value capture and
+/// one `@move` override, so a test can tell which fields an id rewrite touches.
+function closureKind(
+  params: Vector<Analyzer::DefinitionId>,
+  returnType: Analyzer::TypeId,
+  bodyRaw: u32,
+  captureDef: Analyzer::DefinitionId,
+  escapes: boolean,
+): Hir::HirKind {
+  let mut captures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+  captures.push(Hir::HirCapture {
+    sourceDef: captureDef,
+    fieldIndex: 0,
+    mode: Hir::CaptureMode::ByValue,
+    typeInEnv: returnType,
+  });
+
+  let mut overrides: Vector<Hir::HirCaptureOverride> = Vector::new<Hir::HirCaptureOverride>();
+  overrides.push(Hir::HirCaptureOverride {
+    sourceDef: captureDef,
+    mode: Hir::CaptureMode::ByValue,
+  });
+
+  return Hir::HirKind::Closure(Hir::HirClosure {
+    params: params,
+    returnType: returnType,
+    body: hirId(bodyRaw),
+    captures: captures,
+    escapes: escapes,
+    thunkDef: Option::SOME(defId(7)),
+    dropDef: Option::NONE,
+    captureOverrides: overrides,
+  });
+}
+
+@test
+function offsetKindOffsetsClosureBodyOnly(): void {
+  let offsetClosure: Hir::HirKind = Hir::offsetKind(
+    closureKind(Vector::new<Analyzer::DefinitionId>(), typeId(2), 3, defId(4), true),
+    10,
+  );
+
+  let Hir::HirKind::Closure(closure) = &offsetClosure else {
+    @panic("expected Closure kind");
+  };
+
+  Test::assertEq<u32>(closure.body.raw(), 13);
+  Test::assertEq<u32>(closure.returnType.raw(), 2);
+  Test::assert(closure.escapes);
+
+  let Option::SOME(capture) = closure.captures.get(0) else {
+    @panic("missing capture");
+  };
+  Test::assertEq<u32>(capture.sourceDef.raw(), 4);
+  Test::assertEq<u32>(capture.fieldIndex, 0);
+
+  let Option::SOME(thunk) = closure.thunkDef else {
+    @panic("missing thunk def");
+  };
+  Test::assertEq<u32>(thunk.raw(), 7);
+  Test::assert(closure.dropDef.isNone());
+
+  let Option::SOME(captureOverride) = closure.captureOverrides.get(0) else {
+    @panic("missing capture override");
+  };
+  Test::assertEq<u32>(captureOverride.sourceDef.raw(), 4);
+}
+
+@test
+function displayRendersClosureLikeRustPrinter(): void {
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut types: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defs: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let i32Type: Analyzer::TypeId = types.intern(Analyzer::Type::I32);
+  let voidType: Analyzer::TypeId = types.intern(Analyzer::Type::VOID);
+
+  let valueDef: Analyzer::DefinitionId = pushVariableDef(&mut defs, &mut symbols, "value", i32Type, false);
+  let capturedDef: Analyzer::DefinitionId = pushVariableDef(&mut defs, &mut symbols, "captured", i32Type, false);
+
+  let mut closureParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  closureParams.push(valueDef);
+
+  let mut outerParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+  let functionDef: Analyzer::DefinitionId = pushFunctionDef(&mut defs, &mut symbols, "makeAdder", outerParams, voidType);
+
+  let mut store: Hir::HirStore = Hir::HirStore::init();
+  let bodyNode: Hir::HirId = store.alloc(makeNode(Hir::HirKind::Variable(capturedDef), i32Type));
+  let closureNode: Hir::HirId = store.alloc(makeNode(
+    closureKind(closureParams, i32Type, bodyNode.raw(), capturedDef, true),
+    i32Type,
+  ));
+
+  let mut statements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+  statements.push(closureNode);
+  let block: Hir::HirId = store.alloc(makeNode(
+    Hir::HirKind::Block(Hir::HirBlock { statements: statements, expression: Option::NONE }),
+    voidType,
+  ));
+
+  store.setFunctionBody(functionDef, block);
+  store.addItem(functionDef);
+
+  let rendered: String = Hir::Display::printHir(&store, &types, &defs, &symbols);
+
+  let mut expected: String = String::create("=== HIR ===\n\n");
+  expected.pushStr("\n--- Definitions ---\n");
+  expected.pushStr("\nfn makeAdder(): void\n");
+  expected.pushStr("  body:\n");
+  expected.pushStr("    Block : void\n");
+  expected.pushStr("      statements:\n");
+  expected.pushStr("        Closure(value: i32) -> i32 [captures: 1, escapes: true] : i32\n");
+  expected.pushStr("          body:\n");
+  expected.pushStr("            Variable(captured) : i32\n");
+
+  Test::assertEq<str>(rendered.toStr(), expected.toStr());
+}

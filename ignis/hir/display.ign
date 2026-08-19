@@ -23,7 +23,6 @@ export namespace Hir {
   /// - `Variable(...)`/`Call(...)` metadata never shows `[param]`, `[const]`,
   ///   `[extern]`, or `[variadic]` for the same reason; `[mut]` and `[export]`
   ///   are preserved.
-  /// - The deferred `Closure` variant has no arm; every ported variant prints.
   namespace Display {
     function formatBuiltinEqKind(kind: &Hir::BuiltinEqKind): String {
       return match (kind) {
@@ -425,6 +424,26 @@ export namespace Hir {
             Hir::Display::writeLabelLine(out, indent + 1, "args:");
             Hir::Display::printIndexedChildren(hir, types, defs, symbols, &call.args, indent + 2, out);
           }
+        },
+        Hir::HirKind::Closure(closure) -> {
+          let escapesText: str = match (closure.escapes) {
+            true -> "true",
+            false -> "false",
+          };
+
+          let head: String = String::create("Closure(")
+            .concat(Hir::Display::formatParams(types, defs, symbols, &closure.params))
+            .concat(") -> ")
+            .concat(Hir::Display::formatType(types, defs, symbols, closure.returnType))
+            .concat(" [captures: ")
+            .concat(closure.captures.length())
+            .concat(", escapes: ")
+            .concat(escapesText)
+            .concat("]");
+          Hir::Display::writeHeading(out, indent, &head, &typeText);
+
+          Hir::Display::writeLabelLine(out, indent + 1, "body:");
+          Hir::Display::printNode(hir, types, defs, symbols, closure.body, indent + 2, out);
         },
         Hir::HirKind::Cast(cast) -> {
           let head: String = String::create("Cast(-> ")

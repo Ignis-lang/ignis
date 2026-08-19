@@ -19,6 +19,49 @@ export namespace Hir {
     Pending,
   }
 
+  /// Mirrors `ignis_hir::CaptureMode`.
+  enum CaptureMode {
+    ByValue,
+    ByRef,
+    ByMutRef,
+  }
+
+  /// Mirrors `ignis_hir::HIRCapture`.
+  record HirCapture {
+    public sourceDef: Analyzer::DefinitionId;
+    /// Position in the env struct.
+    public fieldIndex: u32;
+    public mode: Hir::CaptureMode;
+    /// `T` for `ByValue`, `*T` for `ByRef`/`ByMutRef`.
+    public typeInEnv: Analyzer::TypeId;
+  }
+
+  /// One `@move x` / `@ref x` / `@refMut x` written on a closure.
+  ///
+  /// The Rust model keys these by definition in a `HashMap`. A vector keeps the
+  /// order the source wrote them, which a hash map cannot promise and which the
+  /// printed form would otherwise vary by.
+  record HirCaptureOverride {
+    public sourceDef: Analyzer::DefinitionId;
+    public mode: Hir::CaptureMode;
+  }
+
+  /// Mirrors `ignis_hir::HIRKind::Closure`.
+  record HirClosure {
+    public params: Vector<Analyzer::DefinitionId>;
+    public returnType: Analyzer::TypeId;
+    public body: Hir::HirId;
+    public captures: Vector<Hir::HirCapture>;
+    /// When true the env is heap-allocated, because the closure outlives the
+    /// scope that defined it.
+    public escapes: boolean;
+    /// Thunk: `(env_ptr: *mut u8, params...) -> ret`. Filled in by capture analysis.
+    public thunkDef: Option<Analyzer::DefinitionId>;
+    /// Drop fn: `(env_ptr: *mut u8) -> void`. `NONE` when nothing needs dropping.
+    public dropDef: Option<Analyzer::DefinitionId>;
+    public captureOverrides: Vector<Hir::HirCaptureOverride>;
+  }
+
   /// Mirrors `ignis_hir::HIRMatchArm`.
   record HirMatchArm {
     public pattern: Hir::HirPattern;
@@ -171,9 +214,7 @@ export namespace Hir {
     public arms: Vector<Hir::HirMatchArm>;
   }
 
-  /// Mirrors `ignis_hir::HIRKind` — all variants except `Closure`, which is
-  /// deferred to the closures epic together with `HIRCapture`/`CaptureMode`.
-  /// `CallClosure` stays because it only references a closure value.
+  /// Mirrors `ignis_hir::HIRKind`.
   enum HirKind {
     Literal(Hir::LiteralValue),
     Unit,
@@ -182,6 +223,7 @@ export namespace Hir {
     Unary(Hir::HirUnary),
     Call(Hir::HirCall),
     CallClosure(Hir::HirCallClosure),
+    Closure(Hir::HirClosure),
     Cast(Hir::HirCast),
     BitCast(Hir::HirCast),
     Reference(Hir::HirReference),
@@ -303,8 +345,8 @@ export namespace Hir {
   /// `HIRKind::offset_ids` variant by variant. Consumes and rebuilds the value
   /// because the selfhost slice models id rewriting functionally.
   ///
-  /// Exhaustive on purpose: adding a variant (e.g. the deferred `Closure`)
-  /// forces a compile error here instead of a silent monomorphization bug.
+  /// Exhaustive on purpose: adding a variant forces a compile error here
+  /// instead of a silent monomorphization bug.
   function offsetKind(kind: Hir::HirKind, offset: u32): Hir::HirKind {
     return match (kind) {
       Hir::HirKind::Literal(value) -> Hir::HirKind::Literal(value),
@@ -327,6 +369,19 @@ export namespace Hir {
       Hir::HirKind::CallClosure(call) -> Hir::HirKind::CallClosure(Hir::HirCallClosure {
         callee: Hir::offsetHirId(call.callee, offset),
         args: Hir::offsetHirIdVector(call.args, offset),
+      }),
+      // The body is the only `HirId` a closure holds. Parameters, captures and
+      // the thunk/drop functions are definitions, which monomorphization
+      // rewrites through the definition store rather than by offset.
+      Hir::HirKind::Closure(closure) -> Hir::HirKind::Closure(Hir::HirClosure {
+        params: closure.params,
+        returnType: closure.returnType,
+        body: Hir::offsetHirId(closure.body, offset),
+        captures: closure.captures,
+        escapes: closure.escapes,
+        thunkDef: closure.thunkDef,
+        dropDef: closure.dropDef,
+        captureOverrides: closure.captureOverrides,
       }),
       Hir::HirKind::Cast(cast) -> Hir::HirKind::Cast(Hir::HirCast {
         expression: Hir::offsetHirId(cast.expression, offset),
