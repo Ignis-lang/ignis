@@ -2957,6 +2957,57 @@ export namespace Analyzer {
       @panic("unreachable: extractFunctionSignature match did not return");
     }
 
+    /// The type arguments a generic enum's variant construction is built with,
+    /// inferred from the expected type.
+    ///
+    /// Only an `expected` that alias-resolves to a `Type::Instance` naming this exact
+    /// enum contributes anything; every other case yields no arguments and leaves the
+    /// payload types unsubstituted, which the ordinary per-argument comparison then
+    /// reports. This mirrors the reference analyzer, which infers variant type
+    /// arguments from the expected type and from nowhere else.
+    function inferVariantTypeArguments(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      constructor: &Analyzer::Typecheck::VariantConstructor,
+      expected: Option<Analyzer::TypeId>,
+    ): Vector<Analyzer::TypeId> {
+      if (constructor.typeParamSymbols.length() == 0) {
+        return Vector::new<Analyzer::TypeId>();
+      }
+
+      let Option::SOME(expectedType) = expected else {
+        return Vector::new<Analyzer::TypeId>();
+      };
+
+      let resolvedExpected: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
+      if (resolvedExpected.cycleAlias.isSome()) {
+        return Vector::new<Analyzer::TypeId>();
+      }
+
+      let Option::SOME(resolvedExpectedNode) = typeStore.get(resolvedExpected.typeId) else {
+        return Vector::new<Analyzer::TypeId>();
+      };
+
+      match (resolvedExpectedNode) {
+        Analyzer::Type::Instance(instance) -> {
+          if (instance.definition.raw() != constructor.enumDefId.raw()) {
+            return Vector::new<Analyzer::TypeId>();
+          }
+
+          if (instance.typeArguments.length() != constructor.typeParamSymbols.length()) {
+            return Vector::new<Analyzer::TypeId>();
+          }
+
+          return Analyzer::Typecheck::copyVariantPayloadTypeIds(&instance.typeArguments);
+        },
+        _ -> {
+          return Vector::new<Analyzer::TypeId>();
+        },
+      };
+
+      @panic("unreachable: inferVariantTypeArguments match did not return");
+    }
+
     /// Everything `Enum::Variant` needs to be typed, whether it is used bare
     /// (unit variant) or applied to arguments (payload variant): the declared
     /// payload types, the owning enum's type, and whether that enum is generic.
@@ -3528,6 +3579,7 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       exprId: Ast::ExpressionId,
       span: SourceSpan,
+      expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
       let resolvedOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, exprId);
       let Option::SOME(resolved) = resolvedOpt else {
@@ -3557,18 +3609,33 @@ export namespace Analyzer {
           // with a payload it is a constructor and must be applied, which
           // `checkCallExpr` handles before the callee ever reaches here.
           if (let Option::SOME(constructor) = Analyzer::Typecheck::extractVariantConstructor(defStore, defId)) {
-            if (constructor.generic) {
-              Analyzer::Typecheck::emitUnsupported(state, span, "generic enum variants in expression position");
-              return Option::NONE;
-            }
-
             if (constructor.payload.length() > 0) {
               Analyzer::Typecheck::emitInvalidNumberOfArguments(state, span, 0, constructor.payload.length());
               return Option::NONE;
             }
 
-            Analyzer::Typecheck::recordExprType(state, exprId, constructor.enumType);
-            return Option::SOME(constructor.enumType);
+            // A generic enum's variant carries the enum's type parameters, and only the
+            // expected type says what they stand for. With nothing to infer from, the
+            // declared type is kept as written, which is what applying a generic variant
+            // constructor without an expected type already does.
+            let mut variantType: Analyzer::TypeId = constructor.enumType;
+            let typeArguments: Vector<Analyzer::TypeId> = Analyzer::Typecheck::inferVariantTypeArguments(
+              defStore,
+              typeStore,
+              &constructor,
+              expected,
+            );
+
+            if (typeArguments.length() > 0) {
+              let mut typeStoreInstanceRef: &mut Analyzer::TypeStore = typeStore;
+              variantType = typeStoreInstanceRef.instance(
+                constructor.enumDefId,
+                Analyzer::Typecheck::copyVariantPayloadTypeIds(&typeArguments),
+              );
+            }
+
+            Analyzer::Typecheck::recordExprType(state, exprId, variantType);
+            return Option::SOME(variantType);
           }
 
           let defTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::definitionType(defStore, typeStore, defId);

@@ -13221,3 +13221,279 @@ function typecheckWrittenRecordInitTypeArgumentOnNonGenericRecordIsIgnored(): vo
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
   assertExprType(&output, fieldValue, typeStore.intern(Analyzer::Type::I32));
 }
+
+/// Build `function identity<T>(value: T): T { return value; }` as a root item.
+function typecheckAddIdentityFunction(module: &mut Ast::Module): void {
+  let tType: Ast::TypeId = typecheckAddPathType(module, "T");
+  let valueParam: Ast::PatternId = typecheckAddAnnotatedBinding(module, "value", tType);
+  let valueExpr: Ast::ExpressionId = typecheckAddVariable(module, "value");
+  let identityRet: Ast::StatementId = typecheckAddReturnExpr(module, valueExpr);
+
+  let mut identityStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  identityStmts.push(identityRet);
+  let identityBody: Ast::StatementId = typecheckAddBlock(module, identityStmts);
+
+  let mut identityParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  identityParams.push(valueParam);
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(typecheckGenericParam("T"));
+
+  let returnType: Ast::TypeId = typecheckAddPathType(module, "T");
+  let mut moduleRef: &mut Ast::Module = module;
+
+  moduleRef.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("identity"),
+    genericParameters: genericParams,
+    parameters: identityParams,
+    returnType: Option::SOME(returnType),
+    body: identityBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Scenario: `1 |> identity<i32>()` binds `T` from the written type argument, so
+/// the pipe types as `i32` and the piped value is checked against the
+/// substituted parameter.
+/// Spec: IGN-135 — explicit type arguments on a piped call.
+@test
+function typecheckPipeExplicitTypeArgumentSpecializesSignature(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddIdentityFunction(&mut module);
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let calleeExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "identity");
+
+  let mut callTypeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  callTypeArguments.push(i32TypeId);
+
+  let callExpr: Ast::ExpressionId = typecheckAddCallWithTypeArguments(
+    &mut module,
+    calleeExpr,
+    callTypeArguments,
+    Vector::new<Ast::ExpressionId>(),
+  );
+
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, callExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+  assertExprType(&output, pipeExpr, typeStore.intern(Analyzer::Type::I32));
+}
+
+/// Scenario: `1 |> identity<str>()` writes a type argument the piped value does
+/// not satisfy. The written argument wins over what the value would have
+/// inferred, so the mismatch is reported instead of silently rebinding `T`.
+/// Spec: IGN-135 — explicit type arguments on a piped call.
+@test
+function typecheckPipeExplicitTypeArgumentOverridesInference(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddIdentityFunction(&mut module);
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let strTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "str");
+  let calleeExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "identity");
+
+  let mut callTypeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  callTypeArguments.push(strTypeId);
+
+  let callExpr: Ast::ExpressionId = typecheckAddCallWithTypeArguments(
+    &mut module,
+    calleeExpr,
+    callTypeArguments,
+    Vector::new<Ast::ExpressionId>(),
+  );
+
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, callExpr);
+  let pipeStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, pipeExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddIntLiteral(&mut module, 0));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(pipeStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_ARGUMENT_TYPE);
+  assertExprType(&output, pipeExpr, typeStore.intern(Analyzer::Type::STR));
+}
+
+/// Scenario: two type arguments written for a piped callee that declares one is
+/// reported once, and the piped value is left unchecked so a single mistake does
+/// not also produce an argument mismatch. The pipe keeps the declared return
+/// type, matching the direct call path.
+/// Spec: IGN-135 — explicit type arguments on a piped call.
+@test
+function typecheckPipeExplicitTypeArgumentCountMismatchIsReported(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddIdentityFunction(&mut module);
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let strTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "str");
+  let calleeExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "identity");
+
+  let mut callTypeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  callTypeArguments.push(i32TypeId);
+  callTypeArguments.push(strTypeId);
+
+  let callExpr: Ast::ExpressionId = typecheckAddCallWithTypeArguments(
+    &mut module,
+    calleeExpr,
+    callTypeArguments,
+    Vector::new<Ast::ExpressionId>(),
+  );
+
+  let pipeLeft: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, callExpr);
+  let pipeStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, pipeExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, typecheckAddIntLiteral(&mut module, 0));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(pipeStmt);
+  bodyStmts.push(retStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, i32TypeId);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_ARGUMENT_COUNT_MISMATCH);
+}
+
+/// Build `enum Maybe<T> { NOTHING }` as a root item.
+function typecheckAddGenericMaybeEnum(module: &mut Ast::Module): void {
+  let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  variants.push(typecheckAddBinding(module, "NOTHING"));
+
+  let mut genericParameters: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParameters.push(typecheckGenericParam("T"));
+
+  let mut moduleRef: &mut Ast::Module = module;
+
+  moduleRef.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+    span: typecheckDummySpan(),
+    name: String::create("Maybe"),
+    genericParameters: genericParameters,
+    variants: variants,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Scenario: `function make(): Maybe<i32> { return Maybe::NOTHING; }` on a
+/// generic enum takes its type arguments from the expected return type, so the
+/// payload-less variant types as `Maybe<i32>` rather than as the bare enum.
+/// Spec: IGN-135 — generic enum variants in expression position.
+@test
+function typecheckGenericVariantInExpressionPositionUsesExpectedTypeArguments(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddGenericMaybeEnum(&mut module);
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let maybeBase: Ast::TypeId = typecheckAddPathType(&mut module, "Maybe");
+  let mut maybeArguments: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+  maybeArguments.push(i32TypeId);
+  let maybeOfI32: Ast::TypeId = typecheckAddGenericType(&mut module, maybeBase, maybeArguments);
+
+  let variantExpr: Ast::ExpressionId = typecheckAddPathExpr2(&mut module, "Maybe", "NOTHING");
+  let returnStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, variantExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(returnStmt);
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("make"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(maybeOfI32),
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+
+  let Option::SOME(variantType) = findExprType(&output, variantExpr) else {
+    @panic("typecheckGenericVariantInExpressionPositionUsesExpectedTypeArguments: variant has no type");
+  };
+  let Option::SOME(variantTypeNode) = typeStore.get(variantType) else {
+    @panic("typecheckGenericVariantInExpressionPositionUsesExpectedTypeArguments: variant type not interned");
+  };
+  let Analyzer::Type::Instance(instance) = variantTypeNode else {
+    @panic("typecheckGenericVariantInExpressionPositionUsesExpectedTypeArguments: variant type is not an instance");
+  };
+
+  Test::assertEq<u64>(instance.typeArguments.length(), 1);
+
+  let Option::SOME(firstArgument) = instance.typeArguments.get(0) else {
+    @panic("typecheckGenericVariantInExpressionPositionUsesExpectedTypeArguments: instance has no type argument");
+  };
+
+  Test::assertEq<u32>(firstArgument.raw(), typeStore.intern(Analyzer::Type::I32).raw());
+}
+
+/// Scenario: the same variant written with nothing to infer from keeps the
+/// enum's own declared type and reports nothing, which is what applying a
+/// generic variant constructor without an expected type already does.
+/// Spec: IGN-135 — generic enum variants in expression position.
+@test
+function typecheckGenericVariantInExpressionPositionWithoutExpectedTypeIsAccepted(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  typecheckAddGenericMaybeEnum(&mut module);
+
+  let variantExpr: Ast::ExpressionId = typecheckAddPathExpr2(&mut module, "Maybe", "NOTHING");
+  let variantStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, variantExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(variantStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let body: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("main"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 0);
+  let Option::SOME(_) = findExprType(&output, variantExpr) else {
+    @panic("typecheckGenericVariantInExpressionPositionWithoutExpectedTypeIsAccepted: variant has no type");
+  };
+}
