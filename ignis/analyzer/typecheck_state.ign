@@ -3211,6 +3211,69 @@ export namespace Analyzer {
       return false;
     }
 
+    /// The declaration a generic annotation's base path names.
+    ///
+    /// Only a record or an enum answers: those are what `Type::Instance` instantiates.
+    /// A parameterized type alias resolves to nothing here, so an annotation written
+    /// over one stays unresolved rather than producing an instance of the alias itself.
+    /// Like the `Path` arm of `resolveLocalAnnotation`, a qualified path is matched on
+    /// its last segment alone — TODO(namespace-path-validation), the same debt tracked
+    /// at `resolvePathTail` in resolver_bodies.ign.
+    function lookupAnnotationBaseDefinition(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      baseTypeId: Ast::TypeId,
+    ): Option<Analyzer::DefinitionId> {
+      let Option::SOME(baseNode) = module.types.get(baseTypeId) else {
+        return Option::NONE;
+      };
+
+      let Ast::Type::Node::Path(path) = baseNode else {
+        return Option::NONE;
+      };
+
+      if (path.segments.length() == 0) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(lastSegment) = path.segments.get(path.segments.length() - 1) else {
+        return Option::NONE;
+      };
+
+      let name: String = lastSegment.clone();
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let symbol: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
+      let mut index: u64 = 0;
+
+      while (index < defStore.length()) {
+        let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+        let Option::SOME(def) = defStore.get(defId) else {
+          index += 1;
+          continue;
+        };
+
+        if (def.name().raw() != symbol.raw()) {
+          index += 1;
+          continue;
+        }
+
+        match (def) {
+          Analyzer::Definition::Record(_) -> {
+            return Option::SOME(defId);
+          },
+          Analyzer::Definition::Enum(_) -> {
+            return Option::SOME(defId);
+          },
+          _ -> {},
+        };
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
     function resolveLocalAnnotation(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
@@ -3447,8 +3510,43 @@ export namespace Analyzer {
             returnType: resolvedReturn,
           })));
         },
-        Ast::Type::Node::Generic(_) -> {
-          return Option::NONE;
+        Ast::Type::Node::Generic(generic) -> {
+          let baseOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::lookupAnnotationBaseDefinition(
+            defStore,
+            symbols,
+            module,
+            generic.base,
+          );
+          let Option::SOME(baseDefId) = baseOpt else {
+            return Option::NONE;
+          };
+
+          let mut arguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut argumentIndex: u64 = 0;
+
+          while (argumentIndex < generic.arguments.length()) {
+            let Option::SOME(argumentTypeId) = generic.arguments.get(argumentIndex) else {
+              return Option::NONE;
+            };
+
+            // One unresolvable argument makes the whole instance unusable: a partial
+            // argument list would compare equal to a different instantiation.
+            let Option::SOME(resolvedArgument) = Analyzer::Typecheck::resolveLocalAnnotation(
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              *argumentTypeId,
+            ) else {
+              return Option::NONE;
+            };
+
+            arguments.push(resolvedArgument);
+            argumentIndex += 1;
+          }
+
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          return Option::SOME(typeStoreRef.instance(baseDefId, arguments));
         },
       };
 
