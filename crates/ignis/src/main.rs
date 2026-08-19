@@ -8,7 +8,7 @@ use std::sync::Arc;
 use clap::Parser as ClapParser;
 use colored::*;
 
-use cli::{BuildCommand, CheckCommand, Cli, FmtCommand, SubCommand, TestCommand, TestStdCommand};
+use cli::{BuildCommand, CheckCommand, Cli, DocCommand, FmtCommand, SubCommand, Target, TestCommand, TestStdCommand};
 use ignis_config::{IgnisBuildConfig, IgnisConfig, IgnisSTDManifest};
 use ignis_driver::{
   build_std, check_runtime, check_std, compile_project, find_project_root, load_project_toml, resolve_project,
@@ -958,6 +958,59 @@ fn check_config_for_single_file(
   Arc::new(config)
 }
 
+fn run_doc(
+  cli: &Cli,
+  cmd: &DocCommand,
+) -> Result<(), ()> {
+  // Documentation extraction needs exactly what `check --analyze-only` needs, so the
+  // configuration is built through the same path rather than a parallel one that could
+  // drift from it.
+  let check = CheckCommand {
+    file_path: cmd.file_path.clone(),
+    project: cmd.project.clone(),
+    analyze_only: true,
+    output_dir: None,
+    std_path: cmd.std_path.clone(),
+    emit: Vec::new(),
+    bin: false,
+    lib: false,
+    target: Target::C,
+    target_triple: None,
+    feature: Vec::new(),
+    features: Vec::new(),
+  };
+
+  let overrides = check_cli_overrides(&check);
+  let input = resolve_compile_input(&check.file_path, &check.project, &overrides)?;
+
+  let (config, entry) = match input {
+    CompileInput::Project(project) => {
+      let entry = project.entry.to_string_lossy().to_string();
+      (check_config_from_project(&project, cli, &check), entry)
+    },
+    CompileInput::SingleFile(path) => {
+      let entry = path.to_string_lossy().to_string();
+      (check_config_for_single_file(cli, &check, &path), entry)
+    },
+  };
+
+  let package = ignis_driver::document_project(config, &entry)?;
+
+  let json = serde_json::to_string_pretty(&package).map_err(|error| {
+    eprintln!("{} Could not serialize documentation: {error}", "Error:".red().bold());
+  })?;
+
+  match &cmd.output {
+    Some(path) => std::fs::write(path, json).map_err(|error| {
+      eprintln!("{} Could not write '{path}': {error}", "Error:".red().bold());
+    }),
+    None => {
+      println!("{json}");
+      Ok(())
+    },
+  }
+}
+
 // =============================================================================
 // Other Commands
 // =============================================================================
@@ -1069,6 +1122,8 @@ fn main() {
     SubCommand::TestStd(cmd) => run_test_std(&cli, cmd),
 
     SubCommand::Check(cmd) => run_check(&cli, cmd),
+
+    SubCommand::Doc(cmd) => run_doc(&cli, cmd),
 
     SubCommand::BuildStd(cmd) => run_build_std(&cli, &cmd.output_dir),
 
