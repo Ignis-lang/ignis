@@ -13813,3 +13813,22 @@ function typecheckMethodCallOnGenericReceiverChecksSubstitutedParameters(): void
 
   assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_ARGUMENT_TYPE);
 }
+
+/// Scenario: a generic declaration's own method writes `Holder<T> { ... }`,
+/// naming the declaration's type parameter in annotation position. Resolving it
+/// to `Type::Param` is what lets the initializer and the return type agree.
+/// Spec: IGN-144 — type parameters in annotation position.
+@test
+function typecheckTypeParameterResolvesInAnnotationPosition(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Holder<T> {\n  public value: T;\n\n  public static make(v: T): Holder<T> {\n    return Holder<T> { value: v };\n  }\n}\n\nfunction main(): void {\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
