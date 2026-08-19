@@ -615,57 +615,6 @@ export namespace Analyzer {
       );
     }
 
-    /// The type arguments a generic enum's variant construction is built with,
-    /// inferred from the expected type.
-    ///
-    /// Only an `expected` that alias-resolves to a `Type::Instance` naming this exact
-    /// enum contributes anything; every other case yields no arguments and leaves the
-    /// payload types unsubstituted, which the ordinary per-argument comparison then
-    /// reports. This mirrors the reference analyzer, which infers variant type
-    /// arguments from the expected type and from nowhere else.
-    function inferVariantTypeArguments(
-      defStore: &mut Analyzer::DefinitionStore,
-      typeStore: &mut Analyzer::TypeStore,
-      constructor: &Analyzer::Typecheck::VariantConstructor,
-      expected: Option<Analyzer::TypeId>,
-    ): Vector<Analyzer::TypeId> {
-      if (constructor.typeParamSymbols.length() == 0) {
-        return Vector::new<Analyzer::TypeId>();
-      }
-
-      let Option::SOME(expectedType) = expected else {
-        return Vector::new<Analyzer::TypeId>();
-      };
-
-      let resolvedExpected: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
-      if (resolvedExpected.cycleAlias.isSome()) {
-        return Vector::new<Analyzer::TypeId>();
-      }
-
-      let Option::SOME(resolvedExpectedNode) = typeStore.get(resolvedExpected.typeId) else {
-        return Vector::new<Analyzer::TypeId>();
-      };
-
-      match (resolvedExpectedNode) {
-        Analyzer::Type::Instance(instance) -> {
-          if (instance.definition.raw() != constructor.enumDefId.raw()) {
-            return Vector::new<Analyzer::TypeId>();
-          }
-
-          if (instance.typeArguments.length() != constructor.typeParamSymbols.length()) {
-            return Vector::new<Analyzer::TypeId>();
-          }
-
-          return Analyzer::Typecheck::copyTypeIdVector(&instance.typeArguments);
-        },
-        _ -> {
-          return Vector::new<Analyzer::TypeId>();
-        },
-      };
-
-      @panic("unreachable: inferVariantTypeArguments match did not return");
-    }
-
     /// Typecheck `Enum::Variant(args)`.
     ///
     /// The variant's declared payload types play the role of parameter types: arity
@@ -973,6 +922,62 @@ export namespace Analyzer {
 
       let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
       let specializedReturn: Analyzer::TypeId = typeStoreReturnRef.substitute(signature.returnType, paramSymbols, &typeArguments);
+
+      return Option::SOME(Analyzer::Typecheck::CalleeSignature {
+        paramTypes: specializedParams,
+        returnType: specializedReturn,
+      });
+    }
+
+    /// Substitute written type arguments through a signature already flattened to types.
+    ///
+    /// The counterpart of `instantiateCallSignature` for callers whose parameters are
+    /// `TypeId`s rather than parameter definitions — the pipe path, which flattens them
+    /// before it knows whether anything will be specialized. `paramSymbols` must already
+    /// agree in number with `typeArgumentIds`. `NONE` means a type argument this pass
+    /// cannot resolve to a type, and is reported before returning.
+    function specializeSignatureFromWrittenTypeArguments(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      span: SourceSpan,
+      typeArgumentIds: &Vector<Ast::TypeId>,
+      paramSymbols: &Vector<Analyzer::SymbolId>,
+      paramTypes: &Vector<Analyzer::TypeId>,
+      returnType: Analyzer::TypeId,
+    ): Option<Analyzer::Typecheck::CalleeSignature> {
+      let Option::SOME(typeArguments) = Analyzer::Typecheck::resolveWrittenTypeArguments(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        span,
+        typeArgumentIds,
+      ) else {
+        return Option::NONE;
+      };
+
+      let mut specializedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < paramTypes.length()) {
+        let Option::SOME(paramType) = paramTypes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let declaredType: Analyzer::TypeId = *paramType;
+        let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+        specializedParams.push(typeStoreParamRef.substitute(declaredType, paramSymbols, &typeArguments));
+
+        index += 1;
+      }
+
+      let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
+      let specializedReturn: Analyzer::TypeId = typeStoreReturnRef.substitute(returnType, paramSymbols, &typeArguments);
 
       return Option::SOME(Analyzer::Typecheck::CalleeSignature {
         paramTypes: specializedParams,
@@ -2420,6 +2425,7 @@ export namespace Analyzer {
             resolvedBodies,
             exprId,
             variable.span,
+            expected,
           );
         },
         Ast::Expression::Node::Path(path) -> {
@@ -2430,6 +2436,7 @@ export namespace Analyzer {
             resolvedBodies,
             exprId,
             path.span,
+            expected,
           );
         },
         Ast::Expression::Node::Grouped(grouped) -> {
@@ -4023,15 +4030,11 @@ export namespace Analyzer {
       // A bare callee writes no arguments of its own; the piped value is the only one.
       let noExtraArgs: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
 
+      // A bare callee has no place to write type arguments either.
+      let noTypeArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
+
       return match (rightExpr) {
         Ast::Expression::Node::Call(call) -> {
-          // The direct call path refuses these, so accepting them here would let a pipe
-          // type a construct the compiler otherwise rejects.
-          if (call.typeArguments.length() > 0) {
-            Analyzer::Typecheck::emitUnsupported(state, pipe.span, "generic call type arguments");
-            return Option::NONE;
-          }
-
           return Analyzer::Typecheck::checkPipePrepend(
             state,
             defStore,
@@ -4041,6 +4044,7 @@ export namespace Analyzer {
             resolvedBodies,
             pipe,
             call.callee,
+            &call.typeArguments,
             &call.arguments,
             leftType,
           );
@@ -4054,6 +4058,7 @@ export namespace Analyzer {
           resolvedBodies,
           pipe,
           rightExprId,
+          &noTypeArgs,
           &noExtraArgs,
           leftType,
         ),
@@ -4066,6 +4071,7 @@ export namespace Analyzer {
           resolvedBodies,
           pipe,
           rightExprId,
+          &noTypeArgs,
           &noExtraArgs,
           leftType,
         ),
@@ -4142,6 +4148,19 @@ export namespace Analyzer {
     record CalleeSignature {
       public paramTypes: Vector<Analyzer::TypeId>;
       public returnType: Analyzer::TypeId;
+    }
+
+    /// What a pipe's right side resolved to, and whether its arguments are still
+    /// worth checking.
+    ///
+    /// `checkArguments` is false when the call site wrote the wrong number of type
+    /// arguments: every parameter type still mentions the type parameters, so checking
+    /// against them would add one mismatch per argument on top of the real mistake. The
+    /// signature is still carried so the pipe keeps a type and the surrounding
+    /// expression goes on being checked, which is what the direct call path does.
+    record PipeCallee {
+      public signature: Analyzer::Typecheck::CalleeSignature;
+      public checkArguments: boolean;
     }
 
     /// The type-parameter symbols a callee declares, in declaration order.
@@ -4256,11 +4275,14 @@ export namespace Analyzer {
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       span: SourceSpan,
       calleeExprId: Ast::ExpressionId,
+      typeArgumentIds: &Vector<Ast::TypeId>,
       leftType: Analyzer::TypeId,
-    ): Option<Analyzer::Typecheck::CalleeSignature> {
+    ): Option<Analyzer::Typecheck::PipeCallee> {
       let Option::SOME(resolved) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, calleeExprId) else {
         return Option::NONE;
       };
@@ -4300,6 +4322,51 @@ export namespace Analyzer {
             index += 1;
           }
 
+          // Type arguments written at the call site say which types the callee's type
+          // parameters stand for, so nothing is left to infer from the piped value.
+          // A callee that declares none is specialized by neither, and its written
+          // arguments are ignored rather than reported, like the direct call path.
+          let writtenParamSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, defId);
+
+          if (typeArgumentIds.length() > 0 && writtenParamSymbols.length() > 0) {
+            if (typeArgumentIds.length() != writtenParamSymbols.length()) {
+              Analyzer::Typecheck::emitTypeArgumentCountMismatch(
+                state,
+                span,
+                typeArgumentIds.length(),
+                writtenParamSymbols.length(),
+              );
+
+              return Option::SOME(Analyzer::Typecheck::PipeCallee {
+                signature: Analyzer::Typecheck::CalleeSignature {
+                  paramTypes: paramTypes,
+                  returnType: signature.returnType,
+                },
+                checkArguments: false,
+              });
+            }
+
+            let Option::SOME(written) = Analyzer::Typecheck::specializeSignatureFromWrittenTypeArguments(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              span,
+              typeArgumentIds,
+              &writtenParamSymbols,
+              &paramTypes,
+              signature.returnType,
+            ) else {
+              return Option::NONE;
+            };
+
+            return Option::SOME(Analyzer::Typecheck::PipeCallee {
+              signature: written,
+              checkArguments: true,
+            });
+          }
+
           // A generic callee's declared parameters mention its type parameters, so the
           // piped value is what says which types they stand for. Nothing is inferred
           // when the callee is not generic, when the first parameter is already
@@ -4313,15 +4380,29 @@ export namespace Analyzer {
             signature.returnType,
             leftType,
           )) {
-            return Option::SOME(specialized);
+            return Option::SOME(Analyzer::Typecheck::PipeCallee {
+              signature: specialized,
+              checkArguments: true,
+            });
           }
 
-          return Option::SOME(Analyzer::Typecheck::CalleeSignature {
-            paramTypes: paramTypes,
-            returnType: signature.returnType,
+          return Option::SOME(Analyzer::Typecheck::PipeCallee {
+            signature: Analyzer::Typecheck::CalleeSignature {
+              paramTypes: paramTypes,
+              returnType: signature.returnType,
+            },
+            checkArguments: true,
           });
         },
         Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> {
+          // A local holds a concrete function type with no type parameters left to
+          // specialize, so type arguments have nothing to bind to. The direct call path
+          // refuses these for the same reason.
+          if (typeArgumentIds.length() > 0) {
+            Analyzer::Typecheck::emitUnsupported(state, span, "type arguments on calls through local values");
+            return Option::NONE;
+          }
+
           let Option::SOME(binding) = Analyzer::Typecheck::lookupLocalBinding(state, localId) else {
             return Option::NONE;
           };
@@ -4347,9 +4428,12 @@ export namespace Analyzer {
             paramIndex += 1;
           }
 
-          return Option::SOME(Analyzer::Typecheck::CalleeSignature {
-            paramTypes: paramTypes,
-            returnType: functionType.returnType,
+          return Option::SOME(Analyzer::Typecheck::PipeCallee {
+            signature: Analyzer::Typecheck::CalleeSignature {
+              paramTypes: paramTypes,
+              returnType: functionType.returnType,
+            },
+            checkArguments: true,
           });
         },
         Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {
@@ -4377,21 +4461,34 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       pipe: &Ast::Expression::Pipe,
       calleeExprId: Ast::ExpressionId,
+      typeArgumentIds: &Vector<Ast::TypeId>,
       extraArgs: &Vector<Ast::ExpressionId>,
       leftType: Analyzer::TypeId,
     ): Option<Analyzer::TypeId> {
       // `pipeCalleeSignature` reports whatever went wrong, so nothing is added here.
-      let Option::SOME(signature) = Analyzer::Typecheck::pipeCalleeSignature(
+      let Option::SOME(callee) = Analyzer::Typecheck::pipeCalleeSignature(
         state,
         defStore,
         typeStore,
+        symbols,
+        module,
         resolvedBodies,
         pipe.span,
         calleeExprId,
+        typeArgumentIds,
         leftType,
       ) else {
         return Option::NONE;
       };
+
+      let signature: Analyzer::Typecheck::CalleeSignature = callee.signature;
+
+      // The type arguments were already reported as wrong, and every parameter type
+      // still mentions the type parameters they were meant to bind.
+      if (!callee.checkArguments) {
+        Analyzer::Typecheck::recordExprType(state, pipe.right, signature.returnType);
+        return Option::SOME(signature.returnType);
+      }
 
       let suppliedCount: u64 = extraArgs.length() + 1;
 
