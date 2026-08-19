@@ -331,6 +331,29 @@ pub struct FmtCommand {
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
+#[command(about = "Extract API documentation from doc comments")]
+pub struct DocCommand {
+  /// File to document (single-file mode) or nothing for project mode
+  pub file_path: Option<String>,
+
+  /// Explicit project directory (overrides auto-detection)
+  #[arg(long)]
+  pub project: Option<String>,
+
+  /// Path to standard library (overrides TOML and env var)
+  #[arg(long)]
+  pub std_path: Option<String>,
+
+  /// Write the JSON document to this file instead of stdout
+  #[arg(short = 'o', long)]
+  pub output: Option<String>,
+
+  /// Emit JSON (currently the only supported format)
+  #[arg(long, default_value = "true")]
+  pub json: bool,
+}
+
+#[derive(Parser, Debug, Clone, PartialEq)]
 pub struct TestCommand {
   /// Optional substring filter for fully qualified test names
   pub filter: Option<String>,
@@ -383,6 +406,8 @@ pub enum SubCommand {
   BuildStd(BuildStdCommand),
   /// Check file or project up to C codegen without linking
   Check(CheckCommand),
+  /// Extract API documentation from doc comments
+  Doc(DocCommand),
   /// Check the standard library up to C codegen without archiving
   CheckStd(CheckStdCommand),
   /// Check the C runtime with syntax-only compilation
