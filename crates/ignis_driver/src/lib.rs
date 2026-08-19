@@ -16,7 +16,7 @@ pub use api::{
 };
 pub use build_layout::BuildLayout;
 pub use context::CompilationContext;
-pub use doc::{document_project, DocItem, DocKind, DocMember, DocPackage};
+pub use doc::{document_project, DocItem, DocKind, DocMember, DocModule, DocPackage};
 pub use link::LinkPlan;
 pub use pipeline::{
   build_std, check_runtime, check_std, compile_file, compile_project, run_project_tests, run_single_file_tests,

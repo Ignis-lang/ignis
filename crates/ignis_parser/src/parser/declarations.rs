@@ -29,8 +29,14 @@ impl super::IgnisParser {
 
     // Handle empty file: parsing an empty file should return an empty list of statements, not an error.
     if self.at(TokenType::Eof) {
+      self.module_doc = self.take_pending_inner_doc();
       return Ok(items);
     }
+
+    // `at` peeked, which skipped the leading comments and left any `//!` block pending.
+    // Claiming it here keeps it away from the first namespace, which takes its own
+    // inner doc after its opening brace.
+    self.module_doc = self.take_pending_inner_doc();
 
     while !self.at(TokenType::Eof) {
       if self.is_compile_if_directive_start() {

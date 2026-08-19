@@ -180,6 +180,35 @@ namespace Math {
 }
 
 #[test]
+fn carries_the_modules_own_documentation() {
+  let package = document(
+    "described",
+    r#"
+//! # The module
+//!
+//! What the file as a whole is for.
+
+/// A function.
+export function noop(): void {
+  return;
+}
+"#,
+  );
+
+  let module = package["modules"]
+    .as_array()
+    .expect("modules array")
+    .iter()
+    .find(|entry| entry["name"] == "described")
+    .expect("the module");
+
+  assert_eq!(module["doc"], "# The module  \n  \nWhat the file as a whole is for.");
+
+  // The block at the top of the file documents the module, not the first declaration.
+  assert_eq!(find(&package, "described::noop")["doc"], "A function.");
+}
+
+#[test]
 fn writes_to_a_file_when_asked() {
   let path = fixture("written", "export function noop(): void {\n  return;\n}\n");
   let out = path.with_extension("json");
