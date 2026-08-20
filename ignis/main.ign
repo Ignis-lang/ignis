@@ -36,15 +36,7 @@ function countBySeverity(bag: &DiagnosticBag, target: Severity): u64 {
 function formatPhaseLine(name: str, errors: u64, warnings: u64): String {
   let status: str = errors == 0 ? "ok" : "fail";
 
-  return String::create("  ")
-    .concat(name)
-    .concat(": ")
-    .concat(status)
-    .concat(" (")
-    .concat(errors)
-    .concat(" errors, ")
-    .concat(warnings)
-    .concat(" warnings)");
+  return `  ${name}: ${status} (${errors} errors, ${warnings} warnings)`;
 }
 
 /// Render and print a diagnostic bag to stderr if it is non-empty.
@@ -127,12 +119,12 @@ function mapImportSourcesToDiscoveryTargets(
 /// Returns 0 on success, 1 on any error (I/O, lex, parse, or analyze).
 function compileFile(path: &String): i32 {
   Io::println(String::create("ignis selfhost (partial pipeline)"));
-  Io::println(String::create("  source: ").concat(path.toStr()));
+  Io::println(`  source: ${path.toStr()}`);
 
   let text: String = match (Fs::readToString(path)) {
     Result::OK(content) -> content,
     Result::ERROR(_) -> {
-      Io::eprintln(String::create("error: cannot read source file: ").concat(path.toStr()));
+      Io::eprintln(`error: cannot read source file: ${path.toStr()}`);
       return 1;
     },
   };
@@ -148,11 +140,7 @@ function compileFile(path: &String): i32 {
       Io::println(formatPhaseLine("discover", discoveryErrors, discoveryWarnings));
       renderBagToStderr(&diagnostics, &file);
       Io::println(
-        String::create("  summary: ")
-          .concat(discoveryErrors)
-          .concat(" errors, ")
-          .concat(discoveryWarnings)
-          .concat(" warnings")
+        `  summary: ${discoveryErrors} errors, ${discoveryWarnings} warnings`
       );
       return 1;
     },
@@ -178,7 +166,7 @@ function compileFile(path: &String): i32 {
       return 1;
     };
     let Result::OK(moduleText) = Fs::readToString(&node.path) else {
-      Io::eprintln(String::create("error: cannot read source file: ").concat(node.path.toString().toStr()));
+      Io::eprintln(`error: cannot read source file: ${node.path.toString().toStr()}`);
       return 1;
     };
 
@@ -196,7 +184,7 @@ function compileFile(path: &String): i32 {
     renderBagToStderr(&output.parseDiagnostics, &moduleFile);
 
     if (!mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, *nodeIndex)) {
-      Io::eprintln(String::create("error: discovery graph import mapping is incomplete for ").concat(modulePath.toStr()));
+      Io::eprintln(`error: discovery graph import mapping is incomplete for ${modulePath.toStr()}`);
       return 1;
     }
 
@@ -212,7 +200,7 @@ function compileFile(path: &String): i32 {
 
   Io::println(formatPhaseLine("lex  ", lexErrors, lexWarnings));
   Io::println(formatPhaseLine("parse", parseErrors, parseWarnings));
-  Io::println(String::create("  roots: ").concat(rootCount));
+  Io::println(`  roots: ${rootCount}`);
 
   let frontendErrors: u64 = lexErrors + parseErrors;
   let frontendWarnings: u64 = lexWarnings + parseWarnings;
@@ -220,11 +208,7 @@ function compileFile(path: &String): i32 {
   if (frontendErrors > 0) {
     Io::println(String::create("  analyze: skipped (frontend errors)"));
     Io::println(
-      String::create("  summary: ")
-        .concat(frontendErrors)
-        .concat(" errors, ")
-        .concat(frontendWarnings)
-        .concat(" warnings")
+      `  summary: ${frontendErrors} errors, ${frontendWarnings} warnings`
     );
     return 1;
   }
@@ -266,11 +250,7 @@ function compileFile(path: &String): i32 {
   let totalWarnings: u64 = frontendWarnings + analyzeWarnings;
 
   Io::println(
-    String::create("  summary: ")
-      .concat(totalErrors)
-      .concat(" errors, ")
-      .concat(totalWarnings)
-      .concat(" warnings")
+    `  summary: ${totalErrors} errors, ${totalWarnings} warnings`
   );
 
   if (totalErrors > 0) {

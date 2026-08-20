@@ -1635,20 +1635,20 @@ export namespace Analyzer {
     /// Recurses through nameOf for the pointee name.
     private pointerNameOf(&self, ptrType: &Analyzer::PointerType): String {
       if (ptrType.mutable) {
-        return String::create("*mut ").concat(self.nameOf(ptrType.pointee).toStr());
+        return `*mut ${self.nameOf(ptrType.pointee).toStr()}`;
       }
 
-      return String::create("*").concat(self.nameOf(ptrType.pointee).toStr());
+      return `*${self.nameOf(ptrType.pointee).toStr()}`;
     }
 
     /// Formats a reference type as "&T" when immutable, "&mut T" when mutable.
     /// Recurses through nameOf for the referent name.
     private referenceNameOf(&self, refType: &Analyzer::ReferenceType): String {
       if (refType.mutable) {
-        return String::create("&mut ").concat(self.nameOf(refType.referent).toStr());
+        return `&mut ${self.nameOf(refType.referent).toStr()}`;
       }
 
-      return String::create("&").concat(self.nameOf(refType.referent).toStr());
+      return `&${self.nameOf(refType.referent).toStr()}`;
     }
 
     /// Formats a function type as "fn(p1, p2) -> r".
@@ -1711,11 +1711,11 @@ export namespace Analyzer {
           Analyzer::Type::FixedArray(element, length) -> self.nameOf(element).concat("[").concat(String::create(length).toStr()).concat("]"),
           Analyzer::Type::Tuple(t) -> self.tupleNameOf(&t.elements),
           Analyzer::Type::Function(f) -> self.functionNameOf(&f),
-          Analyzer::Type::Record(defId) -> String::create("<record:DefId(").concat(String::create(defId.raw()).toStr()).concat(")>"),
-          Analyzer::Type::Enum(defId) -> String::create("<enum:DefId(").concat(String::create(defId.raw()).toStr()).concat(")>"),
-          Analyzer::Type::Param(symbol) -> String::create("<param:Symbol(").concat(String::create(symbol.raw()).toStr()).concat(")>"),
+          Analyzer::Type::Record(defId) -> `<record:DefId(${String::create(defId.raw()).toStr()})>`,
+          Analyzer::Type::Enum(defId) -> `<enum:DefId(${String::create(defId.raw()).toStr()})>`,
+          Analyzer::Type::Param(symbol) -> `<param:Symbol(${String::create(symbol.raw()).toStr()})>`,
           Analyzer::Type::Instance(instance) -> self.instanceNameOf(&instance),
-          Analyzer::Type::Alias(defId) -> String::create("<alias:DefId(").concat(String::create(defId.raw()).toStr()).concat(")>"),
+          Analyzer::Type::Alias(defId) -> `<alias:DefId(${String::create(defId.raw()).toStr()})>`,
         };
       }
 
@@ -1726,9 +1726,7 @@ export namespace Analyzer {
     /// the same definition-id placeholder as Record/Enum until the
     /// DefinitionStore/SymbolTable threading lands.
     private instanceNameOf(&self, instance: &Analyzer::InstanceType): String {
-      let mut result: String = String::create("<instance:DefId(")
-        .concat(String::create(instance.definition.raw()).toStr())
-        .concat(")<");
+      let mut result: String = `<instance:DefId(${String::create(instance.definition.raw()).toStr()})<`;
 
       let mut index: u64 = 0;
       while (index < instance.typeArguments.length()) {
@@ -1756,9 +1754,7 @@ export namespace Analyzer {
       defs: &Analyzer::DefinitionStore,
       syms: &Analyzer::SymbolTable,
     ): String {
-      let fallback: String = String::create("<record:DefId(")
-        .concat(String::create(defId.raw()).toStr())
-        .concat(")>");
+      let fallback: String = `<record:DefId(${String::create(defId.raw()).toStr()})>`;
 
       if (let Option::SOME(def) = defs.get(defId)) {
         return match (def) {
@@ -1789,9 +1785,7 @@ export namespace Analyzer {
       defs: &Analyzer::DefinitionStore,
       syms: &Analyzer::SymbolTable,
     ): String {
-      let fallback: String = String::create("<enum:DefId(")
-        .concat(String::create(defId.raw()).toStr())
-        .concat(")>");
+      let fallback: String = `<enum:DefId(${String::create(defId.raw()).toStr()})>`;
 
       if (let Option::SOME(def) = defs.get(defId)) {
         return match (def) {
@@ -1856,12 +1850,10 @@ export namespace Analyzer {
       syms: &Analyzer::SymbolTable,
     ): String {
       if (ptrType.mutable) {
-        return String::create("*mut ")
-          .concat(self.nameOfResolved(ptrType.pointee, defs, syms).toStr());
+        return `*mut ${self.nameOfResolved(ptrType.pointee, defs, syms).toStr()}`;
       }
 
-      return String::create("*")
-        .concat(self.nameOfResolved(ptrType.pointee, defs, syms).toStr());
+      return `*${self.nameOfResolved(ptrType.pointee, defs, syms).toStr()}`;
     }
 
     /// Formats a reference type as "&T" or "&mut T", using `nameOfResolved`
@@ -1873,12 +1865,10 @@ export namespace Analyzer {
       syms: &Analyzer::SymbolTable,
     ): String {
       if (refType.mutable) {
-        return String::create("&mut ")
-          .concat(self.nameOfResolved(refType.referent, defs, syms).toStr());
+        return `&mut ${self.nameOfResolved(refType.referent, defs, syms).toStr()}`;
       }
 
-      return String::create("&")
-        .concat(self.nameOfResolved(refType.referent, defs, syms).toStr());
+      return `&${self.nameOfResolved(refType.referent, defs, syms).toStr()}`;
     }
 
     /// Formats a function type as "fn(p1, p2) -> r", using `nameOfResolved`
@@ -1923,46 +1913,24 @@ export namespace Analyzer {
       syms: &Analyzer::SymbolTable,
     ): String {
       let nominalName: String = match (defs.get(inst.definition)) {
-        Option::NONE -> String::create("<instance:DefId(")
-          .concat(String::create(inst.definition.raw()).toStr())
-          .concat(")>"),
+        Option::NONE -> `<instance:DefId(${String::create(inst.definition.raw()).toStr()})>`,
         Option::SOME(def) -> match (def) {
           Analyzer::Definition::Record(rec) -> match (syms.resolve(rec.name)) {
             Option::SOME(name) -> String::create(name),
-            Option::NONE -> String::create("<instance:DefId(")
-              .concat(String::create(inst.definition.raw()).toStr())
-              .concat(")>"),
+            Option::NONE -> `<instance:DefId(${String::create(inst.definition.raw()).toStr()})>`,
           },
           Analyzer::Definition::Enum(e) -> match (syms.resolve(e.name)) {
             Option::SOME(name) -> String::create(name),
-            Option::NONE -> String::create("<instance:DefId(")
-              .concat(String::create(inst.definition.raw()).toStr())
-              .concat(")>"),
+            Option::NONE -> `<instance:DefId(${String::create(inst.definition.raw()).toStr()})>`,
           },
-          Analyzer::Definition::Function(_) -> String::create("<instance:DefId(")
-            .concat(String::create(inst.definition.raw()).toStr())
-            .concat(")>"),
-          Analyzer::Definition::Variable(_) -> String::create("<instance:DefId(")
-            .concat(String::create(inst.definition.raw()).toStr())
-            .concat(")>"),
-          Analyzer::Definition::Field(_) -> String::create("<instance:DefId(")
-            .concat(String::create(inst.definition.raw()).toStr())
-            .concat(")>"),
-          Analyzer::Definition::Variant(_) -> String::create("<instance:DefId(")
-            .concat(String::create(inst.definition.raw()).toStr())
-            .concat(")>"),
-          Analyzer::Definition::TypeParam(_) -> String::create("<instance:DefId(")
-            .concat(String::create(inst.definition.raw()).toStr())
-            .concat(")>"),
-          Analyzer::Definition::Method(_) -> String::create("<instance:DefId(")
-            .concat(String::create(inst.definition.raw()).toStr())
-            .concat(")>"),
-          Analyzer::Definition::TypeAlias(_) -> String::create("<instance:DefId(")
-            .concat(String::create(inst.definition.raw()).toStr())
-            .concat(")>"),
-          Analyzer::Definition::Trait(_) -> String::create("<instance:DefId(")
-            .concat(String::create(inst.definition.raw()).toStr())
-            .concat(")>"),
+          Analyzer::Definition::Function(_) -> `<instance:DefId(${String::create(inst.definition.raw()).toStr()})>`,
+          Analyzer::Definition::Variable(_) -> `<instance:DefId(${String::create(inst.definition.raw()).toStr()})>`,
+          Analyzer::Definition::Field(_) -> `<instance:DefId(${String::create(inst.definition.raw()).toStr()})>`,
+          Analyzer::Definition::Variant(_) -> `<instance:DefId(${String::create(inst.definition.raw()).toStr()})>`,
+          Analyzer::Definition::TypeParam(_) -> `<instance:DefId(${String::create(inst.definition.raw()).toStr()})>`,
+          Analyzer::Definition::Method(_) -> `<instance:DefId(${String::create(inst.definition.raw()).toStr()})>`,
+          Analyzer::Definition::TypeAlias(_) -> `<instance:DefId(${String::create(inst.definition.raw()).toStr()})>`,
+          Analyzer::Definition::Trait(_) -> `<instance:DefId(${String::create(inst.definition.raw()).toStr()})>`,
         },
       };
 
@@ -2033,18 +2001,14 @@ export namespace Analyzer {
           Analyzer::Type::Enum(defId) -> self.enumNameOfResolved(defId, defs, syms),
           Analyzer::Type::Param(symbol) -> match (syms.resolve(symbol)) {
             Option::SOME(name) -> String::create(name),
-            Option::NONE -> String::create("<param:Symbol(")
-              .concat(String::create(symbol.raw()).toStr())
-              .concat(")>"),
+            Option::NONE -> `<param:Symbol(${String::create(symbol.raw()).toStr()})>`,
           },
           Analyzer::Type::Instance(inst) -> self.instanceNameOfResolved(&inst, defs, syms),
-          Analyzer::Type::Alias(defId) -> String::create("<alias:DefId(").concat(String::create(defId.raw()).toStr()).concat(")>"),
+          Analyzer::Type::Alias(defId) -> `<alias:DefId(${String::create(defId.raw()).toStr()})>`,
         };
       }
 
-      return String::create("<unknown-type:TypeId(")
-        .concat(String::create(id.raw()).toStr())
-        .concat(")>");
+      return `<unknown-type:TypeId(${String::create(id.raw()).toStr()})>`;
     }
 
     public get(&self, id: Analyzer::TypeId): Option<&Analyzer::Type> {

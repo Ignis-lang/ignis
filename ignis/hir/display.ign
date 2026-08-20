@@ -28,9 +28,7 @@ export namespace Hir {
       return match (kind) {
         Hir::BuiltinEqKind::Primitive -> String::create("primitive"),
         Hir::BuiltinEqKind::Str -> String::create("str"),
-        Hir::BuiltinEqKind::Method(methodDef) -> String::create("method(")
-          .concat(methodDef.raw())
-          .concat(")"),
+        Hir::BuiltinEqKind::Method(methodDef) -> `method(${methodDef.raw()})`,
         Hir::BuiltinEqKind::Pending -> String::create("pending"),
       };
     }
@@ -155,11 +153,9 @@ export namespace Hir {
       let typeText: String = Hir::Display::formatType(types, defs, symbols, node.typeId);
 
       return match (&node.kind) {
-        Hir::HirKind::Literal(value) -> String::create("Literal(").concat(value.debugFormat()).concat(")"),
+        Hir::HirKind::Literal(value) -> `Literal(${value.debugFormat()})`,
         Hir::HirKind::Unit -> String::create("Unit"),
-        Hir::HirKind::Variable(defId) -> String::create("Variable(")
-          .concat(Hir::Display::definitionName(defs, symbols, defId))
-          .concat(")"),
+        Hir::HirKind::Variable(defId) -> `Variable(${Hir::Display::definitionName(defs, symbols, defId)})`,
         Hir::HirKind::Call(call) -> String::create("Call(")
           .concat(Hir::Display::definitionName(defs, symbols, call.callee))
           .concat(") { ")
@@ -183,9 +179,7 @@ export namespace Hir {
           .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, unaryNode.operand))
           .concat(")"),
         Hir::HirKind::Reference(reference) -> Hir::Display::formatCompactReference(hir, types, defs, symbols, &reference),
-        Hir::HirKind::Dereference(expression) -> String::create("*(")
-          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, expression))
-          .concat(")"),
+        Hir::HirKind::Dereference(expression) -> `*(${Hir::Display::formatNodeCompact(hir, types, defs, symbols, expression)})`,
         Hir::HirKind::Cast(cast) -> String::create("Cast(")
           .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, cast.expression))
           .concat(" as ")
@@ -196,21 +190,11 @@ export namespace Hir {
           .concat(" as ")
           .concat(Hir::Display::formatType(types, defs, symbols, cast.target))
           .concat(")"),
-        Hir::HirKind::TypeOf(expression) -> String::create("typeOf(")
-          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, expression))
-          .concat(")"),
-        Hir::HirKind::SizeOf(typeId) -> String::create("sizeOf(")
-          .concat(Hir::Display::formatType(types, defs, symbols, typeId))
-          .concat(")"),
-        Hir::HirKind::AlignOf(typeId) -> String::create("alignOf(")
-          .concat(Hir::Display::formatType(types, defs, symbols, typeId))
-          .concat(")"),
-        Hir::HirKind::MaxOf(typeId) -> String::create("maxOf<")
-          .concat(Hir::Display::formatType(types, defs, symbols, typeId))
-          .concat(">()"),
-        Hir::HirKind::MinOf(typeId) -> String::create("minOf<")
-          .concat(Hir::Display::formatType(types, defs, symbols, typeId))
-          .concat(">()"),
+        Hir::HirKind::TypeOf(expression) -> `typeOf(${Hir::Display::formatNodeCompact(hir, types, defs, symbols, expression)})`,
+        Hir::HirKind::SizeOf(typeId) -> `sizeOf(${Hir::Display::formatType(types, defs, symbols, typeId)})`,
+        Hir::HirKind::AlignOf(typeId) -> `alignOf(${Hir::Display::formatType(types, defs, symbols, typeId)})`,
+        Hir::HirKind::MaxOf(typeId) -> `maxOf<${Hir::Display::formatType(types, defs, symbols, typeId)}>()`,
+        Hir::HirKind::MinOf(typeId) -> `minOf<${Hir::Display::formatType(types, defs, symbols, typeId)}>()`,
         Hir::HirKind::BuiltinLoad(load) -> String::create("builtin_read<")
           .concat(Hir::Display::formatType(types, defs, symbols, load.ty))
           .concat(">(")
@@ -244,9 +228,7 @@ export namespace Hir {
           .concat(">(")
           .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, dropNode.ptr))
           .concat(")"),
-        Hir::HirKind::BuiltinDropGlue(typeId) -> String::create("builtin_drop_glue<")
-          .concat(Hir::Display::formatType(types, defs, symbols, typeId))
-          .concat(">()"),
+        Hir::HirKind::BuiltinDropGlue(typeId) -> `builtin_drop_glue<${Hir::Display::formatType(types, defs, symbols, typeId)}>()`,
         Hir::HirKind::MakeSlice(makeSlice) -> String::create("make_slice<")
           .concat(Hir::Display::formatType(types, defs, symbols, makeSlice.elementType))
           .concat(">(")
@@ -254,12 +236,10 @@ export namespace Hir {
           .concat(", ")
           .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, makeSlice.len))
           .concat(")"),
-        Hir::HirKind::Panic(message) -> String::create("@panic(")
-          .concat(Hir::Display::formatNodeCompact(hir, types, defs, symbols, message))
-          .concat(")"),
+        Hir::HirKind::Panic(message) -> `@panic(${Hir::Display::formatNodeCompact(hir, types, defs, symbols, message)})`,
         Hir::HirKind::Trap -> String::create("@trap()"),
         Hir::HirKind::BuiltinUnreachable -> String::create("@unreachable()"),
-        _ -> String::create("<complex: ").concat(typeText.toStr()).concat(">"),
+        _ -> `<complex: ${typeText.toStr()}>`,
       };
     }
 
@@ -344,7 +324,7 @@ export namespace Hir {
       let mut index: u64 = 0;
 
       while (index < ids.length()) {
-        let label: String = String::create("[").concat(index).concat("]:");
+        let label: String = `[${index}]:`;
         Hir::Display::writeLabelLine(out, indent, label.toStr());
 
         if (let Option::SOME(id) = ids.get(index)) {
@@ -376,7 +356,7 @@ export namespace Hir {
 
       match (&node.kind) {
         Hir::HirKind::Literal(value) -> {
-          let head: String = String::create("Literal(").concat(value.debugFormat()).concat(")");
+          let head: String = `Literal(${value.debugFormat()})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
         },
         Hir::HirKind::Unit -> {
@@ -384,14 +364,11 @@ export namespace Hir {
           Hir::Display::writeHeading(out, indent, &head, &typeText);
         },
         Hir::HirKind::Variable(defId) -> {
-          let head: String = String::create("Variable(")
-            .concat(Hir::Display::definitionName(defs, symbols, defId))
-            .concat(Hir::Display::variableMetadata(defs, defId))
-            .concat(")");
+          let head: String = `Variable(${Hir::Display::definitionName(defs, symbols, defId)}${Hir::Display::variableMetadata(defs, defId)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
         },
         Hir::HirKind::Binary(binaryNode) -> {
-          let head: String = String::create("Binary(").concat(binaryNode.operation.debugName()).concat(")");
+          let head: String = `Binary(${binaryNode.operation.debugName()})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::writeLabelLine(out, indent + 1, "left:");
           Hir::Display::printNode(hir, types, defs, symbols, binaryNode.left, indent + 2, out);
@@ -399,14 +376,12 @@ export namespace Hir {
           Hir::Display::printNode(hir, types, defs, symbols, binaryNode.right, indent + 2, out);
         },
         Hir::HirKind::Unary(unaryNode) -> {
-          let head: String = String::create("Unary(").concat(unaryNode.operation.debugName()).concat(")");
+          let head: String = `Unary(${unaryNode.operation.debugName()})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, unaryNode.operand, indent + 1, out);
         },
         Hir::HirKind::Call(call) -> {
-          let head: String = String::create("Call(")
-            .concat(Hir::Display::definitionName(defs, symbols, call.callee))
-            .concat(")");
+          let head: String = `Call(${Hir::Display::definitionName(defs, symbols, call.callee)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
 
           if (!call.args.isEmpty()) {
@@ -446,16 +421,12 @@ export namespace Hir {
           Hir::Display::printNode(hir, types, defs, symbols, closure.body, indent + 2, out);
         },
         Hir::HirKind::Cast(cast) -> {
-          let head: String = String::create("Cast(-> ")
-            .concat(Hir::Display::formatType(types, defs, symbols, cast.target))
-            .concat(")");
+          let head: String = `Cast(-> ${Hir::Display::formatType(types, defs, symbols, cast.target)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, cast.expression, indent + 1, out);
         },
         Hir::HirKind::BitCast(cast) -> {
-          let head: String = String::create("BitCast(-> ")
-            .concat(Hir::Display::formatType(types, defs, symbols, cast.target))
-            .concat(")");
+          let head: String = `BitCast(-> ${Hir::Display::formatType(types, defs, symbols, cast.target)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, cast.expression, indent + 1, out);
         },
@@ -464,7 +435,7 @@ export namespace Hir {
             true -> "&mut",
             false -> "&",
           };
-          let head: String = String::create("Reference(").concat(refKind).concat(")");
+          let head: String = `Reference(${refKind})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, reference.expression, indent + 1, out);
         },
@@ -492,10 +463,7 @@ export namespace Hir {
           Hir::Display::printIndexedChildren(hir, types, defs, symbols, &elements, indent + 1, out);
         },
         Hir::HirKind::Let(letNode) -> {
-          let head: String = String::create("Let(")
-            .concat(Hir::Display::definitionName(defs, symbols, letNode.name))
-            .concat(Hir::Display::variableMetadata(defs, letNode.name))
-            .concat(")");
+          let head: String = `Let(${Hir::Display::definitionName(defs, symbols, letNode.name)}${Hir::Display::variableMetadata(defs, letNode.name)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
 
           if (let Option::SOME(value) = letNode.value) {
@@ -508,7 +476,7 @@ export namespace Hir {
             Option::SOME(operation) -> String::create(operation.debugName()).concat("="),
             Option::NONE -> String::create("="),
           };
-          let head: String = String::create("Assign(").concat(operationText).concat(")");
+          let head: String = `Assign(${operationText})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::writeLabelLine(out, indent + 1, "target:");
           Hir::Display::printNode(hir, types, defs, symbols, assign.target, indent + 2, out);
@@ -553,7 +521,7 @@ export namespace Hir {
           let head: String = String::create("LetElse");
           Hir::Display::writeHeading(out, indent, &head, &typeText);
 
-          let patternLine: String = String::create("pattern: ").concat(letElse.pattern.debugFormat());
+          let patternLine: String = `pattern: ${letElse.pattern.debugFormat()}`;
           Hir::Display::writeLabelLine(out, indent + 1, patternLine.toStr());
 
           Hir::Display::writeLabelLine(out, indent + 1, "value:");
@@ -567,7 +535,7 @@ export namespace Hir {
             Hir::LoopKind::While(_) -> "while",
             Hir::LoopKind::For(_) -> "for",
           };
-          let head: String = String::create("Loop(").concat(loopKind).concat(")");
+          let head: String = `Loop(${loopKind})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
 
           match (&loopNode.condition) {
@@ -631,79 +599,55 @@ export namespace Hir {
           Hir::Display::printNode(hir, types, defs, symbols, expression, indent + 1, out);
         },
         Hir::HirKind::SizeOf(typeId) -> {
-          let head: String = String::create("SizeOf(")
-            .concat(Hir::Display::formatType(types, defs, symbols, typeId))
-            .concat(")");
+          let head: String = `SizeOf(${Hir::Display::formatType(types, defs, symbols, typeId)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
         },
         Hir::HirKind::AlignOf(typeId) -> {
-          let head: String = String::create("AlignOf(")
-            .concat(Hir::Display::formatType(types, defs, symbols, typeId))
-            .concat(")");
+          let head: String = `AlignOf(${Hir::Display::formatType(types, defs, symbols, typeId)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
         },
         Hir::HirKind::MaxOf(typeId) -> {
-          let head: String = String::create("MaxOf(")
-            .concat(Hir::Display::formatType(types, defs, symbols, typeId))
-            .concat(")");
+          let head: String = `MaxOf(${Hir::Display::formatType(types, defs, symbols, typeId)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
         },
         Hir::HirKind::MinOf(typeId) -> {
-          let head: String = String::create("MinOf(")
-            .concat(Hir::Display::formatType(types, defs, symbols, typeId))
-            .concat(")");
+          let head: String = `MinOf(${Hir::Display::formatType(types, defs, symbols, typeId)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
         },
         Hir::HirKind::BuiltinLoad(load) -> {
-          let head: String = String::create("BuiltinLoad(")
-            .concat(Hir::Display::formatType(types, defs, symbols, load.ty))
-            .concat(")");
+          let head: String = `BuiltinLoad(${Hir::Display::formatType(types, defs, symbols, load.ty)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, load.ptr, indent + 1, out);
         },
         Hir::HirKind::BuiltinStore(storeNode) -> {
-          let head: String = String::create("BuiltinStore(")
-            .concat(Hir::Display::formatType(types, defs, symbols, storeNode.ty))
-            .concat(")");
+          let head: String = `BuiltinStore(${Hir::Display::formatType(types, defs, symbols, storeNode.ty)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, storeNode.ptr, indent + 1, out);
           Hir::Display::printNode(hir, types, defs, symbols, storeNode.value, indent + 1, out);
         },
         Hir::HirKind::BuiltinHash(hashNode) -> {
-          let head: String = String::create("BuiltinHash(")
-            .concat(Hir::Display::formatType(types, defs, symbols, hashNode.ty))
-            .concat(")");
+          let head: String = `BuiltinHash(${Hir::Display::formatType(types, defs, symbols, hashNode.ty)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, hashNode.value, indent + 1, out);
           Hir::Display::printNode(hir, types, defs, symbols, hashNode.hasher, indent + 1, out);
         },
         Hir::HirKind::BuiltinEq(eqNode) -> {
-          let head: String = String::create("BuiltinEq(")
-            .concat(Hir::Display::formatType(types, defs, symbols, eqNode.ty))
-            .concat(", ")
-            .concat(Hir::Display::formatBuiltinEqKind(&eqNode.kind))
-            .concat(")");
+          let head: String = `BuiltinEq(${Hir::Display::formatType(types, defs, symbols, eqNode.ty)}, ${Hir::Display::formatBuiltinEqKind(&eqNode.kind)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, eqNode.left, indent + 1, out);
           Hir::Display::printNode(hir, types, defs, symbols, eqNode.right, indent + 1, out);
         },
         Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
-          let head: String = String::create("BuiltinDropInPlace(")
-            .concat(Hir::Display::formatType(types, defs, symbols, dropNode.ty))
-            .concat(")");
+          let head: String = `BuiltinDropInPlace(${Hir::Display::formatType(types, defs, symbols, dropNode.ty)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, dropNode.ptr, indent + 1, out);
         },
         Hir::HirKind::BuiltinDropGlue(typeId) -> {
-          let head: String = String::create("BuiltinDropGlue(")
-            .concat(Hir::Display::formatType(types, defs, symbols, typeId))
-            .concat(")");
+          let head: String = `BuiltinDropGlue(${Hir::Display::formatType(types, defs, symbols, typeId)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
         },
         Hir::HirKind::MakeSlice(makeSlice) -> {
-          let head: String = String::create("MakeSlice(")
-            .concat(Hir::Display::formatType(types, defs, symbols, makeSlice.elementType))
-            .concat(")");
+          let head: String = `MakeSlice(${Hir::Display::formatType(types, defs, symbols, makeSlice.elementType)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, makeSlice.data, indent + 1, out);
           Hir::Display::printNode(hir, types, defs, symbols, makeSlice.len, indent + 1, out);
@@ -722,20 +666,18 @@ export namespace Hir {
           Hir::Display::writeHeading(out, indent, &head, &typeText);
         },
         Hir::HirKind::FieldAccess(access) -> {
-          let head: String = String::create("FieldAccess(.").concat(access.fieldIndex).concat(")");
+          let head: String = `FieldAccess(.${access.fieldIndex})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printNode(hir, types, defs, symbols, access.base, indent + 1, out);
         },
         Hir::HirKind::RecordInit(init) -> {
-          let head: String = String::create("RecordInit(")
-            .concat(Hir::Display::definitionName(defs, symbols, init.recordDef))
-            .concat(")");
+          let head: String = `RecordInit(${Hir::Display::definitionName(defs, symbols, init.recordDef)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
 
           let mut fieldIndex: u64 = 0;
           while (fieldIndex < init.fields.length()) {
             if (let Option::SOME(field) = init.fields.get(fieldIndex)) {
-              let label: String = String::create("field[").concat(field.fieldIndex).concat("]:");
+              let label: String = `field[${field.fieldIndex}]:`;
               Hir::Display::writeLabelLine(out, indent + 1, label.toStr());
               Hir::Display::printNode(hir, types, defs, symbols, field.value, indent + 2, out);
             }
@@ -743,9 +685,7 @@ export namespace Hir {
           }
         },
         Hir::HirKind::MethodCall(call) -> {
-          let head: String = String::create("MethodCall(")
-            .concat(Hir::Display::definitionName(defs, symbols, call.method))
-            .concat(")");
+          let head: String = `MethodCall(${Hir::Display::definitionName(defs, symbols, call.method)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
 
           if (let Option::SOME(receiver) = call.receiver) {
@@ -759,18 +699,12 @@ export namespace Hir {
           }
         },
         Hir::HirKind::EnumVariant(variant) -> {
-          let head: String = String::create("EnumVariant(")
-            .concat(Hir::Display::definitionName(defs, symbols, variant.enumDef))
-            .concat("::")
-            .concat(variant.variantTag)
-            .concat(")");
+          let head: String = `EnumVariant(${Hir::Display::definitionName(defs, symbols, variant.enumDef)}::${variant.variantTag})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
           Hir::Display::printIndexedChildren(hir, types, defs, symbols, &variant.payload, indent + 1, out);
         },
         Hir::HirKind::StaticAccess(defId) -> {
-          let head: String = String::create("StaticAccess(")
-            .concat(Hir::Display::definitionName(defs, symbols, defId))
-            .concat(")");
+          let head: String = `StaticAccess(${Hir::Display::definitionName(defs, symbols, defId)})`;
           Hir::Display::writeHeading(out, indent, &head, &typeText);
         },
         Hir::HirKind::Match(matchNode) -> {
@@ -786,10 +720,10 @@ export namespace Hir {
               continue;
             };
 
-            let armLabel: String = String::create("arm[").concat(armIndex).concat("]:");
+            let armLabel: String = `arm[${armIndex}]:`;
             Hir::Display::writeLabelLine(out, indent + 1, armLabel.toStr());
 
-            let patternLine: String = String::create("pattern: ").concat(arm.pattern.debugFormat());
+            let patternLine: String = `pattern: ${arm.pattern.debugFormat()}`;
             Hir::Display::writeLabelLine(out, indent + 2, patternLine.toStr());
 
             if (let Option::SOME(guard) = arm.guard) {
