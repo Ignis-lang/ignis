@@ -15,6 +15,7 @@ use ignis_ast::{
     match_expression::{ASTMatch, ASTMatchArm},
     path::{ASTPath, ASTPathSegment},
     reference::ASTReference,
+    template_string::ASTTemplateString,
     ternary::ASTTernary,
     unary::{ASTUnary, UnaryOperator},
     variable::ASTVariableExpression,
@@ -429,6 +430,7 @@ impl IgnisParser {
       | TokenType::True
       | TokenType::False
       | TokenType::Null => self.parse_literal(&token),
+      TokenType::TemplateNoSubstitution | TokenType::TemplateHead => self.parse_template_string(&token),
       TokenType::Identifier => {
         let first = token.clone();
 
@@ -950,6 +952,185 @@ impl IgnisParser {
     Ok(first)
   }
 
+  /// Parses a template literal into an `ASTTemplateString`.
+  ///
+  /// The surface form is kept for the formatter and, in parallel, the literal is
+  /// desugared into `String::create(<head>).concat(..)` so that every later phase
+  /// reuses the existing `String` machinery instead of a dedicated construct.
+  fn parse_template_string(
+    &mut self,
+    head: &Token,
+  ) -> ParserResult<NodeId> {
+    let mut quasis: Vec<String> = vec![head.lexeme.clone()];
+    let mut expressions: Vec<NodeId> = Vec::new();
+    let mut span = head.span.clone();
+
+    if head.type_ == TokenType::TemplateHead {
+      loop {
+        expressions.push(self.parse_expression(0)?);
+
+        let chunk = if self.at(TokenType::TemplateMiddle) {
+          self.bump().clone()
+        } else {
+          self.expect(TokenType::TemplateTail)?.clone()
+        };
+
+        let is_tail = chunk.type_ == TokenType::TemplateTail;
+        span = Span::merge(&span, &chunk.span);
+        quasis.push(chunk.lexeme);
+
+        if is_tail {
+          break;
+        }
+      }
+    }
+
+    let desugared = self.desugar_template_string(&quasis, &expressions, &span);
+
+    Ok(self.allocate_expression(ASTExpression::TemplateString(ASTTemplateString::new(
+      quasis,
+      expressions,
+      desugared,
+      span,
+    ))))
+  }
+
+  /// Builds `String::create(<quasi0>).concat(..)` for a template literal.
+  ///
+  /// Empty chunks are skipped: they would only add a no-op concatenation. The
+  /// leading `String::create` is always emitted because the chain needs an owned
+  /// `String` receiver to start from.
+  fn desugar_template_string(
+    &mut self,
+    quasis: &[String],
+    expressions: &[NodeId],
+    span: &Span,
+  ) -> NodeId {
+    let mut result = self.build_string_create(quasis.first().cloned().unwrap_or_default(), span);
+
+    for (index, expression) in expressions.iter().enumerate() {
+      let argument_span = self.get_span(expression).clone();
+      let argument = self.build_slot_argument(*expression, &argument_span);
+      result = self.build_concat_call(result, argument, &argument_span);
+
+      let Some(chunk) = quasis.get(index + 1) else {
+        continue;
+      };
+
+      if chunk.is_empty() {
+        continue;
+      }
+
+      let literal = self.build_string_literal(chunk.clone(), span);
+      result = self.build_concat_call(result, literal, span);
+    }
+
+    result
+  }
+
+  /// Passes an interpolated slot by reference when it names a place.
+  ///
+  /// Without this, interpolating a variable of a non-Copy type such as `String`
+  /// would select the by-value `concat` overload and move it. Temporaries stay
+  /// by value: they cannot be borrowed and moving them is what the caller wants.
+  fn build_slot_argument(
+    &mut self,
+    expression: NodeId,
+    span: &Span,
+  ) -> NodeId {
+    if !self.is_place_expression(expression) {
+      return expression;
+    }
+
+    self.allocate_expression(ASTExpression::Reference(ASTReference::new_template_slot(
+      expression,
+      span.clone(),
+    )))
+  }
+
+  fn is_place_expression(
+    &self,
+    node_id: NodeId,
+  ) -> bool {
+    let ASTNode::Expression(expression) = self.nodes.get(&node_id) else {
+      return false;
+    };
+
+    match expression {
+      ASTExpression::Variable(_) | ASTExpression::MemberAccess(_) | ASTExpression::VectorAccess(_) => true,
+      ASTExpression::Grouped(grouped) => self.is_place_expression(grouped.expression),
+      _ => false,
+    }
+  }
+
+  fn build_string_literal(
+    &mut self,
+    text: String,
+    span: &Span,
+  ) -> NodeId {
+    self.allocate_expression(ASTExpression::Literal(ASTLiteral::new(
+      IgnisLiteralValue::String(text),
+      span.clone(),
+    )))
+  }
+
+  fn build_string_create(
+    &mut self,
+    text: String,
+    span: &Span,
+  ) -> NodeId {
+    let string_name = self.intern_name("String");
+    let create_name = self.intern_name("create");
+
+    let path = self.allocate_expression(ASTExpression::Path(ASTPath::new(
+      vec![
+        ASTPathSegment::new(string_name, span.clone()),
+        ASTPathSegment::new(create_name, span.clone()),
+      ],
+      span.clone(),
+    )));
+
+    let argument = self.build_string_literal(text, span);
+
+    self.allocate_expression(ASTExpression::Call(ASTCallExpression::new(
+      path,
+      None,
+      span.clone(),
+      vec![argument],
+    )))
+  }
+
+  fn build_concat_call(
+    &mut self,
+    receiver: NodeId,
+    argument: NodeId,
+    span: &Span,
+  ) -> NodeId {
+    let concat_name = self.intern_name("concat");
+
+    let callee = self.allocate_expression(ASTExpression::MemberAccess(ASTMemberAccess::new(
+      receiver,
+      ASTAccessOp::Dot,
+      concat_name,
+      span.clone(),
+      span.clone(),
+    )));
+
+    self.allocate_expression(ASTExpression::Call(ASTCallExpression::new(
+      callee,
+      None,
+      span.clone(),
+      vec![argument],
+    )))
+  }
+
+  fn intern_name(
+    &mut self,
+    name: &str,
+  ) -> SymbolId {
+    self.symbols.borrow_mut().intern(name)
+  }
+
   fn parse_literal(
     &mut self,
     token: &Token,
@@ -1157,6 +1338,141 @@ mod tests {
       ASTNode::Statement(ASTStatement::Expression(e)) => e,
       _ => panic!("expected expression statement"),
     }
+  }
+
+  fn template_of(expr: &ASTExpression) -> &ignis_ast::expressions::ASTTemplateString {
+    match expr {
+      ASTExpression::TemplateString(template) => template,
+      other => panic!("expected a template string, got {:?}", other),
+    }
+  }
+
+  /// Renders the desugared chain in source-like form so a test can assert the
+  /// exact call shape without walking the arena by hand.
+  fn describe(
+    result: &ParseResult,
+    node: &NodeId,
+  ) -> String {
+    let ASTNode::Expression(expr) = result.nodes.get(node) else {
+      panic!("expected an expression node");
+    };
+
+    match expr {
+      ASTExpression::Literal(literal) => match &literal.value {
+        IgnisLiteralValue::String(text) => format!("{:?}", text),
+        other => format!("{:?}", other),
+      },
+      ASTExpression::Variable(variable) => result.symbol_name(&variable.name),
+      ASTExpression::Path(path) => path
+        .segments
+        .iter()
+        .map(|segment| result.symbol_name(&segment.name))
+        .collect::<Vec<_>>()
+        .join("::"),
+      ASTExpression::MemberAccess(access) => {
+        format!("{}.{}", describe(result, &access.object), result.symbol_name(&access.member))
+      },
+      ASTExpression::Reference(reference) => format!("&{}", describe(result, &reference.inner)),
+      ASTExpression::Binary(binary) => format!(
+        "{} {:?} {}",
+        describe(result, &binary.left),
+        binary.operator,
+        describe(result, &binary.right)
+      ),
+      ASTExpression::Call(call) => {
+        let args: Vec<String> = call.arguments.iter().map(|arg| describe(result, arg)).collect();
+
+        format!("{}({})", describe(result, &call.callee), args.join(", "))
+      },
+      other => format!("{:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_template_without_interpolation() {
+    let result = parse_expr("`hello`");
+    let template = template_of(get_expr(&result));
+
+    assert_eq!(template.quasis, vec!["hello".to_string()]);
+    assert!(template.expressions.is_empty());
+    assert_eq!(describe(&result, &template.desugared), r#"String::create("hello")"#);
+  }
+
+  #[test]
+  fn parses_template_with_one_interpolation() {
+    let result = parse_expr("`a${x}b`");
+    let template = template_of(get_expr(&result));
+
+    assert_eq!(template.quasis, vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(template.expressions.len(), 1);
+    assert_eq!(
+      describe(&result, &template.desugared),
+      r#"String::create("a").concat(&x).concat("b")"#
+    );
+  }
+
+  #[test]
+  fn parses_template_with_several_interpolations() {
+    let result = parse_expr("`a${x}b${y}c`");
+    let template = template_of(get_expr(&result));
+
+    assert_eq!(template.quasis, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    assert_eq!(template.expressions.len(), 2);
+    assert_eq!(
+      describe(&result, &template.desugared),
+      r#"String::create("a").concat(&x).concat("b").concat(&y).concat("c")"#
+    );
+  }
+
+  #[test]
+  fn template_desugar_skips_empty_chunks() {
+    let result = parse_expr("`${x}${y}`");
+    let template = template_of(get_expr(&result));
+
+    assert_eq!(template.quasis, vec!["".to_string(), "".to_string(), "".to_string()]);
+    assert_eq!(
+      describe(&result, &template.desugared),
+      r#"String::create("").concat(&x).concat(&y)"#
+    );
+  }
+
+  #[test]
+  fn template_interpolation_accepts_arbitrary_expressions() {
+    let result = parse_expr("`v=${a + b}`");
+    let template = template_of(get_expr(&result));
+
+    assert_eq!(template.expressions.len(), 1);
+
+    let ASTNode::Expression(ASTExpression::Binary(_)) = result.nodes.get(&template.expressions[0]) else {
+      panic!("expected the interpolated expression to be a binary expression");
+    };
+  }
+
+  #[test]
+  fn template_interpolation_expression_is_shared_with_the_desugar() {
+    let result = parse_expr("`a${x}`");
+    let template = template_of(get_expr(&result));
+
+    let ASTNode::Expression(ASTExpression::Call(call)) = result.nodes.get(&template.desugared) else {
+      panic!("expected the desugar root to be a call");
+    };
+
+    let ASTNode::Expression(ASTExpression::Reference(reference)) = result.nodes.get(&call.arguments[0]) else {
+      panic!("expected a place slot to be passed by reference");
+    };
+
+    assert_eq!(vec![reference.inner], template.expressions);
+  }
+
+  #[test]
+  fn template_passes_places_by_reference_and_temporaries_by_value() {
+    let result = parse_expr("`${a} ${b.c} ${d()} ${e + f}`");
+    let template = template_of(get_expr(&result));
+
+    assert_eq!(
+      describe(&result, &template.desugared),
+      r#"String::create("").concat(&a).concat(" ").concat(&b.c).concat(" ").concat(d()).concat(" ").concat(e Add f)"#
+    );
   }
 
   #[test]

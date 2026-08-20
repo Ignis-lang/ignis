@@ -183,6 +183,9 @@ impl<'a> Analyzer<'a> {
         LambdaBody::Expression(expr_id) => self.bind_complete(expr_id, ScopeKind::Block),
       },
 
+      ASTExpression::TemplateString(template) => {
+        self.bind_complete(&template.desugared, ScopeKind::Block);
+      },
       ASTExpression::Assignment(a) => {
         self.bind_complete(&a.value, ScopeKind::Block);
       },

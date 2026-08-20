@@ -160,6 +160,10 @@ fn ast_expression_kinds() -> Vec<KindEntry> {
     },
     KindEntry {
       enum_name: "ASTExpression",
+      variant_name: "TemplateString",
+    },
+    KindEntry {
+      enum_name: "ASTExpression",
       variant_name: "Match",
     },
     KindEntry {
@@ -421,6 +425,7 @@ fn formatter_expression_dispatch_coverage() -> Vec<KindEntry> {
   cover_expr!(Variable);
   cover_expr!(Path);
   cover_expr!(Literal);
+  cover_expr!(TemplateString);
   cover_expr!(Grouped);
   cover_expr!(Unary);
   cover_expr!(Binary);
@@ -647,8 +652,8 @@ fn count_ast_statement_discriminants() -> usize {
 }
 
 fn count_ast_expression_discriminants() -> usize {
-  // ASTExpression has 26 variants (see crates/ignis_ast/src/expressions/mod.rs).
-  26
+  // ASTExpression has 27 variants (see crates/ignis_ast/src/expressions/mod.rs).
+  27
 }
 
 fn count_ast_pattern_discriminants() -> usize {

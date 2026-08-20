@@ -7592,3 +7592,183 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// Template literals
+// =========================================================================
+
+#[test]
+fn e2e_template_literal_without_interpolation() {
+  e2e_workspace_std_test(
+    "template_literal_without_interpolation",
+    r#"
+import Io from "std::io";
+import String from "std::string";
+
+function main(): i32 {
+  let greeting: String = `hello`;
+
+  Io::println(greeting.toStr());
+
+  return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_template_literal_interpolates_primitives() {
+  e2e_workspace_std_test(
+    "template_literal_interpolates_primitives",
+    r#"
+import Io from "std::io";
+import String from "std::string";
+
+function main(): i32 {
+  let name: str = "ignis";
+  let version: i32 = 4;
+  let ready: boolean = true;
+  let initial: char = 'I';
+  let ratio: f64 = 0.5;
+
+  Io::println(`name=${name}`.toStr());
+  Io::println(`version=${version}`.toStr());
+  Io::println(`ready=${ready}`.toStr());
+  Io::println(`initial=${initial}`.toStr());
+  Io::println(`ratio=${ratio}`.toStr());
+
+  return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_template_literal_interpolates_expressions() {
+  e2e_workspace_std_test(
+    "template_literal_interpolates_expressions",
+    r#"
+import Io from "std::io";
+import String from "std::string";
+
+function double(value: i32): i32 {
+  return value * 2;
+}
+
+function main(): i32 {
+  let a: i32 = 3;
+  let b: i32 = 4;
+  let owned: String = String::create("owned");
+
+  Io::println(`sum=${a + b} doubled=${double(a)}`.toStr());
+  Io::println(`owned=${owned} borrowed=${owned.toStr()}`.toStr());
+  Io::println(`nested=${`inner ${a}`}`.toStr());
+
+  return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_template_literal_escapes_delimiters() {
+  e2e_workspace_std_test(
+    "template_literal_escapes_delimiters",
+    r#"
+import Io from "std::io";
+import String from "std::string";
+
+function main(): i32 {
+  Io::println(`a \` b \${notASlot} c \n d`.toStr());
+
+  return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_template_literal_calls_record_to_string() {
+  e2e_workspace_std_test(
+    "template_literal_calls_record_to_string",
+    r#"
+import Io from "std::io";
+import String from "std::string";
+
+record Point {
+  x: i32;
+  y: i32;
+
+  public toString(&self): String {
+    return `(${self.x}, ${self.y})`;
+  }
+}
+
+function main(): i32 {
+  let point: Point = Point { x: 1, y: 2 };
+
+  Io::println(`point=${point.toString()}`.toStr());
+
+  return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_template_literal_does_not_move_interpolated_string() {
+  e2e_workspace_std_test(
+    "template_literal_does_not_move_interpolated_string",
+    r#"
+import Io from "std::io";
+import String from "std::string";
+
+record Wrapper {
+  public label: String;
+}
+
+function main(): i32 {
+  let owned: String = String::create("kept");
+  let wrapper: Wrapper = Wrapper { label: String::create("field") };
+  let count: i32 = 2;
+
+  Io::println(`first=${owned} ${wrapper.label} ${count}`.toStr());
+  Io::println(`second=${owned} ${wrapper.label} ${count}`.toStr());
+  Io::println(owned.toStr());
+
+  return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_template_literal_interpolates_reference_bindings() {
+  e2e_workspace_std_test(
+    "template_literal_interpolates_reference_bindings",
+    r#"
+import Io from "std::io";
+import String from "std::string";
+
+function render(label: &String, values: i32[]): String {
+  let mut out: String = `[${label}]`;
+
+  for (let i: u64 = 0; i < 2 as u64; i += 1 as u64) {
+    out = `${out}${values[i]}`;
+  }
+
+  return out;
+}
+
+function main(): i32 {
+  let label: String = String::create("xs");
+  let values: i32[] = [7, 8];
+
+  Io::println(render(&label, values).toStr());
+  Io::println(label.toStr());
+
+  return 0;
+}
+"#,
+  );
+}

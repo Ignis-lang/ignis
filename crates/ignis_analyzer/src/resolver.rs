@@ -379,6 +379,9 @@ impl<'a> Analyzer<'a> {
         self.resolve_node(&access.name, scope_kind);
         self.resolve_node(&access.index, scope_kind);
       },
+      ASTExpression::TemplateString(template) => {
+        self.resolve_node(&template.desugared, scope_kind);
+      },
       ASTExpression::Grouped(grouped) => {
         self.resolve_node(&grouped.expression, scope_kind);
       },

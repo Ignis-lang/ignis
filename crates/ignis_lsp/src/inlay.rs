@@ -264,6 +264,9 @@ fn collect_expression_children(
       stack.push(t.then_expr);
       stack.push(t.else_expr);
     },
+    ASTExpression::TemplateString(t) => {
+      stack.push(t.desugared);
+    },
     ASTExpression::Cast(c) => {
       stack.push(c.expression);
     },

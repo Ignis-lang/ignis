@@ -52,6 +52,7 @@ pub enum DiagnosticMessage {
   RawNulInSource(Span),
   MultiByteCharacterLiteral(Span),
   UnterminatedString(Span),
+  UnterminatedTemplateString(Span),
   ExpectedInteger(Span),
   ExpectedFloat(Span),
   ExpectedHex(Span),
@@ -966,6 +967,7 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::RawNulInSource(_) => write!(f, "Raw NUL byte is not allowed in source text"),
       DiagnosticMessage::MultiByteCharacterLiteral(_) => write!(f, "multi-byte char literal; use str"),
       DiagnosticMessage::UnterminatedString(_) => write!(f, "Unterminated string literal"),
+      DiagnosticMessage::UnterminatedTemplateString(_) => write!(f, "Unterminated template literal"),
       DiagnosticMessage::ExpectedInteger(_) => write!(f, "Expected integer literal"),
       DiagnosticMessage::ExpectedFloat(_) => write!(f, "Expected float literal"),
       DiagnosticMessage::ExpectedHex(_) => write!(f, "Expected hexadecimal literal"),
@@ -1933,6 +1935,7 @@ impl DiagnosticMessage {
       | DiagnosticMessage::RawNulInSource(at)
       | DiagnosticMessage::MultiByteCharacterLiteral(at)
       | DiagnosticMessage::UnterminatedString(at)
+      | DiagnosticMessage::UnterminatedTemplateString(at)
       | DiagnosticMessage::ExpectedInteger(at)
       | DiagnosticMessage::ExpectedFloat(at)
       | DiagnosticMessage::ExpectedHex(at)
@@ -2185,6 +2188,7 @@ impl DiagnosticMessage {
       DiagnosticMessage::RawNulInSource(_) => "I0051",
       DiagnosticMessage::MultiByteCharacterLiteral(_) => "I0050",
       DiagnosticMessage::UnterminatedString(_) => "I0025",
+      DiagnosticMessage::UnterminatedTemplateString(_) => "I0052",
       DiagnosticMessage::UnexpectedGenerics(_) => "I0026",
       DiagnosticMessage::UndefinedMeta(_) => "I0027",
       DiagnosticMessage::InvalidMetaEntity { .. } => "I0028",

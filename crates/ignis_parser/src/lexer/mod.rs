@@ -16,6 +16,7 @@ pub struct IgnisLexer<'a> {
   pub diagnostics: Vec<DiagnosticMessage>,
   pending_string: Option<String>,
   pending_char: Option<u32>,
+  template_brace_depth: Vec<u32>,
 }
 
 impl<'a> IgnisLexer<'a> {
@@ -35,6 +36,7 @@ impl<'a> IgnisLexer<'a> {
       diagnostics: vec![],
       pending_string: None,
       pending_char: None,
+      template_brace_depth: Vec::new(),
     }
   }
 
@@ -87,8 +89,25 @@ impl<'a> IgnisLexer<'a> {
     match c {
       '(' => Ok(TokenType::LeftParen),
       ')' => Ok(TokenType::RightParen),
-      '{' => Ok(TokenType::LeftBrace),
-      '}' => Ok(TokenType::RightBrace),
+      '{' => {
+        if let Some(depth) = self.template_brace_depth.last_mut() {
+          *depth += 1;
+        }
+
+        Ok(TokenType::LeftBrace)
+      },
+      '}' => {
+        if let Some(depth) = self.template_brace_depth.last_mut() {
+          if *depth == 0 {
+            self.template_brace_depth.pop();
+            return self.template_continuation();
+          }
+
+          *depth -= 1;
+        }
+
+        Ok(TokenType::RightBrace)
+      },
       '[' => Ok(TokenType::LeftBrack),
       ']' => Ok(TokenType::RightBrack),
       ',' => Ok(TokenType::Comma),
@@ -159,6 +178,7 @@ impl<'a> IgnisLexer<'a> {
       '/' => Ok(TokenType::Slash),
       '\'' => self.char_literal(),
       '"' => self.string(),
+      '`' => self.template_literal(),
       '0' if self.peek() == 'x' || self.peek() == 'X' => self.hex_number(),
       '0' if self.peek() == 'b' || self.peek() == 'B' => self.binary_number(),
       '0' if self.peek().is_ascii_digit() => self.number(),
@@ -275,6 +295,114 @@ impl<'a> IgnisLexer<'a> {
 
     self.pending_string = Some(result);
     Ok(TokenType::String)
+  }
+
+  /// Scans a template literal opened by a backtick.
+  ///
+  /// Emits `TemplateNoSubstitution` when the literal has no interpolation, or
+  /// `TemplateHead` when it does. In the latter case an interpolation frame is
+  /// pushed so the matching `}` resumes template scanning instead of closing a
+  /// block.
+  fn template_literal(&mut self) -> LexerResult {
+    let (text, has_interpolation) = self.scan_template_chunk()?;
+
+    self.pending_string = Some(text);
+
+    if has_interpolation {
+      self.template_brace_depth.push(0);
+      return Ok(TokenType::TemplateHead);
+    }
+
+    Ok(TokenType::TemplateNoSubstitution)
+  }
+
+  /// Scans the literal text that follows the `}` closing an interpolation.
+  fn template_continuation(&mut self) -> LexerResult {
+    let (text, has_interpolation) = self.scan_template_chunk()?;
+
+    self.pending_string = Some(text);
+
+    if has_interpolation {
+      self.template_brace_depth.push(0);
+      return Ok(TokenType::TemplateMiddle);
+    }
+
+    Ok(TokenType::TemplateTail)
+  }
+
+  /// Reads template text up to the next `${` or the closing backtick.
+  ///
+  /// Returns the cooked text and whether an interpolation follows it. Nested
+  /// strings and blocks inside an interpolation are handled by the regular
+  /// scanner, so only the delimiters matter here.
+  fn scan_template_chunk(&mut self) -> Result<(String, bool), Box<DiagnosticMessage>> {
+    let chunk_start = self.start;
+    let mut result = String::new();
+
+    loop {
+      if self.is_at_end() {
+        return Err(Box::new(DiagnosticMessage::UnterminatedTemplateString(
+          self.mk_span(chunk_start, self.current),
+        )));
+      }
+
+      match self.peek() {
+        '`' => {
+          self.advance();
+          return Ok((result, false));
+        },
+        '$' if self.peek_next() == '{' => {
+          self.advance();
+          self.advance();
+          return Ok((result, true));
+        },
+        '\0' => {
+          let nul_start = self.current;
+          self.advance();
+          self.skip_to_template_terminator();
+
+          return Err(Box::new(DiagnosticMessage::RawNulInSource(
+            self.mk_span(nul_start, nul_start + 1),
+          )));
+        },
+        '\\' => {
+          self.advance();
+
+          match self.peek() {
+            '`' => result.push('`'),
+            '$' => result.push('$'),
+            '\\' => result.push('\\'),
+            '"' => result.push('"'),
+            'b' => result.push('\u{08}'),
+            'f' => result.push('\u{0C}'),
+            'n' => result.push('\n'),
+            'r' => result.push('\r'),
+            't' => result.push('\t'),
+            '0' => result.push('\0'),
+            _ => {},
+          }
+
+          self.advance();
+        },
+        '\n' => {
+          self.line += 1;
+          result.push('\n');
+          self.advance();
+        },
+        c => {
+          result.push(c);
+          self.advance();
+        },
+      }
+    }
+  }
+
+  fn skip_to_template_terminator(&mut self) {
+    while !self.is_at_end() {
+      if self.advance() == '`' {
+        break;
+      }
+    }
   }
 
   fn skip_to_string_terminator(&mut self) {
@@ -642,6 +770,145 @@ mod tests {
       tokens: lexer.tokens.clone(),
       diagnostics: lexer.diagnostics.clone(),
     }
+  }
+
+  #[test]
+  fn lexes_template_without_interpolation() {
+    let result = lex("`hello`");
+
+    assert!(result.diagnostics.is_empty());
+    assert_tokens(
+      &result.tokens,
+      &[(TokenType::TemplateNoSubstitution, "hello"), (TokenType::Eof, "")],
+    );
+  }
+
+  #[test]
+  fn lexes_template_with_single_interpolation() {
+    let result = lex("`a${x}b`");
+
+    assert!(result.diagnostics.is_empty());
+    assert_tokens(
+      &result.tokens,
+      &[
+        (TokenType::TemplateHead, "a"),
+        (TokenType::Identifier, "x"),
+        (TokenType::TemplateTail, "b"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn lexes_template_with_middle_chunk() {
+    let result = lex("`a${x}b${y}c`");
+
+    assert!(result.diagnostics.is_empty());
+    assert_tokens(
+      &result.tokens,
+      &[
+        (TokenType::TemplateHead, "a"),
+        (TokenType::Identifier, "x"),
+        (TokenType::TemplateMiddle, "b"),
+        (TokenType::Identifier, "y"),
+        (TokenType::TemplateTail, "c"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn lexes_template_interpolation_containing_a_string_with_a_brace() {
+    let result = lex(r#"`a${f("}")}b`"#);
+
+    assert!(result.diagnostics.is_empty());
+    assert_tokens(
+      &result.tokens,
+      &[
+        (TokenType::TemplateHead, "a"),
+        (TokenType::Identifier, "f"),
+        (TokenType::LeftParen, "("),
+        (TokenType::String, "}"),
+        (TokenType::RightParen, ")"),
+        (TokenType::TemplateTail, "b"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn lexes_template_interpolation_containing_a_record_initializer() {
+    let result = lex("`${P { x: 1 }}`");
+
+    assert!(result.diagnostics.is_empty());
+    assert_tokens(
+      &result.tokens,
+      &[
+        (TokenType::TemplateHead, ""),
+        (TokenType::Identifier, "P"),
+        (TokenType::LeftBrace, "{"),
+        (TokenType::Identifier, "x"),
+        (TokenType::Colon, ":"),
+        (TokenType::Int, "1"),
+        (TokenType::RightBrace, "}"),
+        (TokenType::TemplateTail, ""),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn lexes_nested_template_literals() {
+    let result = lex("`a${`b${c}d`}e`");
+
+    assert!(result.diagnostics.is_empty());
+    assert_tokens(
+      &result.tokens,
+      &[
+        (TokenType::TemplateHead, "a"),
+        (TokenType::TemplateHead, "b"),
+        (TokenType::Identifier, "c"),
+        (TokenType::TemplateTail, "d"),
+        (TokenType::TemplateTail, "e"),
+        (TokenType::Eof, ""),
+      ],
+    );
+  }
+
+  #[test]
+  fn template_escapes_cover_backtick_and_dollar() {
+    let result = lex(r"`\`\${x}\n`");
+
+    assert!(result.diagnostics.is_empty());
+    assert_tokens(
+      &result.tokens,
+      &[(TokenType::TemplateNoSubstitution, "`${x}\n"), (TokenType::Eof, "")],
+    );
+  }
+
+  #[test]
+  fn template_spans_multiple_lines() {
+    let result = lex("`a\nb`");
+
+    assert!(result.diagnostics.is_empty());
+    assert_tokens(
+      &result.tokens,
+      &[(TokenType::TemplateNoSubstitution, "a\nb"), (TokenType::Eof, "")],
+    );
+  }
+
+  #[test]
+  fn unterminated_template_reports_a_diagnostic() {
+    let result = lex("`abc");
+
+    assert!(
+      result
+        .diagnostics
+        .iter()
+        .any(|diag| matches!(diag, DiagnosticMessage::UnterminatedTemplateString(_))),
+      "expected an unterminated template diagnostic, got {:?}",
+      result.diagnostics
+    );
   }
 
   fn assert_tokens(

@@ -211,7 +211,11 @@ fn classify_token(
     | TokenType::HexType
     | TokenType::BinaryType => (TokenTypeIndex::Type as u32, ModifierIndex::Readonly.bit()),
 
-    TokenType::String => (TokenTypeIndex::String as u32, 0),
+    TokenType::String
+    | TokenType::TemplateNoSubstitution
+    | TokenType::TemplateHead
+    | TokenType::TemplateMiddle
+    | TokenType::TemplateTail => (TokenTypeIndex::String as u32, 0),
     TokenType::Int | TokenType::Float | TokenType::Hex | TokenType::Binary | TokenType::Char => {
       (TokenTypeIndex::Number as u32, 0)
     },

@@ -1684,6 +1684,10 @@ impl<'a> AstChunkFormatter<'a> {
       ASTExpression::Variable(variable) => Ok(self.slice_span(&variable.span).trim().to_string()),
       ASTExpression::Path(path) => Ok(self.slice_span(&path.span).trim().to_string()),
       ASTExpression::Literal(literal) => Ok(self.slice_span(&literal.span).trim().to_string()),
+      // Printed verbatim, like any other literal: the span covers the whole
+      // template including its delimiters, so slicing keeps chunk whitespace and
+      // escapes exactly as written.
+      ASTExpression::TemplateString(template) => Ok(self.slice_span(&template.span).trim().to_string()),
       ASTExpression::Unit { .. } => Ok("()".to_string()),
       ASTExpression::Grouped(grouped) => Ok(format!("({})", self.format_expression_node(grouped.expression, 0, 0)?)),
       ASTExpression::Tuple(tuple) => Ok(format!(

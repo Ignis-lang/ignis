@@ -69,6 +69,12 @@ pub enum TokenType {
   Hex,    // 0xABC
   Binary, // 0b0101
 
+  // Template literals: `text`, `head${ , }middle${ , }tail`
+  TemplateNoSubstitution,
+  TemplateHead,
+  TemplateMiddle,
+  TemplateTail,
+
   // Types
   StrType,           // str
   Int8Type,          // i8
@@ -404,6 +410,10 @@ impl Display for TokenType {
       TokenType::Static => write!(f, "Static"),
       TokenType::StrType => write!(f, "StrType"),
       TokenType::String => write!(f, "String"),
+      TokenType::TemplateNoSubstitution => write!(f, "TemplateNoSubstitution"),
+      TokenType::TemplateHead => write!(f, "TemplateHead"),
+      TokenType::TemplateMiddle => write!(f, "TemplateMiddle"),
+      TokenType::TemplateTail => write!(f, "TemplateTail"),
       TokenType::SubtractAssign => write!(f, "SubtractAssign"),
       TokenType::Self_ => write!(f, "Self"),
       TokenType::This => write!(f, "This"),

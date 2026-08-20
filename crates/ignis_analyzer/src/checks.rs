@@ -376,6 +376,9 @@ impl<'a> Analyzer<'a> {
           self.extra_checks_node(arg, scope_kind, in_loop, in_function, in_defer);
         }
       },
+      ASTExpression::TemplateString(template) => {
+        self.extra_checks_node(&template.desugared, scope_kind, in_loop, in_function, in_defer);
+      },
       ASTExpression::Binary(binary) => {
         self.extra_checks_node(&binary.left, scope_kind, in_loop, in_function, in_defer);
         self.extra_checks_node(&binary.right, scope_kind, in_loop, in_function, in_defer);

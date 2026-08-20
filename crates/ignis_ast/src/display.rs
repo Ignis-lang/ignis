@@ -308,6 +308,11 @@ impl DisplayLisp for ASTExpression {
         format!("(|> {} {})", formatter.format_node(lhs), formatter.format_node(rhs))
       },
       ASTExpression::PipePlaceholder { .. } => "_".to_string(),
+      ASTExpression::TemplateString(expr) => {
+        let parts: Vec<String> = expr.expressions.iter().map(|id| formatter.format_node(id)).collect();
+
+        format!("(template {:?} {})", expr.quasis, parts.join(" "))
+      },
       ASTExpression::Try { expr, .. } => {
         format!("(! {})", formatter.format_node(expr))
       },

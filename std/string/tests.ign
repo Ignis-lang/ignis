@@ -520,3 +520,60 @@ function charAtReturnsReplacementForMalformedContinuationBytes(): void {
 function snapshotStdRunnerSmoke(): void {
   Test::assertSnapshot("smoke", "std-string-smoke\n");
 }
+
+@test
+function charToStringRendersAsciiScalar(): void {
+  let value: char = 'a';
+  let rendered: String = value.toString();
+
+  Test::assertEq<str>(rendered.toStr(), "a");
+}
+
+@test
+function charToStringRendersMultiByteScalar(): void {
+  let value: char = 'é';
+  let rendered: String = value.toString();
+
+  Test::assertEq<u64>(rendered.length(), 2 as u64);
+}
+
+@test
+function concatCharAppendsScalar(): void {
+  let base: String = String::create("ab");
+  let value: char = 'c';
+  let joined: String = base.concat(value);
+
+  Test::assertEq<str>(joined.toStr(), "abc");
+}
+
+@test
+function concatBooleanAppendsLiteralWord(): void {
+  let base: String = String::create("ok: ");
+
+  Test::assertEq<str>(base.concat(true).toStr(), "ok: true");
+  Test::assertEq<str>(base.concat(false).toStr(), "ok: false");
+}
+
+@test
+function concatBorrowedValuesMatchesByValueOverloads(): void {
+  let base: String = String::create("v=");
+  let number: i32 = 42;
+  let flag: boolean = false;
+  let letter: char = 'z';
+  let slice: str = "tail";
+
+  Test::assertEq<str>(base.concat(&number).toStr(), "v=42");
+  Test::assertEq<str>(base.concat(&flag).toStr(), "v=false");
+  Test::assertEq<str>(base.concat(&letter).toStr(), "v=z");
+  Test::assertEq<str>(base.concat(&slice).toStr(), "v=tail");
+}
+
+@test
+function concatBorrowedStringDoesNotConsumeIt(): void {
+  let base: String = String::create("a");
+  let tail: String = String::create("b");
+
+  Test::assertEq<str>(base.concat(&tail).toStr(), "ab");
+  Test::assertEq<str>(base.concat(&tail).toStr(), "ab");
+  Test::assertEq<str>(tail.toStr(), "b");
+}

@@ -672,3 +672,30 @@ function main(): i32 {
 
   assert_eq!(formatted, source);
 }
+
+#[test]
+fn formats_template_literals_verbatim() {
+  let source = concat!(
+    "function greet(name: str, n: i32): void {\n",
+    "  let a = `plain`;\n",
+    "  let b = `hi ${name}, n=${ n + 1 }`;\n",
+    "  let c = `multi\n",
+    "line ${name}`;\n",
+    "  return;\n",
+    "}\n"
+  );
+
+  let formatted = format_text(source, &FormatOptions::default()).expect("template literals should format");
+
+  assert_snapshot!("formats_template_literals_verbatim", formatted);
+}
+
+#[test]
+fn formatting_template_literals_is_idempotent() {
+  let source = "function greet(name: str): void {\n  let a = `hi ${name}`;\n  return;\n}\n";
+
+  let once = format_text(source, &FormatOptions::default()).expect("first pass");
+  let twice = format_text(&once, &FormatOptions::default()).expect("second pass");
+
+  assert_eq!(once, twice);
+}

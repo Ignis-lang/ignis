@@ -16,6 +16,7 @@ pub mod member_access;
 pub mod path;
 pub mod record_init;
 pub mod reference;
+pub mod template_string;
 pub mod ternary;
 pub mod tuple;
 pub mod unary;
@@ -39,6 +40,7 @@ pub use member_access::{ASTAccessOp, ASTMemberAccess};
 pub use path::{ASTPath, ASTPathSegment};
 pub use record_init::{ASTRecordInit, ASTRecordInitField};
 pub use reference::ASTReference;
+pub use template_string::ASTTemplateString;
 pub use ternary::ASTTernary;
 pub use tuple::ASTTuple;
 pub use unary::ASTUnary;
@@ -63,6 +65,7 @@ pub enum ASTExpression {
   Reference(ASTReference),
   Unary(ASTUnary),
   Literal(ASTLiteral),
+  TemplateString(ASTTemplateString),
   Match(ASTMatch),
   Variable(ASTVariableExpression),
   Vector(ASTVector),
@@ -112,6 +115,7 @@ impl ASTExpression {
       ASTExpression::Reference(expr) => &expr.span,
       ASTExpression::Unary(expr) => &expr.span,
       ASTExpression::Literal(expr) => &expr.span,
+      ASTExpression::TemplateString(expr) => &expr.span,
       ASTExpression::Match(expr) => &expr.span,
       ASTExpression::Variable(expr) => &expr.span,
       ASTExpression::Vector(expr) => &expr.span,

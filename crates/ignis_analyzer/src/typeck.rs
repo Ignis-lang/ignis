@@ -847,6 +847,10 @@ impl<'a> Analyzer<'a> {
       ASTExpression::Reference(ref_) => {
         let expr_type = self.typecheck_node(&ref_.inner, scope_kind, ctx);
 
+        if ref_.template_slot && matches!(self.types.get(&expr_type), Type::Reference { .. }) {
+          return expr_type;
+        }
+
         if ref_.mutable {
           self.mark_mutation_target(&ref_.inner);
         }
@@ -971,6 +975,7 @@ impl<'a> Analyzer<'a> {
           },
         }
       },
+      ASTExpression::TemplateString(template) => self.typecheck_node(&template.desugared, scope_kind, ctx),
       ASTExpression::Grouped(grouped) => self.typecheck_node(&grouped.expression, scope_kind, ctx),
       ASTExpression::Tuple(tuple) => {
         let elements = tuple
@@ -4353,6 +4358,7 @@ impl<'a> Analyzer<'a> {
           + self.count_pipe_placeholders(&tern.else_expr)
       },
       ASTExpression::Cast(cast) => self.count_pipe_placeholders(&cast.expression),
+      ASTExpression::TemplateString(template) => self.count_pipe_placeholders(&template.desugared),
       ASTExpression::Grouped(g) => self.count_pipe_placeholders(&g.expression),
       ASTExpression::VectorAccess(va) => {
         self.count_pipe_placeholders(&va.name) + self.count_pipe_placeholders(&va.index)
@@ -4443,6 +4449,9 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Cast(cast) => {
         self.collect_placeholder_spans_inner(&cast.expression, max, spans);
+      },
+      ASTExpression::TemplateString(template) => {
+        self.collect_placeholder_spans_inner(&template.desugared, max, spans);
       },
       ASTExpression::Grouped(g) => {
         self.collect_placeholder_spans_inner(&g.expression, max, spans);
@@ -9183,6 +9192,7 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Cast(cast) => self.node_contains_let_condition(&cast.expression),
       ASTExpression::Dereference(deref) => self.node_contains_let_condition(&deref.inner),
+      ASTExpression::TemplateString(template) => self.node_contains_let_condition(&template.desugared),
       ASTExpression::Grouped(grouped) => self.node_contains_let_condition(&grouped.expression),
       ASTExpression::Reference(reference) => self.node_contains_let_condition(&reference.inner),
       ASTExpression::Unary(unary) => self.node_contains_let_condition(&unary.operand),
@@ -10242,6 +10252,7 @@ impl<'a> Analyzer<'a> {
       ASTExpression::VectorAccess(access) => self
         .find_first_symbol_usage(access.name, symbol)
         .or_else(|| self.find_first_symbol_usage(access.index, symbol)),
+      ASTExpression::TemplateString(template) => self.find_first_symbol_usage(template.desugared, symbol),
       ASTExpression::Grouped(grouped) => self.find_first_symbol_usage(grouped.expression, symbol),
       ASTExpression::Vector(vector) => vector
         .items

@@ -1060,6 +1060,11 @@ impl<'a> Analyzer<'a> {
           .lookup_type(&ref_.inner)
           .cloned()
           .unwrap_or_else(|| self.types.error());
+
+        if ref_.template_slot && matches!(self.types.get(&expr_type), Type::Reference { .. }) {
+          return expr_id;
+        }
+
         let ref_type = self.types.reference(expr_type, ref_.mutable);
 
         let hir_node = HIRNode {
@@ -1120,6 +1125,7 @@ impl<'a> Analyzer<'a> {
 
         hir.alloc(hir_node)
       },
+      ASTExpression::TemplateString(template) => self.lower_node_to_hir(&template.desugared, hir, scope_kind),
       ASTExpression::Grouped(grouped) => self.lower_node_to_hir(&grouped.expression, hir, scope_kind),
       ASTExpression::Tuple(tuple) => {
         let elements = tuple
