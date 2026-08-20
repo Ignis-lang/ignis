@@ -13929,3 +13929,40 @@ function typecheckTypeParameterResolvesInAnnotationPosition(): void {
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }
+
+/// Scenario: `let values: i32[3] = [1, 2, 3];` propagates the annotation's
+/// element type into every element, so the literals coerce to `i32` instead of
+/// keeping the unsuffixed default and reporting a mismatch.
+/// Spec: IGN-134 B1 — expected type reaches vector literal elements.
+@test
+function typecheckVectorLiteralElementsTakeExpectedElementType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): void {\n  let values: i32[3] = [1, 2, 3];\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: an element the expected type rules out is still reported, so
+/// propagating the annotation does not silence a real mismatch.
+/// Spec: IGN-134 B1 — expected type reaches vector literal elements.
+@test
+function typecheckVectorLiteralElementAgainstExpectedTypeIsChecked(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): void {\n  let values: i32[3] = [1, true, 3];\n  return;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assert(typecheckCountErrors(&output.diagnostics) > 0);
+}

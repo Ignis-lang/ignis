@@ -2628,6 +2628,39 @@ export namespace Analyzer {
       );
     }
 
+    /// The element type an expected vector-like type asks its elements to have.
+    ///
+    /// `NONE` when nothing is expected, when the expectation is not a sequence, or
+    /// when it alias-resolves through a cycle — in every one of those the elements
+    /// are typed on their own and compared to each other, as before.
+    function expectedElementType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      expected: Option<Analyzer::TypeId>,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(expectedType) = expected else {
+        return Option::NONE;
+      };
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, expectedType);
+      if (let Option::SOME(aliasDefId) = resolved.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return Option::NONE;
+      }
+
+      let Option::SOME(resolvedNode) = typeStore.get(resolved.typeId) else {
+        return Option::NONE;
+      };
+
+      return match (resolvedNode) {
+        Analyzer::Type::FixedArray(element, _) -> Option::SOME(element),
+        Analyzer::Type::Slice(element) -> Option::SOME(element),
+        _ -> Option::NONE,
+      };
+    }
+
     function checkExprExpected(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -2888,6 +2921,17 @@ export namespace Analyzer {
           return Option::SOME(matchType);
         },
         Ast::Expression::Node::Vector(value) -> {
+          // The expected type decides what the elements are, exactly as it does for
+          // any other argument position: without it an unsuffixed literal keeps its
+          // default and a `i32[]` annotation reports a mismatch per element.
+          let expectedElement: Option<Analyzer::TypeId> = Analyzer::Typecheck::expectedElementType(
+            state,
+            defStore,
+            typeStore,
+            value.span,
+            expected,
+          );
+
           let mut firstElementTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
           let mut allElementsTyped: boolean = true;
           let mut allElementsMatch: boolean = true;
@@ -2899,7 +2943,7 @@ export namespace Analyzer {
               continue;
             };
 
-            let elementTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *elementId);
+            let elementTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(state, defStore, typeStore, symbols, module, resolvedBodies, *elementId, expectedElement);
             let Option::SOME(elementType) = elementTypeOpt else {
               allElementsTyped = false;
               index += 1;
