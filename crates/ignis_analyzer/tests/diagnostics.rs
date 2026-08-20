@@ -150,7 +150,7 @@ fn method_must_be_called() {
 record Counter {
     value: i32;
 
-    get(): i32 {
+    get(&self): i32 {
         return self.value;
     }
 }
@@ -384,11 +384,11 @@ fn overloaded_instance_methods() {
 record Box {
     value: i32;
 
-    get(): i32 {
+    get(&self): i32 {
         return self.value;
     }
 
-    get(label: str): i32 {
+    get(&self, label: str): i32 {
         return self.value;
     }
 }

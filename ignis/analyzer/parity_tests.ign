@@ -524,6 +524,30 @@ function parityMoveInsideLetElseElseBlock(): void {
   );
 }
 
+/// Origin: golden_ok::record_instance_method.
+/// Host expectation: accepted with no diagnostics.
+///
+/// The fixture declares `&self` since IGN-134's sibling decision: a method that
+/// uses `self` must write its receiver, in both compilers.
+@test
+function parityRecordInstanceMethod(): void {
+  parityAcceptsSource(
+    "record Counter {\n    value: i32;\n\n    public get(&self): i32 {\n        return self.value;\n    }\n}\n\nfunction main(): i32 {\n    let c: Counter = Counter { value: 42 };\n    return c.get();\n}\n",
+  );
+}
+
+/// Origin: diagnostics::method_must_be_called.
+/// Host expectation: rejected with A0061 (MethodMustBeCalled) — `c.get` names a
+/// method without applying it.
+@test
+function parityMethodMustBeCalled(): void {
+  parityRejectsSource(
+    "record Counter {\n    value: i32;\n\n    get(&self): i32 {\n        return self.value;\n    }\n}\n\nfunction main(): i32 {\n    let c: Counter = Counter { value: 42 };\n    return c.get;\n}\n",
+    DiagnosticCode::METHOD_CALL_KIND_MISMATCH,
+    1,
+  );
+}
+
 /// Origin: golden_ok::widening_implicit_u8_to_u32.
 /// Host expectation: compiles; the host also warns that `b` is unused.
 @test
@@ -905,7 +929,7 @@ function parityDotAccessOnNonRecord(): void {
 // ===========================================================================
 // Gap inventory
 //
-// 8 of the 74 curated fixtures are not gates yet. Each one is listed with
+// 6 of the 74 curated fixtures are not gates yet. Each one is listed with
 // its host origin, the host expectation, and what the selfhost pipeline
 // actually does today (observed, not predicted). Nothing here is a weakened
 // expectation: these fixtures are absent from the gates on purpose.
@@ -914,10 +938,6 @@ function parityDotAccessOnNonRecord(): void {
 //
 //   B3 (1) — Deferred local inference is unsupported
 //     An unannotated `let mut x;` completed by a later assignment.
-//
-//   B4 (2) — A method body may not use `self` without an explicit self parameter
-//     Isolated: the same record with `public get(&self): i32` analyzes clean, and
-//     with `public get(): i32` reports I0033 + A0053 + A0066.
 //
 //   B6 (1) — Function overloading is unsupported
 //     The binder reports the second signature as a redefinition.
@@ -939,16 +959,6 @@ function parityDotAccessOnNonRecord(): void {
 //     origin:   golden_ok::infer_deferred_from_assignment
 //     host:     accepted
 //     selfhost: analyzer: A0076 + I0009 + A0053
-//
-//   methodMustBeCalled [B4]
-//     origin:   diagnostics::method_must_be_called
-//     host:     rejected with A0061
-//     selfhost: analyzer: I0033 + A0053 + A0066, instead of the host's A0061 for the uncalled method reference
-//
-//   recordInstanceMethod [B4]
-//     origin:   golden_ok::record_instance_method
-//     host:     accepted
-//     selfhost: analyzer: I0033 + A0053 + A0066
 //
 //   namespacedOverloads [B6]
 //     origin:   golden_ok::overloaded_write_shapes_resolve_without_type_suffixes

@@ -2760,7 +2760,11 @@ impl<'a> Analyzer<'a> {
       (true, false)
     };
 
-    if !is_static {
+    // A receiver has to be written to be used: `get(&self)` and `get(&mut self)`
+    // say what the method borrows, and a bare `get()` says nothing an
+    // implicitly injected `self` could stand for. Enum methods already resolve
+    // this way through `is_static`; records used to inject a shared receiver.
+    if !is_static && method.self_param.is_some() {
       let owner_def = self.defs.get(&owner_def_id);
 
       // For generic owners, self should be Type::Instance so it gets substituted during monomorphization

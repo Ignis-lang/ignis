@@ -1233,7 +1233,7 @@ fn record_instance_method() {
 record Counter {
     value: i32;
 
-    public get(): i32 {
+    public get(&self): i32 {
         return self.value;
     }
 }
