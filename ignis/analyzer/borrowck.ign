@@ -1935,6 +1935,10 @@ export namespace Borrowck {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, call.callee);
         Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, span);
       },
+      // The body is checked on its own as the thunk function, so walking into it
+      // here would check it twice against the wrong scope. Mirrors the reference
+      // borrow checker's empty `Closure` arm.
+      Hir::HirKind::Closure(_) -> {},
       Hir::HirKind::MethodCall(call) -> {
         if (let Option::SOME(receiver) = call.receiver) {
           Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, receiver);
