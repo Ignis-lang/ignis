@@ -548,6 +548,39 @@ function parityMethodMustBeCalled(): void {
   );
 }
 
+/// Origin: golden_ok::infer_deferred_from_assignment.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityInferDeferredFromAssignment(): void {
+  parityAcceptsSource(
+    "function main(): i32 {\n    let mut x;\n    x = 10;\n    return x;\n}\n",
+  );
+}
+
+/// Origin: diagnostics::cannot_move_borrowed_binding_into_let.
+/// Host expectation: rejected with A0186 (CannotMoveOutOfBorrowedValue); the
+/// selfhost code space numbers the same contract `O0002`.
+@test
+function parityCannotMoveBorrowedBindingIntoLet(): void {
+  parityRejectsSource(
+    "@implements(Drop)\nrecord Payload {\n    public value: i32;\n\n    drop(&mut self): void {\n        return;\n    }\n}\n\nenum Source {\n    SOME(Payload),\n    NONE,\n}\n\nfunction takeFromBorrow(src: &Source): i32 {\n    match (src) {\n        Source::SOME(payload) -> {\n            let owned: Payload = payload;\n        },\n        Source::NONE -> {},\n    };\n    return 0;\n}\n",
+    DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW,
+    1,
+  );
+}
+
+/// Origin: diagnostics::cannot_move_borrowed_binding_from_let_else.
+/// Host expectation: rejected with A0186 (CannotMoveOutOfBorrowedValue); the
+/// selfhost code space numbers the same contract `O0002`.
+@test
+function parityCannotMoveBorrowedBindingFromLetElse(): void {
+  parityRejectsSource(
+    "@implements(Drop)\nrecord Payload {\n    public value: i32;\n\n    drop(&mut self): void {\n        return;\n    }\n}\n\nenum Source {\n    SOME(Payload),\n    NONE,\n}\n\nfunction takeFromBorrow(src: &Source): i32 {\n    let Source::SOME(payload) = src else {\n        return 0;\n    };\n\n    let owned: Payload = payload;\n    return owned.value;\n}\n",
+    DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW,
+    1,
+  );
+}
+
 /// Origin: golden_ok::widening_implicit_u8_to_u32.
 /// Host expectation: compiles; the host also warns that `b` is unused.
 @test
@@ -929,15 +962,12 @@ function parityDotAccessOnNonRecord(): void {
 // ===========================================================================
 // Gap inventory
 //
-// 6 of the 74 curated fixtures are not gates yet. Each one is listed with
+// 3 of the 74 curated fixtures are not gates yet. Each one is listed with
 // its host origin, the host expectation, and what the selfhost pipeline
 // actually does today (observed, not predicted). Nothing here is a weakened
 // expectation: these fixtures are absent from the gates on purpose.
 //
 // Root-cause buckets:
-//
-//   B3 (1) — Deferred local inference is unsupported
-//     An unannotated `let mut x;` completed by a later assignment.
 //
 //   B6 (1) — Function overloading is unsupported
 //     The binder reports the second signature as a redefinition.
@@ -947,18 +977,7 @@ function parityDotAccessOnNonRecord(): void {
 //   B8 (1) — `@extension` methods are unsupported
 //     Isolated: an all-`u32` extension fixture still reports I0031, so this is not B1.
 //
-//   B10 (2) — No equivalent of the host's CannotMoveOutOfBorrowedValue (A0186)
-//     The selfhost code space has no ownership code for moving out of borrowed
-//     storage. The fixtures are still rejected, but as a plain type mismatch
-//     (the binding is typed `&Payload`), which is a different contract: it
-//     disappears the moment the binding is annotated as a reference.
-//
 // Fixtures:
-//
-//   inferDeferredFromAssignment [B3]
-//     origin:   golden_ok::infer_deferred_from_assignment
-//     host:     accepted
-//     selfhost: analyzer: A0076 + I0009 + A0053
 //
 //   namespacedOverloads [B6]
 //     origin:   golden_ok::overloaded_write_shapes_resolve_without_type_suffixes
@@ -975,13 +994,4 @@ function parityDotAccessOnNonRecord(): void {
 //     host:     accepted
 //     selfhost: analyzer: I0031 x2
 //
-//   cannotMoveBorrowedBindingFromLetElse [B10]
-//     origin:   diagnostics::cannot_move_borrowed_binding_from_let_else
-//     host:     rejected with A0186
-//     selfhost: analyzer: I0031 x2 + A0053; rejected, but never as an ownership error
-//
-//   cannotMoveBorrowedBindingIntoLet [B10]
-//     origin:   diagnostics::cannot_move_borrowed_binding_into_let
-//     host:     rejected with A0186
-//     selfhost: analyzer: I0031 x3 + A0053 + A0061; rejected, but never as an ownership error
 // ===========================================================================

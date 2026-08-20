@@ -66,6 +66,9 @@ export namespace Analyzer {
       public localIndexes: Vector<u32>;
       public localTypeIds: Vector<Analyzer::TypeId>;
       public localMutableFlags: Vector<boolean>;
+      /// Parallel to `localTypeIds`: true while the binding is waiting for its
+      /// first assignment to decide its type.
+      public localPendingFlags: Vector<boolean>;
       /// Binding-site log feeding `LocalBindingUses`. Unlike the `local*`
       /// scope stack above, these five vectors are never reset per function:
       /// the lint phase reports module-wide.
@@ -90,6 +93,10 @@ export namespace Analyzer {
     record LocalBindingInfo {
       public typeId: Analyzer::TypeId;
       public mutable: boolean;
+      /// True while the binding was declared without an annotation and without
+      /// an initializer, so `typeId` is a placeholder the first assignment
+      /// replaces. Reading such a binding before that assignment is an error.
+      public pending: boolean;
     }
 
     function emitDiagnostic(
@@ -614,6 +621,7 @@ export namespace Analyzer {
         stateRef.localIndexes.pop();
         stateRef.localTypeIds.pop();
         stateRef.localMutableFlags.pop();
+        stateRef.localPendingFlags.pop();
       }
     }
 
@@ -1533,9 +1541,15 @@ export namespace Analyzer {
         };
 
         if (functionId.raw() == localId.enclosingFn.raw() && *localIndex == localId.index) {
+          let mut pendingFlag: boolean = false;
+          if (let Option::SOME(pending) = state.localPendingFlags.get(index)) {
+            pendingFlag = *pending;
+          }
+
           let info: Analyzer::Typecheck::LocalBindingInfo = Analyzer::Typecheck::LocalBindingInfo {
             typeId: *typeId,
             mutable: *mutable,
+            pending: pendingFlag,
           };
 
           // Every consultation of a binding is a use: the oracle marks a
@@ -1767,7 +1781,73 @@ export namespace Analyzer {
       stateRef.localIndexes.push(localId.index);
       stateRef.localTypeIds.push(typeId);
       stateRef.localMutableFlags.push(mutable);
+      stateRef.localPendingFlags.push(false);
       return true;
+    }
+
+    /// Register a binding whose type the first assignment will decide.
+    ///
+    /// `placeholder` stands in until then and is never compared against
+    /// anything: `readPendingLocal` reports a read that happens first, and
+    /// `resolvePendingLocal` replaces it when the assignment arrives.
+    function pushPendingPatternLocal(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      patternId: Ast::PatternId,
+      placeholder: Analyzer::TypeId,
+      span: SourceSpan,
+    ): boolean {
+      if (!Analyzer::Typecheck::pushPatternLocal(state, resolvedBodies, patternId, placeholder, true, span)) {
+        return false;
+      }
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      let last: u64 = stateRef.localPendingFlags.length() - 1;
+      stateRef.localPendingFlags.set(last, true);
+      return true;
+    }
+
+    /// Give a pending binding the type its first assignment supplies.
+    ///
+    /// Answers false when the id names no live binding or when that binding is
+    /// not pending, which is every ordinary assignment.
+    function resolvePendingLocal(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      localId: Analyzer::ResolverBodies::LocalId,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let count: u64 = state.localTypeIds.length();
+      let mut index: u64 = count;
+
+      while (index > 0) {
+        index -= 1;
+
+        let Option::SOME(functionId) = state.localFunctionIds.get(index) else {
+          continue;
+        };
+        let Option::SOME(localIndex) = state.localIndexes.get(index) else {
+          continue;
+        };
+
+        if (functionId.raw() != localId.enclosingFn.raw() || *localIndex != localId.index) {
+          continue;
+        }
+
+        let Option::SOME(pending) = state.localPendingFlags.get(index) else {
+          return false;
+        };
+
+        if (!*pending) {
+          return false;
+        }
+
+        let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+        stateRef.localTypeIds.set(index, typeId);
+        stateRef.localPendingFlags.set(index, false);
+        return true;
+      }
+
+      return false;
     }
 
     function lookupPatternRef(
@@ -2338,12 +2418,18 @@ export namespace Analyzer {
       mutable: boolean,
       span: SourceSpan,
     ): boolean {
+      // Matching through a reference destructures the referent: `match (src)`
+      // on a `&Source` names the same variants as on a `Source`. The payload
+      // sub-patterns still bind the declared types, so handing one on by value
+      // moves out of borrowed storage, which is the borrow checker's call.
+      let scrutineeType: Analyzer::TypeId = Analyzer::Typecheck::derefReceiverType(defStore, typeStore, typeId);
+
       let expectedEnumDefIdOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::requireNonGenericEnumDefId(
         state,
         defStore,
         typeStore,
         span,
-        typeId,
+        scrutineeType,
         "enum variant pattern must match a non-generic enum",
         "typecheck does not support generic enum destructuring",
       );
@@ -3688,6 +3774,14 @@ export namespace Analyzer {
             Analyzer::Typecheck::emitUnsupported(state, span, "unknown local binding type");
             return Option::NONE;
           };
+
+          // A binding declared without an annotation and without an initializer
+          // has no type until something assigns to it, and reading it here is
+          // what would otherwise silently take the placeholder.
+          if (localBinding.pending) {
+            Analyzer::Typecheck::emitCannotInferLocal(state, span);
+            return Option::NONE;
+          }
 
           Analyzer::Typecheck::recordExprType(state, exprId, localBinding.typeId);
           return Option::SOME(localBinding.typeId);

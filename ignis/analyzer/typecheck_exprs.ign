@@ -275,6 +275,28 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, value.target);
 
+      // A binding still waiting for its type takes it from this assignment,
+      // which is the only thing that can decide it. The right side is checked
+      // with nothing expected of it, exactly as an initializer would be.
+      if (localBinding.pending) {
+        let pendingActualOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          value.value,
+        );
+        let Option::SOME(pendingActual) = pendingActualOpt else {
+          return Option::NONE;
+        };
+
+        Analyzer::Typecheck::resolvePendingLocal(state, localId, pendingActual);
+        Analyzer::Typecheck::recordExprType(state, exprId, pendingActual);
+        return Option::SOME(pendingActual);
+      }
+
       // `x = v` where `x: &mut T` assigns through the reference: the target
       // type is the referent and the binding's own mutability is irrelevant,
       // mirroring the reference analyzer's implicit mutable-reference
@@ -3951,6 +3973,16 @@ export namespace Analyzer {
     ): void {
       let Option::SOME(annotationId) = annotation else {
         let Option::SOME(valueExprId) = value else {
+          // `let mut x;` waits for its first assignment to say what it holds.
+          // An immutable binding has no such assignment coming, so it is still
+          // reported here.
+          if (mutable) {
+            let mut typeStorePlaceholderRef: &mut Analyzer::TypeStore = typeStore;
+            let placeholder: Analyzer::TypeId = typeStorePlaceholderRef.intern(Analyzer::Type::VOID);
+            Analyzer::Typecheck::pushPendingPatternLocal(state, resolvedBodies, patternId, placeholder, span);
+            return;
+          }
+
           Analyzer::Typecheck::emitCannotInferLocal(state, span);
           return;
         };

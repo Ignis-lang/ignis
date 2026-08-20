@@ -224,7 +224,12 @@ export namespace Analyzer {
         return Analyzer::Typecheck::ExhaustiveVerdict::Unknown;
       };
 
-      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, scrutineeType);
+      // A reference scrutinee covers the same domain as its referent: the arms
+      // name the referent's variants, so the check has to look past the borrow
+      // the same way the pattern binder does.
+      let derefScrutinee: Analyzer::TypeId = Analyzer::Typecheck::derefReceiverType(defStore, typeStore, scrutineeType);
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, derefScrutinee);
       let Option::SOME(resolvedTypeNode) = typeStore.get(resolved.typeId) else {
         return Analyzer::Typecheck::ExhaustiveVerdict::Unknown;
       };

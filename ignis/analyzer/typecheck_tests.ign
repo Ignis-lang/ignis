@@ -14002,3 +14002,39 @@ function typecheckUnsuffixedIntegerLiteralStillCoercesToUnsigned(): void {
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }
+
+/// Scenario: `let mut x;` takes its type from the assignment that completes it,
+/// so returning it from an `i32` function is not a mismatch.
+/// Spec: parity bucket B3 — deferred local inference.
+@test
+function typecheckDeferredLocalTakesTypeFromFirstAssignment(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let mut x;\n  x = 10;\n  return x;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: reading the same binding before anything assigns to it is
+/// reported rather than silently taking the placeholder type.
+/// Spec: parity bucket B3 — deferred local inference.
+@test
+function typecheckDeferredLocalReadBeforeAssignmentIsReported(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let mut x;\n  return x;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::CANNOT_INFER_TYPE);
+}

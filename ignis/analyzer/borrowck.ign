@@ -173,6 +173,11 @@ export namespace Borrowck {
     /// One entry per enclosing loop, set when a `continue` was seen in it.
     loopContinue: Vector<u32>;
 
+    /// Pattern bindings whose bytes live in borrowed storage, because the
+    /// scrutinee they were destructured from is a reference. Moving one of
+    /// these is what the oracle reports as a move out of a borrowed value.
+    borrowedBindings: Vector<u32>;
+
     /// False after a terminator, until a join restores it.
     public reachable: boolean;
 
@@ -197,6 +202,7 @@ export namespace Borrowck {
         deferStarts: Vector::new<u64>(),
         deferBodies: Vector::new<u32>(),
         loopContinue: Vector::new<u32>(),
+        borrowedBindings: Vector::new<u32>(),
         reachable: true,
         inDefer: false,
       };
@@ -204,6 +210,40 @@ export namespace Borrowck {
 
     public setReachable(&mut self, value: boolean): void {
       self.reachable = value;
+    }
+
+    /// Mark `defRaw` as living in borrowed storage for as long as the arm that
+    /// bound it is being walked.
+    public markBorrowedBinding(&mut self, defRaw: u32): void {
+      self.borrowedBindings.push(defRaw);
+    }
+
+    public borrowedBindingCount(&self): u64 {
+      return self.borrowedBindings.length();
+    }
+
+    public isBorrowedBinding(&self, defRaw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.borrowedBindings.length()) {
+        if (let Option::SOME(entry) = self.borrowedBindings.get(index)) {
+          if (*entry == defRaw) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Drop every borrowed binding registered past `mark`, which is the length
+    /// the vector had before the arm was walked.
+    public truncateBorrowedBindings(&mut self, mark: u64): void {
+      while (self.borrowedBindings.length() > mark) {
+        self.borrowedBindings.pop();
+      }
     }
 
     public setInDefer(&mut self, value: boolean): void {
@@ -1392,6 +1432,19 @@ export namespace Borrowck {
     );
   }
 
+  /// Reports handing on a value that lives in borrowed storage. Mirrors the
+  /// oracle's `CannotMoveOutOfBorrowedValue`, which the selfhost code space
+  /// numbers `O0002`.
+  function emitCannotMoveOutOfBorrow(diagnostics: &mut DiagnosticBag, span: SourceSpan): void {
+    Borrowck::emitError(
+      diagnostics,
+      span,
+      DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW,
+      "cannot move out of borrowed value",
+      "this value is borrowed, so it cannot be handed on by value",
+    );
+  }
+
   /// Transitions a local to `Moved`. An already invalid state is left as it
   /// is, because `checkUse` has already reported it. Mirrors `try_consume`.
   function tryConsume(state: &mut Borrowck::State, defId: Analyzer::DefinitionId): void {
@@ -2160,6 +2213,10 @@ export namespace Borrowck {
       Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, value);
 
       if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, value)) {
+        if (state.isBorrowedBinding(source.raw())) {
+          Borrowck::emitCannotMoveOutOfBorrow(diagnostics, span);
+        }
+
         Borrowck::tryConsume(state, source);
       }
 
@@ -2405,10 +2462,20 @@ export namespace Borrowck {
     let mut bindings: Vector<u32> = Vector::new<u32>();
     Borrowck::collectDroppableBindings(defStore, typeStore, &letElse.pattern, &mut bindings);
 
+    // A let-else destructures the same way a match arm does, so a binding taken
+    // out of a reference-typed value names borrowed storage for as long as it
+    // lives — which here is the enclosing scope, not one arm.
+    let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, letElse.value);
+
     let mut index: u64 = 0;
 
     while (index < bindings.length()) {
       if (let Option::SOME(defRaw) = bindings.get(index)) {
+        if (bindsBorrowedPayloads) {
+          let mut borrowedRef: &mut Borrowck::State = state;
+          borrowedRef.markBorrowedBinding(*defRaw);
+        }
+
         // Unlike a match arm binding, a let-else binding outlives the
         // construct and belongs to the enclosing scope, so it is declared
         // owned there and dropped at that scope's end. Mirrors
@@ -2460,12 +2527,19 @@ export namespace Borrowck {
       let mut bindings: Vector<u32> = Vector::new<u32>();
       Borrowck::collectDroppableBindings(defStore, typeStore, &arm.pattern, &mut bindings);
 
+      let borrowedMark: u64 = state.borrowedBindingCount();
       let mut bindingIndex: u64 = 0;
 
       while (bindingIndex < bindings.length()) {
         if (let Option::SOME(defRaw) = bindings.get(bindingIndex)) {
           let mut declareRef: &mut Borrowck::State = state;
           declareRef.setMoveValue(*defRaw, Borrowck::MOVE_VALID);
+
+          // Destructuring a reference leaves the payload where it was: the
+          // binding names borrowed storage, and handing it on moves out of it.
+          if (bindsBorrowedPayloads) {
+            declareRef.markBorrowedBinding(*defRaw);
+          }
         }
 
         bindingIndex += 1;
@@ -2505,6 +2579,9 @@ export namespace Borrowck {
 
         removeIndex += 1;
       }
+
+      let mut borrowedRef: &mut Borrowck::State = state;
+      borrowedRef.truncateBorrowedBindings(borrowedMark);
 
       branches.push(state.snapshotMoves());
 
