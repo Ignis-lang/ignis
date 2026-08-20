@@ -174,3 +174,30 @@ jobs:
             ignis-nightly-linux-amd64.tar.gz.sha256
             ignis-docs.tar.gz
             ignis-docs.tar.gz.sha256
+
+      # The website reads the guides from this release's `ignis-docs.tar.gz`, so a
+      # documentation change is only live once the site is rebuilt against the new
+      # asset. Nothing else connects the two repositories: without this the site
+      # keeps serving whatever bundle existed at its last build.
+      #
+      # Runs only after Publish succeeded, so a failed upload never triggers a
+      # build against a stale bundle. The hook URL is the credential, which is why
+      # it is a secret and never echoed.
+      - name: Trigger the website build
+        if: success()
+        env:
+          DEPLOY_HOOK: ${{ secrets.CLOUDFLARE_WEBHOOK }}
+        run: |
+          if [ -z "$DEPLOY_HOOK" ]; then
+            echo "CLOUDFLARE_WEBHOOK is not set; skipping the website build."
+            exit 0
+          fi
+
+          STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$DEPLOY_HOOK")
+
+          if [ "$STATUS" != "200" ]; then
+            echo "Deploy hook returned HTTP $STATUS."
+            exit 1
+          fi
+
+          echo "Website build triggered."
