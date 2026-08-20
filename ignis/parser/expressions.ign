@@ -498,9 +498,17 @@ export namespace ParserExpressions {
           return Option::NONE;
         };
 
+        // A decimal literal is signed unless it cannot be: the type it takes when
+        // nothing is expected of it is `i32`, like the reference front end, and a
+        // value past the signed range keeps its unsigned form rather than wrapping.
+        let mut literalValue: Ast::Expression::LiteralValue = Ast::Expression::LiteralValue::UInt(value);
+        if (value <= 9223372036854775807) {
+          literalValue = Ast::Expression::LiteralValue::Int(value as i64);
+        }
+
         let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
           span: token.span,
-          value: Ast::Expression::LiteralValue::UInt(value),
+          value: literalValue,
         }));
         return Option::SOME(ParsedExpression {
           id: expressionId,

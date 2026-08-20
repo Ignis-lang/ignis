@@ -13966,3 +13966,39 @@ function typecheckVectorLiteralElementAgainstExpectedTypeIsChecked(): void {
 
   Test::assert(typecheckCountErrors(&output.diagnostics) > 0);
 }
+
+/// Scenario: `let x = 42;` with no annotation and no expectation in reach types
+/// as `i32`, so returning it from an `i32` function is not a mismatch.
+/// Spec: IGN-134 — an unsuffixed decimal integer literal defaults to i32.
+@test
+function typecheckUnsuffixedIntegerLiteralDefaultsToI32(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let x = 42;\n  return x;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: the same literal still reaches an unsigned annotation, so making
+/// the default signed does not close off `let x: u32 = 42;`.
+/// Spec: IGN-134 — the default applies only where nothing is expected.
+@test
+function typecheckUnsuffixedIntegerLiteralStillCoercesToUnsigned(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): u32 {\n  let x: u32 = 42;\n  return x;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}

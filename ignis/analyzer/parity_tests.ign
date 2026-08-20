@@ -464,6 +464,66 @@ function parityMatchArmInferencePropagates(): void {
   );
 }
 
+/// Origin: golden_ok::for_loop.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityForLoop(): void {
+  parityAcceptsSource(
+    "function sum(): i32 {\n    let mut total: i32 = 0;\n    for (let i = 0; i < 10; i = i + 1) {\n        total = total + i;\n    }\n    return total;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::infer_from_initializer.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityInferFromInitializer(): void {
+  parityAcceptsSource(
+    "function main(): i32 {\n    let x = 42;\n    return x;\n}\n",
+  );
+}
+
+/// Origin: golden_ok::infer_multiple_variables.
+/// Host expectation: accepted with no diagnostics.
+@test
+function parityInferMultipleVariables(): void {
+  parityAcceptsSource(
+    "function main(): i32 {\n    let a = 10;\n    let b = 20;\n    let c = a + b;\n    return c;\n}\n",
+  );
+}
+
+/// Origin: diagnostics::borrow_checking_continues_after_a_let_else.
+/// Host expectation: rejected with A0047 (MutatedWhileBorrowed).
+@test
+function parityBorrowCheckingContinuesAfterLetElse(): void {
+  parityRejectsSource(
+    "enum Maybe {\n    Some(i32),\n    None,\n}\n\nfunction run(input: Maybe): i32 {\n    let mut owned: i32 = 1;\n\n    let Maybe::Some(v) = input else {\n        return -1;\n    };\n\n    let r: &mut i32 = &mut owned;\n    owned = 5;\n    return v + *r;\n}\n",
+    DiagnosticCode::MUTATED_WHILE_BORROWED,
+    1,
+  );
+}
+
+/// Origin: diagnostics::move_in_a_let_else_else_block_does_not_hide_a_later_double_move.
+/// Host expectation: rejected with O0001 (UseAfterMove) at the second
+/// `consume(other)`; the move inside the else block is not what is reported.
+@test
+function parityMoveInLetElseDoesNotHideLaterDoubleMove(): void {
+  parityRejectsSource(
+    "@implements(Drop)\nrecord Owned {\n    public id: i32;\n    drop(&mut self): void { return; }\n}\n\nenum Maybe {\n    Some(i32),\n    None,\n}\n\nfunction consume(value: Owned): i32 {\n    return 1;\n}\n\nfunction run(input: Maybe): i32 {\n    let owned: Owned = Owned { id: 1 };\n    let other: Owned = Owned { id: 2 };\n\n    let Maybe::Some(v) = input else {\n        consume(owned);\n        return -1;\n    };\n\n    consume(other);\n    consume(other);\n    return v;\n}\n",
+    DiagnosticCode::USE_AFTER_MOVE,
+    1,
+  );
+}
+
+/// Origin: golden_ok::move_inside_a_let_else_else_block_does_not_escape_it.
+/// Host expectation: accepted — the else block diverges, so the move it makes
+/// is never observable on the path that falls through the binding.
+@test
+function parityMoveInsideLetElseElseBlock(): void {
+  parityAcceptsSource(
+    "@implements(Drop)\nrecord Owned {\n    public id: i32;\n    drop(&mut self): void { return; }\n}\n\nenum Maybe {\n    Some(i32),\n    None,\n}\n\nfunction consume(value: Owned): i32 {\n    return 1;\n}\n\nfunction run(input: Maybe): i32 {\n    let owned: Owned = Owned { id: 1 };\n\n    let Maybe::Some(v) = input else {\n        consume(owned);\n        return -1;\n    };\n\n    consume(owned);\n    return v;\n}\n",
+  );
+}
+
 /// Origin: golden_ok::widening_implicit_u8_to_u32.
 /// Host expectation: compiles; the host also warns that `b` is unused.
 @test
@@ -845,24 +905,12 @@ function parityDotAccessOnNonRecord(): void {
 // ===========================================================================
 // Gap inventory
 //
-// 14 of the 74 curated fixtures are not gates yet. Each one is listed with
+// 8 of the 74 curated fixtures are not gates yet. Each one is listed with
 // its host origin, the host expectation, and what the selfhost pipeline
 // actually does today (observed, not predicted). Nothing here is a weakened
 // expectation: these fixtures are absent from the gates on purpose.
 //
 // Root-cause buckets:
-//
-//   B1 (6) — An unsuffixed integer literal defaults to `u32` where no expected type applies
-//     The expected type now reaches a `return` value, an assignment right side
-//     and a binary/comparison operand, so those fixtures are gates above. What
-//     remains is the default itself: with no expectation in reach, an unsuffixed
-//     literal is `u32` while the host's is `i32`. Three positions supply no
-//     expectation — an unannotated `let` initializer, a unary operand, and a
-//     vector literal element. Isolated: `let x = 42; return x;` in a function
-//     returning `i32` reports `I0031 expected i32, found u32`, and so does
-//     `return -1;`; `const PRIMES: i32[4] = [2, 3, 5, 7];` reports
-//     `I0031 expected i32[4], found u32[4]`. Changing the default is a language
-//     decision, not a propagation fix, so it is not made here.
 //
 //   B3 (1) — Deferred local inference is unsupported
 //     An unannotated `let mut x;` completed by a later assignment.
@@ -887,33 +935,6 @@ function parityDotAccessOnNonRecord(): void {
 //
 // Fixtures:
 //
-//   borrowCheckingContinuesAfterLetElse [B1]
-//     origin:   diagnostics::borrow_checking_continues_after_a_let_else
-//     host:     rejected with A0047
-//     selfhost: analyzer: I0031 (`return -1` in the else block); the borrow checker then
-//               reports exactly A0047, so only the literal default blocks this gate
-//
-//   inferFromInitializer [B1]
-//     origin:   golden_ok::infer_from_initializer
-//     host:     accepted
-//     selfhost: analyzer: I0031 (`let x = 42` infers u32, the function returns i32)
-//
-//   inferMultipleVariables [B1]
-//     origin:   golden_ok::infer_multiple_variables
-//     host:     accepted
-//     selfhost: analyzer: I0031
-//
-//   moveInLetElseDoesNotHideLaterDoubleMove [B1]
-//     origin:   diagnostics::move_in_a_let_else_else_block_does_not_hide_a_later_double_move
-//     host:     rejected with O0001
-//     selfhost: analyzer: I0031 (`return -1` in the else block); the borrow checker then
-//               reports exactly O0001, so only the literal default blocks this gate
-//
-//   moveInsideLetElseElseBlock [B1]
-//     origin:   golden_ok::move_inside_a_let_else_else_block_does_not_escape_it
-//     host:     accepted
-//     selfhost: analyzer: I0031 (`return -1` in the else block)
-//
 //   inferDeferredFromAssignment [B3]
 //     origin:   golden_ok::infer_deferred_from_assignment
 //     host:     accepted
@@ -928,12 +949,6 @@ function parityDotAccessOnNonRecord(): void {
 //     origin:   golden_ok::record_instance_method
 //     host:     accepted
 //     selfhost: analyzer: I0033 + A0053 + A0066
-//
-//   forLoop [B1]
-//     origin:   golden_ok::for_loop
-//     host:     accepted
-//     selfhost: analyzer: I0031 expected `i32`, found `u32` — the C-style header now
-//               parses, and `let i = 0` is the only thing left between it and the gate
 //
 //   namespacedOverloads [B6]
 //     origin:   golden_ok::overloaded_write_shapes_resolve_without_type_suffixes
