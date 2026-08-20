@@ -465,6 +465,15 @@
 <char> ::= "'" ( [^'\\] | <escape-sequence> ) "'"
 <escape-sequence> ::= "\\" [abfnrtv'"\\]
 
+<template> ::= <template-no-substitution>
+  | <template-head> <expression> (<template-middle> <expression>)* <template-tail>
+<template-no-substitution> ::= "`" <template-char>* "`"
+<template-head> ::= "`" <template-char>* "${"
+<template-middle> ::= "}" <template-char>* "${"
+<template-tail> ::= "}" <template-char>* "`"
+<template-char> ::= [^`\\] | <template-escape>
+<template-escape> ::= <escape-sequence> | "\\`" | "\\$"
+
 <boolean> ::= "true" | "false"
 <null> ::= "null"
 
@@ -484,6 +493,7 @@
   | <hex>
   | <binary>
   | <string>
+  | <template>
   | <char>
   | <boolean>
   | <null>

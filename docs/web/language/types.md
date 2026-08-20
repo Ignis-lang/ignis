@@ -27,6 +27,9 @@ infers within an expression rather than across one.
 grapheme cluster. A character literal that resolves to zero scalars, more than one scalar, or a
 surrogate escape is rejected at compile time.
 
+`String` is the owned, heap-backed counterpart. A template literal — `` `hello ${name}` `` —
+produces one; see [Expressions](/language/expressions#template-literals).
+
 ## Atoms
 
 An `atom` is an interned label. Atom literals carry a `:` prefix, and two atoms with the same name

@@ -17,6 +17,7 @@ This document defines the first canonical formatter policy shipped by `ignis fmt
 - When `use_tabs = true`, each indentation level is emitted as a tab while `indent_width` still defines the logical width used by layout decisions.
 - Normalize spacing around `:`, `=`, `+`, `-`, and commas.
 - Keep generic angle brackets tight: `identity<T>`, not `identity < T >`.
+- Print string and template literals verbatim. Whitespace inside a template's `${ }` slots is left as written.
 - Preserve import/re-export order exactly as written unless grouping or `sort_imports` applies.
 - Consecutive `import ... from` statements with the same path are merged into one import list.
 - Consecutive `export ... from` statements with the same path are merged into one re-export list.

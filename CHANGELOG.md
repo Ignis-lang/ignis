@@ -2,6 +2,14 @@
 
 All notable changes to the Ignis compiler will be documented in this file.
 
+## Unreleased
+
+### Features
+
+- Added template literals: backtick strings with `${}` interpolation, multiline and nestable, producing an owned `String`. An interpolated place expression is borrowed rather than moved.
+- Added `char.toString()`, `String::concat(char)`, `String::concat(boolean)`, and a borrowed `String::concat(&T)` tier for the primitive types.
+- Added template literal support to the self-hosted lexer and parser, which desugar the literal the same way the Rust front-end does.
+
 ## [0.4.0] - 2026-04-24
 
 This release promotes the v0.4 language and standard-library work, including compile-time configuration directives,

@@ -944,6 +944,8 @@ null
 [1, 2, 3]
 ```
 
+Template literals are covered in [Section 9.12](#912-template-literals).
+
 Character literal notes:
 
 - `'a'` and escapes such as `'\n'` are valid.
@@ -1183,6 +1185,84 @@ trace(0) |> f(trace(1)) |> g(trace(2))
 // Desugars to: g(f(trace(0), trace(1)), trace(2))
 // Order: trace(0), trace(1), f(...), trace(2), g(...)
 ```
+
+### 9.12 Template literals
+
+A template literal is delimited by backticks and evaluates to an owned `String`.
+`${ }` interpolates an expression into the surrounding text.
+
+```ignis
+let name: str = "ignis";
+let version: i32 = 4;
+
+let banner: String = `hello ${name} v${version}`;
+let plain: String = `no interpolation`;
+```
+
+Templates may span several lines, and the newlines are part of the value.
+
+```ignis
+let block: String = `first
+second ${name}`;
+```
+
+An interpolation may hold any expression, including another template.
+
+```ignis
+let nested: String = `outer ${`inner ${version}`}`;
+let computed: String = `sum=${version + 1}`;
+```
+
+Escapes are the same as in a string literal, plus `` \` `` for a literal backtick
+and `\${` for text that should not open an interpolation.
+
+```ignis
+let raw: String = `a \` b \${notASlot}`;   // a ` b ${notASlot}
+```
+
+#### Interpolable types
+
+An interpolation resolves through `String::concat`, so the slot type must have a
+`concat` overload: `String`, `str`, `char`, `boolean`, and every integer and
+float type.
+
+A record is interpolated through an explicit conversion.
+
+```ignis
+record Point {
+    x: i32;
+    y: i32;
+
+    public toString(&self): String {
+        return `(${self.x}, ${self.y})`;
+    }
+}
+
+let point: Point = Point { x: 1, y: 2 };
+let text: String = `point=${point.toString()}`;
+```
+
+#### Ownership
+
+An interpolated variable, field, or element is borrowed, not moved, so it stays
+usable afterwards. A temporary is passed by value.
+
+```ignis
+let owned: String = String::create("kept");
+
+let first: String = `a=${owned}`;
+let second: String = `b=${owned}`;   // owned is still live
+```
+
+A slot that already holds a reference is not borrowed a second time, so a
+`&String` parameter interpolates directly.
+
+```ignis
+function render(label: &String): String {
+    return `[${label}]`;
+}
+```
+
 
 ## 10. Pattern Syntax
 
