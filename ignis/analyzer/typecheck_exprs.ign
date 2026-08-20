@@ -1,6 +1,7 @@
 import SourceSpan, DiagnosticCode from "@compiler::diagnostics";
 
 import Ast from "@compiler::ast";
+import Id from "@compiler::ids";
 import Vector from "std::vector";
 
 export namespace Analyzer {
@@ -1286,6 +1287,33 @@ export namespace Analyzer {
 
       let receiverType: Analyzer::TypeId = Analyzer::Typecheck::derefReceiverType(defStore, typeStore, objectType);
 
+      // An `@extension(T)` function answers `value.name(args)` for a receiver
+      // of type `T`, including the primitives no record or enum owns. Owner
+      // methods win: the lookup only runs when the receiver has no owner able
+      // to carry the name.
+      if (let Option::SOME(extensionDefId) = Analyzer::Typecheck::lookupExtensionFunction(
+        defStore,
+        typeStore,
+        symbols,
+        receiverType,
+        ma.member.toStr(),
+      )) {
+        return Analyzer::Typecheck::checkExtensionMethodCall(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          callExprId,
+          call,
+          memberExprId,
+          ma,
+          extensionDefId,
+          objectType,
+        );
+      }
+
       let ownerOpt: Option<Analyzer::Typecheck::RequiredMethodOwner> = Analyzer::Typecheck::requireMethodOwner(
         state,
         defStore,
@@ -1499,6 +1527,114 @@ export namespace Analyzer {
         call,
         &signature,
         1,
+      );
+    }
+
+    /// The `@extension` function that answers `name` for a receiver of
+    /// `receiverType`, if one is declared.
+    ///
+    /// The attribute carries its target as raw text, so the match is made on
+    /// the receiver type's own name: that is the only form both sides share
+    /// without resolving types in the binder.
+    function lookupExtensionFunction(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      receiverType: Analyzer::TypeId,
+      name: str,
+    ): Option<Analyzer::DefinitionId> {
+      let receiverName: String = typeStore.nameOf(receiverType);
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let wanted: Analyzer::SymbolId = symbolsRef.intern(name);
+      let mut index: u64 = 0;
+
+      while (index < defStore.length()) {
+        let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+        let Option::SOME(def) = defStore.get(defId) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Analyzer::Definition::Function(function_) = def) {
+          if (function_.name.raw() == wanted.raw()) {
+            if (let Option::SOME(target) = &function_.extensionTarget) {
+              if (target.equals(receiverName.toStr())) {
+                return Option::SOME(defId);
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Typecheck `value.name(args)` against an `@extension` function, which
+    /// takes the receiver as its first parameter and the written arguments
+    /// after it.
+    function checkExtensionMethodCall(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      callExprId: Ast::ExpressionId,
+      call: &Ast::Expression::Call,
+      memberExprId: Ast::ExpressionId,
+      ma: &Ast::Expression::MemberAccess,
+      extensionDefId: Analyzer::DefinitionId,
+      receiverType: Analyzer::TypeId,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(signature) = Analyzer::Typecheck::extractFunctionSignature(defStore, extensionDefId) else {
+        Analyzer::Typecheck::emitUnsupported(state, ma.span, "calls through non-function definitions");
+        return Option::NONE;
+      };
+
+      let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(defStore, &signature, true);
+
+      if (paramTypes.isEmpty()) {
+        Analyzer::Typecheck::emitUnsupported(state, ma.span, "extension functions without a receiver parameter");
+        return Option::NONE;
+      }
+
+      if (let Option::SOME(receiverParam) = paramTypes.get(0)) {
+        if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, ma.span, *receiverParam, receiverType)) {
+          Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, ma.span, *receiverParam, receiverType);
+        }
+      }
+
+      let mut explicitParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 1;
+
+      while (index < paramTypes.length()) {
+        if (let Option::SOME(paramType) = paramTypes.get(index)) {
+          explicitParams.push(*paramType);
+        }
+
+        index += 1;
+      }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let memberAccessType: Analyzer::TypeId = typeStoreRef.functionType(
+        Analyzer::Typecheck::copyTypeIdVector(&explicitParams),
+        signature.returnType,
+      );
+      Analyzer::Typecheck::recordExprType(state, memberExprId, memberAccessType);
+
+      return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        callExprId,
+        call,
+        &explicitParams,
+        signature.returnType,
       );
     }
 
