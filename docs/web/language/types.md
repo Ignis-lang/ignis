@@ -28,7 +28,7 @@ grapheme cluster. A character literal that resolves to zero scalars, more than o
 surrogate escape is rejected at compile time.
 
 `String` is the owned, heap-backed counterpart. A template literal — `` `hello ${name}` `` —
-produces one; see [Expressions](/language/expressions#template-literals).
+produces one; see [Template literals](/language/template-literals).
 
 ## Atoms
 

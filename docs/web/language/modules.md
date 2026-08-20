@@ -2,7 +2,7 @@
 title: Modules and imports
 description: Namespaces, import and export forms, extern blocks, and how an import path is resolved.
 section: language
-order: 11
+order: 12
 status: stable
 ---
 

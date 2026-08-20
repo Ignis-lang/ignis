@@ -34,42 +34,14 @@ to a `u32` needs no cast. Crossing signs does: `u8` to `i32` requires an explici
 ## Template literals
 
 A backtick literal builds an owned `String`, and `${ }` drops an expression into the surrounding
-text. It may span several lines, and the newlines are part of the value.
+text.
 
 ```ignis
-function greet(name: str, version: i32): String {
-    let banner: String = `hello ${name} v${version}`;
-    let block: String = `first line
-second line`;
-
-    return banner.concat(block);
-}
+let banner: String = `hello ${name} v${version}`;
 ```
 
-A slot takes any expression, another template included, and the usual string escapes apply plus
-`` \` `` for a backtick and `\${` for text that must not open a slot.
-
-```ignis
-let nested: String = `outer ${`inner ${version}`}`;
-let raw: String = `a \` b \${notASlot}`;   // a ` b ${notASlot}
-```
-
-Interpolation goes through `String::concat`, so a slot holds a `String`, `str`, `char`, `boolean`,
-or any integer or float. A record needs an explicit conversion — `${point.toString()}` — because
-the compiler does not infer a method's type parameters from its arguments yet.
-
-Interpolating a variable, field, or element borrows it instead of moving it, so an owned `String`
-stays live across as many templates as you like. A slot that already holds a reference is not
-borrowed twice, so a `&String` parameter interpolates directly.
-
-```ignis
-function render(label: &String, owned: &String): String {
-    let first: String = `[${label}]`;
-
-    return `${first}${owned}`;
-}
-```
-
+See [Template literals](/language/template-literals) for slots, escapes, what a slot accepts, and
+why interpolating a variable does not move it.
 
 ## Operators
 

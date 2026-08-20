@@ -2,7 +2,7 @@
 title: Attributes and directives
 description: The @ annotations on declarations and parameters, and the compile-time directive surface.
 section: language
-order: 12
+order: 13
 status: experimental
 ---
 
