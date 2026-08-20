@@ -451,6 +451,19 @@ function parityConstArray(): void {
   );
 }
 
+/// Origin: diagnostics::match_arm_inference_propagates_expected_type_to_generic_enum_variants.
+/// Host expectation: accepted with no diagnostics.
+///
+/// Promoted from the B9 gap list: the return type reaches the match arms, and a
+/// generic enum variant in expression position now takes its type arguments
+/// from that expectation instead of being refused.
+@test
+function parityMatchArmInferencePropagates(): void {
+  parityAcceptsSource(
+    "enum Option<T> {\n    Some(T),\n    None,\n}\n\nfunction fromBool(flag: boolean): Option<i32> {\n    return match (flag) {\n        true -> Option::Some(1),\n        false -> Option::None,\n    };\n}\n",
+  );
+}
+
 /// Origin: golden_ok::widening_implicit_u8_to_u32.
 /// Host expectation: compiles; the host also warns that `b` is unused.
 @test
@@ -832,7 +845,7 @@ function parityDotAccessOnNonRecord(): void {
 // ===========================================================================
 // Gap inventory
 //
-// 16 of the 74 curated fixtures are not gates yet. Each one is listed with
+// 14 of the 74 curated fixtures are not gates yet. Each one is listed with
 // its host origin, the host expectation, and what the selfhost pipeline
 // actually does today (observed, not predicted). Nothing here is a weakened
 // expectation: these fixtures are absent from the gates on purpose.
@@ -858,9 +871,6 @@ function parityDotAccessOnNonRecord(): void {
 //     Isolated: the same record with `public get(&self): i32` analyzes clean, and
 //     with `public get(): i32` reports I0033 + A0053 + A0066.
 //
-//   B5 (1) — C-style `for (init; condition; step)` is not in the selfhost grammar
-//     Only `for..of` exists; the host header shape is a parse error.
-//
 //   B6 (1) — Function overloading is unsupported
 //     The binder reports the second signature as a redefinition.
 //
@@ -868,8 +878,6 @@ function parityDotAccessOnNonRecord(): void {
 //
 //   B8 (1) — `@extension` methods are unsupported
 //     Isolated: an all-`u32` extension fixture still reports I0031, so this is not B1.
-//
-//   B9 (1) — Generic enum variant inference is unsupported
 //
 //   B10 (2) — No equivalent of the host's CannotMoveOutOfBorrowedValue (A0186)
 //     The selfhost code space has no ownership code for moving out of borrowed
@@ -921,10 +929,11 @@ function parityDotAccessOnNonRecord(): void {
 //     host:     accepted
 //     selfhost: analyzer: I0033 + A0053 + A0066
 //
-//   forLoop [B5]
+//   forLoop [B1]
 //     origin:   golden_ok::for_loop
 //     host:     accepted
-//     selfhost: parser: I0001 x2
+//     selfhost: analyzer: I0031 expected `i32`, found `u32` — the C-style header now
+//               parses, and `let i = 0` is the only thing left between it and the gate
 //
 //   namespacedOverloads [B6]
 //     origin:   golden_ok::overloaded_write_shapes_resolve_without_type_suffixes
@@ -940,11 +949,6 @@ function parityDotAccessOnNonRecord(): void {
 //     origin:   golden_ok::extension_method_basic
 //     host:     accepted
 //     selfhost: analyzer: I0031 x2
-//
-//   matchArmInferencePropagates [B9]
-//     origin:   diagnostics::match_arm_inference_propagates_expected_type_to_generic_enum_variants
-//     host:     accepted
-//     selfhost: analyzer: A0053 x4
 //
 //   cannotMoveBorrowedBindingFromLetElse [B10]
 //     origin:   diagnostics::cannot_move_borrowed_binding_from_let_else

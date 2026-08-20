@@ -3660,3 +3660,62 @@ function parserBorrowsTemplatePlacesAndMovesTemporaries(): void {
 
   Test::assertEq<str>(rendered.toStr(), "String::create(\"\").concat(&a).concat(&b.c).concat(d())");
 }
+
+/// Scenario: the C-style header `for (let i = 0; i < 10; i = i + 1)` parses into
+/// a `For` statement with all three slots filled. The initializer is a mutable
+/// binding even though the source writes no `mut`, matching the host parser.
+/// Spec: GRAMMAR.md `<for>`; parity fixture golden_ok::for_loop.
+@test
+function parserParsesCStyleForStatements(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_for_c_style.ign",
+    "function main(): void { for (let i = 0; i < 10; i = i + 1) { break; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing for function root"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let statementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing for statement"),
+          };
+
+          match (expectStatement(&module, statementId)) {
+            Ast::Statement::Node::For(forStatement) -> {
+              let initializerId: Ast::StatementId = match (forStatement.initializer) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing for initializer"),
+              };
+
+              match (expectStatement(&module, initializerId)) {
+                Ast::Statement::Node::Variable(variable) -> {
+                  Test::assert(variable.mutable);
+                  Test::assert(variable.value.isSome());
+                },
+                _ -> @panic("for initializer is not a mutable binding"),
+              };
+
+              Test::assert(forStatement.condition.isSome());
+              Test::assert(forStatement.update.isSome());
+            },
+            _ -> @panic("statement is not a C-style for"),
+          };
+        },
+        _ -> @panic("function body is not a block"),
+      };
+    },
+    _ -> @panic("root is not a function"),
+  };
+}

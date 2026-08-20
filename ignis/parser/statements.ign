@@ -2,7 +2,7 @@ import Vector from "std::vector";
 
 import Ast from "@compiler::ast";
 import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
-import Keyword, Punctuation from "@compiler::syntax";
+import Keyword, Punctuation, Token from "@compiler::syntax";
 
 import _ from "./shared";
 import _ from "./expressions";
@@ -278,6 +278,66 @@ export namespace ParserStatements {
     })));
   }
 
+  /// Parse everything after the binding of a C-style `for`, given the header
+  /// tokens already consumed by `parseForStatement`.
+  ///
+  /// The initializer binds mutably even where the source writes no `mut`: the
+  /// update clause assigns to it on every iteration, and the host parser marks
+  /// the same binding mutable for that reason.
+  function parseCStyleForRest(
+    parser: &mut ParserShared::State,
+    keyword: Token,
+    pattern: Ast::PatternId,
+  ): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let mut annotation: Option<Ast::TypeId> = Option::NONE;
+    if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
+      let typeId = ParserTypes::parseType(parserRef)!;
+      annotation = Option::SOME(typeId);
+    }
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' in for initializer") else {
+      return Option::NONE;
+    };
+
+    let initialValue = ParserExpressions::parseExpression(parserRef)!;
+    let initializerSemicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after for initializer")!;
+
+    let initializer: Ast::StatementId = parserRef.module.addStatement(Ast::Statement::Node::Variable(Ast::Statement::Variable {
+      span: ParserShared::mergeSpans(keyword.span, initializerSemicolon.span),
+      mutable: true,
+      pattern: pattern,
+      annotation: annotation,
+      value: Option::SOME(initialValue.id),
+    }));
+
+    let condition = ParserExpressions::parseExpression(parserRef)!;
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after for condition") else {
+      return Option::NONE;
+    };
+
+    let update = ParserExpressions::parseExpression(parserRef)!;
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after for update") else {
+      return Option::NONE;
+    };
+
+    let bodyResult: Option<Ast::StatementId> = ParserStatements::parseBlockStatement(parserRef);
+    let body = bodyResult!;
+    let endSpan: SourceSpan = match (parserRef.module.statements.get(body)) {
+      Option::SOME(node) -> Ast::Serializer::statementSpan(node),
+      Option::NONE -> keyword.span,
+    };
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::For(Ast::Statement::For {
+      span: ParserShared::mergeSpans(keyword.span, endSpan),
+      initializer: Option::SOME(initializer),
+      condition: Option::SOME(condition.id),
+      update: Option::SOME(update.id),
+      body: body,
+    })));
+  }
+
   function parseForStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
     let keyword = parserRef.expectKeyword(Keyword::FOR, "expected 'for'")!;
@@ -290,6 +350,13 @@ export namespace ParserStatements {
     if (!consumedLet) {
       parserRef.emitDiagnostic(keyword.span, DiagnosticCode::EXPECTED_TOKEN, "expected for-of loop", "selfhost parser currently supports 'for (let pattern of iterable)' syntax");
       return Option::NONE;
+    }
+
+    // `for (let i = 0; ...)` and `for (let i of xs)` share everything up to the
+    // token after the binding, so the header is parsed once and the deciding
+    // token picks the shape. An annotated binding reaches either one.
+    if (parserRef.atPunctuation(Punctuation::COLON) || parserRef.atPunctuation(Punctuation::EQUAL)) {
+      return ParserStatements::parseCStyleForRest(parserRef, keyword, pattern);
     }
 
     let Option::SOME(_) = parserRef.expectKeyword(Keyword::OF, "expected 'of' in for-of loop") else {
