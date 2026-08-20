@@ -726,3 +726,75 @@ function lexerSnapshotsUnicodeIdentifiers(): void {
   Test::assertEq<u64>(result.diagnostics.length(), 0);
   Test::assertSnapshot("unicode-identifiers", renderTokens(result.tokens).toStr());
 }
+
+@test
+function lexerLexesTemplateLiteralWithoutInterpolation(): void {
+  let result: LexResult = lexText("fixtures/template.ign", "`hello`");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_NO_SUBSTITUTION);
+}
+
+@test
+function lexerLexesTemplateLiteralChunks(): void {
+  let result: LexResult = lexText("fixtures/template.ign", "`a${x}b${y}c`");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_HEAD);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_MIDDLE);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_TAIL);
+}
+
+@test
+function lexerKeepsBlocksInsideTemplateInterpolationSeparate(): void {
+  let result: LexResult = lexText("fixtures/template.ign", "`${P { x: 1 }}`");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_HEAD);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_BRACE);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::COLON);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::INTEGER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_BRACE);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_TAIL);
+}
+
+@test
+function lexerLexesNestedTemplateLiterals(): void {
+  let result: LexResult = lexText("fixtures/template.ign", "`a${`b${c}d`}e`");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_HEAD);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_HEAD);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_TAIL);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_TAIL);
+}
+
+@test
+function lexerKeepsStringsInsideTemplateInterpolationSeparate(): void {
+  let result: LexResult = lexText("fixtures/template.ign", "`a${f(\"}\")}b`");
+  let mut tokens: TokenStream = result.tokens;
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_HEAD);
+  Test::assertEq<TokenKind>(tokens.bump().kindValue(), TokenKind::IDENTIFIER);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::LEFT_PAREN);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::STRING);
+  Test::assertEq<Punctuation>(tokens.bump().punctuationValue(), Punctuation::RIGHT_PAREN);
+  Test::assertEq<LiteralKind>(tokens.bump().literalKindValue(), LiteralKind::TEMPLATE_TAIL);
+}
+
+@test
+function lexerReportsUnterminatedTemplateLiteral(): void {
+  let result: LexResult = lexText("fixtures/template.ign", "`abc");
+
+  Test::assertEq<u64>(result.diagnostics.length(), 1);
+}

@@ -309,6 +309,181 @@ export namespace ParserExpressions {
     return Option::NONE;
   }
 
+  function buildStringLiteral(
+    parser: &mut ParserShared::State,
+    span: SourceSpan,
+    text: &String
+  ): Ast::ExpressionId {
+    return parser.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+      span: span,
+      value: Ast::Expression::LiteralValue::String(text.clone()),
+    }));
+  }
+
+  function buildStringCreate(
+    parser: &mut ParserShared::State,
+    span: SourceSpan,
+    text: &String
+  ): Ast::ExpressionId {
+    let mut segments: Vector<String> = Vector::new<String>();
+    segments.push(String::create("String"));
+    segments.push(String::create("create"));
+
+    let calleeId: Ast::ExpressionId = parser.module.addExpression(Ast::Expression::Node::Path(Ast::Expression::Path {
+      span: span,
+      segments: segments,
+    }));
+
+    let argumentId: Ast::ExpressionId = ParserExpressions::buildStringLiteral(parser, span, text);
+    let mut arguments: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+    arguments.push(argumentId);
+
+    return parser.module.addExpression(Ast::Expression::Node::Call(Ast::Expression::Call {
+      span: span,
+      callee: calleeId,
+      typeArguments: Vector::new<Ast::TypeId>(),
+      arguments: arguments,
+    }));
+  }
+
+  function buildConcatCall(
+    parser: &mut ParserShared::State,
+    receiver: Ast::ExpressionId,
+    argument: Ast::ExpressionId,
+    span: SourceSpan
+  ): Ast::ExpressionId {
+    let calleeId: Ast::ExpressionId = parser.module.addExpression(Ast::Expression::Node::MemberAccess(Ast::Expression::MemberAccess {
+      span: span,
+      object: receiver,
+      operator: Ast::Expression::AccessOperator::Dot,
+      member: String::create("concat"),
+    }));
+
+    let mut arguments: Vector<Ast::ExpressionId> = Vector::new<Ast::ExpressionId>();
+    arguments.push(argument);
+
+    return parser.module.addExpression(Ast::Expression::Node::Call(Ast::Expression::Call {
+      span: span,
+      callee: calleeId,
+      typeArguments: Vector::new<Ast::TypeId>(),
+      arguments: arguments,
+    }));
+  }
+
+  function isPlaceExpression(parser: &mut ParserShared::State, id: Ast::ExpressionId): boolean {
+    let mut currentId: Ast::ExpressionId = id;
+    let mut grouped: boolean = true;
+
+    while (grouped) {
+      let Option::SOME(node) = parser.module.expressions.get(currentId) else {
+        return false;
+      };
+
+      let inner: Option<Ast::ExpressionId> = match (node) {
+        Ast::Expression::Node::Grouped(groupedNode) -> Option::SOME(groupedNode.expression),
+        _ -> Option::NONE,
+      };
+
+      match (inner) {
+        Option::SOME(innerId) -> currentId = innerId,
+        Option::NONE -> grouped = false,
+      };
+    }
+
+    let Option::SOME(node) = parser.module.expressions.get(currentId) else {
+      return false;
+    };
+
+    return match (node) {
+      Ast::Expression::Node::Variable(_) -> true,
+      Ast::Expression::Node::MemberAccess(_) -> true,
+      Ast::Expression::Node::VectorAccess(_) -> true,
+      // A bare identifier parses as a single-segment path; a qualified path names
+      // a static item, which is not borrowed here.
+      Ast::Expression::Node::Path(path) -> path.segments.length() == 1,
+      _ -> false,
+    };
+  }
+
+  /// Borrows an interpolated slot when it names a place, so that interpolating a
+  /// variable does not move it. A temporary stays by value.
+  function buildSlotArgument(
+    parser: &mut ParserShared::State,
+    slot: Ast::ExpressionId,
+    span: SourceSpan
+  ): Ast::ExpressionId {
+    if (!ParserExpressions::isPlaceExpression(parser, slot)) {
+      return slot;
+    }
+
+    return parser.module.addExpression(Ast::Expression::Node::Reference(Ast::Expression::Reference {
+      span: span,
+      mutable: false,
+      target: slot,
+    }));
+  }
+
+  /// Parses a template literal that has at least one interpolation.
+  ///
+  /// The literal is desugared into `String::create(head).concat(..)`, which keeps
+  /// every later phase working on constructs it already understands.
+  function parseTemplateLiteral(
+    parser: &mut ParserShared::State,
+    head: Token
+  ): Option<ParsedExpression> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let headLexeme: String = parserRef.bump().lexemeString();
+    let headText: String = ParserShared::stripTemplateDelimiters(&headLexeme, 1 as u64, 2 as u64);
+
+    let mut result: Ast::ExpressionId = ParserExpressions::buildStringCreate(parserRef, head.span, &headText);
+    let mut span: SourceSpan = head.span;
+    let mut done: boolean = false;
+
+    while (!done) {
+      let slot = ParserExpressions::parseExpression(parserRef)!;
+      let slotArgument: Ast::ExpressionId = ParserExpressions::buildSlotArgument(parserRef, slot.id, slot.span);
+      result = ParserExpressions::buildConcatCall(parserRef, result, slotArgument, slot.span);
+
+      parserRef.skipTrivia();
+      let chunkToken: Token = parserRef.current();
+
+      if (chunkToken.kindValue() != TokenKind::LITERAL) {
+        parserRef.emitDiagnostic(chunkToken.span, DiagnosticCode::EXPECTED_EXPRESSION, "expected expression", "template interpolation must close with '}'");
+        return Option::NONE;
+      }
+
+      let chunkKind: LiteralKind = chunkToken.literalKindValue();
+      let isTail: boolean = chunkKind == LiteralKind::TEMPLATE_TAIL;
+
+      if (!isTail && chunkKind != LiteralKind::TEMPLATE_MIDDLE) {
+        parserRef.emitDiagnostic(chunkToken.span, DiagnosticCode::EXPECTED_EXPRESSION, "expected expression", "template interpolation must close with '}'");
+        return Option::NONE;
+      }
+
+      let mut trailing: u64 = 2 as u64;
+      if (isTail) {
+        trailing = 1 as u64;
+      }
+
+      let chunkLexeme: String = parserRef.bump().lexemeString();
+      let chunkText: String = ParserShared::stripTemplateDelimiters(&chunkLexeme, 1 as u64, trailing);
+
+      if (chunkText.length() > 0) {
+        let chunkId: Ast::ExpressionId = ParserExpressions::buildStringLiteral(parserRef, chunkToken.span, &chunkText);
+        result = ParserExpressions::buildConcatCall(parserRef, result, chunkId, chunkToken.span);
+      }
+
+      span = ParserShared::mergeSpans(span, chunkToken.span);
+      done = isTail;
+    }
+
+    return Option::SOME(ParsedExpression {
+      id: result,
+      span: span,
+    });
+  }
+
   function parseLiteralExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {
     let mut parserRef: &mut ParserShared::State = parser;
 
@@ -411,6 +586,21 @@ export namespace ParserExpressions {
           id: expressionId,
           span: token.span,
         });
+      }
+
+      if (token.literalKindValue() == LiteralKind::TEMPLATE_NO_SUBSTITUTION) {
+        let lexeme: String = parserRef.bump().lexemeString();
+        let text: String = ParserShared::stripTemplateDelimiters(&lexeme, 1 as u64, 1 as u64);
+        let expressionId: Ast::ExpressionId = ParserExpressions::buildStringCreate(parserRef, token.span, &text);
+
+        return Option::SOME(ParsedExpression {
+          id: expressionId,
+          span: token.span,
+        });
+      }
+
+      if (token.literalKindValue() == LiteralKind::TEMPLATE_HEAD) {
+        return ParserExpressions::parseTemplateLiteral(parserRef, token);
       }
     }
 

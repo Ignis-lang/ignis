@@ -35,11 +35,18 @@ record LexerScanner {
   public diagnostics: DiagnosticBag;
   public tokens: TokenStream;
 
+  /// Brace depth inside each template interpolation that is still open.
+  ///
+  /// A `}` closes an interpolation only when the innermost frame is at depth
+  /// zero; otherwise it closes a block written inside the slot.
+  templateBraceDepth: Vector<u64>;
+
   public static create(file: &SourceFile): LexerScanner {
     return LexerScanner {
       cursor: SourceCursor::create(file),
       diagnostics: DiagnosticBag::init(),
       tokens: TokenStream::create(),
+      templateBraceDepth: Vector::new<u64>(),
     };
   }
 
@@ -301,6 +308,133 @@ record LexerScanner {
     }
 
     self.scanDecimalOrFloatLiteral(start);
+  }
+
+  private scanLeftBrace(&mut self, start: SourceMark): void {
+    let depthCount: u64 = self.templateBraceDepth.length();
+
+    if (depthCount > 0) {
+      let lastIndex: u64 = depthCount - 1;
+      let Option::SOME(depth) = self.templateBraceDepth.get(lastIndex) else {
+        self.emitPunctuation(start, Punctuation::LEFT_BRACE, "{");
+        return;
+      };
+
+      let next: u64 = *depth + 1;
+      self.templateBraceDepth.set(lastIndex, next);
+    }
+
+    self.emitPunctuation(start, Punctuation::LEFT_BRACE, "{");
+  }
+
+  private scanRightBrace(&mut self, start: SourceMark): void {
+    let depthCount: u64 = self.templateBraceDepth.length();
+
+    if (depthCount > 0) {
+      let lastIndex: u64 = depthCount - 1;
+      let Option::SOME(depth) = self.templateBraceDepth.get(lastIndex) else {
+        self.emitPunctuation(start, Punctuation::RIGHT_BRACE, "}");
+        return;
+      };
+
+      let current: u64 = *depth;
+
+      if (current == 0) {
+        self.templateBraceDepth.pop();
+        self.scanTemplateContinuation(start);
+        return;
+      }
+
+      self.templateBraceDepth.set(lastIndex, current - 1);
+    }
+
+    self.emitPunctuation(start, Punctuation::RIGHT_BRACE, "}");
+  }
+
+  /// Scans a template literal opened by a backtick.
+  private scanTemplateLiteral(&mut self, start: SourceMark): void {
+    if (self.scanTemplateChunk(start)) {
+      self.templateBraceDepth.push(0 as u64);
+      self.emitLiteral(start, LiteralKind::TEMPLATE_HEAD);
+      return;
+    }
+
+    self.emitLiteral(start, LiteralKind::TEMPLATE_NO_SUBSTITUTION);
+  }
+
+  /// Scans the literal text that follows the `}` closing an interpolation.
+  private scanTemplateContinuation(&mut self, start: SourceMark): void {
+    if (self.scanTemplateChunk(start)) {
+      self.templateBraceDepth.push(0 as u64);
+      self.emitLiteral(start, LiteralKind::TEMPLATE_MIDDLE);
+      return;
+    }
+
+    self.emitLiteral(start, LiteralKind::TEMPLATE_TAIL);
+  }
+
+  /// Consumes template text up to the next `${` or the closing backtick.
+  ///
+  /// Returns whether an interpolation follows the chunk. On an unterminated
+  /// literal it reports the diagnostic itself and returns false, which leaves
+  /// the caller emitting a tail token over the recovered span.
+  private scanTemplateChunk(&mut self, start: SourceMark): boolean {
+    while (let Option::SOME(next) = self.cursor.peekChar()) {
+      if (next == '`') {
+        self.cursor.advanceChar();
+        return false;
+      }
+
+      if (next == '$') {
+        let checkpoint: SourceMark = self.cursor.mark();
+        self.cursor.advanceChar();
+
+        if (let Option::SOME(afterDollar) = self.cursor.peekChar()) {
+          if (afterDollar == '{') {
+            self.cursor.advanceChar();
+            return true;
+          }
+        }
+
+        self.cursor.reset(checkpoint);
+        self.cursor.advanceChar();
+        continue;
+      }
+
+      if (next == '\\') {
+        self.cursor.advanceChar();
+
+        if (self.cursor.isAtEnd()) {
+          self.emitDiagnostic(start, DiagnosticCode::UNTERMINATED_TEMPLATE_STRING, "unterminated template literal", "template literal must end with a closing backtick");
+          return false;
+        }
+
+        self.cursor.advanceChar();
+        continue;
+      }
+
+      if (next == '\0') {
+        let nulStart: SourceMark = self.cursor.mark();
+        self.cursor.advanceChar();
+        self.emitRawNulInSource(nulStart);
+        self.skipToTemplateTerminator();
+
+        return false;
+      }
+
+      self.cursor.advanceChar();
+    }
+
+    self.emitDiagnostic(start, DiagnosticCode::UNTERMINATED_TEMPLATE_STRING, "unterminated template literal", "template literal must end with a closing backtick");
+    return false;
+  }
+
+  private skipToTemplateTerminator(&mut self): void {
+    while (let Option::SOME(current) = self.cursor.advanceChar()) {
+      if (current == '`') {
+        break;
+      }
+    }
   }
 
   private scanStringLiteral(&mut self, start: SourceMark): void {
@@ -750,8 +884,8 @@ record LexerScanner {
     match (current) {
       '(' -> self.emitPunctuation(start, Punctuation::LEFT_PAREN, "("),
       ')' -> self.emitPunctuation(start, Punctuation::RIGHT_PAREN, ")"),
-      '{' -> self.emitPunctuation(start, Punctuation::LEFT_BRACE, "{"),
-      '}' -> self.emitPunctuation(start, Punctuation::RIGHT_BRACE, "}"),
+      '{' -> self.scanLeftBrace(start),
+      '}' -> self.scanRightBrace(start),
       '[' -> self.emitPunctuation(start, Punctuation::LEFT_BRACKET, "["),
       ']' -> self.emitPunctuation(start, Punctuation::RIGHT_BRACKET, "]"),
       ',' -> self.emitPunctuation(start, Punctuation::COMMA, ","),
@@ -858,6 +992,11 @@ record LexerScanner {
 
       if (current == '"') {
         self.scanStringLiteral(start);
+        continue;
+      }
+
+      if (current == '`') {
+        self.scanTemplateLiteral(start);
         continue;
       }
 

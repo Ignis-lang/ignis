@@ -3539,3 +3539,124 @@ function parserParsesGenericCallAndRecordInitTypeArguments(): void {
     _ -> @panic("expected function root for generic expression test"),
   };
 }
+
+/// Renders a desugared expression in source-like form so a template test can
+/// assert the whole call shape in one comparison.
+function describeExpression(module: &Ast::Module, id: Ast::ExpressionId): String {
+  return match (expectExpression(module, id)) {
+    Ast::Expression::Node::Literal(literal) -> match (&literal.value) {
+      Ast::Expression::LiteralValue::String(text) -> `"${text}"`,
+      _ -> String::create("<literal>"),
+    },
+    Ast::Expression::Node::Variable(variable) -> variable.name.clone(),
+    Ast::Expression::Node::Path(path) -> joinPathSegments(&path.segments),
+    Ast::Expression::Node::Reference(reference) -> `&${describeExpression(module, reference.target)}`,
+    Ast::Expression::Node::MemberAccess(access) -> `${describeExpression(module, access.object)}.${access.member}`,
+    Ast::Expression::Node::Call(call) -> `${describeExpression(module, call.callee)}(${describeArguments(module, &call.arguments)})`,
+    _ -> String::create("<expression>"),
+  };
+}
+
+function joinPathSegments(segments: &Vector<String>): String {
+  let mut rendered: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < segments.length()) {
+    let Option::SOME(segment) = segments.get(index) else {
+      break;
+    };
+
+    if (index > 0) {
+      rendered = rendered.concat("::");
+    }
+
+    rendered = rendered.concat(segment);
+    index += 1 as u64;
+  }
+
+  return rendered;
+}
+
+function describeArguments(module: &Ast::Module, arguments: &Vector<Ast::ExpressionId>): String {
+  let mut rendered: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < arguments.length()) {
+    let Option::SOME(argument) = arguments.get(index) else {
+      break;
+    };
+
+    if (index > 0) {
+      rendered = rendered.concat(", ");
+    }
+
+    rendered = rendered.concat(describeExpression(module, *argument));
+    index += 1 as u64;
+  }
+
+  return rendered;
+}
+
+function describeSingleExpressionBody(module: &Ast::Module): String {
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing template function root"),
+  };
+
+  let bodyId: Ast::StatementId = match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> functionItem.body,
+    _ -> @panic("expected a function root"),
+  };
+
+  let statementId: Ast::StatementId = match (expectStatement(module, bodyId)) {
+    Ast::Statement::Node::Block(block) -> match (block.statements.get(0)) {
+      Option::SOME(value) -> *value,
+      Option::NONE -> @panic("missing template statement"),
+    },
+    _ -> @panic("expected a block function body"),
+  };
+
+  return match (expectStatement(module, statementId)) {
+    Ast::Statement::Node::Expression(expressionStatement) -> describeExpression(module, expressionStatement.expression),
+    _ -> @panic("expected an expression statement"),
+  };
+}
+
+function parseTemplateBody(sourceText: str): String {
+  let source: SourceFile = SourceFile::create("fixtures/parser_template.ign", sourceText);
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  return describeSingleExpressionBody(&module);
+}
+
+@test
+function parserDesugarsTemplateWithoutInterpolation(): void {
+  let rendered: String = parseTemplateBody("function main(): void { `hello`; }");
+
+  Test::assertEq<str>(rendered.toStr(), "String::create(\"hello\")");
+}
+
+@test
+function parserDesugarsTemplateWithInterpolations(): void {
+  let rendered: String = parseTemplateBody("function main(): void { `a${x}b${y}c`; }");
+
+  Test::assertEq<str>(rendered.toStr(), "String::create(\"a\").concat(&x).concat(\"b\").concat(&y).concat(\"c\")");
+}
+
+@test
+function parserSkipsEmptyTemplateChunks(): void {
+  let rendered: String = parseTemplateBody("function main(): void { `${x}${y}`; }");
+
+  Test::assertEq<str>(rendered.toStr(), "String::create(\"\").concat(&x).concat(&y)");
+}
+
+@test
+function parserBorrowsTemplatePlacesAndMovesTemporaries(): void {
+  let rendered: String = parseTemplateBody("function main(): void { `${a}${b.c}${d()}`; }");
+
+  Test::assertEq<str>(rendered.toStr(), "String::create(\"\").concat(&a).concat(&b.c).concat(d())");
+}
