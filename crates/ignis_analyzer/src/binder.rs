@@ -484,7 +484,10 @@ impl<'a> Analyzer<'a> {
           }
         },
         ASTRecordItem::Method(method) => {
-          let is_static = method.is_static();
+          // A method with no receiver written is static, the same way an enum's
+          // is: the receiver is what makes a method an instance method, and
+          // without it there is nothing for a call to pass.
+          let is_static = method.is_static() || !method.has_self();
           let method_def_id = self.bind_method(method, record_def_id, is_static);
 
           let target_map = if is_static {

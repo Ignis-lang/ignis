@@ -944,7 +944,7 @@ fn e2e_record_instance_method() {
 record Counter {
     value: i32;
 
-    get(): i32 {
+    get(&self): i32 {
         return self.value;
     }
 }
@@ -1278,7 +1278,7 @@ record User {
     public name: i32;
     private age: i32;
 
-    public getValue(): i32 {
+    public getValue(&self): i32 {
         return self.name + self.age;
     }
 
@@ -1510,7 +1510,7 @@ fn e2e_generic_record_with_method() {
 record Box<T> {
     value: T;
 
-    get(): T {
+    get(&self): T {
         return self.value;
     }
 }
@@ -1603,7 +1603,7 @@ fn e2e_generic_multiple_instantiations() {
     r#"
 record Box<T> {
     value: T;
-    get(): T {
+    get(&self): T {
         return self.value;
     }
 }
@@ -4982,7 +4982,7 @@ fn e2e_method_type_param_explicit() {
 record Box<T> {
     value: T;
 
-    transform<U>(f: (T) -> U): U {
+    transform<U>(&self, f: (T) -> U): U {
         return f(self.value);
     }
 }
@@ -5004,7 +5004,7 @@ fn e2e_method_type_param_inferred() {
 record Box<T> {
     value: T;
 
-    transform<U>(f: (T) -> U): U {
+    transform<U>(&self, f: (T) -> U): U {
         return f(self.value);
     }
 }
@@ -5026,7 +5026,7 @@ fn e2e_method_type_param_closure_with_capture() {
 record Box<T> {
     value: T;
 
-    transform<U>(f: (T) -> U): U {
+    transform<U>(&self, f: (T) -> U): U {
         return f(self.value);
     }
 }
@@ -5219,7 +5219,7 @@ fn e2e_callback_method_type_param_map() {
 record Wrapper<T> {
     public value: T;
 
-    map<U>(@noescape f: (T) -> U): Wrapper<U> {
+    map<U>(&self, @noescape f: (T) -> U): Wrapper<U> {
         return Wrapper { value: f(self.value) };
     }
 }

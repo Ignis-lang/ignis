@@ -1,6 +1,7 @@
 import Vector from "std::vector";
 
 import Ast from "@compiler::ast";
+import Id from "@compiler::ids";
 import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
 import
   Keyword,
@@ -13,6 +14,7 @@ from "@compiler::syntax";
 
 import _ from "./recovery";
 import _ from "./shared";
+import _ from "./patterns";
 import _ from "./types";
 
 export namespace ParserExpressions {
@@ -1252,8 +1254,17 @@ export namespace ParserExpressions {
     }
 
     let letKeyword = parserRef.expectKeyword(Keyword::LET, "expected 'let' in condition")!;
-    let patternResult: Option<Ast::PatternId> = ParserExpressions::parseInlineBindingPattern(parserRef);
-    let pattern = patternResult!;
+
+    // Same split as `parseInlineLetStatement`: an `if (let Enum::Variant(x) = ...)`
+    // condition destructures and needs the full pattern parser, while a bare
+    // binding stays on the inline path.
+    let mut pattern: Ast::PatternId = Id::fromRaw<Ast::PatternTag>(0);
+    if (ParserExpressions::atQualifiedPatternStart(parserRef)) {
+      pattern = ParserPatterns::parsePattern(parserRef)!;
+    } else {
+      let patternResult: Option<Ast::PatternId> = ParserExpressions::parseInlineBindingPattern(parserRef);
+      pattern = patternResult!;
+    }
     parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' in let condition")!;
     let valueResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
     let value = valueResult!;
@@ -1271,6 +1282,28 @@ export namespace ParserExpressions {
       id: expressionId,
       span: span,
     });
+  }
+
+  /// Whether the upcoming pattern names a path rather than a bare binding.
+  ///
+  /// `Enum::Variant(x)` and `Variant(x)` both destructure; a plain `name` does
+  /// not. Deciding by the token after the first identifier keeps the ordinary
+  /// binding on the inline path, whose annotation lands inside the pattern.
+  function atQualifiedPatternStart(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+    parserRef.skipTrivia();
+
+    let current: Token = parserRef.current();
+    if (current.kindValue() != TokenKind::IDENTIFIER) {
+      return false;
+    }
+
+    let next: Token = ParserShared::nextSignificantToken(parserRef, 1 as u64);
+    if (next.kindValue() != TokenKind::PUNCTUATION) {
+      return false;
+    }
+
+    return next.punctuationValue() == Punctuation::DOUBLE_COLON || next.punctuationValue() == Punctuation::LEFT_PAREN;
   }
 
   function parseInlineBindingPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
@@ -1301,7 +1334,18 @@ export namespace ParserExpressions {
     let mut parserRef: &mut ParserShared::State = parser;
     let keyword = parserRef.expectKeyword(Keyword::LET, "expected 'let'")!;
     let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
-    let pattern = ParserExpressions::parseInlineBindingPattern(parserRef)!;
+
+    // A block expression is where a `let ... else` destructuring lands inside a
+    // match arm, and its pattern is a path, not a bare name. The inline binding
+    // parser only reads a name, so a qualified pattern goes to the full pattern
+    // parser instead; that one leaves the annotation to the caller, which the
+    // code below already reads.
+    let mut pattern: Ast::PatternId = Id::fromRaw<Ast::PatternTag>(0);
+    if (ParserExpressions::atQualifiedPatternStart(parserRef)) {
+      pattern = ParserPatterns::parsePattern(parserRef)!;
+    } else {
+      pattern = ParserExpressions::parseInlineBindingPattern(parserRef)!;
+    }
 
     let mut annotation: Option<Ast::TypeId> = Option::NONE;
     let mut value: Option<Ast::ExpressionId> = Option::NONE;

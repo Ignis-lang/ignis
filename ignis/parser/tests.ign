@@ -3308,6 +3308,50 @@ function parserParsesExampleThenStdVectorFilesWithoutDiagnostics(): void {
   assertRealFileParsesWithoutDiagnostics("std/vector/tests.ign");
 }
 
+/// Real-file coverage for template literals, which every other fixture in this
+/// list predates: `std/terminal/tests.ign` interpolates, and
+/// `ignis/analyzer/typecheck_state.ign` is the densest user of them in the
+/// corpus at 23 interpolations. The second file is also the one that found the
+/// block-expression pattern gaps this test now guards.
+@test
+function parserParsesRealFilesUsingTemplateLiterals(): void {
+  assertRealFileParsesWithoutDiagnostics("std/terminal/tests.ign");
+  assertRealFileParsesWithoutDiagnostics("ignis/analyzer/typecheck_state.ign");
+}
+
+/// Scenario: a `let ... else` whose pattern destructures, written inside a
+/// match arm. The arm body is a block expression, whose own `let` parser only
+/// read a bare binding name before.
+/// Spec: GRAMMAR.md `<let-else>` inside a block expression.
+@test
+function parserParsesDestructuringLetElseInsideMatchArm(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_let_else_in_arm.ign",
+    "function f(): void { match (t) { A::B(c) -> { let Option::SOME(x) = g() else { return; }; }, }; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: an `if (let Enum::Variant(x) = value)` condition inside a block
+/// expression, which read its pattern the same restricted way.
+/// Spec: GRAMMAR.md `<let-condition>` inside a block expression.
+@test
+function parserParsesDestructuringIfLetInsideMatchArm(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_if_let_in_arm.ign",
+    "function f(): void { match (t) { A::B(c) -> { if (let Option::SOME(x) = g()) { return; } }, }; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
 function assertRealFileParsesWithoutDiagnostics(path: str): void {
   let sourceText: String = readFixture(path);
   let source: SourceFile = SourceFile::create(path, sourceText.toStr());
