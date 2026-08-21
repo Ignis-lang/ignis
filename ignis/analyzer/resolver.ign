@@ -997,7 +997,8 @@ export namespace Analyzer {
     ///   4. Import overlay (linear scan).
     ///   5. Unknown: emit UNDEFINED_TYPE + return VOID.
     ///
-    /// Multi-segment paths emit UNDEFINED_TYPE — not yet supported.
+    /// A multi-segment path resolves on its last segment; the leading segments
+    /// are an unvalidated namespace qualifier (TODO(namespace-path-validation)).
     function resolvePath(
       state: &mut Analyzer::Resolver::ResolverState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1013,35 +1014,40 @@ export namespace Analyzer {
         return tsRef.intern(Analyzer::Type::VOID);
       }
 
-      if (p.segments.length() > 1) {
-        emitUndefinedType(state, p.span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "multi-segment type paths are not yet supported");
-        let mut tsRef: &mut Analyzer::TypeStore = typeStore;
-        return tsRef.intern(Analyzer::Type::VOID);
-      }
+      // A qualified path names its type in the last segment; the leading ones
+      // are the namespace it lives in. They are not validated here — the same
+      // TODO(namespace-path-validation) the typechecker's annotation reader
+      // carries — but the name they qualify resolves like any other.
+      let qualified: boolean = p.segments.length() > 1;
 
-      let Option::SOME(nameStr) = p.segments.get(0) else {
+      let Option::SOME(nameStr) = p.segments.get(p.segments.length() - 1) else {
         let mut tsRef: &mut Analyzer::TypeStore = typeStore;
         return tsRef.intern(Analyzer::Type::VOID);
       };
 
-      // 1. Primitive check.
-      let primOpt: Option<Analyzer::TypeId> = primitiveForName(typeStore, nameStr.toStr());
+      // 1. Primitive check. A primitive is never written qualified.
+      if (!qualified) {
+        let primOpt: Option<Analyzer::TypeId> = primitiveForName(typeStore, nameStr.toStr());
 
-      if (let Option::SOME(primId) = primOpt) {
-        return primId;
+        if (let Option::SOME(primId) = primOpt) {
+          return primId;
+        }
       }
 
-      // 2. Type-param scope.
+      // 2. Type-param scope, which a qualified path never names either.
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let sym: Analyzer::SymbolId = symbolsRef.intern(nameStr.toStr());
-      let scopeIdxOpt: Option<u64> = scopeLookup(scope, sym);
 
-      if (let Option::SOME(idx) = scopeIdxOpt) {
-        let Option::SOME(tid) = scope.typeIds.get(idx) else {
-          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
-          return tsRef.intern(Analyzer::Type::VOID);
-        };
-        return *tid;
+      if (!qualified) {
+        let scopeIdxOpt: Option<u64> = scopeLookup(scope, sym);
+
+        if (let Option::SOME(idx) = scopeIdxOpt) {
+          let Option::SOME(tid) = scope.typeIds.get(idx) else {
+            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+            return tsRef.intern(Analyzer::Type::VOID);
+          };
+          return *tid;
+        }
       }
 
       // 3. Global type-name index.

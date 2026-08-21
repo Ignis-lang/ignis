@@ -1711,9 +1711,11 @@ function resolveEmitsUnknownTypeDiagnostic(): void {
   Test::assertEq<u32>(fdX.fieldType.raw(), voidId.raw());
 }
 
-/// Scenario: field typed Foo::Bar (multi-segment) — 1 UNSUPPORTED_CONSTRUCT diagnostic.
+/// Scenario: a field typed `Foo::Bar`, where nothing declares `Bar`. A
+/// qualified path resolves on its last segment, so this reports the unknown
+/// name rather than refusing the shape.
 @test
-function resolveEmitsMultiSegmentNotSupported(): void {
+function resolveEmitsUnknownNameForQualifiedPath(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -1775,9 +1777,88 @@ function resolveEmitsMultiSegmentNotSupported(): void {
     @panic("expected diagnostic at index 0");
   };
 
-  let expectedCode: String = String::create(DiagnosticCode::UNSUPPORTED_CONSTRUCT);
+  let expectedCode: String = String::create(DiagnosticCode::UNDEFINED_TYPE);
   let actualCode: String = String::create(diag.code);
   Test::assertEq<boolean>(actualCode.equals(&expectedCode), true);
+}
+
+/// Scenario: a field typed `Ast::Type::Path`, whose last segment names a
+/// declared record. The namespace qualifier is carried but not validated, so
+/// the field resolves to that record's type.
+@test
+function resolveQualifiedPathResolvesOnLastSegment(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut targetFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  let targetId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Target"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: targetFields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create("Outer"));
+  segments.push(String::create("Inner"));
+  segments.push(String::create("Target"));
+
+  let qualifiedTypeId: Ast::TypeId = module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+    span: resolverDummySpan(),
+    segments: segments,
+  }));
+
+  let fieldX: Ast::PatternId = addAnnotatedField(&mut module, "x", qualifiedTypeId);
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldX);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create("Holder"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypes(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let fieldDef: Analyzer::FieldDef = getFieldDef(&mut defStore, &mut typeStore, &module, recordId, &pass1, 0);
+  let Option::SOME(targetDefId) = Analyzer::Binder::findDef(&pass1, targetId.raw()) else {
+    @panic("expected a definition for the target record");
+  };
+
+  Test::assertEq<u32>(fieldDef.fieldType.raw(), typeStore.intern(Analyzer::Type::Record(targetDefId)).raw());
 }
 
 /// Scenario: Vector<i32, str> where Vector<T> expects 1 arg — 1 GENERIC_ARITY_MISMATCH diagnostic.
