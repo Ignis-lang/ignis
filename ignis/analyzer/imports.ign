@@ -34,12 +34,19 @@ export namespace Analyzer {
       public defs: Vector<Analyzer::DefinitionId>;
       public spans: Vector<SourceSpan>;
       public targets: Vector<u64>;
+      /// The path each entry is written as, `Outer::Inner::Name`, so a
+      /// qualified reference can tell apart declarations that share a bare
+      /// name across namespaces. Empty for an entry bound by a plain import.
+      public qualifiedNames: Vector<String>;
     }
 
     record DirectDeclarationIndex {
       public syms: Vector<Analyzer::SymbolId>;
       public defs: Vector<Analyzer::DefinitionId>;
       public spans: Vector<SourceSpan>;
+      /// `Outer::Inner::Name` for a nested declaration, the bare name for a
+      /// top-level one. Parallel to `syms`.
+      public qualifiedNames: Vector<String>;
     }
 
     /// Whether the overlay already binds `name`, readable through a mutable
@@ -69,6 +76,7 @@ export namespace Analyzer {
         defs: Vector::new<Analyzer::DefinitionId>(),
         spans: Vector::new<SourceSpan>(),
         targets: Vector::new<u64>(),
+        qualifiedNames: Vector::new<String>(),
       };
     }
 
@@ -77,6 +85,7 @@ export namespace Analyzer {
         syms: Vector::new<Analyzer::SymbolId>(),
         defs: Vector::new<Analyzer::DefinitionId>(),
         spans: Vector::new<SourceSpan>(),
+        qualifiedNames: Vector::new<String>(),
       };
     }
 
@@ -169,11 +178,35 @@ export namespace Analyzer {
       importSpan: SourceSpan,
       targetModule: u64,
     ): void {
+      Analyzer::Imports::appendQualifiedOverlayEntry(
+        overlay,
+        localName,
+        targetDef,
+        importSpan,
+        targetModule,
+        String::create(""),
+      );
+    }
+
+    /// Append an overlay entry that also records the path it is written as.
+    ///
+    /// A member brought in with its namespace carries `Outer::Inner::Name`; a
+    /// name an import statement lists carries nothing, because the writer
+    /// refers to it by that bare name.
+    function appendQualifiedOverlayEntry(
+      overlay: &mut Analyzer::Imports::ImportOverlay,
+      localName: Analyzer::SymbolId,
+      targetDef: Analyzer::DefinitionId,
+      importSpan: SourceSpan,
+      targetModule: u64,
+      qualifiedName: String,
+    ): void {
       let mut overlayRef: &mut Analyzer::Imports::ImportOverlay = overlay;
       overlayRef.syms.push(localName);
       overlayRef.defs.push(targetDef);
       overlayRef.spans.push(importSpan);
       overlayRef.targets.push(targetModule);
+      overlayRef.qualifiedNames.push(qualifiedName);
     }
 
     function appendDirectIndexEntryIfMissing(
@@ -181,6 +214,7 @@ export namespace Analyzer {
       sym: Analyzer::SymbolId,
       def: Analyzer::DefinitionId,
       span: SourceSpan,
+      qualifiedName: String,
     ): void {
       let mut index: u64 = 0;
       while (index < direct.syms.length()) {
@@ -200,6 +234,7 @@ export namespace Analyzer {
       directRef.syms.push(sym);
       directRef.defs.push(def);
       directRef.spans.push(span);
+      directRef.qualifiedNames.push(qualifiedName);
     }
 
     function appendImportMissingDiagnostic(

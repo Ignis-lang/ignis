@@ -163,6 +163,20 @@ export namespace Analyzer {
           binding.span,
           targetRecord.info.index,
         );
+
+        // Importing a namespace brings what it declares: the corpus writes
+        // `Ast::Item::Node::Function` after importing `Ast`, and the member is
+        // never listed on the import line. Each member carries the path it is
+        // written as, so the five declarations named `Node` stay apart.
+        Analyzer::appendNamespaceMembers(
+          &mut overlay,
+          currentDirect,
+          &targetRecord.direct,
+          sourceNameText.toStr(),
+          localNameText.toStr(),
+          binding.span,
+          targetRecord.info.index,
+        );
         bindingIndex += 1;
       }
 
@@ -170,6 +184,63 @@ export namespace Analyzer {
     }
 
     return overlay;
+  }
+
+  /// Add every declaration the imported namespace `sourceName` contains.
+  ///
+  /// A member is recognised by its path starting with `sourceName::`, and is
+  /// rewritten to start with the local name so an aliased import reads the way
+  /// it was written. Names the importing module declares itself are left alone.
+  function appendNamespaceMembers(
+    overlay: &mut Analyzer::Imports::ImportOverlay,
+    currentDirect: &Analyzer::Imports::DirectDeclarationIndex,
+    targetDirect: &Analyzer::Imports::DirectDeclarationIndex,
+    sourceName: str,
+    localName: str,
+    importSpan: SourceSpan,
+    targetModule: u64,
+  ): void {
+    let prefix: String = `${sourceName}::`;
+    let mut index: u64 = 0;
+
+    while (index < targetDirect.qualifiedNames.length()) {
+      let Option::SOME(qualifiedName) = targetDirect.qualifiedNames.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (!qualifiedName.startsWith(prefix.toStr())) {
+        index += 1;
+        continue;
+      }
+
+      let Option::SOME(memberSym) = targetDirect.syms.get(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(memberDef) = targetDirect.defs.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (Analyzer::Imports::directIndexSpan(currentDirect, *memberSym).isSome()) {
+        index += 1;
+        continue;
+      }
+
+      let suffix: String = qualifiedName.substringBytes(prefix.length(), qualifiedName.length());
+      let localPath: String = `${localName}::${suffix.toStr()}`;
+
+      Analyzer::Imports::appendQualifiedOverlayEntry(
+        overlay,
+        *memberSym,
+        *memberDef,
+        importSpan,
+        targetModule,
+        localPath,
+      );
+      index += 1;
+    }
   }
 
   function copyDiagnostic(source: &Diagnostic): Diagnostic {
@@ -337,6 +408,106 @@ export namespace Analyzer {
     };
   }
 
+  /// The path a declaration is written as inside its module, `Outer::Inner::Name`.
+  ///
+  /// Built by walking the roots and remembering the namespaces entered on the
+  /// way, which is the only place that nesting is recorded once the binder has
+  /// flattened its outputs.
+  function qualifiedNameForItemRaw(module: &Ast::Module, rawId: u32): String {
+    let mut index: u64 = 0;
+
+    while (index < module.roots.length()) {
+      let Option::SOME(rootId) = module.roots.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let prefix: String = String::create("");
+      if (let Option::SOME(found) = Analyzer::qualifiedNameWithin(module, *rootId, rawId, &prefix, 0)) {
+        return found;
+      }
+
+      index += 1;
+    }
+
+    return String::create("");
+  }
+
+  /// The path to `rawId` inside `itemId`, given the prefix already walked.
+  function qualifiedNameWithin(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    rawId: u32,
+    prefix: &String,
+    depth: u64,
+  ): Option<String> {
+    if (depth > 16) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(item) = module.items.get(itemId) else {
+      return Option::NONE;
+    };
+
+    let ownName: String = Analyzer::itemDeclaredName(item);
+
+    let mut ownPath: String = ownName.clone();
+    if (prefix.length() > 0) {
+      ownPath = `${prefix.toStr()}::${ownName.toStr()}`;
+    }
+
+    if (itemId.raw() == rawId) {
+      return Option::SOME(ownPath);
+    }
+
+    match (item) {
+      Ast::Item::Node::Namespace(namespaceItem) -> {
+        let mut childIndex: u64 = 0;
+
+        while (childIndex < namespaceItem.items.length()) {
+          if (let Option::SOME(childId) = namespaceItem.items.get(childIndex)) {
+            if (let Option::SOME(found) = Analyzer::qualifiedNameWithin(module, *childId, rawId, &ownPath, depth + 1)) {
+              return Option::SOME(found);
+            }
+          }
+
+          childIndex += 1;
+        }
+
+        return Option::NONE;
+      },
+      Ast::Item::Node::Export(exported) -> {
+        let Option::SOME(innerItemId) = exported.declaration else {
+          return Option::NONE;
+        };
+
+        return Analyzer::qualifiedNameWithin(module, innerItemId, rawId, prefix, depth + 1);
+      },
+      _ -> {
+        return Option::NONE;
+      },
+    };
+
+    @panic("unreachable: qualifiedNameWithin match did not return");
+  }
+
+  /// The name a declaration item carries, or the empty string for the wrappers
+  /// that declare nothing of their own.
+  function itemDeclaredName(item: &Ast::Item::Node): String {
+    return match (item) {
+      Ast::Item::Node::Function(f) -> f.name.clone(),
+      Ast::Item::Node::Record(r) -> r.name.clone(),
+      Ast::Item::Node::Enum(e) -> e.name.clone(),
+      Ast::Item::Node::Namespace(n) -> n.name.clone(),
+      Ast::Item::Node::Constant(c) -> c.name.clone(),
+      Ast::Item::Node::TypeAlias(a) -> a.name.clone(),
+      Ast::Item::Node::Trait(t) -> t.name.clone(),
+      Ast::Item::Node::Extern(e) -> e.name.clone(),
+      Ast::Item::Node::Import(_) -> String::create(""),
+      Ast::Item::Node::Export(_) -> String::create(""),
+    };
+  }
+
   function directIndexAppendOutput(
     direct: &mut Analyzer::Imports::DirectDeclarationIndex,
     defStore: &mut Analyzer::DefinitionStore,
@@ -370,6 +541,7 @@ export namespace Analyzer {
         definition.name(),
         *defId,
         Analyzer::itemSpanOrEmpty(module, *rawId),
+        Analyzer::qualifiedNameForItemRaw(module, *rawId),
       );
       index += 1;
     }
