@@ -102,11 +102,6 @@ export namespace ParserStatements {
       value = Option::SOME(expression.id);
 
       if (parserRef.consumeKeyword(Keyword::ELSE).isSome()) {
-        if (mutable) {
-          parserRef.emitDiagnostic(keyword.span, DiagnosticCode::UNEXPECTED_TOKEN, "unexpected let-else form", "mutable let-else is not supported in selfhost parser yet");
-          return Option::NONE;
-        }
-
         let elseBranchResult: Option<Ast::StatementId> = ParserStatements::parseBlockStatement(parserRef);
         let elseBranch = elseBranchResult!;
         let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after let-else statement")!;
@@ -117,6 +112,7 @@ export namespace ParserStatements {
 
         return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::LetElse(Ast::Statement::LetElse {
           span: ParserShared::mergeSpans(keyword.span, semicolon.span),
+          mutable: mutable,
           pattern: pattern,
           annotation: annotation,
           value: letValue,
@@ -404,6 +400,10 @@ export namespace ParserStatements {
 
     if (parserRef.atKeyword(Keyword::LET)) {
       return ParserStatements::parseLetStatement(parserRef);
+    }
+
+    if (parserRef.atKeyword(Keyword::CONST)) {
+      return ParserExpressions::parseLocalConstStatement(parserRef);
     }
 
     if (parserRef.atKeyword(Keyword::IF)) {

@@ -123,6 +123,77 @@ export namespace ParserShared {
     return Option::SOME(LibC::Conversion::atof(lexeme.toStr() as CType::CConstStr) as f64);
   }
 
+  /// The value of one hexadecimal digit, or `NONE` when the character is not one.
+  function hexDigitValue(value: char): Option<u32> {
+    if (value >= '0' && value <= '9') {
+      return Option::SOME((value as u32) - ('0' as u32));
+    }
+
+    if (value >= 'a' && value <= 'f') {
+      return Option::SOME(10 + ((value as u32) - ('a' as u32)));
+    }
+
+    if (value >= 'A' && value <= 'F') {
+      return Option::SOME(10 + ((value as u32) - ('A' as u32)));
+    }
+
+    return Option::NONE;
+  }
+
+  /// Reads the `{HEX}` payload of a `\u` escape starting at `startByte`.
+  ///
+  /// `NONE` for a payload that is not a single braced run of one to six hex
+  /// digits naming a Unicode scalar, which is what the lexer already accepted
+  /// before the literal reached the parser.
+  function parseUnicodeEscapeChar(inner: &String, startByte: u64): Option<char> {
+    let mut cursor: u64 = startByte;
+
+    if (cursor >= inner.length()) {
+      return Option::NONE;
+    }
+
+    let open = inner.charAt(cursor, &mut cursor)!;
+    if (open != '{') {
+      return Option::NONE;
+    }
+
+    let mut value: u32 = 0;
+    let mut digits: u64 = 0;
+
+    while (cursor < inner.length()) {
+      let next = inner.charAt(cursor, &mut cursor)!;
+
+      if (next == '}') {
+        if (digits == 0 || cursor != inner.length()) {
+          return Option::NONE;
+        }
+
+        if (value > 1114111) {
+          return Option::NONE;
+        }
+
+        if (value >= 55296 && value <= 57343) {
+          return Option::NONE;
+        }
+
+        return Option::SOME(value as char);
+      }
+
+      let Option::SOME(digit) = ParserShared::hexDigitValue(next) else {
+        return Option::NONE;
+      };
+
+      if (digits >= 6) {
+        return Option::NONE;
+      }
+
+      value = value * 16 + digit;
+      digits += 1;
+    }
+
+    return Option::NONE;
+  }
+
   function parseCharacterLiteral(lexeme: &String): Option<char> {
     let inner: String = ParserShared::stripQuotes(lexeme);
     let mut endByte: u64 = 0;
@@ -142,6 +213,12 @@ export namespace ParserShared {
     }
 
     let escape = inner.charAt(endByte, &mut endByte)!;
+
+    // `\u{...}` carries its own payload, so it is read before the
+    // single-character escapes below rule out anything past the escape letter.
+    if (escape == 'u') {
+      return ParserShared::parseUnicodeEscapeChar(&inner, endByte);
+    }
 
     if (endByte != inner.length()) {
       return Option::NONE;

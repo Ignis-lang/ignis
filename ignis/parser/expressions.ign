@@ -1330,6 +1330,39 @@ export namespace ParserExpressions {
     })));
   }
 
+  /// Parse `const NAME: T = value;` written inside a block.
+  ///
+  /// A local constant is an immutable binding and nothing downstream treats it
+  /// otherwise: the reference front end accepts a call as its initializer, so
+  /// there is no compile-time requirement to carry into the AST, and a `Let`
+  /// node says exactly what the construct is.
+  function parseLocalConstStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let keyword = parserRef.expectKeyword(Keyword::CONST, "expected 'const'")!;
+    let patternResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);
+    let pattern = patternResult!;
+
+    let mut annotation: Option<Ast::TypeId> = Option::NONE;
+    if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
+      let typeId = ParserTypes::parseType(parserRef)!;
+      annotation = Option::SOME(typeId);
+    }
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' in local constant") else {
+      return Option::NONE;
+    };
+
+    let value = ParserExpressions::parseExpression(parserRef)!;
+    let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after local constant")!;
+
+    return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::Let(Ast::Statement::Let {
+      span: ParserShared::mergeSpans(keyword.span, semicolon.span),
+      pattern: pattern,
+      annotation: annotation,
+      value: Option::SOME(value.id),
+    })));
+  }
+
   function parseInlineLetStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
     let keyword = parserRef.expectKeyword(Keyword::LET, "expected 'let'")!;
@@ -1373,6 +1406,7 @@ export namespace ParserExpressions {
 
         return Option::SOME(parserRef.module.addStatement(Ast::Statement::Node::LetElse(Ast::Statement::LetElse {
           span: ParserShared::mergeSpans(keyword.span, semicolon.span),
+          mutable: mutable,
           pattern: pattern,
           annotation: annotation,
           value: letValue,
@@ -1495,11 +1529,13 @@ export namespace ParserExpressions {
     let mut tail: Option<Ast::ExpressionId> = Option::NONE;
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
-      if (parserRef.atKeyword(Keyword::LET) || parserRef.atKeyword(Keyword::IF) || parserRef.atKeyword(Keyword::WHILE) || parserRef.atKeyword(Keyword::RETURN) || parserRef.atKeyword(Keyword::BREAK) || parserRef.atKeyword(Keyword::CONTINUE) || parserRef.atPunctuation(Punctuation::LEFT_BRACE)) {
+      if (parserRef.atKeyword(Keyword::LET) || parserRef.atKeyword(Keyword::CONST) || parserRef.atKeyword(Keyword::IF) || parserRef.atKeyword(Keyword::WHILE) || parserRef.atKeyword(Keyword::RETURN) || parserRef.atKeyword(Keyword::BREAK) || parserRef.atKeyword(Keyword::CONTINUE) || parserRef.atPunctuation(Punctuation::LEFT_BRACE)) {
         let mut statementResult: Option<Ast::StatementId> = Option::NONE;
 
         if (parserRef.atKeyword(Keyword::LET)) {
           statementResult = ParserExpressions::parseInlineLetStatement(parserRef);
+        } else if (parserRef.atKeyword(Keyword::CONST)) {
+          statementResult = ParserExpressions::parseLocalConstStatement(parserRef);
         } else if (parserRef.atKeyword(Keyword::IF)) {
           statementResult = ParserExpressions::parseInlineIfStatement(parserRef);
         } else if (parserRef.atKeyword(Keyword::WHILE)) {

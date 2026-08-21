@@ -3352,6 +3352,88 @@ function parserParsesDestructuringIfLetInsideMatchArm(): void {
   Test::assertEq<u64>(diagnostics.length(), 0);
 }
 
+/// Every `.ign` file under `ignis/` and `std/` parses with the selfhost parser.
+///
+/// This is the parse-level precondition for compiling the compiler with itself:
+/// a construct the corpus uses and this parser cannot read is a hard stop, and
+/// before this gate existed three of them were live at once — destructuring
+/// patterns inside block expressions, local `const`, and `\u{...}` in a char
+/// literal.
+///
+/// The walk is recursive and counts what it read, so an empty or broken walk
+/// fails instead of passing silently.
+@test
+function parserParsesTheWholeSelfhostCorpus(): void {
+  let mut parsedFiles: u64 = 0;
+
+  parseCorpusDirectory("ignis", &mut parsedFiles);
+  parseCorpusDirectory("std", &mut parsedFiles);
+
+  Test::assert(parsedFiles > 150);
+}
+
+/// Parse every `.ign` file in `path` and, recursively, in its subdirectories.
+function parseCorpusDirectory(path: str, parsedFiles: &mut u64): void {
+  let mut entries: Fs::ReadDir = match (Fs::ReadDir::open(path)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> @panic("corpus directory could not be opened"),
+  };
+
+  while (true) {
+    let nextResult: Result<Option<Fs::DirEntry>, Io::IoError> = entries.next();
+
+    let Result::OK(next) = nextResult else {
+      @panic("corpus directory could not be read");
+    };
+
+    let Option::SOME(entry) = next else {
+      break;
+    };
+
+    // `.` and `..` are entries like any other, and recursing into `.` walks
+    // the same directory forever.
+    if (entry.name.equals(".") || entry.name.equals("..")) {
+      continue;
+    }
+
+    let entryPath: String = entry.path.toString();
+
+    if (entry.isDir()) {
+      parseCorpusDirectory(entryPath.toStr(), parsedFiles);
+      continue;
+    }
+
+    let Option::SOME(extension) = entry.path.extension() else {
+      continue;
+    };
+
+    if (!extension.equals("ign")) {
+      continue;
+    }
+
+    parseCorpusFile(entryPath.toStr());
+
+    let mut counter: &mut u64 = parsedFiles;
+    *counter += 1;
+  }
+
+  entries.close();
+}
+
+/// Parse one corpus file and fail with its path when the parser reports anything.
+function parseCorpusFile(path: str): void {
+  let sourceText: String = readFixture(path);
+  let source: SourceFile = SourceFile::create(path, sourceText.toStr());
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  if (diagnostics.length() != 0) {
+    Io::println(`selfhost parser rejected ${path}: ${diagnostics.length()} diagnostics`);
+    @panic("a corpus file no longer parses with the selfhost parser");
+  }
+}
+
 function assertRealFileParsesWithoutDiagnostics(path: str): void {
   let sourceText: String = readFixture(path);
   let source: SourceFile = SourceFile::create(path, sourceText.toStr());
