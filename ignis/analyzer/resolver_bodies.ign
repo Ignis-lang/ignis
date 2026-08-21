@@ -1094,6 +1094,54 @@ export namespace Analyzer {
     /// overlay, so no namespace chain is available for them. Owners that do
     /// not resolve at all are also skipped; `resolvePathTail` emits its own
     /// diagnostic for those.
+    /// The definition a qualified path names, chosen by its namespace chain.
+    ///
+    /// A bare name can be declared once per namespace — the corpus has five
+    /// enums called `Node`, one per `Ast` sub-namespace — so the written prefix
+    /// is what tells them apart. Every entry with that name is considered and
+    /// the one whose enclosing chain matches wins; `NONE` when none does.
+    function bodyGlobalLookupQualified(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      symbols: &mut Analyzer::SymbolTable,
+      segments: &Vector<String>,
+      segCount: u64,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::DefinitionId> {
+      let mut i: u64 = 0;
+
+      while (i < state.globalNameSyms.length()) {
+        let Option::SOME(stored) = state.globalNameSyms.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (stored.raw() != sym.raw()) {
+          i += 1;
+          continue;
+        }
+
+        let Option::SOME(defId) = state.globalNameDefs.get(i) else {
+          i += 1;
+          continue;
+        };
+        let candidateDef: Analyzer::DefinitionId = *defId;
+
+        let Option::SOME(scopeKeyRef) = state.globalNameScopeKeys.get(i) else {
+          i += 1;
+          continue;
+        };
+        let candidateScopeKey: u64 = *scopeKeyRef;
+
+        if (Analyzer::ResolverBodies::namespacePrefixMatches(state, symbols, segments, segCount, candidateScopeKey)) {
+          return Option::SOME(candidateDef);
+        }
+
+        i += 1;
+      }
+
+      return Option::NONE;
+    }
+
     function rejectInvalidNamespacePrefix(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       symbols: &mut Analyzer::SymbolTable,
@@ -1108,16 +1156,13 @@ export namespace Analyzer {
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let ownerSym: Analyzer::SymbolId = symbolsRef.intern(ownerStr.toStr());
 
-      let Option::SOME(ownerPos) = Analyzer::ResolverBodies::bodyGlobalLookupPosition(state, ownerSym) else {
+      let Option::SOME(_ownerPos) = Analyzer::ResolverBodies::bodyGlobalLookupPosition(state, ownerSym) else {
         return false;
       };
 
-      let Option::SOME(ownerScopeKeyRef) = state.globalNameScopeKeys.get(ownerPos) else {
-        return false;
-      };
-      let ownerScopeKey: u64 = *ownerScopeKeyRef;
-
-      if (Analyzer::ResolverBodies::namespacePrefixMatches(state, symbols, segments, segCount, ownerScopeKey)) {
+      // Any declaration of that name whose chain matches makes the prefix
+      // valid; taking only the first one would reject four of the five `Node`s.
+      if (Analyzer::ResolverBodies::bodyGlobalLookupQualified(state, symbols, segments, segCount, ownerSym).isSome()) {
         return false;
       }
 
@@ -1441,6 +1486,18 @@ export namespace Analyzer {
         };
       };
 
+      return Analyzer::ResolverBodies::resolvePathTailForOwner(state, defStore, symbols, ownerDefId, memberName);
+    }
+
+    /// The `owner::member` half of `resolvePathTail`, for callers that already
+    /// know which declaration the owner segment names.
+    function resolvePathTailForOwner(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      ownerDefId: Analyzer::DefinitionId,
+      memberName: str,
+    ): Analyzer::ResolverBodies::PathTailLookup {
       let Option::SOME(ownerDef) = defStore.get(ownerDefId) else {
         return Analyzer::ResolverBodies::PathTailLookup::OwnerNotFound;
       };
@@ -1749,13 +1806,48 @@ export namespace Analyzer {
         return;
       };
 
-      let lookup: Analyzer::ResolverBodies::PathTailLookup = Analyzer::ResolverBodies::resolvePathTail(
-        state,
-        defStore,
-        symbols,
-        ownerStr.toStr(),
-        memberStr.toStr(),
-      );
+      // A qualified path picks its owner by namespace chain, so the five
+      // declarations named `Node` stay apart. Without a prefix there is nothing
+      // to pick by and the flat lookup inside `resolvePathTail` decides.
+      let mut lookup: Analyzer::ResolverBodies::PathTailLookup = Analyzer::ResolverBodies::PathTailLookup::OwnerNotFound;
+
+      if (segCount >= 3) {
+        let mut symbolsQualifiedRef: &mut Analyzer::SymbolTable = symbols;
+        let ownerSym: Analyzer::SymbolId = symbolsQualifiedRef.intern(ownerStr.toStr());
+        let qualifiedOwner: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookupQualified(
+          state,
+          symbols,
+          &p.segments,
+          segCount,
+          ownerSym,
+        );
+
+        if (let Option::SOME(ownerDefId) = qualifiedOwner) {
+          lookup = Analyzer::ResolverBodies::resolvePathTailForOwner(
+            state,
+            defStore,
+            symbols,
+            ownerDefId,
+            memberStr.toStr(),
+          );
+        } else {
+          lookup = Analyzer::ResolverBodies::resolvePathTail(
+            state,
+            defStore,
+            symbols,
+            ownerStr.toStr(),
+            memberStr.toStr(),
+          );
+        }
+      } else {
+        lookup = Analyzer::ResolverBodies::resolvePathTail(
+          state,
+          defStore,
+          symbols,
+          ownerStr.toStr(),
+          memberStr.toStr(),
+        );
+      }
 
       let resolved: Analyzer::ResolverBodies::ResolvedRef = Analyzer::ResolverBodies::mapPathTailLookupToExprRef(
         state,
@@ -1949,13 +2041,43 @@ export namespace Analyzer {
         return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
       };
 
-      let lookup: Analyzer::ResolverBodies::PathTailLookup = Analyzer::ResolverBodies::resolvePathTail(
-        state,
-        defStore,
-        symbols,
-        ownerStr.toStr(),
-        memberStr.toStr(),
-      );
+      // Same owner choice as expression position: the namespace chain is what
+      // separates the five declarations named `Node`.
+      let mut lookup: Analyzer::ResolverBodies::PathTailLookup = Analyzer::ResolverBodies::PathTailLookup::OwnerNotFound;
+      let mut ownerResolved: boolean = false;
+
+      if (segCount >= 3) {
+        let mut symbolsQualifiedRef: &mut Analyzer::SymbolTable = symbols;
+        let ownerSym: Analyzer::SymbolId = symbolsQualifiedRef.intern(ownerStr.toStr());
+        let qualifiedOwner: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookupQualified(
+          state,
+          symbols,
+          &p.segments,
+          segCount,
+          ownerSym,
+        );
+
+        if (let Option::SOME(ownerDefId) = qualifiedOwner) {
+          lookup = Analyzer::ResolverBodies::resolvePathTailForOwner(
+            state,
+            defStore,
+            symbols,
+            ownerDefId,
+            memberStr.toStr(),
+          );
+          ownerResolved = true;
+        }
+      }
+
+      if (!ownerResolved) {
+        lookup = Analyzer::ResolverBodies::resolvePathTail(
+          state,
+          defStore,
+          symbols,
+          ownerStr.toStr(),
+          memberStr.toStr(),
+        );
+      }
 
       return Analyzer::ResolverBodies::resolvePatternPathTailMapped(
         state,
