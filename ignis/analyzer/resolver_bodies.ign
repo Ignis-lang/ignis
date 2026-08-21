@@ -1197,6 +1197,89 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
+    /// The imported declaration a full written path names: every segment is
+    /// part of the match, unlike `bodyImportLookupQualified` where the last
+    /// segment is a member looked up on the owner afterwards.
+    function bodyImportLookupQualifiedFull(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      segments: &Vector<String>,
+      segCount: u64,
+    ): Option<Analyzer::DefinitionId> {
+      let fullPath: String = Analyzer::ResolverBodies::joinPathSegments(segments, segCount);
+      let suffix: String = `::${fullPath.toStr()}`;
+      let mut i: u64 = 0;
+
+      while (i < state.importQualifiedNames.length()) {
+        let Option::SOME(candidate) = state.importQualifiedNames.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (candidate.length() == 0) {
+          i += 1;
+          continue;
+        }
+
+        if (candidate.equals(fullPath.toStr()) || Analyzer::ResolverBodies::pathEndsWith(candidate, &suffix)) {
+          let Option::SOME(defId) = state.importDefs.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          return Option::SOME(*defId);
+        }
+
+        i += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// The declaration a written path names when its qualifier is a namespace
+    /// chain rather than a type: `Outer::Inner::helper` resolves `helper` by
+    /// matching every preceding segment against the declaration's enclosing
+    /// namespaces — this module's own declarations first, imported ones after.
+    ///
+    /// The `segCount + 1` below shifts `bodyGlobalLookupQualified`'s
+    /// owner-oriented prefix window one segment right, so the whole written
+    /// prefix (not the prefix minus the owner) is validated against the chain.
+    function lookupNamespaceQualifiedDeclaration(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      segments: &Vector<String>,
+      segCount: u64,
+    ): Option<Analyzer::DefinitionId> {
+      let Option::SOME(lastStr) = segments.get(segCount - 1) else {
+        return Option::NONE;
+      };
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let lastSym: Analyzer::SymbolId = symbolsRef.intern(lastStr.toStr());
+
+      let mut found: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::bodyGlobalLookupQualified(
+        state,
+        symbols,
+        segments,
+        segCount + 1,
+        lastSym,
+      );
+
+      if (found.isNone()) {
+        found = Analyzer::ResolverBodies::bodyImportLookupQualifiedFull(state, segments, segCount);
+      }
+
+      let Option::SOME(defId) = found else {
+        return Option::NONE;
+      };
+
+      if (Analyzer::ResolverBodies::isTraitDef(defStore, defId)) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(defId);
+    }
+
     function rejectInvalidNamespacePrefix(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       symbols: &mut Analyzer::SymbolTable,
@@ -1755,6 +1838,10 @@ export namespace Analyzer {
     /// table with the pattern-position mapper (`resolvePatternPathTailMapped`).
     function mapPathTailLookupToExprRef(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      segments: &Vector<String>,
+      segCount: u64,
       span: SourceSpan,
       ownerName: str,
       memberName: str,
@@ -1781,20 +1868,68 @@ export namespace Analyzer {
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::OwnerInvalid -> {
+          let nsOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupNamespaceQualifiedDeclaration(
+            state,
+            defStore,
+            symbols,
+            segments,
+            segCount,
+          );
+
+          if (let Option::SOME(nsDefId) = nsOpt) {
+            return Analyzer::ResolverBodies::ResolvedRef::Definition(nsDefId);
+          }
+
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::INVALID_ENTITY_POSITION, "left of '::' must be a record or enum");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::OwnerNotFound -> {
+          let nsOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupNamespaceQualifiedDeclaration(
+            state,
+            defStore,
+            symbols,
+            segments,
+            segCount,
+          );
+
+          if (let Option::SOME(nsDefId) = nsOpt) {
+            return Analyzer::ResolverBodies::ResolvedRef::Definition(nsDefId);
+          }
+
           let message: String = `undeclared name in path: \`${ownerName}\``;
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnEnum -> {
+          let nsOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupNamespaceQualifiedDeclaration(
+            state,
+            defStore,
+            symbols,
+            segments,
+            segCount,
+          );
+
+          if (let Option::SOME(nsDefId) = nsOpt) {
+            return Analyzer::ResolverBodies::ResolvedRef::Definition(nsDefId);
+          }
+
           let message: String = `unknown variant or static method: \`${memberName}\``;
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnRecord -> {
+          let nsOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupNamespaceQualifiedDeclaration(
+            state,
+            defStore,
+            symbols,
+            segments,
+            segCount,
+          );
+
+          if (let Option::SOME(nsDefId) = nsOpt) {
+            return Analyzer::ResolverBodies::ResolvedRef::Definition(nsDefId);
+          }
+
           let message: String = `unknown method or type in path: \`${memberName}\``;
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
@@ -1917,6 +2052,10 @@ export namespace Analyzer {
 
       let resolved: Analyzer::ResolverBodies::ResolvedRef = Analyzer::ResolverBodies::mapPathTailLookupToExprRef(
         state,
+        defStore,
+        symbols,
+        &p.segments,
+        segCount,
         p.span,
         ownerStr.toStr(),
         memberStr.toStr(),

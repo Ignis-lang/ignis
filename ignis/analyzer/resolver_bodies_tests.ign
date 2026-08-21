@@ -4763,3 +4763,148 @@ function resolveBodiesFirstItemNamespaceWrongPrefixIsRejected(): void {
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
 }
+
+/// Assert a ResolvedRef is Definition(Function) and return its DefinitionId.
+function assertResolvesToFunction(
+  defStore: &mut Analyzer::DefinitionStore,
+  r: Analyzer::ResolverBodies::ResolvedRef,
+): Analyzer::DefinitionId {
+  let defId: Analyzer::DefinitionId = assertDefinitionRef(r);
+  let Option::SOME(def) = defStore.get(defId) else {
+    @panic("assertResolvesToFunction: defId not found in defStore");
+  };
+
+  match (def) {
+    Analyzer::Definition::Function(_) -> {
+      return defId;
+    },
+    Analyzer::Definition::Method(_) -> {
+      @panic("assertResolvesToFunction: expected Function, got Method");
+    },
+    Analyzer::Definition::Record(_) -> {
+      @panic("assertResolvesToFunction: expected Function, got Record");
+    },
+    Analyzer::Definition::Enum(_) -> {
+      @panic("assertResolvesToFunction: expected Function, got Enum");
+    },
+    Analyzer::Definition::Variable(_) -> {
+      @panic("assertResolvesToFunction: expected Function, got Variable");
+    },
+    Analyzer::Definition::Field(_) -> {
+      @panic("assertResolvesToFunction: expected Function, got Field");
+    },
+    Analyzer::Definition::Variant(_) -> {
+      @panic("assertResolvesToFunction: expected Function, got Variant");
+    },
+    Analyzer::Definition::TypeParam(_) -> {
+      @panic("assertResolvesToFunction: expected Function, got TypeParam");
+    },
+    Analyzer::Definition::TypeAlias(_) -> {
+      @panic("assertResolvesToFunction: expected Function, got TypeAlias");
+    },
+    Analyzer::Definition::Trait(_) -> {
+      @panic("assertResolvesToFunction: expected Function, got Trait");
+    },
+  };
+}
+
+/// Scenario: `Outer::Inner::helper` (3 segments) where `helper` is a free
+/// function declared inside `namespace Outer { namespace Inner { ... } }`.
+/// The qualifier names a namespace chain, not a type, so the path resolves
+/// to the function itself with no diagnostics. IGN-151 follow-up (F1).
+@test
+function resolveBodiesNamespaceQualifiedFunctionResolves(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // namespace Outer { namespace Inner { function helper(): void { return; } } }
+  let mut helperBody: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  helperBody.push(addReturn(&mut module));
+  let helperId: Ast::ItemId = addMethodItem(&mut module, "helper", Vector::new<Ast::PatternId>(), helperBody);
+
+  let mut innerItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  innerItems.push(helperId);
+  let innerId: Ast::ItemId = module.addItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create("Inner"),
+    items: innerItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut outerItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  outerItems.push(innerId);
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create("Outer"),
+    items: outerItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { Outer::Inner::helper; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr3(&mut module, "Outer", "Inner", "helper");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  let _fnDefId: Analyzer::DefinitionId = assertResolvesToFunction(&mut defStore, ref_);
+}
+
+/// Scenario: `Inner::helper` (2 segments) — the same namespace function
+/// referenced with a partial qualifier. The written prefix matches a suffix
+/// of the declaration's namespace chain, so it resolves. IGN-151 follow-up (F1).
+@test
+function resolveBodiesPartialNamespaceQualifiedFunctionResolves(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // namespace Outer { namespace Inner { function helper(): void { return; } } }
+  let mut helperBody: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  helperBody.push(addReturn(&mut module));
+  let helperId: Ast::ItemId = addMethodItem(&mut module, "helper", Vector::new<Ast::PatternId>(), helperBody);
+
+  let mut innerItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  innerItems.push(helperId);
+  let innerId: Ast::ItemId = module.addItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create("Inner"),
+    items: innerItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut outerItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  outerItems.push(innerId);
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create("Outer"),
+    items: outerItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { Inner::helper; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "Inner", "helper");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  let _fnDefId: Analyzer::DefinitionId = assertResolvesToFunction(&mut defStore, ref_);
+}
