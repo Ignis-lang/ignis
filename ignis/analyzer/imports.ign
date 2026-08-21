@@ -42,6 +42,27 @@ export namespace Analyzer {
       public spans: Vector<SourceSpan>;
     }
 
+    /// Whether the overlay already binds `name`, readable through a mutable
+    /// borrow so a seeding walk can ask while it is still filling the overlay.
+    function overlayHasName(
+      overlay: &mut Analyzer::Imports::ImportOverlay,
+      name: Analyzer::SymbolId
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < overlay.syms.length()) {
+        if (let Option::SOME(candidate) = overlay.syms.get(index)) {
+          if (candidate.raw() == name.raw()) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     function emptyOverlay(): Analyzer::Imports::ImportOverlay {
       return Analyzer::Imports::ImportOverlay {
         syms: Vector::new<Analyzer::SymbolId>(),

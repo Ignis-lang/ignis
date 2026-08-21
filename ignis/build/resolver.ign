@@ -56,6 +56,10 @@ record AliasResolution {
 export record DiscoveryResult {
   public graph: BuildGraph;
   public order: Vector<u64>;
+  /// Absolute paths of the std modules the manifest auto-loads. Every module
+  /// sees their declarations without importing them, which is what makes
+  /// `Option`, `String` and the rest usable anywhere.
+  public preludePaths: Vector<Path::PathBuf>;
 
   public orderCount(&self): u64 {
     return self.order.length();
@@ -888,6 +892,29 @@ function resolverDiscoverProjectRoots(
 ): Result<DiscoveryResult, DiagnosticBag> {
   let mut graph: BuildGraph = BuildGraph::init();
   let mut stack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+
+  // The auto-loaded modules are roots of their own: nothing imports them, and
+  // every other module needs their declarations in scope.
+  let mut preludePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut preludeIndex: u64 = 0;
+
+  while (preludeIndex < manifest.autoLoadCount()) {
+    let Option::SOME(moduleName) = manifest.autoLoadText(preludeIndex) else {
+      preludeIndex += 1;
+      continue;
+    };
+
+    let mut candidateBase: Path::PathBuf = project.stdRoot.join(moduleName.toStr()).normalize();
+    if (let Option::SOME(relativePath) = manifest.modulePathText(moduleName.toStr())) {
+      candidateBase = project.stdRoot.join(relativePath.toStr()).normalize();
+    }
+
+    let mut preludeStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, BuildModuleKind::STD, &mut preludeStack)!;
+    preludePaths.push(candidateBase.clone());
+    preludeIndex += 1;
+  }
+
   let rootIndex: u64 = resolverDiscoverModule(project, manifest, &mut graph, &project.entry, BuildModuleKind::PROJECT, &mut stack)!;
   ModuleGraph::setRoot(&mut graph, rootIndex);
 
@@ -906,11 +933,15 @@ function resolverDiscoverProjectRoots(
     }
   }
 
-  let order: Vector<u64> = includeTestSources ? ModuleGraph::allModulesTopologicalOrder(&graph) : ModuleGraph::topologicalOrder(&graph);
+  // Every node is ordered, not only what the entry reaches: the prelude roots
+  // are reachable from nothing and still have to be analyzed, and before the
+  // modules that rely on them.
+  let order: Vector<u64> = ModuleGraph::allModulesTopologicalOrder(&graph);
 
   return Result::OK(DiscoveryResult {
     graph: graph,
     order: order,
+    preludePaths: preludePaths,
   });
 }
 

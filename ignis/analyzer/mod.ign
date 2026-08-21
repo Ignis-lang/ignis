@@ -468,12 +468,102 @@ export namespace Analyzer {
     };
   }
 
+  /// Whether `pathText` names one of the auto-loaded prelude modules.
+  function isPreludePath(preludePaths: &Vector<String>, pathText: &String): boolean {
+    let mut index: u64 = 0;
+
+    while (index < preludePaths.length()) {
+      if (let Option::SOME(candidate) = preludePaths.get(index)) {
+        if (candidate.equals(pathText.toStr())) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Add every declaration of the already-analyzed prelude modules to `overlay`.
+  ///
+  /// A module's own declarations win, and so does an explicit import: both are
+  /// written where the prelude is not, so neither is overridden here. The first
+  /// prelude module to declare a name keeps it, which mirrors the order the
+  /// manifest lists them in.
+  function seedPreludeOverlay(
+    overlay: &mut Analyzer::Imports::ImportOverlay,
+    currentDirect: &Analyzer::Imports::DirectDeclarationIndex,
+    records: &Vector<Analyzer::ModuleAnalysisRecord>,
+    preludePaths: &Vector<String>,
+    currentPath: &String,
+  ): void {
+    let mut recordIndex: u64 = 0;
+
+    while (recordIndex < records.length()) {
+      let Option::SOME(preludeRecord) = records.get(recordIndex) else {
+        recordIndex += 1;
+        continue;
+      };
+
+      if (!Analyzer::isPreludePath(preludePaths, &preludeRecord.info.pathText)) {
+        recordIndex += 1;
+        continue;
+      }
+
+      if (preludeRecord.info.pathText.equals(currentPath.toStr())) {
+        recordIndex += 1;
+        continue;
+      }
+
+      let mut declIndex: u64 = 0;
+
+      while (declIndex < preludeRecord.direct.syms.length()) {
+        let Option::SOME(name) = preludeRecord.direct.syms.get(declIndex) else {
+          declIndex += 1;
+          continue;
+        };
+        let Option::SOME(defId) = preludeRecord.direct.defs.get(declIndex) else {
+          declIndex += 1;
+          continue;
+        };
+        let Option::SOME(span) = preludeRecord.direct.spans.get(declIndex) else {
+          declIndex += 1;
+          continue;
+        };
+
+        if (Analyzer::Imports::directIndexSpan(currentDirect, *name).isSome()) {
+          declIndex += 1;
+          continue;
+        }
+
+        if (Analyzer::Imports::overlayHasName(overlay, *name)) {
+          declIndex += 1;
+          continue;
+        }
+
+        let mut overlayRef: &mut Analyzer::Imports::ImportOverlay = overlay;
+        Analyzer::Imports::appendOverlayEntry(
+          overlayRef,
+          *name,
+          *defId,
+          *span,
+          preludeRecord.info.index,
+        );
+        declIndex += 1;
+      }
+
+      recordIndex += 1;
+    }
+  }
+
   function analyzeProgram(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
     modules: &Vector<Ast::Module>,
     infos: &Vector<Analyzer::Imports::ModuleInfo>,
+    preludePaths: &Vector<String>,
   ): Vector<Analyzer::ModuleAnalysisRecord> {
     let mut records: Vector<Analyzer::ModuleAnalysisRecord> = Vector::new<Analyzer::ModuleAnalysisRecord>();
     let mut index: u64 = 0;
@@ -509,13 +599,15 @@ export namespace Analyzer {
         &pass2,
       );
       let mut importDiagnostics: DiagnosticBag = DiagnosticBag::init();
-      let overlay: Analyzer::Imports::ImportOverlay = Analyzer::buildImportOverlay(
+      let mut overlay: Analyzer::Imports::ImportOverlay = Analyzer::buildImportOverlay(
         module,
         &direct,
         &records,
         symbols,
         &mut importDiagnostics,
       );
+
+      Analyzer::seedPreludeOverlay(&mut overlay, &direct, &records, preludePaths, &info.pathText);
 
       let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypesWithImports(
         defStore,
