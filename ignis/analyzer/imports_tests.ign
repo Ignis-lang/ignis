@@ -575,8 +575,11 @@ function analyzeProgramPreservesModulesWhenInfosAreShort(): void {
   Test::assertEq<u64>(analysisRecord.output.diagnostics.length(), 0);
 }
 
+/// A namespace and the declarations inside it are both indexed: the corpus
+/// refers to a nested declaration by its bare name through a qualified path,
+/// so importing the namespace has to bring the name along.
 @test
-function directIndexKeepsOnlyRootDeclarationsWithRealSpans(): void {
+function directIndexCarriesNamespaceMembersWithRealSpans(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -601,19 +604,33 @@ function directIndexKeepsOnlyRootDeclarationsWithRealSpans(): void {
     @panic("missing namespace analysis record");
   };
 
-  Test::assertEq<u64>(analysisRecord.direct.defs.length(), 1);
-  let Option::SOME(directSym) = analysisRecord.direct.syms.get(0) else {
+  Test::assertEq<u64>(analysisRecord.direct.defs.length(), 2);
+
+  let Option::SOME(namespaceSym) = analysisRecord.direct.syms.get(0) else {
     @panic("missing direct declaration symbol");
   };
-  let Option::SOME(directName) = symbols.resolve(*directSym) else {
+  let Option::SOME(namespaceName) = symbols.resolve(*namespaceSym) else {
     @panic("missing direct declaration symbol name");
   };
   let Option::SOME(declarationSpan) = analysisRecord.direct.spans.get(0) else {
     @panic("missing direct declaration span");
   };
 
-  Test::assertEq<str>(directName, "Outer");
+  Test::assertEq<str>(namespaceName, "Outer");
   Test::assertEq<str>(declarationSpan.filePath, "imports_tests.ign");
+
+  let Option::SOME(memberSym) = analysisRecord.direct.syms.get(1) else {
+    @panic("missing nested declaration symbol");
+  };
+  let Option::SOME(memberName) = symbols.resolve(*memberSym) else {
+    @panic("missing nested declaration symbol name");
+  };
+  let Option::SOME(memberSpan) = analysisRecord.direct.spans.get(1) else {
+    @panic("missing nested declaration span");
+  };
+
+  Test::assertEq<str>(memberName, "inner");
+  Test::assertEq<str>(memberSpan.filePath, "imports_tests.ign");
 }
 
 @test

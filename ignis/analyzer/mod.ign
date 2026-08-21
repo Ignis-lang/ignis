@@ -228,6 +228,13 @@ export namespace Analyzer {
     }
   }
 
+  /// Whether `rawId` names an item another module can refer to.
+  ///
+  /// A root, the declaration an `export` wraps, or anything declared inside a
+  /// namespace at any depth: the corpus writes `Ast::Expression::Node` and
+  /// means the `Node` declared two namespaces deep, so the index has to carry
+  /// it. The qualifier is not validated here, the same debt the resolvers
+  /// already carry for the segments before the last.
   function moduleHasRootItemRaw(module: &Ast::Module, rawId: u32): boolean {
     let mut index: u64 = 0;
 
@@ -241,20 +248,73 @@ export namespace Analyzer {
         return true;
       }
 
-      if (let Option::SOME(rootItem) = module.items.get(*rootId)) {
-        if (let Ast::Item::Node::Export(exported) = rootItem) {
-          if (let Option::SOME(innerItemId) = exported.declaration) {
-            if (innerItemId.raw() == rawId) {
-              return true;
-            }
-          }
-        }
+      if (Analyzer::itemContainsDeclarationRaw(module, *rootId, rawId, 0)) {
+        return true;
       }
 
       index += 1;
     }
 
     return false;
+  }
+
+  /// Whether `rawId` is declared inside `itemId`, following namespace and
+  /// export nesting. `depth` guards against a malformed tree pointing at
+  /// itself; the corpus nests three deep at most.
+  function itemContainsDeclarationRaw(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    rawId: u32,
+    depth: u64,
+  ): boolean {
+    if (depth > 16) {
+      return false;
+    }
+
+    let Option::SOME(item) = module.items.get(itemId) else {
+      return false;
+    };
+
+    match (item) {
+      Ast::Item::Node::Export(exported) -> {
+        let Option::SOME(innerItemId) = exported.declaration else {
+          return false;
+        };
+
+        if (innerItemId.raw() == rawId) {
+          return true;
+        }
+
+        return Analyzer::itemContainsDeclarationRaw(module, innerItemId, rawId, depth + 1);
+      },
+      Ast::Item::Node::Namespace(namespaceItem) -> {
+        let mut childIndex: u64 = 0;
+
+        while (childIndex < namespaceItem.items.length()) {
+          let Option::SOME(childId) = namespaceItem.items.get(childIndex) else {
+            childIndex += 1;
+            continue;
+          };
+
+          if (childId.raw() == rawId) {
+            return true;
+          }
+
+          if (Analyzer::itemContainsDeclarationRaw(module, *childId, rawId, depth + 1)) {
+            return true;
+          }
+
+          childIndex += 1;
+        }
+
+        return false;
+      },
+      _ -> {
+        return false;
+      },
+    };
+
+    @panic("unreachable: itemContainsDeclarationRaw match did not return");
   }
 
   function itemSpanOrEmpty(module: &Ast::Module, rawId: u32): SourceSpan {
