@@ -191,6 +191,100 @@ export namespace Analyzer {
   /// A member is recognised by its path starting with `sourceName::`, and is
   /// rewritten to start with the local name so an aliased import reads the way
   /// it was written. Names the importing module declares itself are left alone.
+  /// Re-export what `import _ from "..."` pulls in.
+  ///
+  /// The corpus splits one namespace across files and gathers them in an
+  /// aggregate module that imports each part with a discarded binding and
+  /// declares nothing itself. Everyone imports the aggregate, so unless the
+  /// parts pass through it, none of them is ever reachable.
+  function appendReExportedDeclarations(
+    direct: &mut Analyzer::Imports::DirectDeclarationIndex,
+    module: &Ast::Module,
+    records: &Vector<Analyzer::ModuleAnalysisRecord>,
+  ): void {
+    let mut rootIndex: u64 = 0;
+
+    while (rootIndex < module.roots.length()) {
+      let Option::SOME(rootId) = module.roots.get(rootIndex) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(item) = module.items.get(*rootId) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Ast::Item::Node::Import(importItem) = item else {
+        rootIndex += 1;
+        continue;
+      };
+
+      if (!Analyzer::importDiscardsItsBindings(&importItem)) {
+        rootIndex += 1;
+        continue;
+      }
+
+      let Option::SOME(recordIndex) = Analyzer::importRecordIndexForSource(records, &importItem.source) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(targetRecord) = records.get(recordIndex) else {
+        rootIndex += 1;
+        continue;
+      };
+
+      let mut declIndex: u64 = 0;
+
+      while (declIndex < targetRecord.direct.syms.length()) {
+        let Option::SOME(name) = targetRecord.direct.syms.get(declIndex) else {
+          declIndex += 1;
+          continue;
+        };
+        let Option::SOME(defId) = targetRecord.direct.defs.get(declIndex) else {
+          declIndex += 1;
+          continue;
+        };
+        let Option::SOME(span) = targetRecord.direct.spans.get(declIndex) else {
+          declIndex += 1;
+          continue;
+        };
+
+        let mut qualifiedName: String = String::create("");
+        if (let Option::SOME(stored) = targetRecord.direct.qualifiedNames.get(declIndex)) {
+          qualifiedName = stored.clone();
+        }
+
+        Analyzer::Imports::appendDirectIndexEntryIfMissing(direct, *name, *defId, *span, qualifiedName);
+        declIndex += 1;
+      }
+
+      rootIndex += 1;
+    }
+  }
+
+  /// Whether every binding an import writes is discarded, which is how the
+  /// corpus spells "bring this module in whole".
+  function importDiscardsItsBindings(importItem: &Ast::Item::Import): boolean {
+    if (importItem.items.isEmpty()) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < importItem.items.length()) {
+      let Option::SOME(binding) = importItem.items.get(index) else {
+        return false;
+      };
+
+      if (binding.kind != Ast::ImportBindingKind::Discard) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
   function appendNamespaceMembers(
     overlay: &mut Analyzer::Imports::ImportOverlay,
     currentDirect: &Analyzer::Imports::DirectDeclarationIndex,
@@ -824,12 +918,14 @@ export namespace Analyzer {
         &pass1,
       );
 
-      let direct: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
+      let mut direct: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
         defStore,
         module,
         &pass1,
         &pass2,
       );
+
+      Analyzer::appendReExportedDeclarations(&mut direct, module, &records);
       let mut importDiagnostics: DiagnosticBag = DiagnosticBag::init();
       let mut overlay: Analyzer::Imports::ImportOverlay = Analyzer::buildImportOverlay(
         module,
