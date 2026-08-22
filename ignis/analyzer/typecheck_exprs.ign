@@ -826,9 +826,38 @@ export namespace Analyzer {
         },
       };
 
+      // The resolver stops at the first same-name function; sibling overloads
+      // share the same published path, and the arguments pick among them.
+      let mut selectedFunctionDefId: Analyzer::DefinitionId = functionDefId;
+      let functionCandidates: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::freeFunctionOverloadCandidates(defStore, functionDefId);
+
+      if (functionCandidates.length() > 1) {
+        let functionNameOpt: Option<str> = Analyzer::Typecheck::functionDefName(defStore, symbols, functionDefId);
+        let functionName: str = match (functionNameOpt) {
+          Option::SOME(n) -> n,
+          Option::NONE -> "function",
+        };
+        let selectedOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::selectStaticMethodOverload(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          &functionCandidates,
+          call,
+          call.span,
+          functionName,
+        );
+        let Option::SOME(selected) = selectedOpt else {
+          return Option::NONE;
+        };
+        selectedFunctionDefId = selected;
+      }
+
       let signatureOpt: Option<Analyzer::Typecheck::FunctionSignature> = Analyzer::Typecheck::extractFunctionSignature(
         defStore,
-        functionDefId,
+        selectedFunctionDefId,
       );
       let Option::SOME(signature) = signatureOpt else {
         Analyzer::Typecheck::emitUnsupported(state, call.span, "calls through non-function definitions");
@@ -844,7 +873,7 @@ export namespace Analyzer {
         resolvedBodies,
         callExprId,
         call,
-        functionDefId,
+        selectedFunctionDefId,
         &signature,
       );
     }
@@ -1240,6 +1269,77 @@ export namespace Analyzer {
       signature: &Analyzer::Typecheck::FunctionSignature,
     ): Option<Analyzer::TypeId> {
       if (call.typeArguments.length() == 0) {
+        // A generic function called without written type arguments infers
+        // them from the argument types, the way the host's unification does:
+        // the first argument whose declared/actual pair binds every type
+        // parameter decides.
+        let inferSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, functionDefId);
+
+        if (inferSymbols.length() > 0 && call.arguments.length() > 0) {
+          let declaredParams: Vector<Analyzer::TypeId> = Analyzer::Typecheck::staticOverloadParamTypes(defStore, functionDefId)!;
+
+          let mut inferArgTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut inferArgIndex: u64 = 0;
+          while (inferArgIndex < call.arguments.length()) {
+            let Option::SOME(argExprId) = call.arguments.get(inferArgIndex) else {
+              inferArgIndex += 1;
+              continue;
+            };
+            let Option::SOME(argType) = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *argExprId) else {
+              return Option::NONE;
+            };
+            inferArgTypes.push(argType);
+            inferArgIndex += 1;
+          }
+
+          let mut pairIndex: u64 = 0;
+          while (pairIndex < inferArgTypes.length() && pairIndex < declaredParams.length()) {
+            let Option::SOME(declaredParam) = declaredParams.get(pairIndex) else {
+              pairIndex += 1;
+              continue;
+            };
+            let Option::SOME(argType) = inferArgTypes.get(pairIndex) else {
+              pairIndex += 1;
+              continue;
+            };
+
+            let mut typeStoreInferRef: &mut Analyzer::TypeStore = typeStore;
+            if (let Option::SOME(resolvedArgs) = typeStoreInferRef.inferTypeArguments(*declaredParam, *argType, &inferSymbols)) {
+              let mut specializedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+              let mut substituteIndex: u64 = 0;
+
+              while (substituteIndex < declaredParams.length()) {
+                let Option::SOME(paramType) = declaredParams.get(substituteIndex) else {
+                  substituteIndex += 1;
+                  continue;
+                };
+
+                let mut typeStoreSubRef: &mut Analyzer::TypeStore = typeStore;
+                specializedParams.push(typeStoreSubRef.substitute(*paramType, &inferSymbols, &resolvedArgs));
+                substituteIndex += 1;
+              }
+
+              let mut typeStoreRetRef: &mut Analyzer::TypeStore = typeStore;
+              let specializedReturn: Analyzer::TypeId = typeStoreRetRef.substitute(signature.returnType, &inferSymbols, &resolvedArgs);
+
+              return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+                state,
+                defStore,
+                typeStore,
+                symbols,
+                module,
+                resolvedBodies,
+                callExprId,
+                call,
+                &specializedParams,
+                specializedReturn,
+              );
+            }
+
+            pairIndex += 1;
+          }
+        }
+
         return Analyzer::Typecheck::checkCallArgumentsAgainstSignature(
           state,
           defStore,
@@ -1793,6 +1893,75 @@ export namespace Analyzer {
       };
 
       return symbols.resolve(methodDef.name);
+    }
+
+    /// The function's declared name, for diagnostics.
+    function functionDefName(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      functionDefId: Analyzer::DefinitionId,
+    ): Option<str> {
+      let Option::SOME(Analyzer::Definition::Function(functionDef)) = defStore.get(functionDefId) else {
+        return Option::NONE;
+      };
+
+      return symbols.resolve(functionDef.name);
+    }
+
+    /// The free-function overload set: every function definition sharing the
+    /// name AND the published written path (`Fs::read`), so same-named
+    /// functions in different namespaces stay apart.
+    function freeFunctionOverloadCandidates(
+      defStore: &mut Analyzer::DefinitionStore,
+      functionDefId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      let Option::SOME(Analyzer::Definition::Function(functionDef)) = defStore.get(functionDefId) else {
+        out.push(functionDefId);
+        return out;
+      };
+
+      let nameSym: Analyzer::SymbolId = functionDef.name;
+
+      let mut qualifiedName: String = String::create("");
+      if (let Option::SOME(stored) = defStore.qualifiedNameOf(functionDefId)) {
+        qualifiedName = stored.clone();
+      }
+
+      if (qualifiedName.length() == 0) {
+        out.push(functionDefId);
+        return out;
+      }
+
+      let mut index: u64 = 0;
+      while (index < defStore.length()) {
+        let candidateDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+        let mut sameName: boolean = false;
+        if (let Option::SOME(Analyzer::Definition::Function(candidateDef)) = defStore.get(candidateDefId)) {
+          sameName = candidateDef.name.raw() == nameSym.raw();
+        }
+
+        if (!sameName) {
+          index += 1;
+          continue;
+        }
+
+        if (let Option::SOME(candidateQualified) = defStore.qualifiedNameOf(candidateDefId)) {
+          if (candidateQualified.equals(qualifiedName.toStr())) {
+            out.push(candidateDefId);
+          }
+        }
+
+        index += 1;
+      }
+
+      if (out.length() == 0) {
+        out.push(functionDefId);
+      }
+
+      return out;
     }
 
     /// The declared parameter types of a static method — no self slot to skip.
