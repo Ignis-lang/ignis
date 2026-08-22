@@ -59,10 +59,35 @@ export namespace Analyzer {
     return Option::NONE;
   }
 
+  /// The module-vector position whose path equals `source`, from the info
+  /// list — usable before any analysis record exists.
+  function importModuleIndexForSource(
+    infos: &Vector<Analyzer::Imports::ModuleInfo>,
+    source: &String,
+  ): Option<u64> {
+    let mut index: u64 = 0;
+
+    while (index < infos.length()) {
+      let Option::SOME(info) = infos.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (info.pathText.equals(source.toStr())) {
+        return Option::SOME(index);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
   function buildImportOverlay(
     module: &Ast::Module,
     currentDirect: &Analyzer::Imports::DirectDeclarationIndex,
-    records: &Vector<Analyzer::ModuleAnalysisRecord>,
+    directs: &Vector<Analyzer::Imports::DirectDeclarationIndex>,
+    infos: &Vector<Analyzer::Imports::ModuleInfo>,
     symbols: &mut Analyzer::SymbolTable,
     diagnostics: &mut DiagnosticBag,
   ): Analyzer::Imports::ImportOverlay {
@@ -84,7 +109,7 @@ export namespace Analyzer {
         continue;
       };
 
-      let Option::SOME(recordIndex) = Analyzer::importRecordIndexForSource(records, &importItem.source) else {
+      let Option::SOME(recordIndex) = Analyzer::importModuleIndexForSource(infos, &importItem.source) else {
         Analyzer::Imports::appendImportSourceDiagnostic(
           diagnostics,
           importItem.source.toStr(),
@@ -93,10 +118,11 @@ export namespace Analyzer {
         rootIndex += 1;
         continue;
       };
-      let Option::SOME(targetRecord) = records.get(recordIndex) else {
+      let Option::SOME(targetDirect) = directs.get(recordIndex) else {
         rootIndex += 1;
         continue;
       };
+      let targetModuleIndex: u64 = Analyzer::moduleInfoAt(infos, recordIndex).index;
 
       let mut bindingIndex: u64 = 0;
       while (bindingIndex < importItem.items.length()) {
@@ -112,9 +138,9 @@ export namespace Analyzer {
           Analyzer::appendDiscardImportedDeclarations(
             &mut overlay,
             currentDirect,
-            &targetRecord.direct,
+            targetDirect,
             binding.span,
-            targetRecord.info.index,
+            targetModuleIndex,
           );
           bindingIndex += 1;
           continue;
@@ -155,7 +181,7 @@ export namespace Analyzer {
           continue;
         }
 
-        let Option::SOME(targetDef) = Analyzer::Imports::directIndexFind(&targetRecord.direct, sourceName) else {
+        let Option::SOME(targetDef) = Analyzer::Imports::directIndexFind(targetDirect, sourceName) else {
           Analyzer::Imports::appendImportMissingDiagnostic(
             diagnostics,
             sourceNameText.toStr(),
@@ -171,7 +197,7 @@ export namespace Analyzer {
           localName,
           targetDef,
           binding.span,
-          targetRecord.info.index,
+          targetModuleIndex,
         );
 
         // Importing a namespace brings what it declares: the corpus writes
@@ -181,11 +207,11 @@ export namespace Analyzer {
         Analyzer::appendNamespaceMembers(
           &mut overlay,
           currentDirect,
-          &targetRecord.direct,
+          targetDirect,
           sourceNameText.toStr(),
           localNameText.toStr(),
           binding.span,
-          targetRecord.info.index,
+          targetModuleIndex,
         );
         bindingIndex += 1;
       }
@@ -210,7 +236,8 @@ export namespace Analyzer {
   function appendReExportedDeclarations(
     direct: &mut Analyzer::Imports::DirectDeclarationIndex,
     module: &Ast::Module,
-    records: &Vector<Analyzer::ModuleAnalysisRecord>,
+    directs: &Vector<Analyzer::Imports::DirectDeclarationIndex>,
+    infos: &Vector<Analyzer::Imports::ModuleInfo>,
   ): void {
     let mut rootIndex: u64 = 0;
 
@@ -233,33 +260,33 @@ export namespace Analyzer {
         continue;
       }
 
-      let Option::SOME(recordIndex) = Analyzer::importRecordIndexForSource(records, &importItem.source) else {
+      let Option::SOME(recordIndex) = Analyzer::importModuleIndexForSource(infos, &importItem.source) else {
         rootIndex += 1;
         continue;
       };
-      let Option::SOME(targetRecord) = records.get(recordIndex) else {
+      let Option::SOME(targetDirect) = directs.get(recordIndex) else {
         rootIndex += 1;
         continue;
       };
 
       let mut declIndex: u64 = 0;
 
-      while (declIndex < targetRecord.direct.syms.length()) {
-        let Option::SOME(name) = targetRecord.direct.syms.get(declIndex) else {
+      while (declIndex < targetDirect.syms.length()) {
+        let Option::SOME(name) = targetDirect.syms.get(declIndex) else {
           declIndex += 1;
           continue;
         };
-        let Option::SOME(defId) = targetRecord.direct.defs.get(declIndex) else {
+        let Option::SOME(defId) = targetDirect.defs.get(declIndex) else {
           declIndex += 1;
           continue;
         };
-        let Option::SOME(span) = targetRecord.direct.spans.get(declIndex) else {
+        let Option::SOME(span) = targetDirect.spans.get(declIndex) else {
           declIndex += 1;
           continue;
         };
 
         let mut qualifiedName: String = String::create("");
-        if (let Option::SOME(stored) = targetRecord.direct.qualifiedNames.get(declIndex)) {
+        if (let Option::SOME(stored) = targetDirect.qualifiedNames.get(declIndex)) {
           qualifiedName = stored.clone();
         }
 
@@ -951,40 +978,42 @@ export namespace Analyzer {
   function seedPreludeOverlay(
     overlay: &mut Analyzer::Imports::ImportOverlay,
     currentDirect: &Analyzer::Imports::DirectDeclarationIndex,
-    records: &Vector<Analyzer::ModuleAnalysisRecord>,
+    directs: &Vector<Analyzer::Imports::DirectDeclarationIndex>,
+    infos: &Vector<Analyzer::Imports::ModuleInfo>,
     preludePaths: &Vector<String>,
     currentPath: &String,
   ): void {
     let mut recordIndex: u64 = 0;
 
-    while (recordIndex < records.length()) {
-      let Option::SOME(preludeRecord) = records.get(recordIndex) else {
+    while (recordIndex < directs.length()) {
+      let Option::SOME(preludeDirect) = directs.get(recordIndex) else {
         recordIndex += 1;
         continue;
       };
+      let preludeInfo: Analyzer::Imports::ModuleInfo = Analyzer::moduleInfoAt(infos, recordIndex);
 
-      if (!Analyzer::isPreludePath(preludePaths, &preludeRecord.info.pathText)) {
+      if (!Analyzer::isPreludePath(preludePaths, &preludeInfo.pathText)) {
         recordIndex += 1;
         continue;
       }
 
-      if (preludeRecord.info.pathText.equals(currentPath.toStr())) {
+      if (preludeInfo.pathText.equals(currentPath.toStr())) {
         recordIndex += 1;
         continue;
       }
 
       let mut declIndex: u64 = 0;
 
-      while (declIndex < preludeRecord.direct.syms.length()) {
-        let Option::SOME(name) = preludeRecord.direct.syms.get(declIndex) else {
+      while (declIndex < preludeDirect.syms.length()) {
+        let Option::SOME(name) = preludeDirect.syms.get(declIndex) else {
           declIndex += 1;
           continue;
         };
-        let Option::SOME(defId) = preludeRecord.direct.defs.get(declIndex) else {
+        let Option::SOME(defId) = preludeDirect.defs.get(declIndex) else {
           declIndex += 1;
           continue;
         };
-        let Option::SOME(span) = preludeRecord.direct.spans.get(declIndex) else {
+        let Option::SOME(span) = preludeDirect.spans.get(declIndex) else {
           declIndex += 1;
           continue;
         };
@@ -1005,7 +1034,7 @@ export namespace Analyzer {
           *name,
           *defId,
           *span,
-          preludeRecord.info.index,
+          preludeInfo.index,
           String::create(""),
           true,
         );
@@ -1024,16 +1053,22 @@ export namespace Analyzer {
     infos: &Vector<Analyzer::Imports::ModuleInfo>,
     preludePaths: &Vector<String>,
   ): Vector<Analyzer::ModuleAnalysisRecord> {
-    let mut records: Vector<Analyzer::ModuleAnalysisRecord> = Vector::new<Analyzer::ModuleAnalysisRecord>();
     let mut programIndex: Analyzer::Imports::ProgramQualifiedIndex = Analyzer::Imports::emptyProgramQualifiedIndex();
-    let mut index: u64 = 0;
+    let mut pass1s: Vector<Analyzer::Binder::BinderOutput> = Vector::new<Analyzer::Binder::BinderOutput>();
+    let mut pass2s: Vector<Analyzer::Binder::BinderOutput> = Vector::new<Analyzer::Binder::BinderOutput>();
+    let mut directs: Vector<Analyzer::Imports::DirectDeclarationIndex> = Vector::new<Analyzer::Imports::DirectDeclarationIndex>();
 
-    while (index < modules.length()) {
-      let Option::SOME(module) = modules.get(index) else {
-        index += 1;
+    // Phase 1: bind every module before resolving any of them. The prelude
+    // modules use each other (String returns Option, Option prints through
+    // String), so no single analysis order lets one see the other unless all
+    // declarations exist first — the host gets this from its shared stores.
+    let mut bindIndex: u64 = 0;
+
+    while (bindIndex < modules.length()) {
+      let Option::SOME(module) = modules.get(bindIndex) else {
+        bindIndex += 1;
         continue;
       };
-      let info: Analyzer::Imports::ModuleInfo = Analyzer::moduleInfoAt(infos, index);
 
       let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
         &module.roots,
@@ -1059,23 +1094,88 @@ export namespace Analyzer {
         &pass2,
       );
 
+      // The shared index a module publishes includes what its discarded
+      // imports pull in, or a named import against an aggregator module
+      // would find nothing. Targets are dependencies, so they are already
+      // in `directs` when their importer binds.
+      Analyzer::appendReExportedDeclarations(&mut direct, module, &directs, infos);
       Analyzer::appendDirectToProgramIndex(&mut programIndex, &direct);
 
-      // The overlay is built against the module's own declarations only:
-      // re-exported names are appended to `direct` afterwards, or the
+      pass1s.push(pass1);
+      pass2s.push(pass2);
+      directs.push(direct);
+      bindIndex += 1;
+    }
+
+    // Phase 2 must walk in dependency order — the resolver is what patches a
+    // function's VOID placeholder types with its declared ones, so a caller
+    // resolved before its dependency would see void signatures. The binder
+    // outputs are popped into each record, so the vectors are inverted once
+    // and popping them walks the modules forward.
+    let mut pass1sReversed: Vector<Analyzer::Binder::BinderOutput> = Vector::new<Analyzer::Binder::BinderOutput>();
+    let mut pass2sReversed: Vector<Analyzer::Binder::BinderOutput> = Vector::new<Analyzer::Binder::BinderOutput>();
+    let mut invertIndex: u64 = modules.length();
+
+    while (invertIndex > 0) {
+      invertIndex -= 1;
+
+      let Option::SOME(pass1Entry) = pass1s.pop() else {
+        continue;
+      };
+      pass1sReversed.push(pass1Entry);
+
+      let Option::SOME(pass2Entry) = pass2s.pop() else {
+        continue;
+      };
+      pass2sReversed.push(pass2Entry);
+    }
+
+    let mut records: Vector<Analyzer::ModuleAnalysisRecord> = Vector::new<Analyzer::ModuleAnalysisRecord>();
+    let mut index: u64 = 0;
+
+    while (index < modules.length()) {
+      let pass2Popped: Option<Analyzer::Binder::BinderOutput> = pass2sReversed.pop();
+      let pass1Popped: Option<Analyzer::Binder::BinderOutput> = pass1sReversed.pop();
+
+      let Option::SOME(module) = modules.get(index) else {
+        index += 1;
+        continue;
+      };
+      let info: Analyzer::Imports::ModuleInfo = Analyzer::moduleInfoAt(infos, index);
+      let Option::SOME(pass1) = pass1Popped else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(pass2) = pass2Popped else {
+        index += 1;
+        continue;
+      };
+
+      // The record's own direct index is rebuilt (it is pure derived data),
+      // then extended with re-exports now that every module's declarations
+      // are visible. The overlay is built against the module's own
+      // declarations only: re-exported names are appended afterwards, or the
       // own-declaration skip inside the overlay build would drop every
       // discard-imported name as if this module had declared it.
+      let mut direct: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
+        defStore,
+        module,
+        &pass1,
+        &pass2,
+      );
+
       let mut importDiagnostics: DiagnosticBag = DiagnosticBag::init();
       let mut overlay: Analyzer::Imports::ImportOverlay = Analyzer::buildImportOverlay(
         module,
         &direct,
-        &records,
+        &directs,
+        infos,
         symbols,
         &mut importDiagnostics,
       );
 
-      Analyzer::seedPreludeOverlay(&mut overlay, &direct, &records, preludePaths, &info.pathText);
-      Analyzer::appendReExportedDeclarations(&mut direct, module, &records);
+      Analyzer::seedPreludeOverlay(&mut overlay, &direct, &directs, infos, preludePaths, &info.pathText);
+      Analyzer::appendReExportedDeclarations(&mut direct, module, &directs, infos);
 
       let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypesWithImports(
         defStore,
