@@ -106,6 +106,16 @@ export namespace Analyzer {
         };
 
         if (binding.kind == Ast::ImportBindingKind::Discard) {
+          // `import _` binds no name, but the corpus writes it to bring a
+          // sibling part file in whole and refer to its declarations by
+          // qualified path afterwards.
+          Analyzer::appendDiscardImportedDeclarations(
+            &mut overlay,
+            currentDirect,
+            &targetRecord.direct,
+            binding.span,
+            targetRecord.info.index,
+          );
           bindingIndex += 1;
           continue;
         }
@@ -285,6 +295,96 @@ export namespace Analyzer {
     return true;
   }
 
+  /// Bring every declaration of a discard-imported module into the overlay.
+  ///
+  /// Each entry keeps the path it is written as in the target, so a qualified
+  /// reference like `Analyzer::Definition` still tells apart declarations that
+  /// share a bare name. Names the importing module declares itself are left
+  /// alone, and an entry already brought in (same name, same written path) is
+  /// not repeated.
+  function appendDiscardImportedDeclarations(
+    overlay: &mut Analyzer::Imports::ImportOverlay,
+    currentDirect: &Analyzer::Imports::DirectDeclarationIndex,
+    targetDirect: &Analyzer::Imports::DirectDeclarationIndex,
+    importSpan: SourceSpan,
+    targetModule: u64,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < targetDirect.syms.length()) {
+      let Option::SOME(memberSym) = targetDirect.syms.get(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(memberDef) = targetDirect.defs.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (Analyzer::Imports::directIndexSpan(currentDirect, *memberSym).isSome()) {
+        index += 1;
+        continue;
+      }
+
+      let mut qualifiedName: String = String::create("");
+      if (let Option::SOME(stored) = targetDirect.qualifiedNames.get(index)) {
+        qualifiedName = stored.clone();
+      }
+
+      if (Analyzer::overlayHasQualifiedEntry(overlay, *memberSym, &qualifiedName)) {
+        index += 1;
+        continue;
+      }
+
+      Analyzer::Imports::appendQualifiedOverlayEntry(
+        overlay,
+        *memberSym,
+        *memberDef,
+        importSpan,
+        targetModule,
+        qualifiedName.clone(),
+        true,
+      );
+      index += 1;
+    }
+  }
+
+  /// Whether the overlay already carries an entry with this name and written
+  /// path, which is what repeating a discard import of the same module would
+  /// produce.
+  function overlayHasQualifiedEntry(
+    overlay: &mut Analyzer::Imports::ImportOverlay,
+    name: Analyzer::SymbolId,
+    qualifiedName: &String,
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < overlay.syms.length()) {
+      let Option::SOME(candidate) = overlay.syms.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (candidate.raw() != name.raw()) {
+        index += 1;
+        continue;
+      }
+
+      let Option::SOME(storedQualified) = overlay.qualifiedNames.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (storedQualified.equals(qualifiedName.toStr())) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
   function appendNamespaceMembers(
     overlay: &mut Analyzer::Imports::ImportOverlay,
     currentDirect: &Analyzer::Imports::DirectDeclarationIndex,
@@ -332,6 +432,7 @@ export namespace Analyzer {
         importSpan,
         targetModule,
         localPath,
+        true,
       );
       index += 1;
     }
@@ -869,12 +970,14 @@ export namespace Analyzer {
         }
 
         let mut overlayRef: &mut Analyzer::Imports::ImportOverlay = overlay;
-        Analyzer::Imports::appendOverlayEntry(
+        Analyzer::Imports::appendQualifiedOverlayEntry(
           overlayRef,
           *name,
           *defId,
           *span,
           preludeRecord.info.index,
+          String::create(""),
+          true,
         );
         declIndex += 1;
       }
@@ -925,7 +1028,10 @@ export namespace Analyzer {
         &pass2,
       );
 
-      Analyzer::appendReExportedDeclarations(&mut direct, module, &records);
+      // The overlay is built against the module's own declarations only:
+      // re-exported names are appended to `direct` afterwards, or the
+      // own-declaration skip inside the overlay build would drop every
+      // discard-imported name as if this module had declared it.
       let mut importDiagnostics: DiagnosticBag = DiagnosticBag::init();
       let mut overlay: Analyzer::Imports::ImportOverlay = Analyzer::buildImportOverlay(
         module,
@@ -936,6 +1042,7 @@ export namespace Analyzer {
       );
 
       Analyzer::seedPreludeOverlay(&mut overlay, &direct, &records, preludePaths, &info.pathText);
+      Analyzer::appendReExportedDeclarations(&mut direct, module, &records);
 
       let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypesWithImports(
         defStore,

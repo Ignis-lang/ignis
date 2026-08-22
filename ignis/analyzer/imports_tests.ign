@@ -19,6 +19,7 @@ function importsEmptyOverlay(): Analyzer::Imports::ImportOverlay {
     spans: Vector::new<SourceSpan>(),
     targets: Vector::new<u64>(),
     qualifiedNames: Vector::new<String>(),
+    implicit: Vector::new<boolean>(),
   };
 }
 
@@ -836,7 +837,7 @@ function importOverlayDiagnosesLocalDeclarationConflict(): void {
 }
 
 @test
-function importOverlaySkipsDiscardBinding(): void {
+function importOverlayDiscardBindingBringsModuleDeclarations(): void {
   let first: Ast::Module = importsFunctionModule("Exported");
   let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
   bindings.push(importsDiscardBinding());
@@ -847,8 +848,17 @@ function importOverlaySkipsDiscardBinding(): void {
     @panic("missing importing record");
   };
 
-  Test::assertEq<u64>(importingRecord.imports.syms.length(), 0);
+  // `import _ from "..."` binds no name, but the corpus writes it to bring a
+  // sibling part file in whole, referring to its declarations by qualified
+  // path afterwards. The overlay must therefore carry the target's
+  // declarations, each with the path it is written as.
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 1);
   Test::assertEq<u64>(importingRecord.output.diagnostics.length(), 0);
+
+  let Option::SOME(qualifiedName) = importingRecord.imports.qualifiedNames.get(0) else {
+    @panic("missing qualified name on discard-imported declaration");
+  };
+  Test::assertEq<str>(qualifiedName.toStr(), "Exported");
 }
 
 @test

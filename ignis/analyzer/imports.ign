@@ -38,6 +38,11 @@ export namespace Analyzer {
       /// qualified reference can tell apart declarations that share a bare
       /// name across namespaces. Empty for an entry bound by a plain import.
       public qualifiedNames: Vector<String>;
+      /// True for an entry no import line names: a namespace member, a
+      /// discard-imported declaration, or a prelude seed. Implicit entries
+      /// are exempt from the unused-import lint — the writer never wrote
+      /// them, so there is nothing for them to remove.
+      public implicit: Vector<boolean>;
     }
 
     record DirectDeclarationIndex {
@@ -77,6 +82,7 @@ export namespace Analyzer {
         spans: Vector::new<SourceSpan>(),
         targets: Vector::new<u64>(),
         qualifiedNames: Vector::new<String>(),
+        implicit: Vector::new<boolean>(),
       };
     }
 
@@ -185,6 +191,7 @@ export namespace Analyzer {
         importSpan,
         targetModule,
         String::create(""),
+        false,
       );
     }
 
@@ -200,6 +207,7 @@ export namespace Analyzer {
       importSpan: SourceSpan,
       targetModule: u64,
       qualifiedName: String,
+      implicit: boolean,
     ): void {
       let mut overlayRef: &mut Analyzer::Imports::ImportOverlay = overlay;
       overlayRef.syms.push(localName);
@@ -207,6 +215,7 @@ export namespace Analyzer {
       overlayRef.spans.push(importSpan);
       overlayRef.targets.push(targetModule);
       overlayRef.qualifiedNames.push(qualifiedName);
+      overlayRef.implicit.push(implicit);
     }
 
     function appendDirectIndexEntryIfMissing(
