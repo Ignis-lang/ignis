@@ -1,0 +1,1448 @@
+import Vector from "std::vector";
+
+import SourceSpan from "@compiler::diagnostics";
+import Id from "@compiler::ids";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+
+/// HIR monomorphization for the selfhost compiler (IGN-156), mirroring
+/// `ignis_analyzer::mono::Monomorphizer`. Generic definitions reached from
+/// concrete roots are cloned per distinct type-argument list; bodies are
+/// cloned with `Type::Param` substituted away and nested generic calls
+/// rewritten to their concrete clones, to a fixpoint. The output store must
+/// contain no `Param` or `Instance` type — `countRemainingGenerics` is the
+/// measured-loop gate the driver prints.
+export namespace Mono {
+  /// One requested instantiation: a generic function/record/enum with its
+  /// concrete arguments, or a method reached through a generic owner. The
+  /// method form carries the owner's arguments so `self`-typed parameters
+  /// and owner-parameterized locals substitute correctly.
+  record InstanceKey {
+    public primaryDef: Analyzer::DefinitionId;
+    /// `SOME` for the method form: the generic owner the method belongs to.
+    public ownerDef: Option<Analyzer::DefinitionId>;
+    public ownerArgs: Vector<Analyzer::TypeId>;
+    public methodArgs: Vector<Analyzer::TypeId>;
+  }
+
+  function copyTypeIds(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
+    let mut result: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(id) = source.get(index)) {
+        result.push(*id);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function copyKey(key: &Mono::InstanceKey): Mono::InstanceKey {
+    return Mono::InstanceKey {
+      primaryDef: key.primaryDef,
+      ownerDef: key.ownerDef,
+      ownerArgs: Mono::copyTypeIds(&key.ownerArgs),
+      methodArgs: Mono::copyTypeIds(&key.methodArgs),
+    };
+  }
+
+  function typeIdsEqual(
+    left: &Vector<Analyzer::TypeId>,
+    right: &Vector<Analyzer::TypeId>
+  ): boolean {
+    if (left.length() != right.length()) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < left.length()) {
+      let Option::SOME(leftId) = left.get(index) else {
+        return false;
+      };
+      let Option::SOME(rightId) = right.get(index) else {
+        return false;
+      };
+
+      if (leftId.raw() != rightId.raw()) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  function keysEqual(left: &Mono::InstanceKey, right: &Mono::InstanceKey): boolean {
+    if (left.primaryDef.raw() != right.primaryDef.raw()) {
+      return false;
+    }
+
+    let leftOwnerRaw: i64 = match (&left.ownerDef) {
+      Option::SOME(ownerId) -> ownerId.raw() as i64,
+      Option::NONE -> -1,
+    };
+    let rightOwnerRaw: i64 = match (&right.ownerDef) {
+      Option::SOME(ownerId) -> ownerId.raw() as i64,
+      Option::NONE -> -1,
+    };
+
+    if (leftOwnerRaw != rightOwnerRaw) {
+      return false;
+    }
+
+    if (!Mono::typeIdsEqual(&left.ownerArgs, &right.ownerArgs)) {
+      return false;
+    }
+
+    return Mono::typeIdsEqual(&left.methodArgs, &right.methodArgs);
+  }
+
+  /// Monomorphization state: the instantiation cache (parallel vectors, the
+  /// deterministic map idiom), the worklist, and the substitution table of
+  /// definition remaps active while one body is cloned.
+  record MonoState {
+    public cacheKeys: Vector<Mono::InstanceKey>;
+    public cacheConcreteDefs: Vector<Analyzer::DefinitionId>;
+    /// Parallel to `cacheKeys`: whether the body was already substituted.
+    public cacheProcessed: Vector<boolean>;
+    public worklist: Vector<Mono::InstanceKey>;
+    /// Def remap for the body currently being cloned (params and locals of
+    /// the generic def to their concrete clones).
+    public remapFrom: Vector<u32>;
+    public remapTo: Vector<Analyzer::DefinitionId>;
+    /// Bodies already copied into the output store.
+    public copiedDefs: Vector<u32>;
+
+    public static init(): MonoState {
+      return MonoState {
+        cacheKeys: Vector::new<Mono::InstanceKey>(),
+        cacheConcreteDefs: Vector::new<Analyzer::DefinitionId>(),
+        cacheProcessed: Vector::new<boolean>(),
+        worklist: Vector::new<Mono::InstanceKey>(),
+        remapFrom: Vector::new<u32>(),
+        remapTo: Vector::new<Analyzer::DefinitionId>(),
+        copiedDefs: Vector::new<u32>(),
+      };
+    }
+  }
+
+  record MonoOutput {
+    public hir: Hir::HirStore;
+    public instantiations: u64;
+  }
+
+  function cacheLookup(
+    state: &mut MonoState,
+    key: &Mono::InstanceKey
+  ): Option<Analyzer::DefinitionId> {
+    let mut index: u64 = 0;
+
+    while (index < state.cacheKeys.length()) {
+      if (let Option::SOME(existing) = state.cacheKeys.get(index)) {
+        if (Mono::keysEqual(existing, key)) {
+          if (let Option::SOME(concreteId) = state.cacheConcreteDefs.get(index)) {
+            return Option::SOME(*concreteId);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function enqueue(state: &mut MonoState, key: Mono::InstanceKey): void {
+    if (Mono::cacheLookup(state, &key).isSome()) {
+      return;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < state.worklist.length()) {
+      if (let Option::SOME(existing) = state.worklist.get(index)) {
+        if (Mono::keysEqual(existing, &key)) {
+          return;
+        }
+      }
+
+      index += 1;
+    }
+
+    state.worklist.push(key);
+  }
+
+  function remapLookup(
+    state: &mut MonoState,
+    defId: Analyzer::DefinitionId
+  ): Option<Analyzer::DefinitionId> {
+    let mut index: u64 = 0;
+
+    while (index < state.remapFrom.length()) {
+      if (let Option::SOME(fromRaw) = state.remapFrom.get(index)) {
+        if (*fromRaw == defId.raw()) {
+          if (let Option::SOME(target) = state.remapTo.get(index)) {
+            return Option::SOME(*target);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// `Vector__i32`-style mangled name for one instantiation.
+  function mangleName(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    key: &Mono::InstanceKey,
+  ): String {
+    let mut baseName: String = String::create("anon");
+
+    if (let Option::SOME(definition) = defStore.get(key.primaryDef)) {
+      let nameSym: Analyzer::SymbolId = definition.name();
+
+      if (let Option::SOME(text) = symbols.resolve(nameSym)) {
+        baseName = String::create(text);
+      }
+    }
+
+    let mut mangled: String = baseName;
+
+    let mut ownerIndex: u64 = 0;
+    while (ownerIndex < key.ownerArgs.length()) {
+      if (let Option::SOME(argType) = key.ownerArgs.get(ownerIndex)) {
+        mangled = mangled.concat("__").concat(typeStore.nameOf(*argType).toStr());
+      }
+      ownerIndex += 1;
+    }
+
+    let mut methodIndex: u64 = 0;
+    while (methodIndex < key.methodArgs.length()) {
+      if (let Option::SOME(argType) = key.methodArgs.get(methodIndex)) {
+        mangled = mangled.concat("__").concat(typeStore.nameOf(*argType).toStr());
+      }
+      methodIndex += 1;
+    }
+
+    return mangled;
+  }
+
+  /// The `Param`-symbol/argument table for one key: owner generics first,
+  /// then the primary def's own, the oracle's `Substitution::for_method`.
+  record SubstTable {
+    public params: Vector<Analyzer::SymbolId>;
+    public args: Vector<Analyzer::TypeId>;
+  }
+
+  function buildSubstitution(
+    defStore: &mut Analyzer::DefinitionStore,
+    key: &Mono::InstanceKey,
+  ): Mono::SubstTable {
+    let mut params: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+    let mut args: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    if (let Option::SOME(ownerId) = key.ownerDef) {
+      let mut ownerParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(ownerDefinition) = defStore.get(ownerId)) {
+        match (ownerDefinition) {
+          Analyzer::Definition::Record(recordDef) -> {
+            ownerParams = Mono::copyDefIdList(&recordDef.typeParams);
+          },
+          Analyzer::Definition::Enum(enumDef) -> {
+            ownerParams = Mono::copyDefIdList(&enumDef.typeParams);
+          },
+          _ -> {},
+        };
+      }
+
+      let ownerSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &ownerParams);
+      Mono::appendSymbols(&ownerSymbols, &mut params);
+      Mono::appendTypeIds(&key.ownerArgs, &mut args);
+    }
+
+    let mut primaryParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(key.primaryDef)) {
+      match (definition) {
+        Analyzer::Definition::Function(functionDef) -> {
+          primaryParams = Mono::copyDefIdList(&functionDef.typeParams);
+        },
+        Analyzer::Definition::Method(methodDef) -> {
+          primaryParams = Mono::copyDefIdList(&methodDef.typeParams);
+        },
+        Analyzer::Definition::Record(recordDef) -> {
+          primaryParams = Mono::copyDefIdList(&recordDef.typeParams);
+        },
+        Analyzer::Definition::Enum(enumDef) -> {
+          primaryParams = Mono::copyDefIdList(&enumDef.typeParams);
+        },
+        _ -> {},
+      };
+    }
+
+    // A generic-form key carries the primary args in `methodArgs` when the
+    // owner is absent? No: generic-form keys keep them in `ownerArgs` empty
+    // and `methodArgs` holds the primary's own arguments in both forms.
+    let primarySymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &primaryParams);
+    Mono::appendSymbols(&primarySymbols, &mut params);
+    Mono::appendTypeIds(&key.methodArgs, &mut args);
+
+    return Mono::SubstTable {
+      params: params,
+      args: args,
+    };
+  }
+
+  function copyDefIdList(source: &Vector<Analyzer::DefinitionId>): Vector<Analyzer::DefinitionId> {
+    let mut result: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(id) = source.get(index)) {
+        result.push(*id);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function appendSymbols(
+    source: &Vector<Analyzer::SymbolId>,
+    target: &mut Vector<Analyzer::SymbolId>
+  ): void {
+    let mut targetRef: &mut Vector<Analyzer::SymbolId> = target;
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(id) = source.get(index)) {
+        targetRef.push(*id);
+      }
+
+      index += 1;
+    }
+  }
+
+  function appendTypeIds(
+    source: &Vector<Analyzer::TypeId>,
+    target: &mut Vector<Analyzer::TypeId>
+  ): void {
+    let mut targetRef: &mut Vector<Analyzer::TypeId> = target;
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(id) = source.get(index)) {
+        targetRef.push(*id);
+      }
+
+      index += 1;
+    }
+  }
+
+  function substituteType(
+    typeStore: &mut Analyzer::TypeStore,
+    subst: &Mono::SubstTable,
+    typeId: Analyzer::TypeId,
+  ): Analyzer::TypeId {
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    return typeStoreRef.substitute(typeId, &subst.params, &subst.args);
+  }
+
+  /// Clones one `Variable` parameter def with its type substituted, records
+  /// the old->new remap, and returns the clone's id.
+  function instantiateParam(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    state: &mut MonoState,
+    subst: &Mono::SubstTable,
+    paramDefId: Analyzer::DefinitionId,
+  ): Analyzer::DefinitionId {
+    let mut cloned: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(definition) = defStore.get(paramDefId)) {
+      if (let Analyzer::Definition::Variable(variableDef) = definition) {
+        let substituted: Analyzer::TypeId = Mono::substituteType(typeStore, subst, variableDef.declaredType);
+        let clonedName: Analyzer::SymbolId = variableDef.name;
+        let clonedVisibility: Analyzer::Visibility = variableDef.visibility;
+        let clonedMutable: boolean = variableDef.mutable;
+
+        let mut defStoreRef: &mut Analyzer::DefinitionStore = defStore;
+        cloned = Option::SOME(defStoreRef.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
+          name: clonedName,
+          visibility: clonedVisibility,
+          declaredType: substituted,
+          mutable: clonedMutable,
+        })));
+      }
+    }
+
+    let Option::SOME(clonedId) = cloned else {
+      return paramDefId;
+    };
+
+    state.remapFrom.push(paramDefId.raw());
+    state.remapTo.push(clonedId);
+
+    return clonedId;
+  }
+
+  /// Creates the concrete definition for one instantiation key: the generic
+  /// def cloned with substituted signature types and a mangled name. The
+  /// body is cloned later by `substituteBody`.
+  function createConcreteDefShell(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut MonoState,
+    key: &Mono::InstanceKey,
+  ): Analyzer::DefinitionId {
+    let mangled: String = Mono::mangleName(defStore, typeStore, symbols, key);
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let nameSym: Analyzer::SymbolId = symbolsRef.intern(mangled.toStr());
+
+    let subst: Mono::SubstTable = Mono::buildSubstitution(defStore, key);
+
+    // Signature clones remap the generic def's parameter Variables; the
+    // remap entries stay registered for the whole run so the body clone,
+    // which happens later, still finds them.
+    let mut clonedParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut returnType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+    let mut isMethod: boolean = false;
+    let mut methodOwner: Analyzer::DefinitionId = key.primaryDef;
+    let mut methodIsStatic: boolean = false;
+    let mut methodSelfMutable: boolean = false;
+    let mut genericParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut visibility: Analyzer::Visibility = Analyzer::Visibility::PRIVATE;
+
+    if (let Option::SOME(definition) = defStore.get(key.primaryDef)) {
+      match (definition) {
+        Analyzer::Definition::Function(functionDef) -> {
+          genericParams = Mono::copyDefIdList(&functionDef.params);
+          returnType = functionDef.returnType;
+          visibility = functionDef.visibility;
+        },
+        Analyzer::Definition::Method(methodDef) -> {
+          genericParams = Mono::copyDefIdList(&methodDef.params);
+          returnType = methodDef.returnType;
+          visibility = methodDef.visibility;
+          isMethod = true;
+          methodOwner = methodDef.owner;
+          methodIsStatic = methodDef.isStatic;
+          methodSelfMutable = methodDef.selfMutable;
+        },
+        _ -> {},
+      };
+    }
+
+    let mut paramIndex: u64 = 0;
+    while (paramIndex < genericParams.length()) {
+      if (let Option::SOME(paramDefId) = genericParams.get(paramIndex)) {
+        clonedParams.push(Mono::instantiateParam(defStore, typeStore, state, &subst, *paramDefId));
+      }
+      paramIndex += 1;
+    }
+
+    let substitutedReturn: Analyzer::TypeId = Mono::substituteType(typeStore, &subst, returnType);
+
+    let mut defStoreRef: &mut Analyzer::DefinitionStore = defStore;
+
+    if (isMethod) {
+      return defStoreRef.push(Analyzer::Definition::Method(Analyzer::MethodDef {
+        name: nameSym,
+        visibility: visibility,
+        owner: methodOwner,
+        typeParams: Vector::new<Analyzer::DefinitionId>(),
+        params: clonedParams,
+        returnType: substitutedReturn,
+        isStatic: methodIsStatic,
+        selfMutable: methodSelfMutable,
+        isDeprecated: false,
+        deprecatedMessage: Option::NONE,
+      }));
+    }
+
+    return defStoreRef.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+      name: nameSym,
+      visibility: visibility,
+      typeParams: Vector::new<Analyzer::DefinitionId>(),
+      params: clonedParams,
+      returnType: substitutedReturn,
+      isDeprecated: false,
+      deprecatedMessage: Option::NONE,
+      extensionTarget: Option::NONE,
+    }));
+  }
+
+  function copyLiteral(literal: &Hir::LiteralValue): Hir::LiteralValue {
+    return match (literal) {
+      Hir::LiteralValue::Int8(value) -> Hir::LiteralValue::Int8(value),
+      Hir::LiteralValue::Int16(value) -> Hir::LiteralValue::Int16(value),
+      Hir::LiteralValue::Int32(value) -> Hir::LiteralValue::Int32(value),
+      Hir::LiteralValue::Int64(value) -> Hir::LiteralValue::Int64(value),
+      Hir::LiteralValue::UnsignedInt8(value) -> Hir::LiteralValue::UnsignedInt8(value),
+      Hir::LiteralValue::UnsignedInt16(value) -> Hir::LiteralValue::UnsignedInt16(value),
+      Hir::LiteralValue::UnsignedInt32(value) -> Hir::LiteralValue::UnsignedInt32(value),
+      Hir::LiteralValue::UnsignedInt64(value) -> Hir::LiteralValue::UnsignedInt64(value),
+      Hir::LiteralValue::Float32(value) -> Hir::LiteralValue::Float32(value),
+      Hir::LiteralValue::Float64(value) -> Hir::LiteralValue::Float64(value),
+      Hir::LiteralValue::Boolean(value) -> Hir::LiteralValue::Boolean(value),
+      Hir::LiteralValue::Char(value) -> Hir::LiteralValue::Char(value),
+      Hir::LiteralValue::String(value) -> Hir::LiteralValue::String(value.clone()),
+      Hir::LiteralValue::Atom(value) -> Hir::LiteralValue::Atom(value),
+      Hir::LiteralValue::Hex(value) -> Hir::LiteralValue::Hex(value.clone()),
+      Hir::LiteralValue::Binary(value) -> Hir::LiteralValue::Binary(value.clone()),
+      Hir::LiteralValue::Null -> Hir::LiteralValue::Null,
+    };
+  }
+
+  /// Remaps a definition reference through the active body remap.
+  function remapDef(state: &mut MonoState, defId: Analyzer::DefinitionId): Analyzer::DefinitionId {
+    return match (Mono::remapLookup(state, defId)) {
+      Option::SOME(mapped) -> mapped,
+      Option::NONE -> defId,
+    };
+  }
+
+  /// Clones one local `Variable` def under the substitution when the body
+  /// being cloned is generic, registering the remap; identity otherwise.
+  function cloneLocalDef(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    state: &mut MonoState,
+    subst: &Mono::SubstTable,
+    defId: Analyzer::DefinitionId,
+  ): Analyzer::DefinitionId {
+    if (subst.params.length() == 0) {
+      return defId;
+    }
+
+    if (let Option::SOME(existing) = Mono::remapLookup(state, defId)) {
+      return existing;
+    }
+
+    return Mono::instantiateParam(defStore, typeStore, state, subst, defId);
+  }
+
+  function clonePattern(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    state: &mut MonoState,
+    subst: &Mono::SubstTable,
+    pattern: &Hir::HirPattern,
+  ): Hir::HirPattern {
+    match (pattern) {
+      Hir::HirPattern::Wildcard -> {
+        return Hir::HirPattern::Wildcard;
+      },
+      Hir::HirPattern::Literal(literal) -> {
+        return Hir::HirPattern::Literal(Mono::copyLiteral(&literal));
+      },
+      Hir::HirPattern::Binding(defId) -> {
+        return Hir::HirPattern::Binding(Mono::cloneLocalDef(defStore, typeStore, state, subst, defId));
+      },
+      Hir::HirPattern::Variant(variantPattern) -> {
+        let mut args: Vector<Hir::HirPattern> = Vector::new<Hir::HirPattern>();
+        let mut index: u64 = 0;
+
+        while (index < variantPattern.args.length()) {
+          if (let Option::SOME(argPattern) = variantPattern.args.get(index)) {
+            args.push(Mono::clonePattern(defStore, typeStore, state, subst, argPattern));
+          }
+
+          index += 1;
+        }
+
+        return Hir::HirPattern::Variant(Hir::VariantPattern {
+          enumDef: variantPattern.enumDef,
+          variantTag: variantPattern.variantTag,
+          args: args,
+        });
+      },
+      Hir::HirPattern::Tuple(elements) -> {
+        let mut cloned: Vector<Hir::HirPattern> = Vector::new<Hir::HirPattern>();
+        let mut index: u64 = 0;
+
+        while (index < elements.length()) {
+          if (let Option::SOME(element) = elements.get(index)) {
+            cloned.push(Mono::clonePattern(defStore, typeStore, state, subst, element));
+          }
+
+          index += 1;
+        }
+
+        return Hir::HirPattern::Tuple(cloned);
+      },
+      Hir::HirPattern::Or(alternatives) -> {
+        let mut cloned: Vector<Hir::HirPattern> = Vector::new<Hir::HirPattern>();
+        let mut index: u64 = 0;
+
+        while (index < alternatives.length()) {
+          if (let Option::SOME(alternative) = alternatives.get(index)) {
+            cloned.push(Mono::clonePattern(defStore, typeStore, state, subst, alternative));
+          }
+
+          index += 1;
+        }
+
+        return Hir::HirPattern::Or(cloned);
+      },
+      Hir::HirPattern::Constant(defId) -> {
+        return Hir::HirPattern::Constant(defId);
+      },
+    };
+
+    return Hir::HirPattern::Wildcard;
+  }
+
+  /// Ensures one instantiation exists (shell created and cached), returning
+  /// its concrete definition id.
+  function ensureInstantiated(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut MonoState,
+    key: Mono::InstanceKey,
+  ): Analyzer::DefinitionId {
+    if (let Option::SOME(existing) = Mono::cacheLookup(state, &key)) {
+      return existing;
+    }
+
+    let concreteId: Analyzer::DefinitionId = Mono::createConcreteDefShell(defStore, typeStore, symbols, state, &key);
+
+    state.cacheKeys.push(key);
+    state.cacheConcreteDefs.push(concreteId);
+    state.cacheProcessed.push(false);
+
+    return concreteId;
+  }
+
+  /// Substituted type arguments of a call, `NONE` when any still contains a
+  /// `Param` (the enclosing generic context is not yet concrete).
+  function concreteTypeArgs(
+    typeStore: &mut Analyzer::TypeStore,
+    subst: &Mono::SubstTable,
+    typeArgs: &Vector<Analyzer::TypeId>,
+  ): Option<Vector<Analyzer::TypeId>> {
+    let mut result: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < typeArgs.length()) {
+      let Option::SOME(argType) = typeArgs.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let substituted: Analyzer::TypeId = Mono::substituteType(typeStore, subst, *argType);
+
+      if (typeStore.containsTypeParam(substituted)) {
+        return Option::NONE;
+      }
+
+      result.push(substituted);
+      index += 1;
+    }
+
+    return Option::SOME(result);
+  }
+
+  /// The generic owner and its concrete arguments behind a receiver type,
+  /// unwrapping reference layers: the oracle's `unwrap_to_instance_type`.
+  function receiverInstance(
+    typeStore: &mut Analyzer::TypeStore,
+    receiverType: Analyzer::TypeId,
+  ): Option<Analyzer::InstanceType> {
+    let mut currentType: Analyzer::TypeId = receiverType;
+    let mut guard: u64 = 0;
+
+    while (guard < 16) {
+      let mut next: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(typeNode) = typeStore.get(currentType)) {
+        match (typeNode) {
+          Analyzer::Type::Reference(referenceType) -> {
+            next = Option::SOME(referenceType.referent);
+          },
+          Analyzer::Type::Pointer(pointerType) -> {
+            next = Option::SOME(pointerType.pointee);
+          },
+          Analyzer::Type::Instance(instance) -> {
+            return Option::SOME(Analyzer::InstanceType {
+              definition: instance.definition,
+              typeArguments: Mono::copyTypeIds(&instance.typeArguments),
+            });
+          },
+          _ -> {},
+        };
+      }
+
+      let Option::SOME(inner) = next else {
+        return Option::NONE;
+      };
+
+      currentType = inner;
+      guard += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function cloneHirList(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    inputHir: &Hir::HirStore,
+    outputHir: &mut Hir::HirStore,
+    state: &mut MonoState,
+    subst: &Mono::SubstTable,
+    ids: &Vector<Hir::HirId>,
+  ): Vector<Hir::HirId> {
+    let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        result.push(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, *id));
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function cloneOptionalHir(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    inputHir: &Hir::HirStore,
+    outputHir: &mut Hir::HirStore,
+    state: &mut MonoState,
+    subst: &Mono::SubstTable,
+    id: Option<Hir::HirId>,
+  ): Option<Hir::HirId> {
+    return match (id) {
+      Option::SOME(inner) -> Option::SOME(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, inner)),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  /// Clones one HIR tree into the output store: types substituted, local
+  /// definitions remapped, and generic call targets rewritten to their
+  /// concrete clones (enqueuing new instantiations on first sight), the
+  /// oracle's `substitute_hir`.
+  function cloneHir(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    inputHir: &Hir::HirStore,
+    outputHir: &mut Hir::HirStore,
+    state: &mut MonoState,
+    subst: &Mono::SubstTable,
+    hirId: Hir::HirId,
+  ): Hir::HirId {
+    let mut clonedKind: Hir::HirKind = Hir::HirKind::Error;
+    let mut nodeSpan: SourceSpan = SourceSpan::new("", 0, 0);
+    let mut nodeType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+    let mut haveNode: boolean = false;
+
+    if (let Option::SOME(node) = inputHir.get(hirId)) {
+      nodeSpan = node.span;
+      nodeType = Mono::substituteType(typeStore, subst, node.typeId);
+      haveNode = true;
+
+      match (&node.kind) {
+        Hir::HirKind::Literal(literal) -> {
+          clonedKind = Hir::HirKind::Literal(Mono::copyLiteral(&literal));
+        },
+        Hir::HirKind::Unit -> {
+          clonedKind = Hir::HirKind::Unit;
+        },
+        Hir::HirKind::Variable(defId) -> {
+          clonedKind = Hir::HirKind::Variable(Mono::remapDef(state, defId));
+        },
+        Hir::HirKind::Binary(binaryNode) -> {
+          let left: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, binaryNode.left);
+          let right: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, binaryNode.right);
+
+          clonedKind = Hir::HirKind::Binary(Hir::HirBinary {
+            operation: binaryNode.operation,
+            left: left,
+            right: right,
+          });
+        },
+        Hir::HirKind::Unary(unaryNode) -> {
+          let operand: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, unaryNode.operand);
+
+          clonedKind = Hir::HirKind::Unary(Hir::HirUnary {
+            operation: unaryNode.operation,
+            operand: operand,
+          });
+        },
+        Hir::HirKind::Call(callNode) -> {
+          let args: Vector<Hir::HirId> = Mono::cloneHirList(defStore, typeStore, symbols, inputHir, outputHir, state, subst, &callNode.args);
+
+          let mut callee: Analyzer::DefinitionId = callNode.callee;
+          let mut typeArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+          if (callNode.typeArgs.length() > 0) {
+            if (let Option::SOME(concreteArgs) = Mono::concreteTypeArgs(typeStore, subst, &callNode.typeArgs)) {
+              callee = Mono::ensureInstantiated(defStore, typeStore, symbols, state, Mono::InstanceKey {
+                primaryDef: callNode.callee,
+                ownerDef: Option::NONE,
+                ownerArgs: Vector::new<Analyzer::TypeId>(),
+                methodArgs: concreteArgs,
+              });
+            } else {
+              typeArgs = Mono::copyTypeIds(&callNode.typeArgs);
+            }
+          }
+
+          clonedKind = Hir::HirKind::Call(Hir::HirCall {
+            callee: callee,
+            typeArgs: typeArgs,
+            args: args,
+          });
+        },
+        Hir::HirKind::MethodCall(methodNode) -> {
+          let receiver: Option<Hir::HirId> = Mono::cloneOptionalHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, methodNode.receiver);
+          let args: Vector<Hir::HirId> = Mono::cloneHirList(defStore, typeStore, symbols, inputHir, outputHir, state, subst, &methodNode.args);
+
+          let mut method: Analyzer::DefinitionId = methodNode.method;
+          let mut typeArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut rewritten: boolean = false;
+
+          let mut ownerInstance: Option<Analyzer::InstanceType> = Option::NONE;
+
+          if (let Option::SOME(receiverId) = receiver) {
+            let mut receiverType: Analyzer::TypeId = nodeType;
+
+            let mut outputHirRef: &mut Hir::HirStore = outputHir;
+            if (let Option::SOME(receiverNode) = outputHirRef.get(receiverId)) {
+              receiverType = receiverNode.typeId;
+            }
+
+            ownerInstance = Mono::receiverInstance(typeStore, receiverType);
+          }
+
+          let mut ownerDefOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+          let mut ownerArgsVec: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+          match (ownerInstance) {
+            Option::SOME(instance) -> {
+              ownerDefOpt = Option::SOME(instance.definition);
+              ownerArgsVec = instance.typeArguments;
+            },
+            Option::NONE -> {},
+          };
+
+          let concreteArgsOpt: Option<Vector<Analyzer::TypeId>> = Mono::concreteTypeArgs(typeStore, subst, &methodNode.typeArgs);
+
+          if (let Option::SOME(concreteArgs) = concreteArgsOpt) {
+            let mut ownerArgsConcrete: boolean = true;
+            let mut checkIndex: u64 = 0;
+
+            while (checkIndex < ownerArgsVec.length()) {
+              if (let Option::SOME(instanceArg) = ownerArgsVec.get(checkIndex)) {
+                if (typeStore.containsTypeParam(*instanceArg)) {
+                  ownerArgsConcrete = false;
+                }
+              }
+              checkIndex += 1;
+            }
+
+            if (ownerDefOpt.isSome() && ownerArgsConcrete) {
+              method = Mono::ensureInstantiated(defStore, typeStore, symbols, state, Mono::InstanceKey {
+                primaryDef: methodNode.method,
+                ownerDef: ownerDefOpt,
+                ownerArgs: Mono::copyTypeIds(&ownerArgsVec),
+                methodArgs: Mono::copyTypeIds(&concreteArgs),
+              });
+              rewritten = true;
+            } else if (ownerDefOpt.isNone() && concreteArgs.length() > 0) {
+              method = Mono::ensureInstantiated(defStore, typeStore, symbols, state, Mono::InstanceKey {
+                primaryDef: methodNode.method,
+                ownerDef: Option::NONE,
+                ownerArgs: Vector::new<Analyzer::TypeId>(),
+                methodArgs: Mono::copyTypeIds(&concreteArgs),
+              });
+              rewritten = true;
+            }
+          }
+
+          if (!rewritten && methodNode.typeArgs.length() > 0) {
+            typeArgs = Mono::copyTypeIds(&methodNode.typeArgs);
+          }
+
+          clonedKind = Hir::HirKind::MethodCall(Hir::HirMethodCall {
+            receiver: receiver,
+            method: method,
+            typeArgs: typeArgs,
+            args: args,
+          });
+        },
+        Hir::HirKind::CallClosure(closureCall) -> {
+          let callee: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, closureCall.callee);
+          let args: Vector<Hir::HirId> = Mono::cloneHirList(defStore, typeStore, symbols, inputHir, outputHir, state, subst, &closureCall.args);
+
+          clonedKind = Hir::HirKind::CallClosure(Hir::HirCallClosure {
+            callee: callee,
+            args: args,
+          });
+        },
+        Hir::HirKind::Closure(closureNode) -> {
+          let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+          let mut paramIndex: u64 = 0;
+
+          while (paramIndex < closureNode.params.length()) {
+            if (let Option::SOME(paramDef) = closureNode.params.get(paramIndex)) {
+              params.push(Mono::cloneLocalDef(defStore, typeStore, state, subst, *paramDef));
+            }
+            paramIndex += 1;
+          }
+
+          let body: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, closureNode.body);
+
+          clonedKind = Hir::HirKind::Closure(Hir::HirClosure {
+            params: params,
+            returnType: Mono::substituteType(typeStore, subst, closureNode.returnType),
+            body: body,
+            captures: Vector::new<Hir::HirCapture>(),
+            escapes: closureNode.escapes,
+            thunkDef: closureNode.thunkDef,
+            dropDef: closureNode.dropDef,
+            captureOverrides: Vector::new<Hir::HirCaptureOverride>(),
+          });
+        },
+        Hir::HirKind::Cast(castNode) -> {
+          let expression: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, castNode.expression);
+
+          clonedKind = Hir::HirKind::Cast(Hir::HirCast {
+            expression: expression,
+            target: Mono::substituteType(typeStore, subst, castNode.target),
+          });
+        },
+        Hir::HirKind::BitCast(castNode) -> {
+          let expression: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, castNode.expression);
+
+          clonedKind = Hir::HirKind::BitCast(Hir::HirCast {
+            expression: expression,
+            target: Mono::substituteType(typeStore, subst, castNode.target),
+          });
+        },
+        Hir::HirKind::Reference(referenceNode) -> {
+          let expression: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, referenceNode.expression);
+
+          clonedKind = Hir::HirKind::Reference(Hir::HirReference {
+            expression: expression,
+            mutable: referenceNode.mutable,
+          });
+        },
+        Hir::HirKind::Dereference(innerId) -> {
+          clonedKind = Hir::HirKind::Dereference(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, innerId));
+        },
+        Hir::HirKind::Index(indexNode) -> {
+          let base: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, indexNode.base);
+          let indexExpr: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, indexNode.index);
+
+          clonedKind = Hir::HirKind::Index(Hir::HirIndex {
+            base: base,
+            index: indexExpr,
+          });
+        },
+        Hir::HirKind::VectorLiteral(elements) -> {
+          clonedKind = Hir::HirKind::VectorLiteral(Mono::cloneHirList(defStore, typeStore, symbols, inputHir, outputHir, state, subst, &elements));
+        },
+        Hir::HirKind::TupleLiteral(elements) -> {
+          clonedKind = Hir::HirKind::TupleLiteral(Mono::cloneHirList(defStore, typeStore, symbols, inputHir, outputHir, state, subst, &elements));
+        },
+        Hir::HirKind::MakeSlice(sliceNode) -> {
+          let data: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, sliceNode.data);
+          let len: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, sliceNode.len);
+
+          clonedKind = Hir::HirKind::MakeSlice(Hir::HirMakeSlice {
+            data: data,
+            len: len,
+            elementType: Mono::substituteType(typeStore, subst, sliceNode.elementType),
+          });
+        },
+        Hir::HirKind::TypeOf(innerId) -> {
+          clonedKind = Hir::HirKind::TypeOf(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, innerId));
+        },
+        Hir::HirKind::SizeOf(ty) -> {
+          clonedKind = Hir::HirKind::SizeOf(Mono::substituteType(typeStore, subst, ty));
+        },
+        Hir::HirKind::AlignOf(ty) -> {
+          clonedKind = Hir::HirKind::AlignOf(Mono::substituteType(typeStore, subst, ty));
+        },
+        Hir::HirKind::MaxOf(ty) -> {
+          clonedKind = Hir::HirKind::MaxOf(Mono::substituteType(typeStore, subst, ty));
+        },
+        Hir::HirKind::MinOf(ty) -> {
+          clonedKind = Hir::HirKind::MinOf(Mono::substituteType(typeStore, subst, ty));
+        },
+        Hir::HirKind::BuiltinLoad(loadNode) -> {
+          let ptr: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, loadNode.ptr);
+
+          clonedKind = Hir::HirKind::BuiltinLoad(Hir::HirBuiltinLoad {
+            ty: Mono::substituteType(typeStore, subst, loadNode.ty),
+            ptr: ptr,
+          });
+        },
+        Hir::HirKind::BuiltinStore(storeNode) -> {
+          let ptr: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, storeNode.ptr);
+          let value: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, storeNode.value);
+
+          clonedKind = Hir::HirKind::BuiltinStore(Hir::HirBuiltinStore {
+            ty: Mono::substituteType(typeStore, subst, storeNode.ty),
+            ptr: ptr,
+            value: value,
+          });
+        },
+        Hir::HirKind::BuiltinHash(hashNode) -> {
+          let value: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, hashNode.value);
+          let hasher: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, hashNode.hasher);
+
+          clonedKind = Hir::HirKind::BuiltinHash(Hir::HirBuiltinHash {
+            ty: Mono::substituteType(typeStore, subst, hashNode.ty),
+            value: value,
+            hasher: hasher,
+          });
+        },
+        Hir::HirKind::BuiltinEq(eqNode) -> {
+          let left: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, eqNode.left);
+          let right: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, eqNode.right);
+
+          clonedKind = Hir::HirKind::BuiltinEq(Hir::HirBuiltinEq {
+            ty: Mono::substituteType(typeStore, subst, eqNode.ty),
+            left: left,
+            right: right,
+            kind: eqNode.kind,
+          });
+        },
+        Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
+          let ptr: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, dropNode.ptr);
+
+          clonedKind = Hir::HirKind::BuiltinDropInPlace(Hir::HirBuiltinDropInPlace {
+            ty: Mono::substituteType(typeStore, subst, dropNode.ty),
+            ptr: ptr,
+          });
+        },
+        Hir::HirKind::BuiltinDropGlue(ty) -> {
+          clonedKind = Hir::HirKind::BuiltinDropGlue(Mono::substituteType(typeStore, subst, ty));
+        },
+        Hir::HirKind::Panic(messageId) -> {
+          clonedKind = Hir::HirKind::Panic(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, messageId));
+        },
+        Hir::HirKind::Trap -> {
+          clonedKind = Hir::HirKind::Trap;
+        },
+        Hir::HirKind::BuiltinUnreachable -> {
+          clonedKind = Hir::HirKind::BuiltinUnreachable;
+        },
+        Hir::HirKind::FieldAccess(fieldNode) -> {
+          let base: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, fieldNode.base);
+
+          clonedKind = Hir::HirKind::FieldAccess(Hir::HirFieldAccess {
+            base: base,
+            fieldIndex: fieldNode.fieldIndex,
+          });
+        },
+        Hir::HirKind::RecordInit(recordNode) -> {
+          let mut fields: Vector<Hir::HirRecordField> = Vector::new<Hir::HirRecordField>();
+          let mut fieldIndex: u64 = 0;
+
+          while (fieldIndex < recordNode.fields.length()) {
+            if (let Option::SOME(field) = recordNode.fields.get(fieldIndex)) {
+              fields.push(Hir::HirRecordField {
+                fieldIndex: field.fieldIndex,
+                value: Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, field.value),
+              });
+            }
+            fieldIndex += 1;
+          }
+
+          let mut typeArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut argIndex: u64 = 0;
+
+          while (argIndex < recordNode.typeArgs.length()) {
+            if (let Option::SOME(argType) = recordNode.typeArgs.get(argIndex)) {
+              typeArgs.push(Mono::substituteType(typeStore, subst, *argType));
+            }
+            argIndex += 1;
+          }
+
+          clonedKind = Hir::HirKind::RecordInit(Hir::HirRecordInit {
+            recordDef: recordNode.recordDef,
+            typeArgs: typeArgs,
+            fields: fields,
+          });
+        },
+        Hir::HirKind::EnumVariant(variantNode) -> {
+          let payload: Vector<Hir::HirId> = Mono::cloneHirList(defStore, typeStore, symbols, inputHir, outputHir, state, subst, &variantNode.payload);
+
+          let mut typeArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut argIndex: u64 = 0;
+
+          while (argIndex < variantNode.typeArgs.length()) {
+            if (let Option::SOME(argType) = variantNode.typeArgs.get(argIndex)) {
+              typeArgs.push(Mono::substituteType(typeStore, subst, *argType));
+            }
+            argIndex += 1;
+          }
+
+          clonedKind = Hir::HirKind::EnumVariant(Hir::HirEnumVariant {
+            enumDef: variantNode.enumDef,
+            typeArgs: typeArgs,
+            variantTag: variantNode.variantTag,
+            payload: payload,
+          });
+        },
+        Hir::HirKind::StaticAccess(defId) -> {
+          clonedKind = Hir::HirKind::StaticAccess(Mono::remapDef(state, defId));
+        },
+        Hir::HirKind::Let(letNode) -> {
+          let name: Analyzer::DefinitionId = Mono::cloneLocalDef(defStore, typeStore, state, subst, letNode.name);
+          let value: Option<Hir::HirId> = Mono::cloneOptionalHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, letNode.value);
+
+          clonedKind = Hir::HirKind::Let(Hir::HirLet {
+            name: name,
+            value: value,
+          });
+        },
+        Hir::HirKind::Assign(assignNode) -> {
+          let target: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, assignNode.target);
+          let value: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, assignNode.value);
+
+          clonedKind = Hir::HirKind::Assign(Hir::HirAssign {
+            target: target,
+            value: value,
+            operation: assignNode.operation,
+          });
+        },
+        Hir::HirKind::Block(blockNode) -> {
+          let statements: Vector<Hir::HirId> = Mono::cloneHirList(defStore, typeStore, symbols, inputHir, outputHir, state, subst, &blockNode.statements);
+          let expression: Option<Hir::HirId> = Mono::cloneOptionalHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, blockNode.expression);
+
+          clonedKind = Hir::HirKind::Block(Hir::HirBlock {
+            statements: statements,
+            expression: expression,
+          });
+        },
+        Hir::HirKind::If(ifNode) -> {
+          let condition: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, ifNode.condition);
+          let thenBranch: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, ifNode.thenBranch);
+          let elseBranch: Option<Hir::HirId> = Mono::cloneOptionalHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, ifNode.elseBranch);
+
+          clonedKind = Hir::HirKind::If(Hir::HirIf {
+            condition: condition,
+            thenBranch: thenBranch,
+            elseBranch: elseBranch,
+          });
+        },
+        Hir::HirKind::LetElse(letElseNode) -> {
+          let value: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, letElseNode.value);
+          let elseBlock: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, letElseNode.elseBlock);
+
+          clonedKind = Hir::HirKind::LetElse(Hir::HirLetElse {
+            pattern: Mono::clonePattern(defStore, typeStore, state, subst, &letElseNode.pattern),
+            value: value,
+            elseBlock: elseBlock,
+          });
+        },
+        Hir::HirKind::Loop(loopNode) -> {
+          let condition: Hir::LoopKind = match (&loopNode.condition) {
+            Hir::LoopKind::Infinite -> Hir::LoopKind::Infinite,
+            Hir::LoopKind::While(conditionId) -> Hir::LoopKind::While(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, conditionId)),
+            Hir::LoopKind::For(forNode) -> Hir::LoopKind::For(Hir::ForLoop {
+              init: Mono::cloneOptionalHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, forNode.init),
+              condition: Mono::cloneOptionalHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, forNode.condition),
+              update: Mono::cloneOptionalHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, forNode.update),
+            }),
+          };
+
+          let body: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, loopNode.body);
+
+          clonedKind = Hir::HirKind::Loop(Hir::HirLoop {
+            condition: condition,
+            body: body,
+          });
+        },
+        Hir::HirKind::Break -> {
+          clonedKind = Hir::HirKind::Break;
+        },
+        Hir::HirKind::Continue -> {
+          clonedKind = Hir::HirKind::Continue;
+        },
+        Hir::HirKind::Return(valueOpt) -> {
+          clonedKind = Hir::HirKind::Return(Mono::cloneOptionalHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, valueOpt));
+        },
+        Hir::HirKind::Defer(innerId) -> {
+          clonedKind = Hir::HirKind::Defer(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, innerId));
+        },
+        Hir::HirKind::ExpressionStatement(innerId) -> {
+          clonedKind = Hir::HirKind::ExpressionStatement(Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, innerId));
+        },
+        Hir::HirKind::Match(matchNode) -> {
+          let scrutinee: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, matchNode.scrutinee);
+
+          let mut arms: Vector<Hir::HirMatchArm> = Vector::new<Hir::HirMatchArm>();
+          let mut armIndex: u64 = 0;
+
+          while (armIndex < matchNode.arms.length()) {
+            if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+              let pattern: Hir::HirPattern = Mono::clonePattern(defStore, typeStore, state, subst, &arm.pattern);
+              let guard: Option<Hir::HirId> = Mono::cloneOptionalHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, arm.guard);
+              let body: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, arm.body);
+
+              arms.push(Hir::HirMatchArm {
+                pattern: pattern,
+                guard: guard,
+                body: body,
+              });
+            }
+            armIndex += 1;
+          }
+
+          clonedKind = Hir::HirKind::Match(Hir::HirMatch {
+            scrutinee: scrutinee,
+            arms: arms,
+          });
+        },
+        Hir::HirKind::Error -> {
+          clonedKind = Hir::HirKind::Error;
+        },
+      };
+    }
+
+    if (!haveNode) {
+      clonedKind = Hir::HirKind::Error;
+    }
+
+    let mut outputHirRef: &mut Hir::HirStore = outputHir;
+
+    return outputHirRef.alloc(Hir::HirNode {
+      kind: clonedKind,
+      span: nodeSpan,
+      typeId: nodeType,
+    });
+  }
+
+  /// Whether the definition needs monomorphization before its body can be
+  /// copied verbatim: it has its own type params, or its owner does.
+  function defIsGeneric(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let mut ownParams: u64 = 0;
+    let mut ownerId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      match (definition) {
+        Analyzer::Definition::Function(functionDef) -> {
+          ownParams = functionDef.typeParams.length();
+        },
+        Analyzer::Definition::Method(methodDef) -> {
+          ownParams = methodDef.typeParams.length();
+          ownerId = Option::SOME(methodDef.owner);
+        },
+        _ -> {},
+      };
+    }
+
+    if (ownParams > 0) {
+      return true;
+    }
+
+    if (let Option::SOME(owner) = ownerId) {
+      if (let Option::SOME(ownerDefinition) = defStore.get(owner)) {
+        match (ownerDefinition) {
+          Analyzer::Definition::Record(recordDef) -> {
+            return recordDef.typeParams.length() > 0;
+          },
+          Analyzer::Definition::Enum(enumDef) -> {
+            return enumDef.typeParams.length() > 0;
+          },
+          _ -> {},
+        };
+      }
+    }
+
+    return false;
+  }
+
+  function emptySubst(): Mono::SubstTable {
+    return Mono::SubstTable {
+      params: Vector::new<Analyzer::SymbolId>(),
+      args: Vector::new<Analyzer::TypeId>(),
+    };
+  }
+
+  /// Clones the body of one pending instantiation into the output store.
+  function substituteBody(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    inputHir: &Hir::HirStore,
+    outputHir: &mut Hir::HirStore,
+    state: &mut MonoState,
+    cacheIndex: u64,
+  ): void {
+    let mut keyCopy: Option<Mono::InstanceKey> = Option::NONE;
+    let mut concreteId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+
+    if (let Option::SOME(key) = state.cacheKeys.get(cacheIndex)) {
+      keyCopy = Option::SOME(Mono::copyKey(key));
+    }
+
+    if (let Option::SOME(cachedId) = state.cacheConcreteDefs.get(cacheIndex)) {
+      concreteId = *cachedId;
+    }
+
+    let Option::SOME(key) = keyCopy else {
+      return;
+    };
+
+    let Option::SOME(bodyId) = inputHir.functionBodies.get(key.primaryDef) else {
+      return;
+    };
+
+    let subst: Mono::SubstTable = Mono::buildSubstitution(defStore, &key);
+
+    let clonedBody: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, &subst, bodyId);
+
+    let mut outputHirRef: &mut Hir::HirStore = outputHir;
+    outputHirRef.functionBodies.set(concreteId, clonedBody);
+
+    if (!outputHirRef.containsItem(concreteId)) {
+      outputHirRef.items.push(concreteId);
+    }
+  }
+
+  /// Monomorphization entry point: copies every non-generic body into a
+  /// fresh store while rewriting generic calls to their concrete clones,
+  /// then substitutes the pending clones' bodies to a fixpoint.
+  function run(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    inputHir: &Hir::HirStore,
+  ): Mono::MonoOutput {
+    let mut outputHir: Hir::HirStore = Hir::HirStore::init();
+    let mut state: Mono::MonoState = Mono::MonoState::init();
+
+    let emptyTable: Mono::SubstTable = Mono::emptySubst();
+
+    let mut itemIndex: u64 = 0;
+
+    while (itemIndex < inputHir.items.length()) {
+      let Option::SOME(itemDef) = inputHir.items.get(itemIndex) else {
+        itemIndex += 1;
+        continue;
+      };
+
+      if (Mono::defIsGeneric(defStore, *itemDef)) {
+        itemIndex += 1;
+        continue;
+      }
+
+      let Option::SOME(bodyId) = inputHir.functionBodies.get(*itemDef) else {
+        itemIndex += 1;
+        continue;
+      };
+
+      let clonedBody: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, &mut outputHir, &mut state, &emptyTable, bodyId);
+
+      let mut outputHirRef: &mut Hir::HirStore = &mut outputHir;
+      outputHirRef.functionBodies.set(*itemDef, clonedBody);
+
+      if (!outputHirRef.containsItem(*itemDef)) {
+        outputHirRef.items.push(*itemDef);
+      }
+
+      itemIndex += 1;
+    }
+
+    // Fixpoint: bodies of new instantiations may request further ones.
+    let mut guard: u64 = 0;
+
+    while (guard < 1000000) {
+      let mut pendingIndex: Option<u64> = Option::NONE;
+      let mut scanIndex: u64 = 0;
+
+      while (scanIndex < state.cacheProcessed.length()) {
+        if (let Option::SOME(processed) = state.cacheProcessed.get(scanIndex)) {
+          if (!*processed) {
+            pendingIndex = Option::SOME(scanIndex);
+          }
+        }
+
+        if (pendingIndex.isSome()) {
+          break;
+        }
+
+        scanIndex += 1;
+      }
+
+      let Option::SOME(cacheIndex) = pendingIndex else {
+        break;
+      };
+
+      let _ = state.cacheProcessed.set(cacheIndex, true);
+      Mono::substituteBody(defStore, typeStore, symbols, inputHir, &mut outputHir, &mut state, cacheIndex);
+
+      guard += 1;
+    }
+
+    if (let Option::SOME(entryDef) = inputHir.entryPoint) {
+      let mut entryHirRef: &mut Hir::HirStore = &mut outputHir;
+      entryHirRef.setEntryPoint(entryDef);
+    }
+
+    return Mono::MonoOutput {
+      hir: outputHir,
+      instantiations: state.cacheKeys.length(),
+    };
+  }
+
+  /// Counts output nodes whose type still contains a `Param` or names an
+  /// `Instance`, the measured-loop gate mirroring `verify_no_generics`.
+  function countRemainingGenerics(typeStore: &mut Analyzer::TypeStore, hir: &Hir::HirStore): u64 {
+    let mut count: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < hir.nodes.length()) {
+      if (let Option::SOME(node) = hir.nodes.get(index)) {
+        let mut generic: boolean = false;
+
+        if (typeStore.containsTypeParam(node.typeId)) {
+          generic = true;
+        }
+
+        if (let Option::SOME(typeNode) = typeStore.get(node.typeId)) {
+          if (let Analyzer::Type::Instance(_) = typeNode) {
+            generic = true;
+          }
+        }
+
+        if (generic) {
+          count += 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    return count;
+  }
+}

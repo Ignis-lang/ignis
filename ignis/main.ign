@@ -14,6 +14,7 @@ import Hir from "@compiler::hir";
 // outside the graph is never typechecked.
 import _ from "./analyzer/lowering";
 import _ from "./analyzer/borrowck";
+import Mono from "./analyzer/mono";
 import LirLowering from "./lir/lowering";
 import LirVerify from "./lir/verify";
 
@@ -361,12 +362,15 @@ function compileFile(path: &String): i32 {
       lowerIndex += 1;
     }
 
-    // LIR lowers the whole merged program once, the shape monomorphization
-    // (IGN-156) slots into between merge and lowering.
+    let monoResult: Mono::MonoOutput = Mono::run(&mut defStore, &mut typeStore, &mut symbols, &programHir);
+    let monoGenericNodes: u64 = Mono::countRemainingGenerics(&mut typeStore, &monoResult.hir);
+
+    Io::println(`  mono: ${monoResult.instantiations} instantiations, ${monoResult.hir.nodes.length()} nodes, ${monoGenericNodes} generic nodes left`);
+
     let lirResult: LirLowering::LowerModuleResult = LirLowering::lowerModule(
       &mut defStore,
       &mut typeStore,
-      &programHir,
+      &monoResult.hir,
     );
 
     lirUnsupported += lirResult.unsupported;
