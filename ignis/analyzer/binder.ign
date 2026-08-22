@@ -352,6 +352,61 @@ export namespace Analyzer {
     /// Silently skips: Function, Variable, Constant, Import, Extern.
     /// Extern is treated as a leaf: the selfhost `Ast::Item::Extern` has no
     /// `items` field (unlike the Rust reference). Known gap — see future slice.
+    /// Whether the item's `@configFlag(...)` gates it off for this target.
+    ///
+    /// The corpus writes `@platform("linux")` terms joined by `||`; the
+    /// selfhost currently builds for linux, so a flag whose expression never
+    /// names linux disables the item. Items without the directive stay on.
+    function itemDisabledByConfigFlag(node: &Ast::Item::Node): boolean {
+      let metadata: &Ast::Metadata = match (node) {
+        Ast::Item::Node::Function(f) -> &f.metadata,
+        Ast::Item::Node::Record(r) -> &r.metadata,
+        Ast::Item::Node::Enum(e) -> &e.metadata,
+        Ast::Item::Node::Namespace(n) -> &n.metadata,
+        Ast::Item::Node::Import(i) -> &i.metadata,
+        Ast::Item::Node::Constant(c) -> &c.metadata,
+        Ast::Item::Node::Export(x) -> &x.metadata,
+        Ast::Item::Node::Extern(ex) -> &ex.metadata,
+        Ast::Item::Node::TypeAlias(a) -> &a.metadata,
+        Ast::Item::Node::Trait(t) -> &t.metadata,
+      };
+
+      let mut attributeIndex: u64 = 0;
+
+      while (attributeIndex < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(attributeIndex) else {
+          attributeIndex += 1;
+          continue;
+        };
+
+        if (!attribute.name.equals("configFlag")) {
+          attributeIndex += 1;
+          continue;
+        }
+
+        let needle: String = String::create("linux");
+        let mut argumentIndex: u64 = 0;
+        let mut mentionsTarget: boolean = false;
+
+        while (argumentIndex < attribute.arguments.length()) {
+          if (let Option::SOME(argument) = attribute.arguments.get(argumentIndex)) {
+            if (argument.contains(&needle)) {
+              mentionsTarget = true;
+            }
+          }
+          argumentIndex += 1;
+        }
+
+        if (!mentionsTarget) {
+          return true;
+        }
+
+        attributeIndex += 1;
+      }
+
+      return false;
+    }
+
     function predeclareItem(
       state: &mut Analyzer::Binder::BinderState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -364,6 +419,10 @@ export namespace Analyzer {
       let nodeOpt: Option<&Ast::Item::Node> = ast.items.get(itemId);
 
       if (let Option::SOME(node) = nodeOpt) {
+        if (itemDisabledByConfigFlag(node)) {
+          return;
+        }
+
         match (node) {
           Ast::Item::Node::Record(r) -> {
             predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &r.name, r.span, scopeKey, false);
@@ -1842,6 +1901,10 @@ export namespace Analyzer {
       let nodeOpt: Option<&Ast::Item::Node> = ast.items.get(itemId);
 
       if (let Option::SOME(node) = nodeOpt) {
+        if (itemDisabledByConfigFlag(node)) {
+          return;
+        }
+
         match (node) {
           Ast::Item::Node::Record(r) -> {
             completeRecord(state, defStore, typeStore, symbols, ast, itemId, &r, scopeKey, pass1);
