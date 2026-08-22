@@ -192,7 +192,13 @@ export namespace Analyzer {
           }
         }
 
-        if (Analyzer::Typecheck::typeIdIsPointer(typeStore, leftType) && Analyzer::Typecheck::typeIdIsPointer(typeStore, rightType)) {
+        let equalityLeftResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, leftType);
+        let equalityRightResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, rightType);
+
+        if (equalityLeftResolved.cycleAlias.isNone()
+          && equalityRightResolved.cycleAlias.isNone()
+          && Analyzer::Typecheck::typeIdIsPointer(typeStore, equalityLeftResolved.typeId)
+          && Analyzer::Typecheck::typeIdIsPointer(typeStore, equalityRightResolved.typeId)) {
           let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
           Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
           return Option::SOME(booleanType);
@@ -5074,6 +5080,38 @@ export namespace Analyzer {
 
       if (name.equals("trap") || name.equals("unreachable")) {
         return Analyzer::Typecheck::checkBuiltinWithoutArguments(state, typeStore, call);
+      }
+
+      if (name.equals("sliceFromParts")) {
+        if (call.typeArguments.length() != 1) {
+          Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 1, call.typeArguments.length());
+          return Option::NONE;
+        }
+
+        if (call.arguments.length() != 2) {
+          Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 2);
+          return Option::NONE;
+        }
+
+        let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
+          return Option::NONE;
+        };
+        let Option::SOME(elementType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+          let detail: String = `the type argument of \`@${call.name.toStr()}\``;
+          Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
+          return Option::NONE;
+        };
+
+        let mut argIndex: u64 = 0;
+        while (argIndex < call.arguments.length()) {
+          if (let Option::SOME(argExprId) = call.arguments.get(argIndex)) {
+            let _argType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *argExprId);
+          }
+          argIndex += 1;
+        }
+
+        let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        return Option::SOME(typeStoreRef.slice(elementType));
       }
 
       if (name.equals("pointerFromInteger")) {
