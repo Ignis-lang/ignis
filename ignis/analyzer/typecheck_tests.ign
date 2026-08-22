@@ -1462,7 +1462,7 @@ function typecheckAssignmentToNonLocalTargetProducesDiagnostic(): void {
 }
 
 @test
-function typecheckNonAssignOperatorProducesDiagnostic(): void {
+function typecheckCompoundAssignmentOnNumericLocalHappyPath(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -1508,7 +1508,57 @@ function typecheckNonAssignOperatorProducesDiagnostic(): void {
     &module,
   );
 
-  assertSingleDiagnostic(&output, DiagnosticCode::INVALID_ASSIGNMENT_TARGET, "typecheck only supports plain `=` assignment expressions");
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+@test
+function typecheckCompoundAssignmentOnNonNumericLocalProducesDiagnostic(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let boolTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  let xPattern: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "x", boolTypeId);
+  let letStmt: Ast::StatementId = typecheckAddMutableVariableStmt(
+    &mut module,
+    xPattern,
+    boolTypeId,
+    typecheckAddBoolLiteral(&mut module, true),
+  );
+  let assignmentExpr: Ast::ExpressionId = typecheckAddAssignment(
+    &mut module,
+    Ast::Expression::AssignmentOperator::AddAssign,
+    typecheckAddVariable(&mut module, "x"),
+    typecheckAddBoolLiteral(&mut module, false),
+  );
+  let assignmentStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, assignmentExpr);
+  let retStmt: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(assignmentStmt);
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("assignAddBool"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::COMPOUND_ASSIGNMENT_NON_NUMERIC);
 }
 
 @test

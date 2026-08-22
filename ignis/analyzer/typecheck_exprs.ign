@@ -195,16 +195,6 @@ export namespace Analyzer {
       exprId: Ast::ExpressionId,
       value: &Ast::Expression::Assignment,
     ): Option<Analyzer::TypeId> {
-      if (value.operator != Ast::Expression::AssignmentOperator::Assign) {
-        Analyzer::Typecheck::emitDiagnostic(
-          state,
-          value.span,
-          DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
-          "typecheck only supports plain `=` assignment expressions",
-        );
-        return Option::NONE;
-      }
-
       // A place target (`*x`, `obj.field`, `v[i]`) carries no resolver ref of
       // its own, so it is typechecked as an expression and its mutability
       // comes from the place walk instead of a local binding.
@@ -331,8 +321,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, targetType, actualType)) {
-        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, targetType, actualType);
+      if (!Analyzer::Typecheck::assignmentValueMatchesTarget(state, defStore, typeStore, value.span, value.operator, targetType, actualType)) {
         return Option::NONE;
       }
 
@@ -353,6 +342,51 @@ export namespace Analyzer {
         Ast::Expression::Node::MemberAccess(_) -> true,
         _ -> false,
       };
+    }
+
+    /// Check the assigned value against the target for the written operator.
+    ///
+    /// Plain `=` uses the ordinary value-satisfies rule. A compound operator
+    /// requires both sides numeric — the host's rule — and of the same type,
+    /// because the selfhost has no common-type machinery (the same stand-in
+    /// every binary arm applies).
+    function assignmentValueMatchesTarget(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      operator: Ast::Expression::AssignmentOperator,
+      targetType: Analyzer::TypeId,
+      actualType: Analyzer::TypeId,
+    ): boolean {
+      if (operator == Ast::Expression::AssignmentOperator::Assign) {
+        if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, targetType, actualType)) {
+          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, targetType, actualType);
+          return false;
+        }
+
+        return true;
+      }
+
+      let targetNumeric: boolean = Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, targetType);
+      let valueNumeric: boolean = Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, actualType);
+
+      if (!targetNumeric || !valueNumeric) {
+        Analyzer::Typecheck::emitDiagnostic(
+          state,
+          span,
+          DiagnosticCode::COMPOUND_ASSIGNMENT_NON_NUMERIC,
+          "compound assignment requires numeric operands",
+        );
+        return false;
+      }
+
+      if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, targetType, actualType)) {
+        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, targetType, actualType);
+        return false;
+      }
+
+      return true;
     }
 
     /// The referent of `typeId` when it is a `&mut T`, NONE otherwise.
@@ -442,8 +476,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, targetType, actualType)) {
-        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, targetType, actualType);
+      if (!Analyzer::Typecheck::assignmentValueMatchesTarget(state, defStore, typeStore, value.span, value.operator, targetType, actualType)) {
         return Option::NONE;
       }
 
