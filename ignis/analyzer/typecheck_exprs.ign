@@ -3852,6 +3852,7 @@ export namespace Analyzer {
             resolvedBodies,
             exprId,
             &value,
+            expected,
           );
         },
         Ast::Expression::Node::Block(value) -> {
@@ -4867,8 +4868,11 @@ export namespace Analyzer {
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       exprId: Ast::ExpressionId,
       value: &Ast::Expression::Unary,
+      expected: Option<Analyzer::TypeId>,
     ): Option<Analyzer::TypeId> {
-      let operandTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
+      // The reference analyzer checks the operand under the same infer
+      // context, so `-1` expected as `i64` types its literal as `i64`.
+      let operandTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand, expected);
       let Option::SOME(operandType) = operandTypeOpt else {
         return Option::NONE;
       };

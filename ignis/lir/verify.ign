@@ -1,0 +1,453 @@
+import Vector from "std::vector";
+
+import Id from "@compiler::ids";
+import Analyzer from "@compiler::analyzer";
+import Lir from "./mod";
+
+/// LIR well-formedness verification, mirroring `ignis_lir::verify`: every
+/// referenced block, local and temp must exist, temps must be defined before
+/// use in block-store order, branch conditions must be boolean, and return
+/// values must agree with the function signature. Findings are rendered as
+/// strings; the measured loop needs counts and labels, not a typed error
+/// model, and the C emitter never consumes them.
+export namespace LirVerify {
+  record VerifyState {
+    public errors: Vector<String>;
+    public definedTemps: Vector<boolean>;
+
+    public static init(): VerifyState {
+      return VerifyState {
+        errors: Vector::new<String>(),
+        definedTemps: Vector::new<boolean>(),
+      };
+    }
+  }
+
+  function report(
+    state: &mut LirVerify::VerifyState,
+    functionLabel: u32,
+    blockLabel: &String,
+    message: str,
+  ): void {
+    state.errors.push(`fn_${functionLabel} ${blockLabel.toStr()}: ${message}`);
+  }
+
+  function markDefined(state: &mut LirVerify::VerifyState, temp: Lir::TempId): void {
+    let index: u64 = temp.raw() as u64;
+
+    while (state.definedTemps.length() <= index) {
+      state.definedTemps.push(false);
+    }
+
+    let _ = state.definedTemps.set(index, true);
+  }
+
+  function checkTemp(
+    state: &mut LirVerify::VerifyState,
+    function_: &Lir::FunctionLir,
+    functionLabel: u32,
+    blockLabel: &String,
+    temp: Lir::TempId,
+  ): void {
+    if (temp.raw() as u64 >= function_.temps.length()) {
+      LirVerify::report(state, functionLabel, blockLabel, "invalid temp ref");
+      return;
+    }
+
+    let mut defined: boolean = false;
+
+    if (let Option::SOME(flag) = state.definedTemps.get(temp.raw() as u64)) {
+      defined = *flag;
+    }
+
+    if (!defined) {
+      LirVerify::report(state, functionLabel, blockLabel, "temp used before def");
+    }
+  }
+
+  function checkLocal(
+    state: &mut LirVerify::VerifyState,
+    function_: &Lir::FunctionLir,
+    functionLabel: u32,
+    blockLabel: &String,
+    local: Lir::LocalId,
+  ): void {
+    if (local.raw() as u64 >= function_.locals.length()) {
+      LirVerify::report(state, functionLabel, blockLabel, "invalid local ref");
+    }
+  }
+
+  function checkBlock(
+    state: &mut LirVerify::VerifyState,
+    function_: &Lir::FunctionLir,
+    functionLabel: u32,
+    blockLabel: &String,
+    target: Lir::BlockId,
+  ): void {
+    if (target.raw() as u64 >= function_.blocks.length()) {
+      LirVerify::report(state, functionLabel, blockLabel, "invalid block ref");
+    }
+  }
+
+  function checkOperand(
+    state: &mut LirVerify::VerifyState,
+    function_: &Lir::FunctionLir,
+    functionLabel: u32,
+    blockLabel: &String,
+    operand: &Lir::Operand,
+  ): void {
+    match (operand) {
+      Lir::Operand::Temp(temp) -> {
+        LirVerify::checkTemp(state, function_, functionLabel, blockLabel, temp);
+      },
+      Lir::Operand::Local(local) -> {
+        LirVerify::checkLocal(state, function_, functionLabel, blockLabel, local);
+      },
+      _ -> {},
+    };
+  }
+
+  function checkOperandList(
+    state: &mut LirVerify::VerifyState,
+    function_: &Lir::FunctionLir,
+    functionLabel: u32,
+    blockLabel: &String,
+    operands: &Vector<Lir::Operand>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < operands.length()) {
+      if (let Option::SOME(operand) = operands.get(index)) {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, operand);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Canonical form of a type for equality: alias chains resolved, so an
+  /// aliased return annotation compares equal to the canonical type the
+  /// expression carries. Mirrors the oracle, whose LIR never sees aliases.
+  function canonicalType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Analyzer::TypeId {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, ty);
+
+    if (resolved.cycleAlias.isSome()) {
+      return ty;
+    }
+
+    return resolved.typeId;
+  }
+
+  /// Type of an operand, `NONE` for function/global references.
+  function operandType(
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): Option<Analyzer::TypeId> {
+    return match (operand) {
+      Lir::Operand::Temp(temp) -> function_.tempType(temp),
+      Lir::Operand::Local(local) -> function_.localType(local),
+      Lir::Operand::Const(value) -> Option::SOME(Lir::constValueType(&value)),
+      _ -> Option::NONE,
+    };
+  }
+
+  function verifyInstr(
+    state: &mut LirVerify::VerifyState,
+    function_: &Lir::FunctionLir,
+    functionLabel: u32,
+    blockLabel: &String,
+    instr: &Lir::Instr,
+  ): void {
+    match (instr) {
+      Lir::Instr::Load(node) -> {
+        LirVerify::checkLocal(state, function_, functionLabel, blockLabel, node.source);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::Store(node) -> {
+        LirVerify::checkLocal(state, function_, functionLabel, blockLabel, node.dest);
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.value);
+      },
+      Lir::Instr::LoadPtr(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.ptr);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::StorePtr(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.ptr);
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.value);
+      },
+      Lir::Instr::BuiltinLoad(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.ptr);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::BuiltinStore(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.ptr);
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.value);
+      },
+      Lir::Instr::BuiltinHash(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.value);
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.hasher);
+      },
+      Lir::Instr::BuiltinEq(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.left);
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.right);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::Copy(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.source);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::BinOp(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.left);
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.right);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::UnaryOp(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.operand);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::Call(node) -> {
+        LirVerify::checkOperandList(state, function_, functionLabel, blockLabel, &node.args);
+
+        if (let Option::SOME(dest) = node.dest) {
+          LirVerify::markDefined(state, dest);
+        }
+      },
+      Lir::Instr::Cast(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.source);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::BitCast(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.source);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::AddrOfLocal(node) -> {
+        LirVerify::checkLocal(state, function_, functionLabel, blockLabel, node.local);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::GetElementPtr(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.base);
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.index);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::MakeSlice(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.data);
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.len);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::InitVector(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.destPtr);
+        LirVerify::checkOperandList(state, function_, functionLabel, blockLabel, &node.elements);
+      },
+      Lir::Instr::Nop -> {},
+      Lir::Instr::RuntimeCall(node) -> {
+        LirVerify::checkOperandList(state, function_, functionLabel, blockLabel, &node.args);
+      },
+      Lir::Instr::TypeIdOf(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.source);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::SizeOf(node) -> {
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::AlignOf(node) -> {
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::MaxOf(node) -> {
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::MinOf(node) -> {
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::Trap(_) -> {},
+      Lir::Instr::PanicMessage(_) -> {},
+      Lir::Instr::Drop(node) -> {
+        LirVerify::checkLocal(state, function_, functionLabel, blockLabel, node.local);
+      },
+      Lir::Instr::GetFieldPtr(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.base);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::InitRecord(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.destPtr);
+
+        let mut fieldIndex: u64 = 0;
+        while (fieldIndex < node.fields.length()) {
+          if (let Option::SOME(field) = node.fields.get(fieldIndex)) {
+            LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &field.value);
+          }
+          fieldIndex += 1;
+        }
+      },
+      Lir::Instr::InitEnumVariant(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.destPtr);
+        LirVerify::checkOperandList(state, function_, functionLabel, blockLabel, &node.payload);
+      },
+      Lir::Instr::EnumGetTag(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.source);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::EnumGetPayloadField(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.source);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::DropInPlace(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.ptr);
+      },
+      Lir::Instr::MarkMoved(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.ptr);
+      },
+      Lir::Instr::DropGlue(node) -> {
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::MakeClosure(node) -> {
+        LirVerify::checkOperandList(state, function_, functionLabel, blockLabel, &node.captures);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::CallClosure(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.closure);
+        LirVerify::checkOperandList(state, function_, functionLabel, blockLabel, &node.args);
+
+        if (let Option::SOME(dest) = node.dest) {
+          LirVerify::markDefined(state, dest);
+        }
+      },
+      Lir::Instr::DropClosure(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.closure);
+      },
+    };
+  }
+
+  function verifyTerminator(
+    state: &mut LirVerify::VerifyState,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    functionLabel: u32,
+    blockLabel: &String,
+    terminator: &Lir::Terminator,
+  ): void {
+    match (terminator) {
+      Lir::Terminator::Goto(target) -> {
+        LirVerify::checkBlock(state, function_, functionLabel, blockLabel, target);
+      },
+      Lir::Terminator::Branch(branch) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &branch.condition);
+        LirVerify::checkBlock(state, function_, functionLabel, blockLabel, branch.thenBlock);
+        LirVerify::checkBlock(state, function_, functionLabel, blockLabel, branch.elseBlock);
+
+        if (let Option::SOME(conditionType) = LirVerify::operandType(function_, &branch.condition)) {
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          let boolType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::BOOLEAN);
+
+          if (conditionType.raw() != boolType.raw()) {
+            LirVerify::report(state, functionLabel, blockLabel, "non-bool branch condition");
+          }
+        }
+      },
+      Lir::Terminator::Return(valueOpt) -> {
+        let mut isVoid: boolean = false;
+
+        if (let Option::SOME(typeNode) = typeStore.get(function_.returnType)) {
+          if (let Analyzer::Type::VOID = typeNode) {
+            isVoid = true;
+          }
+        }
+
+        match (valueOpt) {
+          Option::SOME(value) -> {
+            LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &value);
+
+            if (isVoid) {
+              LirVerify::report(state, functionLabel, blockLabel, "unexpected return value");
+            } else {
+              if (let Option::SOME(valueType) = LirVerify::operandType(function_, &value)) {
+                let canonicalValue: Analyzer::TypeId = LirVerify::canonicalType(defStore, typeStore, valueType);
+                let canonicalReturn: Analyzer::TypeId = LirVerify::canonicalType(defStore, typeStore, function_.returnType);
+
+                if (canonicalValue.raw() != canonicalReturn.raw()) {
+                  LirVerify::report(state, functionLabel, blockLabel, "return type mismatch");
+                }
+              }
+            }
+          },
+          Option::NONE -> {
+            if (!isVoid) {
+              LirVerify::report(state, functionLabel, blockLabel, "missing return value");
+            }
+          },
+        };
+      },
+      Lir::Terminator::Unreachable -> {},
+    };
+  }
+
+  function verifyFunction(
+    state: &mut LirVerify::VerifyState,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+  ): void {
+    let functionLabel: u32 = function_.defId.raw();
+
+    state.definedTemps = Vector::new<boolean>();
+
+    let mut paramIndex: u64 = 0;
+    while (paramIndex < function_.params.length()) {
+      LirVerify::markDefined(state, Id::fromRaw<Lir::TempTag>(paramIndex as u32));
+      paramIndex += 1;
+    }
+
+    let mut blockIndex: u64 = 0;
+
+    while (blockIndex < function_.blocks.length()) {
+      let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+        blockIndex += 1;
+        continue;
+      };
+
+      let mut instrIndex: u64 = 0;
+
+      while (instrIndex < block.instructions.length()) {
+        if (let Option::SOME(instr) = block.instructions.get(instrIndex)) {
+          LirVerify::verifyInstr(state, function_, functionLabel, &block.label, instr);
+        }
+
+        instrIndex += 1;
+      }
+
+      LirVerify::verifyTerminator(state, defStore, typeStore, function_, functionLabel, &block.label, &block.terminator);
+
+      blockIndex += 1;
+    }
+  }
+
+  /// Verifies every non-extern function of a lowered program and returns the
+  /// findings, empty when the program is well-formed.
+  function verifyProgram(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    program: &Lir::LirProgram,
+  ): Vector<String> {
+    let mut state: LirVerify::VerifyState = LirVerify::VerifyState::init();
+    let mut functionIndex: u64 = 0;
+
+    while (functionIndex < program.functions.length()) {
+      let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+        functionIndex += 1;
+        continue;
+      };
+
+      if (!function_.isExtern) {
+        LirVerify::verifyFunction(&mut state, defStore, typeStore, function_);
+      }
+
+      functionIndex += 1;
+    }
+
+    return state.errors;
+  }
+}

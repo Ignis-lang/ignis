@@ -460,13 +460,7 @@ export namespace LirLowering {
           returned = Option::SOME(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, valueId));
         }
 
-        let mut returnFunctionRef: &mut Lir::FunctionLir = function_;
-
-        let Option::SOME(block) = returnFunctionRef.blocks.getMut(state.currentBlock) else {
-          return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
-        };
-
-        block.terminator = Lir::Terminator::Return(returned);
+        LirLowering::terminate(function_, state, Lir::Terminator::Return(returned));
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
@@ -2063,6 +2057,72 @@ export namespace LirLowering {
     LirLowering::switchToBlock(state, exitBlock);
   }
 
+  function copyDefIds(
+    source: &Vector<Analyzer::DefinitionId>,
+    target: &mut Vector<Analyzer::DefinitionId>,
+  ): void {
+    let mut targetRef: &mut Vector<Analyzer::DefinitionId> = target;
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(defId) = source.get(index)) {
+        targetRef.push(*defId);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Parameters arrive as the implicit temps `t0..tn-1` and are stored into
+  /// their own local slots at entry, the oracle's `lower_function` prologue.
+  function registerParams(
+    defStore: &mut Analyzer::DefinitionStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    paramDefs: &Vector<Analyzer::DefinitionId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < paramDefs.length()) {
+      let Option::SOME(paramDef) = paramDefs.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut paramType: Analyzer::TypeId = function_.returnType;
+      let mut paramMutable: boolean = false;
+
+      if (let Option::SOME(definition) = defStore.get(*paramDef)) {
+        if (let Analyzer::Definition::Variable(variableDef) = definition) {
+          paramType = variableDef.declaredType;
+          paramMutable = variableDef.mutable;
+        }
+      }
+
+      function_.params.push(*paramDef);
+
+      let paramTemp: Lir::TempId = LirLowering::freshTemp(function_, paramType, SourceSpan::new("", 0, 0));
+
+      let mut paramFunctionRef: &mut Lir::FunctionLir = function_;
+      let slot: Lir::LocalId = paramFunctionRef.allocLocal(Lir::LocalData {
+        defId: Option::SOME(*paramDef),
+        ty: paramType,
+        mutable: paramMutable,
+        name: Option::NONE,
+        borrowedAlias: false,
+      });
+
+      LirLowering::registerLocal(state, *paramDef, slot);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+        dest: slot,
+        value: Lir::Operand::Temp(paramTemp),
+      }));
+
+      index += 1;
+    }
+  }
+
   /// Lowers every function body of one module's HIR store.
   function lowerModule(
     defStore: &mut Analyzer::DefinitionStore,
@@ -2087,11 +2147,20 @@ export namespace LirLowering {
       };
 
       let mut returnType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+      let mut paramDefs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
 
       if (let Option::SOME(definition) = defStore.get(*itemDef)) {
-        if (let Analyzer::Definition::Function(functionDef) = definition) {
-          returnType = functionDef.returnType;
-        }
+        match (definition) {
+          Analyzer::Definition::Function(functionDef) -> {
+            returnType = functionDef.returnType;
+            LirLowering::copyDefIds(&functionDef.params, &mut paramDefs);
+          },
+          Analyzer::Definition::Method(methodDef) -> {
+            returnType = methodDef.returnType;
+            LirLowering::copyDefIds(&methodDef.params, &mut paramDefs);
+          },
+          _ -> {},
+        };
       }
 
       let mut function_: Lir::FunctionLir = Lir::FunctionLir::create(*itemDef, returnType);
@@ -2099,6 +2168,8 @@ export namespace LirLowering {
       function_.entryBlock = entry;
 
       let mut state: LirLowering::LowerState = LirLowering::LowerState::init();
+
+      LirLowering::registerParams(defStore, &mut function_, &mut state, &paramDefs);
 
       let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, &mut function_, &mut state, bodyId);
 
