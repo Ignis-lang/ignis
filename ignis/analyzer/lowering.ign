@@ -1347,6 +1347,41 @@ export namespace Lowering {
   /// `EnumVariant`, mirroring the oracle's `try_lower_path_call` enum arm.
   /// Closure calls and generic explicit type arguments are outside this slice
   /// and fall back to `Error`.
+  /// Resolves explicitly written call type arguments (`f<T, U>(...)`) to
+  /// semantic types with the typechecker's own non-emitting annotation probe.
+  /// `NONE` when any argument fails to resolve, matching the checker's refusal.
+  function resolveCallTypeArguments(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    typeArgumentIds: &Vector<Ast::TypeId>,
+  ): Option<Vector<Analyzer::TypeId>> {
+    let mut resolvedArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < typeArgumentIds.length()) {
+      let Option::SOME(annotationId) = typeArgumentIds.get(index) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(resolved) = Analyzer::Typecheck::resolveLocalAnnotation(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        *annotationId,
+      ) else {
+        return Option::NONE;
+      };
+
+      resolvedArguments.push(resolved);
+      index += 1;
+    }
+
+    return Option::SOME(resolvedArguments);
+  }
+
   function lowerCall(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1375,9 +1410,15 @@ export namespace Lowering {
       }
     }
 
-    if (call.typeArguments.length() > 0) {
+    let Option::SOME(callTypeArgs) = Lowering::resolveCallTypeArguments(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      &call.typeArguments,
+    ) else {
       return Lowering::errorNode(hir, typeStore, call.span);
-    }
+    };
 
     let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(
       &output.resolvedBodies.bodyResolution,
@@ -1419,7 +1460,7 @@ export namespace Lowering {
         kind: Hir::HirKind::MethodCall(Hir::HirMethodCall {
           receiver: Option::NONE,
           method: calleeDef,
-          typeArgs: Vector::new<Analyzer::TypeId>(),
+          typeArgs: callTypeArgs,
           args: staticArgs,
         }),
         span: call.span,
@@ -1488,7 +1529,7 @@ export namespace Lowering {
     return hirRef.alloc(Hir::HirNode {
       kind: Hir::HirKind::Call(Hir::HirCall {
         callee: calleeDef,
-        typeArgs: Vector::new<Analyzer::TypeId>(),
+        typeArgs: callTypeArgs,
         args: args,
       }),
       span: call.span,
@@ -1522,9 +1563,15 @@ export namespace Lowering {
     call: &Ast::Expression::Call,
     memberAccess: &Ast::Expression::MemberAccess,
   ): Hir::HirId {
-    if (call.typeArguments.length() > 0) {
+    let Option::SOME(callTypeArgs) = Lowering::resolveCallTypeArguments(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      &call.typeArguments,
+    ) else {
       return Lowering::errorNode(hir, typeStore, call.span);
-    }
+    };
 
     if (memberAccess.operator != Ast::Expression::AccessOperator::Dot) {
       return Lowering::errorNode(hir, typeStore, call.span);
@@ -1602,7 +1649,7 @@ export namespace Lowering {
       kind: Hir::HirKind::MethodCall(Hir::HirMethodCall {
         receiver: Option::SOME(receiver),
         method: methodDefId,
-        typeArgs: Vector::new<Analyzer::TypeId>(),
+        typeArgs: callTypeArgs,
         args: args,
       }),
       span: call.span,
@@ -2090,24 +2137,24 @@ export namespace Lowering {
       errBinding = Option::SOME(Lowering::declareTryBinding(defStore, symbols, "_try_err_value", errInnerType));
     }
 
-    let mut okBody: Hir::HirId = Lowering::errorNode(hir, typeStore, tryExpr.span);
     let mut okArgs: Vector<Hir::HirPattern> = Vector::new<Hir::HirPattern>();
 
-    if (let Option::SOME(okBindingId) = okBinding) {
-      let mut okHirRef: &mut Hir::HirStore = hir;
-      okBody = okHirRef.alloc(Hir::HirNode {
+    let mut okBodyHirRef: &mut Hir::HirStore = hir;
+    let mut okBody: Hir::HirId = match (okBinding) {
+      Option::SOME(okBindingId) -> okBodyHirRef.alloc(Hir::HirNode {
         kind: Hir::HirKind::Variable(okBindingId),
         span: tryExpr.span,
         typeId: okInnerType,
-      });
-      okArgs.push(Hir::HirPattern::Binding(okBindingId));
-    } else {
-      let mut unitHirRef: &mut Hir::HirStore = hir;
-      okBody = unitHirRef.alloc(Hir::HirNode {
+      }),
+      Option::NONE -> okBodyHirRef.alloc(Hir::HirNode {
         kind: Hir::HirKind::Unit,
         span: tryExpr.span,
         typeId: voidTypeId,
-      });
+      }),
+    };
+
+    if (let Option::SOME(okBindingId) = okBinding) {
+      okArgs.push(Hir::HirPattern::Binding(okBindingId));
     }
 
     let mut errPayloadNodes: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
