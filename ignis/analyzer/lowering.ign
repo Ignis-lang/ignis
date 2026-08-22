@@ -1212,7 +1212,7 @@ export namespace Lowering {
         return Lowering::lowerBuiltinCall(defStore, typeStore, symbols, module, output, locals, hir, &builtinCall);
       },
       Ast::Expression::Node::Lambda(lambda) -> {
-        return Lowering::errorNode(hir, typeStore, lambda.span);
+        return Lowering::lowerLambda(defStore, typeStore, symbols, module, output, locals, hir, exprId, &lambda);
       },
       Ast::Expression::Node::CaptureOverride(captureOverride) -> {
         return Lowering::errorNode(hir, typeStore, captureOverride.span);
@@ -1439,6 +1439,7 @@ export namespace Lowering {
           exprId,
           call,
           &memberAccess,
+          Option::NONE,
         );
       }
     }
@@ -1495,7 +1496,49 @@ export namespace Lowering {
       return Lowering::errorNode(hir, typeStore, call.span);
     };
 
-    let Analyzer::ResolverBodies::ResolvedRef::Definition(calleeDef) = resolved else {
+    let mut localCallee: boolean = false;
+    let mut calleeDefOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    match (resolved) {
+      Analyzer::ResolverBodies::ResolvedRef::Local(_) -> {
+        localCallee = true;
+      },
+      Analyzer::ResolverBodies::ResolvedRef::Definition(resolvedDef) -> {
+        calleeDefOpt = Option::SOME(resolvedDef);
+      },
+      _ -> {},
+    };
+
+    // A callee resolving to a local is a function-typed value (a closure or
+    // function parameter): the call goes through the value, not a definition.
+    if (localCallee) {
+      let closureCallee: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, call.callee);
+
+      let closureArgs: Vector<Hir::HirId> = Lowering::lowerExpressionList(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output,
+        locals,
+        hir,
+        &call.arguments,
+      );
+
+      let closureCallType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+      let mut closureHirRef: &mut Hir::HirStore = hir;
+      return closureHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::CallClosure(Hir::HirCallClosure {
+          callee: closureCallee,
+          args: closureArgs,
+        }),
+        span: call.span,
+        typeId: closureCallType,
+      });
+    }
+
+    let Option::SOME(calleeDef) = calleeDefOpt else {
       return Lowering::errorNode(hir, typeStore, call.span);
     };
 
@@ -1630,6 +1673,7 @@ export namespace Lowering {
     exprId: Ast::ExpressionId,
     call: &Ast::Expression::Call,
     memberAccess: &Ast::Expression::MemberAccess,
+    pipedFirstArg: Option<Hir::HirId>,
   ): Hir::HirId {
     let Option::SOME(callTypeArgs) = Lowering::resolveCallTypeArguments(
       defStore,
@@ -1645,7 +1689,33 @@ export namespace Lowering {
       return Lowering::errorNode(hir, typeStore, call.span);
     }
 
-    let baseType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, memberAccess.object);
+    // Inside a pipe RHS the typechecker records no type for the receiver
+    // expression, so a map miss falls back to the resolved binding's own
+    // declared type.
+    let mut baseType: Analyzer::TypeId = Lowering::voidType(typeStore);
+
+    if (let Option::SOME(checkedType) = Lowering::lookupExprType(&output.typecheck, memberAccess.object)) {
+      baseType = checkedType;
+    } else {
+      if (let Option::SOME(objectRef) = Analyzer::ResolverBodies::findExprRef(
+        &output.resolvedBodies.bodyResolution,
+        memberAccess.object.raw(),
+      )) {
+        let objectDefOpt: Option<Analyzer::DefinitionId> = match (objectRef) {
+          Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> Lowering::lookupLocal(locals, localId),
+          Analyzer::ResolverBodies::ResolvedRef::Definition(objectDef) -> Option::SOME(objectDef),
+          _ -> Option::NONE,
+        };
+
+        if (let Option::SOME(objectDefId) = objectDefOpt) {
+          if (let Option::SOME(objectDefinition) = defStore.get(objectDefId)) {
+            if (let Analyzer::Definition::Variable(variableDef) = objectDefinition) {
+              baseType = variableDef.declaredType;
+            }
+          }
+        }
+      }
+    }
     let referentOpt: Option<Analyzer::TypeId> = Lowering::referenceReferent(defStore, typeStore, baseType);
 
     let receiverType: Analyzer::TypeId = match (referentOpt) {
@@ -1741,7 +1811,7 @@ export namespace Lowering {
       });
     }
 
-    let args: Vector<Hir::HirId> = Lowering::lowerExpressionList(
+    let loweredArgs: Vector<Hir::HirId> = Lowering::lowerExpressionList(
       defStore,
       typeStore,
       symbols,
@@ -1751,6 +1821,21 @@ export namespace Lowering {
       hir,
       &call.arguments,
     );
+
+    let mut args: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    if (let Option::SOME(piped) = pipedFirstArg) {
+      args.push(piped);
+    }
+
+    let mut loweredIndex: u64 = 0;
+    while (loweredIndex < loweredArgs.length()) {
+      if (let Option::SOME(loweredArg) = loweredArgs.get(loweredIndex)) {
+        args.push(*loweredArg);
+      }
+
+      loweredIndex += 1;
+    }
 
     let callType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
       Option::SOME(typeId) -> typeId,
@@ -2052,6 +2137,110 @@ export namespace Lowering {
       module,
       *typeArgumentId,
     );
+  }
+
+  /// Lowers a lambda to `HirKind::Closure` with empty captures, escapes
+  /// false and no thunk/drop definitions, exactly like the oracle's
+  /// `lower_lambda_to_hir`: captures and escape analysis belong to a later
+  /// pass. Parameter types come from the checked function type, positionally.
+  function lowerLambda(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+    lambda: &Ast::Expression::Lambda,
+  ): Hir::HirId {
+    let fnType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+    let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut returnType: Analyzer::TypeId = Lowering::voidType(typeStore);
+    let mut isFunctionType: boolean = false;
+
+    if (let Option::SOME(typeNode) = typeStore.get(fnType)) {
+      if (let Analyzer::Type::Function(functionType) = typeNode) {
+        let mut paramIndex: u64 = 0;
+
+        while (paramIndex < functionType.params.length()) {
+          if (let Option::SOME(paramType) = functionType.params.get(paramIndex)) {
+            paramTypes.push(*paramType);
+          }
+
+          paramIndex += 1;
+        }
+
+        returnType = functionType.returnType;
+        isFunctionType = true;
+      }
+    }
+
+    if (!isFunctionType) {
+      return Lowering::errorNode(hir, typeStore, lambda.span);
+    }
+
+    if (paramTypes.length() != lambda.parameters.length()) {
+      return Lowering::errorNode(hir, typeStore, lambda.span);
+    }
+
+    let mut paramDefs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut parameterIndex: u64 = 0;
+
+    while (parameterIndex < lambda.parameters.length()) {
+      let Option::SOME(paramPatternId) = lambda.parameters.get(parameterIndex) else {
+        return Lowering::errorNode(hir, typeStore, lambda.span);
+      };
+
+      let Option::SOME(paramType) = paramTypes.get(parameterIndex) else {
+        return Lowering::errorNode(hir, typeStore, lambda.span);
+      };
+
+      let Option::SOME(paramPattern) = Lowering::lowerPattern(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output,
+        locals,
+        *paramPatternId,
+        *paramType,
+      ) else {
+        return Lowering::errorNode(hir, typeStore, lambda.span);
+      };
+
+      let Hir::HirPattern::Binding(paramDef) = paramPattern else {
+        return Lowering::errorNode(hir, typeStore, lambda.span);
+      };
+
+      paramDefs.push(paramDef);
+      parameterIndex += 1;
+    }
+
+    // The body's `return` targets the lambda, not the enclosing function.
+    let enclosingReturnType: Option<Analyzer::TypeId> = locals.currentReturnType;
+    locals.currentReturnType = Option::SOME(returnType);
+
+    let body: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, lambda.body);
+
+    locals.currentReturnType = enclosingReturnType;
+
+    let mut closureHirRef: &mut Hir::HirStore = hir;
+    return closureHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Closure(Hir::HirClosure {
+        params: paramDefs,
+        returnType: returnType,
+        body: body,
+        captures: Vector::new<Hir::HirCapture>(),
+        escapes: false,
+        thunkDef: Option::NONE,
+        dropDef: Option::NONE,
+        captureOverrides: Vector::new<Hir::HirCaptureOverride>(),
+      }),
+      span: lambda.span,
+      typeId: fnType,
+    });
   }
 
   function lowerBuiltinCall(
@@ -2764,6 +2953,38 @@ export namespace Lowering {
     exprId: Ast::ExpressionId,
     pipe: &Ast::Expression::Pipe,
   ): Hir::HirId {
+    // `value |> obj.method(args)` inserts the piped value as the method's
+    // first argument when the RHS names no placeholder. This runs before
+    // `pipePlacement`: a member-access callee never carries a resolver ref
+    // (ADR-B7), so the placement route cannot resolve it.
+    if (Analyzer::Typecheck::countPipePlaceholders(module, pipe.right) == 0) {
+      let rightExprId: Ast::ExpressionId = Analyzer::Typecheck::unwrapGroupedExpr(module, pipe.right);
+
+      if (let Option::SOME(rightExpr) = module.expressions.get(rightExprId)) {
+        if (let Ast::Expression::Node::Call(rightCall) = rightExpr) {
+          if (let Option::SOME(rightCalleeExpr) = module.expressions.get(rightCall.callee)) {
+            if (let Ast::Expression::Node::MemberAccess(rightMember) = rightCalleeExpr) {
+              let piped: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, pipe.left);
+
+              return Lowering::lowerMethodCall(
+                defStore,
+                typeStore,
+                symbols,
+                module,
+                output,
+                locals,
+                hir,
+                rightExprId,
+                &rightCall,
+                &rightMember,
+                Option::SOME(piped),
+              );
+            }
+          }
+        }
+      }
+    }
+
     let Option::SOME(placement) = Lowering::pipePlacement(module, pipe) else {
       // RHS shapes outside `pipePlacement` (builtin calls, generic callees)
       // still lower whole when they consume the piped value through exactly
@@ -3081,6 +3302,36 @@ export namespace Lowering {
         bindingName = binding.name.clone();
         isBinding = true;
       }
+    }
+
+    let mut isWildcard: boolean = false;
+    if (let Option::SOME(pattern) = module.patterns.get(patternId)) {
+      if (let Ast::Pattern::Node::Wildcard(_) = pattern) {
+        isWildcard = true;
+      }
+    }
+
+    // `let _ = value;` binds nothing: the value is evaluated for its effects
+    // and dropped, an expression statement.
+    if (isWildcard) {
+      let mut discardHirRef: &mut Hir::HirStore = hir;
+
+      if (let Option::SOME(valueId) = value) {
+        let discarded: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, valueId);
+        let mut discardStmtHirRef: &mut Hir::HirStore = hir;
+
+        return discardStmtHirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::ExpressionStatement(discarded),
+          span: span,
+          typeId: Lowering::voidType(typeStore),
+        });
+      }
+
+      return discardHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Unit,
+        span: span,
+        typeId: Lowering::voidType(typeStore),
+      });
     }
 
     if (!isBinding) {

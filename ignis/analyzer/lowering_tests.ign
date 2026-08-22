@@ -430,13 +430,13 @@ function loweringDivergingBuiltins(): void {
 /// result type to lower against, so it stays on the `Error` fallback even
 /// though `HirKind::MaxOf` exists.
 @test
-function loweringUnsupportedBuiltinFallsBackToError(): void {
+function loweringMaxOfBuiltinLowersToMaxOf(): void {
   let rendered: String = loweringRenderChecked(
     "function limit(): u32 {\n  return @maxOf<u32>();\n}\n",
     false,
   );
 
-  Test::assertSnapshot("lowering-unsupported-builtin-error", rendered.toStr());
+  Test::assertSnapshot("lowering-maxof-builtin", rendered.toStr());
 }
 
 /// `for ... of` has no lowering: the oracle's desugar reads the binding
@@ -496,13 +496,13 @@ function loweringMethodBodiesAreRegistered(): void {
 /// has no placement rule, so the whole pipe stays on `Error` and the escaped
 /// placeholder node lowers to its own `Error`.
 @test
-function loweringPipeWithNestedPlaceholderFallsBackToError(): void {
+function loweringPipeWithNestedPlaceholder(): void {
   let rendered: String = loweringRenderChecked(
     "function double(value: u32): u32 {\n  return value * 2;\n}\n\nfunction add(left: u32, right: u32): u32 {\n  return left + right;\n}\n\nfunction go(): u32 {\n  return 1 |> add(2, double(_));\n}\n",
     false,
   );
 
-  Test::assertSnapshot("lowering-pipe-nested-placeholder-error", rendered.toStr());
+  Test::assertSnapshot("lowering-pipe-nested-placeholder", rendered.toStr());
 }
 
 /// A pipe whose right side is not a function definition has no callee to
@@ -517,16 +517,16 @@ function loweringPipeIntoNonFunctionFallsBackToError(): void {
   Test::assertSnapshot("lowering-pipe-non-function-error", rendered.toStr());
 }
 
-/// Explicit type arguments on a call need the monomorphization data the
-/// selfhost analyzer does not produce, so the call stays on `Error`.
+/// Explicit type arguments on a call resolve through the typechecker's
+/// annotation probe and land in the `Call` node's `typeArgs`.
 @test
-function loweringCallWithExplicitTypeArgumentsFallsBackToError(): void {
+function loweringCallWithExplicitTypeArguments(): void {
   let rendered: String = loweringRenderChecked(
     "function identity<T>(value: T): T {\n  return value;\n}\n\nfunction go(): u32 {\n  return identity<u32>(1);\n}\n",
     false,
   );
 
-  Test::assertSnapshot("lowering-call-type-arguments-error", rendered.toStr());
+  Test::assertSnapshot("lowering-call-type-arguments", rendered.toStr());
 }
 
 /// `Enum::Variant(args)` lowers to `EnumVariant` with the arguments as its
