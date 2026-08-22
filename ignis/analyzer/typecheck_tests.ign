@@ -6110,20 +6110,15 @@ function typecheckEnumVariantPatternRejectsGenericEnumScrutinee(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  // Since S3 lifted the match wall, only the generic-enum bind diagnostic
-  // and the exhaustiveness WARNING remain.
-  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 2);
+  // Only the generic-enum bind diagnostic remains: exhaustiveness now
+  // credits variant coverage on generic enums (their variants do not depend
+  // on type arguments), so the single-variant arm is exhaustive.
+  Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
   let Option::SOME(genericDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckEnumVariantPatternRejectsGenericEnumScrutinee: missing generic-enum diagnostic");
   };
   Test::assertEq<str>(genericDiagnostic.code, DiagnosticCode::UNSUPPORTED_CONSTRUCT);
   Test::assertEq<str>(genericDiagnostic.messageText(), "typecheck does not support generic enum destructuring");
-
-  let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(1) else {
-    @panic("typecheckEnumVariantPatternRejectsGenericEnumScrutinee: missing exhaustiveness diagnostic");
-  };
-  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
-  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: generic enum scrutinee requires a wildcard/irrefutable-binding arm");
 }
 
 // Phase 12: bool/irrefutable exhaustiveness + `valuePosition` plumbing

@@ -249,10 +249,8 @@ export namespace Analyzer {
 
           match (def) {
             Analyzer::Definition::Enum(enum_) -> {
-              if (enum_.typeParams.length() > 0) {
-                return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("generic enum scrutinee requires a wildcard/irrefutable-binding arm"));
-              }
-
+              // Variant coverage does not depend on type arguments, so a
+              // generic enum's arms are checked exactly like a plain one's.
               let mut missingCount: u64 = 0;
               let mut firstMissingName: Option<str> = Option::NONE;
               let mut variantIndex: u64 = 0;
@@ -300,6 +298,41 @@ export namespace Analyzer {
           match (genericDef) {
             Analyzer::Definition::Record(_) -> {
               return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("generic record scrutinee requires a wildcard/irrefutable-binding arm"));
+            },
+            Analyzer::Definition::Enum(enum_) -> {
+              let mut missingCount: u64 = 0;
+              let mut firstMissingName: Option<str> = Option::NONE;
+              let mut variantIndex: u64 = 0;
+              while (variantIndex < enum_.variants.length()) {
+                let Option::SOME(variantId) = enum_.variants.get(variantIndex) else {
+                  variantIndex += 1;
+                  continue;
+                };
+
+                if (!Analyzer::Typecheck::matchCoverageHasVariant(&mut coverage, *variantId)) {
+                  missingCount += 1;
+
+                  if (firstMissingName.isNone()) {
+                    if (let Option::SOME(Analyzer::Definition::Variant(variant)) = defStore.get(*variantId)) {
+                      firstMissingName = symbols.resolve(variant.name);
+                    }
+                  }
+                }
+
+                variantIndex += 1;
+              }
+
+              if (missingCount == 0) {
+                return Analyzer::Typecheck::ExhaustiveVerdict::Exhaustive;
+              }
+
+              if (let Option::SOME(name) = firstMissingName) {
+                let message: String = `enum scrutinee is missing variant \`${name}\``;
+                return Analyzer::Typecheck::ExhaustiveVerdict::Missing(message);
+              }
+
+              let message: String = `enum scrutinee is missing ${missingCount} variant(s)`;
+              return Analyzer::Typecheck::ExhaustiveVerdict::Missing(message);
             },
             _ -> {
               return Analyzer::Typecheck::ExhaustiveVerdict::Missing(String::create("generic enum scrutinee requires a wildcard/irrefutable-binding arm"));
