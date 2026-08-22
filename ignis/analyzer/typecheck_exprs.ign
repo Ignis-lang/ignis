@@ -77,6 +77,12 @@ export namespace Analyzer {
         if (Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, leftType)) {
           rightExpected = Option::SOME(leftType);
         }
+
+        // A pointer left makes `x == null` well-typed: the null literal
+        // adopts the pointer type instead of failing to infer one.
+        if (Analyzer::Typecheck::typeIdIsPointer(typeStore, leftType)) {
+          rightExpected = Option::SOME(leftType);
+        }
       }
 
       let rightTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
@@ -90,12 +96,27 @@ export namespace Analyzer {
         rightExpected,
       );
 
-      let Option::SOME(leftType) = leftTypeOpt else {
+      let Option::SOME(initialLeftType) = leftTypeOpt else {
         return Option::NONE;
       };
       let Option::SOME(rightType) = rightTypeOpt else {
         return Option::NONE;
       };
+
+      // The expectation pass above only reaches a literal on the RIGHT of a
+      // numeric left. `3 - x.length()` needs the mirror: an unsuffixed
+      // integer literal on the left re-coerces to the right operand's
+      // integer type when it fits, as the host's literal coercion does.
+      let mut leftType: Analyzer::TypeId = initialLeftType;
+      let literalCoercibleOperator: boolean = Analyzer::Typecheck::isArithmeticBinaryOperator(b.operator)
+        || Analyzer::Typecheck::isEqualityBinaryOperator(b.operator)
+        || Analyzer::Typecheck::isComparisonBinaryOperator(b.operator);
+
+      if (literalCoercibleOperator && !Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, initialLeftType, rightType)) {
+        if (Analyzer::Typecheck::coerceIntegerLiteralTo(state, defStore, typeStore, module, b.left, rightType)) {
+          leftType = rightType;
+        }
+      }
 
       if (Analyzer::Typecheck::isArithmeticBinaryOperator(b.operator)) {
         if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType) && Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, b.span, leftType)) {
@@ -212,6 +233,50 @@ export namespace Analyzer {
 
       Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
       return Option::NONE;
+    }
+
+    /// Re-type an unsuffixed integer literal expression as `targetType` when
+    /// the target is an integer type the literal's value fits. Mirrors the
+    /// host's `try_coerce_integer_literal_to`. Returns whether it applied.
+    function coerceIntegerLiteralTo(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+      targetType: Analyzer::TypeId,
+    ): boolean {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      let Ast::Expression::Node::Literal(literal) = expr else {
+        return false;
+      };
+
+      let Ast::Expression::LiteralValue::Int(value) = literal.value else {
+        return false;
+      };
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, targetType);
+      if (resolved.cycleAlias.isSome()) {
+        return false;
+      }
+
+      let Option::SOME(targetNode) = typeStore.get(resolved.typeId) else {
+        return false;
+      };
+
+      if (!Analyzer::Typecheck::isIntegerTypeNode(targetNode)) {
+        return false;
+      }
+
+      if (!Analyzer::Typecheck::signedLiteralFits(targetNode, value)) {
+        return false;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, exprId, targetType);
+      return true;
     }
 
     function checkAssignmentExpr(
