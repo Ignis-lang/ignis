@@ -1,5 +1,4 @@
 import Vector from "std::vector";
-import Io from "std::io";
 
 import SourceSpan from "@compiler::diagnostics";
 import Id from "@compiler::ids";
@@ -116,19 +115,13 @@ export namespace LirLowering {
     block.instructions.push(instr);
   }
 
-  function createBlock(
-    function_: &mut Lir::FunctionLir,
-    label: str,
-  ): Lir::BlockId {
+  function createBlock(function_: &mut Lir::FunctionLir, label: str): Lir::BlockId {
     let mut functionRef: &mut Lir::FunctionLir = function_;
 
     return functionRef.allocBlock(Lir::Block::create(String::create(label)));
   }
 
-  function switchToBlock(
-    state: &mut LirLowering::LowerState,
-    block: Lir::BlockId,
-  ): void {
+  function switchToBlock(state: &mut LirLowering::LowerState, block: Lir::BlockId): void {
     state.currentBlock = block.raw() as u64;
     state.terminated = false;
   }
@@ -153,10 +146,7 @@ export namespace LirLowering {
     state.terminated = true;
   }
 
-  function isVoidType(
-    typeStore: &mut Analyzer::TypeStore,
-    ty: Analyzer::TypeId,
-  ): boolean {
+  function isVoidType(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
     if (let Option::SOME(typeNode) = typeStore.get(ty)) {
       if (let Analyzer::Type::VOID = typeNode) {
         return true;
@@ -166,10 +156,7 @@ export namespace LirLowering {
     return false;
   }
 
-  function isPointerLikeType(
-    typeStore: &mut Analyzer::TypeStore,
-    ty: Analyzer::TypeId,
-  ): boolean {
+  function isPointerLikeType(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
     if (let Option::SOME(typeNode) = typeStore.get(ty)) {
       return match (typeNode) {
         Analyzer::Type::Pointer(_) -> true,
@@ -271,8 +258,62 @@ export namespace LirLowering {
       Hir::LiteralValue::Boolean(value) -> Option::SOME(Lir::ConstValue::Bool(value, ty)),
       Hir::LiteralValue::Char(value) -> Option::SOME(Lir::ConstValue::Char(value, ty)),
       Hir::LiteralValue::String(value) -> Option::SOME(Lir::ConstValue::Str(value.clone(), ty)),
-      _ -> Option::NONE,
+      Hir::LiteralValue::Atom(symbol) -> Option::SOME(Lir::ConstValue::Atom(symbol.raw(), ty)),
+      Hir::LiteralValue::Hex(digits) -> Option::SOME(Lir::ConstValue::UInt(LirLowering::parseRadixDigits(&digits, 16), ty)),
+      Hir::LiteralValue::Binary(digits) -> Option::SOME(Lir::ConstValue::UInt(LirLowering::parseRadixDigits(&digits, 2), ty)),
+      Hir::LiteralValue::Null -> Option::SOME(Lir::ConstValue::Null(ty)),
     };
+  }
+
+  /// Parses the digit run of a hex or binary literal (the lexeme without the
+  /// `0x`/`0b` prefix, though a leading prefix is skipped defensively) into
+  /// its unsigned bit pattern, the oracle's `from_str_radix` with 0 on any
+  /// malformed digit.
+  function parseRadixDigits(digits: &String, radix: u64): u64 {
+    let mut result: u64 = 0;
+    let mut index: u64 = 0;
+
+    if (digits.length() >= 2) {
+      if (let Option::SOME(first) = digits.charAt(0)) {
+        if (first == '0') {
+          if (let Option::SOME(second) = digits.charAt(1)) {
+            if (second == 'x' || second == 'X' || second == 'b' || second == 'B') {
+              index = 2;
+            }
+          }
+        }
+      }
+    }
+
+    while (index < digits.length()) {
+      let Option::SOME(character) = digits.charAt(index) else {
+        return 0;
+      };
+
+      let mut digit: u64 = 0;
+
+      if (character >= '0' && character <= '9') {
+        digit = (character as u64) - ('0' as u64);
+      } else if (character >= 'a' && character <= 'f') {
+        digit = (character as u64) - ('a' as u64) + 10;
+      } else if (character >= 'A' && character <= 'F') {
+        digit = (character as u64) - ('A' as u64) + 10;
+      } else if (character == '_') {
+        index += 1;
+        continue;
+      } else {
+        return 0;
+      }
+
+      if (digit >= radix) {
+        return 0;
+      }
+
+      result = result * radix + digit;
+      index += 1;
+    }
+
+    return result;
   }
 
   /// Lowers one HIR expression tree to an operand, appending instructions to
@@ -496,6 +537,59 @@ export namespace LirLowering {
         LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
           dest: dest,
           ptr: Lir::Operand::Temp(elementPtr),
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::VectorLiteral(elements) -> {
+        let mut elementType: Option<Analyzer::TypeId> = Option::NONE;
+
+        if (let Option::SOME(typeNode) = typeStore.get(nodeType)) {
+          if (let Analyzer::Type::FixedArray(element, _) = typeNode) {
+            elementType = Option::SOME(element);
+          }
+        }
+
+        let Option::SOME(element) = elementType else {
+          LirLowering::markUnsupported(function_, state);
+
+          return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+        };
+
+        let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
+
+        let mut elementOperands: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
+        let mut elementIndex: u64 = 0;
+
+        while (elementIndex < elements.length()) {
+          if (let Option::SOME(elementId) = elements.get(elementIndex)) {
+            elementOperands.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *elementId));
+          }
+
+          elementIndex += 1;
+        }
+
+        let mut vectorPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        let elementPtrType: Analyzer::TypeId = vectorPtrTypeStoreRef.pointer(element);
+        let vectorPtr: Lir::TempId = LirLowering::freshTemp(function_, elementPtrType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::AddrOfLocal(Lir::InstrAddrOfLocal {
+          dest: vectorPtr,
+          local: local,
+          mutable: true,
+        }));
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::InitVector(Lir::InstrInitVector {
+          destPtr: Lir::Operand::Temp(vectorPtr),
+          elements: elementOperands,
+          elementType: element,
+        }));
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+          dest: dest,
+          source: local,
         }));
 
         return Lir::Operand::Temp(dest);
@@ -894,11 +988,18 @@ export namespace LirLowering {
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
+      Hir::HirKind::Match(matchNode) -> {
+        return LirLowering::lowerMatch(defStore, typeStore, hirStore, function_, state, &matchNode, nodeType, nodeSpan);
+      },
+      Hir::HirKind::LetElse(letElseNode) -> {
+        LirLowering::lowerLetElse(defStore, typeStore, hirStore, function_, state, &letElseNode, nodeSpan);
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
       Hir::HirKind::Defer(_) -> {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       _ -> {
-        Io::eprintln(`LIRUNSUP ${LirLowering::hirKindLabel(&node.kind)}`);
         LirLowering::markUnsupported(function_, state);
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
@@ -1091,6 +1192,671 @@ export namespace LirLowering {
       ptr: targetPtr,
       value: value,
     }));
+  }
+
+  function booleanTypeId(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    return typeStoreRef.intern(Analyzer::Type::BOOLEAN);
+  }
+
+  function unsignedInt32TypeId(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    return typeStoreRef.intern(Analyzer::Type::U32);
+  }
+
+  function boolConstOperand(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    value: boolean,
+    span: SourceSpan,
+  ): Lir::Operand {
+    let boolType: Analyzer::TypeId = LirLowering::booleanTypeId(typeStore);
+    let dest: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Copy(Lir::InstrCopy {
+      dest: dest,
+      source: Lir::Operand::Const(Lir::ConstValue::Bool(value, boolType)),
+    }));
+
+    return Lir::Operand::Temp(dest);
+  }
+
+  /// Loads through reference layers until the value is not a reference, the
+  /// oracle's `materialize_pattern_value`. Returns the value operand and its
+  /// dereferenced type through `LowerState`-independent out parameters is not
+  /// expressible here, so the type is re-derived by the caller when needed.
+  function materializedPatternType(
+    typeStore: &mut Analyzer::TypeStore,
+    valueType: Analyzer::TypeId,
+  ): Analyzer::TypeId {
+    let mut currentType: Analyzer::TypeId = valueType;
+    let mut guard: u64 = 0;
+
+    while (guard < 16) {
+      let mut referent: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(typeNode) = typeStore.get(currentType)) {
+        if (let Analyzer::Type::Reference(referenceType) = typeNode) {
+          referent = Option::SOME(referenceType.referent);
+        }
+      }
+
+      let Option::SOME(inner) = referent else {
+        return currentType;
+      };
+
+      currentType = inner;
+      guard += 1;
+    }
+
+    return currentType;
+  }
+
+  function materializePatternValue(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    value: Lir::Operand,
+    valueType: Analyzer::TypeId,
+    span: SourceSpan,
+  ): Lir::Operand {
+    let mut currentValue: Lir::Operand = value;
+    let mut currentType: Analyzer::TypeId = valueType;
+    let mut guard: u64 = 0;
+
+    while (guard < 16) {
+      let mut referent: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(typeNode) = typeStore.get(currentType)) {
+        if (let Analyzer::Type::Reference(referenceType) = typeNode) {
+          referent = Option::SOME(referenceType.referent);
+        }
+      }
+
+      let Option::SOME(inner) = referent else {
+        return currentValue;
+      };
+
+      let loaded: Lir::TempId = LirLowering::freshTemp(function_, inner, span);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
+        dest: loaded,
+        ptr: currentValue,
+      }));
+
+      currentValue = Lir::Operand::Temp(loaded);
+      currentType = inner;
+      guard += 1;
+    }
+
+    return currentValue;
+  }
+
+  /// Payload types of `variantTag` for a scrutinee whose (dereferenced) type
+  /// names an enum, with instance type arguments substituted.
+  function enumVariantPayloadTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    scrutineeType: Analyzer::TypeId,
+    variantTag: u32,
+  ): Option<Vector<Analyzer::TypeId>> {
+    let mut enumDefOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut instanceArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    if (let Option::SOME(typeNode) = typeStore.get(scrutineeType)) {
+      match (typeNode) {
+        Analyzer::Type::Enum(defId) -> {
+          enumDefOpt = Option::SOME(defId);
+        },
+        Analyzer::Type::Instance(instance) -> {
+          enumDefOpt = Option::SOME(instance.definition);
+
+          let mut argIndex: u64 = 0;
+          while (argIndex < instance.typeArguments.length()) {
+            if (let Option::SOME(argument) = instance.typeArguments.get(argIndex)) {
+              instanceArgs.push(*argument);
+            }
+            argIndex += 1;
+          }
+        },
+        _ -> {},
+      };
+    }
+
+    let Option::SOME(enumDefId) = enumDefOpt else {
+      return Option::NONE;
+    };
+
+    let mut variantDefOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut paramSymbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+
+    if (let Option::SOME(definition) = defStore.get(enumDefId)) {
+      if (let Analyzer::Definition::Enum(enumDef) = definition) {
+        if (let Option::SOME(variantId) = enumDef.variants.get(variantTag as u64)) {
+          variantDefOpt = Option::SOME(*variantId);
+        }
+
+        if (instanceArgs.length() > 0) {
+          paramSymbols = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &enumDef.typeParams);
+        }
+      }
+    }
+
+    let Option::SOME(variantDefId) = variantDefOpt else {
+      return Option::NONE;
+    };
+
+    let mut payloadTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    if (let Option::SOME(variantNode) = defStore.get(variantDefId)) {
+      if (let Analyzer::Definition::Variant(variantDef) = variantNode) {
+        let mut payloadIndex: u64 = 0;
+
+        while (payloadIndex < variantDef.payload.length()) {
+          if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+            if (paramSymbols.length() > 0 && paramSymbols.length() == instanceArgs.length()) {
+              let mut substituteTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+              payloadTypes.push(substituteTypeStoreRef.substitute(*payloadType, &paramSymbols, &instanceArgs));
+            } else {
+              payloadTypes.push(*payloadType);
+            }
+          }
+
+          payloadIndex += 1;
+        }
+      }
+    }
+
+    return Option::SOME(payloadTypes);
+  }
+
+  /// The oracle's `lower_pattern_check`: emits instructions that leave a
+  /// boolean operand describing whether `value` matches `pattern`, binding
+  /// pattern locals along the way. Tuple patterns keep the oracle's own
+  /// empty-tuple simplification.
+  function lowerPatternCheck(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    value: &Lir::Operand,
+    valueType: Analyzer::TypeId,
+    pattern: &Hir::HirPattern,
+    span: SourceSpan,
+  ): Lir::Operand {
+    let boolType: Analyzer::TypeId = LirLowering::booleanTypeId(typeStore);
+
+    match (pattern) {
+      Hir::HirPattern::Wildcard -> {
+        return LirLowering::boolConstOperand(typeStore, function_, state, true, span);
+      },
+      Hir::HirPattern::Literal(literal) -> {
+        let matchType: Analyzer::TypeId = LirLowering::materializedPatternType(typeStore, valueType);
+        let matchValue: Lir::Operand = LirLowering::materializePatternValue(
+          typeStore,
+          function_,
+          state,
+          Lir::copyOperand(value),
+          valueType,
+          span,
+        );
+
+        let mut literalOperand: Lir::Operand = Lir::Operand::Const(Lir::ConstValue::Undef(matchType));
+
+        if (let Option::SOME(constant) = LirLowering::constFromLiteral(&literal, matchType)) {
+          literalOperand = Lir::Operand::Const(constant);
+        }
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
+          dest: dest,
+          op: Hir::BinaryOperation::Equal,
+          left: matchValue,
+          right: literalOperand,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirPattern::Constant(defId) -> {
+        let matchValue: Lir::Operand = LirLowering::materializePatternValue(
+          typeStore,
+          function_,
+          state,
+          Lir::copyOperand(value),
+          valueType,
+          span,
+        );
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
+          dest: dest,
+          op: Hir::BinaryOperation::Equal,
+          left: matchValue,
+          right: Lir::Operand::GlobalRef(defId),
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirPattern::Binding(defId) -> {
+        let mut bindingSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
+        let mut haveSlot: boolean = false;
+
+        if (let Option::SOME(existing) = LirLowering::lookupLocal(state, defId)) {
+          bindingSlot = existing;
+          haveSlot = true;
+        }
+
+        if (!haveSlot) {
+          let mut bindingMutable: boolean = false;
+
+          if (let Option::SOME(definition) = defStore.get(defId)) {
+            if (let Analyzer::Definition::Variable(variableDef) = definition) {
+              bindingMutable = variableDef.mutable;
+            }
+          }
+
+          let mut bindingFunctionRef: &mut Lir::FunctionLir = function_;
+          bindingSlot = bindingFunctionRef.allocLocal(Lir::LocalData {
+            defId: Option::SOME(defId),
+            ty: valueType,
+            mutable: bindingMutable,
+            name: Option::NONE,
+            borrowedAlias: false,
+          });
+
+          LirLowering::registerLocal(state, defId, bindingSlot);
+        }
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+          dest: bindingSlot,
+          value: Lir::copyOperand(value),
+        }));
+
+        return LirLowering::boolConstOperand(typeStore, function_, state, true, span);
+      },
+      Hir::HirPattern::Variant(variantPattern) -> {
+        let enumValue: Lir::Operand = LirLowering::materializePatternValue(
+          typeStore,
+          function_,
+          state,
+          Lir::copyOperand(value),
+          valueType,
+          span,
+        );
+        let enumType: Analyzer::TypeId = LirLowering::materializedPatternType(typeStore, valueType);
+
+        let Option::SOME(payloadTypes) = LirLowering::enumVariantPayloadTypes(
+          defStore,
+          typeStore,
+          enumType,
+          variantPattern.variantTag,
+        ) else {
+          return LirLowering::boolConstOperand(typeStore, function_, state, false, span);
+        };
+
+        let tagType: Analyzer::TypeId = LirLowering::unsignedInt32TypeId(typeStore);
+        let tagTemp: Lir::TempId = LirLowering::freshTemp(function_, tagType, span);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::EnumGetTag(Lir::InstrEnumGetTag {
+          dest: tagTemp,
+          source: Lir::copyOperand(&enumValue),
+        }));
+
+        let tagMatch: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
+          dest: tagMatch,
+          op: Hir::BinaryOperation::Equal,
+          left: Lir::Operand::Temp(tagTemp),
+          right: Lir::Operand::Const(Lir::ConstValue::UInt(variantPattern.variantTag as u64, tagType)),
+        }));
+
+        let mut combined: Lir::Operand = Lir::Operand::Temp(tagMatch);
+        let mut checkIndex: u64 = 0;
+        let mut runtimeFieldIndex: u32 = 0;
+
+        while (checkIndex < variantPattern.args.length() && checkIndex < payloadTypes.length()) {
+          let Option::SOME(argPattern) = variantPattern.args.get(checkIndex) else {
+            checkIndex += 1;
+            continue;
+          };
+          let Option::SOME(fieldType) = payloadTypes.get(checkIndex) else {
+            checkIndex += 1;
+            continue;
+          };
+
+          let mut nested: Lir::Operand = Lir::Operand::Const(Lir::ConstValue::Bool(true, boolType));
+
+          if (LirLowering::isVoidType(typeStore, *fieldType)) {
+            nested = LirLowering::boolConstOperand(typeStore, function_, state, true, span);
+          } else {
+            let fieldTemp: Lir::TempId = LirLowering::freshTemp(function_, *fieldType, span);
+
+            LirLowering::pushInstr(function_, state, Lir::Instr::EnumGetPayloadField(Lir::InstrEnumGetPayloadField {
+              dest: fieldTemp,
+              source: Lir::copyOperand(&enumValue),
+              variantTag: variantPattern.variantTag,
+              fieldIndex: runtimeFieldIndex,
+            }));
+            runtimeFieldIndex += 1;
+
+            let fieldOperand: Lir::Operand = Lir::Operand::Temp(fieldTemp);
+            nested = LirLowering::lowerPatternCheck(
+              defStore,
+              typeStore,
+              function_,
+              state,
+              &fieldOperand,
+              *fieldType,
+              argPattern,
+              span,
+            );
+          }
+
+          let andTemp: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
+            dest: andTemp,
+            op: Hir::BinaryOperation::And,
+            left: combined,
+            right: nested,
+          }));
+
+          combined = Lir::Operand::Temp(andTemp);
+          checkIndex += 1;
+        }
+
+        return combined;
+      },
+      Hir::HirPattern::Or(alternatives) -> {
+        let mut combined: Lir::Operand = LirLowering::boolConstOperand(typeStore, function_, state, false, span);
+        let mut alternativeIndex: u64 = 0;
+
+        while (alternativeIndex < alternatives.length()) {
+          let Option::SOME(alternative) = alternatives.get(alternativeIndex) else {
+            alternativeIndex += 1;
+            continue;
+          };
+
+          let check: Lir::Operand = LirLowering::lowerPatternCheck(
+            defStore,
+            typeStore,
+            function_,
+            state,
+            value,
+            valueType,
+            alternative,
+            span,
+          );
+
+          let orTemp: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
+            dest: orTemp,
+            op: Hir::BinaryOperation::Or,
+            left: combined,
+            right: check,
+          }));
+
+          combined = Lir::Operand::Temp(orTemp);
+          alternativeIndex += 1;
+        }
+
+        return combined;
+      },
+      Hir::HirPattern::Tuple(elements) -> {
+        let mut matchesEmptyTuple: boolean = false;
+
+        if (elements.length() == 0) {
+          if (let Option::SOME(typeNode) = typeStore.get(valueType)) {
+            if (let Analyzer::Type::Tuple(tupleType) = typeNode) {
+              matchesEmptyTuple = tupleType.elements.length() == 0;
+            }
+          }
+        }
+
+        return LirLowering::boolConstOperand(typeStore, function_, state, matchesEmptyTuple, span);
+      },
+    };
+
+    return LirLowering::boolConstOperand(typeStore, function_, state, false, span);
+  }
+
+  /// The oracle's `lower_match` minus drop scheduling: scrutinee spilled to a
+  /// slot, one check/arm block pair per arm, guards branching to the next
+  /// check, a panic block for the non-exhaustive tail, and a result local
+  /// loaded in the merge block for non-void matches.
+  function lowerMatch(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    matchNode: &Hir::HirMatch,
+    nodeType: Analyzer::TypeId,
+    nodeSpan: SourceSpan,
+  ): Lir::Operand {
+    let scrutineeValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, matchNode.scrutinee);
+
+    let mut scrutineeType: Analyzer::TypeId = nodeType;
+    if (let Option::SOME(scrutineeNode) = hirStore.get(matchNode.scrutinee)) {
+      scrutineeType = scrutineeNode.typeId;
+    }
+
+    let scrutineeSlot: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, scrutineeType);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+      dest: scrutineeSlot,
+      value: scrutineeValue,
+    }));
+
+    let isVoid: boolean = LirLowering::isVoidType(typeStore, nodeType);
+
+    let mut resultSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
+    let mut hasResult: boolean = false;
+
+    if (!isVoid) {
+      resultSlot = LirLowering::allocSyntheticLocal(function_, nodeType);
+      hasResult = true;
+    }
+
+    if (matchNode.arms.length() == 0) {
+      LirLowering::pushInstr(function_, state, Lir::Instr::PanicMessage(Lir::InstrPanicMessage {
+        message: String::create("non-exhaustive match"),
+        span: nodeSpan,
+      }));
+      LirLowering::terminate(function_, state, Lir::Terminator::Unreachable);
+
+      return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+    }
+
+    let mergeBlock: Lir::BlockId = LirLowering::createBlock(function_, "match_merge");
+    let panicBlock: Lir::BlockId = LirLowering::createBlock(function_, "match_panic");
+
+    let mut checkBlockRaws: Vector<u32> = Vector::new<u32>();
+    let mut armBlockRaws: Vector<u32> = Vector::new<u32>();
+    let mut blockIndex: u64 = 0;
+
+    while (blockIndex < matchNode.arms.length()) {
+      checkBlockRaws.push(LirLowering::createBlock(function_, "match_check").raw());
+      armBlockRaws.push(LirLowering::createBlock(function_, "match_arm").raw());
+      blockIndex += 1;
+    }
+
+    if (!state.terminated) {
+      if (let Option::SOME(firstCheckRaw) = checkBlockRaws.get(0)) {
+        LirLowering::terminate(function_, state, Lir::Terminator::Goto(Id::fromRaw<Lir::BlockTag>(*firstCheckRaw)));
+      }
+    }
+
+    let mut armIndex: u64 = 0;
+
+    while (armIndex < matchNode.arms.length()) {
+      let Option::SOME(arm) = matchNode.arms.get(armIndex) else {
+        armIndex += 1;
+        continue;
+      };
+      let Option::SOME(checkRaw) = checkBlockRaws.get(armIndex) else {
+        armIndex += 1;
+        continue;
+      };
+      let Option::SOME(armRaw) = armBlockRaws.get(armIndex) else {
+        armIndex += 1;
+        continue;
+      };
+
+      let armBlock: Lir::BlockId = Id::fromRaw<Lir::BlockTag>(*armRaw);
+
+      let mut elseTargetRaw: u32 = panicBlock.raw();
+      if (armIndex + 1 < matchNode.arms.length()) {
+        if (let Option::SOME(nextCheckRaw) = checkBlockRaws.get(armIndex + 1)) {
+          elseTargetRaw = *nextCheckRaw;
+        }
+      }
+      let elseTarget: Lir::BlockId = Id::fromRaw<Lir::BlockTag>(elseTargetRaw);
+
+      LirLowering::switchToBlock(state, Id::fromRaw<Lir::BlockTag>(*checkRaw));
+
+      let scrutineeTemp: Lir::TempId = LirLowering::freshTemp(function_, scrutineeType, nodeSpan);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+        dest: scrutineeTemp,
+        source: scrutineeSlot,
+      }));
+
+      let scrutineeOperand: Lir::Operand = Lir::Operand::Temp(scrutineeTemp);
+      let matches: Lir::Operand = LirLowering::lowerPatternCheck(
+        defStore,
+        typeStore,
+        function_,
+        state,
+        &scrutineeOperand,
+        scrutineeType,
+        &arm.pattern,
+        nodeSpan,
+      );
+
+      if (let Option::SOME(guardId) = arm.guard) {
+        let guardBlock: Lir::BlockId = LirLowering::createBlock(function_, "match_guard");
+
+        LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+          condition: matches,
+          thenBlock: guardBlock,
+          elseBlock: elseTarget,
+        }));
+
+        LirLowering::switchToBlock(state, guardBlock);
+
+        let guardValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, guardId);
+
+        // `terminate` already drops a second terminator, so the branch is
+        // built unconditionally and the operand moves on every path.
+        LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+          condition: guardValue,
+          thenBlock: armBlock,
+          elseBlock: elseTarget,
+        }));
+      } else {
+        LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+          condition: matches,
+          thenBlock: armBlock,
+          elseBlock: elseTarget,
+        }));
+      }
+
+      LirLowering::switchToBlock(state, armBlock);
+
+      let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, arm.body);
+
+      let bodyLive: boolean = !state.terminated;
+      LirLowering::storeResult(function_, state, hasResult && bodyLive, resultSlot, bodyValue);
+
+      if (bodyLive) {
+        LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
+      }
+
+      armIndex += 1;
+    }
+
+    LirLowering::switchToBlock(state, panicBlock);
+    LirLowering::pushInstr(function_, state, Lir::Instr::PanicMessage(Lir::InstrPanicMessage {
+      message: String::create("non-exhaustive match"),
+      span: nodeSpan,
+    }));
+    LirLowering::terminate(function_, state, Lir::Terminator::Unreachable);
+
+    LirLowering::switchToBlock(state, mergeBlock);
+
+    if (hasResult) {
+      let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+        dest: dest,
+        source: resultSlot,
+      }));
+
+      return Lir::Operand::Temp(dest);
+    }
+
+    return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+  }
+
+  /// The oracle's `lower_let_else`: spill the value, check the pattern, and
+  /// branch between the continuation and the diverging else block.
+  function lowerLetElse(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    letElseNode: &Hir::HirLetElse,
+    nodeSpan: SourceSpan,
+  ): void {
+    let mut valueType: Analyzer::TypeId = function_.returnType;
+    if (let Option::SOME(valueNode) = hirStore.get(letElseNode.value)) {
+      valueType = valueNode.typeId;
+    }
+
+    let valueOperand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, letElseNode.value);
+    let scrutineeSlot: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, valueType);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+      dest: scrutineeSlot,
+      value: valueOperand,
+    }));
+
+    let scrutineeOperand: Lir::Operand = Lir::Operand::Local(scrutineeSlot);
+    let matches: Lir::Operand = LirLowering::lowerPatternCheck(
+      defStore,
+      typeStore,
+      function_,
+      state,
+      &scrutineeOperand,
+      valueType,
+      &letElseNode.pattern,
+      nodeSpan,
+    );
+
+    let continueBlock: Lir::BlockId = LirLowering::createBlock(function_, "let_else_ok");
+    let failBlock: Lir::BlockId = LirLowering::createBlock(function_, "let_else_fail");
+
+    LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+      condition: matches,
+      thenBlock: continueBlock,
+      elseBlock: failBlock,
+    }));
+
+    LirLowering::switchToBlock(state, failBlock);
+    let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, letElseNode.elseBlock);
+
+    if (!state.terminated) {
+      LirLowering::terminate(function_, state, Lir::Terminator::Unreachable);
+    }
+
+    LirLowering::switchToBlock(state, continueBlock);
   }
 
   /// Consumes `value`, storing it into `slot` only when `wanted`. Split out

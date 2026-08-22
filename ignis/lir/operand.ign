@@ -38,4 +38,30 @@ export namespace Lir {
     FuncRef(Analyzer::DefinitionId),
     GlobalRef(Analyzer::DefinitionId),
   }
+
+  /// Manual clone for operands: pattern checks read the same scrutinee
+  /// operand several times and `Operand` owns a `String` in its `Str` case.
+  function copyOperand(operand: &Lir::Operand): Lir::Operand {
+    return match (operand) {
+      Lir::Operand::Temp(temp) -> Lir::Operand::Temp(temp),
+      Lir::Operand::Local(local) -> Lir::Operand::Local(local),
+      Lir::Operand::Const(value) -> Lir::Operand::Const(Lir::copyConstValue(&value)),
+      Lir::Operand::FuncRef(defId) -> Lir::Operand::FuncRef(defId),
+      Lir::Operand::GlobalRef(defId) -> Lir::Operand::GlobalRef(defId),
+    };
+  }
+
+  function copyConstValue(value: &Lir::ConstValue): Lir::ConstValue {
+    return match (value) {
+      Lir::ConstValue::Int(raw, ty) -> Lir::ConstValue::Int(raw, ty),
+      Lir::ConstValue::UInt(raw, ty) -> Lir::ConstValue::UInt(raw, ty),
+      Lir::ConstValue::Float(raw, ty) -> Lir::ConstValue::Float(raw, ty),
+      Lir::ConstValue::Bool(raw, ty) -> Lir::ConstValue::Bool(raw, ty),
+      Lir::ConstValue::Char(raw, ty) -> Lir::ConstValue::Char(raw, ty),
+      Lir::ConstValue::Str(text, ty) -> Lir::ConstValue::Str(text.clone(), ty),
+      Lir::ConstValue::Atom(raw, ty) -> Lir::ConstValue::Atom(raw, ty),
+      Lir::ConstValue::Null(ty) -> Lir::ConstValue::Null(ty),
+      Lir::ConstValue::Undef(ty) -> Lir::ConstValue::Undef(ty),
+    };
+  }
 }
