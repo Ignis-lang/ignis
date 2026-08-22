@@ -606,6 +606,28 @@ export namespace Analyzer {
 
         return Analyzer::itemContainsDeclarationRaw(module, innerItemId, rawId, depth + 1);
       },
+      Ast::Item::Node::Extern(externItem) -> {
+        let mut externChildIndex: u64 = 0;
+
+        while (externChildIndex < externItem.items.length()) {
+          let Option::SOME(childId) = externItem.items.get(externChildIndex) else {
+            externChildIndex += 1;
+            continue;
+          };
+
+          if (childId.raw() == rawId) {
+            return true;
+          }
+
+          if (Analyzer::itemContainsDeclarationRaw(module, *childId, rawId, depth + 1)) {
+            return true;
+          }
+
+          externChildIndex += 1;
+        }
+
+        return false;
+      },
       Ast::Item::Node::Namespace(namespaceItem) -> {
         let mut childIndex: u64 = 0;
 
@@ -730,6 +752,21 @@ export namespace Analyzer {
         };
 
         return Analyzer::qualifiedNameWithin(module, innerItemId, rawId, prefix, depth + 1);
+      },
+      Ast::Item::Node::Extern(externItem) -> {
+        let mut externChildIndex: u64 = 0;
+
+        while (externChildIndex < externItem.items.length()) {
+          if (let Option::SOME(childId) = externItem.items.get(externChildIndex)) {
+            if (let Option::SOME(found) = Analyzer::qualifiedNameWithin(module, *childId, rawId, &ownPath, depth + 1)) {
+              return Option::SOME(found);
+            }
+          }
+
+          externChildIndex += 1;
+        }
+
+        return Option::NONE;
       },
       _ -> {
         return Option::NONE;

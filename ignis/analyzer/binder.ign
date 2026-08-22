@@ -442,10 +442,20 @@ export namespace Analyzer {
               predeclareItem(state, defStore, typeStore, symbols, ast, innerItemId, scopeKey);
             }
           },
-          Ast::Item::Node::Extern(_ex) -> {
-            // Known gap: selfhost Ast::Item::Extern lacks an `items` field.
-            // The Rust binder recurses into Extern.items; we treat Extern as a leaf here.
-            // Future slice: extend Ast::Item::Extern with items: Vector<Ast::ItemId>.
+          Ast::Item::Node::Extern(ex) -> {
+            // An extern block scopes its signatures the way a namespace does:
+            // `__string::fn` resolves through the same chain machinery.
+            predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &ex.name, ex.span, scopeKey, false);
+
+            let childScopeKey: u64 = (itemId.raw() as u64) + 1;
+            let mut childIndex: u64 = 0;
+
+            while (childIndex < ex.items.length()) {
+              if (let Option::SOME(childId) = ex.items.get(childIndex)) {
+                predeclareItem(state, defStore, typeStore, symbols, ast, *childId, childScopeKey);
+              }
+              childIndex += 1;
+            }
           },
           Ast::Item::Node::Function(_) -> {},
           Ast::Item::Node::Import(_) -> {},
@@ -1868,7 +1878,17 @@ export namespace Analyzer {
               completeItem(state, defStore, typeStore, symbols, ast, innerItemId, scopeKey, pass1);
             }
           },
-          Ast::Item::Node::Extern(_) -> {},
+          Ast::Item::Node::Extern(externItem) -> {
+            let childScopeKey: u64 = (itemId.raw() as u64) + 1;
+            let mut externChildIndex: u64 = 0;
+
+            while (externChildIndex < externItem.items.length()) {
+              if (let Option::SOME(childId) = externItem.items.get(externChildIndex)) {
+                completeItem(state, defStore, typeStore, symbols, ast, *childId, childScopeKey, pass1);
+              }
+              externChildIndex += 1;
+            }
+          },
           Ast::Item::Node::Import(_) -> {},
         };
       }

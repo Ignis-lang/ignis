@@ -774,7 +774,86 @@ export namespace ParserDeclarations {
     })));
   }
 
-  function parseFunctionSignatureOnly(parser: &mut ParserShared::State): boolean {
+  /// A signature-only extern function: same head as `parseFunctionItem`, a
+  /// `;` where the body would be, and an empty block standing in for it so
+  /// downstream phases can treat the item like any other function.
+  function parseExternFunctionItem(
+    parser: &mut ParserShared::State,
+    metadata: Ast::Metadata
+  ): Option<Ast::ItemId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let keyword = parserRef.expectKeyword(Keyword::FUNCTION, "expected 'function'")!;
+    let nameToken = parserRef.expectIdentifier("expected function name")!;
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after function name") else {
+      return Option::NONE;
+    };
+
+    let mut parameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+
+    if (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
+      while (true) {
+        let parameter = ParserDeclarations::parseBindingPattern(parserRef)!;
+        parameters.push(parameter);
+
+        if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
+          if (parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
+            break;
+          }
+          continue;
+        }
+
+        break;
+      }
+    }
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after function parameters") else {
+      return Option::NONE;
+    };
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::COLON, "expected ':' before function return type") else {
+      return Option::NONE;
+    };
+    let typeId = ParserTypes::parseType(parserRef)!;
+
+    // A `;` ends the signature; a written body still parses — rejecting it is
+    // analysis's job (host A0026), not a parse error.
+    let mut endSpan: SourceSpan = nameToken.span;
+    let mut bodyOpt: Option<Ast::StatementId> = Option::NONE;
+
+    if (let Option::SOME(semicolon) = parserRef.consumePunctuation(Punctuation::SEMICOLON)) {
+      endSpan = semicolon.span;
+    } else if (parserRef.atPunctuation(Punctuation::LEFT_BRACE)) {
+      let parsedBody = ParserStatements::parseBlockStatement(parserRef)!;
+      bodyOpt = Option::SOME(parsedBody);
+
+      if (let Option::SOME(bodyNode) = parserRef.module.statements.get(parsedBody)) {
+        endSpan = Ast::Serializer::statementSpan(bodyNode);
+      }
+    }
+
+    let mut body: Ast::StatementId = parserRef.module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+      span: endSpan,
+      statements: Vector::new<Ast::StatementId>(),
+      tail: Option::NONE,
+    }));
+
+    if (let Option::SOME(parsedBodyId) = bodyOpt) {
+      body = parsedBodyId;
+    }
+
+    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+      span: ParserShared::mergeSpans(keyword.span, endSpan),
+      name: nameToken.lexemeString(),
+      genericParameters: Vector::new<Ast::GenericParam>(),
+      parameters: ParserDeclarations::copyPatternIds(&parameters),
+      returnType: Option::SOME(typeId),
+      body: body,
+      metadata: Ast::copyMetadata(&metadata),
+    })));
+  }
+
+    function parseFunctionSignatureOnly(parser: &mut ParserShared::State): boolean {
     let mut parserRef: &mut ParserShared::State = parser;
 
     let Option::SOME(_) = parserRef.expectKeyword(Keyword::FUNCTION, "expected 'function'") else {
@@ -1130,15 +1209,14 @@ export namespace ParserDeclarations {
       return Option::NONE;
     };
 
+    let mut items: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
-      let Option::SOME(_) = ParserDeclarations::parseLeadingMetadata(parserRef) else {
-        return Option::NONE;
-      };
+      let memberMetadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
 
       if (parserRef.atKeyword(Keyword::FUNCTION)) {
-        if (!ParserDeclarations::parseFunctionSignatureOnly(parserRef)) {
-          return Option::NONE;
-        }
+        let memberId = ParserDeclarations::parseExternFunctionItem(parserRef, memberMetadata)!;
+        items.push(memberId);
         continue;
       }
 
@@ -1158,6 +1236,7 @@ export namespace ParserDeclarations {
     return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Extern(Ast::Item::Extern {
       span: ParserShared::mergeSpans(keyword.span, closeBrace.span),
       name: externName.name.clone(),
+      items: items,
       metadata: Ast::copyMetadata(&metadata),
     })));
   }

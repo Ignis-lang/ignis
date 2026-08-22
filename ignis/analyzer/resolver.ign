@@ -1978,7 +1978,18 @@ export namespace Analyzer {
           resolveTrait(state, defStore, typeStore, symbols, module, pass1, pass2, itemId, &t);
         },
         Ast::Item::Node::Import(_) -> {},
-        Ast::Item::Node::Extern(_) -> {},
+        Ast::Item::Node::Extern(externItem) -> {
+          // Extern signatures resolve like any other function's, or every
+          // call through them would compare against VOID placeholders.
+          let mut externChildIndex: u64 = 0;
+
+          while (externChildIndex < externItem.items.length()) {
+            if (let Option::SOME(childId) = externItem.items.get(externChildIndex)) {
+              resolveItem(state, defStore, typeStore, symbols, module, pass1, pass2, *childId);
+            }
+            externChildIndex += 1;
+          }
+        },
       };
     }
 
