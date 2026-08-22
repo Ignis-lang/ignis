@@ -674,19 +674,20 @@ export namespace Hir {
   /// `entryPoint` is ignored (caller should set it). Items are appended
   /// without duplicates.
   ///
-  /// A namespace function instead of a `HirStore` method because a by-value
-  /// record parameter in method position is currently miscompiled: moving a
-  /// heap-owning field out of it double-frees on method exit. The same move
-  /// pattern in a free function is sound.
-  function mergeStores(target: &mut Hir::HirStore, other: Hir::HirStore): void {
+  /// `other` is drained through a mutable reference rather than taken by
+  /// value: moving a heap-owning field out of a by-value record parameter is
+  /// currently miscompiled (documented for method position; large stores
+  /// reproduce the same double-free through a free function too), so the
+  /// caller keeps ownership and later drops an emptied store.
+  function mergeStores(target: &mut Hir::HirStore, other: &mut Hir::HirStore): void {
     let mut targetRef: &mut Hir::HirStore = target;
     let offset: u32 = targetRef.nodes.length() as u32;
 
-    let mut otherNodes: Vector<Hir::HirNode> = other.nodes;
+    let mut otherRef: &mut Hir::HirStore = other;
     let mut reversed: Vector<Hir::HirNode> = Vector::new<Hir::HirNode>();
 
-    while (!otherNodes.isEmpty()) {
-      let Option::SOME(node) = otherNodes.pop() else {
+    while (!otherRef.nodes.isEmpty()) {
+      let Option::SOME(node) = otherRef.nodes.pop() else {
         break;
       };
 
@@ -707,9 +708,9 @@ export namespace Hir {
 
     let mut bodyIndex: u64 = 0;
 
-    while (bodyIndex < other.functionBodies.length()) {
-      if (let Option::SOME(defId) = other.functionBodies.keyAt(bodyIndex)) {
-        if (let Option::SOME(hirId) = other.functionBodies.valueAt(bodyIndex)) {
+    while (bodyIndex < otherRef.functionBodies.length()) {
+      if (let Option::SOME(defId) = otherRef.functionBodies.keyAt(bodyIndex)) {
+        if (let Option::SOME(hirId) = otherRef.functionBodies.valueAt(bodyIndex)) {
           targetRef.functionBodies.set(defId, Hir::offsetHirId(hirId, offset));
         }
       }
@@ -718,9 +719,9 @@ export namespace Hir {
 
     let mut initIndex: u64 = 0;
 
-    while (initIndex < other.variablesInits.length()) {
-      if (let Option::SOME(defId) = other.variablesInits.keyAt(initIndex)) {
-        if (let Option::SOME(hirId) = other.variablesInits.valueAt(initIndex)) {
+    while (initIndex < otherRef.variablesInits.length()) {
+      if (let Option::SOME(defId) = otherRef.variablesInits.keyAt(initIndex)) {
+        if (let Option::SOME(hirId) = otherRef.variablesInits.valueAt(initIndex)) {
           targetRef.variablesInits.set(defId, Hir::offsetHirId(hirId, offset));
         }
       }
@@ -729,8 +730,8 @@ export namespace Hir {
 
     let mut itemIndex: u64 = 0;
 
-    while (itemIndex < other.items.length()) {
-      if (let Option::SOME(item) = other.items.get(itemIndex)) {
+    while (itemIndex < otherRef.items.length()) {
+      if (let Option::SOME(item) = otherRef.items.get(itemIndex)) {
         if (!targetRef.containsItem(*item)) {
           targetRef.items.push(*item);
         }

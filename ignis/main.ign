@@ -322,6 +322,7 @@ function compileFile(path: &String): i32 {
     let mut lirFunctions: u64 = 0;
     let mut lirVerifyErrors: u64 = 0;
     let mut lowerIndex: u64 = 0;
+    let mut programHir: Hir::HirStore = Hir::HirStore::init();
 
     while (lowerIndex < records.length()) {
       let Option::SOME(analysisRecord) = records.get(lowerIndex) else {
@@ -333,17 +334,20 @@ function compileFile(path: &String): i32 {
         continue;
       };
 
-      let hir: Hir::HirStore = Lowering::lowerModule(
+      let moduleNodeStart: u64 = programHir.nodes.length();
+
+      Lowering::lowerModuleInto(
         &mut defStore,
         &mut typeStore,
         &mut symbols,
         module,
         &analysisRecord.output,
+        &mut programHir,
       );
 
-      let mut nodeIndex: u64 = 0;
-      while (nodeIndex < hir.nodes.length()) {
-        if (let Option::SOME(node) = hir.nodes.get(nodeIndex)) {
+      let mut nodeIndex: u64 = moduleNodeStart;
+      while (nodeIndex < programHir.nodes.length()) {
+        if (let Option::SOME(node) = programHir.nodes.get(nodeIndex)) {
           if (let Hir::HirKind::Error = node.kind) {
             hirErrorNodes += 1;
           }
@@ -351,23 +355,25 @@ function compileFile(path: &String): i32 {
         nodeIndex += 1;
       }
 
-      hirNodes += hir.nodes.length();
-
-      let lirResult: LirLowering::LowerModuleResult = LirLowering::lowerModule(
-        &mut defStore,
-        &mut typeStore,
-        &hir,
-      );
-
-      lirUnsupported += lirResult.unsupported;
-      lirFunctions += lirResult.loweredFunctions;
-
-      let verifyFindings: Vector<String> = LirVerify::verifyProgram(&mut defStore, &mut typeStore, &lirResult.program);
-      lirVerifyErrors += verifyFindings.length();
+      hirNodes += programHir.nodes.length() - moduleNodeStart;
 
       loweredModules += 1;
       lowerIndex += 1;
     }
+
+    // LIR lowers the whole merged program once, the shape monomorphization
+    // (IGN-156) slots into between merge and lowering.
+    let lirResult: LirLowering::LowerModuleResult = LirLowering::lowerModule(
+      &mut defStore,
+      &mut typeStore,
+      &programHir,
+    );
+
+    lirUnsupported += lirResult.unsupported;
+    lirFunctions += lirResult.loweredFunctions;
+
+    let verifyFindings: Vector<String> = LirVerify::verifyProgram(&mut defStore, &mut typeStore, &lirResult.program);
+    lirVerifyErrors += verifyFindings.length();
 
     Io::println(`  lower: ${hirErrorNodes} error nodes, ${hirNodes} hir nodes, ${loweredModules} modules`);
     Io::println(`  lir: ${lirUnsupported} unsupported, ${lirFunctions} functions, ${lirVerifyErrors} verify errors`);

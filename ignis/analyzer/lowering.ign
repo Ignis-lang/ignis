@@ -4007,10 +4007,25 @@ export namespace Lowering {
     output: &Analyzer::AnalyzerOutput,
   ): Hir::HirStore {
     let mut hir: Hir::HirStore = Hir::HirStore::init();
-    let mut locals: Lowering::LocalMap = Lowering::LocalMap::init();
 
-    Lowering::lowerItems(defStore, typeStore, symbols, module, output, &mut locals, &mut hir, &module.roots);
+    Lowering::lowerModuleInto(defStore, typeStore, symbols, module, output, &mut hir);
 
     return hir;
+  }
+
+  /// Like `lowerModule` but appending into a caller-owned store, so a driver
+  /// can lower every module of a program into one shared `HirStore` with
+  /// program-wide ids and no post-hoc offsetting.
+  function lowerModuleInto(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    hir: &mut Hir::HirStore,
+  ): void {
+    let mut locals: Lowering::LocalMap = Lowering::LocalMap::init();
+
+    Lowering::lowerItems(defStore, typeStore, symbols, module, output, &mut locals, hir, &module.roots);
   }
 }
