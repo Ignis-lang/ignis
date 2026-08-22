@@ -1266,7 +1266,11 @@ export namespace ParserExpressions {
       pattern = patternResult!;
     }
     parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' in let condition")!;
-    let valueResult: Option<ParsedExpression> = ParserExpressions::parseExpression(parserRef);
+    // The value stops before `&&`/`||` (binding power 31 sits just above
+    // them), so `let P = e && cond` chains the condition instead of
+    // swallowing it into the scrutinee — where its own bindings would not
+    // exist yet.
+    let valueResult: Option<ParsedExpression> = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 31);
     let value = valueResult!;
 
     let valueId: Ast::ExpressionId = value.id;
@@ -1278,9 +1282,33 @@ export namespace ParserExpressions {
       value: valueId,
     }));
 
+    // `let P = e && cond && ...` chains: the value stopped before `&&`, so
+    // each following conjunct combines here, with the pattern's bindings in
+    // scope for every one of them.
+    let mut conditionId: Ast::ExpressionId = expressionId;
+    let mut conditionSpan: SourceSpan = span;
+
+    while (parserRef.atPunctuation(Punctuation::AND)) {
+      let Option::SOME(_) = parserRef.consumePunctuation(Punctuation::AND) else {
+        break;
+      };
+
+      let rightResult: Option<ParsedExpression> = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 31);
+      let right = rightResult!;
+
+      let combinedSpan: SourceSpan = ParserShared::mergeSpans(conditionSpan, right.span);
+      conditionId = parserRef.module.addExpression(Ast::Expression::Node::Binary(Ast::Expression::Binary {
+        span: combinedSpan,
+        operator: Ast::Expression::BinaryOperator::And,
+        left: conditionId,
+        right: right.id,
+      }));
+      conditionSpan = combinedSpan;
+    }
+
     return Option::SOME(ParsedCondition {
-      id: expressionId,
-      span: span,
+      id: conditionId,
+      span: conditionSpan,
     });
   }
 
