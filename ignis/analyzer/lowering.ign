@@ -1420,6 +1420,41 @@ export namespace Lowering {
       return Lowering::errorNode(hir, typeStore, call.span);
     };
 
+    // `minOf<T>()` / `maxOf<T>()` written without `@` are typed from the
+    // callee name alone (typechecker branch 1b) and carry no resolver ref.
+    let mut bareBuiltinName: String = String::create("");
+    if (let Option::SOME(bareCalleeExpr) = module.expressions.get(call.callee)) {
+      if (let Ast::Expression::Node::Variable(bareCallee) = bareCalleeExpr) {
+        bareBuiltinName = bareCallee.name.clone();
+      }
+
+      if (let Ast::Expression::Node::Path(barePath) = bareCalleeExpr) {
+        if (barePath.segments.length() == 1) {
+          if (let Option::SOME(onlySegment) = barePath.segments.get(0)) {
+            bareBuiltinName = onlySegment.clone();
+          }
+        }
+      }
+    }
+
+    if (bareBuiltinName.equals("minOf") || bareBuiltinName.equals("maxOf")) {
+      let Option::SOME(boundType) = callTypeArgs.get(0) else {
+        return Lowering::errorNode(hir, typeStore, call.span);
+      };
+
+      let kind: Hir::HirKind = match (bareBuiltinName.equals("minOf")) {
+        true -> Hir::HirKind::MinOf(*boundType),
+        false -> Hir::HirKind::MaxOf(*boundType),
+      };
+
+      let mut boundHirRef: &mut Hir::HirStore = hir;
+      return boundHirRef.alloc(Hir::HirNode {
+        kind: kind,
+        span: call.span,
+        typeId: *boundType,
+      });
+    }
+
     let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(
       &output.resolvedBodies.bodyResolution,
       call.callee.raw(),
@@ -1593,6 +1628,51 @@ export namespace Lowering {
       memberAccess.member.toStr(),
       symbols,
     ) else {
+      // An `@extension(T)` function answers the member miss like the oracle:
+      // the receiver becomes the first argument of a plain `Call`.
+      if (let Option::SOME(extensionDefId) = Analyzer::Typecheck::lookupExtensionFunction(
+        defStore,
+        typeStore,
+        symbols,
+        receiverType,
+        memberAccess.member.toStr(),
+      )) {
+        let base: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, memberAccess.object);
+
+        let mut extensionArgs: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+        extensionArgs.push(base);
+
+        let mut argumentIndex: u64 = 0;
+        while (argumentIndex < call.arguments.length()) {
+          if (let Option::SOME(argumentId) = call.arguments.get(argumentIndex)) {
+            extensionArgs.push(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *argumentId));
+          }
+
+          argumentIndex += 1;
+        }
+
+        let mut extensionReturnType: Analyzer::TypeId = Lowering::voidType(typeStore);
+        if (let Option::SOME(signature) = Analyzer::Typecheck::extractFunctionSignature(defStore, extensionDefId)) {
+          extensionReturnType = signature.returnType;
+        }
+
+        let extensionType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
+          Option::SOME(typeId) -> typeId,
+          Option::NONE -> extensionReturnType,
+        };
+
+        let mut extensionHirRef: &mut Hir::HirStore = hir;
+        return extensionHirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::Call(Hir::HirCall {
+            callee: extensionDefId,
+            typeArgs: callTypeArgs,
+            args: extensionArgs,
+          }),
+          span: memberAccess.span,
+          typeId: extensionType,
+        });
+      }
+
       return Lowering::errorNode(hir, typeStore, call.span);
     };
 
