@@ -7,6 +7,7 @@ import DiagnosticBag, DiagnosticRenderer, Severity, SourceFile from "@compiler::
 import Analyzer from "@compiler::analyzer";
 import Ast from "@compiler::ast";
 import ParseOutput, Parser from "@compiler::parser";
+import Hir from "@compiler::hir";
 
 // Pulled in so `ignis check` analyzes them: nothing else in this binary's
 // import graph reaches HIR lowering or the borrow checker yet, and a module
@@ -307,6 +308,53 @@ function compileFile(path: &String): i32 {
   }
 
   Io::println(formatPhaseLine("analyze", analyzeErrors, analyzeWarnings));
+
+  // Lowering runs only over a clean analysis: its inputs assume every
+  // reference resolved and every expression typed. Failures surface as
+  // `HirKind::Error` nodes, counted per module.
+  if (analyzeErrors == 0) {
+    let mut loweredModules: u64 = 0;
+    let mut hirErrorNodes: u64 = 0;
+    let mut hirNodes: u64 = 0;
+    let mut lowerIndex: u64 = 0;
+
+    while (lowerIndex < records.length()) {
+      let Option::SOME(analysisRecord) = records.get(lowerIndex) else {
+        lowerIndex += 1;
+        continue;
+      };
+      let Option::SOME(module) = modules.get(lowerIndex) else {
+        lowerIndex += 1;
+        continue;
+      };
+
+      let hir: Hir::HirStore = Lowering::lowerModule(
+        &mut defStore,
+        &mut typeStore,
+        &mut symbols,
+        module,
+        &analysisRecord.output,
+      );
+
+      let mut nodeIndex: u64 = 0;
+      while (nodeIndex < hir.nodes.length()) {
+        if (let Option::SOME(node) = hir.nodes.get(nodeIndex)) {
+          if (let Hir::HirKind::Error = node.kind) {
+            hirErrorNodes += 1;
+          }
+        }
+        nodeIndex += 1;
+      }
+
+      hirNodes += hir.nodes.length();
+      loweredModules += 1;
+      lowerIndex += 1;
+    }
+
+    Io::println(`  lower: ${hirErrorNodes} error nodes, ${hirNodes} hir nodes, ${loweredModules} modules`);
+  } else {
+    Io::println(String::create("  lower: skipped (analyze errors)"));
+  }
 
   let totalErrors: u64 = frontendErrors + analyzeErrors;
   let totalWarnings: u64 = frontendWarnings + analyzeWarnings;

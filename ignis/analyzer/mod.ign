@@ -30,10 +30,11 @@ export namespace Analyzer {
 
   record ModuleAnalysisRecord {
     public info: Analyzer::Imports::ModuleInfo;
-    public pass1: Analyzer::Binder::BinderOutput;
-    public pass2: Analyzer::Binder::BinderOutput;
     public direct: Analyzer::Imports::DirectDeclarationIndex;
     public imports: Analyzer::Imports::ImportOverlay;
+    /// Owns the binder passes too (`output.pass1` / `output.pass2`).
+    /// Duplicating them as record fields read the same moved value twice,
+    /// which the runtime's drop check flags on first use after analysis.
     public output: Analyzer::AnalyzerOutput;
   }
 
@@ -1510,8 +1511,6 @@ export namespace Analyzer {
 
       records.push(Analyzer::ModuleAnalysisRecord {
         info: info,
-        pass1: output.pass1,
-        pass2: output.pass2,
         direct: direct,
         imports: overlay,
         output: output,
