@@ -4475,7 +4475,18 @@ export namespace Analyzer {
       mutable: boolean,
       span: SourceSpan,
     ): void {
-      let Option::SOME(annotationId) = annotation else {
+      // The inline-let parser (expression blocks) attaches `: T` to the
+      // binding pattern rather than the statement, so the effective
+      // annotation is whichever of the two was written.
+      let mut effectiveAnnotation: Option<Ast::TypeId> = annotation;
+
+      if (effectiveAnnotation.isNone()) {
+        if (let Option::SOME(Ast::Pattern::Node::Binding(bindingPattern)) = module.patterns.get(patternId)) {
+          effectiveAnnotation = bindingPattern.annotation;
+        }
+      }
+
+      let Option::SOME(annotationId) = effectiveAnnotation else {
         let Option::SOME(valueExprId) = value else {
           // `let mut x;` waits for its first assignment to say what it holds.
           // An immutable binding has no such assignment coming, so it is still
