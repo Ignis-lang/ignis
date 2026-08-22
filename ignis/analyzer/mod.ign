@@ -306,6 +306,7 @@ export namespace Analyzer {
   function recordQualifiedNamesInDefStore(
     defStore: &mut Analyzer::DefinitionStore,
     direct: &Analyzer::Imports::DirectDeclarationIndex,
+    moduleIndex: u64,
   ): void {
     let mut declIndex: u64 = 0;
 
@@ -323,6 +324,9 @@ export namespace Analyzer {
         let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
         defsRef.setQualifiedName(*defId, qualifiedName.clone());
       }
+
+      let mut defsModuleRef: &mut Analyzer::DefinitionStore = defStore;
+      defsModuleRef.setDefModule(*defId, moduleIndex);
 
       declIndex += 1;
     }
@@ -991,7 +995,7 @@ export namespace Analyzer {
       &pass1,
       &pass2,
     );
-    Analyzer::recordQualifiedNamesInDefStore(defStore, &stampDirect);
+    Analyzer::recordQualifiedNamesInDefStore(defStore, &stampDirect, 0);
 
     let emptyProgramIndex: Analyzer::Imports::ProgramQualifiedIndex = Analyzer::Imports::emptyProgramQualifiedIndex();
 
@@ -1263,7 +1267,7 @@ export namespace Analyzer {
       Analyzer::appendReExportedDeclarations(&mut direct, module, &directs, infos);
       Analyzer::appendNamedReExports(&mut direct, module, &directs, infos);
       Analyzer::appendDirectToProgramIndex(&mut programIndex, &direct);
-      Analyzer::recordQualifiedNamesInDefStore(defStore, &direct);
+      Analyzer::recordQualifiedNamesInDefStore(defStore, &direct, bindIndex);
 
       pass1s.push(pass1);
       pass2s.push(pass2);
@@ -1305,6 +1309,9 @@ export namespace Analyzer {
         pass1,
         pass2,
       );
+
+      let mut activeRef2a: &mut Analyzer::DefinitionStore = defStore;
+      activeRef2a.setActiveModule(signatureIndex);
 
       let mut importDiagnostics: DiagnosticBag = DiagnosticBag::init();
       let mut overlay: Analyzer::Imports::ImportOverlay = Analyzer::buildImportOverlay(
@@ -1416,6 +1423,9 @@ export namespace Analyzer {
       // declarations only: re-exported names are appended afterwards, or the
       // own-declaration skip inside the overlay build would drop every
       // discard-imported name as if this module had declared it.
+      let mut activeRef2b: &mut Analyzer::DefinitionStore = defStore;
+      activeRef2b.setActiveModule(index);
+
       let mut direct: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
         defStore,
         module,

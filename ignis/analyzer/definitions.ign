@@ -246,12 +246,44 @@ export namespace Analyzer {
     /// later phases can pick between same-named declarations by the path a
     /// reference writes. Empty for definitions no module publishes.
     qualifiedNames: HashMap<u32, String>;
+    /// The module index each published declaration belongs to, and the module
+    /// currently being analyzed — so a bare-name scan can prefer the current
+    /// module's declaration over a same-named one from elsewhere.
+    defModules: HashMap<u32, u64>;
+    activeModule: u64;
 
     public static init(): DefinitionStore {
       return DefinitionStore {
         definitions: IndexVec::new<Analyzer::DefinitionTag, Analyzer::Definition>(),
         qualifiedNames: HashMap::new<u32, String>(),
+        defModules: HashMap::new<u32, u64>(),
+        activeModule: 0,
       };
+    }
+
+    /// Record which module published `id`. First write wins.
+    public setDefModule(&mut self, id: Analyzer::DefinitionId, moduleIndex: u64): void {
+      let raw: u32 = id.raw();
+      if (self.defModules.get(&raw).isSome()) {
+        return;
+      }
+
+      self.defModules.insert(raw, moduleIndex);
+    }
+
+    /// Whether `id` was published by the module currently being analyzed.
+    public defBelongsToActiveModule(&self, id: Analyzer::DefinitionId): boolean {
+      let raw: u32 = id.raw();
+      let Option::SOME(moduleIndex) = self.defModules.get(&raw) else {
+        return false;
+      };
+
+      return *moduleIndex == self.activeModule;
+    }
+
+    /// Set the module whose bodies are being analyzed.
+    public setActiveModule(&mut self, moduleIndex: u64): void {
+      self.activeModule = moduleIndex;
     }
 
     /// Record the written path a declaration is published under. First write
