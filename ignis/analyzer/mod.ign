@@ -300,7 +300,35 @@ export namespace Analyzer {
 
   /// Whether every binding an import writes is discarded, which is how the
   /// corpus spells "bring this module in whole".
-  /// Feed one module's declarations into the program-wide qualified index.
+  /// Stamp each published declaration's written path onto the definition
+  /// store, so phases without the program index (typecheck's local-annotation
+  /// resolution) can still pick between same-named declarations by path.
+  function recordQualifiedNamesInDefStore(
+    defStore: &mut Analyzer::DefinitionStore,
+    direct: &Analyzer::Imports::DirectDeclarationIndex,
+  ): void {
+    let mut declIndex: u64 = 0;
+
+    while (declIndex < direct.syms.length()) {
+      let Option::SOME(defId) = direct.defs.get(declIndex) else {
+        declIndex += 1;
+        continue;
+      };
+      let Option::SOME(qualifiedName) = direct.qualifiedNames.get(declIndex) else {
+        declIndex += 1;
+        continue;
+      };
+
+      if (qualifiedName.length() > 0) {
+        let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+        defsRef.setQualifiedName(*defId, qualifiedName.clone());
+      }
+
+      declIndex += 1;
+    }
+  }
+
+    /// Feed one module's declarations into the program-wide qualified index.
   function appendDirectToProgramIndex(
     programIndex: &mut Analyzer::Imports::ProgramQualifiedIndex,
     direct: &Analyzer::Imports::DirectDeclarationIndex,
@@ -1137,6 +1165,7 @@ export namespace Analyzer {
       // in `directs` when their importer binds.
       Analyzer::appendReExportedDeclarations(&mut direct, module, &directs, infos);
       Analyzer::appendDirectToProgramIndex(&mut programIndex, &direct);
+      Analyzer::recordQualifiedNamesInDefStore(defStore, &direct);
 
       pass1s.push(pass1);
       pass2s.push(pass2);

@@ -3479,11 +3479,39 @@ export namespace Analyzer {
               return Option::NONE;
             }
 
+            // The written path decides between same-named declarations:
+            // `Analyzer::TypeId` and `Ast::TypeId` both end in `TypeId`, and
+            // first-match by bare name picks whichever bound first.
+            let mut writtenPath: String = String::create("");
+            let mut writtenIndex: u64 = 0;
+            while (writtenIndex < path.segments.length()) {
+              if (let Option::SOME(writtenSegment) = path.segments.get(writtenIndex)) {
+                if (writtenIndex > 0) {
+                  writtenPath.pushStr("::");
+                }
+                writtenPath.pushStr(writtenSegment.toStr());
+              }
+              writtenIndex += 1;
+            }
+            let writtenSuffix: String = `::${writtenPath.toStr()}`;
+
             let mut qualifiedSymbolsRef: &mut Analyzer::SymbolTable = symbols;
             let lastSymbol: Analyzer::SymbolId = qualifiedSymbolsRef.intern(lastName.toStr());
             let mut qualifiedIndex: u64 = 0;
             while (qualifiedIndex < defStore.length()) {
               let qualifiedDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(qualifiedIndex as u32);
+
+              let mut pathMatches: boolean = false;
+              if (let Option::SOME(storedQualified) = defStore.qualifiedNameOf(qualifiedDefId)) {
+                pathMatches = storedQualified.equals(writtenPath.toStr())
+                  || Analyzer::Imports::programPathEndsWith(storedQualified, &writtenSuffix);
+              }
+
+              if (!pathMatches) {
+                qualifiedIndex += 1;
+                continue;
+              }
+
               let Option::SOME(qualifiedDef) = defStore.get(qualifiedDefId) else {
                 qualifiedIndex += 1;
                 continue;
@@ -3514,6 +3542,38 @@ export namespace Analyzer {
               };
 
               qualifiedIndex += 1;
+            }
+
+            // No stamped path matched — fall back to the bare last-segment
+            // scan (ADR D11's unvalidated-prefix leniency), which also covers
+            // single-module analysis, where no qualified name is stamped.
+            let mut bareIndex: u64 = 0;
+            while (bareIndex < defStore.length()) {
+              let bareDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(bareIndex as u32);
+              let Option::SOME(bareDef) = defStore.get(bareDefId) else {
+                bareIndex += 1;
+                continue;
+              };
+
+              if (bareDef.name().raw() != lastSymbol.raw()) {
+                bareIndex += 1;
+                continue;
+              }
+
+              match (bareDef) {
+                Analyzer::Definition::Record(record_) -> {
+                  return Option::SOME(record_.typeId);
+                },
+                Analyzer::Definition::Enum(enum_) -> {
+                  return Option::SOME(enum_.typeId);
+                },
+                Analyzer::Definition::TypeAlias(alias_) -> {
+                  return Option::SOME(alias_.typeId);
+                },
+                _ -> {},
+              };
+
+              bareIndex += 1;
             }
 
             return Option::NONE;

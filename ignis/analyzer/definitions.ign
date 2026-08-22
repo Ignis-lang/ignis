@@ -1,4 +1,5 @@
 import IndexVec from "@compiler::indexing";
+import HashMap from "std::collections";
 
 export namespace Analyzer {
   /// Visibility of a top-level declaration in a module.
@@ -240,11 +241,34 @@ export namespace Analyzer {
   /// returns empty and `push` is the sole allocator.
   record DefinitionStore {
     definitions: IndexVec<Analyzer::DefinitionTag, Analyzer::Definition>;
+    /// The written path of each declaration (`Analyzer::TypeId`), keyed by
+    /// raw definition id. Filled by `analyzeProgram` as modules bind, so
+    /// later phases can pick between same-named declarations by the path a
+    /// reference writes. Empty for definitions no module publishes.
+    qualifiedNames: HashMap<u32, String>;
 
     public static init(): DefinitionStore {
       return DefinitionStore {
         definitions: IndexVec::new<Analyzer::DefinitionTag, Analyzer::Definition>(),
+        qualifiedNames: HashMap::new<u32, String>(),
       };
+    }
+
+    /// Record the written path a declaration is published under. First write
+    /// wins: a re-export repeats the original path.
+    public setQualifiedName(&mut self, id: Analyzer::DefinitionId, qualifiedName: String): void {
+      let raw: u32 = id.raw();
+      if (self.qualifiedNames.get(&raw).isSome()) {
+        return;
+      }
+
+      self.qualifiedNames.insert(id.raw(), qualifiedName);
+    }
+
+    /// The written path recorded for `id`, if any.
+    public qualifiedNameOf(&self, id: Analyzer::DefinitionId): Option<&String> {
+      let raw: u32 = id.raw();
+      return self.qualifiedNames.get(&raw);
     }
 
     public push(&mut self, def: Analyzer::Definition): Analyzer::DefinitionId {
