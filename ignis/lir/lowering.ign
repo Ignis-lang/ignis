@@ -1,4 +1,5 @@
 import Vector from "std::vector";
+import Io from "std::io";
 
 import SourceSpan from "@compiler::diagnostics";
 import Id from "@compiler::ids";
@@ -19,6 +20,11 @@ export namespace LirLowering {
     public localDefRaws: Vector<u32>;
     public localSlotRaws: Vector<u32>;
     public currentBlock: u64;
+    /// True once the current block got its real terminator: later terminators
+    /// are dropped, mirroring the oracle builder guard.
+    public terminated: boolean;
+    public breakBlockRaws: Vector<u32>;
+    public continueBlockRaws: Vector<u32>;
 
     public static init(): LowerState {
       return LowerState {
@@ -26,6 +32,9 @@ export namespace LirLowering {
         localDefRaws: Vector::new<u32>(),
         localSlotRaws: Vector::new<u32>(),
         currentBlock: 0,
+        terminated: false,
+        breakBlockRaws: Vector::new<u32>(),
+        continueBlockRaws: Vector::new<u32>(),
       };
     }
   }
@@ -36,6 +45,61 @@ export namespace LirLowering {
     public program: Lir::LirProgram;
     public unsupported: u64;
     public loweredFunctions: u64;
+  }
+
+  /// Debug label of a HIR node kind, used by the measured loop to bucket
+  /// unsupported constructs.
+  function hirKindLabel(kind: &Hir::HirKind): str {
+    return match (kind) {
+      Hir::HirKind::Literal(_) -> "Literal",
+      Hir::HirKind::Unit -> "Unit",
+      Hir::HirKind::Variable(_) -> "Variable",
+      Hir::HirKind::Binary(_) -> "Binary",
+      Hir::HirKind::Unary(_) -> "Unary",
+      Hir::HirKind::Call(_) -> "Call",
+      Hir::HirKind::CallClosure(_) -> "CallClosure",
+      Hir::HirKind::Closure(_) -> "Closure",
+      Hir::HirKind::Cast(_) -> "Cast",
+      Hir::HirKind::BitCast(_) -> "BitCast",
+      Hir::HirKind::Reference(_) -> "Reference",
+      Hir::HirKind::Dereference(_) -> "Dereference",
+      Hir::HirKind::Index(_) -> "Index",
+      Hir::HirKind::VectorLiteral(_) -> "VectorLiteral",
+      Hir::HirKind::TupleLiteral(_) -> "TupleLiteral",
+      Hir::HirKind::MakeSlice(_) -> "MakeSlice",
+      Hir::HirKind::TypeOf(_) -> "TypeOf",
+      Hir::HirKind::SizeOf(_) -> "SizeOf",
+      Hir::HirKind::AlignOf(_) -> "AlignOf",
+      Hir::HirKind::MaxOf(_) -> "MaxOf",
+      Hir::HirKind::MinOf(_) -> "MinOf",
+      Hir::HirKind::BuiltinLoad(_) -> "BuiltinLoad",
+      Hir::HirKind::BuiltinStore(_) -> "BuiltinStore",
+      Hir::HirKind::BuiltinHash(_) -> "BuiltinHash",
+      Hir::HirKind::BuiltinEq(_) -> "BuiltinEq",
+      Hir::HirKind::BuiltinDropInPlace(_) -> "BuiltinDropInPlace",
+      Hir::HirKind::BuiltinDropGlue(_) -> "BuiltinDropGlue",
+      Hir::HirKind::Panic(_) -> "Panic",
+      Hir::HirKind::Trap -> "Trap",
+      Hir::HirKind::BuiltinUnreachable -> "BuiltinUnreachable",
+      Hir::HirKind::FieldAccess(_) -> "FieldAccess",
+      Hir::HirKind::RecordInit(_) -> "RecordInit",
+      Hir::HirKind::MethodCall(_) -> "MethodCall",
+      Hir::HirKind::EnumVariant(_) -> "EnumVariant",
+      Hir::HirKind::StaticAccess(_) -> "StaticAccess",
+      Hir::HirKind::Let(_) -> "Let",
+      Hir::HirKind::Assign(_) -> "Assign",
+      Hir::HirKind::Block(_) -> "Block",
+      Hir::HirKind::If(_) -> "If",
+      Hir::HirKind::LetElse(_) -> "LetElse",
+      Hir::HirKind::Loop(_) -> "Loop",
+      Hir::HirKind::Break -> "Break",
+      Hir::HirKind::Continue -> "Continue",
+      Hir::HirKind::Return(_) -> "Return",
+      Hir::HirKind::Defer(_) -> "Defer",
+      Hir::HirKind::ExpressionStatement(_) -> "ExpressionStatement",
+      Hir::HirKind::Match(_) -> "Match",
+      Hir::HirKind::Error -> "Error",
+    };
   }
 
   function pushInstr(
@@ -50,6 +114,88 @@ export namespace LirLowering {
     };
 
     block.instructions.push(instr);
+  }
+
+  function createBlock(
+    function_: &mut Lir::FunctionLir,
+    label: str,
+  ): Lir::BlockId {
+    let mut functionRef: &mut Lir::FunctionLir = function_;
+
+    return functionRef.allocBlock(Lir::Block::create(String::create(label)));
+  }
+
+  function switchToBlock(
+    state: &mut LirLowering::LowerState,
+    block: Lir::BlockId,
+  ): void {
+    state.currentBlock = block.raw() as u64;
+    state.terminated = false;
+  }
+
+  /// Sets the current block's terminator unless one is already in place.
+  function terminate(
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    terminator: Lir::Terminator,
+  ): void {
+    if (state.terminated) {
+      return;
+    }
+
+    let mut functionRef: &mut Lir::FunctionLir = function_;
+
+    let Option::SOME(block) = functionRef.blocks.getMut(state.currentBlock) else {
+      return;
+    };
+
+    block.terminator = terminator;
+    state.terminated = true;
+  }
+
+  function isVoidType(
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): boolean {
+    if (let Option::SOME(typeNode) = typeStore.get(ty)) {
+      if (let Analyzer::Type::VOID = typeNode) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function isPointerLikeType(
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): boolean {
+    if (let Option::SOME(typeNode) = typeStore.get(ty)) {
+      return match (typeNode) {
+        Analyzer::Type::Pointer(_) -> true,
+        Analyzer::Type::Reference(_) -> true,
+        _ -> false,
+      };
+    }
+
+    return false;
+  }
+
+  /// Allocates an anonymous slot for a value the next instruction needs an
+  /// address for, the oracle's synthetic local.
+  function allocSyntheticLocal(
+    function_: &mut Lir::FunctionLir,
+    ty: Analyzer::TypeId,
+  ): Lir::LocalId {
+    let mut functionRef: &mut Lir::FunctionLir = function_;
+
+    return functionRef.allocLocal(Lir::LocalData {
+      defId: Option::NONE,
+      ty: ty,
+      mutable: true,
+      name: Option::NONE,
+      borrowedAlias: false,
+    });
   }
 
   function markUnsupported(
@@ -283,12 +429,872 @@ export namespace LirLowering {
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
+      Hir::HirKind::Unary(unaryNode) -> {
+        let operand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, unaryNode.operand);
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::UnaryOp(Lir::InstrUnaryOp {
+          dest: dest,
+          op: unaryNode.operation,
+          operand: operand,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::Cast(castNode) -> {
+        let source: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, castNode.expression);
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, castNode.target, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Cast(Lir::InstrCast {
+          dest: dest,
+          source: source,
+          targetType: castNode.target,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::BitCast(castNode) -> {
+        let source: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, castNode.expression);
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, castNode.target, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::BitCast(Lir::InstrCast {
+          dest: dest,
+          source: source,
+          targetType: castNode.target,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::Dereference(innerId) -> {
+        let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, innerId);
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
+          dest: dest,
+          ptr: pointer,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::Index(indexNode) -> {
+        let base: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, indexNode.base);
+        let indexOperand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, indexNode.index);
+
+        let mut pointerTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        let elementPtrType: Analyzer::TypeId = pointerTypeStoreRef.pointer(nodeType);
+        let elementPtr: Lir::TempId = LirLowering::freshTemp(function_, elementPtrType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::GetElementPtr(Lir::InstrGetElementPtr {
+          dest: elementPtr,
+          base: base,
+          index: indexOperand,
+          elementType: nodeType,
+        }));
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
+          dest: dest,
+          ptr: Lir::Operand::Temp(elementPtr),
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::MakeSlice(sliceNode) -> {
+        let data: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, sliceNode.data);
+        let len: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, sliceNode.len);
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::MakeSlice(Lir::InstrMakeSlice {
+          dest: dest,
+          data: data,
+          len: len,
+          elementType: sliceNode.elementType,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::SizeOf(ty) -> {
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::SizeOf(Lir::InstrTypeQuery {
+          dest: dest,
+          ty: ty,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::AlignOf(ty) -> {
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::AlignOf(Lir::InstrTypeQuery {
+          dest: dest,
+          ty: ty,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::MaxOf(ty) -> {
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::MaxOf(Lir::InstrTypeQuery {
+          dest: dest,
+          ty: ty,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::MinOf(ty) -> {
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::MinOf(Lir::InstrTypeQuery {
+          dest: dest,
+          ty: ty,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::BuiltinLoad(loadNode) -> {
+        let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, loadNode.ptr);
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, loadNode.ty, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::BuiltinLoad(Lir::InstrBuiltinLoad {
+          dest: dest,
+          ptr: pointer,
+          ty: loadNode.ty,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::BuiltinStore(storeNode) -> {
+        let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, storeNode.ptr);
+        let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, storeNode.value);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::BuiltinStore(Lir::InstrBuiltinStore {
+          ptr: pointer,
+          value: value,
+          ty: storeNode.ty,
+        }));
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::BuiltinHash(hashNode) -> {
+        let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hashNode.value);
+        let hasher: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hashNode.hasher);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::BuiltinHash(Lir::InstrBuiltinHash {
+          value: value,
+          hasher: hasher,
+          ty: hashNode.ty,
+        }));
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::BuiltinEq(eqNode) -> {
+        let left: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, eqNode.left);
+        let right: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, eqNode.right);
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        let kind: Lir::BuiltinEqKind = match (&eqNode.kind) {
+          Hir::BuiltinEqKind::Primitive -> Lir::BuiltinEqKind::Primitive,
+          Hir::BuiltinEqKind::Str -> Lir::BuiltinEqKind::Str,
+          Hir::BuiltinEqKind::Method(methodDef) -> Lir::BuiltinEqKind::Method(methodDef),
+          Hir::BuiltinEqKind::Pending -> Lir::BuiltinEqKind::Primitive,
+        };
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::BuiltinEq(Lir::InstrBuiltinEq {
+          dest: dest,
+          left: left,
+          right: right,
+          ty: eqNode.ty,
+          kind: kind,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
+        let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, dropNode.ptr);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::DropInPlace(Lir::InstrDropInPlace {
+          ptr: pointer,
+          ty: dropNode.ty,
+        }));
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::BuiltinDropGlue(ty) -> {
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::DropGlue(Lir::InstrDropGlue {
+          dest: dest,
+          ty: ty,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::TypeOf(innerId) -> {
+        let source: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, innerId);
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::TypeIdOf(Lir::InstrTypeIdOf {
+          dest: dest,
+          source: source,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::Panic(messageId) -> {
+        let mut message: String = String::create("<non-literal panic>");
+
+        if (let Option::SOME(messageNode) = hirStore.get(messageId)) {
+          if (let Hir::HirKind::Literal(literal) = &messageNode.kind) {
+            if (let Hir::LiteralValue::String(text) = literal) {
+              message = text.clone();
+            }
+          }
+        }
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::PanicMessage(Lir::InstrPanicMessage {
+          message: message,
+          span: nodeSpan,
+        }));
+        LirLowering::terminate(function_, state, Lir::Terminator::Unreachable);
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::Trap -> {
+        LirLowering::pushInstr(function_, state, Lir::Instr::Trap(Lir::InstrTrap {
+          span: nodeSpan,
+        }));
+        LirLowering::terminate(function_, state, Lir::Terminator::Unreachable);
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::BuiltinUnreachable -> {
+        LirLowering::terminate(function_, state, Lir::Terminator::Unreachable);
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::FieldAccess(fieldNode) -> {
+        let basePtr: Lir::Operand = LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, fieldNode.base);
+
+        let mut fieldPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        let fieldPtrType: Analyzer::TypeId = fieldPtrTypeStoreRef.pointer(nodeType);
+        let fieldPtr: Lir::TempId = LirLowering::freshTemp(function_, fieldPtrType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::GetFieldPtr(Lir::InstrGetFieldPtr {
+          dest: fieldPtr,
+          base: basePtr,
+          fieldIndex: fieldNode.fieldIndex,
+          fieldType: nodeType,
+        }));
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
+          dest: dest,
+          ptr: Lir::Operand::Temp(fieldPtr),
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::Reference(referenceNode) -> {
+        return LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, referenceNode.expression);
+      },
+      Hir::HirKind::RecordInit(recordNode) -> {
+        let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
+
+        let mut fieldOperands: Vector<Lir::InitRecordField> = Vector::new<Lir::InitRecordField>();
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < recordNode.fields.length()) {
+          if (let Option::SOME(field) = recordNode.fields.get(fieldIndex)) {
+            fieldOperands.push(Lir::InitRecordField {
+              fieldIndex: field.fieldIndex,
+              value: LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, field.value),
+            });
+          }
+
+          fieldIndex += 1;
+        }
+
+        let mut recordPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        let recordPtrType: Analyzer::TypeId = recordPtrTypeStoreRef.pointer(nodeType);
+        let recordPtr: Lir::TempId = LirLowering::freshTemp(function_, recordPtrType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::AddrOfLocal(Lir::InstrAddrOfLocal {
+          dest: recordPtr,
+          local: local,
+          mutable: true,
+        }));
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::InitRecord(Lir::InstrInitRecord {
+          destPtr: Lir::Operand::Temp(recordPtr),
+          fields: fieldOperands,
+          recordType: nodeType,
+        }));
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+          dest: dest,
+          source: local,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::EnumVariant(variantNode) -> {
+        let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
+
+        let mut payloadOperands: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
+        let mut payloadIndex: u64 = 0;
+
+        while (payloadIndex < variantNode.payload.length()) {
+          if (let Option::SOME(payloadId) = variantNode.payload.get(payloadIndex)) {
+            payloadOperands.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *payloadId));
+          }
+
+          payloadIndex += 1;
+        }
+
+        let mut enumPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        let enumPtrType: Analyzer::TypeId = enumPtrTypeStoreRef.pointer(nodeType);
+        let enumPtr: Lir::TempId = LirLowering::freshTemp(function_, enumPtrType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::AddrOfLocal(Lir::InstrAddrOfLocal {
+          dest: enumPtr,
+          local: local,
+          mutable: true,
+        }));
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::InitEnumVariant(Lir::InstrInitEnumVariant {
+          destPtr: Lir::Operand::Temp(enumPtr),
+          enumType: nodeType,
+          variantTag: variantNode.variantTag,
+          payload: payloadOperands,
+        }));
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+          dest: dest,
+          source: local,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::MethodCall(methodNode) -> {
+        let mut callArgs: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
+
+        if (let Option::SOME(receiverId) = methodNode.receiver) {
+          callArgs.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, receiverId));
+        }
+
+        let mut argIndex: u64 = 0;
+
+        while (argIndex < methodNode.args.length()) {
+          if (let Option::SOME(argId) = methodNode.args.get(argIndex)) {
+            callArgs.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *argId));
+          }
+
+          argIndex += 1;
+        }
+
+        if (LirLowering::isVoidType(typeStore, nodeType)) {
+          LirLowering::pushInstr(function_, state, Lir::Instr::Call(Lir::InstrCall {
+            dest: Option::NONE,
+            callee: methodNode.method,
+            args: callArgs,
+          }));
+
+          return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+        }
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Call(Lir::InstrCall {
+          dest: Option::SOME(dest),
+          callee: methodNode.method,
+          args: callArgs,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::CallClosure(closureCallNode) -> {
+        let closure: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, closureCallNode.callee);
+
+        let mut closureArgs: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
+        let mut argIndex: u64 = 0;
+
+        while (argIndex < closureCallNode.args.length()) {
+          if (let Option::SOME(argId) = closureCallNode.args.get(argIndex)) {
+            closureArgs.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *argId));
+          }
+
+          argIndex += 1;
+        }
+
+        if (LirLowering::isVoidType(typeStore, nodeType)) {
+          LirLowering::pushInstr(function_, state, Lir::Instr::CallClosure(Lir::InstrCallClosure {
+            dest: Option::NONE,
+            closure: closure,
+            args: closureArgs,
+            returnType: nodeType,
+          }));
+
+          return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+        }
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::CallClosure(Lir::InstrCallClosure {
+          dest: Option::SOME(dest),
+          closure: closure,
+          args: closureArgs,
+          returnType: nodeType,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::StaticAccess(defId) -> {
+        return Lir::Operand::GlobalRef(defId);
+      },
+      Hir::HirKind::Assign(assignNode) -> {
+        LirLowering::lowerAssign(defStore, typeStore, hirStore, function_, state, &assignNode);
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::If(ifNode) -> {
+        return LirLowering::lowerIf(defStore, typeStore, hirStore, function_, state, &ifNode, nodeType, nodeSpan);
+      },
+      Hir::HirKind::Loop(loopNode) -> {
+        LirLowering::lowerLoop(defStore, typeStore, hirStore, function_, state, &loopNode);
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::Break -> {
+        let breakLength: u64 = state.breakBlockRaws.length();
+
+        if (breakLength > 0) {
+          if (let Option::SOME(targetRaw) = state.breakBlockRaws.get(breakLength - 1)) {
+            LirLowering::terminate(function_, state, Lir::Terminator::Goto(Id::fromRaw<Lir::BlockTag>(*targetRaw)));
+          }
+        }
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::Continue -> {
+        let continueLength: u64 = state.continueBlockRaws.length();
+
+        if (continueLength > 0) {
+          if (let Option::SOME(targetRaw) = state.continueBlockRaws.get(continueLength - 1)) {
+            LirLowering::terminate(function_, state, Lir::Terminator::Goto(Id::fromRaw<Lir::BlockTag>(*targetRaw)));
+          }
+        }
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::Defer(_) -> {
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
       _ -> {
+        Io::eprintln(`LIRUNSUP ${LirLowering::hirKindLabel(&node.kind)}`);
         LirLowering::markUnsupported(function_, state);
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
     };
+  }
+
+  /// Pointer to the storage a place expression names, mirroring the oracle's
+  /// lvalue paths: a pointer-typed base passes through, a local variable
+  /// takes its address, a nested field access chains `GetFieldPtr`, and any
+  /// other value spills to a synthetic local first.
+  function lowerPlacePtr(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    hirId: Hir::HirId,
+  ): Lir::Operand {
+    let Option::SOME(node) = hirStore.get(hirId) else {
+      state.unsupported += 1;
+      return Lir::Operand::Const(Lir::ConstValue::Undef(function_.returnType));
+    };
+
+    let nodeType: Analyzer::TypeId = node.typeId;
+    let nodeSpan: SourceSpan = node.span;
+
+    if (LirLowering::isPointerLikeType(typeStore, nodeType)) {
+      return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hirId);
+    }
+
+    if (let Hir::HirKind::Variable(defId) = &node.kind) {
+      if (let Option::SOME(slot) = LirLowering::lookupLocal(state, defId)) {
+        let mut ptrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        let ptrType: Analyzer::TypeId = ptrTypeStoreRef.pointer(nodeType);
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, ptrType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::AddrOfLocal(Lir::InstrAddrOfLocal {
+          dest: dest,
+          local: slot,
+          mutable: true,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      }
+    }
+
+    if (let Hir::HirKind::Dereference(innerId) = &node.kind) {
+      return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, innerId);
+    }
+
+    if (let Hir::HirKind::FieldAccess(fieldNode) = &node.kind) {
+      let basePtr: Lir::Operand = LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, fieldNode.base);
+
+      let mut fieldPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let fieldPtrType: Analyzer::TypeId = fieldPtrTypeStoreRef.pointer(nodeType);
+      let fieldPtr: Lir::TempId = LirLowering::freshTemp(function_, fieldPtrType, nodeSpan);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::GetFieldPtr(Lir::InstrGetFieldPtr {
+        dest: fieldPtr,
+        base: basePtr,
+        fieldIndex: fieldNode.fieldIndex,
+        fieldType: nodeType,
+      }));
+
+      return Lir::Operand::Temp(fieldPtr);
+    }
+
+    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hirId);
+    let spill: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+      dest: spill,
+      value: value,
+    }));
+
+    let mut spillPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    let spillPtrType: Analyzer::TypeId = spillPtrTypeStoreRef.pointer(nodeType);
+    let dest: Lir::TempId = LirLowering::freshTemp(function_, spillPtrType, nodeSpan);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::AddrOfLocal(Lir::InstrAddrOfLocal {
+      dest: dest,
+      local: spill,
+      mutable: false,
+    }));
+
+    return Lir::Operand::Temp(dest);
+  }
+
+  /// `target = value` and `target op= value`. A plain local stores directly;
+  /// every other target goes through its place pointer and `StorePtr`.
+  function lowerAssign(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    assignNode: &Hir::HirAssign,
+  ): void {
+    let mut targetType: Analyzer::TypeId = function_.returnType;
+    let mut targetIsLocal: boolean = false;
+    let mut targetSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
+
+    if (let Option::SOME(targetNode) = hirStore.get(assignNode.target)) {
+      targetType = targetNode.typeId;
+
+      if (let Hir::HirKind::Variable(defId) = &targetNode.kind) {
+        if (let Option::SOME(slot) = LirLowering::lookupLocal(state, defId)) {
+          targetIsLocal = true;
+          targetSlot = slot;
+        }
+      }
+    }
+
+    if (targetIsLocal) {
+      if (let Option::SOME(operation) = assignNode.operation) {
+        let current: Lir::TempId = LirLowering::freshTemp(function_, targetType, SourceSpan::new("", 0, 0));
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+          dest: current,
+          source: targetSlot,
+        }));
+
+        let rhs: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, assignNode.value);
+        let result: Lir::TempId = LirLowering::freshTemp(function_, targetType, SourceSpan::new("", 0, 0));
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
+          dest: result,
+          op: operation,
+          left: Lir::Operand::Temp(current),
+          right: rhs,
+        }));
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+          dest: targetSlot,
+          value: Lir::Operand::Temp(result),
+        }));
+
+        return;
+      }
+
+      let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, assignNode.value);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+        dest: targetSlot,
+        value: value,
+      }));
+
+      return;
+    }
+
+    let targetPtr: Lir::Operand = LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, assignNode.target);
+
+    if (let Option::SOME(operation) = assignNode.operation) {
+      // A place pointer is always a temp; the temp id copies, so the same
+      // pointer reads the old value and receives the new one.
+      let Lir::Operand::Temp(ptrTemp) = targetPtr else {
+        state.unsupported += 1;
+        return;
+      };
+
+      let current: Lir::TempId = LirLowering::freshTemp(function_, targetType, SourceSpan::new("", 0, 0));
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
+        dest: current,
+        ptr: Lir::Operand::Temp(ptrTemp),
+      }));
+
+      let rhs: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, assignNode.value);
+      let result: Lir::TempId = LirLowering::freshTemp(function_, targetType, SourceSpan::new("", 0, 0));
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
+        dest: result,
+        op: operation,
+        left: Lir::Operand::Temp(current),
+        right: rhs,
+      }));
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::StorePtr(Lir::InstrStorePtr {
+        ptr: Lir::Operand::Temp(ptrTemp),
+        value: Lir::Operand::Temp(result),
+      }));
+
+      return;
+    }
+
+    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, assignNode.value);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::StorePtr(Lir::InstrStorePtr {
+      ptr: targetPtr,
+      value: value,
+    }));
+  }
+
+  /// Consumes `value`, storing it into `slot` only when `wanted`. Split out
+  /// so the operand is moved on every path, which the ownership checker
+  /// requires of branch-dependent stores.
+  function storeResult(
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    wanted: boolean,
+    slot: Lir::LocalId,
+    value: Lir::Operand,
+  ): void {
+    if (!wanted) {
+      return;
+    }
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+      dest: slot,
+      value: value,
+    }));
+  }
+
+  /// The oracle's `lower_if`: branch, then/else blocks storing into one
+  /// result local when the expression is non-void, merge block loading it.
+  function lowerIf(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    ifNode: &Hir::HirIf,
+    nodeType: Analyzer::TypeId,
+    nodeSpan: SourceSpan,
+  ): Lir::Operand {
+    let condition: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, ifNode.condition);
+
+    let thenBlock: Lir::BlockId = LirLowering::createBlock(function_, "then");
+    let elseBlock: Lir::BlockId = LirLowering::createBlock(function_, "else");
+    let mergeBlock: Lir::BlockId = LirLowering::createBlock(function_, "merge");
+
+    let isVoid: boolean = LirLowering::isVoidType(typeStore, nodeType);
+
+    let mut resultSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
+    let mut hasResult: boolean = false;
+
+    if (!isVoid) {
+      resultSlot = LirLowering::allocSyntheticLocal(function_, nodeType);
+      hasResult = true;
+    }
+
+    LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+      condition: condition,
+      thenBlock: thenBlock,
+      elseBlock: elseBlock,
+    }));
+
+    LirLowering::switchToBlock(state, thenBlock);
+    let thenValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, ifNode.thenBranch);
+
+    let thenLive: boolean = !state.terminated;
+    LirLowering::storeResult(function_, state, hasResult && thenLive, resultSlot, thenValue);
+
+    if (thenLive) {
+      LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
+    }
+
+    LirLowering::switchToBlock(state, elseBlock);
+
+    if (let Option::SOME(elseId) = ifNode.elseBranch) {
+      let elseValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, elseId);
+
+      let elseLive: boolean = !state.terminated;
+      LirLowering::storeResult(function_, state, hasResult && elseLive, resultSlot, elseValue);
+
+      if (elseLive) {
+        LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
+      }
+    } else {
+      LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
+    }
+
+    LirLowering::switchToBlock(state, mergeBlock);
+
+    if (hasResult) {
+      let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+        dest: dest,
+        source: resultSlot,
+      }));
+
+      return Lir::Operand::Temp(dest);
+    }
+
+    return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+  }
+
+  /// The oracle's `lower_loop` for infinite, while and for shapes.
+  function lowerLoop(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    loopNode: &Hir::HirLoop,
+  ): void {
+    let exitBlock: Lir::BlockId = LirLowering::createBlock(function_, "loop_exit");
+
+    match (&loopNode.condition) {
+      Hir::LoopKind::Infinite -> {
+        let bodyBlock: Lir::BlockId = LirLowering::createBlock(function_, "loop_body");
+
+        state.breakBlockRaws.push(exitBlock.raw());
+        state.continueBlockRaws.push(bodyBlock.raw());
+
+        LirLowering::terminate(function_, state, Lir::Terminator::Goto(bodyBlock));
+
+        LirLowering::switchToBlock(state, bodyBlock);
+        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, loopNode.body);
+
+        if (!state.terminated) {
+          LirLowering::terminate(function_, state, Lir::Terminator::Goto(bodyBlock));
+        }
+      },
+      Hir::LoopKind::While(conditionId) -> {
+        let headerBlock: Lir::BlockId = LirLowering::createBlock(function_, "loop_header");
+        let bodyBlock: Lir::BlockId = LirLowering::createBlock(function_, "loop_body");
+        let continueBlock: Lir::BlockId = LirLowering::createBlock(function_, "loop_continue");
+
+        state.breakBlockRaws.push(exitBlock.raw());
+        state.continueBlockRaws.push(continueBlock.raw());
+
+        LirLowering::terminate(function_, state, Lir::Terminator::Goto(headerBlock));
+
+        LirLowering::switchToBlock(state, headerBlock);
+        let condition: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, conditionId);
+
+        LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+          condition: condition,
+          thenBlock: bodyBlock,
+          elseBlock: exitBlock,
+        }));
+
+        LirLowering::switchToBlock(state, bodyBlock);
+        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, loopNode.body);
+
+        if (!state.terminated) {
+          LirLowering::terminate(function_, state, Lir::Terminator::Goto(continueBlock));
+        }
+
+        LirLowering::switchToBlock(state, continueBlock);
+        LirLowering::terminate(function_, state, Lir::Terminator::Goto(headerBlock));
+      },
+      Hir::LoopKind::For(forNode) -> {
+        let headerBlock: Lir::BlockId = LirLowering::createBlock(function_, "loop_header");
+        let bodyBlock: Lir::BlockId = LirLowering::createBlock(function_, "loop_body");
+        let continueBlock: Lir::BlockId = LirLowering::createBlock(function_, "loop_continue");
+
+        state.breakBlockRaws.push(exitBlock.raw());
+        state.continueBlockRaws.push(continueBlock.raw());
+
+        if (let Option::SOME(initId) = forNode.init) {
+          let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, initId);
+        }
+
+        if (!state.terminated) {
+          LirLowering::terminate(function_, state, Lir::Terminator::Goto(headerBlock));
+        }
+
+        LirLowering::switchToBlock(state, headerBlock);
+
+        if (let Option::SOME(conditionId) = forNode.condition) {
+          let condition: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, conditionId);
+
+          LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+            condition: condition,
+            thenBlock: bodyBlock,
+            elseBlock: exitBlock,
+          }));
+        } else {
+          LirLowering::terminate(function_, state, Lir::Terminator::Goto(bodyBlock));
+        }
+
+        LirLowering::switchToBlock(state, bodyBlock);
+        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, loopNode.body);
+
+        if (!state.terminated) {
+          LirLowering::terminate(function_, state, Lir::Terminator::Goto(continueBlock));
+        }
+
+        LirLowering::switchToBlock(state, continueBlock);
+
+        if (let Option::SOME(updateId) = forNode.update) {
+          let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, updateId);
+        }
+
+        LirLowering::terminate(function_, state, Lir::Terminator::Goto(headerBlock));
+      },
+    };
+
+    let _breakPopped = state.breakBlockRaws.pop();
+    let _continuePopped = state.continueBlockRaws.pop();
+
+    LirLowering::switchToBlock(state, exitBlock);
   }
 
   /// Lowers every function body of one module's HIR store.
