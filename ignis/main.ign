@@ -79,6 +79,50 @@ function mapImportSourcesToDiscoveryTargets(
     let Option::SOME(item) = module.items.getMut(*rootId) else {
       return false;
     };
+    if (let Ast::Item::Node::Export(exportItem) = item) {
+      // `export Name from "path"` carries a source too; it maps to its
+      // discovery target the same way an import does.
+      let Option::SOME(exportSource) = Ast::copyOptionalString(&exportItem.source) else {
+        rootIndex += 1;
+        continue;
+      };
+
+      let mut exportEdgeIndex: u64 = 0;
+      let mut exportMatched: boolean = false;
+
+      while (exportEdgeIndex < node.edges.length()) {
+        let Option::SOME(edge) = node.edges.get(exportEdgeIndex) else {
+          return false;
+        };
+
+        if (edge.source.equals(exportSource.toStr())) {
+          let Option::SOME(target) = graph.nodes.get(edge.targetIndex) else {
+            return false;
+          };
+
+          *item = Ast::Item::Node::Export(Ast::Item::Export {
+            span: exportItem.span,
+            declaration: exportItem.declaration,
+            items: Ast::copyImportBindings(&exportItem.items),
+            source: Option::SOME(target.path.toString()),
+            sourceSpan: exportItem.sourceSpan,
+            metadata: Ast::emptyMetadata(),
+          });
+          exportMatched = true;
+          break;
+        }
+
+        exportEdgeIndex += 1;
+      }
+
+      if (!exportMatched) {
+        return false;
+      }
+
+      rootIndex += 1;
+      continue;
+    }
+
     let Ast::Item::Node::Import(importItem) = item else {
       rootIndex += 1;
       continue;

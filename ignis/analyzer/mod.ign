@@ -328,7 +328,95 @@ export namespace Analyzer {
     }
   }
 
-  /// Feed one module's declarations into the program-wide qualified index.
+  /// Re-publish what `export Name from "path"` names: the declaration itself
+  /// and, when it is a namespace, everything written under `Name::`.
+  function appendNamedReExports(
+    direct: &mut Analyzer::Imports::DirectDeclarationIndex,
+    module: &Ast::Module,
+    directs: &Vector<Analyzer::Imports::DirectDeclarationIndex>,
+    infos: &Vector<Analyzer::Imports::ModuleInfo>,
+  ): void {
+    let mut rootIndex: u64 = 0;
+
+    while (rootIndex < module.roots.length()) {
+      let Option::SOME(rootId) = module.roots.get(rootIndex) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(item) = module.items.get(*rootId) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Ast::Item::Node::Export(exportItem) = item else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(sourceText) = Ast::copyOptionalString(&exportItem.source) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(recordIndex) = Analyzer::importModuleIndexForSource(infos, &sourceText) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(targetDirect) = directs.get(recordIndex) else {
+        rootIndex += 1;
+        continue;
+      };
+
+      let mut bindingIndex: u64 = 0;
+      while (bindingIndex < exportItem.items.length()) {
+        let Option::SOME(binding) = exportItem.items.get(bindingIndex) else {
+          bindingIndex += 1;
+          continue;
+        };
+        let Option::SOME(nameText) = Ast::copyOptionalString(&binding.name) else {
+          bindingIndex += 1;
+          continue;
+        };
+
+        let prefix: String = `${nameText.toStr()}::`;
+        let mut declIndex: u64 = 0;
+
+        while (declIndex < targetDirect.qualifiedNames.length()) {
+          let Option::SOME(qualifiedName) = targetDirect.qualifiedNames.get(declIndex) else {
+            declIndex += 1;
+            continue;
+          };
+
+          let matchesName: boolean = qualifiedName.equals(nameText.toStr())
+            || qualifiedName.startsWith(prefix.toStr());
+
+          if (!matchesName) {
+            declIndex += 1;
+            continue;
+          }
+
+          let Option::SOME(sym) = targetDirect.syms.get(declIndex) else {
+            declIndex += 1;
+            continue;
+          };
+          let Option::SOME(defId) = targetDirect.defs.get(declIndex) else {
+            declIndex += 1;
+            continue;
+          };
+          let Option::SOME(span) = targetDirect.spans.get(declIndex) else {
+            declIndex += 1;
+            continue;
+          };
+
+          Analyzer::Imports::appendDirectIndexEntryIfMissing(direct, *sym, *defId, *span, qualifiedName.clone());
+          declIndex += 1;
+        }
+
+        bindingIndex += 1;
+      }
+
+      rootIndex += 1;
+    }
+  }
+
+    /// Feed one module's declarations into the program-wide qualified index.
   function appendDirectToProgramIndex(
     programIndex: &mut Analyzer::Imports::ProgramQualifiedIndex,
     direct: &Analyzer::Imports::DirectDeclarationIndex,
@@ -1174,6 +1262,7 @@ export namespace Analyzer {
       // would find nothing. Targets are dependencies, so they are already
       // in `directs` when their importer binds.
       Analyzer::appendReExportedDeclarations(&mut direct, module, &directs, infos);
+      Analyzer::appendNamedReExports(&mut direct, module, &directs, infos);
       Analyzer::appendDirectToProgramIndex(&mut programIndex, &direct);
       Analyzer::recordQualifiedNamesInDefStore(defStore, &direct);
 
