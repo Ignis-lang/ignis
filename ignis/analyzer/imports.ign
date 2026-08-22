@@ -275,14 +275,28 @@ export namespace Analyzer {
           continue;
         };
 
-        if (existing.raw() == sym.raw()) {
-          let Option::SOME(span) = overlay.spans.get(index) else {
-            return Option::NONE;
-          };
-          return Option::SOME(*span);
+        if (existing.raw() != sym.raw()) {
+          index += 1;
+          continue;
         }
 
-        index += 1;
+        // Only an explicitly written binding counts for duplicate reporting:
+        // an implicit entry (namespace member, discard import, prelude seed)
+        // is shadowed silently by a written import of the same name.
+        let mut entryImplicit: boolean = false;
+        if (let Option::SOME(implicitFlag) = overlay.implicit.get(index)) {
+          entryImplicit = *implicitFlag;
+        }
+
+        if (entryImplicit) {
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(span) = overlay.spans.get(index) else {
+          return Option::NONE;
+        };
+        return Option::SOME(*span);
       }
 
       return Option::NONE;

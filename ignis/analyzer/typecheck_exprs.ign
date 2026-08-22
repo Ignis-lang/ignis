@@ -53,9 +53,18 @@ export namespace Analyzer {
       if (statements.length() > 0) {
         if (let Option::SOME(lastStmtId) = statements.get(statements.length() - 1)) {
           if (let Option::SOME(lastStmt) = module.statements.get(*lastStmtId)) {
-            if (let Ast::Statement::Node::Return(_) = lastStmt) {
-              lastDiverges = true;
-            }
+            match (lastStmt) {
+              Ast::Statement::Node::Return(_) -> {
+                lastDiverges = true;
+              },
+              Ast::Statement::Node::Continue(_) -> {
+                lastDiverges = true;
+              },
+              Ast::Statement::Node::Break(_) -> {
+                lastDiverges = true;
+              },
+              _ -> {},
+            };
           }
         }
       }
@@ -1354,8 +1363,16 @@ export namespace Analyzer {
               continue;
             };
 
+            // The argument may spell its shape through an alias; unification
+            // sees the resolved form.
+            let inferArgResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, *argType);
+            let mut inferArgType: Analyzer::TypeId = *argType;
+            if (inferArgResolved.cycleAlias.isNone()) {
+              inferArgType = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, inferArgResolved.typeId, 0);
+            }
+
             let mut typeStoreInferRef: &mut Analyzer::TypeStore = typeStore;
-            if (let Option::SOME(resolvedArgs) = typeStoreInferRef.inferTypeArguments(*declaredParam, *argType, &inferSymbols)) {
+            if (let Option::SOME(resolvedArgs) = typeStoreInferRef.inferTypeArguments(*declaredParam, inferArgType, &inferSymbols)) {
               let mut specializedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
               let mut substituteIndex: u64 = 0;
 
