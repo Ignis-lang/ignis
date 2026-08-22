@@ -162,6 +162,14 @@ function typecheckAddIntLiteral(module: &mut Ast::Module, value: i64): Ast::Expr
   }));
 }
 
+function typecheckAddCharLiteral(module: &mut Ast::Module, value: char): Ast::ExpressionId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+    span: typecheckDummySpan(),
+    value: Ast::Expression::LiteralValue::Character(value),
+  }));
+}
+
 function typecheckAddBoolLiteral(module: &mut Ast::Module, value: boolean): Ast::ExpressionId {
   let mut moduleRef: &mut Ast::Module = module;
   return moduleRef.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
@@ -14284,6 +14292,45 @@ function typecheckLetConditionBindsPatternAndIsBoolean(): void {
     genericParameters: Vector::new<Ast::GenericParam>(),
     parameters: Vector::new<Ast::PatternId>(),
     returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: `'a' == 'b'` types as boolean — the host accepts char equality
+/// and ordering, so the selfhost must too. IGN-151 follow-up (F4).
+@test
+function typecheckCharEqualityIsBoolean(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let left: Ast::ExpressionId = typecheckAddCharLiteral(&mut module, 'a');
+  let right: Ast::ExpressionId = typecheckAddCharLiteral(&mut module, 'b');
+  let comparison: Ast::ExpressionId = typecheckAddBinary(&mut module, Ast::Expression::BinaryOperator::Equal, left, right);
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, comparison);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  let booleanTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "boolean");
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("charsEqual"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(booleanTypeId),
     body: bodyBlock,
     metadata: Ast::emptyMetadata(),
   }));

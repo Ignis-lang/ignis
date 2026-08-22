@@ -127,12 +127,42 @@ export namespace Analyzer {
           return Option::SOME(booleanType);
         }
 
+        // The host also accepts char == char, unit-enum == unit-enum of the
+        // same enum, and pointer == pointer.
+        if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType)) {
+          let leftResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, leftType);
+
+          if (leftResolved.cycleAlias.isNone()) {
+            let charOrUnitEnum: boolean = Analyzer::Typecheck::typeIdIsChar(typeStore, leftResolved.typeId)
+              || Analyzer::Typecheck::isUnitEnumType(defStore, typeStore, leftResolved.typeId);
+
+            if (charOrUnitEnum) {
+              let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+              Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+              return Option::SOME(booleanType);
+            }
+          }
+        }
+
+        if (Analyzer::Typecheck::typeIdIsPointer(typeStore, leftType) && Analyzer::Typecheck::typeIdIsPointer(typeStore, rightType)) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
         Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
         return Option::NONE;
       }
 
       if (Analyzer::Typecheck::isComparisonBinaryOperator(b.operator)) {
         if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType) && Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, b.span, leftType)) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
+        // The host also orders char operands by scalar value.
+        if (Analyzer::Typecheck::typeIdIsChar(typeStore, leftType) && Analyzer::Typecheck::typeIdIsChar(typeStore, rightType)) {
           let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
           Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
           return Option::SOME(booleanType);
@@ -3669,6 +3699,54 @@ export namespace Analyzer {
         Analyzer::Type::CHAR -> true,
         _ -> false,
       };
+    }
+
+    /// Whether `typeId` is an enum none of whose variants carries a payload,
+    /// which is what makes `==` well-defined on it (host `is_unit_enum`).
+    function isUnitEnumType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let Option::SOME(typeNode) = typeStore.get(typeId) else {
+        return false;
+      };
+
+      let Analyzer::Type::Enum(enumDefId) = typeNode else {
+        return false;
+      };
+
+      let Option::SOME(def) = defStore.get(enumDefId) else {
+        return false;
+      };
+
+      let Analyzer::Definition::Enum(enumDef) = def else {
+        return false;
+      };
+
+      let mut variantIndex: u64 = 0;
+
+      while (variantIndex < enumDef.variants.length()) {
+        let Option::SOME(variantDefId) = enumDef.variants.get(variantIndex) else {
+          variantIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(variantDef) = defStore.get(*variantDefId) else {
+          variantIndex += 1;
+          continue;
+        };
+
+        if (let Analyzer::Definition::Variant(variant) = variantDef) {
+          if (variant.payload.length() > 0) {
+            return false;
+          }
+        }
+
+        variantIndex += 1;
+      }
+
+      return true;
     }
 
     /// Validates the `from as to` pair and emits `INVALID_CAST` when no
