@@ -2934,6 +2934,12 @@ export namespace Analyzer {
 
           if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = patternRefOpt) {
             if (let Option::SOME(def) = defStore.get(defId)) {
+              // A constant pattern binds nothing; its only obligation — value
+              // comparability with the scrutinee — is checked at lowering.
+              if (let Analyzer::Definition::Variable(_) = def) {
+                return true;
+              }
+
               if (let Analyzer::Definition::Variant(_) = def) {
                 return Analyzer::Typecheck::collectEnumVariantPatternBindings(
                   state,

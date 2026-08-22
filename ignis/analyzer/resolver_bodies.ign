@@ -2453,6 +2453,7 @@ export namespace Analyzer {
       return Analyzer::ResolverBodies::resolvePatternPathTailMapped(
         state,
         defStore,
+        symbols,
         p,
         ownerStr.toStr(),
         memberStr.toStr(),
@@ -2635,6 +2636,7 @@ export namespace Analyzer {
     function resolvePatternPathTailMapped(
       state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
       defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
       p: &Ast::Pattern::Path,
       ownerName: str,
       memberName: str,
@@ -2665,16 +2667,58 @@ export namespace Analyzer {
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::OwnerNotFound -> {
+          // A written path can name a CONSTANT used as a pattern
+          // (`__fs_errno::ENOENT ->`); the chain-aware reading finds it.
+          if (let Option::SOME(constantDefId) = Analyzer::ResolverBodies::lookupNamespaceQualifiedDeclaration(
+            state,
+            defStore,
+            symbols,
+            &p.segments,
+            p.segments.length(),
+          )) {
+            if (let Option::SOME(Analyzer::Definition::Variable(_)) = defStore.get(constantDefId)) {
+              return Analyzer::ResolverBodies::ResolvedRef::Definition(constantDefId);
+            }
+          }
+
           let message: String = `undeclared name in path: \`${ownerName}\``;
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnEnum -> {
+          // A written path can name a CONSTANT used as a pattern
+          // (`__fs_errno::ENOENT ->`); the chain-aware reading finds it.
+          if (let Option::SOME(constantDefId) = Analyzer::ResolverBodies::lookupNamespaceQualifiedDeclaration(
+            state,
+            defStore,
+            symbols,
+            &p.segments,
+            p.segments.length(),
+          )) {
+            if (let Option::SOME(Analyzer::Definition::Variable(_)) = defStore.get(constantDefId)) {
+              return Analyzer::ResolverBodies::ResolvedRef::Definition(constantDefId);
+            }
+          }
+
           let message: String = `unknown variant or static method: \`${memberName}\``;
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnRecord -> {
+          // A written path can name a CONSTANT used as a pattern
+          // (`__fs_errno::ENOENT ->`); the chain-aware reading finds it.
+          if (let Option::SOME(constantDefId) = Analyzer::ResolverBodies::lookupNamespaceQualifiedDeclaration(
+            state,
+            defStore,
+            symbols,
+            &p.segments,
+            p.segments.length(),
+          )) {
+            if (let Option::SOME(Analyzer::Definition::Variable(_)) = defStore.get(constantDefId)) {
+              return Analyzer::ResolverBodies::ResolvedRef::Definition(constantDefId);
+            }
+          }
+
           let message: String = `unknown method or type in path: \`${memberName}\``;
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
