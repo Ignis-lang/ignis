@@ -1919,6 +1919,28 @@ export namespace Lowering {
   /// printer (`TypeStore::nameOfResolved`) takes shared borrows of the three
   /// stores, which lowering holds mutably end to end. The compiler has no
   /// `&mut` to `&` reborrow, so the call cannot be made from here.
+  /// Resolves a builtin call's single written type argument, `NONE` when it
+  /// is absent or names something the annotation probe cannot resolve.
+  function builtinTypeArgument(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    builtinCall: &Ast::Expression::BuiltinCall,
+  ): Option<Analyzer::TypeId> {
+    let Option::SOME(typeArgumentId) = builtinCall.typeArguments.get(0) else {
+      return Option::NONE;
+    };
+
+    return Analyzer::Typecheck::resolveLocalAnnotation(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      *typeArgumentId,
+    );
+  }
+
   function lowerBuiltinCall(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1961,6 +1983,248 @@ export namespace Lowering {
         kind: Hir::HirKind::Panic(message),
         span: builtinCall.span,
         typeId: Lowering::neverType(typeStore),
+      });
+    }
+
+    if (name.equals("minOf") || name.equals("maxOf")) {
+      let Option::SOME(valueType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let mut boundHirRef: &mut Hir::HirStore = hir;
+      let kind: Hir::HirKind = match (name.equals("minOf")) {
+        true -> Hir::HirKind::MinOf(valueType),
+        false -> Hir::HirKind::MaxOf(valueType),
+      };
+
+      return boundHirRef.alloc(Hir::HirNode {
+        kind: kind,
+        span: builtinCall.span,
+        typeId: valueType,
+      });
+    }
+
+    if (name.equals("integerFromPointer")) {
+      let Option::SOME(argumentId) = builtinCall.arguments.get(0) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let operand: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *argumentId);
+      let targetType: Analyzer::TypeId = Lowering::unsignedInt64Type(typeStore);
+
+      let mut castHirRef: &mut Hir::HirStore = hir;
+      return castHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Cast(Hir::HirCast {
+          expression: operand,
+          target: targetType,
+        }),
+        span: builtinCall.span,
+        typeId: targetType,
+      });
+    }
+
+    if (name.equals("pointerFromInteger") || name.equals("bitCast")) {
+      let Option::SOME(targetType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let Option::SOME(argumentId) = builtinCall.arguments.get(0) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let operand: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *argumentId);
+
+      let kind: Hir::HirKind = match (name.equals("bitCast")) {
+        true -> Hir::HirKind::BitCast(Hir::HirCast {
+          expression: operand,
+          target: targetType,
+        }),
+        false -> Hir::HirKind::Cast(Hir::HirCast {
+          expression: operand,
+          target: targetType,
+        }),
+      };
+
+      let mut castHirRef: &mut Hir::HirStore = hir;
+      return castHirRef.alloc(Hir::HirNode {
+        kind: kind,
+        span: builtinCall.span,
+        typeId: targetType,
+      });
+    }
+
+    if (name.equals("read")) {
+      let Option::SOME(valueType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let Option::SOME(pointerId) = builtinCall.arguments.get(0) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let pointer: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *pointerId);
+
+      let mut loadHirRef: &mut Hir::HirStore = hir;
+      return loadHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::BuiltinLoad(Hir::HirBuiltinLoad {
+          ty: valueType,
+          ptr: pointer,
+        }),
+        span: builtinCall.span,
+        typeId: valueType,
+      });
+    }
+
+    if (name.equals("write")) {
+      let Option::SOME(valueType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let Option::SOME(pointerId) = builtinCall.arguments.get(0) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let Option::SOME(valueId) = builtinCall.arguments.get(1) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let pointer: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *pointerId);
+      let value: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *valueId);
+
+      let mut storeHirRef: &mut Hir::HirStore = hir;
+      return storeHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::BuiltinStore(Hir::HirBuiltinStore {
+          ty: valueType,
+          ptr: pointer,
+          value: value,
+        }),
+        span: builtinCall.span,
+        typeId: Lowering::voidType(typeStore),
+      });
+    }
+
+    if (name.equals("dropInPlace")) {
+      let Option::SOME(valueType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let Option::SOME(pointerId) = builtinCall.arguments.get(0) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let pointer: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *pointerId);
+
+      let mut dropHirRef: &mut Hir::HirStore = hir;
+      return dropHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::BuiltinDropInPlace(Hir::HirBuiltinDropInPlace {
+          ty: valueType,
+          ptr: pointer,
+        }),
+        span: builtinCall.span,
+        typeId: Lowering::voidType(typeStore),
+      });
+    }
+
+    if (name.equals("dropGlue")) {
+      let Option::SOME(valueType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let mut glueHirRef: &mut Hir::HirStore = hir;
+      return glueHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::BuiltinDropGlue(valueType),
+        span: builtinCall.span,
+        typeId: Lowering::voidType(typeStore),
+      });
+    }
+
+    if (name.equals("hash")) {
+      let Option::SOME(valueType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let Option::SOME(valueId) = builtinCall.arguments.get(0) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let Option::SOME(hasherId) = builtinCall.arguments.get(1) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let value: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *valueId);
+      let hasher: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *hasherId);
+
+      let mut hashHirRef: &mut Hir::HirStore = hir;
+      return hashHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::BuiltinHash(Hir::HirBuiltinHash {
+          ty: valueType,
+          value: value,
+          hasher: hasher,
+        }),
+        span: builtinCall.span,
+        typeId: Lowering::voidType(typeStore),
+      });
+    }
+
+    if (name.equals("eq")) {
+      let Option::SOME(valueType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let Option::SOME(leftId) = builtinCall.arguments.get(0) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let Option::SOME(rightId) = builtinCall.arguments.get(1) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let left: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *leftId);
+      let right: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *rightId);
+
+      // The concrete equality strategy is picked later, exactly like the
+      // oracle's unresolved `BuiltinEqKind::Pending` fallback.
+      let mut eqHirRef: &mut Hir::HirStore = hir;
+      return eqHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::BuiltinEq(Hir::HirBuiltinEq {
+          ty: valueType,
+          left: left,
+          right: right,
+          kind: Hir::BuiltinEqKind::Pending,
+        }),
+        span: builtinCall.span,
+        typeId: Lowering::booleanType(typeStore),
+      });
+    }
+
+    if (name.equals("sliceFromParts")) {
+      let Option::SOME(elementType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let Option::SOME(dataId) = builtinCall.arguments.get(0) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let Option::SOME(lenId) = builtinCall.arguments.get(1) else {
+        return Lowering::errorNode(hir, typeStore, builtinCall.span);
+      };
+
+      let data: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *dataId);
+      let len: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, *lenId);
+
+      let mut sliceTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let sliceType: Analyzer::TypeId = sliceTypeStoreRef.slice(elementType);
+
+      let mut sliceHirRef: &mut Hir::HirStore = hir;
+      return sliceHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::MakeSlice(Hir::HirMakeSlice {
+          data: data,
+          len: len,
+          elementType: elementType,
+        }),
+        span: builtinCall.span,
+        typeId: sliceType,
       });
     }
 
