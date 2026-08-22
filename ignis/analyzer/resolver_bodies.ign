@@ -2101,25 +2101,6 @@ export namespace Analyzer {
         return;
       }
 
-      if (segCount >= 3) {
-        let prefixInvalid: boolean = Analyzer::ResolverBodies::rejectInvalidNamespacePrefix(
-          state,
-          symbols,
-          &p.segments,
-          segCount,
-          p.span,
-        );
-
-        if (prefixInvalid) {
-          Analyzer::ResolverBodies::recordExprRef(
-            state,
-            exprId,
-            Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
-          );
-          return;
-        }
-      }
-
       let Option::SOME(ownerStr) = p.segments.get(segCount - 2) else {
         return;
       };
@@ -2151,23 +2132,40 @@ export namespace Analyzer {
           ownerDef = Analyzer::ResolverBodies::bodyProgramLookupPath(state, &p.segments, segCount - 1);
         }
 
-        if (let Option::SOME(ownerDefId) = ownerDef) {
-          lookup = Analyzer::ResolverBodies::resolvePathTailForOwner(
+        let Option::SOME(ownerDefId) = ownerDef else {
+          // No owner matches the written chain. A full-path declaration (a
+          // namespace function or constant) is the remaining legal reading;
+          // past that, the prefix itself is wrong, and falling to a flat
+          // owner lookup would silently ignore what the writer wrote.
+          if (let Option::SOME(fullDefId) = Analyzer::ResolverBodies::lookupNamespaceQualifiedDeclaration(
             state,
             defStore,
             symbols,
-            ownerDefId,
-            memberStr.toStr(),
-          );
-        } else {
-          lookup = Analyzer::ResolverBodies::resolvePathTail(
+            &p.segments,
+            segCount,
+          )) {
+            Analyzer::ResolverBodies::recordExprRef(state, exprId, Analyzer::ResolverBodies::ResolvedRef::Definition(fullDefId));
+            return;
+          }
+
+          let fullPath: String = Analyzer::ResolverBodies::joinPathSegments(&p.segments, segCount);
+          let message: String = `undeclared name in path: \`${fullPath.toStr()}\``;
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
+          Analyzer::ResolverBodies::recordExprRef(
             state,
-            defStore,
-            symbols,
-            ownerStr.toStr(),
-            memberStr.toStr(),
+            exprId,
+            Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved")),
           );
-        }
+          return;
+        };
+
+        lookup = Analyzer::ResolverBodies::resolvePathTailForOwner(
+          state,
+          defStore,
+          symbols,
+          ownerDefId,
+          memberStr.toStr(),
+        );
       } else {
         lookup = Analyzer::ResolverBodies::resolvePathTail(
           state,
@@ -2349,22 +2347,8 @@ export namespace Analyzer {
       }
 
       // 2+ segments: last-two-segment lookup via `resolvePathTail`, mirroring
-      // expression position, including namespace-prefix validation for 3+
-      // segments (IGN-77).
-      if (segCount >= 3) {
-        let prefixInvalid: boolean = Analyzer::ResolverBodies::rejectInvalidNamespacePrefix(
-          state,
-          symbols,
-          &p.segments,
-          segCount,
-          p.span,
-        );
-
-        if (prefixInvalid) {
-          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
-        }
-      }
-
+      // expression position. For 3+ segments a wrong prefix reports the full
+      // written path once every chain-aware lookup has had its chance.
       let Option::SOME(ownerStr) = p.segments.get(segCount - 2) else {
         Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, "unknown enum");
         return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
@@ -2407,6 +2391,13 @@ export namespace Analyzer {
             memberStr.toStr(),
           );
           ownerResolved = true;
+        } else {
+          // No owner matches the written chain: a flat fallback would ignore
+          // the prefix the writer wrote, so the whole path reports instead.
+          let fullPath: String = Analyzer::ResolverBodies::joinPathSegments(&p.segments, segCount);
+          let message: String = `undeclared name in path: \`${fullPath.toStr()}\``;
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         }
       }
 

@@ -351,9 +351,18 @@ export namespace Analyzer {
           continue;
         }
 
-        if (let Option::SOME(existingQualified) = direct.qualifiedNames.get(index)) {
-          if (existingQualified.equals(qualifiedName.toStr())) {
-            return;
+        // Overloads share both the name and the path; only the exact same
+        // definition arriving twice is a duplicate.
+        let mut sameDef: boolean = false;
+        if (let Option::SOME(existingDef) = direct.defs.get(index)) {
+          sameDef = existingDef.raw() == def.raw();
+        }
+
+        if (sameDef) {
+          if (let Option::SOME(existingQualified) = direct.qualifiedNames.get(index)) {
+            if (existingQualified.equals(qualifiedName.toStr())) {
+              return;
+            }
           }
         }
 
