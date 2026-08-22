@@ -2919,6 +2919,19 @@ export namespace Analyzer {
         },
         Ast::Pattern::Node::Path(path) -> {
           let patternRefOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupPatternRef(resolvedBodies, patternId);
+
+          // A single-segment path the resolver bound as a LOCAL is a plain
+          // binding wearing path syntax — it takes the scrutinee's type,
+          // never the record-destructure machinery.
+          let mut pathBindsLocal: boolean = false;
+          if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(_)) = Analyzer::Typecheck::lookupPatternRef(resolvedBodies, patternId)) {
+            pathBindsLocal = true;
+          }
+
+          if (pathBindsLocal) {
+            return Analyzer::Typecheck::pushPatternLocal(state, resolvedBodies, patternId, typeId, mutable, span);
+          }
+
           if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = patternRefOpt) {
             if (let Option::SOME(def) = defStore.get(defId)) {
               if (let Analyzer::Definition::Variant(_) = def) {

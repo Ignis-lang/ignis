@@ -99,9 +99,11 @@ export namespace Analyzer {
         }
 
         // A pointer left makes `x == null` well-typed: the null literal
-        // adopts the pointer type instead of failing to infer one.
-        if (Analyzer::Typecheck::typeIdIsPointer(typeStore, leftType)) {
-          rightExpected = Option::SOME(leftType);
+        // adopts the pointer type instead of failing to infer one. The left
+        // may spell its pointer through an alias (`CType::DirPtr`).
+        let nullLeftResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, leftType);
+        if (nullLeftResolved.cycleAlias.isNone() && Analyzer::Typecheck::typeIdIsPointer(typeStore, nullLeftResolved.typeId)) {
+          rightExpected = Option::SOME(nullLeftResolved.typeId);
         }
       }
 
@@ -138,6 +140,16 @@ export namespace Analyzer {
 
       if (Analyzer::Typecheck::isArithmeticBinaryOperator(b.operator)) {
         if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType) && Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, b.span, leftType)) {
+          Analyzer::Typecheck::recordExprType(state, exprId, leftType);
+          return Option::SOME(leftType);
+        }
+
+        // Pointer arithmetic: `ptr + offset` / `ptr - offset` keeps the
+        // pointer type when the offset is an integer.
+        let leftAliasResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, leftType);
+        if (leftAliasResolved.cycleAlias.isNone()
+          && Analyzer::Typecheck::typeIdIsPointer(typeStore, leftAliasResolved.typeId)
+          && Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, b.span, rightType)) {
           Analyzer::Typecheck::recordExprType(state, exprId, leftType);
           return Option::SOME(leftType);
         }
@@ -5118,22 +5130,32 @@ export namespace Analyzer {
           return Option::NONE;
         }
 
-        if (call.arguments.length() != 1) {
-          Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 1);
+        if (call.arguments.length() != 2) {
+          Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 2);
           return Option::NONE;
         }
 
         let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
           return Option::NONE;
         };
-        let hashValueTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId);
+
+        // @hash<T>(value, hasher): the value is checked expecting &T, the
+        // hasher checks on its own, and the call itself yields void.
+        let mut hashExpected: Option<Analyzer::TypeId> = Option::NONE;
+        if (let Option::SOME(hashValueType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId)) {
+          let mut typeStoreHashRef: &mut Analyzer::TypeStore = typeStore;
+          hashExpected = Option::SOME(typeStoreHashRef.reference(hashValueType));
+        }
 
         if (let Option::SOME(argExprId) = call.arguments.get(0)) {
-          let _argType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(state, defStore, typeStore, symbols, module, resolvedBodies, *argExprId, hashValueTypeOpt);
+          let _argType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(state, defStore, typeStore, symbols, module, resolvedBodies, *argExprId, hashExpected);
+        }
+        if (let Option::SOME(hasherExprId) = call.arguments.get(1)) {
+          let _hasherType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *hasherExprId);
         }
 
         let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
-        return Option::SOME(typeStoreRef.intern(Analyzer::Type::U64));
+        return Option::SOME(typeStoreRef.intern(Analyzer::Type::VOID));
       }
 
       if (name.equals("minOf") || name.equals("maxOf")) {
