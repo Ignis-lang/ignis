@@ -609,6 +609,37 @@ export namespace Analyzer {
         }
       }
 
+      // Branch 1b: `minOf<T>()` / `maxOf<T>()` written without `@` — the host
+      // types these from the callee name alone, before any resolution.
+      if (let Option::SOME(bareCalleeExpr) = module.expressions.get(call.callee)) {
+        if (let Ast::Expression::Node::Variable(bareCallee) = bareCalleeExpr) {
+          if (bareCallee.name.equals("minOf") || bareCallee.name.equals("maxOf")) {
+            if (call.typeArguments.length() != 1) {
+              Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, bareCallee.name.toStr(), 1, call.typeArguments.length());
+              return Option::NONE;
+            }
+
+            if (call.arguments.length() != 0) {
+              Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 0);
+              return Option::NONE;
+            }
+
+            let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
+              return Option::NONE;
+            };
+            let Option::SOME(resultType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+              let detail: String = `the type argument of \`${bareCallee.name.toStr()}\``;
+              Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
+              return Option::NONE;
+            };
+
+            Analyzer::Typecheck::recordExprType(state, call.callee, resultType);
+            Analyzer::Typecheck::recordExprType(state, callExprId, resultType);
+            return Option::SOME(resultType);
+          }
+        }
+      }
+
       // Branch 2: a path callee that resolved (at resolver time) directly to a
       // static `Definition::Method` — e.g. `Tipo::staticMethod(args)`. Bypasses
       // `checkExpr(callee)` (and therefore the bare method-reference guard,
@@ -3771,6 +3802,7 @@ export namespace Analyzer {
             typeStore,
             symbols,
             module,
+            resolvedBodies,
             &value,
           ) else {
             return Option::NONE;
@@ -4803,6 +4835,7 @@ export namespace Analyzer {
       typeStore: &mut Analyzer::TypeStore,
       symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       call: &Ast::Expression::BuiltinCall,
     ): Option<Analyzer::TypeId> {
       let name: &String = &call.name;
@@ -4827,6 +4860,14 @@ export namespace Analyzer {
 
       if (name.equals("trap") || name.equals("unreachable")) {
         return Analyzer::Typecheck::checkBuiltinWithoutArguments(state, typeStore, call);
+      }
+
+      if (name.equals("minOf") || name.equals("maxOf")) {
+        return Analyzer::Typecheck::checkBuiltinTypeArgResult(state, defStore, typeStore, symbols, module, call);
+      }
+
+      if (name.equals("read") || name.equals("write") || name.equals("dropInPlace") || name.equals("eq")) {
+        return Analyzer::Typecheck::checkBuiltinPointerFamily(state, defStore, typeStore, symbols, module, resolvedBodies, call);
       }
 
       if (Analyzer::Typecheck::isKnownBuiltinName(name)) {
@@ -4874,6 +4915,113 @@ export namespace Analyzer {
       }
 
       return name.equals("dropInPlace") || name.equals("dropGlue");
+    }
+
+    /// `@minOf<T>()` / `@maxOf<T>()`: one type argument, no value arguments,
+    /// and the result IS the type argument.
+    function checkBuiltinTypeArgResult(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      call: &Ast::Expression::BuiltinCall,
+    ): Option<Analyzer::TypeId> {
+      if (call.typeArguments.length() != 1) {
+        Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 1, call.typeArguments.length());
+        return Option::NONE;
+      }
+
+      if (call.arguments.length() != 0) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 0);
+        return Option::NONE;
+      }
+
+      let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
+        return Option::NONE;
+      };
+
+      return Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId);
+    }
+
+    /// `@read<T>(p)`, `@write<T>(p, v)`, `@dropInPlace<T>(p)`, `@eq<T>(a, b)`:
+    /// one type argument driving each argument's expectation.
+    function checkBuiltinPointerFamily(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      call: &Ast::Expression::BuiltinCall,
+    ): Option<Analyzer::TypeId> {
+      if (call.typeArguments.length() != 1) {
+        Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 1, call.typeArguments.length());
+        return Option::NONE;
+      }
+
+      let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
+        return Option::NONE;
+      };
+      let Option::SOME(valueType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+        let detail: String = `the type argument of \`@${call.name.toStr()}\``;
+        Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
+        return Option::NONE;
+      };
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let pointerType: Analyzer::TypeId = typeStoreRef.mutablePointer(valueType);
+      let voidType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::VOID);
+      let booleanType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::BOOLEAN);
+
+      let isEq: boolean = call.name.equals("eq");
+      let isWrite: boolean = call.name.equals("write");
+      let mut expectedCount: u64 = 1;
+      if (isEq || isWrite) {
+        expectedCount = 2;
+      }
+
+      if (call.arguments.length() != expectedCount) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), expectedCount);
+        return Option::NONE;
+      }
+
+      let mut argIndex: u64 = 0;
+      while (argIndex < call.arguments.length()) {
+        let Option::SOME(argExprId) = call.arguments.get(argIndex) else {
+          argIndex += 1;
+          continue;
+        };
+
+        // @eq compares two T values; the pointer family points its first
+        // argument at T and @write supplies a T second.
+        let mut expectedArg: Analyzer::TypeId = pointerType;
+        if (isEq || (isWrite && argIndex == 1)) {
+          expectedArg = valueType;
+        }
+
+        let _argType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          *argExprId,
+          Option::SOME(expectedArg),
+        );
+        argIndex += 1;
+      }
+
+      if (call.name.equals("read")) {
+        return Option::SOME(valueType);
+      }
+
+      if (isEq) {
+        return Option::SOME(booleanType);
+      }
+
+      return Option::SOME(voidType);
     }
 
     /// `@name<T>()`: exactly one type argument, no value arguments, fixed result type.

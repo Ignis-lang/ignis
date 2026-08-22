@@ -1936,7 +1936,19 @@ export namespace Analyzer {
         return;
       }
 
-      // 5. Unknown.
+      // 5. `minOf`/`maxOf` are builtins the host accepts without `@`; the
+      // typechecker answers them from the callee name, so an unresolved
+      // reference here is expected, not an error.
+      if (String::create(name).equals("minOf") || String::create(name).equals("maxOf")) {
+        Analyzer::ResolverBodies::recordExprRef(
+          state,
+          exprId,
+          Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("bare-builtin")),
+        );
+        return;
+      }
+
+      // 6. Unknown.
       let message: String = `undeclared variable: \`${name}\``;
       Analyzer::ResolverBodies::emitUndeclaredVariable(state, span, DiagnosticCode::UNDECLARED_VARIABLE, message.toStr());
       Analyzer::ResolverBodies::recordExprRef(
