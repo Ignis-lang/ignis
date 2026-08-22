@@ -1,0 +1,40 @@
+import Vector from "std::vector";
+
+import SourceSpan from "@compiler::diagnostics";
+
+import _ from "./ids";
+import _ from "./operand";
+import _ from "./instr";
+
+export namespace Lir {
+  /// Mirrors `ignis_lir::Terminator`: how control leaves a basic block.
+  enum Terminator {
+    Goto(Lir::BlockId),
+    Branch(Lir::TerminatorBranch),
+    Return(Option<Lir::Operand>),
+    Unreachable,
+  }
+
+  record TerminatorBranch {
+    public condition: Lir::Operand;
+    public thenBlock: Lir::BlockId;
+    public elseBlock: Lir::BlockId;
+  }
+
+  /// Mirrors `ignis_lir::Block`: instructions ending in one terminator.
+  record Block {
+    public label: String;
+    public instructions: Vector<Lir::Instr>;
+    public terminator: Lir::Terminator;
+    public span: SourceSpan;
+
+    public static create(label: String): Block {
+      return Block {
+        label: label,
+        instructions: Vector::new<Lir::Instr>(),
+        terminator: Lir::Terminator::Unreachable,
+        span: SourceSpan::new("", 0, 0),
+      };
+    }
+  }
+}

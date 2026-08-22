@@ -1,0 +1,350 @@
+import Vector from "std::vector";
+
+import SourceSpan from "@compiler::diagnostics";
+import Id from "@compiler::ids";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import Lir from "./mod";
+
+/// HIR -> LIR lowering for the selfhost compiler (IGN-155), grown with the
+/// same measured-loop discipline as the AST -> HIR slice: every construct
+/// outside the supported core emits `Instr::Nop`, bumps the state's
+/// `unsupported` counter and keeps going, so one full-corpus run yields the
+/// exact distance left instead of stopping at the first gap.
+export namespace LirLowering {
+  /// Per-function lowering state. Locals are mapped by raw definition id,
+  /// parallel-vector style like `Lowering::LocalMap`.
+  record LowerState {
+    public unsupported: u64;
+    public localDefRaws: Vector<u32>;
+    public localSlotRaws: Vector<u32>;
+    public currentBlock: u64;
+
+    public static init(): LowerState {
+      return LowerState {
+        unsupported: 0,
+        localDefRaws: Vector::new<u32>(),
+        localSlotRaws: Vector::new<u32>(),
+        currentBlock: 0,
+      };
+    }
+  }
+
+  /// The whole-module result: one function table plus the unsupported count
+  /// the measured loop tracks.
+  record LowerModuleResult {
+    public program: Lir::LirProgram;
+    public unsupported: u64;
+    public loweredFunctions: u64;
+  }
+
+  function pushInstr(
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    instr: Lir::Instr,
+  ): void {
+    let mut functionRef: &mut Lir::FunctionLir = function_;
+
+    let Option::SOME(block) = functionRef.blocks.getMut(state.currentBlock) else {
+      return;
+    };
+
+    block.instructions.push(instr);
+  }
+
+  function markUnsupported(
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+  ): void {
+    state.unsupported += 1;
+    LirLowering::pushInstr(function_, state, Lir::Instr::Nop);
+  }
+
+  function lookupLocal(
+    state: &mut LirLowering::LowerState,
+    defId: Analyzer::DefinitionId,
+  ): Option<Lir::LocalId> {
+    let mut index: u64 = 0;
+
+    while (index < state.localDefRaws.length()) {
+      if (let Option::SOME(raw) = state.localDefRaws.get(index)) {
+        if (*raw == defId.raw()) {
+          let Option::SOME(slotRaw) = state.localSlotRaws.get(index) else {
+            return Option::NONE;
+          };
+
+          return Option::SOME(Id::fromRaw<Lir::LocalTag>(*slotRaw));
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function registerLocal(
+    state: &mut LirLowering::LowerState,
+    defId: Analyzer::DefinitionId,
+    slot: Lir::LocalId,
+  ): void {
+    state.localDefRaws.push(defId.raw());
+    state.localSlotRaws.push(slot.raw());
+  }
+
+  function freshTemp(
+    function_: &mut Lir::FunctionLir,
+    ty: Analyzer::TypeId,
+    span: SourceSpan,
+  ): Lir::TempId {
+    let mut functionRef: &mut Lir::FunctionLir = function_;
+
+    return functionRef.allocTemp(Lir::TempData {
+      ty: ty,
+      span: span,
+    });
+  }
+
+  /// Maps a HIR literal to a LIR constant. Every numeric width widens into
+  /// the Rust model's `Int`/`UInt`/`Float` carriers with the node's own type.
+  function constFromLiteral(
+    literal: &Hir::LiteralValue,
+    ty: Analyzer::TypeId,
+  ): Option<Lir::ConstValue> {
+    return match (literal) {
+      Hir::LiteralValue::Int8(value) -> Option::SOME(Lir::ConstValue::Int(value as i64, ty)),
+      Hir::LiteralValue::Int16(value) -> Option::SOME(Lir::ConstValue::Int(value as i64, ty)),
+      Hir::LiteralValue::Int32(value) -> Option::SOME(Lir::ConstValue::Int(value as i64, ty)),
+      Hir::LiteralValue::Int64(value) -> Option::SOME(Lir::ConstValue::Int(value, ty)),
+      Hir::LiteralValue::UnsignedInt8(value) -> Option::SOME(Lir::ConstValue::UInt(value as u64, ty)),
+      Hir::LiteralValue::UnsignedInt16(value) -> Option::SOME(Lir::ConstValue::UInt(value as u64, ty)),
+      Hir::LiteralValue::UnsignedInt32(value) -> Option::SOME(Lir::ConstValue::UInt(value as u64, ty)),
+      Hir::LiteralValue::UnsignedInt64(value) -> Option::SOME(Lir::ConstValue::UInt(value, ty)),
+      Hir::LiteralValue::Float32(value) -> Option::SOME(Lir::ConstValue::Float(value as f64, ty)),
+      Hir::LiteralValue::Float64(value) -> Option::SOME(Lir::ConstValue::Float(value, ty)),
+      Hir::LiteralValue::Boolean(value) -> Option::SOME(Lir::ConstValue::Bool(value, ty)),
+      Hir::LiteralValue::Char(value) -> Option::SOME(Lir::ConstValue::Char(value, ty)),
+      Hir::LiteralValue::String(value) -> Option::SOME(Lir::ConstValue::Str(value.clone(), ty)),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// Lowers one HIR expression tree to an operand, appending instructions to
+  /// the state's current block. Unsupported constructs count once and yield
+  /// `Undef` of the node's type.
+  function lowerExpr(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    hirId: Hir::HirId,
+  ): Lir::Operand {
+    let Option::SOME(node) = hirStore.get(hirId) else {
+      state.unsupported += 1;
+      return Lir::Operand::Const(Lir::ConstValue::Undef(function_.returnType));
+    };
+
+    let nodeType: Analyzer::TypeId = node.typeId;
+    let nodeSpan: SourceSpan = node.span;
+
+    match (&node.kind) {
+      Hir::HirKind::Literal(literal) -> {
+        if (let Option::SOME(constant) = LirLowering::constFromLiteral(&literal, nodeType)) {
+          return Lir::Operand::Const(constant);
+        }
+
+        LirLowering::markUnsupported(function_, state);
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::Unit -> {
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::Variable(defId) -> {
+        if (let Option::SOME(slot) = LirLowering::lookupLocal(state, defId)) {
+          let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+            dest: dest,
+            source: slot,
+          }));
+
+          return Lir::Operand::Temp(dest);
+        }
+
+        return Lir::Operand::GlobalRef(defId);
+      },
+      Hir::HirKind::Binary(binaryNode) -> {
+        let left: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, binaryNode.left);
+        let right: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, binaryNode.right);
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
+          dest: dest,
+          op: binaryNode.operation,
+          left: left,
+          right: right,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::Call(call) -> {
+        let mut args: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
+        let mut argIndex: u64 = 0;
+
+        while (argIndex < call.args.length()) {
+          if (let Option::SOME(argId) = call.args.get(argIndex)) {
+            args.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *argId));
+          }
+
+          argIndex += 1;
+        }
+
+        let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Call(Lir::InstrCall {
+          dest: Option::SOME(dest),
+          callee: call.callee,
+          args: args,
+        }));
+
+        return Lir::Operand::Temp(dest);
+      },
+      Hir::HirKind::Let(letNode) -> {
+        let mut declaredType: Analyzer::TypeId = nodeType;
+        let mut mutable: boolean = false;
+        let mut name: Option<String> = Option::NONE;
+
+        if (let Option::SOME(definition) = defStore.get(letNode.name)) {
+          if (let Analyzer::Definition::Variable(variableDef) = definition) {
+            declaredType = variableDef.declaredType;
+            mutable = variableDef.mutable;
+          }
+        }
+
+        let mut allocFunctionRef: &mut Lir::FunctionLir = function_;
+        let slot: Lir::LocalId = allocFunctionRef.allocLocal(Lir::LocalData {
+          defId: Option::SOME(letNode.name),
+          ty: declaredType,
+          mutable: mutable,
+          name: name,
+          borrowedAlias: false,
+        });
+
+        LirLowering::registerLocal(state, letNode.name, slot);
+
+        if (let Option::SOME(valueId) = letNode.value) {
+          let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, valueId);
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+            dest: slot,
+            value: value,
+          }));
+        }
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::Block(block) -> {
+        let mut statementIndex: u64 = 0;
+
+        while (statementIndex < block.statements.length()) {
+          if (let Option::SOME(statementId) = block.statements.get(statementIndex)) {
+            let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *statementId);
+          }
+
+          statementIndex += 1;
+        }
+
+        if (let Option::SOME(valueId) = block.expression) {
+          return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, valueId);
+        }
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::ExpressionStatement(innerId) -> {
+        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, innerId);
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      Hir::HirKind::Return(valueOpt) -> {
+        let mut returned: Option<Lir::Operand> = Option::NONE;
+
+        if (let Option::SOME(valueId) = valueOpt) {
+          returned = Option::SOME(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, valueId));
+        }
+
+        let mut returnFunctionRef: &mut Lir::FunctionLir = function_;
+
+        let Option::SOME(block) = returnFunctionRef.blocks.getMut(state.currentBlock) else {
+          return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+        };
+
+        block.terminator = Lir::Terminator::Return(returned);
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+      _ -> {
+        LirLowering::markUnsupported(function_, state);
+
+        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+      },
+    };
+  }
+
+  /// Lowers every function body of one module's HIR store.
+  function lowerModule(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+  ): LirLowering::LowerModuleResult {
+    let mut program: Lir::LirProgram = Lir::LirProgram::init();
+    let mut unsupported: u64 = 0;
+    let mut loweredFunctions: u64 = 0;
+
+    let mut itemIndex: u64 = 0;
+
+    while (itemIndex < hirStore.items.length()) {
+      let Option::SOME(itemDef) = hirStore.items.get(itemIndex) else {
+        itemIndex += 1;
+        continue;
+      };
+
+      let Option::SOME(bodyId) = hirStore.functionBodies.get(*itemDef) else {
+        itemIndex += 1;
+        continue;
+      };
+
+      let mut returnType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+
+      if (let Option::SOME(definition) = defStore.get(*itemDef)) {
+        if (let Analyzer::Definition::Function(functionDef) = definition) {
+          returnType = functionDef.returnType;
+        }
+      }
+
+      let mut function_: Lir::FunctionLir = Lir::FunctionLir::create(*itemDef, returnType);
+      let entry: Lir::BlockId = function_.allocBlock(Lir::Block::create(String::create("entry")));
+      function_.entryBlock = entry;
+
+      let mut state: LirLowering::LowerState = LirLowering::LowerState::init();
+
+      let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, &mut function_, &mut state, bodyId);
+
+      unsupported += state.unsupported;
+      loweredFunctions += 1;
+
+      program.functions.set(*itemDef, function_);
+      itemIndex += 1;
+    }
+
+    if (let Option::SOME(entryDef) = hirStore.entryPoint) {
+      program.entryPoint = Option::SOME(entryDef);
+    }
+
+    return LirLowering::LowerModuleResult {
+      program: program,
+      unsupported: unsupported,
+      loweredFunctions: loweredFunctions,
+    };
+  }
+}

@@ -14,6 +14,7 @@ import Hir from "@compiler::hir";
 // outside the graph is never typechecked.
 import _ from "./analyzer/lowering";
 import _ from "./analyzer/borrowck";
+import LirLowering from "./lir/lowering";
 
 import BuildGraph, BuildModuleKind from "./build/module_graph";
 import DiscoveryResult, Resolver from "./build/resolver";
@@ -316,6 +317,8 @@ function compileFile(path: &String): i32 {
     let mut loweredModules: u64 = 0;
     let mut hirErrorNodes: u64 = 0;
     let mut hirNodes: u64 = 0;
+    let mut lirUnsupported: u64 = 0;
+    let mut lirFunctions: u64 = 0;
     let mut lowerIndex: u64 = 0;
 
     while (lowerIndex < records.length()) {
@@ -347,11 +350,22 @@ function compileFile(path: &String): i32 {
       }
 
       hirNodes += hir.nodes.length();
+
+      let lirResult: LirLowering::LowerModuleResult = LirLowering::lowerModule(
+        &mut defStore,
+        &mut typeStore,
+        &hir,
+      );
+
+      lirUnsupported += lirResult.unsupported;
+      lirFunctions += lirResult.loweredFunctions;
+
       loweredModules += 1;
       lowerIndex += 1;
     }
 
     Io::println(`  lower: ${hirErrorNodes} error nodes, ${hirNodes} hir nodes, ${loweredModules} modules`);
+    Io::println(`  lir: ${lirUnsupported} unsupported, ${lirFunctions} functions`);
   } else {
     Io::println(String::create("  lower: skipped (analyze errors)"));
   }

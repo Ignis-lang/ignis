@@ -1,0 +1,267 @@
+import Vector from "std::vector";
+
+import SourceSpan from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+
+import _ from "./ids";
+import _ from "./operand";
+
+export namespace Lir {
+  /// Mirrors `ignis_lir::instr::BuiltinEqKind`.
+  enum BuiltinEqKind {
+    Primitive,
+    Str,
+    Method(Analyzer::DefinitionId),
+  }
+
+  record InstrLoad {
+    public dest: Lir::TempId;
+    public source: Lir::LocalId;
+  }
+
+  record InstrStore {
+    public dest: Lir::LocalId;
+    public value: Lir::Operand;
+  }
+
+  record InstrLoadPtr {
+    public dest: Lir::TempId;
+    public ptr: Lir::Operand;
+  }
+
+  record InstrStorePtr {
+    public ptr: Lir::Operand;
+    public value: Lir::Operand;
+  }
+
+  record InstrBuiltinLoad {
+    public dest: Lir::TempId;
+    public ptr: Lir::Operand;
+    public ty: Analyzer::TypeId;
+  }
+
+  record InstrBuiltinStore {
+    public ptr: Lir::Operand;
+    public value: Lir::Operand;
+    public ty: Analyzer::TypeId;
+  }
+
+  record InstrBuiltinHash {
+    public value: Lir::Operand;
+    public hasher: Lir::Operand;
+    public ty: Analyzer::TypeId;
+  }
+
+  record InstrBuiltinEq {
+    public dest: Lir::TempId;
+    public left: Lir::Operand;
+    public right: Lir::Operand;
+    public ty: Analyzer::TypeId;
+    public kind: Lir::BuiltinEqKind;
+  }
+
+  record InstrCopy {
+    public dest: Lir::TempId;
+    public source: Lir::Operand;
+  }
+
+  record InstrBinOp {
+    public dest: Lir::TempId;
+    public op: Hir::BinaryOperation;
+    public left: Lir::Operand;
+    public right: Lir::Operand;
+  }
+
+  record InstrUnaryOp {
+    public dest: Lir::TempId;
+    public op: Hir::UnaryOperation;
+    public operand: Lir::Operand;
+  }
+
+  record InstrCall {
+    public dest: Option<Lir::TempId>;
+    public callee: Analyzer::DefinitionId;
+    public args: Vector<Lir::Operand>;
+  }
+
+  record InstrCast {
+    public dest: Lir::TempId;
+    public source: Lir::Operand;
+    public targetType: Analyzer::TypeId;
+  }
+
+  record InstrAddrOfLocal {
+    public dest: Lir::TempId;
+    public local: Lir::LocalId;
+    public mutable: boolean;
+  }
+
+  record InstrGetElementPtr {
+    public dest: Lir::TempId;
+    public base: Lir::Operand;
+    public index: Lir::Operand;
+    public elementType: Analyzer::TypeId;
+  }
+
+  record InstrMakeSlice {
+    public dest: Lir::TempId;
+    public data: Lir::Operand;
+    public len: Lir::Operand;
+    public elementType: Analyzer::TypeId;
+  }
+
+  record InstrInitVector {
+    public destPtr: Lir::Operand;
+    public elements: Vector<Lir::Operand>;
+    public elementType: Analyzer::TypeId;
+  }
+
+  record InstrRuntimeCall {
+    public name: String;
+    public args: Vector<Lir::Operand>;
+  }
+
+  record InstrTypeIdOf {
+    public dest: Lir::TempId;
+    public source: Lir::Operand;
+  }
+
+  record InstrTypeQuery {
+    public dest: Lir::TempId;
+    public ty: Analyzer::TypeId;
+  }
+
+  record InstrTrap {
+    public span: SourceSpan;
+  }
+
+  record InstrPanicMessage {
+    public message: String;
+    public span: SourceSpan;
+  }
+
+  record InstrDrop {
+    public local: Lir::LocalId;
+  }
+
+  record InstrGetFieldPtr {
+    public dest: Lir::TempId;
+    public base: Lir::Operand;
+    public fieldIndex: u32;
+    public fieldType: Analyzer::TypeId;
+  }
+
+  /// One `(field_index, value)` pair of the Rust model's `InitRecord`.
+  record InitRecordField {
+    public fieldIndex: u32;
+    public value: Lir::Operand;
+  }
+
+  record InstrInitRecord {
+    public destPtr: Lir::Operand;
+    public fields: Vector<Lir::InitRecordField>;
+    public recordType: Analyzer::TypeId;
+  }
+
+  record InstrInitEnumVariant {
+    public destPtr: Lir::Operand;
+    public enumType: Analyzer::TypeId;
+    public variantTag: u32;
+    public payload: Vector<Lir::Operand>;
+  }
+
+  record InstrEnumGetTag {
+    public dest: Lir::TempId;
+    public source: Lir::Operand;
+  }
+
+  record InstrEnumGetPayloadField {
+    public dest: Lir::TempId;
+    public source: Lir::Operand;
+    public variantTag: u32;
+    public fieldIndex: u32;
+  }
+
+  record InstrDropInPlace {
+    public ptr: Lir::Operand;
+    public ty: Analyzer::TypeId;
+  }
+
+  record InstrMarkMoved {
+    public ptr: Lir::Operand;
+    public ty: Analyzer::TypeId;
+  }
+
+  record InstrDropGlue {
+    public dest: Lir::TempId;
+    public ty: Analyzer::TypeId;
+  }
+
+  record InstrMakeClosure {
+    public dest: Lir::TempId;
+    public thunk: Analyzer::DefinitionId;
+    public dropFn: Option<Analyzer::DefinitionId>;
+    public captures: Vector<Lir::Operand>;
+    public closureType: Analyzer::TypeId;
+    public heapAllocate: boolean;
+  }
+
+  record InstrCallClosure {
+    public dest: Option<Lir::TempId>;
+    public closure: Lir::Operand;
+    public args: Vector<Lir::Operand>;
+    public returnType: Analyzer::TypeId;
+  }
+
+  record InstrDropClosure {
+    public closure: Lir::Operand;
+    public closureType: Analyzer::TypeId;
+    public heapAllocated: boolean;
+  }
+
+  /// Mirrors `ignis_lir::Instr` (TAC: one operation, result in a temp).
+  /// `SizeOf`/`AlignOf`/`MaxOf`/`MinOf` share the `InstrTypeQuery` payload
+  /// because the Rust variants carry identical fields.
+  enum Instr {
+    Load(Lir::InstrLoad),
+    Store(Lir::InstrStore),
+    LoadPtr(Lir::InstrLoadPtr),
+    StorePtr(Lir::InstrStorePtr),
+    BuiltinLoad(Lir::InstrBuiltinLoad),
+    BuiltinStore(Lir::InstrBuiltinStore),
+    BuiltinHash(Lir::InstrBuiltinHash),
+    BuiltinEq(Lir::InstrBuiltinEq),
+    Copy(Lir::InstrCopy),
+    BinOp(Lir::InstrBinOp),
+    UnaryOp(Lir::InstrUnaryOp),
+    Call(Lir::InstrCall),
+    Cast(Lir::InstrCast),
+    BitCast(Lir::InstrCast),
+    AddrOfLocal(Lir::InstrAddrOfLocal),
+    GetElementPtr(Lir::InstrGetElementPtr),
+    MakeSlice(Lir::InstrMakeSlice),
+    InitVector(Lir::InstrInitVector),
+    Nop,
+    RuntimeCall(Lir::InstrRuntimeCall),
+    TypeIdOf(Lir::InstrTypeIdOf),
+    SizeOf(Lir::InstrTypeQuery),
+    AlignOf(Lir::InstrTypeQuery),
+    MaxOf(Lir::InstrTypeQuery),
+    MinOf(Lir::InstrTypeQuery),
+    Trap(Lir::InstrTrap),
+    PanicMessage(Lir::InstrPanicMessage),
+    Drop(Lir::InstrDrop),
+    GetFieldPtr(Lir::InstrGetFieldPtr),
+    InitRecord(Lir::InstrInitRecord),
+    InitEnumVariant(Lir::InstrInitEnumVariant),
+    EnumGetTag(Lir::InstrEnumGetTag),
+    EnumGetPayloadField(Lir::InstrEnumGetPayloadField),
+    DropInPlace(Lir::InstrDropInPlace),
+    MarkMoved(Lir::InstrMarkMoved),
+    DropGlue(Lir::InstrDropGlue),
+    MakeClosure(Lir::InstrMakeClosure),
+    CallClosure(Lir::InstrCallClosure),
+    DropClosure(Lir::InstrDropClosure),
+  }
+}

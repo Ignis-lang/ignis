@@ -1,0 +1,190 @@
+import Vector from "std::vector";
+
+import SourceSpan from "@compiler::diagnostics";
+import Id from "@compiler::ids";
+import Analyzer from "@compiler::analyzer";
+
+import _ from "./ids";
+import _ from "./operand";
+import _ from "./block";
+
+export namespace Lir {
+  /// Mirrors `ignis_lir::LocalData`: metadata for one stack slot.
+  record LocalData {
+    public defId: Option<Analyzer::DefinitionId>;
+    public ty: Analyzer::TypeId;
+    public mutable: boolean;
+    public name: Option<String>;
+    public borrowedAlias: boolean;
+  }
+
+  /// Mirrors `ignis_lir::TempData`: metadata for one temporary.
+  record TempData {
+    public ty: Analyzer::TypeId;
+    public span: SourceSpan;
+  }
+
+  /// Mirrors `ignis_lir::FunctionLir`. The Rust model also carries an
+  /// `inline_mode` hint; the selfhost definition store has no inline
+  /// attribute yet, so the field waits for it.
+  record FunctionLir {
+    public defId: Analyzer::DefinitionId;
+    public params: Vector<Analyzer::DefinitionId>;
+    public returnType: Analyzer::TypeId;
+    public locals: Vector<Lir::LocalData>;
+    public temps: Vector<Lir::TempData>;
+    public blocks: Vector<Lir::Block>;
+    public entryBlock: Lir::BlockId;
+    public isExtern: boolean;
+    public isVariadic: boolean;
+    public span: SourceSpan;
+
+    public static create(defId: Analyzer::DefinitionId, returnType: Analyzer::TypeId): FunctionLir {
+      return FunctionLir {
+        defId: defId,
+        params: Vector::new<Analyzer::DefinitionId>(),
+        returnType: returnType,
+        locals: Vector::new<Lir::LocalData>(),
+        temps: Vector::new<Lir::TempData>(),
+        blocks: Vector::new<Lir::Block>(),
+        entryBlock: Id::fromRaw<Lir::BlockTag>(0),
+        isExtern: false,
+        isVariadic: false,
+        span: SourceSpan::new("", 0, 0),
+      };
+    }
+
+    public allocLocal(&mut self, data: Lir::LocalData): Lir::LocalId {
+      let index: u64 = self.locals.length();
+
+      self.locals.push(data);
+
+      return Id::fromRaw<Lir::LocalTag>(index as u32);
+    }
+
+    public allocTemp(&mut self, data: Lir::TempData): Lir::TempId {
+      let index: u64 = self.temps.length();
+
+      self.temps.push(data);
+
+      return Id::fromRaw<Lir::TempTag>(index as u32);
+    }
+
+    public allocBlock(&mut self, block: Lir::Block): Lir::BlockId {
+      let index: u64 = self.blocks.length();
+
+      self.blocks.push(block);
+
+      return Id::fromRaw<Lir::BlockTag>(index as u32);
+    }
+
+    public localType(&self, local: Lir::LocalId): Option<Analyzer::TypeId> {
+      let Option::SOME(data) = self.locals.get(local.raw() as u64) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(data.ty);
+    }
+
+    public tempType(&self, temp: Lir::TempId): Option<Analyzer::TypeId> {
+      let Option::SOME(data) = self.temps.get(temp.raw() as u64) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(data.ty);
+    }
+  }
+
+  /// Function table of a `LirProgram`, keyed by definition. Parallel vectors
+  /// keep insertion order deterministic, like `Hir::HirDefMap`.
+  record LirFunctionMap {
+    defs: Vector<Analyzer::DefinitionId>;
+    functions: Vector<Lir::FunctionLir>;
+
+    public static init(): LirFunctionMap {
+      return LirFunctionMap {
+        defs: Vector::new<Analyzer::DefinitionId>(),
+        functions: Vector::new<Lir::FunctionLir>(),
+      };
+    }
+
+    public set(&mut self, defId: Analyzer::DefinitionId, function_: Lir::FunctionLir): void {
+      let mut index: u64 = 0;
+
+      while (index < self.defs.length()) {
+        let mut found: boolean = false;
+
+        if (let Option::SOME(existing) = self.defs.get(index)) {
+          if (existing.equals(&defId)) {
+            found = true;
+          }
+        }
+
+        if (found) {
+          self.functions.set(index, function_);
+          return;
+        }
+
+        index += 1;
+      }
+
+      self.defs.push(defId);
+      self.functions.push(function_);
+    }
+
+    public get(&self, defId: Analyzer::DefinitionId): Option<&Lir::FunctionLir> {
+      let mut index: u64 = 0;
+
+      while (index < self.defs.length()) {
+        let mut found: boolean = false;
+
+        if (let Option::SOME(existing) = self.defs.get(index)) {
+          if (existing.equals(&defId)) {
+            found = true;
+          }
+        }
+
+        if (found) {
+          return self.functions.get(index);
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    public length(&self): u64 {
+      return self.defs.length();
+    }
+
+    public functionAt(&self, index: u64): Option<&Lir::FunctionLir> {
+      return self.functions.get(index);
+    }
+
+    public defAt(&self, index: u64): Option<&Analyzer::DefinitionId> {
+      return self.defs.get(index);
+    }
+  }
+
+  /// One module-level constant initializer of a `LirProgram`.
+  record GlobalInit {
+    public defId: Analyzer::DefinitionId;
+    public value: Lir::Operand;
+  }
+
+  /// Mirrors `ignis_lir::LirProgram`.
+  record LirProgram {
+    public functions: Lir::LirFunctionMap;
+    public globalInits: Vector<Lir::GlobalInit>;
+    public entryPoint: Option<Analyzer::DefinitionId>;
+
+    public static init(): LirProgram {
+      return LirProgram {
+        functions: Lir::LirFunctionMap::init(),
+        globalInits: Vector::new<Lir::GlobalInit>(),
+        entryPoint: Option::NONE,
+      };
+    }
+  }
+}
