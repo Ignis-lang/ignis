@@ -14344,3 +14344,22 @@ function typecheckCharEqualityIsBoolean(): void {
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }
+
+/// Scenario: destructuring a variant of an instantiated generic enum binds
+/// the payload with the instance's type argument substituted in, so
+/// `Wrap::FULL(value)` on a `Wrap<u32>` binds `value: u32`. IGN-151
+/// follow-up (F3).
+@test
+function typecheckGenericEnumInstanceDestructuringBindsSubstitutedPayload(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Wrap<T> {\n  FULL(T),\n  EMPTY,\n}\n\nfunction unwrap(w: Wrap<u32>): u32 {\n  match (w) {\n    Wrap::FULL(value) -> {\n      return value;\n    },\n    Wrap::EMPTY -> {\n      return 0;\n    },\n  };\n\n  return 0;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}

@@ -2045,7 +2045,98 @@ export namespace Analyzer {
       @panic("unreachable: requireNonGenericEnumDefId match did not return");
     }
 
-    record RequiredMethodOwner {
+    /// The enum a variant pattern destructures, together with what its type
+    /// parameters stand for when the scrutinee is an instantiated generic
+    /// (`Option<String>`); both vectors are empty for a plain enum.
+    record PatternEnumOwner {
+      public defId: Analyzer::DefinitionId;
+      public typeParamSymbols: Vector<Analyzer::SymbolId>;
+      public typeArguments: Vector<Analyzer::TypeId>;
+    }
+
+    /// The enum behind a variant-pattern scrutinee. Accepts a plain enum and
+    /// an instantiated generic enum; a bare generic enum — nothing to bind its
+    /// parameters to — and every non-enum type are rejected with the caller's
+    /// messages, mirroring `requireMethodOwner`'s owner handling.
+    function requireEnumOwnerForPattern(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      typeId: Analyzer::TypeId,
+      nonEnumMessage: str,
+      genericMessage: str,
+    ): Option<Analyzer::Typecheck::PatternEnumOwner> {
+      let resolvedType: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (let Option::SOME(aliasDefId) = resolvedType.cycleAlias) {
+        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+        return Option::NONE;
+      }
+
+      let Option::SOME(resolvedTypeNode) = typeStore.get(resolvedType.typeId) else {
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonEnumMessage);
+        return Option::NONE;
+      };
+
+      match (resolvedTypeNode) {
+        Analyzer::Type::Enum(defId) -> {
+          let Option::SOME(def) = defStore.get(defId) else {
+            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonEnumMessage);
+            return Option::NONE;
+          };
+
+          match (def) {
+            Analyzer::Definition::Enum(enum_) -> {
+              if (enum_.typeParams.length() > 0) {
+                Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNSUPPORTED_CONSTRUCT, genericMessage);
+                return Option::NONE;
+              }
+
+              return Option::SOME(Analyzer::Typecheck::PatternEnumOwner {
+                defId: defId,
+                typeParamSymbols: Vector::new<Analyzer::SymbolId>(),
+                typeArguments: Vector::new<Analyzer::TypeId>(),
+              });
+            },
+            _ -> {
+              Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonEnumMessage);
+              return Option::NONE;
+            },
+          };
+        },
+        Analyzer::Type::Instance(instance) -> {
+          let instanceDefId: Analyzer::DefinitionId = instance.definition;
+          let Option::SOME(def) = defStore.get(instanceDefId) else {
+            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonEnumMessage);
+            return Option::NONE;
+          };
+
+          match (def) {
+            Analyzer::Definition::Enum(enum_) -> {
+              let typeParamSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &enum_.typeParams);
+
+              return Option::SOME(Analyzer::Typecheck::PatternEnumOwner {
+                defId: instanceDefId,
+                typeParamSymbols: typeParamSymbols,
+                typeArguments: Analyzer::Typecheck::copyVariantPayloadTypeIds(&instance.typeArguments),
+              });
+            },
+            _ -> {
+              Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonEnumMessage);
+              return Option::NONE;
+            },
+          };
+        },
+        _ -> {
+          Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonEnumMessage);
+          return Option::NONE;
+        },
+      };
+
+      @panic("unreachable: requireEnumOwnerForPattern match did not return");
+    }
+
+        record RequiredMethodOwner {
       public defId: Analyzer::DefinitionId;
       public typeId: Analyzer::TypeId;
       public instanceMethods: Vector<Analyzer::DefinitionId>;
@@ -2424,18 +2515,19 @@ export namespace Analyzer {
       // moves out of borrowed storage, which is the borrow checker's call.
       let scrutineeType: Analyzer::TypeId = Analyzer::Typecheck::derefReceiverType(defStore, typeStore, typeId);
 
-      let expectedEnumDefIdOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::requireNonGenericEnumDefId(
+      let ownerOpt: Option<Analyzer::Typecheck::PatternEnumOwner> = Analyzer::Typecheck::requireEnumOwnerForPattern(
         state,
         defStore,
         typeStore,
         span,
         scrutineeType,
-        "enum variant pattern must match a non-generic enum",
+        "enum variant pattern must match an enum",
         "typecheck does not support generic enum destructuring",
       );
-      let Option::SOME(expectedEnumDefId) = expectedEnumDefIdOpt else {
+      let Option::SOME(enumOwner) = ownerOpt else {
         return false;
       };
+      let expectedEnumDefId: Analyzer::DefinitionId = enumOwner.defId;
 
       let Option::SOME(variantDefNode) = defStore.get(variantDefId) else {
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, "enum variant pattern must resolve to a variant of the scrutinee's enum");
@@ -2477,7 +2569,13 @@ export namespace Analyzer {
           return false;
         };
 
-        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *argPatternId, *payloadType, mutable, span)) {
+        let mut boundType: Analyzer::TypeId = *payloadType;
+        if (enumOwner.typeArguments.length() == enumOwner.typeParamSymbols.length() && enumOwner.typeParamSymbols.length() > 0) {
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          boundType = typeStoreRef.substitute(boundType, &enumOwner.typeParamSymbols, &enumOwner.typeArguments);
+        }
+
+        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *argPatternId, boundType, mutable, span)) {
           return false;
         }
 
