@@ -723,6 +723,83 @@ export namespace Analyzer {
       return;
     }
 
+    /// Deep alias normalization: rewrites `typeId` replacing every alias —
+    /// at any depth: under references, pointers, slices, arrays, tuples,
+    /// instance arguments, and function types — with what it resolves to, so
+    /// `&IdVector` and `&Vector<ExpressionId>` compare equal.
+    function normalizeAliasesDeep(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+      depth: u64,
+    ): Analyzer::TypeId {
+      if (depth > 16) {
+        return typeId;
+      }
+
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (resolved.cycleAlias.isSome()) {
+        return typeId;
+      }
+
+      let Option::SOME(node) = typeStore.get(resolved.typeId) else {
+        return resolved.typeId;
+      };
+
+      match (node) {
+        Analyzer::Type::Reference(reference) -> {
+          let inner: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, reference.referent, depth + 1);
+          let mutable: boolean = reference.mutable;
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+
+          if (mutable) {
+            return tsRef.mutableReference(inner);
+          }
+
+          return tsRef.reference(inner);
+        },
+        Analyzer::Type::Pointer(pointer) -> {
+          let inner: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, pointer.pointee, depth + 1);
+          let mutable: boolean = pointer.mutable;
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+
+          if (mutable) {
+            return tsRef.mutablePointer(inner);
+          }
+
+          return tsRef.pointer(inner);
+        },
+        Analyzer::Type::Slice(element) -> {
+          let inner: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, element, depth + 1);
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.slice(inner);
+        },
+        Analyzer::Type::Instance(instance) -> {
+          let mut normalizedArguments: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut argIndex: u64 = 0;
+
+          while (argIndex < instance.typeArguments.length()) {
+            let Option::SOME(argument) = instance.typeArguments.get(argIndex) else {
+              argIndex += 1;
+              continue;
+            };
+
+            normalizedArguments.push(Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, *argument, depth + 1));
+            argIndex += 1;
+          }
+
+          let definition: Analyzer::DefinitionId = instance.definition;
+          let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+          return tsRef.instance(definition, normalizedArguments);
+        },
+        _ -> {
+          return resolved.typeId;
+        },
+      };
+
+      @panic("unreachable: normalizeAliasesDeep match did not return");
+    }
+
     function typesEqual(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -743,7 +820,15 @@ export namespace Analyzer {
         return true;
       }
 
-      return leftResolved.typeId.raw() == rightResolved.typeId.raw();
+      if (leftResolved.typeId.raw() == rightResolved.typeId.raw()) {
+        return true;
+      }
+
+      // Aliases can hide at any depth (`&IdVector` vs `&Vector<Id>`); a deep
+      // normalization decides what the shallow chain above could not.
+      let leftDeep: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, leftResolved.typeId, 0);
+      let rightDeep: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, rightResolved.typeId, 0);
+      return leftDeep.raw() == rightDeep.raw();
     }
 
     function isSupportedNumericType(
