@@ -1336,44 +1336,51 @@ export namespace Analyzer {
             return tsRef.intern(Analyzer::Type::VOID);
           };
 
-          if (basePath.segments.length() != 1) {
-            emitUndefinedType(state, gSpan, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "generic base must be a single-segment path");
-            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
-            return tsRef.intern(Analyzer::Type::VOID);
-          }
+          let baseQualified: boolean = basePath.segments.length() > 1;
 
-          let Option::SOME(firstSeg) = basePath.segments.get(0) else {
-            emitUndefinedType(state, gSpan, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "generic base must be a single-segment path");
+          let Option::SOME(lastSeg) = basePath.segments.get(basePath.segments.length() - 1) else {
+            emitUndefinedType(state, gSpan, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "generic base path is empty");
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           };
 
-          let baseNameStr: String = firstSeg.clone();
+          let baseNameStr: String = lastSeg.clone();
           let basePathSpan: SourceSpan = basePath.span;
 
           let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
           let sym: Analyzer::SymbolId = symbolsRef.intern(baseNameStr.toStr());
 
-          // Type-param in generic position is invalid.
-          if (scopeLookup(scope, sym).isSome()) {
+          // Type-param in generic position is invalid; never written qualified.
+          if (!baseQualified && scopeLookup(scope, sym).isSome()) {
             let message: String = `type parameter \`${baseNameStr.toStr()}\` cannot take generic arguments`;
             emitUndefinedType(state, gSpan, DiagnosticCode::GENERIC_ARGS_NOT_ALLOWED, message.toStr());
             let mut tsRef: &mut Analyzer::TypeStore = typeStore;
             return tsRef.intern(Analyzer::Type::VOID);
           }
 
-          // Primitive in generic position is invalid.
-          let primCheck: Option<Analyzer::TypeId> = primitiveForName(typeStore, baseNameStr.toStr());
+          // Primitive in generic position is invalid; never written qualified.
+          if (!baseQualified) {
+            let primCheck: Option<Analyzer::TypeId> = primitiveForName(typeStore, baseNameStr.toStr());
 
-          if (primCheck.isSome()) {
-            let message: String = `primitive type \`${baseNameStr.toStr()}\` does not take generic arguments`;
-            emitUndefinedType(state, gSpan, DiagnosticCode::GENERIC_ARGS_NOT_ALLOWED, message.toStr());
-            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
-            return tsRef.intern(Analyzer::Type::VOID);
+            if (primCheck.isSome()) {
+              let message: String = `primitive type \`${baseNameStr.toStr()}\` does not take generic arguments`;
+              emitUndefinedType(state, gSpan, DiagnosticCode::GENERIC_ARGS_NOT_ALLOWED, message.toStr());
+              let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+              return tsRef.intern(Analyzer::Type::VOID);
+            }
           }
 
-          // Global lookup.
-          let mut defIdOpt: Option<Analyzer::DefinitionId> = globalLookup(state, sym);
+          // A qualified base picks its declaration by written path first, the
+          // same rule `resolvePath` applies.
+          let mut defIdOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+          if (baseQualified) {
+            defIdOpt = programLookupForPath(state, sym, &basePath);
+          }
+
+          if (defIdOpt.isNone()) {
+            defIdOpt = globalLookup(state, sym);
+          }
 
           if (defIdOpt.isNone()) {
             defIdOpt = importLookup(state, sym);
