@@ -1173,13 +1173,77 @@ export namespace Analyzer {
       bindIndex += 1;
     }
 
-    // Phase 2 must walk in dependency order — the resolver is what patches a
-    // function's VOID placeholder types with its declared ones, so a caller
-    // resolved before its dependency would see void signatures. The binder
-    // outputs are popped into each record, so the vectors are inverted once
-    // and popping them walks the modules forward.
+    // Phase 2a: resolve every module's signatures before any module's
+    // bodies typecheck. The prelude is mutually recursive one level above
+    // binding too — String's methods mention Vector while Vector's mention
+    // String — so no single order lets one typecheck against the other's
+    // resolved signatures unless all signatures resolve first.
+    let mut overlays: Vector<Analyzer::Imports::ImportOverlay> = Vector::new<Analyzer::Imports::ImportOverlay>();
+    let mut importDiagnosticsList: Vector<DiagnosticBag> = Vector::new<DiagnosticBag>();
+    let mut resolvedTypesList: Vector<Analyzer::Resolver::ResolverOutput> = Vector::new<Analyzer::Resolver::ResolverOutput>();
+    let mut signatureIndex: u64 = 0;
+
+    while (signatureIndex < modules.length()) {
+      let Option::SOME(module) = modules.get(signatureIndex) else {
+        signatureIndex += 1;
+        continue;
+      };
+      let info: Analyzer::Imports::ModuleInfo = Analyzer::moduleInfoAt(infos, signatureIndex);
+      let Option::SOME(pass1) = pass1s.get(signatureIndex) else {
+        signatureIndex += 1;
+        continue;
+      };
+      let Option::SOME(pass2) = pass2s.get(signatureIndex) else {
+        signatureIndex += 1;
+        continue;
+      };
+      // The shared entry in `directs` already carries re-exports; the overlay
+      // build needs the module's own declarations only, or every
+      // discard-imported name would be skipped as if declared here.
+      let ownDirect: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
+        defStore,
+        module,
+        pass1,
+        pass2,
+      );
+
+      let mut importDiagnostics: DiagnosticBag = DiagnosticBag::init();
+      let mut overlay: Analyzer::Imports::ImportOverlay = Analyzer::buildImportOverlay(
+        module,
+        &ownDirect,
+        &directs,
+        infos,
+        symbols,
+        &mut importDiagnostics,
+      );
+
+      Analyzer::seedPreludeOverlay(&mut overlay, &ownDirect, &directs, infos, preludePaths, &info.pathText);
+
+      let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypesWithImports(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        pass1,
+        pass2,
+        &overlay,
+        &programIndex,
+      );
+
+      overlays.push(overlay);
+      importDiagnosticsList.push(importDiagnostics);
+      resolvedTypesList.push(resolvedTypes);
+      signatureIndex += 1;
+    }
+
+    // Phase 2b walks in dependency order too, popping the stored outputs into
+    // each record. The vectors are inverted once so popping them walks the
+    // modules forward.
     let mut pass1sReversed: Vector<Analyzer::Binder::BinderOutput> = Vector::new<Analyzer::Binder::BinderOutput>();
     let mut pass2sReversed: Vector<Analyzer::Binder::BinderOutput> = Vector::new<Analyzer::Binder::BinderOutput>();
+    let mut overlaysReversed: Vector<Analyzer::Imports::ImportOverlay> = Vector::new<Analyzer::Imports::ImportOverlay>();
+    let mut importDiagnosticsReversed: Vector<DiagnosticBag> = Vector::new<DiagnosticBag>();
+    let mut resolvedTypesReversed: Vector<Analyzer::Resolver::ResolverOutput> = Vector::new<Analyzer::Resolver::ResolverOutput>();
     let mut invertIndex: u64 = modules.length();
 
     while (invertIndex > 0) {
@@ -1194,6 +1258,21 @@ export namespace Analyzer {
         continue;
       };
       pass2sReversed.push(pass2Entry);
+
+      let Option::SOME(overlayEntry) = overlays.pop() else {
+        continue;
+      };
+      overlaysReversed.push(overlayEntry);
+
+      let Option::SOME(importDiagnosticsEntry) = importDiagnosticsList.pop() else {
+        continue;
+      };
+      importDiagnosticsReversed.push(importDiagnosticsEntry);
+
+      let Option::SOME(resolvedTypesEntry) = resolvedTypesList.pop() else {
+        continue;
+      };
+      resolvedTypesReversed.push(resolvedTypesEntry);
     }
 
     let mut records: Vector<Analyzer::ModuleAnalysisRecord> = Vector::new<Analyzer::ModuleAnalysisRecord>();
@@ -1202,6 +1281,9 @@ export namespace Analyzer {
     while (index < modules.length()) {
       let pass2Popped: Option<Analyzer::Binder::BinderOutput> = pass2sReversed.pop();
       let pass1Popped: Option<Analyzer::Binder::BinderOutput> = pass1sReversed.pop();
+      let overlayPopped: Option<Analyzer::Imports::ImportOverlay> = overlaysReversed.pop();
+      let importDiagnosticsPopped: Option<DiagnosticBag> = importDiagnosticsReversed.pop();
+      let resolvedTypesPopped: Option<Analyzer::Resolver::ResolverOutput> = resolvedTypesReversed.pop();
 
       let Option::SOME(module) = modules.get(index) else {
         index += 1;
@@ -1213,6 +1295,18 @@ export namespace Analyzer {
         continue;
       };
       let Option::SOME(pass2) = pass2Popped else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(overlay) = overlayPopped else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(importDiagnostics) = importDiagnosticsPopped else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(resolvedTypes) = resolvedTypesPopped else {
         index += 1;
         continue;
       };
@@ -1230,29 +1324,7 @@ export namespace Analyzer {
         &pass2,
       );
 
-      let mut importDiagnostics: DiagnosticBag = DiagnosticBag::init();
-      let mut overlay: Analyzer::Imports::ImportOverlay = Analyzer::buildImportOverlay(
-        module,
-        &direct,
-        &directs,
-        infos,
-        symbols,
-        &mut importDiagnostics,
-      );
-
-      Analyzer::seedPreludeOverlay(&mut overlay, &direct, &directs, infos, preludePaths, &info.pathText);
       Analyzer::appendReExportedDeclarations(&mut direct, module, &directs, infos);
-
-      let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypesWithImports(
-        defStore,
-        typeStore,
-        symbols,
-        module,
-        &pass1,
-        &pass2,
-        &overlay,
-        &programIndex,
-      );
 
       let resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodiesWithImports(
         defStore,
