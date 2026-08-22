@@ -168,6 +168,13 @@ export namespace Analyzer {
           return Option::SOME(commonType);
         }
 
+        // Mixed signed/unsigned with no widening: the host's common-type rule
+        // falls back to the right operand's type rather than erroring.
+        if (Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, leftType) && Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, rightType)) {
+          Analyzer::Typecheck::recordExprType(state, exprId, rightType);
+          return Option::SOME(rightType);
+        }
+
         Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
         return Option::NONE;
       }
@@ -179,7 +186,7 @@ export namespace Analyzer {
           return Option::SOME(booleanType);
         }
 
-        if (Analyzer::Typecheck::commonIntegerType(defStore, typeStore, leftType, rightType).isSome()) {
+        if (Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, leftType) && Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, rightType)) {
           let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
           Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
           return Option::SOME(booleanType);
@@ -228,7 +235,7 @@ export namespace Analyzer {
           return Option::SOME(booleanType);
         }
 
-        if (Analyzer::Typecheck::commonIntegerType(defStore, typeStore, leftType, rightType).isSome()) {
+        if (Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, leftType) && Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, rightType)) {
           let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
           Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
           return Option::SOME(booleanType);
