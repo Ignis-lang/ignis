@@ -75,6 +75,117 @@ export namespace Analyzer {
       return false;
     }
 
+    /// Program-wide index of every module's declarations by qualified name.
+    ///
+    /// Mirrors the host compiler's shared `NamespaceStore`: a namespace is one
+    /// entity re-opened across files, so `Analyzer::Definition` written in a
+    /// part file resolves even though that file imports nothing. Only
+    /// qualified references consult this index — a bare name still needs an
+    /// import or a local declaration.
+    record ProgramQualifiedIndex {
+      public syms: Vector<Analyzer::SymbolId>;
+      public defs: Vector<Analyzer::DefinitionId>;
+      public qualifiedNames: Vector<String>;
+    }
+
+    function emptyProgramQualifiedIndex(): Analyzer::Imports::ProgramQualifiedIndex {
+      return Analyzer::Imports::ProgramQualifiedIndex {
+        syms: Vector::new<Analyzer::SymbolId>(),
+        defs: Vector::new<Analyzer::DefinitionId>(),
+        qualifiedNames: Vector::new<String>(),
+      };
+    }
+
+    /// Append one declaration, skipping an entry already present under the
+    /// same name and written path (a re-export duplicates its original).
+    function appendProgramQualifiedEntry(
+      index: &mut Analyzer::Imports::ProgramQualifiedIndex,
+      sym: Analyzer::SymbolId,
+      def: Analyzer::DefinitionId,
+      qualifiedName: String,
+    ): void {
+      if (qualifiedName.length() == 0) {
+        return;
+      }
+
+      let mut i: u64 = 0;
+      while (i < index.syms.length()) {
+        let Option::SOME(existingSym) = index.syms.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (existingSym.raw() == sym.raw()) {
+          if (let Option::SOME(existingQualified) = index.qualifiedNames.get(i)) {
+            if (existingQualified.equals(qualifiedName.toStr())) {
+              return;
+            }
+          }
+        }
+
+        i += 1;
+      }
+
+      let mut indexRef: &mut Analyzer::Imports::ProgramQualifiedIndex = index;
+      indexRef.syms.push(sym);
+      indexRef.defs.push(def);
+      indexRef.qualifiedNames.push(qualifiedName);
+    }
+
+    /// Whether `candidate` ends with `suffix`, byte for byte.
+    function programPathEndsWith(candidate: &String, suffix: &String): boolean {
+      if (suffix.length() > candidate.length()) {
+        return false;
+      }
+
+      let tail: String = candidate.substringBytes(candidate.length() - suffix.length(), candidate.length());
+      return tail.equals(suffix.toStr());
+    }
+
+    /// The declaration a written qualified path names in the program index.
+    ///
+    /// `writtenPath` may omit leading namespaces: `Typecheck::TypecheckState`
+    /// matches `Analyzer::Typecheck::TypecheckState` the same way the import
+    /// overlay's partial qualification does.
+    function programQualifiedFind(
+      index: &Analyzer::Imports::ProgramQualifiedIndex,
+      sym: Analyzer::SymbolId,
+      writtenPath: &String,
+    ): Option<Analyzer::DefinitionId> {
+      let suffix: String = `::${writtenPath.toStr()}`;
+      let mut i: u64 = 0;
+
+      while (i < index.syms.length()) {
+        let Option::SOME(candidateSym) = index.syms.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (candidateSym.raw() != sym.raw()) {
+          i += 1;
+          continue;
+        }
+
+        let Option::SOME(candidate) = index.qualifiedNames.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (candidate.equals(writtenPath.toStr()) || Analyzer::Imports::programPathEndsWith(candidate, &suffix)) {
+          let Option::SOME(defId) = index.defs.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          return Option::SOME(*defId);
+        }
+
+        i += 1;
+      }
+
+      return Option::NONE;
+    }
+
     function emptyOverlay(): Analyzer::Imports::ImportOverlay {
       return Analyzer::Imports::ImportOverlay {
         syms: Vector::new<Analyzer::SymbolId>(),

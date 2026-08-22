@@ -181,6 +181,12 @@ export namespace Analyzer {
       /// empty for a name an import statement listed directly.
       public importQualifiedNames: Vector<String>;
 
+      /// Program-wide qualified declarations (host NamespaceStore mirror).
+      /// Consulted only by qualified-path lookups, never by bare names.
+      public programSyms: Vector<Analyzer::SymbolId>;
+      public programDefs: Vector<Analyzer::DefinitionId>;
+      public programQualifiedNames: Vector<String>;
+
       /// Per-function transient state (reset at each function/constant entry).
       public currentFunction: Analyzer::DefinitionId;
       public localStack: Analyzer::ResolverBodies::LocalStack;
@@ -1269,6 +1275,10 @@ export namespace Analyzer {
         found = Analyzer::ResolverBodies::bodyImportLookupQualifiedFull(state, segments, segCount);
       }
 
+      if (found.isNone()) {
+        found = Analyzer::ResolverBodies::bodyProgramLookupPath(state, segments, segCount);
+      }
+
       let Option::SOME(defId) = found else {
         return Option::NONE;
       };
@@ -1278,6 +1288,73 @@ export namespace Analyzer {
       }
 
       return Option::SOME(defId);
+    }
+
+    /// Copy the program-wide qualified index into body-resolver state.
+    function copyBodyProgramIndex(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      programIndex: &Analyzer::Imports::ProgramQualifiedIndex,
+    ): void {
+      let mut stateRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+      let mut i: u64 = 0;
+
+      while (i < programIndex.syms.length()) {
+        let Option::SOME(sym) = programIndex.syms.get(i) else {
+          i += 1;
+          continue;
+        };
+        let Option::SOME(defId) = programIndex.defs.get(i) else {
+          i += 1;
+          continue;
+        };
+        let Option::SOME(qualifiedName) = programIndex.qualifiedNames.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        stateRef.programSyms.push(*sym);
+        stateRef.programDefs.push(*defId);
+        stateRef.programQualifiedNames.push(qualifiedName.clone());
+        i += 1;
+      }
+    }
+
+    /// The program-index declaration a written path (its first `segCount`
+    /// segments) names. Partial qualification matches by `::`-suffix, the same
+    /// rule the import overlay applies.
+    function bodyProgramLookupPath(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      segments: &Vector<String>,
+      segCount: u64,
+    ): Option<Analyzer::DefinitionId> {
+      let writtenPath: String = Analyzer::ResolverBodies::joinPathSegments(segments, segCount);
+      let suffix: String = `::${writtenPath.toStr()}`;
+      let mut i: u64 = 0;
+
+      while (i < state.programQualifiedNames.length()) {
+        let Option::SOME(candidate) = state.programQualifiedNames.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (candidate.length() == 0) {
+          i += 1;
+          continue;
+        }
+
+        if (candidate.equals(writtenPath.toStr()) || Analyzer::Imports::programPathEndsWith(candidate, &suffix)) {
+          let Option::SOME(defId) = state.programDefs.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          return Option::SOME(*defId);
+        }
+
+        i += 1;
+      }
+
+      return Option::NONE;
     }
 
     function rejectInvalidNamespacePrefix(
@@ -2022,6 +2099,9 @@ export namespace Analyzer {
         if (ownerDef.isNone()) {
           ownerDef = Analyzer::ResolverBodies::bodyImportLookupQualified(state, &p.segments, segCount);
         }
+        if (ownerDef.isNone()) {
+          ownerDef = Analyzer::ResolverBodies::bodyProgramLookupPath(state, &p.segments, segCount - 1);
+        }
 
         if (let Option::SOME(ownerDefId) = ownerDef) {
           lookup = Analyzer::ResolverBodies::resolvePathTailForOwner(
@@ -2265,6 +2345,9 @@ export namespace Analyzer {
         let mut ownerDef: Option<Analyzer::DefinitionId> = qualifiedOwner;
         if (ownerDef.isNone()) {
           ownerDef = Analyzer::ResolverBodies::bodyImportLookupQualified(state, &p.segments, segCount);
+        }
+        if (ownerDef.isNone()) {
+          ownerDef = Analyzer::ResolverBodies::bodyProgramLookupPath(state, &p.segments, segCount - 1);
         }
 
         if (let Option::SOME(ownerDefId) = ownerDef) {
@@ -3275,6 +3358,7 @@ export namespace Analyzer {
       pass2: &Analyzer::Binder::BinderOutput,
     ): Analyzer::ResolverBodies::ResolverBodiesOutput {
       let overlay: Analyzer::Imports::ImportOverlay = Analyzer::Imports::emptyOverlay();
+      let programIndex: Analyzer::Imports::ProgramQualifiedIndex = Analyzer::Imports::emptyProgramQualifiedIndex();
       return Analyzer::ResolverBodies::resolveBodiesWithImports(
         defStore,
         typeStore,
@@ -3283,6 +3367,7 @@ export namespace Analyzer {
         pass1,
         pass2,
         &overlay,
+        &programIndex,
       );
     }
 
@@ -3294,6 +3379,7 @@ export namespace Analyzer {
       pass1: &Analyzer::Binder::BinderOutput,
       pass2: &Analyzer::Binder::BinderOutput,
       overlay: &Analyzer::Imports::ImportOverlay,
+      programIndex: &Analyzer::Imports::ProgramQualifiedIndex,
     ): Analyzer::ResolverBodies::ResolverBodiesOutput {
       let sentinel: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
 
@@ -3308,6 +3394,9 @@ export namespace Analyzer {
         importSyms: Vector::new<Analyzer::SymbolId>(),
         importQualifiedNames: Vector::new<String>(),
         importDefs: Vector::new<Analyzer::DefinitionId>(),
+        programSyms: Vector::new<Analyzer::SymbolId>(),
+        programDefs: Vector::new<Analyzer::DefinitionId>(),
+        programQualifiedNames: Vector::new<String>(),
         currentFunction: sentinel,
         localStack: Analyzer::ResolverBodies::LocalStack {
           scopeStarts: Vector::new<u64>(),
@@ -3339,6 +3428,7 @@ export namespace Analyzer {
       Analyzer::ResolverBodies::buildBodyGlobalNameIndex(&mut state, defStore, pass1);
       Analyzer::ResolverBodies::buildBodyGlobalNameIndex(&mut state, defStore, pass2);
       Analyzer::ResolverBodies::copyBodyImportOverlay(&mut state, overlay);
+      Analyzer::ResolverBodies::copyBodyProgramIndex(&mut state, programIndex);
 
       // Walk all top-level items in source order (REQ-E2, REQ-E3, REQ-E6).
       let mut i: u64 = 0;

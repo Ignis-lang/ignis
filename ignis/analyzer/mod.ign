@@ -273,7 +273,33 @@ export namespace Analyzer {
 
   /// Whether every binding an import writes is discarded, which is how the
   /// corpus spells "bring this module in whole".
-  function importDiscardsItsBindings(importItem: &Ast::Item::Import): boolean {
+  /// Feed one module's declarations into the program-wide qualified index.
+  function appendDirectToProgramIndex(
+    programIndex: &mut Analyzer::Imports::ProgramQualifiedIndex,
+    direct: &Analyzer::Imports::DirectDeclarationIndex,
+  ): void {
+    let mut declIndex: u64 = 0;
+
+    while (declIndex < direct.syms.length()) {
+      let Option::SOME(sym) = direct.syms.get(declIndex) else {
+        declIndex += 1;
+        continue;
+      };
+      let Option::SOME(defId) = direct.defs.get(declIndex) else {
+        declIndex += 1;
+        continue;
+      };
+      let Option::SOME(qualifiedName) = direct.qualifiedNames.get(declIndex) else {
+        declIndex += 1;
+        continue;
+      };
+
+      Analyzer::Imports::appendProgramQualifiedEntry(programIndex, *sym, *defId, qualifiedName.clone());
+      declIndex += 1;
+    }
+  }
+
+    function importDiscardsItsBindings(importItem: &Ast::Item::Import): boolean {
     if (importItem.items.isEmpty()) {
       return false;
     }
@@ -778,6 +804,8 @@ export namespace Analyzer {
       &pass1,
     );
 
+    let emptyProgramIndex: Analyzer::Imports::ProgramQualifiedIndex = Analyzer::Imports::emptyProgramQualifiedIndex();
+
     let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypesWithImports(
       defStore,
       typeStore,
@@ -786,6 +814,7 @@ export namespace Analyzer {
       &pass1,
       &pass2,
       overlay,
+      &emptyProgramIndex,
     );
 
     let resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodiesWithImports(
@@ -796,6 +825,7 @@ export namespace Analyzer {
       &pass1,
       &pass2,
       overlay,
+      &emptyProgramIndex,
     );
 
     let typecheck: Analyzer::Typecheck::TypecheckOutput = Analyzer::Typecheck::checkModule(
@@ -995,6 +1025,7 @@ export namespace Analyzer {
     preludePaths: &Vector<String>,
   ): Vector<Analyzer::ModuleAnalysisRecord> {
     let mut records: Vector<Analyzer::ModuleAnalysisRecord> = Vector::new<Analyzer::ModuleAnalysisRecord>();
+    let mut programIndex: Analyzer::Imports::ProgramQualifiedIndex = Analyzer::Imports::emptyProgramQualifiedIndex();
     let mut index: u64 = 0;
 
     while (index < modules.length()) {
@@ -1028,6 +1059,8 @@ export namespace Analyzer {
         &pass2,
       );
 
+      Analyzer::appendDirectToProgramIndex(&mut programIndex, &direct);
+
       // The overlay is built against the module's own declarations only:
       // re-exported names are appended to `direct` afterwards, or the
       // own-declaration skip inside the overlay build would drop every
@@ -1052,6 +1085,7 @@ export namespace Analyzer {
         &pass1,
         &pass2,
         &overlay,
+        &programIndex,
       );
 
       let resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodiesWithImports(
@@ -1062,6 +1096,7 @@ export namespace Analyzer {
         &pass1,
         &pass2,
         &overlay,
+        &programIndex,
       );
 
       let typecheck: Analyzer::Typecheck::TypecheckOutput = Analyzer::Typecheck::checkModule(

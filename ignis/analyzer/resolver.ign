@@ -51,6 +51,10 @@ export namespace Analyzer {
       public diagnostics: DiagnosticBag;
       public globalNameIndex: HashMap<u32, Analyzer::DefinitionId>;
       public importNameIndex: HashMap<u32, Analyzer::DefinitionId>;
+      /// Program-wide qualified declarations (host NamespaceStore mirror).
+      public programSyms: Vector<Analyzer::SymbolId>;
+      public programDefs: Vector<Analyzer::DefinitionId>;
+      public programQualifiedNames: Vector<String>;
     }
 
     /// Type-parameter scope for one item walk (Record, Enum, or Function).
@@ -988,6 +992,91 @@ export namespace Analyzer {
     // with generic resolution inlined to avoid mutual-recursion forward refs.
     // =========================================================================
 
+    /// Copy the program-wide qualified index into resolver state.
+    function copyProgramQualifiedIndex(
+      state: &mut Analyzer::Resolver::ResolverState,
+      programIndex: &Analyzer::Imports::ProgramQualifiedIndex,
+    ): void {
+      let mut stateRef: &mut Analyzer::Resolver::ResolverState = state;
+      let mut i: u64 = 0;
+
+      while (i < programIndex.syms.length()) {
+        let Option::SOME(sym) = programIndex.syms.get(i) else {
+          i += 1;
+          continue;
+        };
+        let Option::SOME(defId) = programIndex.defs.get(i) else {
+          i += 1;
+          continue;
+        };
+        let Option::SOME(qualifiedName) = programIndex.qualifiedNames.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        stateRef.programSyms.push(*sym);
+        stateRef.programDefs.push(*defId);
+        stateRef.programQualifiedNames.push(qualifiedName.clone());
+        i += 1;
+      }
+    }
+
+    /// The program-index declaration a written qualified type path names.
+    function programLookupForPath(
+      state: &mut Analyzer::Resolver::ResolverState,
+      sym: Analyzer::SymbolId,
+      p: &Ast::Type::Path,
+    ): Option<Analyzer::DefinitionId> {
+      let mut writtenPath: String = String::create("");
+      let mut segIndex: u64 = 0;
+
+      while (segIndex < p.segments.length()) {
+        let Option::SOME(seg) = p.segments.get(segIndex) else {
+          segIndex += 1;
+          continue;
+        };
+
+        if (segIndex > 0) {
+          writtenPath.pushStr("::");
+        }
+        writtenPath.pushStr(seg.toStr());
+        segIndex += 1;
+      }
+
+      let suffix: String = `::${writtenPath.toStr()}`;
+      let mut i: u64 = 0;
+
+      while (i < state.programSyms.length()) {
+        let Option::SOME(candidateSym) = state.programSyms.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (candidateSym.raw() != sym.raw()) {
+          i += 1;
+          continue;
+        }
+
+        let Option::SOME(candidate) = state.programQualifiedNames.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        if (candidate.equals(writtenPath.toStr()) || Analyzer::Imports::programPathEndsWith(candidate, &suffix)) {
+          let Option::SOME(defId) = state.programDefs.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          return Option::SOME(*defId);
+        }
+
+        i += 1;
+      }
+
+      return Option::NONE;
+    }
+
     /// Resolve a single-segment `Ast::Type::Path` to an `Analyzer::TypeId`.
     ///
     /// Resolution order:
@@ -1085,7 +1174,26 @@ export namespace Analyzer {
         return nominalTypeFor(defStore, typeStore, defId);
       }
 
-      // 4. Unknown.
+      // 4. Program-wide qualified index — a qualified path only, mirroring
+      // the host's shared namespace store.
+      if (qualified) {
+        let programOpt: Option<Analyzer::DefinitionId> = programLookupForPath(state, sym, p);
+
+        if (let Option::SOME(defId) = programOpt) {
+          if (isTraitDef(defStore, defId)) {
+            let message: String = `trait \`${nameStr.toStr()}\` cannot be used in type position`;
+            emitUndefinedType(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
+            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+            return tsRef.intern(Analyzer::Type::VOID);
+          }
+
+          if (isTypeNameDef(defStore, defId)) {
+            return nominalTypeFor(defStore, typeStore, defId);
+          }
+        }
+      }
+
+      // 5. Unknown.
       let message: String = `unknown type name: \`${nameStr.toStr()}\``;
       emitUndefinedType(state, p.span, DiagnosticCode::UNDEFINED_TYPE, message.toStr());
       let mut tsRef: &mut Analyzer::TypeStore = typeStore;
@@ -2107,16 +2215,21 @@ export namespace Analyzer {
       pass1: &Analyzer::Binder::BinderOutput,
       pass2: &Analyzer::Binder::BinderOutput,
       overlay: &Analyzer::Imports::ImportOverlay,
+      programIndex: &Analyzer::Imports::ProgramQualifiedIndex,
     ): Analyzer::Resolver::ResolverOutput {
       let mut state: Analyzer::Resolver::ResolverState = Analyzer::Resolver::ResolverState {
         diagnostics: DiagnosticBag::init(),
         globalNameIndex: HashMap::new<u32, Analyzer::DefinitionId>(),
         importNameIndex: HashMap::new<u32, Analyzer::DefinitionId>(),
+        programSyms: Vector::new<Analyzer::SymbolId>(),
+        programDefs: Vector::new<Analyzer::DefinitionId>(),
+        programQualifiedNames: Vector::new<String>(),
       };
 
       buildGlobalNameIndex(&mut state, defStore, pass1);
       buildGlobalNameIndex(&mut state, defStore, pass2);
       appendImportOverlayToState(&mut state, overlay);
+      copyProgramQualifiedIndex(&mut state, programIndex);
 
       let mut index: u64 = 0;
 
@@ -2168,6 +2281,7 @@ export namespace Analyzer {
       pass2: &Analyzer::Binder::BinderOutput,
     ): Analyzer::Resolver::ResolverOutput {
       let overlay: Analyzer::Imports::ImportOverlay = Analyzer::Imports::emptyOverlay();
+      let programIndex: Analyzer::Imports::ProgramQualifiedIndex = Analyzer::Imports::emptyProgramQualifiedIndex();
       return Analyzer::Resolver::resolveTypesWithImports(
         defStore,
         typeStore,
@@ -2176,6 +2290,7 @@ export namespace Analyzer {
         pass1,
         pass2,
         &overlay,
+        &programIndex,
       );
     }
   }
