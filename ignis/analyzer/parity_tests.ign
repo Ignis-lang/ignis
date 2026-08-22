@@ -968,27 +968,29 @@ function parityDotAccessOnNonRecord(): void {
   );
 }
 
+/// Origin: golden_ok::overloaded_write_shapes_resolve_without_type_suffixes.
+/// Host expectation: accepted — two `Fs::write` signatures coexist and each
+/// call picks the one its arguments satisfy (B6, IGN-148).
+@test
+function parityNamespacedOverloads(): void {
+  parityAcceptsSource(
+    "namespace Fs {\n    function write(path: str, text: str): void {\n        return;\n    }\n\n    function write(path: str, data: *void, len: u64): void {\n        return;\n    }\n}\n\nfunction main(): void {\n    Fs::write(\"/tmp/message.txt\", \"hello\");\n    Fs::write(\"/tmp/data.bin\", \"hello\" as *void, 5 as u64);\n    return;\n}\n",
+  );
+}
+
 // ===========================================================================
 // Gap inventory
 //
-// 2 of the 74 curated fixtures are not gates yet. Each one is listed with
+// 1 of the 74 curated fixtures is not a gate yet. Each one is listed with
 // its host origin, the host expectation, and what the selfhost pipeline
 // actually does today (observed, not predicted). Nothing here is a weakened
 // expectation: these fixtures are absent from the gates on purpose.
 //
 // Root-cause buckets:
 //
-//   B6 (1) — Function overloading is unsupported
-//     The binder reports the second signature as a redefinition.
-//
 //   B7 (1) — Traits are unsupported
 //
 // Fixtures:
-//
-//   namespacedOverloads [B6]
-//     origin:   golden_ok::overloaded_write_shapes_resolve_without_type_suffixes
-//     host:     accepted
-//     selfhost: analyzer: A0052 + I0033 x2 + A0053 x4
 //
 //   traitBasicRequiredMethod [B7]
 //     origin:   golden_ok::trait_basic_required_method
