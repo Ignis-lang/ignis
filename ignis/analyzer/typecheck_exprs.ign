@@ -631,11 +631,26 @@ export namespace Analyzer {
 
       // Branch 1b: `minOf<T>()` / `maxOf<T>()` written without `@` — the host
       // types these from the callee name alone, before any resolution.
+      let mut bareBuiltinName: String = String::create("");
       if (let Option::SOME(bareCalleeExpr) = module.expressions.get(call.callee)) {
         if (let Ast::Expression::Node::Variable(bareCallee) = bareCalleeExpr) {
-          if (bareCallee.name.equals("minOf") || bareCallee.name.equals("maxOf")) {
+          bareBuiltinName = bareCallee.name.clone();
+        }
+
+        if (let Ast::Expression::Node::Path(barePath) = bareCalleeExpr) {
+          if (barePath.segments.length() == 1) {
+            if (let Option::SOME(onlySegment) = barePath.segments.get(0)) {
+              bareBuiltinName = onlySegment.clone();
+            }
+          }
+        }
+      }
+
+      {
+        {
+          if (bareBuiltinName.equals("minOf") || bareBuiltinName.equals("maxOf")) {
             if (call.typeArguments.length() != 1) {
-              Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, bareCallee.name.toStr(), 1, call.typeArguments.length());
+              Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, bareBuiltinName.toStr(), 1, call.typeArguments.length());
               return Option::NONE;
             }
 
@@ -648,7 +663,7 @@ export namespace Analyzer {
               return Option::NONE;
             };
             let Option::SOME(resultType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
-              let detail: String = `the type argument of \`${bareCallee.name.toStr()}\``;
+              let detail: String = `the type argument of \`${bareBuiltinName.toStr()}\``;
               Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
               return Option::NONE;
             };
