@@ -5066,6 +5066,33 @@ export namespace Analyzer {
         return Analyzer::Typecheck::checkBuiltinWithoutArguments(state, typeStore, call);
       }
 
+      if (name.equals("pointerFromInteger")) {
+        if (call.typeArguments.length() != 1) {
+          Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 1, call.typeArguments.length());
+          return Option::NONE;
+        }
+
+        if (call.arguments.length() != 1) {
+          Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 1);
+          return Option::NONE;
+        }
+
+        let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
+          return Option::NONE;
+        };
+        let Option::SOME(pointerResultType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+          let detail: String = `the type argument of \`@${call.name.toStr()}\``;
+          Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
+          return Option::NONE;
+        };
+
+        if (let Option::SOME(argExprId) = call.arguments.get(0)) {
+          let _argType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *argExprId);
+        }
+
+        return Option::SOME(pointerResultType);
+      }
+
       if (name.equals("integerFromPointer")) {
         if (call.typeArguments.length() != 0) {
           Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 0, call.typeArguments.length());

@@ -1720,6 +1720,8 @@ export namespace Analyzer {
       symbols: &mut Analyzer::SymbolTable,
       ownerName: str,
       memberName: str,
+      segments: &Vector<String>,
+      segCount: u64,
     ): Analyzer::ResolverBodies::PathTailLookup {
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let ownerSym: Analyzer::SymbolId = symbolsRef.intern(ownerName);
@@ -1743,7 +1745,7 @@ export namespace Analyzer {
         };
       };
 
-      return Analyzer::ResolverBodies::resolvePathTailForOwner(state, defStore, symbols, ownerDefId, memberName);
+      return Analyzer::ResolverBodies::resolvePathTailForOwner(state, defStore, symbols, ownerDefId, memberName, segments, segCount);
     }
 
     /// The `owner::member` half of `resolvePathTail`, for callers that already
@@ -1754,6 +1756,8 @@ export namespace Analyzer {
       symbols: &mut Analyzer::SymbolTable,
       ownerDefId: Analyzer::DefinitionId,
       memberName: str,
+      segments: &Vector<String>,
+      segCount: u64,
     ): Analyzer::ResolverBodies::PathTailLookup {
       let Option::SOME(ownerDef) = defStore.get(ownerDefId) else {
         return Analyzer::ResolverBodies::PathTailLookup::OwnerNotFound;
@@ -1812,6 +1816,33 @@ export namespace Analyzer {
 
           if (let Option::SOME(methodDefId) = instanceOpt) {
             return Analyzer::ResolverBodies::PathTailLookup::InstanceMethod(methodDefId);
+          }
+
+          // The chain-aware reading goes first: `Ast::Type::Path` must find
+          // the `Path` under `Ast::Type`, not whichever declaration named
+          // `Path` binds first in a flat scan.
+          if (let Option::SOME(qualifiedDefId) = Analyzer::ResolverBodies::lookupNamespaceQualifiedDeclaration(
+            state,
+            defStore,
+            symbols,
+            segments,
+            segCount,
+          )) {
+            // Only a type declaration may stand in as a TypeFallback —
+            // pattern position treats anything else as an invariant break.
+            // A function or constant found here still resolves, through the
+            // mapper's own fallback on the MemberNotFound path below.
+            if (let Option::SOME(qualifiedDef) = defStore.get(qualifiedDefId)) {
+              match (qualifiedDef) {
+                Analyzer::Definition::Record(_) -> {
+                  return Analyzer::ResolverBodies::PathTailLookup::TypeFallback(qualifiedDefId);
+                },
+                Analyzer::Definition::Enum(_) -> {
+                  return Analyzer::ResolverBodies::PathTailLookup::TypeFallback(qualifiedDefId);
+                },
+                _ -> {},
+              };
+            }
           }
 
           let fallback: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::resolvePathTailTypeFallback(
@@ -2165,6 +2196,8 @@ export namespace Analyzer {
           symbols,
           ownerDefId,
           memberStr.toStr(),
+          &p.segments,
+          segCount,
         );
       } else {
         lookup = Analyzer::ResolverBodies::resolvePathTail(
@@ -2173,6 +2206,8 @@ export namespace Analyzer {
           symbols,
           ownerStr.toStr(),
           memberStr.toStr(),
+          &p.segments,
+          segCount,
         );
       }
 
@@ -2389,6 +2424,8 @@ export namespace Analyzer {
             symbols,
             ownerDefId,
             memberStr.toStr(),
+            &p.segments,
+            segCount,
           );
           ownerResolved = true;
         } else {
@@ -2408,6 +2445,8 @@ export namespace Analyzer {
           symbols,
           ownerStr.toStr(),
           memberStr.toStr(),
+          &p.segments,
+          segCount,
         );
       }
 
