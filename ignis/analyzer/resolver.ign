@@ -1139,7 +1139,28 @@ export namespace Analyzer {
         }
       }
 
-      // 3. Global type-name index.
+      // 3. A qualified path picks its declaration by written path first — the
+      // program-wide index validates the prefix — so `Analyzer::TypeId` and
+      // `Ast::TypeId` stay apart even though both end in `TypeId`. Bare-name
+      // lookups only decide when no qualified candidate matches.
+      if (qualified) {
+        let programFirstOpt: Option<Analyzer::DefinitionId> = programLookupForPath(state, sym, p);
+
+        if (let Option::SOME(defId) = programFirstOpt) {
+          if (isTraitDef(defStore, defId)) {
+            let message: String = `trait \`${nameStr.toStr()}\` cannot be used in type position`;
+            emitUndefinedType(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, message.toStr());
+            let mut tsRef: &mut Analyzer::TypeStore = typeStore;
+            return tsRef.intern(Analyzer::Type::VOID);
+          }
+
+          if (isTypeNameDef(defStore, defId)) {
+            return nominalTypeFor(defStore, typeStore, defId);
+          }
+        }
+      }
+
+      // 4. Global type-name index.
       let globalOpt: Option<Analyzer::DefinitionId> = globalLookup(state, sym);
 
       if (let Option::SOME(defId) = globalOpt) {
