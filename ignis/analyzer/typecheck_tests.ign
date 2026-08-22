@@ -14363,3 +14363,20 @@ function typecheckGenericEnumInstanceDestructuringBindsSubstitutedPayload(): voi
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }
+
+/// Scenario: two instance methods share a name and differ in parameter type;
+/// each call picks the signature its argument satisfies. IGN-148 (B6).
+@test
+function typecheckInstanceMethodOverloadSelectsByArgumentType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Counter {\n  value: u32;\n\n  bump(&self, amount: u32): u32 {\n    return self.value + amount;\n  }\n\n  bump(&self, double: boolean): u32 {\n    if (double) {\n      return self.value * 2;\n    }\n\n    return self.value;\n  }\n}\n\nfunction useCounter(counter: &Counter): u32 {\n  let byAmount: u32 = counter.bump(3 as u32);\n  let byFlag: u32 = counter.bump(true);\n  return byAmount + byFlag;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}

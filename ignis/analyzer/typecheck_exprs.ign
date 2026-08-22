@@ -1391,12 +1391,36 @@ export namespace Analyzer {
 
       let memberName: str = ma.member.toStr();
 
-      let instanceOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
+      let candidateSet: Vector<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodCandidatesInTable(
         defStore,
         &owner.instanceMethods,
         memberName,
         symbols,
       );
+
+      let mut instanceOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (candidateSet.length() > 1) {
+        let selectedOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::selectMethodOverload(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          &owner,
+          &candidateSet,
+          call,
+          ma.span,
+          memberName,
+        );
+        let Option::SOME(selected) = selectedOpt else {
+          return Option::NONE;
+        };
+        instanceOpt = Option::SOME(selected);
+      } else if (let Option::SOME(single) = candidateSet.get(0)) {
+        instanceOpt = Option::SOME(*single);
+      }
 
       let Option::SOME(methodDefId) = instanceOpt else {
         let staticOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
@@ -1590,6 +1614,168 @@ export namespace Analyzer {
         &signature,
         1,
       );
+    }
+
+    /// The declared parameter types of `methodDefId` with the owner's type
+    /// arguments substituted in, self excluded. NONE when the definition is
+    /// not a callable signature.
+    function methodOverloadParamTypes(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      owner: &Analyzer::Typecheck::RequiredMethodOwner,
+      methodDefId: Analyzer::DefinitionId,
+    ): Option<Vector<Analyzer::TypeId>> {
+      let signatureOpt: Option<Analyzer::Typecheck::FunctionSignature> = Analyzer::Typecheck::extractFunctionSignature(defStore, methodDefId);
+      let Option::SOME(signature) = signatureOpt else {
+        return Option::NONE;
+      };
+
+      let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut paramIndex: u64 = 1;
+
+      while (paramIndex < signature.params.length()) {
+        let Option::SOME(paramDefId) = signature.params.get(paramIndex) else {
+          paramIndex += 1;
+          continue;
+        };
+
+        if (let Option::SOME(Analyzer::Definition::Variable(parameter)) = defStore.get(*paramDefId)) {
+          paramTypes.push(parameter.declaredType);
+        }
+
+        paramIndex += 1;
+      }
+
+      if (owner.typeArguments.length() == owner.typeParamSymbols.length() && owner.typeParamSymbols.length() > 0) {
+        let substituted: Analyzer::Typecheck::CalleeSignature = Analyzer::Typecheck::substituteOwnerTypeArguments(
+          typeStore,
+          owner,
+          &paramTypes,
+          signature.returnType,
+        );
+        return Option::SOME(substituted.paramTypes);
+      }
+
+      return Option::SOME(paramTypes);
+    }
+
+    /// Pick one method among same-name candidates by arity and argument types,
+    /// mirroring the host's `resolve_overload`: an exact type match costs 0, a
+    /// value-satisfies match costs 1, anything else disqualifies. A unique
+    /// lowest cost wins; a tie is ambiguous (A0101) and no survivor is a
+    /// no-match (A0100). Arguments are typed once with no expectation — a
+    /// failing argument has already reported itself, so the call just bails.
+    function selectMethodOverload(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      owner: &Analyzer::Typecheck::RequiredMethodOwner,
+      candidates: &Vector<Analyzer::DefinitionId>,
+      call: &Ast::Expression::Call,
+      span: SourceSpan,
+      memberName: str,
+    ): Option<Analyzer::DefinitionId> {
+      let mut argTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut argIndex: u64 = 0;
+
+      while (argIndex < call.arguments.length()) {
+        let Option::SOME(argExprId) = call.arguments.get(argIndex) else {
+          argIndex += 1;
+          continue;
+        };
+
+        let argTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *argExprId);
+        let Option::SOME(argType) = argTypeOpt else {
+          return Option::NONE;
+        };
+
+        argTypes.push(argType);
+        argIndex += 1;
+      }
+
+      let mut bestDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut bestCost: u64 = 0;
+      let mut candidateIndex: u64 = 0;
+
+      while (candidateIndex < candidates.length()) {
+        let Option::SOME(candidateDefId) = candidates.get(candidateIndex) else {
+          candidateIndex += 1;
+          continue;
+        };
+
+        let paramTypesOpt: Option<Vector<Analyzer::TypeId>> = Analyzer::Typecheck::methodOverloadParamTypes(defStore, typeStore, owner, *candidateDefId);
+        let Option::SOME(paramTypes) = paramTypesOpt else {
+          candidateIndex += 1;
+          continue;
+        };
+
+        if (paramTypes.length() != argTypes.length()) {
+          candidateIndex += 1;
+          continue;
+        }
+
+        let mut cost: u64 = 0;
+        let mut matches: boolean = true;
+        let mut i: u64 = 0;
+
+        while (i < argTypes.length()) {
+          let Option::SOME(argType) = argTypes.get(i) else {
+            i += 1;
+            continue;
+          };
+          let Option::SOME(paramType) = paramTypes.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, *paramType, *argType)) {
+            i += 1;
+            continue;
+          }
+
+          if (Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, *paramType, *argType)) {
+            cost += 1;
+            i += 1;
+            continue;
+          }
+
+          matches = false;
+          break;
+        }
+
+        if (matches) {
+          if (bestDefIds.length() == 0 || cost < bestCost) {
+            bestDefIds = Vector::new<Analyzer::DefinitionId>();
+            bestDefIds.push(*candidateDefId);
+            bestCost = cost;
+          } else if (cost == bestCost) {
+            bestDefIds.push(*candidateDefId);
+          }
+        }
+
+        candidateIndex += 1;
+      }
+
+      if (bestDefIds.length() == 0) {
+        let message: String = `no overload of \`${memberName}\` matches the call's argument types`;
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
+        return Option::NONE;
+      }
+
+      if (bestDefIds.length() > 1) {
+        let message: String = `ambiguous call to overloaded \`${memberName}\``;
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
+        return Option::NONE;
+      }
+
+      let Option::SOME(winner) = bestDefIds.get(0) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(*winner);
     }
 
     /// The `@extension` function that answers `name` for a receiver of

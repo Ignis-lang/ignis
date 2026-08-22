@@ -2101,7 +2101,7 @@ function binderDuplicateParamName(): void {
 /// Phase 8.7 RED: Duplicate function names in a namespace.
 /// 1 diagnostic, only first function's DefinitionId in pass-2 output.
 @test
-function binderDuplicateFunctionName(): void {
+function binderBindsDuplicateFunctionNamesAsOverloads(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -2161,19 +2161,18 @@ function binderDuplicateFunctionName(): void {
     &pass1,
   );
 
-  // 1 diagnostic for duplicate "foo".
-  Test::assertEq<u64>(pass2.diagnostics.length(), 1);
+  // A second "foo" is an overload, not a redefinition: no diagnostic, and
+  // both signatures bind their own definition (IGN-148).
+  Test::assertEq<u64>(pass2.diagnostics.length(), 0);
 
-  // First "foo" is in pass-2 output.
   match (Analyzer::Binder::findDef(&pass2, fn1Id.raw())) {
     Option::SOME(_) -> {},
     Option::NONE -> @panic("first 'foo' function not found in pass-2 output"),
   };
 
-  // Second "foo" is NOT in pass-2 output.
   match (Analyzer::Binder::findDef(&pass2, fn2Id.raw())) {
-    Option::SOME(_) -> @panic("second 'foo' should not be in pass-2 output"),
-    Option::NONE -> {},
+    Option::SOME(_) -> {},
+    Option::NONE -> @panic("second 'foo' overload not found in pass-2 output"),
   };
 }
 
@@ -2667,7 +2666,7 @@ function binderBindsTraitMethod(): void {
 }
 
 @test
-function binderDiagnosesDuplicateRecordMethodNames(): void {
+function binderBindsDuplicateRecordMethodNamesAsOverloads(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -2705,7 +2704,9 @@ function binderDiagnosesDuplicateRecordMethodNames(): void {
   let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module);
   let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(&module.roots, &mut defStore, &mut typeStore, &mut symbols, &module, &pass1);
 
-  Test::assertEq<u64>(pass2.diagnostics.length(), 1);
+  // A second method with the same name is an overload, not a redefinition
+  // (IGN-148): both signatures bind with no diagnostic.
+  Test::assertEq<u64>(pass2.diagnostics.length(), 0);
 }
 
 @test

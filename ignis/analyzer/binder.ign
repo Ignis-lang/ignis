@@ -1266,32 +1266,34 @@ export namespace Analyzer {
           Ast::Item::Node::Function(fn_) -> {
             let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
             let sym: Analyzer::SymbolId = symbolsRef.intern(fn_.name.toStr());
+            // A second method with the same name is an overload, not a
+            // redefinition: every signature binds and lands in the owner's
+            // table, and the call site picks among them.
             let duplicateOpt: Option<SourceSpan> = findDuplicateSpan(state, scopeKey, sym);
 
-            if (let Option::SOME(_) = duplicateOpt) {
-              emitDuplicateNameDiagnostic(state, "method name", fn_.name.toStr(), fn_.span);
-            } else {
+            if (duplicateOpt.isNone()) {
               recordScopeEntry(state, scopeKey, sym, fn_.span);
-              let hasSelf: boolean = functionHasSelfReceiver(ast, &fn_);
-              let isStatic: boolean = metadataIsStatic(&fn_.metadata) || (noSelfMeansStatic && !hasSelf);
-              let methodDefId: Analyzer::DefinitionId = bindMethod(
-                state,
-                defStore,
-                typeStore,
-                symbols,
-                ast,
-                *methodId,
-                &fn_,
-                owner,
-                isStatic,
-                nsScopeKey,
-              );
+            }
 
-              if (isStatic) {
-                staticMethods.push(methodDefId);
-              } else {
-                instanceMethods.push(methodDefId);
-              }
+            let hasSelf: boolean = functionHasSelfReceiver(ast, &fn_);
+            let isStatic: boolean = metadataIsStatic(&fn_.metadata) || (noSelfMeansStatic && !hasSelf);
+            let methodDefId: Analyzer::DefinitionId = bindMethod(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              ast,
+              *methodId,
+              &fn_,
+              owner,
+              isStatic,
+              nsScopeKey,
+            );
+
+            if (isStatic) {
+              staticMethods.push(methodDefId);
+            } else {
+              instanceMethods.push(methodDefId);
             }
           },
           Ast::Item::Node::Record(_) -> {},
@@ -1720,11 +1722,10 @@ export namespace Analyzer {
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let sym: Analyzer::SymbolId = symbolsRef.intern(fn_.name.toStr());
 
+      // A second function with the same name is an overload, not a
+      // redefinition: every signature binds its own definition, and the call
+      // site picks among them by arity and argument types.
       let duplicateOpt: Option<SourceSpan> = findDuplicateSpan(state, scopeKey, sym);
-      if (let Option::SOME(_) = duplicateOpt) {
-        emitDuplicateNameDiagnostic(state, "function name", fn_.name.toStr(), fn_.span);
-        return;
-      }
 
       let mut typesRef: &mut Analyzer::TypeStore = typeStore;
       let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
@@ -1760,7 +1761,9 @@ export namespace Analyzer {
       let mut defsRef2: &mut Analyzer::DefinitionStore = defStore;
       defsRef2.replace(defId, Analyzer::Definition::Function(newFn));
 
-      recordScopeEntry(state, scopeKey, sym, fn_.span);
+      if (duplicateOpt.isNone()) {
+        recordScopeEntry(state, scopeKey, sym, fn_.span);
+      }
       let mut stateRef: &mut Analyzer::Binder::BinderState = state;
       stateRef.nodeIds.push(itemId.raw());
       stateRef.defIds.push(defId);

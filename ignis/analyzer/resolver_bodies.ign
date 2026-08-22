@@ -1556,6 +1556,42 @@ export namespace Analyzer {
     /// only `Method(m)` compares names, every other `Definition` variant is
     /// covered explicitly even though method tables are expected to contain
     /// only `Method` defs.
+    /// Every method in `table` named `name`, in declaration order — the
+    /// overload candidate set a call site selects from.
+    function lookupMethodCandidatesInTable(
+      defStore: &mut Analyzer::DefinitionStore,
+      table: &Vector<Analyzer::DefinitionId>,
+      name: str,
+      symbols: &mut Analyzer::SymbolTable,
+    ): Vector<Analyzer::DefinitionId> {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let targetSym: Analyzer::SymbolId = symbolsRef.intern(name);
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut i: u64 = 0;
+
+      while (i < table.length()) {
+        let Option::SOME(methodDefId) = table.get(i) else {
+          i += 1;
+          continue;
+        };
+
+        let Option::SOME(def) = defStore.get(*methodDefId) else {
+          i += 1;
+          continue;
+        };
+
+        if (let Analyzer::Definition::Method(m) = def) {
+          if (m.name.raw() == targetSym.raw()) {
+            out.push(*methodDefId);
+          }
+        }
+
+        i += 1;
+      }
+
+      return out;
+    }
+
     function lookupMethodInTable(
       defStore: &mut Analyzer::DefinitionStore,
       table: &Vector<Analyzer::DefinitionId>,
