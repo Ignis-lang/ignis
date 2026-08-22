@@ -336,6 +336,9 @@ export namespace Analyzer {
       span: SourceSpan,
       qualifiedName: String,
     ): void {
+      // Same bare name under different written paths must coexist —
+      // `__fcntl::fcntl` and `LibC::File::fcntl` are distinct declarations.
+      // Only an entry repeating both the name and the path is a duplicate.
       let mut index: u64 = 0;
       while (index < direct.syms.length()) {
         let Option::SOME(existing) = direct.syms.get(index) else {
@@ -343,8 +346,15 @@ export namespace Analyzer {
           continue;
         };
 
-        if (existing.raw() == sym.raw()) {
-          return;
+        if (existing.raw() != sym.raw()) {
+          index += 1;
+          continue;
+        }
+
+        if (let Option::SOME(existingQualified) = direct.qualifiedNames.get(index)) {
+          if (existingQualified.equals(qualifiedName.toStr())) {
+            return;
+          }
         }
 
         index += 1;

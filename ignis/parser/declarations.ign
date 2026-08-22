@@ -774,7 +774,38 @@ export namespace ParserDeclarations {
     })));
   }
 
-  /// A signature-only extern function: same head as `parseFunctionItem`, a
+  /// A signature-only extern constant: `const NAME: Type;`. A zero literal
+  /// stands in for the missing initializer so downstream phases can treat the
+  /// item like any other constant — its real value lives in the linked C.
+  function parseExternConstantItem(
+    parser: &mut ParserShared::State,
+    metadata: Ast::Metadata
+  ): Option<Ast::ItemId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let keyword = parserRef.expectKeyword(Keyword::CONST, "expected 'const'")!;
+    let nameToken = parserRef.expectIdentifier("expected constant name")!;
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::COLON, "expected ':' after constant name") else {
+      return Option::NONE;
+    };
+    let typeId = ParserTypes::parseType(parserRef)!;
+    let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after extern constant declaration")!;
+
+    let placeholder: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+      span: nameToken.span,
+      value: Ast::Expression::LiteralValue::Int(0),
+    }));
+
+    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+      span: ParserShared::mergeSpans(keyword.span, semicolon.span),
+      name: nameToken.lexemeString(),
+      annotation: Option::SOME(typeId),
+      value: placeholder,
+      metadata: Ast::copyMetadata(&metadata),
+    })));
+  }
+
+    /// A signature-only extern function: same head as `parseFunctionItem`, a
   /// `;` where the body would be, and an empty block standing in for it so
   /// downstream phases can treat the item like any other function.
   function parseExternFunctionItem(
@@ -1221,9 +1252,8 @@ export namespace ParserDeclarations {
       }
 
       if (parserRef.atKeyword(Keyword::CONST)) {
-        if (!ParserDeclarations::parseConstantSignatureOnly(parserRef)) {
-          return Option::NONE;
-        }
+        let constId = ParserDeclarations::parseExternConstantItem(parserRef, memberMetadata)!;
+        items.push(constId);
         continue;
       }
 
