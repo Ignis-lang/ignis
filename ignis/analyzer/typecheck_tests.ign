@@ -14249,3 +14249,51 @@ function typecheckDeferredLocalReadBeforeAssignmentIsReported(): void {
 
   Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::CANNOT_INFER_TYPE);
 }
+
+/// Scenario: `if (let v = 1) { return; }` — a let condition binds its pattern
+/// from the scrutinee's type and the condition itself is boolean, so the
+/// statement typechecks with no diagnostics. IGN-151 follow-up.
+@test
+function typecheckLetConditionBindsPatternAndIsBoolean(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let pattern: Ast::PatternId = typecheckAddBinding(&mut module, "v");
+  let scrutinee: Ast::ExpressionId = typecheckAddIntLiteral(&mut module, 1);
+  let letCondition: Ast::ExpressionId = module.addExpression(Ast::Expression::Node::LetCondition(Ast::Expression::LetCondition {
+    span: typecheckDummySpan(),
+    pattern: pattern,
+    value: scrutinee,
+  }));
+
+  let mut thenStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  thenStmts.push(typecheckAddReturn(&mut module));
+  let thenBlock: Ast::StatementId = typecheckAddBlock(&mut module, thenStmts);
+  let ifStmt: Ast::StatementId = typecheckAddIfStatement(&mut module, letCondition, thenBlock, Option::NONE);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(ifStmt);
+  bodyStmts.push(typecheckAddReturn(&mut module));
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("guarded"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}

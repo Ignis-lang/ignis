@@ -3035,9 +3035,18 @@ export namespace Analyzer {
           return Option::SOME(unitType);
         },
         Ast::Expression::Node::LetCondition(value) -> {
-          let _valueType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.value);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "let conditions");
-          return Option::NONE;
+          // `let PATTERN = value` in condition position: the scrutinee's type
+          // drives the pattern's bindings — visible in the guarded branch, the
+          // resolver already scoped them — and the condition itself is boolean.
+          let valueTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.value);
+
+          if (let Option::SOME(valueType) = valueTypeOpt) {
+            Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, value.pattern, valueType, false, value.span);
+          }
+
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
         },
         Ast::Expression::Node::Reference(value) -> {
           return Analyzer::Typecheck::checkReferenceExpr(
