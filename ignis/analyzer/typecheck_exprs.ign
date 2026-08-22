@@ -614,7 +614,36 @@ export namespace Analyzer {
       // `checkExpr(callee)` (and therefore the bare method-reference guard,
       // WU3) since this is a legitimate call, not a value use.
       let staticResolvedOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, call.callee);
-      if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(staticDefId)) = staticResolvedOpt) {
+      if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(resolvedStaticDefId)) = staticResolvedOpt) {
+        // The resolver stops at the first same-name static; the overload set
+        // lives on the owner, and the arguments pick among it here.
+        let mut staticDefId: Analyzer::DefinitionId = resolvedStaticDefId;
+        let staticCandidates: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::staticOverloadCandidates(defStore, symbols, resolvedStaticDefId);
+
+        if (staticCandidates.length() > 1) {
+          let staticNameOpt: Option<str> = Analyzer::Typecheck::methodDefName(defStore, symbols, resolvedStaticDefId);
+          let staticName: str = match (staticNameOpt) {
+            Option::SOME(n) -> n,
+            Option::NONE -> "static method",
+          };
+          let selectedOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::selectStaticMethodOverload(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            &staticCandidates,
+            call,
+            call.span,
+            staticName,
+          );
+          let Option::SOME(selected) = selectedOpt else {
+            return Option::NONE;
+          };
+          staticDefId = selected;
+        }
+
         let methodInfoOpt: Option<Analyzer::Typecheck::MethodCallInfo> = Analyzer::Typecheck::lookupMethodDefInfo(defStore, staticDefId);
 
         if (let Option::SOME(methodInfo) = methodInfoOpt) {
@@ -1720,6 +1749,209 @@ export namespace Analyzer {
       }
 
       return Option::SOME(paramTypes);
+    }
+
+    /// The method's declared name, for diagnostics.
+    function methodDefName(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      methodDefId: Analyzer::DefinitionId,
+    ): Option<str> {
+      let Option::SOME(Analyzer::Definition::Method(methodDef)) = defStore.get(methodDefId) else {
+        return Option::NONE;
+      };
+
+      return symbols.resolve(methodDef.name);
+    }
+
+    /// The declared parameter types of a static method — no self slot to skip.
+    function staticOverloadParamTypes(
+      defStore: &mut Analyzer::DefinitionStore,
+      methodDefId: Analyzer::DefinitionId,
+    ): Option<Vector<Analyzer::TypeId>> {
+      let signatureOpt: Option<Analyzer::Typecheck::FunctionSignature> = Analyzer::Typecheck::extractFunctionSignature(defStore, methodDefId);
+      let Option::SOME(signature) = signatureOpt else {
+        return Option::NONE;
+      };
+
+      let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < signature.params.length()) {
+        let Option::SOME(paramDefId) = signature.params.get(paramIndex) else {
+          paramIndex += 1;
+          continue;
+        };
+
+        if (let Option::SOME(Analyzer::Definition::Variable(parameter)) = defStore.get(*paramDefId)) {
+          paramTypes.push(parameter.declaredType);
+        }
+
+        paramIndex += 1;
+      }
+
+      return Option::SOME(paramTypes);
+    }
+
+    /// The static-method overload set sharing `staticDefId`'s name on its
+    /// owner. A single-element set means no selection is needed.
+    function staticOverloadCandidates(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      staticDefId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      let Option::SOME(Analyzer::Definition::Method(staticMethod)) = defStore.get(staticDefId) else {
+        out.push(staticDefId);
+        return out;
+      };
+
+      let ownerDefId: Analyzer::DefinitionId = staticMethod.owner;
+      let nameOpt: Option<str> = symbols.resolve(staticMethod.name);
+      let Option::SOME(name) = nameOpt else {
+        out.push(staticDefId);
+        return out;
+      };
+
+      let mut table: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      match (defStore.get(ownerDefId)) {
+        Option::SOME(Analyzer::Definition::Record(rec)) -> {
+          table = Analyzer::Typecheck::copyDefinitionIdVector(&rec.staticMethods);
+        },
+        Option::SOME(Analyzer::Definition::Enum(en)) -> {
+          table = Analyzer::Typecheck::copyDefinitionIdVector(&en.staticMethods);
+        },
+        _ -> {
+          out.push(staticDefId);
+          return out;
+        },
+      };
+
+      let found: Vector<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodCandidatesInTable(defStore, &table, name, symbols);
+
+      if (found.length() == 0) {
+        out.push(staticDefId);
+        return out;
+      }
+
+      return found;
+    }
+
+    /// Pick one static method among same-name candidates by arity and
+    /// argument types — the static twin of `selectMethodOverload`, with no
+    /// self slot and no owner substitution (a generic owner's statics go
+    /// through the written-type-argument path instead).
+    function selectStaticMethodOverload(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      candidates: &Vector<Analyzer::DefinitionId>,
+      call: &Ast::Expression::Call,
+      span: SourceSpan,
+      memberName: str,
+    ): Option<Analyzer::DefinitionId> {
+      let mut argTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut argIndex: u64 = 0;
+
+      while (argIndex < call.arguments.length()) {
+        let Option::SOME(argExprId) = call.arguments.get(argIndex) else {
+          argIndex += 1;
+          continue;
+        };
+
+        let argTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *argExprId);
+        let Option::SOME(argType) = argTypeOpt else {
+          return Option::NONE;
+        };
+
+        argTypes.push(argType);
+        argIndex += 1;
+      }
+
+      let mut bestDefIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut bestCost: u64 = 0;
+      let mut candidateIndex: u64 = 0;
+
+      while (candidateIndex < candidates.length()) {
+        let Option::SOME(candidateDefId) = candidates.get(candidateIndex) else {
+          candidateIndex += 1;
+          continue;
+        };
+
+        let paramTypesOpt: Option<Vector<Analyzer::TypeId>> = Analyzer::Typecheck::staticOverloadParamTypes(defStore, *candidateDefId);
+        let Option::SOME(paramTypes) = paramTypesOpt else {
+          candidateIndex += 1;
+          continue;
+        };
+
+        if (paramTypes.length() != argTypes.length()) {
+          candidateIndex += 1;
+          continue;
+        }
+
+        let mut cost: u64 = 0;
+        let mut matches: boolean = true;
+        let mut i: u64 = 0;
+
+        while (i < argTypes.length()) {
+          let Option::SOME(argType) = argTypes.get(i) else {
+            i += 1;
+            continue;
+          };
+          let Option::SOME(paramType) = paramTypes.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, *paramType, *argType)) {
+            i += 1;
+            continue;
+          }
+
+          if (Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, *paramType, *argType)) {
+            cost += 1;
+            i += 1;
+            continue;
+          }
+
+          matches = false;
+          break;
+        }
+
+        if (matches) {
+          if (bestDefIds.length() == 0 || cost < bestCost) {
+            bestDefIds = Vector::new<Analyzer::DefinitionId>();
+            bestDefIds.push(*candidateDefId);
+            bestCost = cost;
+          } else if (cost == bestCost) {
+            bestDefIds.push(*candidateDefId);
+          }
+        }
+
+        candidateIndex += 1;
+      }
+
+      if (bestDefIds.length() == 0) {
+        let message: String = `no overload of \`${memberName}\` matches the call's argument types`;
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
+        return Option::NONE;
+      }
+
+      if (bestDefIds.length() > 1) {
+        let message: String = `ambiguous call to overloaded \`${memberName}\``;
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
+        return Option::NONE;
+      }
+
+      let Option::SOME(winner) = bestDefIds.get(0) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(*winner);
     }
 
     /// Pick one method among same-name candidates by arity and argument types,
