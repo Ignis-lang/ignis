@@ -83,6 +83,9 @@ export namespace Lowering {
     public indexes: Vector<u32>;
     public defs: Vector<Analyzer::DefinitionId>;
     public currentReturnType: Option<Analyzer::TypeId>;
+    /// Ambient-pipe LHS stack, the oracle's `pipe_lhs_hir_stack`: a
+    /// placeholder inside a pipe RHS reads its piped value from the top.
+    public pipedValues: Vector<Hir::HirId>;
 
     public static init(): LocalMap {
       return LocalMap {
@@ -90,6 +93,7 @@ export namespace Lowering {
         indexes: Vector::new<u32>(),
         defs: Vector::new<Analyzer::DefinitionId>(),
         currentReturnType: Option::NONE,
+        pipedValues: Vector::new<Hir::HirId>(),
       };
     }
   }
@@ -889,6 +893,12 @@ export namespace Lowering {
       return Option::NONE;
     };
 
+    if (let Option::SOME(definition) = defStore.get(variantDef)) {
+      if (let Analyzer::Definition::Variable(_) = definition) {
+        return Option::SOME(Hir::HirPattern::Constant(variantDef));
+      }
+    }
+
     let Option::SOME(info) = Lowering::variantPatternInfo(defStore, variantDef) else {
       return Option::NONE;
     };
@@ -1049,7 +1059,21 @@ export namespace Lowering {
         });
       },
       Ast::Expression::Node::Ternary(ternary) -> {
-        return Lowering::errorNode(hir, typeStore, ternary.span);
+        let condition: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, ternary.condition);
+        let thenBranch: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, ternary.thenBranch);
+        let elseBranch: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, ternary.elseBranch);
+        let ternaryType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
+
+        let mut ternaryHirRef: &mut Hir::HirStore = hir;
+        return ternaryHirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::If(Hir::HirIf {
+            condition: condition,
+            thenBranch: thenBranch,
+            elseBranch: Option::SOME(elseBranch),
+          }),
+          span: ternary.span,
+          typeId: ternaryType,
+        });
       },
       Ast::Expression::Node::Cast(cast) -> {
         return Lowering::lowerCast(defStore, typeStore, symbols, module, output, locals, hir, &cast);
@@ -1200,7 +1224,16 @@ export namespace Lowering {
       // substitutes the piped value for the placeholder it owns without ever
       // lowering the placeholder node itself.
       Ast::Expression::Node::PipePlaceholder(placeholder) -> {
-        return Lowering::errorNode(hir, typeStore, placeholder.span);
+        let stackLength: u64 = locals.pipedValues.length();
+        if (stackLength == 0) {
+          return Lowering::errorNode(hir, typeStore, placeholder.span);
+        }
+
+        let Option::SOME(piped) = locals.pipedValues.get(stackLength - 1) else {
+          return Lowering::errorNode(hir, typeStore, placeholder.span);
+        };
+
+        return *piped;
       },
       Ast::Expression::Node::Try(tryExpr) -> {
         return Lowering::lowerTryExpr(defStore, typeStore, symbols, module, output, locals, hir, exprId, &tryExpr);
@@ -2732,6 +2765,19 @@ export namespace Lowering {
     pipe: &Ast::Expression::Pipe,
   ): Hir::HirId {
     let Option::SOME(placement) = Lowering::pipePlacement(module, pipe) else {
+      // RHS shapes outside `pipePlacement` (builtin calls, generic callees)
+      // still lower whole when they consume the piped value through exactly
+      // one placeholder, read back from the ambient stack.
+      if (Analyzer::Typecheck::countPipePlaceholders(module, pipe.right) == 1) {
+        let piped: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, pipe.left);
+
+        locals.pipedValues.push(piped);
+        let lowered: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, pipe.right);
+        let _ = locals.pipedValues.pop();
+
+        return lowered;
+      }
+
       return Lowering::errorNode(hir, typeStore, pipe.span);
     };
 
