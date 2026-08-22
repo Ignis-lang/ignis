@@ -293,6 +293,17 @@ export namespace Analyzer {
             return Analyzer::Checks::Termination::ALWAYS;
           }
 
+          // A statement-position match whose every unguarded arm always
+          // terminates cannot fall through — statement matches record no
+          // expression type, so the never-check above cannot see them.
+          if (let Option::SOME(exprNode) = module.expressions.get(exprStmt.expression)) {
+            if (let Ast::Expression::Node::Match(matchExpr) = exprNode) {
+              if (Analyzer::Checks::matchAlwaysTerminates(typeStore, module, typecheck, &matchExpr)) {
+                return Analyzer::Checks::Termination::ALWAYS;
+              }
+            }
+          }
+
           return Analyzer::Checks::Termination::SOMETIMES;
         },
         _ -> {},
@@ -751,6 +762,82 @@ export namespace Analyzer {
         Analyzer::Type::NEVER -> true,
         _ -> false,
       };
+    }
+
+    /// Whether every arm of a match always terminates, so control cannot
+    /// continue past the match. A guarded arm may not run, so any guard
+    /// forfeits the guarantee.
+    function matchAlwaysTerminates(
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      matchExpr: &Ast::Expression::Match,
+    ): boolean {
+      if (matchExpr.arms.length() == 0) {
+        return false;
+      }
+
+      let mut armIndex: u64 = 0;
+
+      while (armIndex < matchExpr.arms.length()) {
+        let Option::SOME(arm) = matchExpr.arms.get(armIndex) else {
+          return false;
+        };
+
+        if (arm.guard.isSome()) {
+          return false;
+        }
+
+        if (!Analyzer::Checks::armBodyAlwaysTerminates(typeStore, module, typecheck, arm.body)) {
+          return false;
+        }
+
+        armIndex += 1;
+      }
+
+      return true;
+    }
+
+    /// Whether one match-arm body always terminates: a never-typed
+    /// expression, or a block one of whose statements always terminates.
+    function armBodyAlwaysTerminates(
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      bodyExprId: Ast::ExpressionId,
+    ): boolean {
+      if (Analyzer::Checks::exprIsNever(typeStore, typecheck, bodyExprId)) {
+        return true;
+      }
+
+      let Option::SOME(bodyNode) = module.expressions.get(bodyExprId) else {
+        return false;
+      };
+
+      let Ast::Expression::Node::Block(block) = bodyNode else {
+        return false;
+      };
+
+      let mut statementIndex: u64 = 0;
+
+      while (statementIndex < block.statements.length()) {
+        let Option::SOME(statementId) = block.statements.get(statementIndex) else {
+          statementIndex += 1;
+          continue;
+        };
+
+        if (Analyzer::Checks::stmtTermination(typeStore, module, typecheck, *statementId) == Analyzer::Checks::Termination::ALWAYS) {
+          return true;
+        }
+
+        statementIndex += 1;
+      }
+
+      if (let Option::SOME(tailId) = block.tail) {
+        return Analyzer::Checks::exprIsNever(typeStore, typecheck, tailId);
+      }
+
+      return false;
     }
 
     /// Missing-return check plus body walk for a function or method item.
