@@ -243,6 +243,88 @@ function lintUsedImportIsClean(): void {
   Test::assertEq<u64>(importingRecord.output.lints.diagnostics.length(), 0);
 }
 
+/// Scenario: module B imports `helper` and reaches it only through a path
+/// written in expression position, the shape a namespace call takes — clean
+/// via the expression-position scan.
+@test
+function lintImportUsedOnlyInPathExpressionIsClean(): void {
+  let first: Ast::Module = lintHelperModule();
+
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(lintNamedBinding("helper", 7, 13));
+  let mut second: Ast::Module = lintModuleWithImport("a.ign", bindings);
+
+  let mut segments: Vector<String> = Vector::new<String>();
+  segments.push(String::create("helper"));
+  segments.push(String::create("run"));
+
+  let callee: Ast::ExpressionId = second.addExpression(Ast::Expression::Node::Path(Ast::Expression::Path {
+    span: lintSpan(20, 26),
+    segments: segments,
+  }));
+
+  let callStmt: Ast::StatementId = lintAddCallStmt(&mut second, callee);
+  let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  statements.push(callStmt);
+  let body: Ast::StatementId = lintAddBlock(&mut second, statements);
+  lintAddFunction(&mut second, "main", body, Ast::emptyMetadata());
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = lintAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+
+  Test::assertEq<u64>(importingRecord.output.lints.diagnostics.length(), 0);
+}
+
+/// Scenario: module B imports `Marker` and names it only inside an
+/// `@implements(...)` attribute — clean via the attribute-argument scan.
+@test
+function lintImportUsedOnlyInAttributeArgumentIsClean(): void {
+  let mut first: Ast::Module = Ast::Module::init();
+  first.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: lintDummySpan(),
+    name: String::create("Marker"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(lintNamedBinding("Marker", 7, 13));
+  let mut second: Ast::Module = lintModuleWithImport("a.ign", bindings);
+
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("Marker"));
+
+  let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  attributes.push(Ast::Attribute {
+    span: lintDummySpan(),
+    name: String::create("implements"),
+    arguments: arguments,
+  });
+
+  second.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: lintDummySpan(),
+    name: String::create("Holder"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::Metadata {
+      attributes: attributes,
+      modifiers: Vector::new<Ast::Modifier>(),
+    },
+  }));
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = lintAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+
+  Test::assertEq<u64>(importingRecord.output.lints.diagnostics.length(), 0);
+}
+
 /// Scenario: module B imports record `Data` and uses it only as a field
 /// type annotation — clean via the type-position scan.
 @test
