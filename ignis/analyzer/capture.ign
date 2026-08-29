@@ -23,11 +23,9 @@ import Escape from "./escape";
 /// captured value owns resources, the drop function), and marks the closures
 /// that outlive their defining scope.
 ///
-/// Two deliberate divergences from the oracle, both rooted in the selfhost
-/// definition store not recording parameter attributes yet:
-///   - `@takes` cannot be consulted, so an argument whose parameter is
-///     non-Copy counts as a move regardless of whether the callee is extern.
-///   - `@noescape` cannot be consulted, which [[Escape]] documents.
+/// An extern callee takes ownership of an argument only when its parameter
+/// says `@takes`: the C function on the other side has no drop of its own, so
+/// a non-Copy parameter alone means nothing there.
 export namespace Capture {
   /// How a captured variable is used inside the closure body.
   record VarUsage {
@@ -201,23 +199,53 @@ export namespace Capture {
   }
 
   /// Whether passing an argument in the given parameter position transfers
-  /// ownership: it does when the parameter's type is non-Copy.
+  /// ownership: it does when the parameter's type is non-Copy, and for an
+  /// extern callee only when the parameter also says `@takes`.
   function isMoveForParam(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     paramDefs: &Vector<Analyzer::DefinitionId>,
     paramIndex: u64,
+    calleeIsExtern: boolean,
   ): boolean {
     let Option::SOME(paramDefId) = paramDefs.get(paramIndex) else {
       // Trailing variadic arguments have no parameter to consult.
       return false;
     };
 
+    let mut paramTakes: boolean = false;
+
+    if (let Option::SOME(definition) = defStore.get(*paramDefId)) {
+      if (let Analyzer::Definition::Variable(variableDef) = definition) {
+        paramTakes = variableDef.takes;
+      }
+    }
+
+    if (calleeIsExtern && !paramTakes) {
+      return false;
+    }
+
     let Option::SOME(paramType) = Capture::variableType(defStore, *paramDefId) else {
       return false;
     };
 
     return !Analyzer::Typecheck::isCopyType(defStore, typeStore, paramType);
+  }
+
+  /// Whether the callee is declared inside an `extern` block. Methods never
+  /// are, so only a function definition can answer yes.
+  function calleeIsExtern(
+    defStore: &mut Analyzer::DefinitionStore,
+    calleeDef: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(calleeDef) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Function(functionDef) -> functionDef.isExtern,
+      _ -> false,
+    };
   }
 
   function calleeParams(
@@ -308,6 +336,7 @@ export namespace Capture {
     args: &Vector<Hir::HirId>,
     paramDefs: &Vector<Analyzer::DefinitionId>,
     paramOffset: u64,
+    calleeIsExtern: boolean,
     varDef: Analyzer::DefinitionId,
   ): void {
     let mut index: u64 = 0;
@@ -321,7 +350,7 @@ export namespace Capture {
       let mut consumed: boolean = false;
 
       if (Capture::isVarReference(hir, *argId, varDef)) {
-        if (Capture::isMoveForParam(defStore, typeStore, paramDefs, index + paramOffset)) {
+        if (Capture::isMoveForParam(defStore, typeStore, paramDefs, index + paramOffset, calleeIsExtern)) {
           let mut usageRef: &mut Capture::VarUsage = usage;
           usageRef.moved = true;
           consumed = true;
@@ -371,7 +400,8 @@ export namespace Capture {
       },
       Hir::HirKind::Call(callNode) -> {
         let paramDefs: Vector<Analyzer::DefinitionId> = Capture::calleeParams(defStore, callNode.callee);
-        Capture::analyzeCallArguments(hir, defStore, typeStore, usage, &callNode.args, &paramDefs, 0, varDef);
+        let isExtern: boolean = Capture::calleeIsExtern(defStore, callNode.callee);
+        Capture::analyzeCallArguments(hir, defStore, typeStore, usage, &callNode.args, &paramDefs, 0, isExtern, varDef);
       },
       Hir::HirKind::MethodCall(methodNode) -> {
         let mut paramOffset: u64 = 0;
@@ -382,8 +412,9 @@ export namespace Capture {
           paramOffset = 1;
         }
 
+        // Methods are never extern in Ignis.
         let paramDefs: Vector<Analyzer::DefinitionId> = Capture::calleeParams(defStore, methodNode.method);
-        Capture::analyzeCallArguments(hir, defStore, typeStore, usage, &methodNode.args, &paramDefs, paramOffset, varDef);
+        Capture::analyzeCallArguments(hir, defStore, typeStore, usage, &methodNode.args, &paramDefs, paramOffset, false, varDef);
       },
       Hir::HirKind::CallClosure(closureCall) -> {
         Capture::analyzeVarUsage(hir, defStore, typeStore, usage, closureCall.callee, varDef);
@@ -1219,6 +1250,8 @@ export namespace Capture {
       visibility: Analyzer::Visibility::PRIVATE,
       declaredType: envPointerType,
       mutable: false,
+      takes: false,
+      noEscape: false,
     }));
 
     let mut thunkParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
@@ -1248,6 +1281,7 @@ export namespace Capture {
       isDeprecated: false,
       deprecatedMessage: Option::NONE,
       extensionTarget: Option::NONE,
+      isExtern: false,
     }));
 
     let mut hirRef: &mut Hir::HirStore = hir;
@@ -1282,6 +1316,8 @@ export namespace Capture {
       visibility: Analyzer::Visibility::PRIVATE,
       declaredType: envPointerType,
       mutable: false,
+      takes: false,
+      noEscape: false,
     }));
 
     let mut dropParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
@@ -1301,6 +1337,7 @@ export namespace Capture {
       isDeprecated: false,
       deprecatedMessage: Option::NONE,
       extensionTarget: Option::NONE,
+      isExtern: false,
     }));
 
     let mut hirRef: &mut Hir::HirStore = hir;
