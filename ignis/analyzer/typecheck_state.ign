@@ -932,14 +932,12 @@ export namespace Analyzer {
     /// fields or variant payloads do; unresolved type parameters
     /// conservatively are not.
     function isCopyType(
-      state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
-      span: SourceSpan,
       typeId: Analyzer::TypeId,
     ): boolean {
       let mut visited: Vector<u32> = Vector::new<u32>();
-      return Analyzer::Typecheck::isCopyTypeInner(state, defStore, typeStore, span, typeId, &mut visited);
+      return Analyzer::Typecheck::isCopyTypeInner(defStore, typeStore, typeId, &mut visited);
     }
 
     /// Recursive worker for `isCopyType`. `visited` holds the raw type ids of
@@ -947,16 +945,16 @@ export namespace Analyzer {
     /// answers non-Copy on revisit instead of looping, like the Rust
     /// `is_copy_with_defs_inner`.
     function isCopyTypeInner(
-      state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
-      span: SourceSpan,
       typeId: Analyzer::TypeId,
       visited: &mut Vector<u32>,
     ): boolean {
       let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
-      if (let Option::SOME(aliasDefId) = resolved.cycleAlias) {
-        Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
+      // A cyclic alias is reported where it is declared; here it only answers
+      // non-Copy, so the predicate needs neither a span nor the check state
+      // and post-analysis passes can call it.
+      if (resolved.cycleAlias.isSome()) {
         return false;
       }
 
@@ -1047,11 +1045,11 @@ export namespace Analyzer {
       }
 
       if (let Option::SOME(defId) = recordDefId) {
-        return Analyzer::Typecheck::recordCopyAnswer(state, defStore, typeStore, span, resolved.typeId, defId, visited);
+        return Analyzer::Typecheck::recordCopyAnswer(defStore, typeStore, resolved.typeId, defId, visited);
       }
 
       if (let Option::SOME(defId) = enumDefId) {
-        return Analyzer::Typecheck::enumCopyAnswer(state, defStore, typeStore, span, resolved.typeId, defId, visited);
+        return Analyzer::Typecheck::enumCopyAnswer(defStore, typeStore, resolved.typeId, defId, visited);
       }
 
       let mut componentIndex: u64 = 0;
@@ -1061,7 +1059,7 @@ export namespace Analyzer {
           continue;
         };
 
-        if (!Analyzer::Typecheck::isCopyTypeInner(state, defStore, typeStore, span, *component, visited)) {
+        if (!Analyzer::Typecheck::isCopyTypeInner(defStore, typeStore, *component, visited)) {
           return false;
         }
 
@@ -1096,10 +1094,8 @@ export namespace Analyzer {
     /// `Copy` forces Copy, otherwise the record copies when every field type
     /// does. A revisit through `visited` answers non-Copy to break cycles.
     function recordCopyAnswer(
-      state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
-      span: SourceSpan,
       typeId: Analyzer::TypeId,
       defId: Analyzer::DefinitionId,
       visited: &mut Vector<u32>,
@@ -1155,10 +1151,8 @@ export namespace Analyzer {
       }
 
       let answer: boolean = Analyzer::Typecheck::copyAnswerFromTraitFlagsAndComponents(
-        state,
         defStore,
         typeStore,
-        span,
         implementsCopy,
         implementsDrop,
         &fieldTypes,
@@ -1174,10 +1168,8 @@ export namespace Analyzer {
     /// Same shape as `recordCopyAnswer` with variant payload types standing
     /// in for record field types.
     function enumCopyAnswer(
-      state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
-      span: SourceSpan,
       typeId: Analyzer::TypeId,
       defId: Analyzer::DefinitionId,
       visited: &mut Vector<u32>,
@@ -1242,10 +1234,8 @@ export namespace Analyzer {
       }
 
       let answer: boolean = Analyzer::Typecheck::copyAnswerFromTraitFlagsAndComponents(
-        state,
         defStore,
         typeStore,
-        span,
         implementsCopy,
         implementsDrop,
         &payloadTypes,
@@ -1261,10 +1251,8 @@ export namespace Analyzer {
     /// `Copy`, and without either flag the answer is structural over the
     /// gathered component types.
     function copyAnswerFromTraitFlagsAndComponents(
-      state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
-      span: SourceSpan,
       implementsCopy: boolean,
       implementsDrop: boolean,
       componentTypes: &Vector<Analyzer::TypeId>,
@@ -1285,7 +1273,7 @@ export namespace Analyzer {
           continue;
         };
 
-        if (!Analyzer::Typecheck::isCopyTypeInner(state, defStore, typeStore, span, *componentType, visited)) {
+        if (!Analyzer::Typecheck::isCopyTypeInner(defStore, typeStore, *componentType, visited)) {
           return false;
         }
 

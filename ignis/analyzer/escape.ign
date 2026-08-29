@@ -1,0 +1,424 @@
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import Vector from "std::vector";
+
+/// Escape analysis for closures, the port of
+/// `crates/ignis_analyzer/src/escape.rs`.
+///
+/// A closure escapes when its value, or an alias of it, reaches a `return`, a
+/// field or static assignment target, a call argument, a record initializer
+/// field or an enum variant payload. An escaping closure needs a heap-allocated
+/// environment, because the scope that built the environment is gone by the
+/// time the closure runs.
+///
+/// One deliberate divergence from the oracle: it exempts arguments whose
+/// parameter carries `@noescape`, and the selfhost definition store records no
+/// parameter attributes, so every call argument is treated as escaping. The
+/// direction is safe (a heap environment where a stack one would do) and it
+/// disappears once parameter attributes reach the binder.
+export namespace Escape {
+  /// Maps a definition bound to a closure (directly or through an alias
+  /// chain) to that closure's node. Two parallel vectors instead of a map,
+  /// matching how the rest of the selfhost models small keyed tables.
+  record AliasTable {
+    public defs: Vector<Analyzer::DefinitionId>;
+    public closures: Vector<Hir::HirId>;
+
+    public static init(): AliasTable {
+      return AliasTable {
+        defs: Vector::new<Analyzer::DefinitionId>(),
+        closures: Vector::new<Hir::HirId>(),
+      };
+    }
+
+    public lookup(&self, defId: Analyzer::DefinitionId): Option<Hir::HirId> {
+      let mut index: u64 = 0;
+
+      while (index < self.defs.length()) {
+        if (let Option::SOME(existing) = self.defs.get(index)) {
+          if (existing.raw() == defId.raw()) {
+            if (let Option::SOME(closureId) = self.closures.get(index)) {
+              return Option::SOME(*closureId);
+            }
+
+            return Option::NONE;
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    public insert(&mut self, defId: Analyzer::DefinitionId, closureId: Hir::HirId): void {
+      if (self.lookup(defId).isSome()) {
+        return;
+      }
+
+      self.defs.push(defId);
+      self.closures.push(closureId);
+    }
+  }
+
+  function pushHirId(ids: &mut Vector<Hir::HirId>, value: Hir::HirId): void {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(existing) = ids.get(index)) {
+        if (existing.raw() == value.raw()) {
+          return;
+        }
+      }
+
+      index += 1;
+    }
+
+    let mut idsRef: &mut Vector<Hir::HirId> = ids;
+    idsRef.push(value);
+  }
+
+  /// The closure nodes that outlive their defining scope.
+  function analyzeEscapes(
+    hir: &mut Hir::HirStore,
+    defStore: &mut Analyzer::DefinitionStore,
+  ): Vector<Hir::HirId> {
+    let mut aliases: Escape::AliasTable = Escape::AliasTable::init();
+
+    let mut nodeIndex: u64 = 0;
+
+    while (nodeIndex < hir.nodes.length()) {
+      if (let Option::SOME(node) = hir.nodes.get(nodeIndex)) {
+        if (let Hir::HirKind::Let(letNode) = &node.kind) {
+          if (let Option::SOME(valueId) = letNode.value) {
+            if (let Option::SOME(valueNode) = hir.get(valueId)) {
+              if (let Hir::HirKind::Closure(_) = &valueNode.kind) {
+                aliases.insert(letNode.name, valueId);
+              }
+            }
+          }
+        }
+      }
+
+      nodeIndex += 1;
+    }
+
+    // Fixpoint over `let b = a` chains, so an alias of an alias still names
+    // the closure it ultimately refers to.
+    let mut changed: boolean = true;
+
+    while (changed) {
+      changed = false;
+
+      let mut aliasIndex: u64 = 0;
+
+      while (aliasIndex < hir.nodes.length()) {
+        if (let Option::SOME(node) = hir.nodes.get(aliasIndex)) {
+          if (let Hir::HirKind::Let(letNode) = &node.kind) {
+            if (let Option::SOME(valueId) = letNode.value) {
+              if (let Option::SOME(valueNode) = hir.get(valueId)) {
+                if (let Hir::HirKind::Variable(sourceDef) = &valueNode.kind) {
+                  if (let Option::SOME(closureId) = aliases.lookup(sourceDef)) {
+                    if (aliases.lookup(letNode.name).isNone()) {
+                      aliases.insert(letNode.name, closureId);
+                      changed = true;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        aliasIndex += 1;
+      }
+    }
+
+    let mut escaping: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut bodyIndex: u64 = 0;
+
+    while (bodyIndex < hir.functionBodies.length()) {
+      if (let Option::SOME(bodyId) = hir.functionBodies.valueAt(bodyIndex)) {
+        Escape::scanForEscapes(hir, defStore, &aliases, &mut escaping, bodyId);
+      }
+
+      bodyIndex += 1;
+    }
+
+    return escaping;
+  }
+
+  /// Marks the closure `hirId` refers to, when it refers to one at all.
+  function markIfClosureRef(
+    hir: &mut Hir::HirStore,
+    aliases: &Escape::AliasTable,
+    escaping: &mut Vector<Hir::HirId>,
+    hirId: Hir::HirId,
+  ): void {
+    let Option::SOME(node) = hir.get(hirId) else {
+      return;
+    };
+
+    if (let Hir::HirKind::Variable(defId) = &node.kind) {
+      if (let Option::SOME(closureId) = aliases.lookup(defId)) {
+        Escape::pushHirId(escaping, closureId);
+      }
+    }
+  }
+
+  function scanForEscapesList(
+    hir: &mut Hir::HirStore,
+    defStore: &mut Analyzer::DefinitionStore,
+    aliases: &Escape::AliasTable,
+    escaping: &mut Vector<Hir::HirId>,
+    ids: &Vector<Hir::HirId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, *id);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Scans every argument of a call: each one both escapes on its own and is
+  /// descended into. Without parameter attributes there is no `@noescape`
+  /// exemption to apply.
+  function scanCallArguments(
+    hir: &mut Hir::HirStore,
+    defStore: &mut Analyzer::DefinitionStore,
+    aliases: &Escape::AliasTable,
+    escaping: &mut Vector<Hir::HirId>,
+    args: &Vector<Hir::HirId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < args.length()) {
+      if (let Option::SOME(argId) = args.get(index)) {
+        Escape::markIfClosureRef(hir, aliases, escaping, *argId);
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, *argId);
+      }
+
+      index += 1;
+    }
+  }
+
+  function scanForEscapes(
+    hir: &mut Hir::HirStore,
+    defStore: &mut Analyzer::DefinitionStore,
+    aliases: &Escape::AliasTable,
+    escaping: &mut Vector<Hir::HirId>,
+    hirId: Hir::HirId,
+  ): void {
+    let Option::SOME(node) = hir.get(hirId) else {
+      return;
+    };
+
+    match (&node.kind) {
+      Hir::HirKind::Return(value) -> {
+        if (let Option::SOME(valueId) = value) {
+          Escape::markIfClosureRef(hir, aliases, escaping, valueId);
+          Escape::scanForEscapes(hir, defStore, aliases, escaping, valueId);
+        }
+      },
+      Hir::HirKind::Call(callNode) -> {
+        Escape::scanCallArguments(hir, defStore, aliases, escaping, &callNode.args);
+      },
+      Hir::HirKind::MethodCall(methodNode) -> {
+        if (let Option::SOME(receiverId) = methodNode.receiver) {
+          Escape::scanForEscapes(hir, defStore, aliases, escaping, receiverId);
+        }
+
+        Escape::scanCallArguments(hir, defStore, aliases, escaping, &methodNode.args);
+      },
+      Hir::HirKind::CallClosure(closureCall) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, closureCall.callee);
+        Escape::scanCallArguments(hir, defStore, aliases, escaping, &closureCall.args);
+      },
+      Hir::HirKind::Assign(assignNode) -> {
+        let mut complexTarget: boolean = false;
+
+        if (let Option::SOME(targetNode) = hir.get(assignNode.target)) {
+          match (&targetNode.kind) {
+            Hir::HirKind::FieldAccess(_) -> {
+              complexTarget = true;
+            },
+            Hir::HirKind::StaticAccess(_) -> {
+              complexTarget = true;
+            },
+            Hir::HirKind::Index(_) -> {
+              complexTarget = true;
+            },
+            _ -> {},
+          };
+        }
+
+        if (complexTarget) {
+          Escape::markIfClosureRef(hir, aliases, escaping, assignNode.value);
+        }
+
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, assignNode.target);
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, assignNode.value);
+      },
+      Hir::HirKind::RecordInit(recordNode) -> {
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < recordNode.fields.length()) {
+          if (let Option::SOME(field) = recordNode.fields.get(fieldIndex)) {
+            Escape::markIfClosureRef(hir, aliases, escaping, field.value);
+            Escape::scanForEscapes(hir, defStore, aliases, escaping, field.value);
+          }
+
+          fieldIndex += 1;
+        }
+      },
+      Hir::HirKind::EnumVariant(variantNode) -> {
+        let mut payloadIndex: u64 = 0;
+
+        while (payloadIndex < variantNode.payload.length()) {
+          if (let Option::SOME(payloadId) = variantNode.payload.get(payloadIndex)) {
+            Escape::markIfClosureRef(hir, aliases, escaping, *payloadId);
+            Escape::scanForEscapes(hir, defStore, aliases, escaping, *payloadId);
+          }
+
+          payloadIndex += 1;
+        }
+      },
+      Hir::HirKind::Closure(_) -> {},
+      Hir::HirKind::Block(blockNode) -> {
+        Escape::scanForEscapesList(hir, defStore, aliases, escaping, &blockNode.statements);
+
+        if (let Option::SOME(expressionId) = blockNode.expression) {
+          Escape::scanForEscapes(hir, defStore, aliases, escaping, expressionId);
+        }
+      },
+      Hir::HirKind::Let(letNode) -> {
+        if (let Option::SOME(valueId) = letNode.value) {
+          Escape::scanForEscapes(hir, defStore, aliases, escaping, valueId);
+        }
+      },
+      Hir::HirKind::If(ifNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, ifNode.condition);
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, ifNode.thenBranch);
+
+        if (let Option::SOME(elseId) = ifNode.elseBranch) {
+          Escape::scanForEscapes(hir, defStore, aliases, escaping, elseId);
+        }
+      },
+      Hir::HirKind::LetElse(letElseNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, letElseNode.value);
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, letElseNode.elseBlock);
+      },
+      Hir::HirKind::Loop(loopNode) -> {
+        match (&loopNode.condition) {
+          Hir::LoopKind::While(conditionId) -> {
+            Escape::scanForEscapes(hir, defStore, aliases, escaping, conditionId);
+          },
+          Hir::LoopKind::For(forLoop) -> {
+            if (let Option::SOME(initId) = forLoop.init) {
+              Escape::scanForEscapes(hir, defStore, aliases, escaping, initId);
+            }
+
+            if (let Option::SOME(conditionId) = forLoop.condition) {
+              Escape::scanForEscapes(hir, defStore, aliases, escaping, conditionId);
+            }
+
+            if (let Option::SOME(updateId) = forLoop.update) {
+              Escape::scanForEscapes(hir, defStore, aliases, escaping, updateId);
+            }
+          },
+          Hir::LoopKind::Infinite -> {},
+        };
+
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, loopNode.body);
+      },
+      Hir::HirKind::ExpressionStatement(inner) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, inner);
+      },
+      Hir::HirKind::Binary(binaryNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, binaryNode.left);
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, binaryNode.right);
+      },
+      Hir::HirKind::Unary(unaryNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, unaryNode.operand);
+      },
+      Hir::HirKind::Cast(castNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, castNode.expression);
+      },
+      Hir::HirKind::BitCast(castNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, castNode.expression);
+      },
+      Hir::HirKind::Reference(referenceNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, referenceNode.expression);
+      },
+      Hir::HirKind::Dereference(inner) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, inner);
+      },
+      Hir::HirKind::TypeOf(inner) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, inner);
+      },
+      Hir::HirKind::Panic(inner) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, inner);
+      },
+      Hir::HirKind::Defer(inner) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, inner);
+      },
+      Hir::HirKind::Index(indexNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, indexNode.base);
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, indexNode.index);
+      },
+      Hir::HirKind::FieldAccess(fieldNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, fieldNode.base);
+      },
+      Hir::HirKind::VectorLiteral(elements) -> {
+        Escape::scanForEscapesList(hir, defStore, aliases, escaping, &elements);
+      },
+      Hir::HirKind::TupleLiteral(elements) -> {
+        Escape::scanForEscapesList(hir, defStore, aliases, escaping, &elements);
+      },
+      Hir::HirKind::MakeSlice(sliceNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, sliceNode.data);
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, sliceNode.len);
+      },
+      Hir::HirKind::Match(matchNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, matchNode.scrutinee);
+
+        let mut armIndex: u64 = 0;
+
+        while (armIndex < matchNode.arms.length()) {
+          if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+            if (let Option::SOME(guardId) = arm.guard) {
+              Escape::scanForEscapes(hir, defStore, aliases, escaping, guardId);
+            }
+
+            Escape::scanForEscapes(hir, defStore, aliases, escaping, arm.body);
+          }
+
+          armIndex += 1;
+        }
+      },
+      Hir::HirKind::BuiltinLoad(loadNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, loadNode.ptr);
+      },
+      Hir::HirKind::BuiltinStore(storeNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, storeNode.ptr);
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, storeNode.value);
+      },
+      Hir::HirKind::BuiltinHash(hashNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, hashNode.value);
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, hashNode.hasher);
+      },
+      Hir::HirKind::BuiltinEq(eqNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, eqNode.left);
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, eqNode.right);
+      },
+      Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, dropNode.ptr);
+      },
+      _ -> {},
+    };
+  }
+}

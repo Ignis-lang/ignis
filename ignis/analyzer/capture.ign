@@ -1,0 +1,1680 @@
+import Diagnostic, DiagnosticBag, DiagnosticCode, LabelKind, Severity, SourceSpan from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import Id from "@compiler::ids";
+import Vector from "std::vector";
+
+import Escape from "./escape";
+
+/// Closure capture analysis, the port of
+/// `crates/ignis_analyzer/src/capture.rs`.
+///
+/// AST lowering emits every closure with an empty capture list and no thunk,
+/// because deciding what a closure captures needs the whole body in HIR form.
+/// This pass fills that in: for each closure it collects the free variables of
+/// the body, infers how each one is used, synthesizes the thunk (and, when a
+/// captured value owns resources, the drop function), and marks the closures
+/// that outlive their defining scope.
+///
+/// Two deliberate divergences from the oracle, both rooted in the selfhost
+/// definition store not recording parameter attributes yet:
+///   - `@takes` cannot be consulted, so an argument whose parameter is
+///     non-Copy counts as a move regardless of whether the callee is extern.
+///   - `@noescape` cannot be consulted, which [[Escape]] documents.
+export namespace Capture {
+  /// How a captured variable is used inside the closure body.
+  record VarUsage {
+    /// Appears in a read position, meaning anywhere but as an assign target.
+    public read: boolean;
+    /// The variable, or a path rooted at it, is an assignment target.
+    public mutated: boolean;
+    /// The variable is handed to a call as an owned, non-Copy argument.
+    public moved: boolean;
+
+    public static init(): VarUsage {
+      return VarUsage {
+        read: false,
+        mutated: false,
+        moved: false,
+      };
+    }
+  }
+
+  function containsRaw(values: &mut Vector<u32>, target: u32): boolean {
+    let mut index: u64 = 0;
+
+    while (index < values.length()) {
+      if (let Option::SOME(existing) = values.get(index)) {
+        if (*existing == target) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function pushRaw(values: &mut Vector<u32>, value: u32): void {
+    let mut index: u64 = 0;
+
+    while (index < values.length()) {
+      if (let Option::SOME(existing) = values.get(index)) {
+        if (*existing == value) {
+          return;
+        }
+      }
+
+      index += 1;
+    }
+
+    let mut valuesRef: &mut Vector<u32> = values;
+    valuesRef.push(value);
+  }
+
+  /// A definition is capturable when it names a runtime value. Functions,
+  /// types and constants are reached by name at any depth and never enter an
+  /// environment.
+  function isCapturable(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Variable(_) -> true,
+      _ -> false,
+    };
+  }
+
+  function variableType(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): Option<Analyzer::TypeId> {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return Option::NONE;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Variable(variableDef) -> Option::SOME(variableDef.declaredType),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// Priority: moved beats mutated beats read. A Copy type that is only read
+  /// is cheaper by value than behind a pointer, so it captures by value too.
+  function inferCaptureMode(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    usage: &Capture::VarUsage,
+    varType: Analyzer::TypeId,
+  ): Hir::CaptureMode {
+    if (usage.moved) {
+      return Hir::CaptureMode::ByValue;
+    }
+
+    if (usage.mutated) {
+      return Hir::CaptureMode::ByMutRef;
+    }
+
+    if (Analyzer::Typecheck::isCopyType(defStore, typeStore, varType)) {
+      return Hir::CaptureMode::ByValue;
+    }
+
+    return Hir::CaptureMode::ByRef;
+  }
+
+  function isVarReference(
+    hir: &mut Hir::HirStore,
+    hirId: Hir::HirId,
+    varDef: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(node) = hir.get(hirId) else {
+      return false;
+    };
+
+    if (let Hir::HirKind::Variable(defId) = &node.kind) {
+      return defId.raw() == varDef.raw();
+    }
+
+    return false;
+  }
+
+  /// Whether an assignment target writes through `varDef` itself.
+  ///
+  /// `x = v` and `x.f = v` and `x[i] = v` all write into `x`; `*p = v` writes
+  /// where `p` points, so a dereference breaks the chain.
+  function isRootedAt(
+    hir: &mut Hir::HirStore,
+    targetId: Hir::HirId,
+    varDef: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(node) = hir.get(targetId) else {
+      return false;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Variable(defId) -> defId.raw() == varDef.raw(),
+      Hir::HirKind::FieldAccess(fieldNode) -> Capture::isRootedAt(hir, fieldNode.base, varDef),
+      Hir::HirKind::Index(indexNode) -> Capture::isRootedAt(hir, indexNode.base, varDef),
+      _ -> false,
+    };
+  }
+
+  /// Walks an assignment target for references that are not the write root,
+  /// such as the index expression of `arr[x]`.
+  function analyzeVarUsageInTarget(
+    hir: &mut Hir::HirStore,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    usage: &mut Capture::VarUsage,
+    targetId: Hir::HirId,
+    varDef: Analyzer::DefinitionId,
+  ): void {
+    let Option::SOME(node) = hir.get(targetId) else {
+      return;
+    };
+
+    match (&node.kind) {
+      Hir::HirKind::Index(indexNode) -> {
+        Capture::analyzeVarUsageInTarget(hir, defStore, typeStore, usage, indexNode.base, varDef);
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, indexNode.index, varDef);
+      },
+      Hir::HirKind::FieldAccess(fieldNode) -> {
+        Capture::analyzeVarUsageInTarget(hir, defStore, typeStore, usage, fieldNode.base, varDef);
+      },
+      Hir::HirKind::Dereference(inner) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, inner, varDef);
+      },
+      _ -> {},
+    };
+  }
+
+  /// Whether passing an argument in the given parameter position transfers
+  /// ownership: it does when the parameter's type is non-Copy.
+  function isMoveForParam(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    paramDefs: &Vector<Analyzer::DefinitionId>,
+    paramIndex: u64,
+  ): boolean {
+    let Option::SOME(paramDefId) = paramDefs.get(paramIndex) else {
+      // Trailing variadic arguments have no parameter to consult.
+      return false;
+    };
+
+    let Option::SOME(paramType) = Capture::variableType(defStore, *paramDefId) else {
+      return false;
+    };
+
+    return !Analyzer::Typecheck::isCopyType(defStore, typeStore, paramType);
+  }
+
+  function calleeParams(
+    defStore: &mut Analyzer::DefinitionStore,
+    calleeDef: Analyzer::DefinitionId,
+  ): Vector<Analyzer::DefinitionId> {
+    let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(calleeDef)) {
+      match (definition) {
+        Analyzer::Definition::Function(functionDef) -> {
+          params = Capture::copyDefIds(&functionDef.params);
+        },
+        Analyzer::Definition::Method(methodDef) -> {
+          params = Capture::copyDefIds(&methodDef.params);
+        },
+        _ -> {},
+      };
+    }
+
+    return params;
+  }
+
+  function copyDefIds(source: &Vector<Analyzer::DefinitionId>): Vector<Analyzer::DefinitionId> {
+    let mut result: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(defId) = source.get(index)) {
+        result.push(*defId);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// Records a bare reference handed to a call whose parameter list is
+  /// unavailable: a non-Copy value is consumed, a Copy value is read.
+  function recordUntypedArgumentUse(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    usage: &mut Capture::VarUsage,
+    varDef: Analyzer::DefinitionId,
+  ): void {
+    let mut usageRef: &mut Capture::VarUsage = usage;
+
+    let Option::SOME(varType) = Capture::variableType(defStore, varDef) else {
+      usageRef.read = true;
+      return;
+    };
+
+    if (Analyzer::Typecheck::isCopyType(defStore, typeStore, varType)) {
+      usageRef.read = true;
+      return;
+    }
+
+    usageRef.moved = true;
+  }
+
+  function analyzeVarUsageList(
+    hir: &mut Hir::HirStore,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    usage: &mut Capture::VarUsage,
+    ids: &Vector<Hir::HirId>,
+    varDef: Analyzer::DefinitionId,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, *id, varDef);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Walks arguments of a call whose parameters are known, so a direct
+  /// reference in a by-value position counts as a move rather than a read.
+  function analyzeCallArguments(
+    hir: &mut Hir::HirStore,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    usage: &mut Capture::VarUsage,
+    args: &Vector<Hir::HirId>,
+    paramDefs: &Vector<Analyzer::DefinitionId>,
+    paramOffset: u64,
+    varDef: Analyzer::DefinitionId,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < args.length()) {
+      let Option::SOME(argId) = args.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut consumed: boolean = false;
+
+      if (Capture::isVarReference(hir, *argId, varDef)) {
+        if (Capture::isMoveForParam(defStore, typeStore, paramDefs, index + paramOffset)) {
+          let mut usageRef: &mut Capture::VarUsage = usage;
+          usageRef.moved = true;
+          consumed = true;
+        }
+      }
+
+      if (!consumed) {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, *argId, varDef);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Records how `varDef` is used across the subtree rooted at `hirId`.
+  ///
+  /// Nested closures are skipped: their own captures already name whatever
+  /// they use, and `collectFreeVars` propagates those upward.
+  function analyzeVarUsage(
+    hir: &mut Hir::HirStore,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    usage: &mut Capture::VarUsage,
+    hirId: Hir::HirId,
+    varDef: Analyzer::DefinitionId,
+  ): void {
+    let Option::SOME(node) = hir.get(hirId) else {
+      return;
+    };
+
+    match (&node.kind) {
+      Hir::HirKind::Variable(defId) -> {
+        if (defId.raw() == varDef.raw()) {
+          let mut usageRef: &mut Capture::VarUsage = usage;
+          usageRef.read = true;
+        }
+      },
+      Hir::HirKind::Assign(assignNode) -> {
+        if (Capture::isRootedAt(hir, assignNode.target, varDef)) {
+          let mut usageRef: &mut Capture::VarUsage = usage;
+          usageRef.mutated = true;
+        } else {
+          Capture::analyzeVarUsageInTarget(hir, defStore, typeStore, usage, assignNode.target, varDef);
+        }
+
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, assignNode.value, varDef);
+      },
+      Hir::HirKind::Call(callNode) -> {
+        let paramDefs: Vector<Analyzer::DefinitionId> = Capture::calleeParams(defStore, callNode.callee);
+        Capture::analyzeCallArguments(hir, defStore, typeStore, usage, &callNode.args, &paramDefs, 0, varDef);
+      },
+      Hir::HirKind::MethodCall(methodNode) -> {
+        let mut paramOffset: u64 = 0;
+
+        if (let Option::SOME(receiverId) = methodNode.receiver) {
+          Capture::analyzeVarUsage(hir, defStore, typeStore, usage, receiverId, varDef);
+          // `self` occupies the first parameter slot of an instance method.
+          paramOffset = 1;
+        }
+
+        let paramDefs: Vector<Analyzer::DefinitionId> = Capture::calleeParams(defStore, methodNode.method);
+        Capture::analyzeCallArguments(hir, defStore, typeStore, usage, &methodNode.args, &paramDefs, paramOffset, varDef);
+      },
+      Hir::HirKind::CallClosure(closureCall) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, closureCall.callee, varDef);
+
+        let mut index: u64 = 0;
+
+        while (index < closureCall.args.length()) {
+          let Option::SOME(argId) = closureCall.args.get(index) else {
+            index += 1;
+            continue;
+          };
+
+          if (Capture::isVarReference(hir, *argId, varDef)) {
+            Capture::recordUntypedArgumentUse(defStore, typeStore, usage, varDef);
+          } else {
+            Capture::analyzeVarUsage(hir, defStore, typeStore, usage, *argId, varDef);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirKind::Let(letNode) -> {
+        if (let Option::SOME(valueId) = letNode.value) {
+          if (Capture::isVarReference(hir, valueId, varDef)) {
+            Capture::recordUntypedArgumentUse(defStore, typeStore, usage, varDef);
+          } else {
+            Capture::analyzeVarUsage(hir, defStore, typeStore, usage, valueId, varDef);
+          }
+        }
+      },
+      Hir::HirKind::Closure(_) -> {},
+      Hir::HirKind::Block(blockNode) -> {
+        Capture::analyzeVarUsageList(hir, defStore, typeStore, usage, &blockNode.statements, varDef);
+
+        if (let Option::SOME(expressionId) = blockNode.expression) {
+          Capture::analyzeVarUsage(hir, defStore, typeStore, usage, expressionId, varDef);
+        }
+      },
+      Hir::HirKind::Binary(binaryNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, binaryNode.left, varDef);
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, binaryNode.right, varDef);
+      },
+      Hir::HirKind::Unary(unaryNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, unaryNode.operand, varDef);
+      },
+      Hir::HirKind::Cast(castNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, castNode.expression, varDef);
+      },
+      Hir::HirKind::BitCast(castNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, castNode.expression, varDef);
+      },
+      Hir::HirKind::Reference(referenceNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, referenceNode.expression, varDef);
+      },
+      Hir::HirKind::Dereference(inner) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, inner, varDef);
+      },
+      Hir::HirKind::TypeOf(inner) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, inner, varDef);
+      },
+      Hir::HirKind::ExpressionStatement(inner) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, inner, varDef);
+      },
+      Hir::HirKind::Panic(inner) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, inner, varDef);
+      },
+      Hir::HirKind::Defer(inner) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, inner, varDef);
+      },
+      Hir::HirKind::Index(indexNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, indexNode.base, varDef);
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, indexNode.index, varDef);
+      },
+      Hir::HirKind::FieldAccess(fieldNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, fieldNode.base, varDef);
+      },
+      Hir::HirKind::VectorLiteral(elements) -> {
+        Capture::analyzeVarUsageList(hir, defStore, typeStore, usage, &elements, varDef);
+      },
+      Hir::HirKind::TupleLiteral(elements) -> {
+        Capture::analyzeVarUsageList(hir, defStore, typeStore, usage, &elements, varDef);
+      },
+      Hir::HirKind::MakeSlice(sliceNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, sliceNode.data, varDef);
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, sliceNode.len, varDef);
+      },
+      Hir::HirKind::RecordInit(recordNode) -> {
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < recordNode.fields.length()) {
+          if (let Option::SOME(field) = recordNode.fields.get(fieldIndex)) {
+            Capture::analyzeVarUsage(hir, defStore, typeStore, usage, field.value, varDef);
+          }
+
+          fieldIndex += 1;
+        }
+      },
+      Hir::HirKind::EnumVariant(variantNode) -> {
+        Capture::analyzeVarUsageList(hir, defStore, typeStore, usage, &variantNode.payload, varDef);
+      },
+      Hir::HirKind::If(ifNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, ifNode.condition, varDef);
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, ifNode.thenBranch, varDef);
+
+        if (let Option::SOME(elseId) = ifNode.elseBranch) {
+          Capture::analyzeVarUsage(hir, defStore, typeStore, usage, elseId, varDef);
+        }
+      },
+      Hir::HirKind::LetElse(letElseNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, letElseNode.value, varDef);
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, letElseNode.elseBlock, varDef);
+      },
+      Hir::HirKind::Loop(loopNode) -> {
+        match (&loopNode.condition) {
+          Hir::LoopKind::While(conditionId) -> {
+            Capture::analyzeVarUsage(hir, defStore, typeStore, usage, conditionId, varDef);
+          },
+          Hir::LoopKind::For(forLoop) -> {
+            if (let Option::SOME(initId) = forLoop.init) {
+              Capture::analyzeVarUsage(hir, defStore, typeStore, usage, initId, varDef);
+            }
+
+            if (let Option::SOME(conditionId) = forLoop.condition) {
+              Capture::analyzeVarUsage(hir, defStore, typeStore, usage, conditionId, varDef);
+            }
+
+            if (let Option::SOME(updateId) = forLoop.update) {
+              Capture::analyzeVarUsage(hir, defStore, typeStore, usage, updateId, varDef);
+            }
+          },
+          Hir::LoopKind::Infinite -> {},
+        };
+
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, loopNode.body, varDef);
+      },
+      Hir::HirKind::Return(value) -> {
+        if (let Option::SOME(valueId) = value) {
+          Capture::analyzeVarUsage(hir, defStore, typeStore, usage, valueId, varDef);
+        }
+      },
+      Hir::HirKind::Match(matchNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, matchNode.scrutinee, varDef);
+
+        let mut armIndex: u64 = 0;
+
+        while (armIndex < matchNode.arms.length()) {
+          if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+            if (let Option::SOME(guardId) = arm.guard) {
+              Capture::analyzeVarUsage(hir, defStore, typeStore, usage, guardId, varDef);
+            }
+
+            Capture::analyzeVarUsage(hir, defStore, typeStore, usage, arm.body, varDef);
+          }
+
+          armIndex += 1;
+        }
+      },
+      Hir::HirKind::BuiltinLoad(loadNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, loadNode.ptr, varDef);
+      },
+      Hir::HirKind::BuiltinStore(storeNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, storeNode.ptr, varDef);
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, storeNode.value, varDef);
+      },
+      Hir::HirKind::BuiltinHash(hashNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, hashNode.value, varDef);
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, hashNode.hasher, varDef);
+      },
+      Hir::HirKind::BuiltinEq(eqNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, eqNode.left, varDef);
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, eqNode.right, varDef);
+      },
+      Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
+        Capture::analyzeVarUsage(hir, defStore, typeStore, usage, dropNode.ptr, varDef);
+      },
+      _ -> {},
+    };
+  }
+
+  /// Every closure node, innermost first. An inner closure must have its
+  /// captures filled before the enclosing one scans for free variables, so
+  /// transitive captures propagate outward.
+  function collectClosuresBottomUp(hir: &mut Hir::HirStore): Vector<Hir::HirId> {
+    let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut visited: Vector<u32> = Vector::new<u32>();
+
+    let mut bodyIndex: u64 = 0;
+
+    while (bodyIndex < hir.functionBodies.length()) {
+      if (let Option::SOME(bodyId) = hir.functionBodies.valueAt(bodyIndex)) {
+        Capture::collectClosuresPostorder(hir, bodyId, &mut result, &mut visited);
+      }
+
+      bodyIndex += 1;
+    }
+
+    let mut initIndex: u64 = 0;
+
+    while (initIndex < hir.variablesInits.length()) {
+      if (let Option::SOME(initId) = hir.variablesInits.valueAt(initIndex)) {
+        Capture::collectClosuresPostorder(hir, initId, &mut result, &mut visited);
+      }
+
+      initIndex += 1;
+    }
+
+    return result;
+  }
+
+  function collectClosuresPostorderList(
+    hir: &mut Hir::HirStore,
+    result: &mut Vector<Hir::HirId>,
+    visited: &mut Vector<u32>,
+    ids: &Vector<Hir::HirId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        Capture::collectClosuresPostorder(hir, *id, result, visited);
+      }
+
+      index += 1;
+    }
+  }
+
+  function collectClosuresPostorder(
+    hir: &mut Hir::HirStore,
+    hirId: Hir::HirId,
+    result: &mut Vector<Hir::HirId>,
+    visited: &mut Vector<u32>,
+  ): void {
+    if (Capture::containsRaw(visited, hirId.raw())) {
+      return;
+    }
+
+    Capture::pushRaw(visited, hirId.raw());
+
+    let Option::SOME(node) = hir.get(hirId) else {
+      return;
+    };
+
+    match (&node.kind) {
+      Hir::HirKind::Closure(closureNode) -> {
+        Capture::collectClosuresPostorder(hir, closureNode.body, result, visited);
+
+        let mut resultRef: &mut Vector<Hir::HirId> = result;
+        resultRef.push(hirId);
+      },
+      Hir::HirKind::Block(blockNode) -> {
+        Capture::collectClosuresPostorderList(hir, result, visited, &blockNode.statements);
+
+        if (let Option::SOME(expressionId) = blockNode.expression) {
+          Capture::collectClosuresPostorder(hir, expressionId, result, visited);
+        }
+      },
+      Hir::HirKind::Let(letNode) -> {
+        if (let Option::SOME(valueId) = letNode.value) {
+          Capture::collectClosuresPostorder(hir, valueId, result, visited);
+        }
+      },
+      Hir::HirKind::LetElse(letElseNode) -> {
+        Capture::collectClosuresPostorder(hir, letElseNode.value, result, visited);
+        Capture::collectClosuresPostorder(hir, letElseNode.elseBlock, result, visited);
+      },
+      Hir::HirKind::Assign(assignNode) -> {
+        Capture::collectClosuresPostorder(hir, assignNode.target, result, visited);
+        Capture::collectClosuresPostorder(hir, assignNode.value, result, visited);
+      },
+      Hir::HirKind::Call(callNode) -> {
+        Capture::collectClosuresPostorderList(hir, result, visited, &callNode.args);
+      },
+      Hir::HirKind::MethodCall(methodNode) -> {
+        if (let Option::SOME(receiverId) = methodNode.receiver) {
+          Capture::collectClosuresPostorder(hir, receiverId, result, visited);
+        }
+
+        Capture::collectClosuresPostorderList(hir, result, visited, &methodNode.args);
+      },
+      Hir::HirKind::CallClosure(closureCall) -> {
+        Capture::collectClosuresPostorder(hir, closureCall.callee, result, visited);
+        Capture::collectClosuresPostorderList(hir, result, visited, &closureCall.args);
+      },
+      Hir::HirKind::Binary(binaryNode) -> {
+        Capture::collectClosuresPostorder(hir, binaryNode.left, result, visited);
+        Capture::collectClosuresPostorder(hir, binaryNode.right, result, visited);
+      },
+      Hir::HirKind::Unary(unaryNode) -> {
+        Capture::collectClosuresPostorder(hir, unaryNode.operand, result, visited);
+      },
+      Hir::HirKind::Cast(castNode) -> {
+        Capture::collectClosuresPostorder(hir, castNode.expression, result, visited);
+      },
+      Hir::HirKind::BitCast(castNode) -> {
+        Capture::collectClosuresPostorder(hir, castNode.expression, result, visited);
+      },
+      Hir::HirKind::Reference(referenceNode) -> {
+        Capture::collectClosuresPostorder(hir, referenceNode.expression, result, visited);
+      },
+      Hir::HirKind::Dereference(inner) -> {
+        Capture::collectClosuresPostorder(hir, inner, result, visited);
+      },
+      Hir::HirKind::TypeOf(inner) -> {
+        Capture::collectClosuresPostorder(hir, inner, result, visited);
+      },
+      Hir::HirKind::ExpressionStatement(inner) -> {
+        Capture::collectClosuresPostorder(hir, inner, result, visited);
+      },
+      Hir::HirKind::Panic(inner) -> {
+        Capture::collectClosuresPostorder(hir, inner, result, visited);
+      },
+      Hir::HirKind::Defer(inner) -> {
+        Capture::collectClosuresPostorder(hir, inner, result, visited);
+      },
+      Hir::HirKind::Index(indexNode) -> {
+        Capture::collectClosuresPostorder(hir, indexNode.base, result, visited);
+        Capture::collectClosuresPostorder(hir, indexNode.index, result, visited);
+      },
+      Hir::HirKind::FieldAccess(fieldNode) -> {
+        Capture::collectClosuresPostorder(hir, fieldNode.base, result, visited);
+      },
+      Hir::HirKind::VectorLiteral(elements) -> {
+        Capture::collectClosuresPostorderList(hir, result, visited, &elements);
+      },
+      Hir::HirKind::TupleLiteral(elements) -> {
+        Capture::collectClosuresPostorderList(hir, result, visited, &elements);
+      },
+      Hir::HirKind::MakeSlice(sliceNode) -> {
+        Capture::collectClosuresPostorder(hir, sliceNode.data, result, visited);
+        Capture::collectClosuresPostorder(hir, sliceNode.len, result, visited);
+      },
+      Hir::HirKind::RecordInit(recordNode) -> {
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < recordNode.fields.length()) {
+          if (let Option::SOME(field) = recordNode.fields.get(fieldIndex)) {
+            Capture::collectClosuresPostorder(hir, field.value, result, visited);
+          }
+
+          fieldIndex += 1;
+        }
+      },
+      Hir::HirKind::EnumVariant(variantNode) -> {
+        Capture::collectClosuresPostorderList(hir, result, visited, &variantNode.payload);
+      },
+      Hir::HirKind::If(ifNode) -> {
+        Capture::collectClosuresPostorder(hir, ifNode.condition, result, visited);
+        Capture::collectClosuresPostorder(hir, ifNode.thenBranch, result, visited);
+
+        if (let Option::SOME(elseId) = ifNode.elseBranch) {
+          Capture::collectClosuresPostorder(hir, elseId, result, visited);
+        }
+      },
+      Hir::HirKind::Loop(loopNode) -> {
+        match (&loopNode.condition) {
+          Hir::LoopKind::While(conditionId) -> {
+            Capture::collectClosuresPostorder(hir, conditionId, result, visited);
+          },
+          Hir::LoopKind::For(forLoop) -> {
+            if (let Option::SOME(initId) = forLoop.init) {
+              Capture::collectClosuresPostorder(hir, initId, result, visited);
+            }
+
+            if (let Option::SOME(conditionId) = forLoop.condition) {
+              Capture::collectClosuresPostorder(hir, conditionId, result, visited);
+            }
+
+            if (let Option::SOME(updateId) = forLoop.update) {
+              Capture::collectClosuresPostorder(hir, updateId, result, visited);
+            }
+          },
+          Hir::LoopKind::Infinite -> {},
+        };
+
+        Capture::collectClosuresPostorder(hir, loopNode.body, result, visited);
+      },
+      Hir::HirKind::Return(value) -> {
+        if (let Option::SOME(valueId) = value) {
+          Capture::collectClosuresPostorder(hir, valueId, result, visited);
+        }
+      },
+      Hir::HirKind::Match(matchNode) -> {
+        Capture::collectClosuresPostorder(hir, matchNode.scrutinee, result, visited);
+
+        let mut armIndex: u64 = 0;
+
+        while (armIndex < matchNode.arms.length()) {
+          if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+            if (let Option::SOME(guardId) = arm.guard) {
+              Capture::collectClosuresPostorder(hir, guardId, result, visited);
+            }
+
+            Capture::collectClosuresPostorder(hir, arm.body, result, visited);
+          }
+
+          armIndex += 1;
+        }
+      },
+      Hir::HirKind::BuiltinLoad(loadNode) -> {
+        Capture::collectClosuresPostorder(hir, loadNode.ptr, result, visited);
+      },
+      Hir::HirKind::BuiltinStore(storeNode) -> {
+        Capture::collectClosuresPostorder(hir, storeNode.ptr, result, visited);
+        Capture::collectClosuresPostorder(hir, storeNode.value, result, visited);
+      },
+      Hir::HirKind::BuiltinHash(hashNode) -> {
+        Capture::collectClosuresPostorder(hir, hashNode.value, result, visited);
+        Capture::collectClosuresPostorder(hir, hashNode.hasher, result, visited);
+      },
+      Hir::HirKind::BuiltinEq(eqNode) -> {
+        Capture::collectClosuresPostorder(hir, eqNode.left, result, visited);
+        Capture::collectClosuresPostorder(hir, eqNode.right, result, visited);
+      },
+      Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
+        Capture::collectClosuresPostorder(hir, dropNode.ptr, result, visited);
+      },
+      _ -> {},
+    };
+  }
+
+  /// Definitions introduced inside the subtree: `let` names and every
+  /// binding a pattern brings into scope. They belong to the closure, so they
+  /// are never captured.
+  function collectLocals(
+    hir: &mut Hir::HirStore,
+    hirId: Hir::HirId,
+    locals: &mut Vector<u32>,
+  ): void {
+    let Option::SOME(node) = hir.get(hirId) else {
+      return;
+    };
+
+    match (&node.kind) {
+      Hir::HirKind::Let(letNode) -> {
+        Capture::pushRaw(locals, letNode.name.raw());
+
+        if (let Option::SOME(valueId) = letNode.value) {
+          Capture::collectLocals(hir, valueId, locals);
+        }
+      },
+      Hir::HirKind::LetElse(letElseNode) -> {
+        Capture::collectPatternBindings(&letElseNode.pattern, locals);
+        Capture::collectLocals(hir, letElseNode.value, locals);
+        Capture::collectLocals(hir, letElseNode.elseBlock, locals);
+      },
+      Hir::HirKind::Block(blockNode) -> {
+        let mut index: u64 = 0;
+
+        while (index < blockNode.statements.length()) {
+          if (let Option::SOME(statementId) = blockNode.statements.get(index)) {
+            Capture::collectLocals(hir, *statementId, locals);
+          }
+
+          index += 1;
+        }
+
+        if (let Option::SOME(expressionId) = blockNode.expression) {
+          Capture::collectLocals(hir, expressionId, locals);
+        }
+      },
+      Hir::HirKind::If(ifNode) -> {
+        Capture::collectLocals(hir, ifNode.condition, locals);
+        Capture::collectLocals(hir, ifNode.thenBranch, locals);
+
+        if (let Option::SOME(elseId) = ifNode.elseBranch) {
+          Capture::collectLocals(hir, elseId, locals);
+        }
+      },
+      Hir::HirKind::Loop(loopNode) -> {
+        match (&loopNode.condition) {
+          Hir::LoopKind::While(conditionId) -> {
+            Capture::collectLocals(hir, conditionId, locals);
+          },
+          Hir::LoopKind::For(forLoop) -> {
+            if (let Option::SOME(initId) = forLoop.init) {
+              Capture::collectLocals(hir, initId, locals);
+            }
+
+            if (let Option::SOME(conditionId) = forLoop.condition) {
+              Capture::collectLocals(hir, conditionId, locals);
+            }
+
+            if (let Option::SOME(updateId) = forLoop.update) {
+              Capture::collectLocals(hir, updateId, locals);
+            }
+          },
+          Hir::LoopKind::Infinite -> {},
+        };
+
+        Capture::collectLocals(hir, loopNode.body, locals);
+      },
+      Hir::HirKind::Match(matchNode) -> {
+        Capture::collectLocals(hir, matchNode.scrutinee, locals);
+
+        let mut armIndex: u64 = 0;
+
+        while (armIndex < matchNode.arms.length()) {
+          if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+            Capture::collectPatternBindings(&arm.pattern, locals);
+
+            if (let Option::SOME(guardId) = arm.guard) {
+              Capture::collectLocals(hir, guardId, locals);
+            }
+
+            Capture::collectLocals(hir, arm.body, locals);
+          }
+
+          armIndex += 1;
+        }
+      },
+      Hir::HirKind::ExpressionStatement(inner) -> {
+        Capture::collectLocals(hir, inner, locals);
+      },
+      Hir::HirKind::Return(value) -> {
+        if (let Option::SOME(valueId) = value) {
+          Capture::collectLocals(hir, valueId, locals);
+        }
+      },
+      Hir::HirKind::Closure(_) -> {},
+      _ -> {},
+    };
+  }
+
+  function collectPatternBindings(
+    pattern: &Hir::HirPattern,
+    locals: &mut Vector<u32>,
+  ): void {
+    match (pattern) {
+      Hir::HirPattern::Binding(defId) -> {
+        Capture::pushRaw(locals, defId.raw());
+      },
+      Hir::HirPattern::Variant(variantPattern) -> {
+        let mut index: u64 = 0;
+
+        while (index < variantPattern.args.length()) {
+          if (let Option::SOME(argPattern) = variantPattern.args.get(index)) {
+            Capture::collectPatternBindings(argPattern, locals);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Tuple(elements) -> {
+        let mut index: u64 = 0;
+
+        while (index < elements.length()) {
+          if (let Option::SOME(element) = elements.get(index)) {
+            Capture::collectPatternBindings(element, locals);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Or(alternatives) -> {
+        let mut index: u64 = 0;
+
+        while (index < alternatives.length()) {
+          if (let Option::SOME(alternative) = alternatives.get(index)) {
+            Capture::collectPatternBindings(alternative, locals);
+          }
+
+          index += 1;
+        }
+      },
+      _ -> {},
+    };
+  }
+
+  /// Records a free variable, in first-reference order, skipping locals,
+  /// duplicates and definitions that name no runtime value.
+  function recordFreeVar(
+    defStore: &mut Analyzer::DefinitionStore,
+    locals: &mut Vector<u32>,
+    freeVars: &mut Vector<Analyzer::DefinitionId>,
+    seen: &mut Vector<u32>,
+    defId: Analyzer::DefinitionId,
+  ): void {
+    if (Capture::containsRaw(locals, defId.raw())) {
+      return;
+    }
+
+    if (Capture::containsRaw(seen, defId.raw())) {
+      return;
+    }
+
+    if (!Capture::isCapturable(defStore, defId)) {
+      return;
+    }
+
+    Capture::pushRaw(seen, defId.raw());
+
+    let mut freeVarsRef: &mut Vector<Analyzer::DefinitionId> = freeVars;
+    freeVarsRef.push(defId);
+  }
+
+  function collectFreeVarsList(
+    hir: &mut Hir::HirStore,
+    defStore: &mut Analyzer::DefinitionStore,
+    locals: &mut Vector<u32>,
+    freeVars: &mut Vector<Analyzer::DefinitionId>,
+    seen: &mut Vector<u32>,
+    ids: &Vector<Hir::HirId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, *id);
+      }
+
+      index += 1;
+    }
+  }
+
+  function collectFreeVars(
+    hir: &mut Hir::HirStore,
+    defStore: &mut Analyzer::DefinitionStore,
+    locals: &mut Vector<u32>,
+    freeVars: &mut Vector<Analyzer::DefinitionId>,
+    seen: &mut Vector<u32>,
+    hirId: Hir::HirId,
+  ): void {
+    let Option::SOME(node) = hir.get(hirId) else {
+      return;
+    };
+
+    match (&node.kind) {
+      Hir::HirKind::Variable(defId) -> {
+        Capture::recordFreeVar(defStore, locals, freeVars, seen, defId);
+      },
+      // An inner closure was processed first, so its capture list already
+      // names everything it needs from this scope.
+      Hir::HirKind::Closure(closureNode) -> {
+        let mut index: u64 = 0;
+
+        while (index < closureNode.captures.length()) {
+          if (let Option::SOME(capture) = closureNode.captures.get(index)) {
+            Capture::recordFreeVar(defStore, locals, freeVars, seen, capture.sourceDef);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirKind::Let(letNode) -> {
+        if (let Option::SOME(valueId) = letNode.value) {
+          Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, valueId);
+        }
+      },
+      Hir::HirKind::LetElse(letElseNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, letElseNode.value);
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, letElseNode.elseBlock);
+      },
+      Hir::HirKind::Block(blockNode) -> {
+        Capture::collectFreeVarsList(hir, defStore, locals, freeVars, seen, &blockNode.statements);
+
+        if (let Option::SOME(expressionId) = blockNode.expression) {
+          Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, expressionId);
+        }
+      },
+      Hir::HirKind::Binary(binaryNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, binaryNode.left);
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, binaryNode.right);
+      },
+      Hir::HirKind::Unary(unaryNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, unaryNode.operand);
+      },
+      Hir::HirKind::Call(callNode) -> {
+        Capture::collectFreeVarsList(hir, defStore, locals, freeVars, seen, &callNode.args);
+      },
+      Hir::HirKind::MethodCall(methodNode) -> {
+        if (let Option::SOME(receiverId) = methodNode.receiver) {
+          Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, receiverId);
+        }
+
+        Capture::collectFreeVarsList(hir, defStore, locals, freeVars, seen, &methodNode.args);
+      },
+      Hir::HirKind::CallClosure(closureCall) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, closureCall.callee);
+        Capture::collectFreeVarsList(hir, defStore, locals, freeVars, seen, &closureCall.args);
+      },
+      Hir::HirKind::Assign(assignNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, assignNode.target);
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, assignNode.value);
+      },
+      Hir::HirKind::Cast(castNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, castNode.expression);
+      },
+      Hir::HirKind::BitCast(castNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, castNode.expression);
+      },
+      Hir::HirKind::Reference(referenceNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, referenceNode.expression);
+      },
+      Hir::HirKind::Dereference(inner) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, inner);
+      },
+      Hir::HirKind::TypeOf(inner) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, inner);
+      },
+      Hir::HirKind::ExpressionStatement(inner) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, inner);
+      },
+      Hir::HirKind::Panic(inner) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, inner);
+      },
+      Hir::HirKind::Defer(inner) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, inner);
+      },
+      Hir::HirKind::Index(indexNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, indexNode.base);
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, indexNode.index);
+      },
+      Hir::HirKind::FieldAccess(fieldNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, fieldNode.base);
+      },
+      Hir::HirKind::VectorLiteral(elements) -> {
+        Capture::collectFreeVarsList(hir, defStore, locals, freeVars, seen, &elements);
+      },
+      Hir::HirKind::TupleLiteral(elements) -> {
+        Capture::collectFreeVarsList(hir, defStore, locals, freeVars, seen, &elements);
+      },
+      Hir::HirKind::MakeSlice(sliceNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, sliceNode.data);
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, sliceNode.len);
+      },
+      Hir::HirKind::RecordInit(recordNode) -> {
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < recordNode.fields.length()) {
+          if (let Option::SOME(field) = recordNode.fields.get(fieldIndex)) {
+            Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, field.value);
+          }
+
+          fieldIndex += 1;
+        }
+      },
+      Hir::HirKind::EnumVariant(variantNode) -> {
+        Capture::collectFreeVarsList(hir, defStore, locals, freeVars, seen, &variantNode.payload);
+      },
+      Hir::HirKind::If(ifNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, ifNode.condition);
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, ifNode.thenBranch);
+
+        if (let Option::SOME(elseId) = ifNode.elseBranch) {
+          Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, elseId);
+        }
+      },
+      Hir::HirKind::Loop(loopNode) -> {
+        match (&loopNode.condition) {
+          Hir::LoopKind::While(conditionId) -> {
+            Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, conditionId);
+          },
+          Hir::LoopKind::For(forLoop) -> {
+            if (let Option::SOME(initId) = forLoop.init) {
+              Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, initId);
+            }
+
+            if (let Option::SOME(conditionId) = forLoop.condition) {
+              Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, conditionId);
+            }
+
+            if (let Option::SOME(updateId) = forLoop.update) {
+              Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, updateId);
+            }
+          },
+          Hir::LoopKind::Infinite -> {},
+        };
+
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, loopNode.body);
+      },
+      Hir::HirKind::Return(value) -> {
+        if (let Option::SOME(valueId) = value) {
+          Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, valueId);
+        }
+      },
+      Hir::HirKind::Match(matchNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, matchNode.scrutinee);
+
+        let mut armIndex: u64 = 0;
+
+        while (armIndex < matchNode.arms.length()) {
+          if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+            if (let Option::SOME(guardId) = arm.guard) {
+              Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, guardId);
+            }
+
+            Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, arm.body);
+          }
+
+          armIndex += 1;
+        }
+      },
+      Hir::HirKind::BuiltinLoad(loadNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, loadNode.ptr);
+      },
+      Hir::HirKind::BuiltinStore(storeNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, storeNode.ptr);
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, storeNode.value);
+      },
+      Hir::HirKind::BuiltinHash(hashNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, hashNode.value);
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, hashNode.hasher);
+      },
+      Hir::HirKind::BuiltinEq(eqNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, eqNode.left);
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, eqNode.right);
+      },
+      Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
+        Capture::collectFreeVars(hir, defStore, locals, freeVars, seen, dropNode.ptr);
+      },
+      _ -> {},
+    };
+  }
+
+  /// `(env: *u8, params...) -> ret`. The closure body becomes the thunk's
+  /// body; LIR lowering prepends the environment-extraction preamble.
+  function createThunkDefinition(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &mut Hir::HirStore,
+    closureIndex: u64,
+    originalParams: &Vector<Analyzer::DefinitionId>,
+    returnType: Analyzer::TypeId,
+    bodyId: Hir::HirId,
+  ): Analyzer::DefinitionId {
+    let envPointerType: Analyzer::TypeId = Capture::environmentPointerType(typeStore);
+
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let envName: String = `__closure_env_${closureIndex}`;
+    let envSymbol: Analyzer::SymbolId = symbolsRef.intern(envName.toStr());
+
+    let mut envStoreRef: &mut Analyzer::DefinitionStore = defStore;
+    let envParam: Analyzer::DefinitionId = envStoreRef.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
+      name: envSymbol,
+      visibility: Analyzer::Visibility::PRIVATE,
+      declaredType: envPointerType,
+      mutable: false,
+    }));
+
+    let mut thunkParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    thunkParams.push(envParam);
+
+    let mut paramIndex: u64 = 0;
+
+    while (paramIndex < originalParams.length()) {
+      if (let Option::SOME(paramDefId) = originalParams.get(paramIndex)) {
+        thunkParams.push(*paramDefId);
+      }
+
+      paramIndex += 1;
+    }
+
+    let mut thunkSymbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let thunkName: String = `__closure_thunk_${closureIndex}`;
+    let thunkSymbol: Analyzer::SymbolId = thunkSymbolsRef.intern(thunkName.toStr());
+
+    let mut thunkStoreRef: &mut Analyzer::DefinitionStore = defStore;
+    let thunkDef: Analyzer::DefinitionId = thunkStoreRef.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+      name: thunkSymbol,
+      visibility: Analyzer::Visibility::PRIVATE,
+      typeParams: Vector::new<Analyzer::DefinitionId>(),
+      params: thunkParams,
+      returnType: returnType,
+      isDeprecated: false,
+      deprecatedMessage: Option::NONE,
+      extensionTarget: Option::NONE,
+    }));
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    hirRef.setFunctionBody(thunkDef, bodyId);
+    hirRef.items.push(thunkDef);
+
+    return thunkDef;
+  }
+
+  /// `(env: *u8) -> void`. The body is a bare `return`; LIR lowering emits the
+  /// per-capture drop calls from the capture list.
+  function createDropFunction(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &mut Hir::HirStore,
+    closureIndex: u64,
+    span: SourceSpan,
+  ): Analyzer::DefinitionId {
+    let envPointerType: Analyzer::TypeId = Capture::environmentPointerType(typeStore);
+
+    let mut voidStoreRef: &mut Analyzer::TypeStore = typeStore;
+    let voidType: Analyzer::TypeId = voidStoreRef.intern(Analyzer::Type::VOID);
+
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let envName: String = `__closure_drop_env_${closureIndex}`;
+    let envSymbol: Analyzer::SymbolId = symbolsRef.intern(envName.toStr());
+
+    let mut envStoreRef: &mut Analyzer::DefinitionStore = defStore;
+    let envParam: Analyzer::DefinitionId = envStoreRef.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
+      name: envSymbol,
+      visibility: Analyzer::Visibility::PRIVATE,
+      declaredType: envPointerType,
+      mutable: false,
+    }));
+
+    let mut dropParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    dropParams.push(envParam);
+
+    let mut dropSymbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let dropName: String = `__closure_drop_${closureIndex}`;
+    let dropSymbol: Analyzer::SymbolId = dropSymbolsRef.intern(dropName.toStr());
+
+    let mut dropStoreRef: &mut Analyzer::DefinitionStore = defStore;
+    let dropDef: Analyzer::DefinitionId = dropStoreRef.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+      name: dropSymbol,
+      visibility: Analyzer::Visibility::PRIVATE,
+      typeParams: Vector::new<Analyzer::DefinitionId>(),
+      params: dropParams,
+      returnType: voidType,
+      isDeprecated: false,
+      deprecatedMessage: Option::NONE,
+      extensionTarget: Option::NONE,
+    }));
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    let bodyId: Hir::HirId = hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Return(Option::NONE),
+      span: span,
+      typeId: voidType,
+    });
+
+    hirRef.setFunctionBody(dropDef, bodyId);
+    hirRef.items.push(dropDef);
+
+    return dropDef;
+  }
+
+  function environmentPointerType(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
+    let mut byteStoreRef: &mut Analyzer::TypeStore = typeStore;
+    let byteType: Analyzer::TypeId = byteStoreRef.intern(Analyzer::Type::U8);
+
+    let mut pointerStoreRef: &mut Analyzer::TypeStore = typeStore;
+    return pointerStoreRef.pointer(byteType);
+  }
+
+  /// A closure needs a drop function when it owns a capture that owns
+  /// resources of its own.
+  function needsDropFunction(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    captures: &Vector<Hir::HirCapture>,
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < captures.length()) {
+      if (let Option::SOME(capture) = captures.get(index)) {
+        if (let Hir::CaptureMode::ByValue = capture.mode) {
+          if (Borrowck::needsDropType(defStore, typeStore, capture.typeInEnv)) {
+            return true;
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function captureModeOverride(
+    overrides: &Vector<Hir::HirCaptureOverride>,
+    defId: Analyzer::DefinitionId,
+  ): Option<Hir::CaptureMode> {
+    let mut index: u64 = 0;
+
+    while (index < overrides.length()) {
+      if (let Option::SOME(override_) = overrides.get(index)) {
+        if (override_.sourceDef.raw() == defId.raw()) {
+          return Option::SOME(override_.mode);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function copyCaptures(source: &Vector<Hir::HirCapture>): Vector<Hir::HirCapture> {
+    let mut result: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(capture) = source.get(index)) {
+        result.push(Hir::HirCapture {
+          sourceDef: capture.sourceDef,
+          fieldIndex: capture.fieldIndex,
+          mode: capture.mode,
+          typeInEnv: capture.typeInEnv,
+        });
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function copyCaptureOverrides(source: &Vector<Hir::HirCaptureOverride>): Vector<Hir::HirCaptureOverride> {
+    let mut result: Vector<Hir::HirCaptureOverride> = Vector::new<Hir::HirCaptureOverride>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(override_) = source.get(index)) {
+        result.push(Hir::HirCaptureOverride {
+          sourceDef: override_.sourceDef,
+          mode: override_.mode,
+        });
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// The type a capture occupies in the environment struct: the value itself
+  /// when captured by value, a pointer to it otherwise.
+  function captureTypeInEnvironment(
+    typeStore: &mut Analyzer::TypeStore,
+    mode: &Hir::CaptureMode,
+    varType: Analyzer::TypeId,
+  ): Analyzer::TypeId {
+    if (let Hir::CaptureMode::ByValue = mode) {
+      return varType;
+    }
+
+    let mut pointerStoreRef: &mut Analyzer::TypeStore = typeStore;
+    return pointerStoreRef.pointer(varType);
+  }
+
+  /// Fills in every closure's captures, thunk, drop function and escape flag.
+  /// Returns the diagnostics the pass produced.
+  function populateClosureCaptures(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &mut Hir::HirStore,
+  ): DiagnosticBag {
+    let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+
+    let closureIds: Vector<Hir::HirId> = Capture::collectClosuresBottomUp(hir);
+    let mut closureIndex: u64 = 0;
+
+    while (closureIndex < closureIds.length()) {
+      let Option::SOME(closureId) = closureIds.get(closureIndex) else {
+        closureIndex += 1;
+        continue;
+      };
+
+      let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut overrides: Vector<Hir::HirCaptureOverride> = Vector::new<Hir::HirCaptureOverride>();
+      let mut bodyId: Hir::HirId = *closureId;
+      let mut returnType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+      let mut closureSpan: SourceSpan = SourceSpan::new("", 0, 0);
+      let mut closureType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+      let mut escapes: boolean = false;
+      let mut isClosure: boolean = false;
+
+      if (let Option::SOME(node) = hir.get(*closureId)) {
+        if (let Hir::HirKind::Closure(closureNode) = &node.kind) {
+          params = Capture::copyDefIds(&closureNode.params);
+          overrides = Capture::copyCaptureOverrides(&closureNode.captureOverrides);
+          bodyId = closureNode.body;
+          returnType = closureNode.returnType;
+          escapes = closureNode.escapes;
+          closureSpan = node.span;
+          closureType = node.typeId;
+          isClosure = true;
+        }
+      }
+
+      if (!isClosure) {
+        closureIndex += 1;
+        continue;
+      }
+
+      let mut locals: Vector<u32> = Vector::new<u32>();
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < params.length()) {
+        if (let Option::SOME(paramDefId) = params.get(paramIndex)) {
+          Capture::pushRaw(&mut locals, paramDefId.raw());
+        }
+
+        paramIndex += 1;
+      }
+
+      Capture::collectLocals(hir, bodyId, &mut locals);
+
+      let mut freeVars: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut seen: Vector<u32> = Vector::new<u32>();
+      Capture::collectFreeVars(hir, defStore, &mut locals, &mut freeVars, &mut seen, bodyId);
+
+      let mut captures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+      let mut freeIndex: u64 = 0;
+
+      while (freeIndex < freeVars.length()) {
+        let Option::SOME(freeDefId) = freeVars.get(freeIndex) else {
+          freeIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(varType) = Capture::variableType(defStore, *freeDefId) else {
+          freeIndex += 1;
+          continue;
+        };
+
+        let mut usage: Capture::VarUsage = Capture::VarUsage::init();
+        Capture::analyzeVarUsage(hir, defStore, typeStore, &mut usage, bodyId, *freeDefId);
+
+        let mut mode: Hir::CaptureMode = Capture::inferCaptureMode(defStore, typeStore, &usage, varType);
+
+        if (let Option::SOME(overrideMode) = Capture::captureModeOverride(&overrides, *freeDefId)) {
+          mode = overrideMode;
+        }
+
+        let typeInEnv: Analyzer::TypeId = Capture::captureTypeInEnvironment(typeStore, &mode, varType);
+
+        captures.push(Hir::HirCapture {
+          sourceDef: *freeDefId,
+          fieldIndex: freeIndex as u32,
+          mode: mode,
+          typeInEnv: typeInEnv,
+        });
+
+        freeIndex += 1;
+      }
+
+      let thunkDef: Analyzer::DefinitionId = Capture::createThunkDefinition(
+        defStore,
+        typeStore,
+        symbols,
+        hir,
+        closureIndex,
+        &params,
+        returnType,
+        bodyId,
+      );
+
+      let mut dropDef: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (Capture::needsDropFunction(defStore, typeStore, &captures)) {
+        dropDef = Option::SOME(Capture::createDropFunction(
+          defStore,
+          typeStore,
+          symbols,
+          hir,
+          closureIndex,
+          closureSpan,
+        ));
+      }
+
+      // The node is rebuilt rather than mutated through the enum payload,
+      // the same shape the monomorphizer uses to patch definitions.
+      let mut updateRef: &mut Hir::HirStore = hir;
+      let _ = updateRef.nodes.set(closureId.raw() as u64, Hir::HirNode {
+        kind: Hir::HirKind::Closure(Hir::HirClosure {
+          params: params,
+          returnType: returnType,
+          body: bodyId,
+          captures: captures,
+          escapes: escapes,
+          thunkDef: Option::SOME(thunkDef),
+          dropDef: dropDef,
+          captureOverrides: overrides,
+        }),
+        span: closureSpan,
+        typeId: closureType,
+      });
+
+      closureIndex += 1;
+    }
+
+    let escaping: Vector<Hir::HirId> = Escape::analyzeEscapes(hir, defStore);
+    let mut escapeIndex: u64 = 0;
+
+    while (escapeIndex < escaping.length()) {
+      let Option::SOME(escapingId) = escaping.get(escapeIndex) else {
+        escapeIndex += 1;
+        continue;
+      };
+
+      let mut refCaptureNames: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut escapeSpan: SourceSpan = SourceSpan::new("", 0, 0);
+      let mut escapeType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+
+      let mut escapeParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut escapeOverrides: Vector<Hir::HirCaptureOverride> = Vector::new<Hir::HirCaptureOverride>();
+      let mut escapeCaptures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+      let mut escapeBody: Hir::HirId = *escapingId;
+      let mut escapeReturnType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+      let mut escapeThunk: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut escapeDrop: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut escapeIsClosure: boolean = false;
+
+      if (let Option::SOME(node) = hir.get(*escapingId)) {
+        escapeSpan = node.span;
+        escapeType = node.typeId;
+
+        if (let Hir::HirKind::Closure(closureNode) = &node.kind) {
+          escapeParams = Capture::copyDefIds(&closureNode.params);
+          escapeOverrides = Capture::copyCaptureOverrides(&closureNode.captureOverrides);
+          escapeCaptures = Capture::copyCaptures(&closureNode.captures);
+          escapeBody = closureNode.body;
+          escapeReturnType = closureNode.returnType;
+          escapeThunk = closureNode.thunkDef;
+          escapeDrop = closureNode.dropDef;
+          escapeIsClosure = true;
+
+          let mut captureIndex: u64 = 0;
+
+          while (captureIndex < closureNode.captures.length()) {
+            if (let Option::SOME(capture) = closureNode.captures.get(captureIndex)) {
+              let mut byReference: boolean = false;
+
+              match (&capture.mode) {
+                Hir::CaptureMode::ByRef -> {
+                  byReference = true;
+                },
+                Hir::CaptureMode::ByMutRef -> {
+                  byReference = true;
+                },
+                _ -> {},
+              };
+
+              if (byReference) {
+                if (let Option::SOME(definition) = defStore.get(capture.sourceDef)) {
+                  refCaptureNames.push(definition.name());
+                }
+              }
+            }
+
+            captureIndex += 1;
+          }
+        }
+      }
+
+      if (!escapeIsClosure) {
+        escapeIndex += 1;
+        continue;
+      }
+
+      let mut escapeRef: &mut Hir::HirStore = hir;
+      let _ = escapeRef.nodes.set(escapingId.raw() as u64, Hir::HirNode {
+        kind: Hir::HirKind::Closure(Hir::HirClosure {
+          params: escapeParams,
+          returnType: escapeReturnType,
+          body: escapeBody,
+          captures: escapeCaptures,
+          escapes: true,
+          thunkDef: escapeThunk,
+          dropDef: escapeDrop,
+          captureOverrides: escapeOverrides,
+        }),
+        span: escapeSpan,
+        typeId: escapeType,
+      });
+
+      // An escaping closure outlives the frame its references point into.
+      let mut nameIndex: u64 = 0;
+
+      while (nameIndex < refCaptureNames.length()) {
+        if (let Option::SOME(nameSymbol) = refCaptureNames.get(nameIndex)) {
+          let mut captureName: String = String::create("<unknown>");
+
+          if (let Option::SOME(resolved) = symbols.resolve(*nameSymbol)) {
+            captureName = String::create(resolved);
+          }
+
+          let message: String = `closure escapes its scope while capturing \`${captureName.toStr()}\` by reference`;
+
+          let mut diagnostic: Diagnostic = Diagnostic::new(
+            Severity::ERROR,
+            DiagnosticCode::CLOSURE_ESCAPES_WITH_REF_CAPTURE,
+            message.toStr(),
+            escapeSpan,
+          );
+          diagnostic.addLabel(LabelKind::PRIMARY, escapeSpan, "closure defined here");
+
+          let mut bag: &mut DiagnosticBag = &mut diagnostics;
+          bag.push(diagnostic);
+        }
+
+        nameIndex += 1;
+      }
+
+      escapeIndex += 1;
+    }
+
+    return diagnostics;
+  }
+}
