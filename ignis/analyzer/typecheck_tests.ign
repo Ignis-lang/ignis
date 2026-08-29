@@ -8662,6 +8662,85 @@ function typecheckAddPipe(
   }));
 }
 
+/// Scenario: `true |> r.take()` checks the piped value against the method's first
+/// explicit parameter. The right side is a call whose callee is a member access, a
+/// shape `pipeCalleeSignature` used to drop without typing anything.
+/// Spec: IGN-162 — pipes into instance methods.
+@test
+function typecheckPipeIntoInstanceMethodChecksPipedValue(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32Type: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let voidType: Ast::TypeId = typecheckAddPathType(&mut module, "void");
+  let recordType: Ast::TypeId = typecheckAddPathType(&mut module, "R");
+
+  // record R { take(self, value: i32): void { return; } }
+  let selfPat: Ast::PatternId = typecheckAddBinding(&mut module, "self");
+  let valuePat: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", i32Type);
+  let methodReturn: Ast::StatementId = typecheckAddReturn(&mut module);
+
+  let mut methodStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  methodStmts.push(methodReturn);
+  let methodBody: Ast::StatementId = typecheckAddBlock(&mut module, methodStmts);
+
+  let mut methodParams: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  methodParams.push(selfPat);
+  methodParams.push(valuePat);
+
+  let methodId: Ast::ItemId = module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("take"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: methodParams,
+    returnType: Option::SOME(voidType),
+    body: methodBody,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  methods.push(methodId);
+
+  module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: typecheckDummySpan(),
+    name: String::create("R"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: methods,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // let r: R = R {};
+  let recordPath: Ast::ExpressionId = typecheckAddVariable(&mut module, "R");
+  let recordInit: Ast::ExpressionId = typecheckAddRecordInit(
+    &mut module,
+    recordPath,
+    Vector::new<Ast::TypeId>(),
+    Vector::new<Ast::Expression::RecordInitField>(),
+  );
+  let receiverPat: Ast::PatternId = typecheckAddBinding(&mut module, "r");
+  let letStmt: Ast::StatementId = typecheckAddLetStmt(&mut module, receiverPat, recordType, recordInit);
+
+  // true |> r.take();
+  let receiverExpr: Ast::ExpressionId = typecheckAddVariable(&mut module, "r");
+  let methodAccess: Ast::ExpressionId = typecheckAddMemberAccess(&mut module, receiverExpr, "take");
+  let callExpr: Ast::ExpressionId = typecheckAddCall(&mut module, methodAccess, Vector::new<Ast::ExpressionId>());
+  let pipeLeft: Ast::ExpressionId = typecheckAddBoolLiteral(&mut module, true);
+  let pipeExpr: Ast::ExpressionId = typecheckAddPipe(&mut module, pipeLeft, callExpr);
+  let pipeStmt: Ast::StatementId = typecheckAddExprStmt(&mut module, pipeExpr);
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(letStmt);
+  bodyStmts.push(pipeStmt);
+  typecheckAddMainFunction(&mut module, bodyStmts, voidType);
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_ARGUMENT_TYPE);
+}
+
 /// Scenario: `1 |> f(_)` types the placeholder as the piped value and the pipe as the
 /// call's return type.
 /// Spec: IGN-26 — pipe expressions.

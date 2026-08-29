@@ -5828,6 +5828,95 @@ export namespace Analyzer {
     /// resolved, a value that is not callable, and a method needing a receiver are three
     /// different mistakes, and one catch-all would describe two of them wrongly. A name the
     /// resolver already rejected is passed over in silence rather than reported twice.
+    /// The signature of a pipe callee written as `receiver.method`, with the
+    /// receiver removed from the parameter list.
+    ///
+    /// `pipeCalleeSignature` resolves its callee through `lookupExprRef`,
+    /// which records the definition a *name* lands on and nothing for a member
+    /// access, so `x |> obj.method(args)` had no arm at all: the pipe was
+    /// dropped without a type, without an argument check, and without marking
+    /// the receiver mutated. The resolution here mirrors `checkPipeBareMethod`,
+    /// the same call written without parentheses.
+    function pipeMethodCallee(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      ma: &Ast::Expression::MemberAccess,
+    ): Option<Analyzer::Typecheck::PipeCallee> {
+      let objectType: Analyzer::TypeId = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, ma.object)!;
+
+      let receiverType: Analyzer::TypeId = Analyzer::Typecheck::derefReceiverType(defStore, typeStore, objectType);
+
+      let owner: Analyzer::Typecheck::RequiredMethodOwner = Analyzer::Typecheck::requireMethodOwner(
+        state,
+        defStore,
+        typeStore,
+        ma.span,
+        receiverType,
+        "method call target must be a non-generic record or enum",
+        "typecheck does not support generic method receivers",
+      )!;
+
+      let memberName: str = ma.member.toStr();
+
+      let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupMethodInTable(defStore, &owner.instanceMethods, memberName, symbols) else {
+        let staticOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
+          defStore,
+          &owner.staticMethods,
+          memberName,
+          symbols,
+        );
+
+        if (staticOpt.isSome()) {
+          let message: String = `static method \`${memberName}\` cannot be called through an instance`;
+          Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, message.toStr());
+          return Option::NONE;
+        }
+
+        Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, ma.span, DiagnosticCode::UNKNOWN_MEMBER, "unknown method", memberName);
+        return Option::NONE;
+      };
+
+      let info: Analyzer::Typecheck::MethodCallInfo = Analyzer::Typecheck::lookupMethodDefInfo(defStore, methodDefId)!;
+
+      if (info.selfMutable) {
+        Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, ma.object);
+
+        // Same reference-first rule as every other method path: the reference
+        // type's mutability decides before the binding's.
+        let referenceMutability: Option<boolean> = Analyzer::Typecheck::receiverReferenceMutability(defStore, typeStore, objectType);
+
+        if (let Option::SOME(referenceMutable) = referenceMutability) {
+          if (!referenceMutable) {
+            Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method through a shared reference");
+            return Option::NONE;
+          }
+        } else if (!Analyzer::Typecheck::pipeReceiverIsMutable(state, resolvedBodies, ma.object)) {
+          Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method on immutable receiver");
+          return Option::NONE;
+        }
+      }
+
+      let signature: Analyzer::Typecheck::FunctionSignature = Analyzer::Typecheck::extractFunctionSignature(defStore, methodDefId)!;
+
+      let declaredParamTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::methodExplicitParamTypes(defStore, &signature, info.isStatic);
+
+      let specialized: Analyzer::Typecheck::CalleeSignature = Analyzer::Typecheck::substituteOwnerTypeArguments(
+        typeStore,
+        &owner,
+        &declaredParamTypes,
+        signature.returnType,
+      );
+
+      return Option::SOME(Analyzer::Typecheck::PipeCallee {
+        signature: specialized,
+        checkArguments: true,
+      });
+    }
+
     function pipeCalleeSignature(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -5840,6 +5929,14 @@ export namespace Analyzer {
       typeArgumentIds: &Vector<Ast::TypeId>,
       leftType: Analyzer::TypeId,
     ): Option<Analyzer::Typecheck::PipeCallee> {
+      if (let Option::SOME(calleeExpr) = module.expressions.get(calleeExprId)) {
+        if (let Ast::Expression::Node::MemberAccess(ma) = calleeExpr) {
+          if (ma.operator == Ast::Expression::AccessOperator::Dot) {
+            return Analyzer::Typecheck::pipeMethodCallee(state, defStore, typeStore, symbols, module, resolvedBodies, &ma);
+          }
+        }
+      }
+
       let Option::SOME(resolved) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, calleeExprId) else {
         return Option::NONE;
       };
