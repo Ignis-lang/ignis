@@ -410,6 +410,17 @@ function compileFile(path: &String): i32 {
     Io::println(
       `  codegen: ${emitResult.unsupported} unsupported, ${emitResult.functions} functions, ${emitResult.source.length()} bytes`
     );
+
+    // The emitted translation unit is the next thing to feed to a C compiler,
+    // and the `// unsupported instruction: <Variant>` comments in it are how the
+    // remaining work is counted per variant.
+    let emitPath: str = "selfhost_emit.c";
+
+    if (let Result::ERROR(_) = Fs::writeString(emitPath, &emitResult.source)) {
+      Io::println(String::create("  emit: could not write selfhost_emit.c"));
+    } else {
+      Io::println(`  emit: ${emitPath}`);
+    }
   } else {
     Io::println(String::create("  lower: skipped (analyze errors)"));
   }

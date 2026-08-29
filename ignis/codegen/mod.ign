@@ -2,6 +2,7 @@ import Vector from "std::vector";
 
 import Id from "@compiler::ids";
 import Analyzer from "@compiler::analyzer";
+import Borrowck from "@compiler::analyzer::borrowck";
 import Hir from "@compiler::hir";
 import Lir from "@compiler::lir";
 
@@ -436,6 +437,532 @@ export namespace CodegenC {
     };
   }
 
+  /// Whether the nominal behind `defId` carries `@implements(Drop)`, which is
+  /// what makes its `__ignis_drop_state` byte meaningful.
+  function hasDropTrait(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Record(recordDef) -> recordDef.implementsDrop,
+      Analyzer::Definition::Enum(enumDef) -> enumDef.implementsDrop,
+      _ -> false,
+    };
+  }
+
+  /// The user-written `drop` method of a nominal, if it declares one.
+  function findDropMethod(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): Option<Analyzer::DefinitionId> {
+    return CodegenC::findNamedInstanceMethod(defStore, symbols, defId, "drop");
+  }
+
+  /// The instance method of a nominal written with the given name.
+  function findNamedInstanceMethod(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+    methodName: str,
+  ): Option<Analyzer::DefinitionId> {
+    let mut methods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      match (definition) {
+        Analyzer::Definition::Record(recordDef) -> {
+          methods = CodegenC::copyDefIds(&recordDef.instanceMethods);
+        },
+        Analyzer::Definition::Enum(enumDef) -> {
+          methods = CodegenC::copyDefIds(&enumDef.instanceMethods);
+        },
+        _ -> {},
+      };
+    }
+
+    let mut methodIndex: u64 = 0;
+
+    while (methodIndex < methods.length()) {
+      let Option::SOME(methodId) = methods.get(methodIndex) else {
+        methodIndex += 1;
+        continue;
+      };
+
+      let Option::SOME(method) = defStore.get(*methodId) else {
+        methodIndex += 1;
+        continue;
+      };
+
+      if (let Option::SOME(text) = symbols.resolve(method.name())) {
+        if (String::create(text).equals(methodName)) {
+          return Option::SOME(*methodId);
+        }
+      }
+
+      methodIndex += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The drop calls one value needs: its own `drop` method when it declares
+  /// one, otherwise the drops of every droppable field or variant payload.
+  ///
+  /// A `@implements(Drop)` nominal is guarded by its `__ignis_drop_state` byte
+  /// so a value dropped twice runs its destructor once.
+  function emitFieldDrops(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    expression: &String,
+    typeId: Analyzer::TypeId,
+  ): void {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return;
+    };
+
+    let mut nominal: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+    let mut isRecord: boolean = false;
+    let mut isEnum: boolean = false;
+
+    match (typeNode) {
+      Analyzer::Type::Record(defId) -> {
+        nominal = defId;
+        isRecord = true;
+      },
+      Analyzer::Type::Enum(defId) -> {
+        nominal = defId;
+        isEnum = true;
+      },
+      _ -> {},
+    };
+
+    if (!isRecord && !isEnum) {
+      return;
+    }
+
+    let guarded: boolean = CodegenC::hasDropTrait(defStore, nominal);
+
+    if (let Option::SOME(methodId) = CodegenC::findDropMethod(defStore, symbols, nominal)) {
+      let name: String = CodegenC::mangledName(defStore, symbols, methodId);
+
+      let mut block: String = String::create("");
+
+      if (guarded) {
+        let open: String = `    if (!(${expression.toStr()}).__ignis_drop_state) {\n  `;
+        block.pushStr(open.toStr());
+      }
+
+      let call: String = `    ${name.toStr()}(&${expression.toStr()});\n`;
+      block.pushStr(call.toStr());
+
+      if (guarded) {
+        let mark: String = `      (${expression.toStr()}).__ignis_drop_state = 1;\n    }\n`;
+        block.pushStr(mark.toStr());
+      }
+
+      let mut outputRef: &mut String = output;
+      outputRef.pushStr(block.toStr());
+
+      return;
+    }
+
+    if (isEnum) {
+      CodegenC::emitEnumVariantDrops(defStore, typeStore, symbols, output, expression, nominal);
+      return;
+    }
+
+    let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(nominal)) {
+      if (let Analyzer::Definition::Record(recordDef) = definition) {
+        fields = CodegenC::copyDefIds(&recordDef.fields);
+      }
+    }
+
+    let mut fieldIndex: u64 = 0;
+
+    while (fieldIndex < fields.length()) {
+      let Option::SOME(fieldId) = fields.get(fieldIndex) else {
+        fieldIndex += 1;
+        continue;
+      };
+
+      let Option::SOME(fieldDefinition) = defStore.get(*fieldId) else {
+        fieldIndex += 1;
+        continue;
+      };
+
+      let Analyzer::Definition::Field(fieldDef) = fieldDefinition else {
+        fieldIndex += 1;
+        continue;
+      };
+
+      let fieldType: Analyzer::TypeId = fieldDef.fieldType;
+      let index: u32 = fieldDef.index;
+
+      if (Borrowck::needsDropType(defStore, typeStore, fieldType)) {
+        let access: String = `${expression.toStr()}.field_${index}`;
+        CodegenC::emitFieldDrops(defStore, typeStore, symbols, output, &access, fieldType);
+      }
+
+      fieldIndex += 1;
+    }
+  }
+
+  /// Drop the payload of whichever variant is live, dispatching on the tag.
+  function emitEnumVariantDrops(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    expression: &String,
+    defId: Analyzer::DefinitionId,
+  ): void {
+    let mut variants: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Enum(enumDef) = definition) {
+        variants = CodegenC::copyDefIds(&enumDef.variants);
+      }
+    }
+
+    let mut body: String = String::create("");
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < variants.length()) {
+      let Option::SOME(variantId) = variants.get(variantIndex) else {
+        variantIndex += 1;
+        continue;
+      };
+
+      let Option::SOME(variantDefinition) = defStore.get(*variantId) else {
+        variantIndex += 1;
+        continue;
+      };
+
+      let Analyzer::Definition::Variant(variantDef) = variantDefinition else {
+        variantIndex += 1;
+        continue;
+      };
+
+      let tag: u32 = variantDef.tagValue;
+      let payload: Vector<Analyzer::TypeId> = CodegenC::copyTypeIds(&variantDef.payload);
+
+      let mut arm: String = String::create("");
+      let mut payloadIndex: u64 = 0;
+
+      while (payloadIndex < payload.length()) {
+        let Option::SOME(payloadType) = payload.get(payloadIndex) else {
+          payloadIndex += 1;
+          continue;
+        };
+
+        if (Borrowck::needsDropType(defStore, typeStore, *payloadType)) {
+          let access: String = `${expression.toStr()}.payload.variant_${tag}.field_${payloadIndex}`;
+          CodegenC::emitFieldDrops(defStore, typeStore, symbols, &mut arm, &access, *payloadType);
+        }
+
+        payloadIndex += 1;
+      }
+
+      if (arm.length() > 0) {
+        let label: String = `      case ${tag}:\n`;
+        body.pushStr(label.toStr());
+        body.pushStr(arm.toStr());
+        body.pushStr("        break;\n");
+      }
+
+      variantIndex += 1;
+    }
+
+    if (body.length() == 0) {
+      return;
+    }
+
+    let open: String = `    switch ((${expression.toStr()}).tag) {\n`;
+
+    let mut outputRef: &mut String = output;
+    outputRef.pushStr(open.toStr());
+    outputRef.pushStr(body.toStr());
+    outputRef.pushStr("    }\n");
+  }
+
+  /// Mark a moved-from value as already dropped, so the drop scheduled at the
+  /// end of its scope becomes a no-op.
+  function emitUninitializedDropState(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    output: &mut String,
+    expression: &String,
+    typeId: Analyzer::TypeId,
+  ): void {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return;
+    };
+
+    let mut nominal: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+    let mut isRecord: boolean = false;
+    let mut isEnum: boolean = false;
+
+    match (typeNode) {
+      Analyzer::Type::Record(defId) -> {
+        nominal = defId;
+        isRecord = true;
+      },
+      Analyzer::Type::Enum(defId) -> {
+        nominal = defId;
+        isEnum = true;
+      },
+      _ -> {},
+    };
+
+    if (!isRecord && !isEnum) {
+      return;
+    }
+
+    if (CodegenC::hasDropTrait(defStore, nominal)) {
+      let line: String = `    (${expression.toStr()}).__ignis_drop_state = 1;\n`;
+      let mut outputRef: &mut String = output;
+      outputRef.pushStr(line.toStr());
+
+      return;
+    }
+
+    if (isEnum) {
+      return;
+    }
+
+    let mut fields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(nominal)) {
+      if (let Analyzer::Definition::Record(recordDef) = definition) {
+        fields = CodegenC::copyDefIds(&recordDef.fields);
+      }
+    }
+
+    let mut fieldIndex: u64 = 0;
+
+    while (fieldIndex < fields.length()) {
+      let Option::SOME(fieldId) = fields.get(fieldIndex) else {
+        fieldIndex += 1;
+        continue;
+      };
+
+      let Option::SOME(fieldDefinition) = defStore.get(*fieldId) else {
+        fieldIndex += 1;
+        continue;
+      };
+
+      let Analyzer::Definition::Field(fieldDef) = fieldDefinition else {
+        fieldIndex += 1;
+        continue;
+      };
+
+      let fieldType: Analyzer::TypeId = fieldDef.fieldType;
+      let index: u32 = fieldDef.index;
+
+      if (Borrowck::needsDropType(defStore, typeStore, fieldType)) {
+        let access: String = `${expression.toStr()}.field_${index}`;
+        CodegenC::emitUninitializedDropState(defStore, typeStore, output, &access, fieldType);
+      }
+
+      fieldIndex += 1;
+    }
+  }
+
+  /// A builtin operand arrives as a pointer to the value, so reading it needs
+  /// a cast and a dereference.
+  function builtinRefDeref(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    expression: &String,
+    typeId: Analyzer::TypeId,
+  ): String {
+    let target: String = CodegenC::formatCType(defStore, typeStore, symbols, typeId);
+    return `*(${target.toStr()}*)(${expression.toStr()})`;
+  }
+
+  /// The `std::hash::Hasher` record, which owns every `write*` method the hash
+  /// builtin dispatches to.
+  function findHasherDef(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+  ): Option<Analyzer::DefinitionId> {
+    let mut index: u64 = 0;
+
+    while (index < defStore.length()) {
+      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+      let Option::SOME(definition) = defStore.get(defId) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Analyzer::Definition::Record(recordDef) = definition) {
+        if (let Option::SOME(text) = symbols.resolve(recordDef.name)) {
+          if (String::create(text).equals("Hasher")) {
+            return Option::SOME(defId);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The `Hasher::write*` method for a primitive type, named by the same
+  /// mapping the host uses.
+  function hasherWriteMethod(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): str {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return "";
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::BOOLEAN -> "writeBoolean",
+      Analyzer::Type::CHAR -> "writeChar",
+      Analyzer::Type::I8 -> "writeI8",
+      Analyzer::Type::I16 -> "writeI16",
+      Analyzer::Type::I32 -> "writeI32",
+      Analyzer::Type::I64 -> "writeI64",
+      Analyzer::Type::U8 -> "writeByte",
+      Analyzer::Type::U16 -> "writeU16",
+      Analyzer::Type::U32 -> "writeU32",
+      Analyzer::Type::U64 -> "writeU64",
+      Analyzer::Type::STR -> "writeStr",
+      _ -> "",
+    };
+  }
+
+  /// Whether `@eq` on this type compares with C `==`.
+  function isPrimitiveEqType(
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): boolean {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::BOOLEAN -> true,
+      Analyzer::Type::CHAR -> true,
+      Analyzer::Type::I8 -> true,
+      Analyzer::Type::I16 -> true,
+      Analyzer::Type::I32 -> true,
+      Analyzer::Type::I64 -> true,
+      Analyzer::Type::U8 -> true,
+      Analyzer::Type::U16 -> true,
+      Analyzer::Type::U32 -> true,
+      Analyzer::Type::U64 -> true,
+      _ -> false,
+    };
+  }
+
+  /// The C name of the drop-glue helper for a type. The type store is
+  /// deduplicated, so the raw type id already identifies the type uniquely
+  /// within one translation unit.
+  function dropGlueName(typeId: Analyzer::TypeId): String {
+    return `ignis_drop_glue_t${typeId.raw()}`;
+  }
+
+  /// The C expression for the largest value a numeric type holds. A
+  /// non-numeric type cannot reach `@maxOf`, so the fallback only keeps the
+  /// emitter total.
+  function typeMaxValue(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): str {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return "0";
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I8 -> "INT8_MAX",
+      Analyzer::Type::I16 -> "INT16_MAX",
+      Analyzer::Type::I32 -> "INT32_MAX",
+      Analyzer::Type::I64 -> "INT64_MAX",
+      Analyzer::Type::U8 -> "UINT8_MAX",
+      Analyzer::Type::U16 -> "UINT16_MAX",
+      Analyzer::Type::U32 -> "UINT32_MAX",
+      Analyzer::Type::U64 -> "UINT64_MAX",
+      Analyzer::Type::F32 -> "FLT_MAX",
+      Analyzer::Type::F64 -> "DBL_MAX",
+      _ -> "0",
+    };
+  }
+
+  /// The C expression for the smallest value a numeric type holds.
+  function typeMinValue(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): str {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return "0";
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::I8 -> "INT8_MIN",
+      Analyzer::Type::I16 -> "INT16_MIN",
+      Analyzer::Type::I32 -> "INT32_MIN",
+      Analyzer::Type::I64 -> "INT64_MIN",
+      Analyzer::Type::U8 -> "((u8)0)",
+      Analyzer::Type::U16 -> "((u16)0)",
+      Analyzer::Type::U32 -> "((u32)0)",
+      Analyzer::Type::U64 -> "((u64)0)",
+      Analyzer::Type::F32 -> "(-FLT_MAX)",
+      Analyzer::Type::F64 -> "(-DBL_MAX)",
+      _ -> "0",
+    };
+  }
+
+  /// The variant name of an instruction, so the unsupported counter says what
+  /// is still missing instead of only how much.
+  function instructionName(instruction: &Lir::Instr): str {
+    return match (instruction) {
+      Lir::Instr::Load(_) -> "Load",
+      Lir::Instr::Store(_) -> "Store",
+      Lir::Instr::LoadPtr(_) -> "LoadPtr",
+      Lir::Instr::StorePtr(_) -> "StorePtr",
+      Lir::Instr::BuiltinLoad(_) -> "BuiltinLoad",
+      Lir::Instr::BuiltinStore(_) -> "BuiltinStore",
+      Lir::Instr::BuiltinHash(_) -> "BuiltinHash",
+      Lir::Instr::BuiltinEq(_) -> "BuiltinEq",
+      Lir::Instr::Copy(_) -> "Copy",
+      Lir::Instr::BinOp(_) -> "BinOp",
+      Lir::Instr::UnaryOp(_) -> "UnaryOp",
+      Lir::Instr::Call(_) -> "Call",
+      Lir::Instr::Cast(_) -> "Cast",
+      Lir::Instr::BitCast(_) -> "BitCast",
+      Lir::Instr::AddrOfLocal(_) -> "AddrOfLocal",
+      Lir::Instr::GetElementPtr(_) -> "GetElementPtr",
+      Lir::Instr::MakeSlice(_) -> "MakeSlice",
+      Lir::Instr::InitVector(_) -> "InitVector",
+      Lir::Instr::Nop -> "Nop",
+      Lir::Instr::RuntimeCall(_) -> "RuntimeCall",
+      Lir::Instr::TypeIdOf(_) -> "TypeIdOf",
+      Lir::Instr::SizeOf(_) -> "SizeOf",
+      Lir::Instr::AlignOf(_) -> "AlignOf",
+      Lir::Instr::MaxOf(_) -> "MaxOf",
+      Lir::Instr::MinOf(_) -> "MinOf",
+      Lir::Instr::Trap(_) -> "Trap",
+      Lir::Instr::PanicMessage(_) -> "PanicMessage",
+      Lir::Instr::Drop(_) -> "Drop",
+      Lir::Instr::GetFieldPtr(_) -> "GetFieldPtr",
+      Lir::Instr::InitRecord(_) -> "InitRecord",
+      Lir::Instr::InitEnumVariant(_) -> "InitEnumVariant",
+      Lir::Instr::EnumGetTag(_) -> "EnumGetTag",
+      Lir::Instr::EnumGetPayloadField(_) -> "EnumGetPayloadField",
+      Lir::Instr::DropInPlace(_) -> "DropInPlace",
+      Lir::Instr::MarkMoved(_) -> "MarkMoved",
+      Lir::Instr::DropGlue(_) -> "DropGlue",
+      Lir::Instr::MakeClosure(_) -> "MakeClosure",
+      Lir::Instr::CallClosure(_) -> "CallClosure",
+      Lir::Instr::DropClosure(_) -> "DropClosure",
+    };
+  }
+
   /// One instruction. Anything the emitter cannot express yet leaves a comment
   /// naming it and bumps the counter, so a corpus run measures what is left.
   function emitInstruction(
@@ -444,6 +971,7 @@ export namespace CodegenC {
     symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     unsupported: &mut u64,
+    function_: &Lir::FunctionLir,
     instruction: &Lir::Instr,
   ): void {
     match (instruction) {
@@ -621,12 +1149,298 @@ export namespace CodegenC {
         let mut outputRef: &mut String = output;
         outputRef.pushStr("    /* nop */\n");
       },
+      Lir::Instr::BuiltinLoad(node) -> {
+        let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.ptr);
+        let target: String = CodegenC::formatCType(defStore, typeStore, symbols, node.ty);
+        let line: String = `    t${node.dest.raw()} = *(${target.toStr()}*)(${pointer.toStr()});\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::BuiltinStore(node) -> {
+        let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.ptr);
+        let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.value);
+        let target: String = CodegenC::formatCType(defStore, typeStore, symbols, node.ty);
+        let line: String = `    *(${target.toStr()}*)(${pointer.toStr()}) = ${value.toStr()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::BitCast(node) -> {
+        // The Rust emitter also guards the copy with a `_Static_assert` on the
+        // two sizes. That needs the source operand's type, which this emitter
+        // cannot resolve yet, so the copy is sized by the destination alone.
+        let source: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.source);
+        let target: String = CodegenC::formatCType(defStore, typeStore, symbols, node.targetType);
+        let line: String = `    memcpy(&t${node.dest.raw()}, &${source.toStr()}, sizeof(${target.toStr()}));\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::MakeSlice(node) -> {
+        let data: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.data);
+        let length: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.len);
+
+        let mut sliceType: String = String::create("void*");
+
+        if (let Option::SOME(temp) = function_.temps.get(node.dest.raw() as u64)) {
+          sliceType = CodegenC::formatCType(defStore, typeStore, symbols, temp.ty);
+        }
+
+        let mut line: String = `    t${node.dest.raw()} = (${sliceType.toStr()})`;
+        line.pushStr("{ .data = ");
+        line.pushStr(data.toStr());
+        line.pushStr(", .len = ");
+        line.pushStr(length.toStr());
+        line.pushStr(" };\n");
+
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::InitVector(node) -> {
+        let destination: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.destPtr);
+        let mut elementIndex: u64 = 0;
+
+        while (elementIndex < node.elements.length()) {
+          if (let Option::SOME(element) = node.elements.get(elementIndex)) {
+            let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, element);
+            let line: String = `    ${destination.toStr()}[${elementIndex}] = ${value.toStr()};\n`;
+            let mut elementRef: &mut String = output;
+            elementRef.pushStr(line.toStr());
+          }
+
+          elementIndex += 1;
+        }
+      },
+      Lir::Instr::RuntimeCall(node) -> {
+        let mut call: String = String::create("    ");
+        call.pushStr(node.name.toStr());
+        call.pushStr("(");
+
+        let mut argIndex: u64 = 0;
+
+        while (argIndex < node.args.length()) {
+          if (let Option::SOME(argument) = node.args.get(argIndex)) {
+            if (argIndex > 0) {
+              call.pushStr(", ");
+            }
+
+            let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, argument);
+            call.pushStr(value.toStr());
+          }
+
+          argIndex += 1;
+        }
+
+        call.pushStr(");\n");
+
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(call.toStr());
+      },
+      Lir::Instr::SizeOf(node) -> {
+        let target: String = CodegenC::formatCType(defStore, typeStore, symbols, node.ty);
+        let line: String = `    t${node.dest.raw()} = sizeof(${target.toStr()});\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::AlignOf(node) -> {
+        let target: String = CodegenC::formatCType(defStore, typeStore, symbols, node.ty);
+        let line: String = `    t${node.dest.raw()} = _Alignof(${target.toStr()});\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::MaxOf(node) -> {
+        let bound: str = CodegenC::typeMaxValue(typeStore, node.ty);
+        let line: String = `    t${node.dest.raw()} = ${bound};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::BuiltinEq(node) -> {
+        let left: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.left);
+        let right: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.right);
+
+        let mut line: String = String::create("");
+
+        match (&node.kind) {
+          Lir::BuiltinEqKind::Primitive -> {
+            if (CodegenC::isPrimitiveEqType(typeStore, node.ty)) {
+              let leftValue: String = CodegenC::builtinRefDeref(defStore, typeStore, symbols, &left, node.ty);
+              let rightValue: String = CodegenC::builtinRefDeref(defStore, typeStore, symbols, &right, node.ty);
+              line = `    t${node.dest.raw()} = ${leftValue.toStr()} == ${rightValue.toStr()};\n`;
+            }
+          },
+          Lir::BuiltinEqKind::Str -> {
+            let leftValue: String = CodegenC::builtinRefDeref(defStore, typeStore, symbols, &left, node.ty);
+            let rightValue: String = CodegenC::builtinRefDeref(defStore, typeStore, symbols, &right, node.ty);
+            line = `    t${node.dest.raw()} = strcmp(${leftValue.toStr()}, ${rightValue.toStr()}) == 0;\n`;
+          },
+          Lir::BuiltinEqKind::Method(methodId) -> {
+            let name: String = CodegenC::mangledName(defStore, symbols, methodId);
+            line = `    t${node.dest.raw()} = ${name.toStr()}(${left.toStr()}, ${right.toStr()});\n`;
+          },
+        };
+
+        if (line.length() == 0) {
+          let mut countRef: &mut u64 = unsupported;
+          countRef += 1;
+
+          let mut skipRef: &mut String = output;
+          skipRef.pushStr("    // unsupported instruction: BuiltinEq\n");
+
+          return;
+        }
+
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::BuiltinHash(node) -> {
+        let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.value);
+        let hasher: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.hasher);
+
+        let writeMethod: str = CodegenC::hasherWriteMethod(typeStore, node.ty);
+
+        if (String::create(writeMethod).length() > 0) {
+          let mut hasherDef: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+          let mut found: boolean = false;
+
+          if (let Option::SOME(defId) = CodegenC::findHasherDef(defStore, symbols)) {
+            hasherDef = defId;
+            found = true;
+          }
+
+          if (found) {
+            if (let Option::SOME(methodId) = CodegenC::findNamedInstanceMethod(defStore, symbols, hasherDef, writeMethod)) {
+              let name: String = CodegenC::mangledName(defStore, symbols, methodId);
+              let argument: String = CodegenC::builtinRefDeref(defStore, typeStore, symbols, &value, node.ty);
+              let line: String = `    ${name.toStr()}(${hasher.toStr()}, ${argument.toStr()});\n`;
+
+              let mut outputRef: &mut String = output;
+              outputRef.pushStr(line.toStr());
+
+              return;
+            }
+          }
+        } else {
+          let mut nominal: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+          let mut isNominal: boolean = false;
+
+          if (let Option::SOME(typeNode) = typeStore.get(node.ty)) {
+            match (typeNode) {
+              Analyzer::Type::Record(defId) -> {
+                nominal = defId;
+                isNominal = true;
+              },
+              Analyzer::Type::Enum(defId) -> {
+                nominal = defId;
+                isNominal = true;
+              },
+              _ -> {},
+            };
+          }
+
+          if (isNominal) {
+            if (let Option::SOME(methodId) = CodegenC::findNamedInstanceMethod(defStore, symbols, nominal, "hash")) {
+              let name: String = CodegenC::mangledName(defStore, symbols, methodId);
+              let line: String = `    ${name.toStr()}(${value.toStr()}, ${hasher.toStr()});\n`;
+
+              let mut outputRef: &mut String = output;
+              outputRef.pushStr(line.toStr());
+
+              return;
+            }
+          }
+        }
+
+        let mut countRef: &mut u64 = unsupported;
+        countRef += 1;
+
+        let mut skipRef: &mut String = output;
+        skipRef.pushStr("    // unsupported instruction: BuiltinHash\n");
+      },
+      Lir::Instr::Drop(node) -> {
+        let Option::SOME(local) = function_.locals.get(node.local.raw() as u64) else {
+          return;
+        };
+
+        if (local.borrowedAlias) {
+          let line: String = `    /* drop l${node.local.raw()}: borrowed alias */\n`;
+          let mut aliasRef: &mut String = output;
+          aliasRef.pushStr(line.toStr());
+
+          return;
+        }
+
+        let localType: Analyzer::TypeId = local.ty;
+        let access: String = `l${node.local.raw()}`;
+
+        CodegenC::emitFieldDrops(defStore, typeStore, symbols, output, &access, localType);
+      },
+      Lir::Instr::DropInPlace(node) -> {
+        let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.ptr);
+
+        if (!Borrowck::needsDropType(defStore, typeStore, node.ty)) {
+          let line: String = `    (void)${pointer.toStr()}; /* drop_in_place: no-op */\n`;
+          let mut skipRef: &mut String = output;
+          skipRef.pushStr(line.toStr());
+
+          return;
+        }
+
+        let target: String = CodegenC::formatCType(defStore, typeStore, symbols, node.ty);
+        let open: String = `    { ${target.toStr()}* __dip = (${target.toStr()}*)${pointer.toStr()}; (void)__dip;\n`;
+
+        let mut openRef: &mut String = output;
+        openRef.pushStr(open.toStr());
+
+        let access: String = String::create("(*__dip)");
+        CodegenC::emitFieldDrops(defStore, typeStore, symbols, output, &access, node.ty);
+
+        let mut closeRef: &mut String = output;
+        closeRef.pushStr("    }\n");
+      },
+      Lir::Instr::MarkMoved(node) -> {
+        let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.ptr);
+
+        if (!Borrowck::needsDropType(defStore, typeStore, node.ty)) {
+          let line: String = `    (void)${pointer.toStr()}; /* mark_moved: no-op */\n`;
+          let mut skipRef: &mut String = output;
+          skipRef.pushStr(line.toStr());
+
+          return;
+        }
+
+        let target: String = CodegenC::formatCType(defStore, typeStore, symbols, node.ty);
+        let open: String = `    { ${target.toStr()}* __moved = (${target.toStr()}*)${pointer.toStr()}; (void)__moved;\n`;
+
+        let mut openRef: &mut String = output;
+        openRef.pushStr(open.toStr());
+
+        let access: String = String::create("(*__moved)");
+        CodegenC::emitUninitializedDropState(defStore, typeStore, output, &access, node.ty);
+
+        let mut closeRef: &mut String = output;
+        closeRef.pushStr("    }\n");
+      },
+      Lir::Instr::DropGlue(node) -> {
+        // The runtime takes glue through an opaque `void*` and casts it back to
+        // `IgnisDropFn` itself.
+        let glue: String = CodegenC::dropGlueName(node.ty);
+        let line: String = `    t${node.dest.raw()} = (void*)${glue.toStr()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::MinOf(node) -> {
+        let bound: str = CodegenC::typeMinValue(typeStore, node.ty);
+        let line: String = `    t${node.dest.raw()} = ${bound};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
       _ -> {
         let mut countRef: &mut u64 = unsupported;
         countRef += 1;
 
+        let name: str = CodegenC::instructionName(instruction);
+        let line: String = `    // unsupported instruction: ${name}\n`;
+
         let mut outputRef: &mut String = output;
-        outputRef.pushStr("    // unsupported instruction\n");
+        outputRef.pushStr(line.toStr());
       },
     };
   }
@@ -952,7 +1766,7 @@ export namespace CodegenC {
 
       while (instructionIndex < block.instructions.length()) {
         if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
-          CodegenC::emitInstruction(defStore, typeStore, symbols, output, unsupported, instruction);
+          CodegenC::emitInstruction(defStore, typeStore, symbols, output, unsupported, function_, instruction);
         }
 
         instructionIndex += 1;
@@ -965,6 +1779,97 @@ export namespace CodegenC {
 
     let mut closeRef: &mut String = output;
     closeRef.pushStr("}\n\n");
+  }
+
+  /// One `static void <name>(u8*)` helper per type a `DropGlue` instruction
+  /// names. The runtime calls these through a function pointer, so they have to
+  /// exist before the first function body that takes their address.
+  function emitDropGlueHelpers(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    program: &Lir::LirProgram,
+  ): void {
+    let mut glueTypes: Vector<u32> = Vector::new<u32>();
+    let mut functionIndex: u64 = 0;
+
+    while (functionIndex < program.functions.length()) {
+      let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+        functionIndex += 1;
+        continue;
+      };
+
+      let mut blockIndex: u64 = 0;
+
+      while (blockIndex < function_.blocks.length()) {
+        let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+          blockIndex += 1;
+          continue;
+        };
+
+        let mut instructionIndex: u64 = 0;
+
+        while (instructionIndex < block.instructions.length()) {
+          if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
+            if (let Lir::Instr::DropGlue(node) = instruction) {
+              if (!CodegenC::containsRaw(&mut glueTypes, node.ty.raw())) {
+                glueTypes.push(node.ty.raw());
+              }
+            }
+          }
+
+          instructionIndex += 1;
+        }
+
+        blockIndex += 1;
+      }
+
+      functionIndex += 1;
+    }
+
+    if (glueTypes.length() == 0) {
+      return;
+    }
+
+    let mut headerRef: &mut String = output;
+    headerRef.pushStr("\n// Drop glue\n");
+
+    let mut glueIndex: u64 = 0;
+
+    while (glueIndex < glueTypes.length()) {
+      let Option::SOME(raw) = glueTypes.get(glueIndex) else {
+        glueIndex += 1;
+        continue;
+      };
+
+      let typeId: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
+      let name: String = CodegenC::dropGlueName(typeId);
+
+      let open: String = `static void ${name.toStr()}(u8* payload) {\n`;
+
+      let mut openRef: &mut String = output;
+      openRef.pushStr(open.toStr());
+
+      if (Borrowck::needsDropType(defStore, typeStore, typeId)) {
+        let target: String = CodegenC::formatCType(defStore, typeStore, symbols, typeId);
+        let bind: String = `    ${target.toStr()}* value = (${target.toStr()}*)payload;\n`;
+
+        let mut bindRef: &mut String = output;
+        bindRef.pushStr(bind.toStr());
+
+        let access: String = String::create("(*value)");
+        CodegenC::emitFieldDrops(defStore, typeStore, symbols, output, &access, typeId);
+      } else {
+        let mut voidRef: &mut String = output;
+        voidRef.pushStr("    (void)payload;\n");
+      }
+
+      let mut closeRef: &mut String = output;
+      closeRef.pushStr("}\n\n");
+
+      glueIndex += 1;
+    }
   }
 
   /// The whole translation unit: the runtime header, one forward declaration
@@ -980,7 +1885,14 @@ export namespace CodegenC {
     let mut unsupported: u64 = 0;
     let mut functions: u64 = 0;
 
-    source.pushStr("#include \"ignis_rt.h\"\n\n");
+    source.pushStr("#include \"ignis_rt.h\"\n");
+
+    // `ignis_rt.h` already pulls stdint, stdlib and float.h. `memcpy` and `pow`
+    // come from these two, and the Rust emitter only includes them when an
+    // instruction needs them. Scanning the program for that is a refinement the
+    // measured loop does not need yet.
+    source.pushStr("#include <string.h>\n");
+    source.pushStr("#include <math.h>\n\n");
 
     let typeDefs: Vector<Analyzer::DefinitionId> = CodegenC::orderedTypeDefs(defStore, typeStore);
 
@@ -1009,6 +1921,8 @@ export namespace CodegenC {
 
       definitionIndex += 1;
     }
+
+    CodegenC::emitDropGlueHelpers(defStore, typeStore, symbols, &mut source, program);
 
     source.pushStr("\n// Function prototypes\n");
 
@@ -1207,6 +2121,21 @@ export namespace CodegenC {
     }
 
     return components;
+  }
+
+  function copyTypeIds(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
+    let mut result: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(typeId) = source.get(index)) {
+        result.push(*typeId);
+      }
+
+      index += 1;
+    }
+
+    return result;
   }
 
   function copyDefIds(source: &Vector<Analyzer::DefinitionId>): Vector<Analyzer::DefinitionId> {
