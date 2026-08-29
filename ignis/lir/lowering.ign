@@ -4,6 +4,7 @@ import SourceSpan from "@compiler::diagnostics";
 import Id from "@compiler::ids";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
+import Borrowck from "@compiler::analyzer::borrowck";
 import Lir from "./mod";
 
 /// HIR -> LIR lowering for the selfhost compiler (IGN-155), grown with the
@@ -24,6 +25,9 @@ export namespace LirLowering {
     public terminated: boolean;
     public breakBlockRaws: Vector<u32>;
     public continueBlockRaws: Vector<u32>;
+    /// Definitions whose local slot holds a pointer to the original place
+    /// rather than a copy: the by-mutable-reference captures of a thunk.
+    public byrefCaptureRaws: Vector<u32>;
 
     public static init(): LowerState {
       return LowerState {
@@ -34,6 +38,7 @@ export namespace LirLowering {
         terminated: false,
         breakBlockRaws: Vector::new<u32>(),
         continueBlockRaws: Vector::new<u32>(),
+        byrefCaptureRaws: Vector::new<u32>(),
       };
     }
   }
@@ -183,6 +188,51 @@ export namespace LirLowering {
       name: Option::NONE,
       borrowedAlias: false,
     });
+  }
+
+  function isByrefCapture(
+    state: &mut LirLowering::LowerState,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < state.byrefCaptureRaws.length()) {
+      if (let Option::SOME(raw) = state.byrefCaptureRaws.get(index)) {
+        if (*raw == defId.raw()) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function markByrefCapture(
+    state: &mut LirLowering::LowerState,
+    defId: Analyzer::DefinitionId,
+  ): void {
+    if (LirLowering::isByrefCapture(state, defId)) {
+      return;
+    }
+
+    let mut stateRef: &mut LirLowering::LowerState = state;
+    stateRef.byrefCaptureRaws.push(defId.raw());
+  }
+
+  /// The pointee of a pointer type, or the type itself when it is not one.
+  function pointeeOrSelf(
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId,
+  ): Analyzer::TypeId {
+    if (let Option::SOME(typeNode) = typeStore.get(ty)) {
+      if (let Analyzer::Type::Pointer(pointerType) = typeNode) {
+        return pointerType.pointee;
+      }
+    }
+
+    return ty;
   }
 
   function markUnsupported(
@@ -349,6 +399,32 @@ export namespace LirLowering {
       },
       Hir::HirKind::Variable(defId) -> {
         if (let Option::SOME(slot) = LirLowering::lookupLocal(state, defId)) {
+          // A by-mutable-reference capture keeps a pointer in its slot, so
+          // reading it needs one more hop than an ordinary local.
+          if (LirLowering::isByrefCapture(state, defId)) {
+            let mut pointerType: Analyzer::TypeId = nodeType;
+
+            if (let Option::SOME(slotType) = function_.localType(slot)) {
+              pointerType = slotType;
+            }
+
+            let pointerTemp: Lir::TempId = LirLowering::freshTemp(function_, pointerType, nodeSpan);
+
+            LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+              dest: pointerTemp,
+              source: slot,
+            }));
+
+            let valueTemp: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+            LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
+              dest: valueTemp,
+              ptr: Lir::Operand::Temp(pointerTemp),
+            }));
+
+            return Lir::Operand::Temp(valueTemp);
+          }
+
           let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
 
           LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
@@ -993,6 +1069,9 @@ export namespace LirLowering {
       Hir::HirKind::Defer(_) -> {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
+      Hir::HirKind::Closure(closureNode) -> {
+        return LirLowering::lowerClosure(typeStore, function_, state, &closureNode, nodeType, nodeSpan);
+      },
       _ -> {
         LirLowering::markUnsupported(function_, state);
 
@@ -1027,6 +1106,25 @@ export namespace LirLowering {
 
     if (let Hir::HirKind::Variable(defId) = &node.kind) {
       if (let Option::SOME(slot) = LirLowering::lookupLocal(state, defId)) {
+        // The slot of a by-mutable-reference capture already points at the
+        // original place, so its address is the value it holds.
+        if (LirLowering::isByrefCapture(state, defId)) {
+          let mut pointerType: Analyzer::TypeId = nodeType;
+
+          if (let Option::SOME(slotType) = function_.localType(slot)) {
+            pointerType = slotType;
+          }
+
+          let pointerTemp: Lir::TempId = LirLowering::freshTemp(function_, pointerType, nodeSpan);
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+            dest: pointerTemp,
+            source: slot,
+          }));
+
+          return Lir::Operand::Temp(pointerTemp);
+        }
+
         let mut ptrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
         let ptrType: Analyzer::TypeId = ptrTypeStoreRef.pointer(nodeType);
         let dest: Lir::TempId = LirLowering::freshTemp(function_, ptrType, nodeSpan);
@@ -1085,6 +1183,440 @@ export namespace LirLowering {
 
   /// `target = value` and `target op= value`. A plain local stores directly;
   /// every other target goes through its place pointer and `StorePtr`.
+  /// Assignment to a by-mutable-reference capture: the slot holds a pointer
+  /// to the original place, so the value is stored through it.
+  /// The thunk and drop-function capture lists of every closure in the store,
+  /// keyed by raw definition id. Lowering a thunk needs the capture list of
+  /// the closure it belongs to, and the closure node is nowhere near the
+  /// thunk's own body.
+  record ClosureTables {
+    public thunkDefRaws: Vector<u32>;
+    public thunkCaptures: Vector<Vector<Hir::HirCapture>>;
+    public dropDefRaws: Vector<u32>;
+    public dropCaptures: Vector<Vector<Hir::HirCapture>>;
+
+    public static init(): ClosureTables {
+      return ClosureTables {
+        thunkDefRaws: Vector::new<u32>(),
+        thunkCaptures: Vector::new<Vector<Hir::HirCapture>>(),
+        dropDefRaws: Vector::new<u32>(),
+        dropCaptures: Vector::new<Vector<Hir::HirCapture>>(),
+      };
+    }
+
+    /// Empty both when the definition is not a thunk and when its closure
+    /// captures nothing, which lower the same way.
+    public thunkCapturesFor(&self, defRaw: u32): Vector<Hir::HirCapture> {
+      let mut index: u64 = 0;
+
+      while (index < self.thunkDefRaws.length()) {
+        if (let Option::SOME(existing) = self.thunkDefRaws.get(index)) {
+          if (*existing == defRaw) {
+            if (let Option::SOME(captures) = self.thunkCaptures.get(index)) {
+              return LirLowering::copyCaptures(captures);
+            }
+
+            return Vector::new<Hir::HirCapture>();
+          }
+        }
+
+        index += 1;
+      }
+
+      return Vector::new<Hir::HirCapture>();
+    }
+
+    public dropCapturesFor(&self, defRaw: u32): Vector<Hir::HirCapture> {
+      let mut index: u64 = 0;
+
+      while (index < self.dropDefRaws.length()) {
+        if (let Option::SOME(existing) = self.dropDefRaws.get(index)) {
+          if (*existing == defRaw) {
+            if (let Option::SOME(captures) = self.dropCaptures.get(index)) {
+              return LirLowering::copyCaptures(captures);
+            }
+
+            return Vector::new<Hir::HirCapture>();
+          }
+        }
+
+        index += 1;
+      }
+
+      return Vector::new<Hir::HirCapture>();
+    }
+  }
+
+  function copyCaptures(source: &Vector<Hir::HirCapture>): Vector<Hir::HirCapture> {
+    let mut result: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(capture) = source.get(index)) {
+        result.push(Hir::HirCapture {
+          sourceDef: capture.sourceDef,
+          fieldIndex: capture.fieldIndex,
+          mode: capture.mode,
+          typeInEnv: capture.typeInEnv,
+        });
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function collectClosureTables(hirStore: &Hir::HirStore): LirLowering::ClosureTables {
+    let mut tables: LirLowering::ClosureTables = LirLowering::ClosureTables::init();
+    let mut index: u64 = 0;
+
+    while (index < hirStore.nodes.length()) {
+      if (let Option::SOME(node) = hirStore.nodes.get(index)) {
+        if (let Hir::HirKind::Closure(closureNode) = &node.kind) {
+          if (let Option::SOME(thunkDef) = closureNode.thunkDef) {
+            tables.thunkDefRaws.push(thunkDef.raw());
+            tables.thunkCaptures.push(LirLowering::copyCaptures(&closureNode.captures));
+          }
+
+          if (let Option::SOME(dropDef) = closureNode.dropDef) {
+            tables.dropDefRaws.push(dropDef.raw());
+            tables.dropCaptures.push(LirLowering::copyCaptures(&closureNode.captures));
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return tables;
+  }
+
+  /// Loads the environment pointer a thunk or drop function receives as its
+  /// first parameter.
+  function loadEnvironmentPointer(
+    defStore: &mut Analyzer::DefinitionStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    paramDefs: &Vector<Analyzer::DefinitionId>,
+  ): Option<Lir::TempId> {
+    let Option::SOME(envParam) = paramDefs.get(0) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(envLocal) = LirLowering::lookupLocal(state, *envParam) else {
+      return Option::NONE;
+    };
+
+    let mut envPointerType: Analyzer::TypeId = function_.returnType;
+
+    if (let Option::SOME(definition) = defStore.get(*envParam)) {
+      if (let Analyzer::Definition::Variable(variableDef) = definition) {
+        envPointerType = variableDef.declaredType;
+      }
+    }
+
+    let envTemp: Lir::TempId = LirLowering::freshTemp(function_, envPointerType, SourceSpan::new("", 0, 0));
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+      dest: envTemp,
+      source: envLocal,
+    }));
+
+    return Option::SOME(envTemp);
+  }
+
+  /// Unpacks a thunk's environment into locals the body can reference by the
+  /// same definitions it used in the enclosing function.
+  ///
+  ///   ByValue:  read the field and keep the value
+  ///   ByRef:    read the field, then dereference it
+  ///   ByMutRef: read the field and keep the pointer, so writes reach the original
+  function emitThunkPreamble(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    paramDefs: &Vector<Analyzer::DefinitionId>,
+    captures: &Vector<Hir::HirCapture>,
+  ): void {
+    let span: SourceSpan = SourceSpan::new("", 0, 0);
+
+    let Option::SOME(envTemp) = LirLowering::loadEnvironmentPointer(defStore, function_, state, paramDefs) else {
+      return;
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < captures.length()) {
+      let Option::SOME(capture) = captures.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut fieldPointerStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let fieldPointerType: Analyzer::TypeId = fieldPointerStoreRef.pointer(capture.typeInEnv);
+      let fieldPointer: Lir::TempId = LirLowering::freshTemp(function_, fieldPointerType, span);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::GetFieldPtr(Lir::InstrGetFieldPtr {
+        dest: fieldPointer,
+        base: Lir::Operand::Temp(envTemp),
+        fieldIndex: capture.fieldIndex,
+        fieldType: capture.typeInEnv,
+      }));
+
+      let fieldValue: Lir::TempId = LirLowering::freshTemp(function_, capture.typeInEnv, span);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
+        dest: fieldValue,
+        ptr: Lir::Operand::Temp(fieldPointer),
+      }));
+
+      let mut storedValue: Lir::Operand = Lir::Operand::Temp(fieldValue);
+      let mut localType: Analyzer::TypeId = capture.typeInEnv;
+      let mut localMutable: boolean = false;
+      let mut isByref: boolean = false;
+
+      match (&capture.mode) {
+        Hir::CaptureMode::ByValue -> {},
+        Hir::CaptureMode::ByRef -> {
+          let pointeeType: Analyzer::TypeId = LirLowering::pointeeOrSelf(typeStore, capture.typeInEnv);
+          let derefValue: Lir::TempId = LirLowering::freshTemp(function_, pointeeType, span);
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
+            dest: derefValue,
+            ptr: Lir::Operand::Temp(fieldValue),
+          }));
+
+          storedValue = Lir::Operand::Temp(derefValue);
+          localType = pointeeType;
+        },
+        Hir::CaptureMode::ByMutRef -> {
+          localMutable = true;
+          isByref = true;
+        },
+      };
+
+      let mut captureFunctionRef: &mut Lir::FunctionLir = function_;
+      let captureLocal: Lir::LocalId = captureFunctionRef.allocLocal(Lir::LocalData {
+        defId: Option::SOME(capture.sourceDef),
+        ty: localType,
+        mutable: localMutable,
+        name: Option::NONE,
+        borrowedAlias: false,
+      });
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+        dest: captureLocal,
+        value: storedValue,
+      }));
+
+      LirLowering::registerLocal(state, capture.sourceDef, captureLocal);
+
+      if (isByref) {
+        LirLowering::markByrefCapture(state, capture.sourceDef);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// A closure drop function owns only what the environment owns: every
+  /// by-value capture whose type needs dropping.
+  function emitDropFunctionBody(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    paramDefs: &Vector<Analyzer::DefinitionId>,
+    captures: &Vector<Hir::HirCapture>,
+  ): void {
+    let span: SourceSpan = SourceSpan::new("", 0, 0);
+
+    let Option::SOME(envTemp) = LirLowering::loadEnvironmentPointer(defStore, function_, state, paramDefs) else {
+      return;
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < captures.length()) {
+      let Option::SOME(capture) = captures.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut isByValue: boolean = false;
+
+      if (let Hir::CaptureMode::ByValue = &capture.mode) {
+        isByValue = true;
+      }
+
+      if (!isByValue) {
+        index += 1;
+        continue;
+      }
+
+      if (!Borrowck::needsDropType(defStore, typeStore, capture.typeInEnv)) {
+        index += 1;
+        continue;
+      }
+
+      let mut fieldPointerStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let fieldPointerType: Analyzer::TypeId = fieldPointerStoreRef.pointer(capture.typeInEnv);
+      let fieldPointer: Lir::TempId = LirLowering::freshTemp(function_, fieldPointerType, span);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::GetFieldPtr(Lir::InstrGetFieldPtr {
+        dest: fieldPointer,
+        base: Lir::Operand::Temp(envTemp),
+        fieldIndex: capture.fieldIndex,
+        fieldType: capture.typeInEnv,
+      }));
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::DropInPlace(Lir::InstrDropInPlace {
+        ptr: Lir::Operand::Temp(fieldPointer),
+        ty: capture.typeInEnv,
+      }));
+
+      index += 1;
+    }
+  }
+
+  /// Packs the captured values into an environment and produces the closure
+  /// value: the thunk pointer, the optional drop pointer and the environment.
+  function lowerClosure(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    closureNode: &Hir::HirClosure,
+    nodeType: Analyzer::TypeId,
+    nodeSpan: SourceSpan,
+  ): Lir::Operand {
+    // Capture analysis fills the thunk in; without it there is no callable
+    // body to point at, so the closure value is null rather than wrong.
+    let Option::SOME(thunkDef) = closureNode.thunkDef else {
+      return Lir::Operand::Const(Lir::ConstValue::Null(nodeType));
+    };
+
+    let mut captureOperands: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
+    let mut index: u64 = 0;
+
+    while (index < closureNode.captures.length()) {
+      let Option::SOME(capture) = closureNode.captures.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(slot) = LirLowering::lookupLocal(state, capture.sourceDef) else {
+        captureOperands.push(Lir::Operand::Const(Lir::ConstValue::Undef(capture.typeInEnv)));
+        index += 1;
+        continue;
+      };
+
+      let captureTemp: Lir::TempId = LirLowering::freshTemp(function_, capture.typeInEnv, nodeSpan);
+
+      let mut byValue: boolean = false;
+
+      if (let Hir::CaptureMode::ByValue = &capture.mode) {
+        byValue = true;
+      }
+
+      if (byValue) {
+        LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+          dest: captureTemp,
+          source: slot,
+        }));
+      } else {
+        let mut mutableCapture: boolean = false;
+
+        if (let Hir::CaptureMode::ByMutRef = &capture.mode) {
+          mutableCapture = true;
+        }
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::AddrOfLocal(Lir::InstrAddrOfLocal {
+          dest: captureTemp,
+          local: slot,
+          mutable: mutableCapture,
+        }));
+      }
+
+      captureOperands.push(Lir::Operand::Temp(captureTemp));
+      index += 1;
+    }
+
+    let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::MakeClosure(Lir::InstrMakeClosure {
+      dest: dest,
+      thunk: thunkDef,
+      dropFn: closureNode.dropDef,
+      captures: captureOperands,
+      closureType: nodeType,
+      heapAllocate: closureNode.escapes,
+    }));
+
+    let _ = typeStore;
+
+    return Lir::Operand::Temp(dest);
+  }
+
+  function lowerByrefAssign(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    assignNode: &Hir::HirAssign,
+    targetSlot: Lir::LocalId,
+    targetType: Analyzer::TypeId,
+  ): void {
+    let span: SourceSpan = SourceSpan::new("", 0, 0);
+
+    let mut pointerType: Analyzer::TypeId = targetType;
+
+    if (let Option::SOME(slotType) = function_.localType(targetSlot)) {
+      pointerType = slotType;
+    }
+
+    let pointerTemp: Lir::TempId = LirLowering::freshTemp(function_, pointerType, span);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+      dest: pointerTemp,
+      source: targetSlot,
+    }));
+
+    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, assignNode.value);
+
+    let Option::SOME(operation) = assignNode.operation else {
+      LirLowering::pushInstr(function_, state, Lir::Instr::StorePtr(Lir::InstrStorePtr {
+        ptr: Lir::Operand::Temp(pointerTemp),
+        value: value,
+      }));
+
+      return;
+    };
+
+    let current: Lir::TempId = LirLowering::freshTemp(function_, targetType, span);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
+      dest: current,
+      ptr: Lir::Operand::Temp(pointerTemp),
+    }));
+
+    let combined: Lir::TempId = LirLowering::freshTemp(function_, targetType, span);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
+      dest: combined,
+      op: operation,
+      left: Lir::Operand::Temp(current),
+      right: value,
+    }));
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::StorePtr(Lir::InstrStorePtr {
+      ptr: Lir::Operand::Temp(pointerTemp),
+      value: Lir::Operand::Temp(combined),
+    }));
+  }
+
   function lowerAssign(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1095,6 +1627,7 @@ export namespace LirLowering {
   ): void {
     let mut targetType: Analyzer::TypeId = function_.returnType;
     let mut targetIsLocal: boolean = false;
+    let mut targetIsByref: boolean = false;
     let mut targetSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
 
     if (let Option::SOME(targetNode) = hirStore.get(assignNode.target)) {
@@ -1102,10 +1635,21 @@ export namespace LirLowering {
 
       if (let Hir::HirKind::Variable(defId) = &targetNode.kind) {
         if (let Option::SOME(slot) = LirLowering::lookupLocal(state, defId)) {
+          // Writing a by-mutable-reference capture has to go through the
+          // pointer in the slot, otherwise the write lands on the copy.
+          if (LirLowering::isByrefCapture(state, defId)) {
+            targetIsByref = true;
+          }
+
           targetIsLocal = true;
           targetSlot = slot;
         }
       }
+    }
+
+    if (targetIsByref) {
+      LirLowering::lowerByrefAssign(defStore, typeStore, hirStore, function_, state, assignNode, targetSlot, targetType);
+      return;
     }
 
     if (targetIsLocal) {
@@ -2323,6 +2867,7 @@ export namespace LirLowering {
     hirStore: &Hir::HirStore,
   ): LirLowering::LowerModuleResult {
     let mut program: Lir::LirProgram = Lir::LirProgram::init();
+    let tables: LirLowering::ClosureTables = LirLowering::collectClosureTables(hirStore);
     let mut unsupported: u64 = 0;
     let mut loweredFunctions: u64 = 0;
 
@@ -2363,6 +2908,20 @@ export namespace LirLowering {
       let mut state: LirLowering::LowerState = LirLowering::LowerState::init();
 
       LirLowering::registerParams(defStore, &mut function_, &mut state, &paramDefs);
+
+      let thunkCaptures: Vector<Hir::HirCapture> = tables.thunkCapturesFor(itemDef.raw());
+
+      if (thunkCaptures.length() > 0) {
+        LirLowering::emitThunkPreamble(defStore, typeStore, &mut function_, &mut state, &paramDefs, &thunkCaptures);
+      }
+
+      // The drop function's own HIR body is a bare `return`, so the field
+      // drops go in front of it rather than replacing it.
+      let dropCaptures: Vector<Hir::HirCapture> = tables.dropCapturesFor(itemDef.raw());
+
+      if (dropCaptures.length() > 0) {
+        LirLowering::emitDropFunctionBody(defStore, typeStore, &mut function_, &mut state, &paramDefs, &dropCaptures);
+      }
 
       let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, &mut function_, &mut state, bodyId);
 
