@@ -63,6 +63,9 @@ export namespace Analyzer {
       public scopeKeys: Vector<u64>;
       public scopeSyms: Vector<Analyzer::SymbolId>;
       public scopeSpans: Vector<SourceSpan>;
+      /// True while the children of an `extern` block are being completed.
+      /// The functions inside one have no body and keep their written name.
+      public insideExtern: boolean;
     }
 
     /// Output produced by `predeclareRoots`.
@@ -620,6 +623,26 @@ export namespace Analyzer {
     /// Whether the item's attributes carry `@deprecated`, with or without a
     /// message argument. Follows `implementsLangTrait` in matching the
     /// attribute by raw name text.
+    /// Whether `metadata` carries the bare attribute `name`.
+    function hasAttribute(metadata: &Ast::Metadata, name: str): boolean {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (attribute.name.equals(name)) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     function hasDeprecatedAttribute(metadata: &Ast::Metadata): boolean {
       let mut index: u64 = 0;
 
@@ -1111,6 +1134,8 @@ export namespace Analyzer {
                   visibility: Analyzer::Visibility::PUBLIC,
                   declaredType: sentinelId,
                   mutable: false,
+                  takes: Analyzer::Binder::hasAttribute(&b.metadata, "takes"),
+                  noEscape: Analyzer::Binder::hasAttribute(&b.metadata, "noescape"),
                 };
                 let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                 let paramId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(paramDef));
@@ -1809,6 +1834,7 @@ export namespace Analyzer {
         isDeprecated: false,
         deprecatedMessage: Option::NONE,
         extensionTarget: Option::NONE,
+        isExtern: false,
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       let defId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Function(placeholderFn));
@@ -1826,6 +1852,7 @@ export namespace Analyzer {
         isDeprecated: Analyzer::Binder::hasDeprecatedAttribute(&fn_.metadata),
         deprecatedMessage: Analyzer::Binder::deprecatedAttributeMessage(&fn_.metadata),
         extensionTarget: Analyzer::Binder::extensionAttributeTarget(&fn_.metadata),
+        isExtern: state.insideExtern,
       };
       let mut defsRef2: &mut Analyzer::DefinitionStore = defStore;
       defsRef2.replace(defId, Analyzer::Definition::Function(newFn));
@@ -1870,6 +1897,8 @@ export namespace Analyzer {
         visibility: Analyzer::Visibility::PUBLIC,
         declaredType: sentinelId,
         mutable: false,
+        takes: false,
+        noEscape: false,
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       let defId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(varDef));
@@ -1945,12 +1974,18 @@ export namespace Analyzer {
             let childScopeKey: u64 = (itemId.raw() as u64) + 1;
             let mut externChildIndex: u64 = 0;
 
+            let mut enterRef: &mut Analyzer::Binder::BinderState = state;
+            enterRef.insideExtern = true;
+
             while (externChildIndex < externItem.items.length()) {
               if (let Option::SOME(childId) = externItem.items.get(externChildIndex)) {
                 completeItem(state, defStore, typeStore, symbols, ast, *childId, childScopeKey, pass1);
               }
               externChildIndex += 1;
             }
+
+            let mut leaveRef: &mut Analyzer::Binder::BinderState = state;
+            leaveRef.insideExtern = false;
           },
           Ast::Item::Node::Import(_) -> {},
         };
@@ -1986,6 +2021,7 @@ export namespace Analyzer {
         scopeKeys: scopeKeys,
         scopeSyms: scopeSyms,
         scopeSpans: scopeSpans,
+        insideExtern: false,
       };
 
       let typeStoreLengthBefore: u64 = typeStore.length();
@@ -2055,6 +2091,7 @@ export namespace Analyzer {
         scopeKeys: scopeKeys,
         scopeSyms: scopeSyms,
         scopeSpans: scopeSpans,
+        insideExtern: false,
       };
 
       let mut index: u64 = 0;

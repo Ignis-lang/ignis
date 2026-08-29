@@ -11,11 +11,10 @@ import Vector from "std::vector";
 /// environment, because the scope that built the environment is gone by the
 /// time the closure runs.
 ///
-/// One deliberate divergence from the oracle: it exempts arguments whose
-/// parameter carries `@noescape`, and the selfhost definition store records no
-/// parameter attributes, so every call argument is treated as escaping. The
-/// direction is safe (a heap environment where a stack one would do) and it
-/// disappears once parameter attributes reach the binder.
+/// An argument whose parameter carries `@noescape` is exempt: the callee
+/// promises not to keep the closure past the call, so its environment can stay
+/// on the stack. A call through a closure value has no parameter list to
+/// consult, so every argument there escapes.
 export namespace Escape {
   /// Maps a definition bound to a closure (directly or through an alias
   /// chain) to that closure's node. Two parallel vectors instead of a map,
@@ -184,21 +183,81 @@ export namespace Escape {
     }
   }
 
-  /// Scans every argument of a call: each one both escapes on its own and is
-  /// descended into. Without parameter attributes there is no `@noescape`
-  /// exemption to apply.
+  /// Whether the parameter in `paramIndex` carries `@noescape`.
+  function paramIsNoEscape(
+    defStore: &mut Analyzer::DefinitionStore,
+    paramDefs: &Vector<Analyzer::DefinitionId>,
+    paramIndex: u64,
+  ): boolean {
+    let Option::SOME(paramDefId) = paramDefs.get(paramIndex) else {
+      return false;
+    };
+
+    let Option::SOME(definition) = defStore.get(*paramDefId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Variable(variableDef) -> variableDef.noEscape,
+      _ -> false,
+    };
+  }
+
+  function calleeParams(
+    defStore: &mut Analyzer::DefinitionStore,
+    calleeDef: Analyzer::DefinitionId,
+  ): Vector<Analyzer::DefinitionId> {
+    let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(calleeDef)) {
+      match (definition) {
+        Analyzer::Definition::Function(functionDef) -> {
+          params = Escape::copyDefIds(&functionDef.params);
+        },
+        Analyzer::Definition::Method(methodDef) -> {
+          params = Escape::copyDefIds(&methodDef.params);
+        },
+        _ -> {},
+      };
+    }
+
+    return params;
+  }
+
+  function copyDefIds(source: &Vector<Analyzer::DefinitionId>): Vector<Analyzer::DefinitionId> {
+    let mut result: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(defId) = source.get(index)) {
+        result.push(*defId);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// Scans every argument of a call: each one escapes on its own unless its
+  /// parameter carries `@noescape`, and each is descended into either way.
   function scanCallArguments(
     hir: &mut Hir::HirStore,
     defStore: &mut Analyzer::DefinitionStore,
     aliases: &Escape::AliasTable,
     escaping: &mut Vector<Hir::HirId>,
     args: &Vector<Hir::HirId>,
+    paramDefs: &Vector<Analyzer::DefinitionId>,
+    paramOffset: u64,
   ): void {
     let mut index: u64 = 0;
 
     while (index < args.length()) {
       if (let Option::SOME(argId) = args.get(index)) {
-        Escape::markIfClosureRef(hir, aliases, escaping, *argId);
+        if (!Escape::paramIsNoEscape(defStore, paramDefs, index + paramOffset)) {
+          Escape::markIfClosureRef(hir, aliases, escaping, *argId);
+        }
+
         Escape::scanForEscapes(hir, defStore, aliases, escaping, *argId);
       }
 
@@ -225,18 +284,26 @@ export namespace Escape {
         }
       },
       Hir::HirKind::Call(callNode) -> {
-        Escape::scanCallArguments(hir, defStore, aliases, escaping, &callNode.args);
+        let paramDefs: Vector<Analyzer::DefinitionId> = Escape::calleeParams(defStore, callNode.callee);
+        Escape::scanCallArguments(hir, defStore, aliases, escaping, &callNode.args, &paramDefs, 0);
       },
       Hir::HirKind::MethodCall(methodNode) -> {
+        let mut paramOffset: u64 = 0;
+
         if (let Option::SOME(receiverId) = methodNode.receiver) {
           Escape::scanForEscapes(hir, defStore, aliases, escaping, receiverId);
+          // `self` occupies the first parameter slot of an instance method.
+          paramOffset = 1;
         }
 
-        Escape::scanCallArguments(hir, defStore, aliases, escaping, &methodNode.args);
+        let paramDefs: Vector<Analyzer::DefinitionId> = Escape::calleeParams(defStore, methodNode.method);
+        Escape::scanCallArguments(hir, defStore, aliases, escaping, &methodNode.args, &paramDefs, paramOffset);
       },
+      // A call through a closure value has no parameter list to consult.
       Hir::HirKind::CallClosure(closureCall) -> {
+        let noParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
         Escape::scanForEscapes(hir, defStore, aliases, escaping, closureCall.callee);
-        Escape::scanCallArguments(hir, defStore, aliases, escaping, &closureCall.args);
+        Escape::scanCallArguments(hir, defStore, aliases, escaping, &closureCall.args, &noParams, 0);
       },
       Hir::HirKind::Assign(assignNode) -> {
         let mut complexTarget: boolean = false;
