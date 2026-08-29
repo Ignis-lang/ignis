@@ -1,0 +1,1226 @@
+import Vector from "std::vector";
+
+import Id from "@compiler::ids";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import Lir from "@compiler::lir";
+
+/// LIR -> C emission for the Ignis selfhost compiler.
+///
+/// Port of `crates/ignis_codegen_c`, following the same measured loop the
+/// earlier stages used: every construct the emitter cannot express yet bumps
+/// `unsupported` and leaves a comment in the output, so one full-corpus run
+/// says exactly how much is left.
+///
+/// One deliberate divergence from the oracle: symbol names. The host derives a
+/// C name from the owning namespace chain plus an overload suffix, machinery
+/// the selfhost definition store does not carry. The selfhost emits the whole
+/// program from its own LIR, std included, so its names only have to be unique
+/// within that one translation unit. Every non-extern definition therefore
+/// gets its written name plus its definition id, which is unique by
+/// construction. An extern function keeps its written name, because that one
+/// has to match the symbol the C side already defines.
+export namespace CodegenC {
+  /// The emitted translation unit plus what the run measured.
+  record EmitOutput {
+    public source: String;
+    /// LIR instructions and terminators the emitter does not handle yet.
+    public unsupported: u64;
+    /// Function bodies written out, extern declarations excluded.
+    public functions: u64;
+  }
+
+  /// Whether `text` can appear in a C identifier.
+  function isIdentifierByte(byte: u8): boolean {
+    if (byte >= 48 && byte <= 57) {
+      return true;
+    }
+
+    if (byte >= 65 && byte <= 90) {
+      return true;
+    }
+
+    if (byte >= 97 && byte <= 122) {
+      return true;
+    }
+
+    return byte == 95;
+  }
+
+  /// `text` with every byte C cannot spell replaced by an underscore.
+  function sanitize(text: str): String {
+    let source: String = String::create(text);
+    let mut result: String = String::create("");
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(byte) = source.byteAt(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (CodegenC::isIdentifierByte(byte)) {
+        result.pushByte(byte);
+      } else {
+        result.pushStr("_");
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function definitionName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): String {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return String::create("__unknown");
+    };
+
+    let nameSymbol: Analyzer::SymbolId = definition.name();
+
+    let Option::SOME(text) = symbols.resolve(nameSymbol) else {
+      return String::create("__unnamed");
+    };
+
+    return CodegenC::sanitize(text);
+  }
+
+  /// The C symbol for a definition. Extern functions keep the name the C side
+  /// already defines; everything else is suffixed with its definition id.
+  function mangledName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): String {
+    let mut isExtern: boolean = false;
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Function(functionDef) = definition) {
+        isExtern = functionDef.isExtern;
+      }
+    }
+
+    let base: String = CodegenC::definitionName(defStore, symbols, defId);
+
+    if (isExtern) {
+      return base;
+    }
+
+    return `${base.toStr()}_${defId.raw()}`;
+  }
+
+  function structName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): String {
+    let base: String = CodegenC::definitionName(defStore, symbols, defId);
+
+    return `${base.toStr()}_${defId.raw()}`;
+  }
+
+  /// The C spelling of a type.
+  ///
+  /// Post-monomorphization no `Param` or `Instance` survives, so both answer
+  /// `void*` rather than panicking: an emitter that crashes on a bad input
+  /// says less than one that emits something the C compiler will reject at a
+  /// named line.
+  function formatCType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    typeId: Analyzer::TypeId,
+  ): String {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return String::create("void*");
+    };
+
+    let mut pointee: Analyzer::TypeId = typeId;
+    let mut nominal: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+
+    // 0 answers directly, 1 is a pointer to `pointee`, 2 is a struct name.
+    let mut shape: u64 = 0;
+    let mut direct: String = String::create("void*");
+
+    match (typeNode) {
+      Analyzer::Type::I8 -> {
+        direct = String::create("i8");
+      },
+      Analyzer::Type::I16 -> {
+        direct = String::create("i16");
+      },
+      Analyzer::Type::I32 -> {
+        direct = String::create("i32");
+      },
+      Analyzer::Type::I64 -> {
+        direct = String::create("i64");
+      },
+      Analyzer::Type::U8 -> {
+        direct = String::create("u8");
+      },
+      Analyzer::Type::U16 -> {
+        direct = String::create("u16");
+      },
+      Analyzer::Type::U32 -> {
+        direct = String::create("u32");
+      },
+      Analyzer::Type::U64 -> {
+        direct = String::create("u64");
+      },
+      Analyzer::Type::F32 -> {
+        direct = String::create("f32");
+      },
+      Analyzer::Type::F64 -> {
+        direct = String::create("f64");
+      },
+      Analyzer::Type::BOOLEAN -> {
+        direct = String::create("boolean");
+      },
+      Analyzer::Type::CHAR -> {
+        direct = String::create("ignis_char_t");
+      },
+      Analyzer::Type::STR -> {
+        direct = String::create("const char*");
+      },
+      Analyzer::Type::VOID -> {
+        direct = String::create("void");
+      },
+      // A diverging expression still has to occupy a slot in C.
+      Analyzer::Type::NEVER -> {
+        direct = String::create("void");
+      },
+      Analyzer::Type::Pointer(pointerType) -> {
+        shape = 1;
+        pointee = pointerType.pointee;
+      },
+      Analyzer::Type::Reference(referenceType) -> {
+        shape = 1;
+        pointee = referenceType.referent;
+      },
+      // A fixed array decays to a pointer at every use the emitter has.
+      Analyzer::Type::FixedArray(element, _) -> {
+        shape = 1;
+        pointee = element;
+      },
+      Analyzer::Type::Record(recordDef) -> {
+        shape = 2;
+        nominal = recordDef;
+      },
+      Analyzer::Type::Enum(enumDef) -> {
+        shape = 2;
+        nominal = enumDef;
+      },
+      _ -> {},
+    };
+
+    if (shape == 1) {
+      let inner: String = CodegenC::formatCType(defStore, typeStore, symbols, pointee);
+
+      return `${inner.toStr()}*`;
+    }
+
+    if (shape == 2) {
+      let name: String = CodegenC::structName(defStore, symbols, nominal);
+
+      return `struct ${name.toStr()}`;
+    }
+
+    return direct;
+  }
+
+  function binaryOperator(op: &Hir::BinaryOperation): str {
+    return match (op) {
+      Hir::BinaryOperation::Add -> "+",
+      Hir::BinaryOperation::Sub -> "-",
+      Hir::BinaryOperation::Mul -> "*",
+      Hir::BinaryOperation::Div -> "/",
+      Hir::BinaryOperation::Mod -> "%",
+      Hir::BinaryOperation::And -> "&&",
+      Hir::BinaryOperation::Or -> "||",
+      Hir::BinaryOperation::Equal -> "==",
+      Hir::BinaryOperation::NotEqual -> "!=",
+      Hir::BinaryOperation::LessThan -> "<",
+      Hir::BinaryOperation::LessEqual -> "<=",
+      Hir::BinaryOperation::GreaterThan -> ">",
+      Hir::BinaryOperation::GreaterEqual -> ">=",
+      Hir::BinaryOperation::BitAnd -> "&",
+      Hir::BinaryOperation::BitOr -> "|",
+      Hir::BinaryOperation::BitXor -> "^",
+      Hir::BinaryOperation::BitShiftLeft -> "<<",
+      Hir::BinaryOperation::BitShiftRight -> ">>",
+      // `**` has no C operator; the caller reports it unsupported.
+      Hir::BinaryOperation::Pow -> "",
+    };
+  }
+
+  function unaryOperator(op: &Hir::UnaryOperation): str {
+    return match (op) {
+      Hir::UnaryOperation::Not -> "!",
+      Hir::UnaryOperation::Neg -> "-",
+      Hir::UnaryOperation::BitNot -> "~",
+    };
+  }
+
+  /// A C string literal body with the bytes C cannot carry raw escaped.
+  function escapeStringLiteral(value: &String): String {
+    let mut result: String = String::create("");
+    let mut index: u64 = 0;
+
+    while (index < value.length()) {
+      let Option::SOME(byte) = value.byteAt(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (byte == 34) {
+        result.pushStr("\\\"");
+      } else if (byte == 92) {
+        result.pushStr("\\\\");
+      } else if (byte == 10) {
+        result.pushStr("\\n");
+      } else if (byte == 13) {
+        result.pushStr("\\r");
+      } else if (byte == 9) {
+        result.pushStr("\\t");
+      } else {
+        result.pushByte(byte);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function formatConst(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    value: &Lir::ConstValue,
+  ): String {
+    match (value) {
+      Lir::ConstValue::Int(number, _) -> {
+        return `${number}`;
+      },
+      Lir::ConstValue::UInt(number, _) -> {
+        return `${number}U`;
+      },
+      Lir::ConstValue::Float(number, _) -> {
+        return `${number}`;
+      },
+      Lir::ConstValue::Bool(flag, _) -> {
+        if (flag) {
+          return String::create("true");
+        }
+
+        return String::create("false");
+      },
+      Lir::ConstValue::Char(scalar, _) -> {
+        return `${scalar}U`;
+      },
+      Lir::ConstValue::Str(text, _) -> {
+        let escaped: String = CodegenC::escapeStringLiteral(&text);
+
+        return `"${escaped.toStr()}"`;
+      },
+      Lir::ConstValue::Atom(scalar, _) -> {
+        return `${scalar}U`;
+      },
+      Lir::ConstValue::Null(_) -> {
+        return String::create("NULL");
+      },
+      // An undefined value still needs a well-typed zero in C.
+      Lir::ConstValue::Undef(ty) -> {
+        let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, ty);
+
+        return `(${typeText.toStr()}){0}`;
+      },
+    };
+
+    @panic("unreachable: formatConst match did not return");
+  }
+
+  function formatOperand(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    operand: &Lir::Operand,
+  ): String {
+    match (operand) {
+      Lir::Operand::Temp(temp) -> {
+        return `t${temp.raw()}`;
+      },
+      Lir::Operand::Local(local) -> {
+        return `l${local.raw()}`;
+      },
+      Lir::Operand::Const(value) -> {
+        return CodegenC::formatConst(defStore, typeStore, symbols, &value);
+      },
+      Lir::Operand::FuncRef(defId) -> {
+        return CodegenC::mangledName(defStore, symbols, defId);
+      },
+      Lir::Operand::GlobalRef(defId) -> {
+        return CodegenC::mangledName(defStore, symbols, defId);
+      },
+    };
+
+    @panic("unreachable: formatOperand match did not return");
+  }
+
+  /// `<return> <name>(<params>)`, shared by the prototype and the definition.
+  function functionSignature(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    function_: &Lir::FunctionLir,
+  ): String {
+    let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, function_.returnType);
+    let name: String = CodegenC::mangledName(defStore, symbols, function_.defId);
+
+    let mut signature: String = `${returnText.toStr()} ${name.toStr()}(`;
+
+    if (function_.params.length() == 0) {
+      signature.pushStr("void");
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < function_.params.length()) {
+      let Option::SOME(paramDefId) = function_.params.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut paramType: Analyzer::TypeId = function_.returnType;
+
+      if (let Option::SOME(definition) = defStore.get(*paramDefId)) {
+        if (let Analyzer::Definition::Variable(variableDef) = definition) {
+          paramType = variableDef.declaredType;
+        }
+      }
+
+      if (index > 0) {
+        signature.pushStr(", ");
+      }
+
+      let paramText: String = CodegenC::formatCType(defStore, typeStore, symbols, paramType);
+
+      // Parameters arrive as the implicit temps `t0..tn-1`, the same shape the
+      // LIR prologue stores into local slots.
+      let declaration: String = `${paramText.toStr()} t${index}`;
+      signature.pushStr(declaration.toStr());
+
+      index += 1;
+    }
+
+    signature.pushStr(")");
+
+    return signature;
+  }
+
+  function isExternFunction(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Function(functionDef) -> functionDef.isExtern,
+      _ -> false,
+    };
+  }
+
+  /// One instruction. Anything the emitter cannot express yet leaves a comment
+  /// naming it and bumps the counter, so a corpus run measures what is left.
+  function emitInstruction(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    unsupported: &mut u64,
+    instruction: &Lir::Instr,
+  ): void {
+    match (instruction) {
+      Lir::Instr::Load(node) -> {
+        let line: String = `    t${node.dest.raw()} = l${node.source.raw()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::Store(node) -> {
+        let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.value);
+        let line: String = `    l${node.dest.raw()} = ${value.toStr()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::LoadPtr(node) -> {
+        let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.ptr);
+        let line: String = `    t${node.dest.raw()} = *${pointer.toStr()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::StorePtr(node) -> {
+        let pointer: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.ptr);
+        let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.value);
+        let line: String = `    *${pointer.toStr()} = ${value.toStr()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::Copy(node) -> {
+        let source: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.source);
+        let line: String = `    t${node.dest.raw()} = ${source.toStr()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::BinOp(node) -> {
+        let operator: str = CodegenC::binaryOperator(&node.op);
+
+        if (String::create(operator).length() == 0) {
+          let mut powRef: &mut u64 = unsupported;
+          powRef += 1;
+
+          let mut outputRef: &mut String = output;
+          outputRef.pushStr("    // unsupported: BinOp Pow\n");
+        } else {
+          let left: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.left);
+          let right: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.right);
+          let line: String = `    t${node.dest.raw()} = ${left.toStr()} ${operator} ${right.toStr()};\n`;
+          let mut outputRef: &mut String = output;
+          outputRef.pushStr(line.toStr());
+        }
+      },
+      Lir::Instr::UnaryOp(node) -> {
+        let operator: str = CodegenC::unaryOperator(&node.op);
+        let operand: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.operand);
+        let line: String = `    t${node.dest.raw()} = ${operator}${operand.toStr()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::Cast(node) -> {
+        let target: String = CodegenC::formatCType(defStore, typeStore, symbols, node.targetType);
+        let source: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.source);
+        let line: String = `    t${node.dest.raw()} = (${target.toStr()})${source.toStr()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::AddrOfLocal(node) -> {
+        let line: String = `    t${node.dest.raw()} = &l${node.local.raw()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::GetFieldPtr(node) -> {
+        let base: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.base);
+        let line: String = `    t${node.dest.raw()} = &((${base.toStr()})->field_${node.fieldIndex});\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::GetElementPtr(node) -> {
+        let base: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.base);
+        let index: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.index);
+        let line: String = `    t${node.dest.raw()} = &(${base.toStr()}[${index.toStr()}]);\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::EnumGetTag(node) -> {
+        let source: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.source);
+        let line: String = `    t${node.dest.raw()} = (${source.toStr()}).tag;\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::EnumGetPayloadField(node) -> {
+        let source: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.source);
+        let line: String = `    t${node.dest.raw()} = (${source.toStr()}).payload.variant_${node.variantTag}.field_${node.fieldIndex};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::InitEnumVariant(node) -> {
+        let destination: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.destPtr);
+        let header: String = `    (${destination.toStr()})->tag = ${node.variantTag}U;\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(header.toStr());
+
+        let mut payloadIndex: u64 = 0;
+
+        while (payloadIndex < node.payload.length()) {
+          if (let Option::SOME(payloadOperand) = node.payload.get(payloadIndex)) {
+            let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, payloadOperand);
+            let line: String = `    (${destination.toStr()})->payload.variant_${node.variantTag}.field_${payloadIndex} = ${value.toStr()};\n`;
+            let mut payloadRef: &mut String = output;
+            payloadRef.pushStr(line.toStr());
+          }
+
+          payloadIndex += 1;
+        }
+      },
+      Lir::Instr::InitRecord(node) -> {
+        let destination: String = CodegenC::formatOperand(defStore, typeStore, symbols, &node.destPtr);
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < node.fields.length()) {
+          if (let Option::SOME(field) = node.fields.get(fieldIndex)) {
+            let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, &field.value);
+            let line: String = `    (${destination.toStr()})->field_${field.fieldIndex} = ${value.toStr()};\n`;
+            let mut fieldRef: &mut String = output;
+            fieldRef.pushStr(line.toStr());
+          }
+
+          fieldIndex += 1;
+        }
+      },
+      Lir::Instr::Call(node) -> {
+        let callee: String = CodegenC::mangledName(defStore, symbols, node.callee);
+
+        let mut call: String = String::create("");
+
+        if (let Option::SOME(dest) = node.dest) {
+          let assignment: String = `    t${dest.raw()} = `;
+          call.pushStr(assignment.toStr());
+        } else {
+          call.pushStr("    ");
+        }
+
+        call.pushStr(callee.toStr());
+        call.pushStr("(");
+
+        let mut argIndex: u64 = 0;
+
+        while (argIndex < node.args.length()) {
+          if (let Option::SOME(argument) = node.args.get(argIndex)) {
+            if (argIndex > 0) {
+              call.pushStr(", ");
+            }
+
+            let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, argument);
+            call.pushStr(value.toStr());
+          }
+
+          argIndex += 1;
+        }
+
+        call.pushStr(");\n");
+
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(call.toStr());
+      },
+      Lir::Instr::PanicMessage(node) -> {
+        let escaped: String = CodegenC::escapeStringLiteral(&node.message);
+        let line: String = `    ignis_panic("${escaped.toStr()}");\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::Trap(_) -> {
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr("    __builtin_trap();\n");
+      },
+      Lir::Instr::Nop -> {
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr("    /* nop */\n");
+      },
+      _ -> {
+        let mut countRef: &mut u64 = unsupported;
+        countRef += 1;
+
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr("    // unsupported instruction\n");
+      },
+    };
+  }
+
+  function emitTerminator(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    function_: &Lir::FunctionLir,
+    terminator: &Lir::Terminator,
+  ): void {
+    match (terminator) {
+      Lir::Terminator::Goto(target) -> {
+        let mut label: String = String::create("block");
+
+        if (let Option::SOME(block) = function_.blocks.get(target.raw() as u64)) {
+          label = String::create(block.label.toStr());
+        }
+
+        let line: String = `    goto ${label.toStr()}_${target.raw()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Terminator::Branch(branch) -> {
+        let condition: String = CodegenC::formatOperand(defStore, typeStore, symbols, &branch.condition);
+
+        let mut thenLabel: String = String::create("block");
+        let mut elseLabel: String = String::create("block");
+
+        if (let Option::SOME(block) = function_.blocks.get(branch.thenBlock.raw() as u64)) {
+          thenLabel = String::create(block.label.toStr());
+        }
+
+        if (let Option::SOME(block) = function_.blocks.get(branch.elseBlock.raw() as u64)) {
+          elseLabel = String::create(block.label.toStr());
+        }
+
+        let line: String = `    if (${condition.toStr()}) goto ${thenLabel.toStr()}_${branch.thenBlock.raw()}; else goto ${elseLabel.toStr()}_${branch.elseBlock.raw()};\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Terminator::Return(value) -> {
+        let mut outputRef: &mut String = output;
+
+        if (let Option::SOME(operand) = value) {
+          let text: String = CodegenC::formatOperand(defStore, typeStore, symbols, &operand);
+          let line: String = `    return ${text.toStr()};\n`;
+          outputRef.pushStr(line.toStr());
+        } else {
+          outputRef.pushStr("    return;\n");
+        }
+      },
+      // A block the verifier proved unreachable still needs an exit in C.
+      Lir::Terminator::Unreachable -> {
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr("    __builtin_unreachable();\n");
+      },
+    };
+  }
+
+  /// The record and enum definitions the program needs, in an order C accepts:
+  /// a struct holding another by value has to come after it.
+  ///
+  /// Definition order is not that order. Monomorphization reserves a
+  /// container's id before concretizing its fields, so a specialization used
+  /// by value always lands on a higher id than the type holding it.
+  function orderedTypeDefs(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+  ): Vector<Analyzer::DefinitionId> {
+    let mut ordered: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut emitted: Vector<u32> = Vector::new<u32>();
+    let mut visiting: Vector<u32> = Vector::new<u32>();
+
+    let mut rawId: u64 = 0;
+
+    while (rawId < defStore.length()) {
+      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+
+      CodegenC::visitTypeDef(defStore, typeStore, &mut ordered, &mut emitted, &mut visiting, defId);
+
+      rawId += 1;
+    }
+
+    return ordered;
+  }
+
+  /// One struct definition. A record lays its fields out in order; an enum is
+  /// a tag plus a union of the variants that carry a payload. Both grow a drop
+  /// state byte when the type owns resources, matching the layout the runtime
+  /// and the drop paths expect.
+  function emitTypeDefinition(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    defId: Analyzer::DefinitionId,
+  ): void {
+    let name: String = CodegenC::structName(defStore, symbols, defId);
+
+    let mut isRecord: boolean = false;
+    let mut isEnum: boolean = false;
+    let mut implementsDrop: boolean = false;
+    let mut members: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      match (definition) {
+        Analyzer::Definition::Record(recordDef) -> {
+          isRecord = true;
+          implementsDrop = recordDef.implementsDrop;
+          members = CodegenC::copyDefIds(&recordDef.fields);
+        },
+        Analyzer::Definition::Enum(enumDef) -> {
+          isEnum = true;
+          implementsDrop = enumDef.implementsDrop;
+          members = CodegenC::copyDefIds(&enumDef.variants);
+        },
+        _ -> {},
+      };
+    }
+
+    let mut outputRef: &mut String = output;
+
+    if (isRecord) {
+      outputRef.pushStr("struct ");
+      outputRef.pushStr(name.toStr());
+      outputRef.pushStr(" {\n");
+
+      let mut wroteField: boolean = false;
+      let mut index: u64 = 0;
+
+      while (index < members.length()) {
+        let Option::SOME(fieldDefId) = members.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Option::SOME(fieldDefinition) = defStore.get(*fieldDefId)) {
+          if (let Analyzer::Definition::Field(fieldDef) = fieldDefinition) {
+            let fieldType: String = CodegenC::formatCType(defStore, typeStore, symbols, fieldDef.fieldType);
+            let line: String = `    ${fieldType.toStr()} field_${fieldDef.index};\n`;
+
+            let mut fieldRef: &mut String = output;
+            fieldRef.pushStr(line.toStr());
+            wroteField = true;
+          }
+        }
+
+        index += 1;
+      }
+
+      let mut tailRef: &mut String = output;
+
+      if (implementsDrop) {
+        tailRef.pushStr("    uint8_t __ignis_drop_state;\n");
+        wroteField = true;
+      }
+
+      // C rejects an empty struct.
+      if (!wroteField) {
+        tailRef.pushStr("    char _empty;\n");
+      }
+
+      tailRef.pushStr("};\n");
+      return;
+    }
+
+    if (!isEnum) {
+      return;
+    }
+
+    outputRef.pushStr("struct ");
+    outputRef.pushStr(name.toStr());
+    outputRef.pushStr(" {\n    u32 tag;\n");
+
+    let mut hasPayload: boolean = false;
+    let mut probeIndex: u64 = 0;
+
+    while (probeIndex < members.length()) {
+      if (let Option::SOME(variantDefId) = members.get(probeIndex)) {
+        if (let Option::SOME(variantDefinition) = defStore.get(*variantDefId)) {
+          if (let Analyzer::Definition::Variant(variantDef) = variantDefinition) {
+            if (variantDef.payload.length() > 0) {
+              hasPayload = true;
+            }
+          }
+        }
+      }
+
+      probeIndex += 1;
+    }
+
+    if (hasPayload) {
+      let mut unionRef: &mut String = output;
+      unionRef.pushStr("    union {\n");
+
+      let mut variantIndex: u64 = 0;
+
+      while (variantIndex < members.length()) {
+        let Option::SOME(variantDefId) = members.get(variantIndex) else {
+          variantIndex += 1;
+          continue;
+        };
+
+        let mut payloadTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+        let mut tagValue: u32 = 0;
+
+        if (let Option::SOME(variantDefinition) = defStore.get(*variantDefId)) {
+          if (let Analyzer::Definition::Variant(variantDef) = variantDefinition) {
+            tagValue = variantDef.tagValue;
+
+            let mut payloadIndex: u64 = 0;
+
+            while (payloadIndex < variantDef.payload.length()) {
+              if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+                payloadTypes.push(*payloadType);
+              }
+
+              payloadIndex += 1;
+            }
+          }
+        }
+
+        if (payloadTypes.length() == 0) {
+          variantIndex += 1;
+          continue;
+        }
+
+        let mut structRef: &mut String = output;
+        structRef.pushStr("        struct {\n");
+
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < payloadTypes.length()) {
+          if (let Option::SOME(payloadType) = payloadTypes.get(fieldIndex)) {
+            let payloadText: String = CodegenC::formatCType(defStore, typeStore, symbols, *payloadType);
+            let line: String = `            ${payloadText.toStr()} field_${fieldIndex};\n`;
+
+            let mut lineRef: &mut String = output;
+            lineRef.pushStr(line.toStr());
+          }
+
+          fieldIndex += 1;
+        }
+
+        let closing: String = `        }} variant_${tagValue};\n`;
+        let mut closeRef: &mut String = output;
+        closeRef.pushStr(closing.toStr());
+
+        variantIndex += 1;
+      }
+
+      let mut endUnionRef: &mut String = output;
+      endUnionRef.pushStr("    } payload;\n");
+    }
+
+    let mut enumTailRef: &mut String = output;
+
+    if (implementsDrop) {
+      enumTailRef.pushStr("    uint8_t __ignis_drop_state;\n");
+    }
+
+    enumTailRef.pushStr("};\n");
+  }
+
+  function emitFunction(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    unsupported: &mut u64,
+    function_: &Lir::FunctionLir,
+  ): void {
+    let signature: String = CodegenC::functionSignature(defStore, typeStore, symbols, function_);
+
+    let mut headerRef: &mut String = output;
+    headerRef.pushStr(signature.toStr());
+    headerRef.pushStr(" {\n");
+
+    let mut localIndex: u64 = 0;
+
+    while (localIndex < function_.locals.length()) {
+      if (let Option::SOME(local) = function_.locals.get(localIndex)) {
+        let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, local.ty);
+        let line: String = `    ${typeText.toStr()} l${localIndex};\n`;
+
+        let mut localRef: &mut String = output;
+        localRef.pushStr(line.toStr());
+      }
+
+      localIndex += 1;
+    }
+
+    // Parameters already occupy `t0..tn-1` as the signature declares them.
+    let mut tempIndex: u64 = function_.params.length();
+
+    while (tempIndex < function_.temps.length()) {
+      if (let Option::SOME(temp) = function_.temps.get(tempIndex)) {
+        let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, temp.ty);
+        let line: String = `    ${typeText.toStr()} t${tempIndex};\n`;
+
+        let mut tempRef: &mut String = output;
+        tempRef.pushStr(line.toStr());
+      }
+
+      tempIndex += 1;
+    }
+
+    let mut blockIndex: u64 = 0;
+
+    while (blockIndex < function_.blocks.length()) {
+      let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+        blockIndex += 1;
+        continue;
+      };
+
+      let label: String = `\n${block.label.toStr()}_${blockIndex}:;\n`;
+      let mut labelRef: &mut String = output;
+      labelRef.pushStr(label.toStr());
+
+      let mut instructionIndex: u64 = 0;
+
+      while (instructionIndex < block.instructions.length()) {
+        if (let Option::SOME(instruction) = block.instructions.get(instructionIndex)) {
+          CodegenC::emitInstruction(defStore, typeStore, symbols, output, unsupported, instruction);
+        }
+
+        instructionIndex += 1;
+      }
+
+      CodegenC::emitTerminator(defStore, typeStore, symbols, output, function_, &block.terminator);
+
+      blockIndex += 1;
+    }
+
+    let mut closeRef: &mut String = output;
+    closeRef.pushStr("}\n\n");
+  }
+
+  /// The whole translation unit: the runtime header, one forward declaration
+  /// and one definition per nominal type, a prototype per function, then the
+  /// bodies.
+  function emitProgram(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    program: &Lir::LirProgram,
+  ): CodegenC::EmitOutput {
+    let mut source: String = String::create("");
+    let mut unsupported: u64 = 0;
+    let mut functions: u64 = 0;
+
+    source.pushStr("#include \"ignis_rt.h\"\n\n");
+
+    let typeDefs: Vector<Analyzer::DefinitionId> = CodegenC::orderedTypeDefs(defStore, typeStore);
+
+    source.pushStr("// Type forward declarations\n");
+
+    let mut forwardIndex: u64 = 0;
+
+    while (forwardIndex < typeDefs.length()) {
+      if (let Option::SOME(defId) = typeDefs.get(forwardIndex)) {
+        let name: String = CodegenC::structName(defStore, symbols, *defId);
+        let line: String = `struct ${name.toStr()};\n`;
+        source.pushStr(line.toStr());
+      }
+
+      forwardIndex += 1;
+    }
+
+    source.pushStr("\n// Type definitions\n");
+
+    let mut definitionIndex: u64 = 0;
+
+    while (definitionIndex < typeDefs.length()) {
+      if (let Option::SOME(defId) = typeDefs.get(definitionIndex)) {
+        CodegenC::emitTypeDefinition(defStore, typeStore, symbols, &mut source, *defId);
+      }
+
+      definitionIndex += 1;
+    }
+
+    source.pushStr("\n// Function prototypes\n");
+
+    let mut prototypeIndex: u64 = 0;
+
+    while (prototypeIndex < program.functions.length()) {
+      if (let Option::SOME(function_) = program.functions.functionAt(prototypeIndex)) {
+        let signature: String = CodegenC::functionSignature(defStore, typeStore, symbols, function_);
+        let line: String = `${signature.toStr()};\n`;
+        source.pushStr(line.toStr());
+      }
+
+      prototypeIndex += 1;
+    }
+
+    source.pushStr("\n// Function definitions\n");
+
+    let mut bodyIndex: u64 = 0;
+
+    while (bodyIndex < program.functions.length()) {
+      let Option::SOME(function_) = program.functions.functionAt(bodyIndex) else {
+        bodyIndex += 1;
+        continue;
+      };
+
+      // An extern function is defined on the C side; a prototype is all it gets.
+      if (CodegenC::isExternFunction(defStore, function_.defId)) {
+        bodyIndex += 1;
+        continue;
+      }
+
+      CodegenC::emitFunction(defStore, typeStore, symbols, &mut source, &mut unsupported, function_);
+      functions += 1;
+
+      bodyIndex += 1;
+    }
+
+    return CodegenC::EmitOutput {
+      source: source,
+      unsupported: unsupported,
+      functions: functions,
+    };
+  }
+
+  function containsRaw(values: &mut Vector<u32>, target: u32): boolean {
+    let mut index: u64 = 0;
+
+    while (index < values.length()) {
+      if (let Option::SOME(existing) = values.get(index)) {
+        if (*existing == target) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// The definition a type needs complete before a struct can hold it by
+  /// value. A pointer needs only a forward declaration, so it answers `NONE`.
+  function byValueDependency(
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Option<Analyzer::DefinitionId> {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return Option::NONE;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::Record(recordDef) -> Option::SOME(recordDef),
+      Analyzer::Type::Enum(enumDef) -> Option::SOME(enumDef),
+      _ -> Option::NONE,
+    };
+  }
+
+  function visitTypeDef(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    ordered: &mut Vector<Analyzer::DefinitionId>,
+    emitted: &mut Vector<u32>,
+    visiting: &mut Vector<u32>,
+    defId: Analyzer::DefinitionId,
+  ): void {
+    if (CodegenC::containsRaw(emitted, defId.raw())) {
+      return;
+    }
+
+    // A cycle can only be spelled through a pointer, which needs no ordering.
+    if (CodegenC::containsRaw(visiting, defId.raw())) {
+      return;
+    }
+
+    let mut isTypeDef: boolean = false;
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      match (definition) {
+        Analyzer::Definition::Record(recordDef) -> {
+          isTypeDef = recordDef.typeParams.length() == 0;
+        },
+        Analyzer::Definition::Enum(enumDef) -> {
+          isTypeDef = enumDef.typeParams.length() == 0;
+        },
+        _ -> {},
+      };
+    }
+
+    if (!isTypeDef) {
+      return;
+    }
+
+    let mut visitingRef: &mut Vector<u32> = visiting;
+    visitingRef.push(defId.raw());
+
+    let componentTypeIds: Vector<Analyzer::TypeId> = CodegenC::componentTypesOf(defStore, defId);
+    let mut componentIndex: u64 = 0;
+
+    while (componentIndex < componentTypeIds.length()) {
+      if (let Option::SOME(componentType) = componentTypeIds.get(componentIndex)) {
+        if (let Option::SOME(dependency) = CodegenC::byValueDependency(typeStore, *componentType)) {
+          CodegenC::visitTypeDef(defStore, typeStore, ordered, emitted, visiting, dependency);
+        }
+      }
+
+      componentIndex += 1;
+    }
+
+    let mut popRef: &mut Vector<u32> = visiting;
+    let _ = popRef.pop();
+
+    let mut emittedRef: &mut Vector<u32> = emitted;
+    emittedRef.push(defId.raw());
+
+    let mut orderedRef: &mut Vector<Analyzer::DefinitionId> = ordered;
+    orderedRef.push(defId);
+  }
+
+  /// Every type a record or enum holds: field types for one, variant payload
+  /// types for the other.
+  function componentTypesOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): Vector<Analyzer::TypeId> {
+    let mut components: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    let mut fieldDefs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut variantDefs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      match (definition) {
+        Analyzer::Definition::Record(recordDef) -> {
+          fieldDefs = CodegenC::copyDefIds(&recordDef.fields);
+        },
+        Analyzer::Definition::Enum(enumDef) -> {
+          variantDefs = CodegenC::copyDefIds(&enumDef.variants);
+        },
+        _ -> {},
+      };
+    }
+
+    let mut fieldIndex: u64 = 0;
+
+    while (fieldIndex < fieldDefs.length()) {
+      if (let Option::SOME(fieldDefId) = fieldDefs.get(fieldIndex)) {
+        if (let Option::SOME(fieldDefinition) = defStore.get(*fieldDefId)) {
+          if (let Analyzer::Definition::Field(fieldDef) = fieldDefinition) {
+            components.push(fieldDef.fieldType);
+          }
+        }
+      }
+
+      fieldIndex += 1;
+    }
+
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < variantDefs.length()) {
+      if (let Option::SOME(variantDefId) = variantDefs.get(variantIndex)) {
+        if (let Option::SOME(variantDefinition) = defStore.get(*variantDefId)) {
+          if (let Analyzer::Definition::Variant(variantDef) = variantDefinition) {
+            let mut payloadIndex: u64 = 0;
+
+            while (payloadIndex < variantDef.payload.length()) {
+              if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
+                components.push(*payloadType);
+              }
+
+              payloadIndex += 1;
+            }
+          }
+        }
+      }
+
+      variantIndex += 1;
+    }
+
+    return components;
+  }
+
+  function copyDefIds(source: &Vector<Analyzer::DefinitionId>): Vector<Analyzer::DefinitionId> {
+    let mut result: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(defId) = source.get(index)) {
+        result.push(*defId);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+}
