@@ -423,6 +423,210 @@ export namespace Analyzer {
     /// position of a `Type::Path`. Composite types (`Generic`, `Reference`,
     /// `Slice`, ...) store their inner types as separate nodes in the same
     /// store, so scanning `Path` nodes alone covers every spelling.
+    /// Whether `name` heads a path written in expression position, such as
+    /// the `LirVerify` of `LirVerify::verifyProgram(...)` or of a namespace
+    /// constant. Name resolution records the definition the path lands on,
+    /// never the namespace it went through, so an import used only this way
+    /// would otherwise read as unused.
+    function nameUsedInExpressionPosition(module: &Ast::Module, name: str): boolean {
+      let mut index: u64 = 0;
+
+      while (index < module.expressions.length()) {
+        let exprId: Ast::ExpressionId = Id::fromRaw<Ast::ExpressionTag>(index as u32);
+        let Option::SOME(expression) = module.expressions.get(exprId) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Ast::Expression::Node::Path(path) = expression) {
+          if (let Option::SOME(headSegment) = path.segments.get(0)) {
+            if (headSegment.equals(name)) {
+              return true;
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Whether `name` is re-exported (`export Align;`) or names a generic
+    /// bound (`HashSet<T: Hash + Eq>`). Neither position resolves through the
+    /// body of the module, so both look like non-uses to `collectUsedDefs`.
+    function nameUsedInExportOrBound(module: &Ast::Module, name: str): boolean {
+      let mut index: u64 = 0;
+
+      while (index < module.items.length()) {
+        let itemId: Ast::ItemId = Id::fromRaw<Ast::ItemTag>(index as u32);
+        let Option::SOME(item) = module.items.get(itemId) else {
+          index += 1;
+          continue;
+        };
+
+        let mut found: boolean = false;
+
+        match (item) {
+          Ast::Item::Node::Export(export_) -> {
+            found = Analyzer::Lint::bindingsMention(&export_.items, name);
+          },
+          Ast::Item::Node::Function(function_) -> {
+            found = Analyzer::Lint::boundsMention(&function_.genericParameters, name);
+          },
+          Ast::Item::Node::Record(record_) -> {
+            found = Analyzer::Lint::boundsMention(&record_.genericParameters, name);
+          },
+          Ast::Item::Node::Enum(enum_) -> {
+            found = Analyzer::Lint::boundsMention(&enum_.genericParameters, name);
+          },
+          Ast::Item::Node::TypeAlias(alias) -> {
+            found = Analyzer::Lint::boundsMention(&alias.genericParameters, name);
+          },
+          Ast::Item::Node::Trait(trait_) -> {
+            found = Analyzer::Lint::boundsMention(&trait_.genericParameters, name);
+          },
+          _ -> {},
+        };
+
+        if (found) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    function bindingsMention(bindings: &Vector<Ast::ImportBinding>, name: str): boolean {
+      let mut index: u64 = 0;
+
+      while (index < bindings.length()) {
+        if (let Option::SOME(binding) = bindings.get(index)) {
+          if (let Option::SOME(bindingName) = &binding.name) {
+            if (bindingName.equals(name)) {
+              return true;
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    function boundsMention(parameters: &Vector<Ast::GenericParam>, name: str): boolean {
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < parameters.length()) {
+        let Option::SOME(parameter) = parameters.get(paramIndex) else {
+          paramIndex += 1;
+          continue;
+        };
+
+        let mut boundIndex: u64 = 0;
+
+        while (boundIndex < parameter.bounds.length()) {
+          if (let Option::SOME(bound) = parameter.bounds.get(boundIndex)) {
+            if (let Option::SOME(headSegment) = bound.segments.get(0)) {
+              if (headSegment.equals(name)) {
+                return true;
+              }
+            }
+          }
+
+          boundIndex += 1;
+        }
+
+        paramIndex += 1;
+      }
+
+      return false;
+    }
+
+    /// Whether `name` appears as an attribute argument, such as the `Eq` of
+    /// `@implements(Copy, Eq, Display)`. Attribute arguments are stored as the
+    /// raw lexemes the parser saw and resolve to no definition, so an import
+    /// used only there would otherwise read as unused.
+    function nameUsedInAttributeArgument(module: &Ast::Module, name: str): boolean {
+      let mut index: u64 = 0;
+
+      while (index < module.items.length()) {
+        let itemId: Ast::ItemId = Id::fromRaw<Ast::ItemTag>(index as u32);
+        let Option::SOME(item) = module.items.get(itemId) else {
+          index += 1;
+          continue;
+        };
+
+        let mut found: boolean = false;
+
+        match (item) {
+          Ast::Item::Node::Function(function_) -> {
+            found = Analyzer::Lint::metadataMentions(&function_.metadata, name);
+          },
+          Ast::Item::Node::Record(record_) -> {
+            found = Analyzer::Lint::metadataMentions(&record_.metadata, name);
+          },
+          Ast::Item::Node::Enum(enum_) -> {
+            found = Analyzer::Lint::metadataMentions(&enum_.metadata, name);
+          },
+          Ast::Item::Node::Namespace(namespace_) -> {
+            found = Analyzer::Lint::metadataMentions(&namespace_.metadata, name);
+          },
+          Ast::Item::Node::Extern(extern_) -> {
+            found = Analyzer::Lint::metadataMentions(&extern_.metadata, name);
+          },
+          Ast::Item::Node::Constant(constant) -> {
+            found = Analyzer::Lint::metadataMentions(&constant.metadata, name);
+          },
+          Ast::Item::Node::TypeAlias(alias) -> {
+            found = Analyzer::Lint::metadataMentions(&alias.metadata, name);
+          },
+          Ast::Item::Node::Trait(trait_) -> {
+            found = Analyzer::Lint::metadataMentions(&trait_.metadata, name);
+          },
+          _ -> {},
+        };
+
+        if (found) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    function metadataMentions(metadata: &Ast::Metadata, name: str): boolean {
+      let mut attributeIndex: u64 = 0;
+
+      while (attributeIndex < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(attributeIndex) else {
+          attributeIndex += 1;
+          continue;
+        };
+
+        let mut argumentIndex: u64 = 0;
+
+        while (argumentIndex < attribute.arguments.length()) {
+          if (let Option::SOME(argument) = attribute.arguments.get(argumentIndex)) {
+            if (argument.equals(name)) {
+              return true;
+            }
+          }
+
+          argumentIndex += 1;
+        }
+
+        attributeIndex += 1;
+      }
+
+      return false;
+    }
+
     function nameUsedInTypePosition(module: &Ast::Module, name: str): boolean {
       let mut index: u64 = 0;
 
@@ -704,6 +908,21 @@ export namespace Analyzer {
         };
 
         if (Analyzer::Lint::nameUsedInTypePosition(module, name)) {
+          index += 1;
+          continue;
+        }
+
+        if (Analyzer::Lint::nameUsedInExpressionPosition(module, name)) {
+          index += 1;
+          continue;
+        }
+
+        if (Analyzer::Lint::nameUsedInAttributeArgument(module, name)) {
+          index += 1;
+          continue;
+        }
+
+        if (Analyzer::Lint::nameUsedInExportOrBound(module, name)) {
           index += 1;
           continue;
         }
