@@ -64,6 +64,40 @@ function main(): void {
   );
 }
 
+/// A constant array has no LIR constant form, so indexing one used to collapse
+/// the whole expression to no operand: `return PRIMES[1]` reached the verifier
+/// as a return with nothing to return.
+#[test]
+fn e2e_const_array_index_in_return() {
+  e2e_test(
+    "const_array_index_in_return",
+    r#"
+const PRIMES: i32[4] = [2, 3, 5, 7];
+
+function main(): i32 {
+    return PRIMES[1];
+}
+"#,
+  );
+}
+
+/// The same index through a local, which compiled before but produced an
+/// uninitialized local because the initializer lowered to nothing.
+#[test]
+fn e2e_const_array_index_through_local() {
+  e2e_test(
+    "const_array_index_through_local",
+    r#"
+const PRIMES: i32[4] = [2, 3, 5, 7];
+
+function main(): i32 {
+    let value: i32 = PRIMES[2];
+    return value;
+}
+"#,
+  );
+}
+
 #[test]
 fn e2e_return_code() {
   e2e_test(

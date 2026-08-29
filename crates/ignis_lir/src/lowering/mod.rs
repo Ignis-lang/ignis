@@ -714,9 +714,14 @@ impl<'a> LoweringContext<'a> {
         DefinitionKind::Function(_) => Some(Operand::FuncRef(def_id)),
 
         DefinitionKind::Constant(const_def) => {
-          // Try to inline the constant value directly.
-          if let Some(value) = &const_def.value {
-            return self.definition_const_to_lir_const(value, ty).map(Operand::Const);
+          // Try to inline the constant value directly. An aggregate has no LIR
+          // constant form, so it falls through to the global reference below
+          // rather than collapsing the whole expression to `None` — the base of
+          // `CONST_ARRAY[i]` is exactly that case.
+          if let Some(value) = &const_def.value
+            && let Some(constant) = self.definition_const_to_lir_const(value, ty)
+          {
+            return Some(Operand::Const(constant));
           }
 
           // No compile-time value: check if the constant has a HIR init
