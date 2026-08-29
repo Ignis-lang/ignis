@@ -1623,6 +1623,125 @@ export namespace LirLowering {
   /// slot, one check/arm block pair per arm, guards branching to the next
   /// check, a panic block for the non-exhaustive tail, and a result local
   /// loaded in the merge block for non-void matches.
+  /// Checks one arm's pattern against a tuple scrutinee held in per-element
+  /// locals. A tuple literal never becomes a value: `match (a, b)` compares
+  /// the elements positionally, so nothing materializes the pair.
+  function lowerTupleMatchPatternCheck(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    elementLocals: &Vector<Lir::LocalId>,
+    elementTypes: &Vector<Analyzer::TypeId>,
+    pattern: &Hir::HirPattern,
+    span: SourceSpan,
+  ): Lir::Operand {
+    let boolType: Analyzer::TypeId = LirLowering::booleanTypeId(typeStore);
+
+    match (pattern) {
+      Hir::HirPattern::Wildcard -> {
+        return LirLowering::boolConstOperand(typeStore, function_, state, true, span);
+      },
+      Hir::HirPattern::Tuple(elements) -> {
+        if (elements.length() != elementLocals.length()) {
+          return LirLowering::boolConstOperand(typeStore, function_, state, false, span);
+        }
+
+        let mut combined: Lir::Operand = LirLowering::boolConstOperand(typeStore, function_, state, true, span);
+        let mut index: u64 = 0;
+
+        while (index < elements.length()) {
+          let Option::SOME(elementPattern) = elements.get(index) else {
+            index += 1;
+            continue;
+          };
+          let Option::SOME(elementLocal) = elementLocals.get(index) else {
+            index += 1;
+            continue;
+          };
+          let Option::SOME(elementType) = elementTypes.get(index) else {
+            index += 1;
+            continue;
+          };
+
+          let elementTemp: Lir::TempId = LirLowering::freshTemp(function_, *elementType, span);
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+            dest: elementTemp,
+            source: *elementLocal,
+          }));
+
+          let elementOperand: Lir::Operand = Lir::Operand::Temp(elementTemp);
+          let nested: Lir::Operand = LirLowering::lowerPatternCheck(
+            defStore,
+            typeStore,
+            function_,
+            state,
+            &elementOperand,
+            *elementType,
+            elementPattern,
+            span,
+          );
+
+          let andTemp: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
+            dest: andTemp,
+            op: Hir::BinaryOperation::And,
+            left: combined,
+            right: nested,
+          }));
+
+          combined = Lir::Operand::Temp(andTemp);
+          index += 1;
+        }
+
+        return combined;
+      },
+      Hir::HirPattern::Or(alternatives) -> {
+        let mut combined: Lir::Operand = LirLowering::boolConstOperand(typeStore, function_, state, false, span);
+        let mut index: u64 = 0;
+
+        while (index < alternatives.length()) {
+          let Option::SOME(alternative) = alternatives.get(index) else {
+            index += 1;
+            continue;
+          };
+
+          let nested: Lir::Operand = LirLowering::lowerTupleMatchPatternCheck(
+            defStore,
+            typeStore,
+            function_,
+            state,
+            elementLocals,
+            elementTypes,
+            alternative,
+            span,
+          );
+
+          let orTemp: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
+
+          LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
+            dest: orTemp,
+            op: Hir::BinaryOperation::Or,
+            left: combined,
+            right: nested,
+          }));
+
+          combined = Lir::Operand::Temp(orTemp);
+          index += 1;
+        }
+
+        return combined;
+      },
+      _ -> {
+        return LirLowering::boolConstOperand(typeStore, function_, state, false, span);
+      },
+    };
+
+    @panic("unreachable: lowerTupleMatchPatternCheck match did not return");
+  }
+
   function lowerMatch(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1633,19 +1752,63 @@ export namespace LirLowering {
     nodeType: Analyzer::TypeId,
     nodeSpan: SourceSpan,
   ): Lir::Operand {
-    let scrutineeValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, matchNode.scrutinee);
+    let mut tupleElements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut isTupleScrutinee: boolean = false;
 
-    let mut scrutineeType: Analyzer::TypeId = nodeType;
     if (let Option::SOME(scrutineeNode) = hirStore.get(matchNode.scrutinee)) {
-      scrutineeType = scrutineeNode.typeId;
+      if (let Hir::HirKind::TupleLiteral(elements) = &scrutineeNode.kind) {
+        isTupleScrutinee = true;
+        tupleElements = LirLowering::copyHirIds(&elements);
+      }
     }
 
-    let scrutineeSlot: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, scrutineeType);
+    let mut elementLocals: Vector<Lir::LocalId> = Vector::new<Lir::LocalId>();
+    let mut elementTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
 
-    LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
-      dest: scrutineeSlot,
-      value: scrutineeValue,
-    }));
+    let mut scrutineeType: Analyzer::TypeId = nodeType;
+    let mut scrutineeSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
+
+    if (isTupleScrutinee) {
+      let mut elementIndex: u64 = 0;
+
+      while (elementIndex < tupleElements.length()) {
+        let Option::SOME(elementId) = tupleElements.get(elementIndex) else {
+          elementIndex += 1;
+          continue;
+        };
+
+        let mut elementType: Analyzer::TypeId = nodeType;
+
+        if (let Option::SOME(elementNode) = hirStore.get(*elementId)) {
+          elementType = elementNode.typeId;
+        }
+
+        let elementValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *elementId);
+        let elementLocal: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, elementType);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+          dest: elementLocal,
+          value: elementValue,
+        }));
+
+        elementLocals.push(elementLocal);
+        elementTypes.push(elementType);
+        elementIndex += 1;
+      }
+    } else {
+      let scrutineeValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, matchNode.scrutinee);
+
+      if (let Option::SOME(scrutineeNode) = hirStore.get(matchNode.scrutinee)) {
+        scrutineeType = scrutineeNode.typeId;
+      }
+
+      scrutineeSlot = LirLowering::allocSyntheticLocal(function_, scrutineeType);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+        dest: scrutineeSlot,
+        value: scrutineeValue,
+      }));
+    }
 
     let isVoid: boolean = LirLowering::isVoidType(typeStore, nodeType);
 
@@ -1714,24 +1877,39 @@ export namespace LirLowering {
 
       LirLowering::switchToBlock(state, Id::fromRaw<Lir::BlockTag>(*checkRaw));
 
-      let scrutineeTemp: Lir::TempId = LirLowering::freshTemp(function_, scrutineeType, nodeSpan);
+      let mut matches: Lir::Operand = LirLowering::boolConstOperand(typeStore, function_, state, false, nodeSpan);
 
-      LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
-        dest: scrutineeTemp,
-        source: scrutineeSlot,
-      }));
+      if (isTupleScrutinee) {
+        matches = LirLowering::lowerTupleMatchPatternCheck(
+          defStore,
+          typeStore,
+          function_,
+          state,
+          &elementLocals,
+          &elementTypes,
+          &arm.pattern,
+          nodeSpan,
+        );
+      } else {
+        let scrutineeTemp: Lir::TempId = LirLowering::freshTemp(function_, scrutineeType, nodeSpan);
 
-      let scrutineeOperand: Lir::Operand = Lir::Operand::Temp(scrutineeTemp);
-      let matches: Lir::Operand = LirLowering::lowerPatternCheck(
-        defStore,
-        typeStore,
-        function_,
-        state,
-        &scrutineeOperand,
-        scrutineeType,
-        &arm.pattern,
-        nodeSpan,
-      );
+        LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+          dest: scrutineeTemp,
+          source: scrutineeSlot,
+        }));
+
+        let scrutineeOperand: Lir::Operand = Lir::Operand::Temp(scrutineeTemp);
+        matches = LirLowering::lowerPatternCheck(
+          defStore,
+          typeStore,
+          function_,
+          state,
+          &scrutineeOperand,
+          scrutineeType,
+          &arm.pattern,
+          nodeSpan,
+        );
+      }
 
       if (let Option::SOME(guardId) = arm.guard) {
         let guardBlock: Lir::BlockId = LirLowering::createBlock(function_, "match_guard");
@@ -2055,6 +2233,21 @@ export namespace LirLowering {
     let _continuePopped = state.continueBlockRaws.pop();
 
     LirLowering::switchToBlock(state, exitBlock);
+  }
+
+  function copyHirIds(source: &Vector<Hir::HirId>): Vector<Hir::HirId> {
+    let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(hirId) = source.get(index)) {
+        result.push(*hirId);
+      }
+
+      index += 1;
+    }
+
+    return result;
   }
 
   function copyDefIds(
