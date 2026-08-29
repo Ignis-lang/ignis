@@ -2583,10 +2583,18 @@ export namespace Lowering {
     public errPayload: Vector<Analyzer::TypeId>;
   }
 
+  /// The ok/err payload types of one try-capable variant, with the enum's
+  /// type parameters replaced by the arguments the scrutinee applied. The
+  /// declared payload of a generic `Result<T, E>` names `T` and `E`, and the
+  /// synthetic `try` bindings would carry those parameters into a body that
+  /// has none, so the substitution mirrors `tryVariantPayloadType`.
   function tryVariantPayload(
     defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
     variants: &Vector<Analyzer::DefinitionId>,
     tag: u32,
+    typeParamSymbols: &Vector<Analyzer::SymbolId>,
+    typeArguments: &Vector<Analyzer::TypeId>,
   ): Vector<Analyzer::TypeId> {
     let empty: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
 
@@ -2602,7 +2610,22 @@ export namespace Lowering {
       return empty;
     };
 
-    return Analyzer::Typecheck::copyVariantPayloadTypeIds(&variant.payload);
+    let declared: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyVariantPayloadTypeIds(&variant.payload);
+
+    let mut substituted: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < declared.length()) {
+      if (let Option::SOME(payloadType) = declared.get(index)) {
+        let payloadTypeId: Analyzer::TypeId = *payloadType;
+        let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        substituted.push(typeStoreRef.substitute(payloadTypeId, typeParamSymbols, typeArguments));
+      }
+
+      index += 1;
+    }
+
+    return substituted;
   }
 
   function tryEnumInfo(
@@ -2624,13 +2647,33 @@ export namespace Lowering {
       return Option::NONE;
     };
 
+    let paramSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &parts.typeParams);
+
+    let okPayload: Vector<Analyzer::TypeId> = Lowering::tryVariantPayload(
+      defStore,
+      typeStore,
+      &parts.variants,
+      parts.okVariant,
+      &paramSymbols,
+      &decomposition.typeArguments,
+    );
+
+    let errPayload: Vector<Analyzer::TypeId> = Lowering::tryVariantPayload(
+      defStore,
+      typeStore,
+      &parts.variants,
+      parts.errVariant,
+      &paramSymbols,
+      &decomposition.typeArguments,
+    );
+
     return Option::SOME(Lowering::TryEnumInfo {
       enumDef: decomposition.enumDefId,
       typeArgs: decomposition.typeArguments,
       okTag: parts.okVariant,
       errTag: parts.errVariant,
-      okPayload: Lowering::tryVariantPayload(defStore, &parts.variants, parts.okVariant),
-      errPayload: Lowering::tryVariantPayload(defStore, &parts.variants, parts.errVariant),
+      okPayload: okPayload,
+      errPayload: errPayload,
     });
   }
 
