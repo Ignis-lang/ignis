@@ -963,6 +963,60 @@ export namespace Mono {
     return Option::NONE;
   }
 
+  /// Splits a generic callee's explicit type arguments between its owner's
+  /// parameters and its own. A static method of a generic record writes the
+  /// record's arguments at the call site (`Vector::new<u64>()`), so binding
+  /// them to the method would leave the record's parameter unsubstituted.
+  function keyForCallee(
+    defStore: &mut Analyzer::DefinitionStore,
+    calleeDef: Analyzer::DefinitionId,
+    concreteArgs: &Vector<Analyzer::TypeId>,
+  ): Mono::InstanceKey {
+    let mut ownerId: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut ownParams: u64 = 0;
+
+    if (let Option::SOME(definition) = defStore.get(calleeDef)) {
+      if (let Analyzer::Definition::Method(methodDef) = definition) {
+        ownerId = Option::SOME(methodDef.owner);
+        ownParams = methodDef.typeParams.length();
+      }
+    }
+
+    if (ownParams == 0) {
+      if (let Option::SOME(owner) = ownerId) {
+        let mut ownerParams: u64 = 0;
+
+        if (let Option::SOME(ownerDefinition) = defStore.get(owner)) {
+          match (ownerDefinition) {
+            Analyzer::Definition::Record(recordDef) -> {
+              ownerParams = recordDef.typeParams.length();
+            },
+            Analyzer::Definition::Enum(enumDef) -> {
+              ownerParams = enumDef.typeParams.length();
+            },
+            _ -> {},
+          };
+        }
+
+        if (ownerParams > 0 && ownerParams == concreteArgs.length()) {
+          return Mono::InstanceKey {
+            primaryDef: calleeDef,
+            ownerDef: Option::SOME(owner),
+            ownerArgs: Mono::copyTypeIds(concreteArgs),
+            methodArgs: Vector::new<Analyzer::TypeId>(),
+          };
+        }
+      }
+    }
+
+    return Mono::InstanceKey {
+      primaryDef: calleeDef,
+      ownerDef: Option::NONE,
+      ownerArgs: Vector::new<Analyzer::TypeId>(),
+      methodArgs: Mono::copyTypeIds(concreteArgs),
+    };
+  }
+
   function receiverInstance(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1110,12 +1164,9 @@ export namespace Mono {
 
           if (callNode.typeArgs.length() > 0) {
             if (let Option::SOME(concreteArgs) = Mono::concreteTypeArgs(defStore, typeStore, symbols, state, subst, &callNode.typeArgs)) {
-              callee = Mono::ensureInstantiated(defStore, typeStore, symbols, state, Mono::InstanceKey {
-                primaryDef: callNode.callee,
-                ownerDef: Option::NONE,
-                ownerArgs: Vector::new<Analyzer::TypeId>(),
-                methodArgs: concreteArgs,
-              });
+              let calleeKey: Mono::InstanceKey = Mono::keyForCallee(defStore, callNode.callee, &concreteArgs);
+
+              callee = Mono::ensureInstantiated(defStore, typeStore, symbols, state, calleeKey);
             } else {
               typeArgs = Mono::copyTypeIds(&callNode.typeArgs);
             }
@@ -1183,12 +1234,9 @@ export namespace Mono {
               });
               rewritten = true;
             } else if (ownerDefOpt.isNone() && concreteArgs.length() > 0) {
-              method = Mono::ensureInstantiated(defStore, typeStore, symbols, state, Mono::InstanceKey {
-                primaryDef: methodNode.method,
-                ownerDef: Option::NONE,
-                ownerArgs: Vector::new<Analyzer::TypeId>(),
-                methodArgs: Mono::copyTypeIds(&concreteArgs),
-              });
+              let methodKey: Mono::InstanceKey = Mono::keyForCallee(defStore, methodNode.method, &concreteArgs);
+
+              method = Mono::ensureInstantiated(defStore, typeStore, symbols, state, methodKey);
               rewritten = true;
             }
           }
