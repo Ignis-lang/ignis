@@ -16,6 +16,7 @@ import _ from "./analyzer/lowering";
 import _ from "./analyzer/borrowck";
 import _ from "./analyzer/escape";
 import Capture from "./analyzer/capture";
+import CodegenC from "./codegen/mod";
 import Mono from "./analyzer/mono";
 import LirLowering from "./lir/lowering";
 import LirVerify from "./lir/verify";
@@ -398,6 +399,17 @@ function compileFile(path: &String): i32 {
 
     Io::println(`  lower: ${hirErrorNodes} error nodes, ${hirNodes} hir nodes, ${loweredModules} modules`);
     Io::println(`  lir: ${lirUnsupported} unsupported, ${lirFunctions} functions, ${lirVerifyErrors} verify errors`);
+
+    let emitResult: CodegenC::EmitOutput = CodegenC::emitProgram(
+      &mut defStore,
+      &mut typeStore,
+      &mut symbols,
+      &lirResult.program,
+    );
+
+    Io::println(
+      `  codegen: ${emitResult.unsupported} unsupported, ${emitResult.functions} functions, ${emitResult.source.length()} bytes`
+    );
   } else {
     Io::println(String::create("  lower: skipped (analyze errors)"));
   }
