@@ -1189,6 +1189,7 @@ export namespace CodegenC {
       },
       Lir::Instr::Call(node) -> {
         let callee: String = CodegenC::mangledName(defStore, symbols, node.callee);
+        let calleeIsExtern: boolean = CodegenC::isExternFunction(defStore, node.callee);
 
         let mut call: String = String::create("    ");
 
@@ -1211,6 +1212,15 @@ export namespace CodegenC {
             }
 
             let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, argument);
+
+            // A runtime function spells its parameters with the header's own C
+            // tags, which are structurally identical to the emitter's record
+            // structs but named differently. Passing through `void*` is what
+            // the host does for the same reason.
+            if (calleeIsExtern && CodegenC::operandIsIndirect(typeStore, function_, argument)) {
+              call.pushStr("(void*)");
+            }
+
             call.pushStr(value.toStr());
           }
 
@@ -2206,6 +2216,28 @@ export namespace CodegenC {
     return CodegenC::isVoidType(typeStore, data.ty);
   }
 
+  /// Whether an operand is a pointer or a reference, and so can cross an
+  /// extern boundary through `void*`.
+  function operandIsIndirect(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): boolean {
+    let Option::SOME(typeId) = CodegenC::operandType(function_, operand) else {
+      return false;
+    };
+
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::Pointer(_) -> true,
+      Analyzer::Type::Reference(_) -> true,
+      _ -> false,
+    };
+  }
+
   function isVoidType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
     let Option::SOME(typeNode) = typeStore.get(typeId) else {
       return false;
@@ -2367,6 +2399,16 @@ export namespace CodegenC {
       }
 
       let name: String = CodegenC::mangledName(defStore, symbols, defId);
+
+      // `ignis_rt.h` already declares everything the runtime owns, and it spells
+      // the string and vector types with its own C tags. Redeclaring one here
+      // with the emitter's struct name is a conflicting declaration, not a
+      // missing one.
+      if (name.startsWith("ignis_")) {
+        rawId += 1;
+        continue;
+      }
+
       let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, returnType);
 
       let mut line: String = `extern ${returnText.toStr()} ${name.toStr()}(`;
