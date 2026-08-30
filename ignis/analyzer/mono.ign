@@ -542,6 +542,8 @@ export namespace Mono {
         let clonedName: Analyzer::SymbolId = variableDef.name;
         let clonedVisibility: Analyzer::Visibility = variableDef.visibility;
         let clonedMutable: boolean = variableDef.mutable;
+        let clonedTakes: boolean = variableDef.takes;
+        let clonedNoEscape: boolean = variableDef.noEscape;
 
         let mut defStoreRef: &mut Analyzer::DefinitionStore = defStore;
         cloned = Option::SOME(defStoreRef.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
@@ -549,8 +551,8 @@ export namespace Mono {
           visibility: clonedVisibility,
           declaredType: substituted,
           mutable: clonedMutable,
-          takes: false,
-          noEscape: false,
+          takes: clonedTakes,
+          noEscape: clonedNoEscape,
         })));
       }
     }
@@ -1844,6 +1846,9 @@ export namespace Mono {
       let mut owner: Analyzer::DefinitionId = defId;
       let mut isStatic: boolean = false;
       let mut selfMutable: boolean = false;
+      let mut isExtern: boolean = false;
+      let mut takes: boolean = false;
+      let mut noEscape: boolean = false;
       let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
       let mut mutable: boolean = false;
       let mut fieldIndex: u32 = 0;
@@ -1862,6 +1867,7 @@ export namespace Mono {
             isDeprecated = functionDef.isDeprecated;
             deprecatedMessage = Mono::copyOptionalString(&functionDef.deprecatedMessage);
             extensionTarget = Mono::copyOptionalString(&functionDef.extensionTarget);
+            isExtern = functionDef.isExtern;
           },
           Analyzer::Definition::Method(methodDef) -> {
             kind = 2;
@@ -1882,6 +1888,8 @@ export namespace Mono {
             visibility = variableDef.visibility;
             declaredType = variableDef.declaredType;
             mutable = variableDef.mutable;
+            takes = variableDef.takes;
+            noEscape = variableDef.noEscape;
           },
           Analyzer::Definition::Field(fieldDef) -> {
             kind = 4;
@@ -1919,7 +1927,7 @@ export namespace Mono {
           isDeprecated: isDeprecated,
           deprecatedMessage: deprecatedMessage,
           extensionTarget: extensionTarget,
-          isExtern: false,
+          isExtern: isExtern,
         }));
 
         rawId += 1;
@@ -1956,8 +1964,8 @@ export namespace Mono {
           visibility: visibility,
           declaredType: concreteDeclared,
           mutable: mutable,
-          takes: false,
-          noEscape: false,
+          takes: takes,
+          noEscape: noEscape,
         }));
 
         rawId += 1;
