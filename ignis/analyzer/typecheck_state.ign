@@ -18,6 +18,14 @@ export namespace Analyzer {
       public typeIds: Vector<Analyzer::TypeId>;
     }
 
+    /// Side map from a call expression's raw id to the overload the
+    /// arguments selected. The resolver stops at the first same-name
+    /// definition, so lowering needs this to call the right sibling.
+    record CallTargetMap {
+      public nodeIds: Vector<u32>;
+      public defIds: Vector<Analyzer::DefinitionId>;
+    }
+
     /// Declaration and use log for local bindings, produced by typecheck and
     /// consumed by the lint phase.
     ///
@@ -51,12 +59,14 @@ export namespace Analyzer {
     record TypecheckOutput {
       public diagnostics: DiagnosticBag;
       public exprTypes: Analyzer::Typecheck::ExprTypeMap;
+      public callTargets: Analyzer::Typecheck::CallTargetMap;
       public localUses: Analyzer::Typecheck::LocalBindingUses;
     }
 
     record TypecheckState {
       public diagnostics: DiagnosticBag;
       public exprTypes: Analyzer::Typecheck::ExprTypeMap;
+      public callTargets: Analyzer::Typecheck::CallTargetMap;
       public currentFunction: Analyzer::DefinitionId;
       public currentReturnType: Analyzer::TypeId;
       public loopDepth: u64;
@@ -578,6 +588,16 @@ export namespace Analyzer {
       let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
       stateRef.exprTypes.nodeIds.push(exprId.raw());
       stateRef.exprTypes.typeIds.push(typeId);
+    }
+
+    function recordCallTarget(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      exprId: Ast::ExpressionId,
+      defId: Analyzer::DefinitionId,
+    ): void {
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.callTargets.nodeIds.push(exprId.raw());
+      stateRef.callTargets.defIds.push(defId);
     }
 
     function lookupRecordedExprType(

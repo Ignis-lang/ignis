@@ -143,6 +143,35 @@ export namespace Lowering {
   /// Checked type of an expression, using the same last-write-wins reverse
   /// scan as `Checks::exprIsNever` and the typechecker's own
   /// `lookupRecordedExprType`.
+  /// The overload the typechecker selected for a call expression, when the
+  /// callee had more than one same-name candidate.
+  function lookupCallTarget(
+    typecheck: &Analyzer::Typecheck::TypecheckOutput,
+    exprId: Ast::ExpressionId,
+  ): Option<Analyzer::DefinitionId> {
+    let mut index: u64 = typecheck.callTargets.nodeIds.length();
+
+    while (index > 0) {
+      index -= 1;
+
+      let Option::SOME(nodeId) = typecheck.callTargets.nodeIds.get(index) else {
+        continue;
+      };
+
+      if (*nodeId != exprId.raw()) {
+        continue;
+      }
+
+      let Option::SOME(defId) = typecheck.callTargets.defIds.get(index) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(*defId);
+    }
+
+    return Option::NONE;
+  }
+
   function lookupExprType(
     typecheck: &Analyzer::Typecheck::TypecheckOutput,
     exprId: Ast::ExpressionId,
@@ -1511,6 +1540,10 @@ export namespace Lowering {
       _ -> {},
     };
 
+    if (let Option::SOME(selectedDef) = Lowering::lookupCallTarget(&output.typecheck, exprId)) {
+      calleeDefOpt = Option::SOME(selectedDef);
+    }
+
     // A callee resolving to a local is a function-typed value (a closure or
     // function parameter): the call goes through the value, not a definition.
     if (localCallee) {
@@ -1727,12 +1760,18 @@ export namespace Lowering {
 
     let methods: Vector<Analyzer::DefinitionId> = Lowering::instanceMethodTable(defStore, typeStore, receiverType);
 
-    let Option::SOME(methodDefId) = Analyzer::ResolverBodies::lookupMethodInTable(
-      defStore,
-      &methods,
-      memberAccess.member.toStr(),
-      symbols,
-    ) else {
+    let mut methodLookup: Option<Analyzer::DefinitionId> = Lowering::lookupCallTarget(&output.typecheck, exprId);
+
+    if (methodLookup.isNone()) {
+      methodLookup = Analyzer::ResolverBodies::lookupMethodInTable(
+        defStore,
+        &methods,
+        memberAccess.member.toStr(),
+        symbols,
+      );
+    }
+
+    let Option::SOME(methodDefId) = methodLookup else {
       // An `@extension(T)` function answers the member miss like the oracle:
       // the receiver becomes the first argument of a plain `Call`.
       if (let Option::SOME(extensionDefId) = Analyzer::Typecheck::lookupExtensionFunction(
