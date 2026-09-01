@@ -2034,6 +2034,7 @@ export namespace LirLowering {
   function lowerPatternCheck(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     value: &Lir::Operand,
@@ -2089,6 +2090,8 @@ export namespace LirLowering {
 
         if (let Option::SOME(folded) = LirLowering::foldedConstOperand(typeStore, state, defId, valueType)) {
           constantOperand = folded;
+        } else if (let Option::SOME(initId) = hirStore.constantInit(defId)) {
+          constantOperand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, initId);
         }
 
         let dest: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
@@ -2209,6 +2212,7 @@ export namespace LirLowering {
             nested = LirLowering::lowerPatternCheck(
               defStore,
               typeStore,
+              hirStore,
               function_,
               state,
               &fieldOperand,
@@ -2246,6 +2250,7 @@ export namespace LirLowering {
           let check: Lir::Operand = LirLowering::lowerPatternCheck(
             defStore,
             typeStore,
+            hirStore,
             function_,
             state,
             value,
@@ -2297,6 +2302,7 @@ export namespace LirLowering {
   function lowerTupleMatchPatternCheck(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     elementLocals: &Vector<Lir::LocalId>,
@@ -2343,6 +2349,7 @@ export namespace LirLowering {
           let nested: Lir::Operand = LirLowering::lowerPatternCheck(
             defStore,
             typeStore,
+            hirStore,
             function_,
             state,
             &elementOperand,
@@ -2379,6 +2386,7 @@ export namespace LirLowering {
           let nested: Lir::Operand = LirLowering::lowerTupleMatchPatternCheck(
             defStore,
             typeStore,
+            hirStore,
             function_,
             state,
             elementLocals,
@@ -2551,6 +2559,7 @@ export namespace LirLowering {
         matches = LirLowering::lowerTupleMatchPatternCheck(
           defStore,
           typeStore,
+          hirStore,
           function_,
           state,
           &elementLocals,
@@ -2570,6 +2579,7 @@ export namespace LirLowering {
         matches = LirLowering::lowerPatternCheck(
           defStore,
           typeStore,
+          hirStore,
           function_,
           state,
           &scrutineeOperand,
@@ -2672,6 +2682,7 @@ export namespace LirLowering {
     let matches: Lir::Operand = LirLowering::lowerPatternCheck(
       defStore,
       typeStore,
+      hirStore,
       function_,
       state,
       &scrutineeOperand,
@@ -3049,6 +3060,17 @@ export namespace LirLowering {
       }
 
       let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, &mut function_, &mut state, bodyId);
+
+      // A body that falls off its end returns void implicitly; anything else
+      // reaching here was already rejected by the checker, so the block is
+      // unreachable rather than a return of nothing.
+      if (!state.terminated) {
+        if (LirLowering::isVoidType(typeStore, returnType)) {
+          LirLowering::terminate(&mut function_, &mut state, Lir::Terminator::Return(Option::NONE));
+        } else {
+          LirLowering::terminate(&mut function_, &mut state, Lir::Terminator::Unreachable);
+        }
+      }
 
       unsupported += state.unsupported;
       loweredFunctions += 1;

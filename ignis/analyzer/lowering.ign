@@ -172,6 +172,46 @@ export namespace Lowering {
     return Option::NONE;
   }
 
+  /// The type arguments the typechecker inferred for a call written without
+  /// any, when the callee is generic.
+  function lookupCallTypeArgs(
+    typecheck: &Analyzer::Typecheck::TypecheckOutput,
+    exprId: Ast::ExpressionId,
+  ): Option<Vector<Analyzer::TypeId>> {
+    let mut index: u64 = typecheck.callTypeArgs.nodeIds.length();
+
+    while (index > 0) {
+      index -= 1;
+
+      let Option::SOME(nodeId) = typecheck.callTypeArgs.nodeIds.get(index) else {
+        continue;
+      };
+
+      if (*nodeId != exprId.raw()) {
+        continue;
+      }
+
+      let Option::SOME(typeArgs) = typecheck.callTypeArgs.typeArgs.get(index) else {
+        return Option::NONE;
+      };
+
+      let mut copied: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut argIndex: u64 = 0;
+
+      while (argIndex < typeArgs.length()) {
+        if (let Option::SOME(typeArg) = typeArgs.get(argIndex)) {
+          copied.push(*typeArg);
+        }
+
+        argIndex += 1;
+      }
+
+      return Option::SOME(copied);
+    }
+
+    return Option::NONE;
+  }
+
   function lookupExprType(
     typecheck: &Analyzer::Typecheck::TypecheckOutput,
     exprId: Ast::ExpressionId,
@@ -1476,7 +1516,7 @@ export namespace Lowering {
       }
     }
 
-    let Option::SOME(callTypeArgs) = Lowering::resolveCallTypeArguments(
+    let Option::SOME(writtenTypeArgs) = Lowering::resolveCallTypeArguments(
       defStore,
       typeStore,
       symbols,
@@ -1485,6 +1525,14 @@ export namespace Lowering {
     ) else {
       return Lowering::errorNode(hir, typeStore, call.span);
     };
+
+    let mut callTypeArgs: Vector<Analyzer::TypeId> = writtenTypeArgs;
+
+    if (callTypeArgs.length() == 0) {
+      if (let Option::SOME(inferred) = Lowering::lookupCallTypeArgs(&output.typecheck, exprId)) {
+        callTypeArgs = inferred;
+      }
+    }
 
     // `minOf<T>()` / `maxOf<T>()` written without `@` are typed from the
     // callee name alone (typechecker branch 1b) and carry no resolver ref.
