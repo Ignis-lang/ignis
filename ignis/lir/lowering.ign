@@ -1278,6 +1278,26 @@ export namespace LirLowering {
       return Lir::Operand::Temp(fieldPtr);
     }
 
+    // `&base[index]` is the element's own address, never a copy of it: a
+    // spilled copy would hand the caller a pointer into this frame.
+    if (let Hir::HirKind::Index(indexNode) = &node.kind) {
+      let base: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, indexNode.base);
+      let indexOperand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, indexNode.index);
+
+      let mut elementPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let elementPtrType: Analyzer::TypeId = elementPtrTypeStoreRef.pointer(nodeType);
+      let elementPtr: Lir::TempId = LirLowering::freshTemp(function_, elementPtrType, nodeSpan);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::GetElementPtr(Lir::InstrGetElementPtr {
+        dest: elementPtr,
+        base: base,
+        index: indexOperand,
+        elementType: nodeType,
+      }));
+
+      return Lir::Operand::Temp(elementPtr);
+    }
+
     let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hirId);
     let spill: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
 

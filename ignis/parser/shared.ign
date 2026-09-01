@@ -42,6 +42,54 @@ export namespace ParserShared {
     return lexeme.substringBytes(1, lexeme.length() - 1);
   }
 
+  /// Decodes the escape sequences of a string or template chunk, mirroring
+  /// the host lexer's table: an unknown escape drops both the backslash and
+  /// the character after it. Template-only escapes (`` \` `` and `\$`)
+  /// decode the same way in a plain string, where they cannot occur.
+  function decodeEscapes(text: String): String {
+    let mut result: String = String::create("");
+    let mut index: u64 = 0;
+
+    while (index < text.length()) {
+      let Option::SOME(byte) = text.byteAt(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (byte != '\\' as u8) {
+        result.pushByte(byte);
+        index += 1;
+        continue;
+      }
+
+      index += 1;
+
+      let Option::SOME(escaped) = text.byteAt(index) else {
+        break;
+      };
+
+      if (escaped == 'n' as u8) {
+        result.pushByte(10);
+      } else if (escaped == 'r' as u8) {
+        result.pushByte(13);
+      } else if (escaped == 't' as u8) {
+        result.pushByte(9);
+      } else if (escaped == '0' as u8) {
+        result.pushByte(0);
+      } else if (escaped == 'b' as u8) {
+        result.pushByte(8);
+      } else if (escaped == 'f' as u8) {
+        result.pushByte(12);
+      } else if (escaped == '"' as u8 || escaped == '\\' as u8 || escaped == '`' as u8 || escaped == '$' as u8) {
+        result.pushByte(escaped);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
   /// Removes the delimiters around a template chunk.
   ///
   /// `leading` and `trailing` are byte counts: a head is `` `text${ `` and a tail

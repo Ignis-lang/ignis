@@ -436,7 +436,7 @@ export namespace ParserExpressions {
     let mut parserRef: &mut ParserShared::State = parser;
 
     let headLexeme: String = parserRef.bump().lexemeString();
-    let headText: String = ParserShared::stripTemplateDelimiters(&headLexeme, 1 as u64, 2 as u64);
+    let headText: String = ParserShared::decodeEscapes(ParserShared::stripTemplateDelimiters(&headLexeme, 1 as u64, 2 as u64));
 
     let mut result: Ast::ExpressionId = ParserExpressions::buildStringCreate(parserRef, head.span, &headText);
     let mut span: SourceSpan = head.span;
@@ -469,7 +469,7 @@ export namespace ParserExpressions {
       }
 
       let chunkLexeme: String = parserRef.bump().lexemeString();
-      let chunkText: String = ParserShared::stripTemplateDelimiters(&chunkLexeme, 1 as u64, trailing);
+      let chunkText: String = ParserShared::decodeEscapes(ParserShared::stripTemplateDelimiters(&chunkLexeme, 1 as u64, trailing));
 
       if (chunkText.length() > 0) {
         let chunkId: Ast::ExpressionId = ParserExpressions::buildStringLiteral(parserRef, chunkToken.span, &chunkText);
@@ -522,7 +522,7 @@ export namespace ParserExpressions {
         let lexeme: String = parserRef.bump().lexemeString();
         let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
           span: token.span,
-          value: Ast::Expression::LiteralValue::String(ParserShared::stripQuotes(&lexeme)),
+          value: Ast::Expression::LiteralValue::String(ParserShared::decodeEscapes(ParserShared::stripQuotes(&lexeme))),
         }));
         return Option::SOME(ParsedExpression {
           id: expressionId,
@@ -600,7 +600,7 @@ export namespace ParserExpressions {
 
       if (token.literalKindValue() == LiteralKind::TEMPLATE_NO_SUBSTITUTION) {
         let lexeme: String = parserRef.bump().lexemeString();
-        let text: String = ParserShared::stripTemplateDelimiters(&lexeme, 1 as u64, 1 as u64);
+        let text: String = ParserShared::decodeEscapes(ParserShared::stripTemplateDelimiters(&lexeme, 1 as u64, 1 as u64));
         let expressionId: Ast::ExpressionId = ParserExpressions::buildStringCreate(parserRef, token.span, &text);
 
         return Option::SOME(ParsedExpression {
