@@ -923,7 +923,7 @@ export namespace LirLowering {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::FieldAccess(fieldNode) -> {
-        let basePtr: Lir::Operand = LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, fieldNode.base);
+        let basePtr: Lir::Operand = LirLowering::lowerBasePtr(defStore, typeStore, hirStore, function_, state, fieldNode.base);
 
         let mut fieldPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
         let fieldPtrType: Analyzer::TypeId = fieldPtrTypeStoreRef.pointer(nodeType);
@@ -946,7 +946,7 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::Reference(referenceNode) -> {
-        return LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, referenceNode.expression);
+        return LirLowering::lowerBasePtr(defStore, typeStore, hirStore, function_, state, referenceNode.expression);
       },
       Hir::HirKind::RecordInit(recordNode) -> {
         let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
@@ -1171,6 +1171,31 @@ export namespace LirLowering {
   /// lvalue paths: a pointer-typed base passes through, a local variable
   /// takes its address, a nested field access chains `GetFieldPtr`, and any
   /// other value spills to a synthetic local first.
+  /// The pointer a field access or reference starts from. A pointer-typed
+  /// expression is already that pointer (auto-deref of `self.field` through
+  /// `&mut T`); anything else is a place whose address is taken. An
+  /// assignment target never comes through here: a pointer-typed field is a
+  /// place to store into, not a pointer to store through.
+  function lowerBasePtr(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    hirId: Hir::HirId,
+  ): Lir::Operand {
+    let Option::SOME(node) = hirStore.get(hirId) else {
+      state.unsupported += 1;
+      return Lir::Operand::Const(Lir::ConstValue::Undef(function_.returnType));
+    };
+
+    if (LirLowering::isPointerLikeType(typeStore, node.typeId)) {
+      return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hirId);
+    }
+
+    return LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, hirId);
+  }
+
   function lowerPlacePtr(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1186,10 +1211,6 @@ export namespace LirLowering {
 
     let nodeType: Analyzer::TypeId = node.typeId;
     let nodeSpan: SourceSpan = node.span;
-
-    if (LirLowering::isPointerLikeType(typeStore, nodeType)) {
-      return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hirId);
-    }
 
     if (let Hir::HirKind::Variable(defId) = &node.kind) {
       if (let Option::SOME(slot) = LirLowering::lookupLocal(state, defId)) {
@@ -1231,7 +1252,7 @@ export namespace LirLowering {
     }
 
     if (let Hir::HirKind::FieldAccess(fieldNode) = &node.kind) {
-      let basePtr: Lir::Operand = LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, fieldNode.base);
+      let basePtr: Lir::Operand = LirLowering::lowerBasePtr(defStore, typeStore, hirStore, function_, state, fieldNode.base);
 
       let mut fieldPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
       let fieldPtrType: Analyzer::TypeId = fieldPtrTypeStoreRef.pointer(nodeType);

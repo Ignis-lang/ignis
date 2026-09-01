@@ -952,6 +952,66 @@ export namespace CodegenC {
     return Option::NONE;
   }
 
+  function isEqualityOperation(op: &Hir::BinaryOperation): boolean {
+    return match (op) {
+      Hir::BinaryOperation::Equal | Hir::BinaryOperation::NotEqual -> true,
+      _ -> false,
+    };
+  }
+
+  /// Whether an operand is an enum none of whose variants carries a payload.
+  function isUnitEnumOperand(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): boolean {
+    let Option::SOME(typeId) = CodegenC::operandType(function_, operand) else {
+      return false;
+    };
+
+    let mut enumDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+      if (let Analyzer::Type::Enum(defId) = typeNode) {
+        enumDefId = Option::SOME(defId);
+      }
+    }
+
+    let Option::SOME(defId) = enumDefId else {
+      return false;
+    };
+
+    let mut variants: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Enum(enumDef) = definition) {
+        variants = CodegenC::copyDefIds(&enumDef.variants);
+      }
+    }
+
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < variants.length()) {
+      let Option::SOME(variantId) = variants.get(variantIndex) else {
+        variantIndex += 1;
+        continue;
+      };
+
+      if (let Option::SOME(variantDefinition) = defStore.get(*variantId)) {
+        if (let Analyzer::Definition::Variant(variantDef) = variantDefinition) {
+          if (variantDef.payload.length() > 0) {
+            return false;
+          }
+        }
+      }
+
+      variantIndex += 1;
+    }
+
+    return true;
+  }
+
   /// The C name of the drop-glue helper for a type. The type store is
   /// deduplicated, so the raw type id already identifies the type uniquely
   /// within one translation unit.
@@ -1104,7 +1164,15 @@ export namespace CodegenC {
         } else {
           let left: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.left);
           let right: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.right);
-          let line: String = `    t${node.dest.raw()} = ${left.toStr()} ${operator} ${right.toStr()};\n`;
+          // Equality on a payload-free enum compares tags: the C struct has
+          // no `==` of its own.
+          let mut tagSuffix: str = "";
+
+          if (CodegenC::isEqualityOperation(&node.op) && CodegenC::isUnitEnumOperand(defStore, typeStore, function_, &node.left)) {
+            tagSuffix = ".tag";
+          }
+
+          let line: String = `    t${node.dest.raw()} = ${left.toStr()}${tagSuffix} ${operator} ${right.toStr()}${tagSuffix};\n`;
           let mut outputRef: &mut String = output;
           outputRef.pushStr(line.toStr());
         }
