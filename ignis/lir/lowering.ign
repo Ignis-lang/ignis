@@ -28,8 +28,11 @@ export namespace LirLowering {
     /// Definitions whose local slot holds a pointer to the original place
     /// rather than a copy: the by-mutable-reference captures of a thunk.
     public byrefCaptureRaws: Vector<u32>;
+    /// Evaluated module constants, so a reference to one folds into a LIR
+    /// constant instead of naming a global the emitter has no definition for.
+    public constValues: Analyzer::ConstEval::ConstValueMap;
 
-    public static init(): LowerState {
+    public static init(constValues: &Analyzer::ConstEval::ConstValueMap): LowerState {
       return LowerState {
         unsupported: 0,
         localDefRaws: Vector::new<u32>(),
@@ -39,6 +42,7 @@ export namespace LirLowering {
         breakBlockRaws: Vector::new<u32>(),
         continueBlockRaws: Vector::new<u32>(),
         byrefCaptureRaws: Vector::new<u32>(),
+        constValues: LirLowering::copyConstValueMap(constValues),
       };
     }
   }
@@ -149,6 +153,81 @@ export namespace LirLowering {
 
     block.terminator = terminator;
     state.terminated = true;
+  }
+
+  function copyConstValueMap(
+    map: &Analyzer::ConstEval::ConstValueMap
+  ): Analyzer::ConstEval::ConstValueMap {
+    let mut defIdRaws: Vector<u32> = Vector::new<u32>();
+    let mut values: Vector<Analyzer::ConstEval::ConstValue> = Vector::new<Analyzer::ConstEval::ConstValue>();
+    let mut index: u64 = 0;
+
+    while (index < map.defIdRaws.length()) {
+      let Option::SOME(defIdRaw) = map.defIdRaws.get(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(value) = map.values.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      defIdRaws.push(*defIdRaw);
+      values.push(Analyzer::ConstEval::copyConstValue(value));
+      index += 1;
+    }
+
+    return Analyzer::ConstEval::ConstValueMap { defIdRaws: defIdRaws, values: values };
+  }
+
+  function isUnsignedIntegerType(
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId
+  ): boolean {
+    if (let Option::SOME(typeNode) = typeStore.get(ty)) {
+      return match (typeNode) {
+        Analyzer::Type::U8 | Analyzer::Type::U16 | Analyzer::Type::U32 | Analyzer::Type::U64 -> true,
+        _ -> false,
+      };
+    }
+
+    return false;
+  }
+
+  function integerConst(bits: i64, isUnsigned: boolean, ty: Analyzer::TypeId): Lir::ConstValue {
+    if (isUnsigned) {
+      return Lir::ConstValue::UInt(bits as u64, ty);
+    }
+
+    return Lir::ConstValue::Int(bits, ty);
+  }
+
+  /// The folded operand for a reference to a constant with an evaluated value.
+  /// The analyzer keeps every integer as an `i64` bit pattern, so an unsigned
+  /// constant is reinterpreted here, the way the oracle does, to keep C from
+  /// applying signed semantics to it.
+  function foldedConstOperand(
+    typeStore: &mut Analyzer::TypeStore,
+    state: &mut LirLowering::LowerState,
+    defId: Analyzer::DefinitionId,
+    ty: Analyzer::TypeId,
+  ): Option<Lir::Operand> {
+    let Option::SOME(value) = Analyzer::ConstEval::findConstValue(&mut state.constValues, defId.raw()) else {
+      return Option::NONE;
+    };
+
+    let isUnsigned: boolean = LirLowering::isUnsignedIntegerType(typeStore, ty);
+
+    let constant: Lir::ConstValue = match (value) {
+      Analyzer::ConstEval::ConstValue::Int(i) -> LirLowering::integerConst(i, isUnsigned, ty),
+      Analyzer::ConstEval::ConstValue::Float(f) -> Lir::ConstValue::Float(f, ty),
+      Analyzer::ConstEval::ConstValue::Bool(b) -> Lir::ConstValue::Bool(b, ty),
+      Analyzer::ConstEval::ConstValue::Char(c) -> Lir::ConstValue::Char(c as u32, ty),
+      Analyzer::ConstEval::ConstValue::Str(s) -> Lir::ConstValue::Str(s, ty),
+      Analyzer::ConstEval::ConstValue::Null -> Lir::ConstValue::Null(ty),
+    };
+
+    return Option::SOME(Lir::Operand::Const(constant));
   }
 
   function isVoidType(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
@@ -433,6 +512,10 @@ export namespace LirLowering {
           }));
 
           return Lir::Operand::Temp(dest);
+        }
+
+        if (let Option::SOME(folded) = LirLowering::foldedConstOperand(typeStore, state, defId, nodeType)) {
+          return folded;
         }
 
         return Lir::Operand::GlobalRef(defId);
@@ -1021,6 +1104,10 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::StaticAccess(defId) -> {
+        if (let Option::SOME(folded) = LirLowering::foldedConstOperand(typeStore, state, defId, nodeType)) {
+          return folded;
+        }
+
         return Lir::Operand::GlobalRef(defId);
       },
       Hir::HirKind::Assign(assignNode) -> {
@@ -1967,13 +2054,19 @@ export namespace LirLowering {
           span,
         );
 
+        let mut constantOperand: Lir::Operand = Lir::Operand::GlobalRef(defId);
+
+        if (let Option::SOME(folded) = LirLowering::foldedConstOperand(typeStore, state, defId, valueType)) {
+          constantOperand = folded;
+        }
+
         let dest: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
           dest: dest,
           op: Hir::BinaryOperation::Equal,
           left: matchValue,
-          right: Lir::Operand::GlobalRef(defId),
+          right: constantOperand,
         }));
 
         return Lir::Operand::Temp(dest);
@@ -2865,6 +2958,7 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    constValues: &Analyzer::ConstEval::ConstValueMap,
   ): LirLowering::LowerModuleResult {
     let mut program: Lir::LirProgram = Lir::LirProgram::init();
     let tables: LirLowering::ClosureTables = LirLowering::collectClosureTables(hirStore);
@@ -2905,7 +2999,7 @@ export namespace LirLowering {
       let entry: Lir::BlockId = function_.allocBlock(Lir::Block::create(String::create("entry")));
       function_.entryBlock = entry;
 
-      let mut state: LirLowering::LowerState = LirLowering::LowerState::init();
+      let mut state: LirLowering::LowerState = LirLowering::LowerState::init(constValues);
 
       LirLowering::registerParams(defStore, &mut function_, &mut state, &paramDefs);
 
