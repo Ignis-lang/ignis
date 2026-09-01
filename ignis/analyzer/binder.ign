@@ -590,6 +590,31 @@ export namespace Analyzer {
     ///
     /// `@extension(Type, mut)` carries a second argument the selfhost does not
     /// model yet; the target is read the same way from both forms.
+    function externNameAttribute(metadata: &Ast::Metadata): Option<String> {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let name: &String = &attribute.name;
+        if (!name.equals("externName")) {
+          index += 1;
+          continue;
+        }
+
+        if (let Option::SOME(argument) = attribute.arguments.get(0)) {
+          return Option::SOME(Analyzer::Binder::stripQuotes(argument));
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
     function extensionAttributeTarget(metadata: &Ast::Metadata): Option<String> {
       let mut index: u64 = 0;
 
@@ -690,26 +715,33 @@ export namespace Analyzer {
           return Option::NONE;
         };
 
-        let length: u64 = argument.length();
-        if (length >= 2) {
-          let firstIsQuote: boolean = match (argument.byteAt(0)) {
-            Option::SOME(byte) -> byte == '"' as u8,
-            Option::NONE -> false,
-          };
-          let lastIsQuote: boolean = match (argument.byteAt(length - 1)) {
-            Option::SOME(byte) -> byte == '"' as u8,
-            Option::NONE -> false,
-          };
-
-          if (firstIsQuote && lastIsQuote) {
-            return Option::SOME(argument.substringBytes(1, length - 1));
-          }
-        }
-
-        return Option::SOME(argument.clone());
+        return Option::SOME(Analyzer::Binder::stripQuotes(argument));
       }
 
       return Option::NONE;
+    }
+
+    /// A string attribute argument without its surrounding quotes; any other
+    /// lexeme is returned as written.
+    function stripQuotes(argument: &String): String {
+      let length: u64 = argument.length();
+
+      if (length >= 2) {
+        let firstIsQuote: boolean = match (argument.byteAt(0)) {
+          Option::SOME(byte) -> byte == '"' as u8,
+          Option::NONE -> false,
+        };
+        let lastIsQuote: boolean = match (argument.byteAt(length - 1)) {
+          Option::SOME(byte) -> byte == '"' as u8,
+          Option::NONE -> false,
+        };
+
+        if (firstIsQuote && lastIsQuote) {
+          return argument.substringBytes(1, length - 1);
+        }
+      }
+
+      return argument.clone();
     }
 
     /// The try capability an enum's attributes ask for, if any.
@@ -1136,6 +1168,7 @@ export namespace Analyzer {
                   mutable: false,
                   takes: Analyzer::Binder::hasAttribute(&b.metadata, "takes"),
                   noEscape: Analyzer::Binder::hasAttribute(&b.metadata, "noescape"),
+                  isExtern: false,
                 };
                 let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                 let paramId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(paramDef));
@@ -1835,6 +1868,7 @@ export namespace Analyzer {
         deprecatedMessage: Option::NONE,
         extensionTarget: Option::NONE,
         isExtern: false,
+        externName: Option::NONE,
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       let defId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Function(placeholderFn));
@@ -1853,6 +1887,7 @@ export namespace Analyzer {
         deprecatedMessage: Analyzer::Binder::deprecatedAttributeMessage(&fn_.metadata),
         extensionTarget: Analyzer::Binder::extensionAttributeTarget(&fn_.metadata),
         isExtern: state.insideExtern,
+        externName: Analyzer::Binder::externNameAttribute(&fn_.metadata),
       };
       let mut defsRef2: &mut Analyzer::DefinitionStore = defStore;
       defsRef2.replace(defId, Analyzer::Definition::Function(newFn));
@@ -1899,6 +1934,7 @@ export namespace Analyzer {
         mutable: false,
         takes: false,
         noEscape: false,
+        isExtern: state.insideExtern,
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       let defId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(varDef));

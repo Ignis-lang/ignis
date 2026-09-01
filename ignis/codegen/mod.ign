@@ -117,19 +117,35 @@ export namespace CodegenC {
     return CodegenC::sanitize(text);
   }
 
-  /// The C symbol for a definition. Extern functions keep the name the C side
-  /// already defines; everything else is suffixed with its definition id.
+  /// The C symbol for a definition. Extern functions and constants keep the
+  /// name the C side already defines; everything else is suffixed with its
+  /// definition id.
   function mangledName(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
     defId: Analyzer::DefinitionId,
   ): String {
     let mut isExtern: boolean = false;
+    let mut externName: Option<String> = Option::NONE;
 
     if (let Option::SOME(definition) = defStore.get(defId)) {
-      if (let Analyzer::Definition::Function(functionDef) = definition) {
-        isExtern = functionDef.isExtern;
-      }
+      match (definition) {
+        Analyzer::Definition::Function(functionDef) -> {
+          isExtern = functionDef.isExtern;
+
+          if (let Option::SOME(name) = &functionDef.externName) {
+            externName = Option::SOME(name.clone());
+          }
+        },
+        Analyzer::Definition::Variable(variableDef) -> {
+          isExtern = variableDef.isExtern;
+        },
+        _ -> {},
+      };
+    }
+
+    if (let Option::SOME(name) = externName) {
+      return name;
     }
 
     let base: String = CodegenC::definitionName(defStore, symbols, defId);
@@ -2433,94 +2449,22 @@ export namespace CodegenC {
 
   /// A declaration for every function the C side defines.
   ///
-  /// An extern function has no body to lower, so it never reaches the LIR
-  /// program and the prototype loop never sees it. Its declaration has to come
-  /// straight out of the definition store.
-  function emitExternDeclarations(
-    defStore: &mut Analyzer::DefinitionStore,
-    typeStore: &mut Analyzer::TypeStore,
-    symbols: &mut Analyzer::SymbolTable,
-    output: &mut String,
-    closures: &CodegenC::ClosureTables,
-  ): void {
-    let mut declarations: String = String::create("");
-    let mut rawId: u64 = 0;
-
-    while (rawId < defStore.length()) {
-      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
-
-      let mut isExtern: boolean = false;
-      let mut returnType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
-      let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
-
-      if (let Option::SOME(definition) = defStore.get(defId)) {
-        if (let Analyzer::Definition::Function(functionDef) = definition) {
-          isExtern = functionDef.isExtern;
-          returnType = functionDef.returnType;
-          params = CodegenC::copyDefIds(&functionDef.params);
-        }
-      }
-
-      if (!isExtern) {
-        rawId += 1;
-        continue;
-      }
-
-      let name: String = CodegenC::mangledName(defStore, symbols, defId);
-
-      // `ignis_rt.h` already declares everything the runtime owns, and it spells
-      // the string and vector types with its own C tags. Redeclaring one here
-      // with the emitter's struct name is a conflicting declaration, not a
-      // missing one.
-      if (name.startsWith("ignis_")) {
-        rawId += 1;
-        continue;
-      }
-
-      let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, returnType);
-
-      let mut line: String = `extern ${returnText.toStr()} ${name.toStr()}(`;
-
-      if (params.length() == 0) {
-        line.pushStr("void");
-      } else {
-        let mut paramIndex: u64 = 0;
-
-        while (paramIndex < params.length()) {
-          if (let Option::SOME(paramId) = params.get(paramIndex)) {
-            let mut paramType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
-
-            if (let Option::SOME(paramDefinition) = defStore.get(*paramId)) {
-              if (let Analyzer::Definition::Variable(variableDef) = paramDefinition) {
-                paramType = variableDef.declaredType;
-              }
-            }
-
-            if (paramIndex > 0) {
-              line.pushStr(", ");
-            }
-
-            let text: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, paramType);
-            line.pushStr(text.toStr());
-          }
-
-          paramIndex += 1;
-        }
-      }
-
-      line.pushStr(");\n");
-      declarations.pushStr(line.toStr());
-
-      rawId += 1;
-    }
-
-    if (declarations.length() == 0) {
-      return;
-    }
-
+  function emitStdHeaders(output: &mut String): void {
     let mut outputRef: &mut String = output;
-    outputRef.pushStr("\n// Extern declarations\n");
-    outputRef.pushStr(declarations.toStr());
+    outputRef.pushStr("#include <stdlib.h>\n");
+    outputRef.pushStr("#include <string.h>\n");
+    outputRef.pushStr("#include <stdio.h>\n");
+    outputRef.pushStr("#include <errno.h>\n");
+    outputRef.pushStr("#include <ctype.h>\n");
+    outputRef.pushStr("#include <time.h>\n");
+    outputRef.pushStr("#include <signal.h>\n");
+    outputRef.pushStr("#include <unistd.h>\n");
+    outputRef.pushStr("#include <sys/mman.h>\n");
+    outputRef.pushStr("#include <sys/wait.h>\n");
+    outputRef.pushStr("#include <sys/stat.h>\n");
+    outputRef.pushStr("#include <dirent.h>\n");
+    outputRef.pushStr("#include <fcntl.h>\n");
+    outputRef.pushStr("#include <math.h>\n\n");
   }
 
   /// One `static void <name>(u8*)` helper per type a `DropGlue` instruction
@@ -2630,12 +2574,12 @@ export namespace CodegenC {
 
     source.pushStr("#include \"ignis_rt.h\"\n");
 
-    // `ignis_rt.h` already pulls stdint, stdlib and float.h. `memcpy` and `pow`
-    // come from these two, and the Rust emitter only includes them when an
-    // instruction needs them. Scanning the program for that is a refinement the
-    // measured loop does not need yet.
-    source.pushStr("#include <string.h>\n");
-    source.pushStr("#include <math.h>\n\n");
+    // The host includes the headers each linked std module names in
+    // `std/manifest.toml`; this is that list for `libc` and `math`, which every
+    // program pulls through the prelude. An extern function is then declared
+    // by its header, never by the emitter, since a second declaration with the
+    // emitter's spelling of the parameter types conflicts with the header's.
+    CodegenC::emitStdHeaders(&mut source);
 
     let tables: CodegenC::ClosureTables = CodegenC::collectClosureTables(defStore, typeStore, program);
     let closures: &CodegenC::ClosureTables = &tables;
@@ -2671,8 +2615,6 @@ export namespace CodegenC {
     CodegenC::emitClosureTypes(defStore, typeStore, symbols, &mut source, closures);
 
     CodegenC::emitDropGlueHelpers(defStore, typeStore, symbols, &mut source, closures, program);
-
-    CodegenC::emitExternDeclarations(defStore, typeStore, symbols, &mut source, closures);
 
     source.pushStr("\n// Function prototypes\n");
 

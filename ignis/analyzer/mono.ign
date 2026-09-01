@@ -575,6 +575,7 @@ export namespace Mono {
           mutable: clonedMutable,
           takes: clonedTakes,
           noEscape: clonedNoEscape,
+          isExtern: false,
         })));
       }
     }
@@ -685,6 +686,7 @@ export namespace Mono {
       deprecatedMessage: Option::NONE,
       extensionTarget: Option::NONE,
       isExtern: false,
+      externName: Option::NONE,
     }));
   }
 
@@ -1803,6 +1805,29 @@ export namespace Mono {
       itemIndex += 1;
     }
 
+    // A use of a module constant const-eval could not fold lowers its
+    // initializer in place, so the output store needs those expressions too.
+    // Constants are never generic.
+    let mut initIndex: u64 = 0;
+
+    while (initIndex < inputHir.constantInits.length()) {
+      let Option::SOME(constDef) = inputHir.constantInits.keyAt(initIndex) else {
+        initIndex += 1;
+        continue;
+      };
+      let Option::SOME(initId) = inputHir.constantInits.valueAt(initIndex) else {
+        initIndex += 1;
+        continue;
+      };
+
+      let clonedInit: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, &mut outputHir, &mut state, &emptyTable, initId);
+
+      let mut initHirRef: &mut Hir::HirStore = &mut outputHir;
+      initHirRef.setConstantInit(constDef, clonedInit);
+
+      initIndex += 1;
+    }
+
     Mono::drainPending(defStore, typeStore, symbols, inputHir, &mut outputHir, &mut state);
 
     // The sweep can request instantiations of its own, so the worklist is
@@ -1892,6 +1917,7 @@ export namespace Mono {
       let mut isStatic: boolean = false;
       let mut selfMutable: boolean = false;
       let mut isExtern: boolean = false;
+      let mut externName: Option<String> = Option::NONE;
       let mut takes: boolean = false;
       let mut noEscape: boolean = false;
       let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
@@ -1913,6 +1939,7 @@ export namespace Mono {
             deprecatedMessage = Mono::copyOptionalString(&functionDef.deprecatedMessage);
             extensionTarget = Mono::copyOptionalString(&functionDef.extensionTarget);
             isExtern = functionDef.isExtern;
+            externName = Mono::copyOptionalString(&functionDef.externName);
           },
           Analyzer::Definition::Method(methodDef) -> {
             kind = 2;
@@ -1935,6 +1962,7 @@ export namespace Mono {
             mutable = variableDef.mutable;
             takes = variableDef.takes;
             noEscape = variableDef.noEscape;
+            isExtern = variableDef.isExtern;
           },
           Analyzer::Definition::Field(fieldDef) -> {
             kind = 4;
@@ -1973,6 +2001,7 @@ export namespace Mono {
           deprecatedMessage: deprecatedMessage,
           extensionTarget: extensionTarget,
           isExtern: isExtern,
+          externName: externName,
         }));
 
         rawId += 1;
@@ -2011,6 +2040,7 @@ export namespace Mono {
           mutable: mutable,
           takes: takes,
           noEscape: noEscape,
+          isExtern: isExtern,
         }));
 
         rawId += 1;

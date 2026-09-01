@@ -742,6 +742,7 @@ export namespace Lowering {
       mutable: false,
       takes: false,
       noEscape: false,
+      isExtern: false,
     }));
 
     if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(localId)) = Analyzer::ResolverBodies::findPatternRef(
@@ -2738,6 +2739,7 @@ export namespace Lowering {
       mutable: false,
       takes: false,
       noEscape: false,
+      isExtern: false,
     }));
   }
 
@@ -3443,6 +3445,7 @@ export namespace Lowering {
       mutable: mutable,
       takes: false,
       noEscape: false,
+      isExtern: false,
     }));
 
     if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Local(localId)) = Analyzer::ResolverBodies::findPatternRef(
@@ -4055,8 +4058,35 @@ export namespace Lowering {
           Lowering::lowerItem(defStore, typeStore, symbols, module, output, locals, hir, innerItemId);
         }
       },
+      Ast::Item::Node::Constant(constant) -> {
+        Lowering::lowerConstantItem(defStore, typeStore, symbols, module, output, locals, hir, itemId, &constant);
+      },
       _ -> {},
     };
+  }
+
+  /// Records a module constant's initializer in `constantInits`. A constant
+  /// const-eval could not fold (one that re-exports an extern constant, say)
+  /// is lowered from this expression at each use, as the oracle does.
+  function lowerConstantItem(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    itemId: Ast::ItemId,
+    constant: &Ast::Item::Constant,
+  ): void {
+    let Option::SOME(defId) = Lowering::findItemDef(output, itemId) else {
+      return;
+    };
+
+    let init: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, constant.value);
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    hirRef.setConstantInit(defId, init);
   }
 
   function lowerItems(

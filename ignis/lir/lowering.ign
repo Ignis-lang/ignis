@@ -518,6 +518,12 @@ export namespace LirLowering {
           return folded;
         }
 
+        // A constant without a folded value still has its initializer; the
+        // oracle lowers that expression at the use site.
+        if (let Option::SOME(initId) = hirStore.constantInit(defId)) {
+          return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, initId);
+        }
+
         return Lir::Operand::GlobalRef(defId);
       },
       Hir::HirKind::Binary(binaryNode) -> {
@@ -1106,6 +1112,10 @@ export namespace LirLowering {
       Hir::HirKind::StaticAccess(defId) -> {
         if (let Option::SOME(folded) = LirLowering::foldedConstOperand(typeStore, state, defId, nodeType)) {
           return folded;
+        }
+
+        if (let Option::SOME(initId) = hirStore.constantInit(defId)) {
+          return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, initId);
         }
 
         return Lir::Operand::GlobalRef(defId);
