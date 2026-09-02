@@ -1,8 +1,9 @@
 import Test from "std::test";
 
-import SourceSpan from "@compiler::diagnostics";
+import DiagnosticBag, DiagnosticCode, SourceFile, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
+import ParseOutput, Parser from "@compiler::parser";
 
 /// Build a zero-byte source span suitable for test diagnostics.
 function dummySpan(): SourceSpan {
@@ -3244,4 +3245,123 @@ function binderLangWithUnknownArgumentIsReported(): void {
 
   Test::assertEq<u64>(pass2.diagnostics.length(), 1);
   Test::assertEq<boolean>(enumTryCapabilityOf(&defStore, &pass1, enumId).isNone(), true);
+}
+
+// ===========================================================================
+// Attribute validation
+//
+// These go through the parser: an attribute list only exists in parsed
+// source, and the point of this slice is that the binder reads the written
+// name and target.
+// ===========================================================================
+
+/// Bind `source` through both binder passes and return the merged diagnostics.
+function binderBindSource(source: str): DiagnosticBag {
+  let file: SourceFile = SourceFile::create("binder_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let pass1 = Analyzer::Binder::predeclareRoots(
+    &parsed.module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+  let pass2 = Analyzer::Binder::completeRoots(
+    &parsed.module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &pass1,
+  );
+
+  let mut merged: DiagnosticBag = DiagnosticBag::init();
+  Analyzer::appendDiagnostics(&mut merged, &pass1.diagnostics);
+  Analyzer::appendDiagnostics(&mut merged, &pass2.diagnostics);
+
+  return merged;
+}
+
+/// Assert that `bag` carries `code` with exactly `message`.
+function binderAssertDiagnostic(bag: &DiagnosticBag, code: str, message: str): void {
+  let expectedCode: String = String::create(code);
+  let expectedMessage: String = String::create(message);
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (expectedCode.equals(diagnostic.code) && expectedMessage.equals(diagnostic.messageText())) {
+      return;
+    }
+
+    index += 1;
+  }
+
+  @panic("binderAssertDiagnostic: no diagnostic with the expected code and message");
+}
+
+/// Scenario: an attribute no target accepts, written on a record.
+@test
+function binderRejectsUnknownRecordAttribute(): void {
+  let bag: DiagnosticBag = binderBindSource(
+    "@bogusAttr\nrecord Foo {\n  x: i32;\n}\n",
+  );
+
+  binderAssertDiagnostic(
+    &bag,
+    DiagnosticCode::UNKNOWN_ATTRIBUTE,
+    "unknown attribute '@bogusAttr' on record",
+  );
+}
+
+/// Scenario: a layout attribute written on a function, where it means nothing.
+/// The target is part of the message, so a misplaced attribute reads as such.
+@test
+function binderRejectsPackedOnFunction(): void {
+  let bag: DiagnosticBag = binderBindSource(
+    "@packed\nfunction foo(): void {\n  return;\n}\n",
+  );
+
+  binderAssertDiagnostic(
+    &bag,
+    DiagnosticCode::UNKNOWN_ATTRIBUTE,
+    "unknown attribute '@packed' on function",
+  );
+}
+
+/// Scenario: `@aligned(N)` with an `N` no allocation can honour.
+@test
+function binderRejectsAlignmentThatIsNotAPowerOfTwo(): void {
+  let bag: DiagnosticBag = binderBindSource(
+    "@aligned(7)\nrecord BadAlign {\n  x: i32;\n}\n",
+  );
+
+  binderAssertDiagnostic(
+    &bag,
+    DiagnosticCode::ALIGNMENT_NOT_POWER_OF_TWO,
+    "alignment 7 is not a power of two",
+  );
+}
+
+/// Scenario: the layout attributes on the declarations that accept them stay
+/// silent, so the table rejects placement rather than the attribute itself.
+@test
+function binderAcceptsLayoutAttributesOnARecord(): void {
+  let bag: DiagnosticBag = binderBindSource(
+    "@packed\n@aligned(8)\nrecord Good {\n  x: i32;\n}\n",
+  );
+
+  Test::assertEq<u64>(bag.length(), 0);
 }

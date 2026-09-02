@@ -961,6 +961,104 @@ export namespace Analyzer {
       stateRef.diagnostics.push(diag);
     }
 
+    /// Whether `name` is an attribute `target` accepts.
+    ///
+    /// Mirrors the per-target tables the host binder matches on. `configFlag`
+    /// is accepted everywhere because the selfhost parser keeps it as an
+    /// attribute for the binder to act on, where the host parser consumes it
+    /// before an attribute list exists.
+    function attributeIsKnownFor(name: &String, target: str): boolean {
+      if (name.equals("allow") || name.equals("warn") || name.equals("deny") || name.equals("configFlag")) {
+        return true;
+      }
+
+      let targetName: String = String::create(target);
+
+      if (targetName.equals("record")) {
+        return name.equals("packed") || name.equals("aligned") || name.equals("implements") || name.equals("lang");
+      }
+
+      if (targetName.equals("field")) {
+        return name.equals("aligned");
+      }
+
+      if (targetName.equals("parameter")) {
+        return name.equals("takes") || name.equals("noescape");
+      }
+
+      return name.equals("test") || name.equals("externName") || name.equals("cold") || name.equals("deprecated") || name.equals("extension") || name.equals("directive");
+    }
+
+    /// Report every attribute `target` does not accept, and every `@aligned(N)`
+    /// whose `N` is not a power of two.
+    function validateAttributes(
+      state: &mut Analyzer::Binder::BinderState,
+      metadata: &Ast::Metadata,
+      target: str,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (!Analyzer::Binder::attributeIsKnownFor(&attribute.name, target)) {
+          Analyzer::Binder::emitUnknownAttribute(state, &attribute.name, target, attribute.span);
+          index += 1;
+          continue;
+        }
+
+        if (attribute.name.equals("aligned") && attribute.arguments.length() == 1) {
+          if (let Option::SOME(argument) = attribute.arguments.get(0)) {
+            if (let Option::SOME(value) = Analyzer::Binder::parseDecimal(argument)) {
+              if (value == 0 || (value & (value - 1)) != 0) {
+                Analyzer::Binder::emitAlignmentNotPowerOfTwo(state, value, attribute.span);
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+    }
+
+    function emitUnknownAttribute(
+      state: &mut Analyzer::Binder::BinderState,
+      name: &String,
+      target: str,
+      span: SourceSpan,
+    ): void {
+      let message: String = `unknown attribute '@${name.toStr()}' on ${target}`;
+      let mut diag: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        DiagnosticCode::UNKNOWN_ATTRIBUTE,
+        message.toStr(),
+        span,
+      );
+      diag.addLabel(LabelKind::PRIMARY, span, message.toStr());
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
+    function emitAlignmentNotPowerOfTwo(
+      state: &mut Analyzer::Binder::BinderState,
+      value: u64,
+      span: SourceSpan,
+    ): void {
+      let message: String = `alignment ${value} is not a power of two`;
+      let mut diag: Diagnostic = Diagnostic::new(
+        Severity::ERROR,
+        DiagnosticCode::ALIGNMENT_NOT_POWER_OF_TWO,
+        message.toStr(),
+        span,
+      );
+      diag.addLabel(LabelKind::PRIMARY, span, message.toStr());
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.diagnostics.push(diag);
+    }
+
     /// Emit a diagnostic for trait methods that do not declare a `self` receiver.
     function emitMissingTraitSelfDiagnostic(
       state: &mut Analyzer::Binder::BinderState,
@@ -1182,6 +1280,8 @@ export namespace Analyzer {
         if (let Option::SOME(pat) = patOpt) {
           match (pat) {
             Ast::Pattern::Node::Binding(b) -> {
+              Analyzer::Binder::validateAttributes(state, &b.metadata, "field");
+
               let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
               let sym: Analyzer::SymbolId = symbolsRef.intern(b.name.toStr());
 
@@ -1422,6 +1522,8 @@ export namespace Analyzer {
         if (let Option::SOME(pat) = patOpt) {
           match (pat) {
             Ast::Pattern::Node::Binding(b) -> {
+              Analyzer::Binder::validateAttributes(state, &b.metadata, "parameter");
+
               let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
               let sym: Analyzer::SymbolId = symbolsRef.intern(b.name.toStr());
 
@@ -1592,6 +1694,8 @@ export namespace Analyzer {
       isStatic: boolean,
       nsScopeKey: u64,
     ): Analyzer::DefinitionId {
+      Analyzer::Binder::validateAttributes(state, &fn_.metadata, "method");
+
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let sym: Analyzer::SymbolId = symbolsRef.intern(fn_.name.toStr());
 
@@ -1808,6 +1912,8 @@ export namespace Analyzer {
       scopeKey: u64,
       pass1: &Analyzer::Binder::BinderOutput,
     ): void {
+      Analyzer::Binder::validateAttributes(state, &rec.metadata, "record");
+
       let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());
       let Option::SOME(defId) = defIdOpt else {
         return;
@@ -1890,6 +1996,10 @@ export namespace Analyzer {
       scopeKey: u64,
       pass1: &Analyzer::Binder::BinderOutput,
     ): void {
+      // The host reports a misplaced enum attribute against the `record`
+      // target too, so the wording matches for both declaration kinds.
+      Analyzer::Binder::validateAttributes(state, &en.metadata, "record");
+
       let defIdOpt: Option<Analyzer::DefinitionId> = findDef(pass1, itemId.raw());
       let Option::SOME(defId) = defIdOpt else {
         return;
@@ -2133,6 +2243,8 @@ export namespace Analyzer {
       fn_: &Ast::Item::Function,
       scopeKey: u64,
     ): void {
+      Analyzer::Binder::validateAttributes(state, &fn_.metadata, "function");
+
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let sym: Analyzer::SymbolId = symbolsRef.intern(fn_.name.toStr());
 
