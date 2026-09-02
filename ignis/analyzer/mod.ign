@@ -952,6 +952,36 @@ export namespace Analyzer {
     }
   }
 
+  /// Every declaration a module can name without writing a qualified path:
+  /// what it declares or re-exports, plus what its imports bind.
+  function moduleVisibleDefinitions(
+    direct: &Analyzer::Imports::DirectDeclarationIndex,
+    overlay: &Analyzer::Imports::ImportOverlay,
+  ): Vector<Analyzer::DefinitionId> {
+    let mut visible: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < direct.defs.length()) {
+      if (let Option::SOME(defId) = direct.defs.get(index)) {
+        visible.push(*defId);
+      }
+
+      index += 1;
+    }
+
+    let mut overlayIndex: u64 = 0;
+
+    while (overlayIndex < overlay.defs.length()) {
+      if (let Option::SOME(defId) = overlay.defs.get(overlayIndex)) {
+        visible.push(*defId);
+      }
+
+      overlayIndex += 1;
+    }
+
+    return visible;
+  }
+
   function buildDirectDeclarationIndex(
     defStore: &mut Analyzer::DefinitionStore,
     module: &Ast::Module,
@@ -1435,6 +1465,10 @@ export namespace Analyzer {
       );
 
       Analyzer::appendReExportedDeclarations(&mut direct, module, &directs, infos);
+
+      let visibleDefs: Vector<Analyzer::DefinitionId> = Analyzer::moduleVisibleDefinitions(&direct, &overlay);
+      let mut visibleRef2b: &mut Analyzer::DefinitionStore = defStore;
+      visibleRef2b.setActiveModuleVisibleDefs(&visibleDefs);
 
       let resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodiesWithImports(
         defStore,

@@ -1,8 +1,9 @@
 import Test from "std::test";
 
-import DiagnosticCode, SourceSpan from "@compiler::diagnostics";
+import DiagnosticCode, SourceFile, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
+import ParseOutput, Parser from "@compiler::parser";
 
 function importsDummySpan(): SourceSpan {
   return SourceSpan::new("imports_tests.ign", 0, 0);
@@ -1164,4 +1165,102 @@ function resolveBodiesPrefersCurrentModuleGlobalOverImportOverlay(): void {
 
   Test::assertEq<u32>(actualDef.raw(), localDef.raw());
   Test::assertEq<u64>(output.resolvedBodies.diagnostics.length(), 0);
+}
+
+// ===========================================================================
+// IGN-175 — module-scoped name visibility across a whole program
+//
+// These fixtures go through the real parser: both bugs they pin are about how
+// a module's declarations reach — or fail to reach — another module, and the
+// hand-built AST helpers above cannot express a re-export line.
+// ===========================================================================
+
+/// Parses `source` under `pathText`, which is also the string an import line
+/// has to write to name the module.
+function importsParseModule(pathText: str, source: str): Ast::Module {
+  let file: SourceFile = SourceFile::create(pathText, source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  return parsed.module;
+}
+
+/// Analyzes two parsed modules as one program, in the order given.
+function importsAnalyzeTwoSources(
+  firstPath: str,
+  firstSource: str,
+  secondPath: str,
+  secondSource: str,
+): Vector<Analyzer::ModuleAnalysisRecord> {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(importsParseModule(firstPath, firstSource));
+  modules.push(importsParseModule(secondPath, secondSource));
+
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  infos.push(importsModuleInfo(0, firstPath));
+  infos.push(importsModuleInfo(1, secondPath));
+
+  let noPrelude: Vector<String> = Vector::new<String>();
+  return Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+    &noPrelude,
+  );
+}
+
+/// The diagnostic codes one analysis record carries, joined by `,`.
+function importsDiagnosticCodes(analysisRecord: &Analyzer::ModuleAnalysisRecord): String {
+  let mut codes: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < analysisRecord.output.diagnostics.length()) {
+    let Option::SOME(diagnostic) = analysisRecord.output.diagnostics.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (index > 0) {
+      codes.pushChar(',');
+    }
+
+    let code: String = String::create(diagnostic.code);
+    codes.push(&code);
+    index += 1;
+  }
+
+  return codes;
+}
+
+/// Scenario: two modules each keep a private helper under the same name and
+/// call their own. Neither can name the other's, so the two never form one
+/// overload set.
+@test
+function analyzeProgramKeepsAnotherModulesPrivateHelperOutOfTheOverloadSet(): void {
+  let helperSource: str = "function fixturePath(name: str): str {\n  return name;\n}\n\nexport function usesHelper(): str {\n  return fixturePath(\"value\");\n}\n";
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoSources(
+    "a.ign",
+    helperSource,
+    "b.ign",
+    helperSource,
+  );
+
+  let Option::SOME(first) = records.get(0) else {
+    @panic("missing first analysis record");
+  };
+  let Option::SOME(second) = records.get(1) else {
+    @panic("missing second analysis record");
+  };
+
+  Test::assertEq<str>(importsDiagnosticCodes(first).toStr(), "");
+  Test::assertEq<str>(importsDiagnosticCodes(second).toStr(), "");
 }
