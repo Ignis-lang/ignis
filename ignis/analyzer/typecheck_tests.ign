@@ -10513,6 +10513,64 @@ function typecheckVectorLiteralWithFixedArrayAnnotationHappyPath(): void {
   assertExprType(&output, vectorExpr, typeStore.fixedArray(elementType, 3));
 }
 
+/// Scenario: a record and a generic function both named `T`, and a bare `T`
+/// annotation read from inside the generic.
+/// Spec: IGN-170 — a type parameter is bound nearer than any declaration a
+/// namespace holds, so the annotation reads it and not the record.
+@test
+function typecheckAnnotationPrefersATypeParameterOverASameNamedRecord(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let i32TypeId: Ast::TypeId = typecheckAddPathType(&mut module, "i32");
+  let mut recordFields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  recordFields.push(typecheckAddAnnotatedField(&mut module, "value", i32TypeId));
+
+  let _recordItem: Ast::ItemId = typecheckAddRecordItem(&mut module, "T", Vector::new<Ast::GenericParam>(), recordFields);
+
+  let paramTypeId: Ast::TypeId = typecheckAddPathType(&mut module, "T");
+  let valueParam: Ast::PatternId = typecheckAddAnnotatedBinding(&mut module, "value", paramTypeId);
+  let mut params: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  params.push(valueParam);
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(typecheckGenericParam("T"));
+
+  let valueUse: Ast::ExpressionId = typecheckAddVariable(&mut module, "value");
+  let retStmt: Ast::StatementId = typecheckAddReturnExpr(&mut module, valueUse);
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(retStmt);
+  let bodyBlock: Ast::StatementId = typecheckAddBlock(&mut module, bodyStmts);
+
+  module.addRootItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: typecheckDummySpan(),
+    name: String::create("identity"),
+    genericParameters: genericParams,
+    parameters: params,
+    returnType: Option::SOME(paramTypeId),
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let _output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
+
+  let Option::SOME(resolved) = Analyzer::Typecheck::resolveLocalAnnotation(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    paramTypeId,
+  ) else {
+    Test::assertEq<str>("no annotation resolved", "a type parameter");
+    return;
+  };
+
+  let symbol: Analyzer::SymbolId = symbols.intern("T");
+  Test::assertEq<u32>(resolved.raw(), typeStore.param(symbol).raw());
+}
+
 /// Scenario: `let view: i32[] = [1, 2, 3];` binds an array value to a slice
 /// annotation. The array knows its own length, so the slice is built from it
 /// and the annotation is accepted.

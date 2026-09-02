@@ -151,6 +151,19 @@ function loweringRenderCaptureOverrides(source: str): String {
   return rendered;
 }
 
+/// Scenario: a local binding takes a record's name, and a record literal of
+/// that name is written after it.
+/// Spec: IGN-170 — a value can never be what `Name { ... }` wants, so the
+/// literal reads the name against record declarations instead.
+@test
+function loweringRecordLiteralReadsPastABindingOfTheSameName(): void {
+  let rendered: String = loweringRender(
+    "record Point {\n  public x: i32;\n}\n\nfunction main(): i32 {\n  let Point: i32 = 7;\n  let origin: Point = Point { x: 5 };\n\n  return origin.x * 10 + Point;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-record-literal-past-binding", rendered.toStr());
+}
+
 /// Scenario: `@move` and `@ref` written on the binding a closure reads.
 /// Spec: IGN-170 — the override reaches the closure's own list, and a nested
 /// lambda keeps its overrides out of the enclosing one.
