@@ -1816,16 +1816,74 @@ export namespace Borrowck {
     };
   }
 
+  /// Whether a field access reads through borrowed storage: its base chain
+  /// reaches a dereferenced reference or a borrowed pattern binding. Mirrors
+  /// `field_base_is_borrowed`.
+  function fieldBaseIsBorrowed(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    nodeId: Hir::HirId,
+  ): boolean {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return false;
+    };
+
+    let mut baseOpt: Option<Hir::HirId> = Option::NONE;
+
+    match (&node.kind) {
+      Hir::HirKind::FieldAccess(access) -> {
+        baseOpt = Option::SOME(access.base);
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(baseId) = baseOpt else {
+      return false;
+    };
+
+    let Option::SOME(baseNode) = hir.get(baseId) else {
+      return false;
+    };
+
+    let mut derefInner: Option<Hir::HirId> = Option::NONE;
+    let mut variableRaw: Option<u32> = Option::NONE;
+
+    match (&baseNode.kind) {
+      Hir::HirKind::Dereference(inner) -> {
+        derefInner = Option::SOME(inner);
+      },
+      Hir::HirKind::Variable(defId) -> {
+        variableRaw = Option::SOME(defId.raw());
+      },
+      _ -> {},
+    };
+
+    if (let Option::SOME(innerId) = derefInner) {
+      if (let Option::SOME(innerNode) = hir.get(innerId)) {
+        if (Borrowck::isReferenceType(typeStore, innerNode.typeId)) {
+          return true;
+        }
+      }
+
+      return Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, innerId);
+    }
+
+    if (let Option::SOME(raw) = variableRaw) {
+      return state.isBorrowedBinding(raw);
+    }
+
+    return Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, baseId);
+  }
+
   /// Whether destructuring this scrutinee binds payloads that still live in
-  /// borrowed storage. Ported from `scrutinee_binds_borrowed_payloads` down to
-  /// the two cases this slice can answer: a reference-typed scrutinee, and a
-  /// dereference of a reference. Its remaining cases need the borrowed-pattern
-  /// binding set and the field-base walk, neither of which is ported yet; both
-  /// are field or dereference shapes that `aliasesExternalStorage` already
-  /// suppresses.
+  /// borrowed storage: a reference-typed scrutinee, a dereference of a
+  /// reference, a binding an earlier destructure through a reference produced,
+  /// or a field reached through one. Mirrors `scrutinee_binds_borrowed_payloads`.
   function bindsBorrowedPayloads(
     typeStore: &mut Analyzer::TypeStore,
     hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
     scrutinee: Hir::HirId,
   ): boolean {
     let Option::SOME(node) = hir.get(scrutinee) else {
@@ -1837,13 +1895,29 @@ export namespace Borrowck {
     }
 
     let mut inner: Option<Hir::HirId> = Option::NONE;
+    let mut variableRaw: Option<u32> = Option::NONE;
+    let mut isFieldAccess: boolean = false;
 
     match (&node.kind) {
       Hir::HirKind::Dereference(target) -> {
         inner = Option::SOME(target);
       },
+      Hir::HirKind::Variable(defId) -> {
+        variableRaw = Option::SOME(defId.raw());
+      },
+      Hir::HirKind::FieldAccess(_) -> {
+        isFieldAccess = true;
+      },
       _ -> {},
     };
+
+    if (let Option::SOME(raw) = variableRaw) {
+      return state.isBorrowedBinding(raw);
+    }
+
+    if (isFieldAccess) {
+      return Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, scrutinee);
+    }
 
     let Option::SOME(innerId) = inner else {
       return false;
@@ -2861,7 +2935,7 @@ export namespace Borrowck {
     // A let-else destructures the same way a match arm does, so a binding taken
     // out of a reference-typed value names borrowed storage for as long as it
     // lives — which here is the enclosing scope, not one arm.
-    let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, letElse.value);
+    let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, state, letElse.value);
 
     // A binding that takes an owned payload out of the scrutinee leaves the
     // scrutinee variable without it: the variable is consumed here so its
@@ -2914,7 +2988,7 @@ export namespace Borrowck {
     }
 
     let aliasesExternalStorage: boolean = Borrowck::aliasesExternalStorage(hir, matchNode.scrutinee);
-    let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, matchNode.scrutinee);
+    let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, state, matchNode.scrutinee);
 
     let preReachable: boolean = state.reachable;
     let preMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
