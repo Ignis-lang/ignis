@@ -136,6 +136,34 @@ export namespace LirLowering {
     };
   }
 
+  /// The operand a stored value lowers to, or `NONE` when lowering it left
+  /// the block terminated.
+  ///
+  /// A diverging value (`@panic`, `@trap`, `@unreachable`) has no operand to
+  /// store, and the store it fed cannot be reached. `lowerExpr` still has to
+  /// answer an operand, so it answers `Undef` of the node type; storing that
+  /// puts a `void` compound literal in the C the emitter writes. The oracle's
+  /// `lower_hir_node` answers `None` there and every store site skips itself,
+  /// which is what this reproduces.
+  function lowerStoredValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    valueId: Hir::HirId,
+  ): Option<Lir::Operand> {
+    let terminatedBefore: boolean = state.terminated;
+    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId);
+
+    if (!terminatedBefore && state.terminated) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(value);
+  }
+
   function pushInstr(
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
@@ -1065,12 +1093,12 @@ export namespace LirLowering {
             }
           }
 
-          let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId);
-
-          LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
-            dest: slot,
-            value: value,
-          }));
+          if (let Option::SOME(value) = LirLowering::lowerStoredValue(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId)) {
+            LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+              dest: slot,
+              value: value,
+            }));
+          }
         }
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
@@ -2278,7 +2306,9 @@ export namespace LirLowering {
       source: targetSlot,
     }));
 
-    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value);
+    let Option::SOME(value) = LirLowering::lowerStoredValue(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value) else {
+      return;
+    };
 
     let Option::SOME(operation) = assignNode.operation else {
       LirLowering::emitOverwriteDrops(dropSchedules, function_, state, assignId);
@@ -2361,7 +2391,10 @@ export namespace LirLowering {
           source: targetSlot,
         }));
 
-        let rhs: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value);
+        let Option::SOME(rhs) = LirLowering::lowerStoredValue(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value) else {
+          return;
+        };
+
         let result: Lir::TempId = LirLowering::freshTemp(function_, targetType, SourceSpan::new("", 0, 0));
 
         LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
@@ -2383,7 +2416,9 @@ export namespace LirLowering {
         return;
       }
 
-      let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value);
+      let Option::SOME(value) = LirLowering::lowerStoredValue(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value) else {
+        return;
+      };
 
       LirLowering::emitOverwriteDrops(dropSchedules, function_, state, assignId);
 
@@ -2412,7 +2447,10 @@ export namespace LirLowering {
         ptr: Lir::Operand::Temp(ptrTemp),
       }));
 
-      let rhs: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value);
+      let Option::SOME(rhs) = LirLowering::lowerStoredValue(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value) else {
+        return;
+      };
+
       let result: Lir::TempId = LirLowering::freshTemp(function_, targetType, SourceSpan::new("", 0, 0));
 
       LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
@@ -2430,7 +2468,9 @@ export namespace LirLowering {
       return;
     }
 
-    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value);
+    let Option::SOME(value) = LirLowering::lowerStoredValue(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value) else {
+      return;
+    };
 
     LirLowering::pushInstr(function_, state, Lir::Instr::StorePtr(Lir::InstrStorePtr {
       ptr: targetPtr,

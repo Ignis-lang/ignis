@@ -2,6 +2,7 @@ import Test from "std::test";
 import Vector from "std::vector";
 
 import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import Id from "@compiler::ids";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
@@ -167,6 +168,108 @@ function lirRenderDrops(
   return rendered;
 }
 
+/// Renders the stack slots one program allocated and the stores that reach
+/// them: for each function, every named local with the type its slot carries,
+/// then the store instructions block by block.
+///
+/// This pins the two facts the drop renderer above cannot show — the slot
+/// holds the binding's declared type, and a store fed by a diverging value is
+/// not emitted at all.
+function lirRenderLocalsAndStores(
+  defStore: &Analyzer::DefinitionStore,
+  typeStore: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+  program: &Lir::LirProgram,
+): String {
+  let mut rendered: String = String::create("");
+  let mut functionIndex: u64 = 0;
+
+  while (functionIndex < program.functions.length()) {
+    let Option::SOME(defId) = program.functions.defAt(functionIndex) else {
+      functionIndex += 1;
+      continue;
+    };
+    let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+      functionIndex += 1;
+      continue;
+    };
+
+    rendered.pushStr("fn ");
+    rendered.pushStr(lirDefinitionName(defStore, symbols, *defId).toStr());
+    rendered.pushStr("\n");
+
+    let mut localIndex: u64 = 0;
+
+    while (localIndex < function_.locals.length()) {
+      let Option::SOME(local) = function_.locals.get(localIndex) else {
+        localIndex += 1;
+        continue;
+      };
+
+      if (local.defId.isSome()) {
+        let slot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(localIndex as u32);
+        let name: String = lirLocalName(defStore, symbols, function_, slot);
+
+        rendered.pushStr("  local ");
+        rendered.pushStr(name.toStr());
+        rendered.pushStr(": ");
+        rendered.pushStr(typeStore.nameOf(local.ty).toStr());
+        rendered.pushStr("\n");
+      }
+
+      localIndex += 1;
+    }
+
+    let mut blockIndex: u64 = 0;
+
+    while (blockIndex < function_.blocks.length()) {
+      let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+        blockIndex += 1;
+        continue;
+      };
+
+      rendered.pushStr("  ");
+      rendered.pushStr(block.label.toStr());
+      rendered.pushStr(":\n");
+
+      let mut instrIndex: u64 = 0;
+
+      while (instrIndex < block.instructions.length()) {
+        if (let Option::SOME(instr) = block.instructions.get(instrIndex)) {
+          match (instr) {
+            Lir::Instr::Store(storeInstr) -> {
+              let name: String = lirLocalName(defStore, symbols, function_, storeInstr.dest);
+
+              rendered.pushStr("    store ");
+              rendered.pushStr(name.toStr());
+              rendered.pushStr("\n");
+            },
+            Lir::Instr::StorePtr(_) -> {
+              rendered.pushStr("    store-ptr\n");
+            },
+            Lir::Instr::PanicMessage(_) -> {
+              rendered.pushStr("    panic\n");
+            },
+            _ -> {},
+          };
+        }
+
+        instrIndex += 1;
+      }
+
+      rendered.pushStr("    -> ");
+      rendered.pushStr(lirTerminatorLabel(&block.terminator));
+      rendered.pushStr("\n");
+
+      blockIndex += 1;
+    }
+
+    functionIndex += 1;
+  }
+
+  return rendered;
+}
+
 /// Runs the whole front end over `source` and renders where LIR lowering
 /// placed the drops the ownership walk scheduled.
 ///
@@ -223,6 +326,74 @@ function lirRenderLoweredDrops(source: str): String {
   );
 
   return lirRenderDrops(&defStore, &symbols, &lowered.program);
+}
+
+/// Runs the whole front end over `source` and renders the slots LIR lowering
+/// allocated with the stores that reach them.
+function lirRenderLoweredLocals(source: str): String {
+  let file: SourceFile = SourceFile::create("lowering_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(lirCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(lirCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(lirCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &hir,
+  );
+
+  Test::assertEq<u64>(lirCountErrors(&checked.diagnostics), 0);
+
+  let constValues: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap {
+    defIdRaws: Vector::new<u32>(),
+    values: Vector::new<Analyzer::ConstEval::ConstValue>(),
+  };
+
+  let lowered: LirLowering::LowerModuleResult = LirLowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &hir,
+    &checked.dropSchedules,
+    &constValues,
+  );
+
+  return lirRenderLocalsAndStores(&defStore, &typeStore, &symbols, &lowered.program);
+}
+
+/// Scenario: a binding whose initializer diverges, an assignment whose value
+/// diverges, and a `let mut x;` waiting for its first assignment.
+/// Spec: the slot carries the type the binding was declared with, and a store
+/// fed by a value that never produces one is not emitted.
+@test
+function lirLoweringSkipsStoresFedByDivergingValues(): void {
+  let rendered: String = lirRenderLoweredLocals(
+    "function fromPanic(): u64 {\n  let value: u64 = @panic(\"init\");\n  return value;\n}\n\nfunction assignedFromPanic(flag: boolean): u64 {\n  let mut value: u64 = 5;\n\n  if (flag) {\n    value = @panic(\"bail\");\n  }\n\n  return value;\n}\n\nfunction deferred(): i32 {\n  let mut x;\n  x = 10;\n  return x;\n}\n",
+  );
+
+  Test::assertSnapshot("lir-lowering-diverging-stores", rendered.toStr());
 }
 
 /// Scenario: an owning local that falls out of scope, one whose value moved
