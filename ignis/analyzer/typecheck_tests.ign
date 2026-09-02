@@ -15152,3 +15152,109 @@ function typecheckRejectsWrongArityThroughAFunctionTypedConstant(): void {
 
   assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
 }
+
+/// Assert that `code` was reported with exactly `message`, anywhere in the
+/// run's diagnostics.
+function assertContainsDiagnostic(
+  output: &Analyzer::AnalyzerOutput,
+  code: str,
+  message: str
+): void {
+  let expectedCode: String = String::create(code);
+  let expectedMessage: String = String::create(message);
+  let mut index: u64 = 0;
+
+  while (index < output.diagnostics.length()) {
+    let Option::SOME(diagnostic) = output.diagnostics.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (expectedCode.equals(diagnostic.code) && expectedMessage.equals(diagnostic.messageText())) {
+      return;
+    }
+
+    index += 1;
+  }
+
+  @panic("assertContainsDiagnostic: no diagnostic with the expected code and message");
+}
+
+/// Scenario: a constant index past the end of a fixed array. The host rejects
+/// this at typecheck time rather than leaving it to the runtime bounds check.
+@test
+function typecheckRejectsConstantIndexPastFixedArrayEnd(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let arr: i32[3] = [1, 2, 3];\n  return arr[5];\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::INDEX_OUT_OF_BOUNDS,
+    "Index 5 is out of bounds for array of size 3",
+  );
+}
+
+/// Scenario: a negative constant index. Negation is folded, so the reported
+/// index reads the way it was written.
+@test
+function typecheckRejectsNegativeConstantIndex(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let arr: i32[3] = [1, 2, 3];\n  return arr[-1];\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::INDEX_OUT_OF_BOUNDS,
+    "Index -1 is out of bounds for array of size 3",
+  );
+}
+
+/// Scenario: an index equal to the array's size, the off-by-one the exclusive
+/// bound is about.
+@test
+function typecheckRejectsConstantIndexEqualToFixedArraySize(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let arr: i32[3] = [1, 2, 3];\n  return arr[3];\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::INDEX_OUT_OF_BOUNDS,
+    "Index 3 is out of bounds for array of size 3",
+  );
+}
+
+/// Scenario: the last in-bounds index, which stays silent.
+@test
+function typecheckAcceptsLastInBoundsConstantIndex(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let arr: i32[3] = [1, 2, 3];\n  return arr[2];\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}

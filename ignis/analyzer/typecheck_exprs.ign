@@ -4007,6 +4007,90 @@ export namespace Analyzer {
       return Option::SOME(operandView.okType);
     }
 
+    /// The value of an integer expression that is constant by inspection.
+    ///
+    /// The const-eval phase runs after typechecking, so its folded constants
+    /// are not reachable from here; only the literal forms an index is
+    /// written in are folded — an integer literal, a parenthesised one, and a
+    /// negated one. A named constant used as an index therefore yields `NONE`
+    /// and is left to the runtime bounds check.
+    function constantIntegerValue(module: &Ast::Module, exprId: Ast::ExpressionId): Option<i64> {
+      let Option::SOME(expression) = module.expressions.get(exprId) else {
+        return Option::NONE;
+      };
+
+      match (expression) {
+        Ast::Expression::Node::Literal(literal) -> {
+          return Analyzer::Typecheck::literalIntegerValue(&literal.value);
+        },
+        Ast::Expression::Node::Grouped(grouped) -> {
+          return Analyzer::Typecheck::constantIntegerValue(module, grouped.expression);
+        },
+        Ast::Expression::Node::Unary(unary) -> {
+          return Analyzer::Typecheck::negatedConstantIntegerValue(module, unary.operator, unary.operand);
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      return Option::NONE;
+    }
+
+    function literalIntegerValue(value: &Ast::Expression::LiteralValue): Option<i64> {
+      match (value) {
+        Ast::Expression::LiteralValue::Int(literal) -> {
+          return Option::SOME(literal);
+        },
+        Ast::Expression::LiteralValue::UInt(literal) -> {
+          return Option::SOME(literal as i64);
+        },
+        _ -> {
+          return Option::NONE;
+        },
+      };
+
+      return Option::NONE;
+    }
+
+    function negatedConstantIntegerValue(
+      module: &Ast::Module,
+      operator: Ast::Expression::UnaryOperator,
+      operandId: Ast::ExpressionId,
+    ): Option<i64> {
+      if (operator != Ast::Expression::UnaryOperator::Negate) {
+        return Option::NONE;
+      }
+
+      let Option::SOME(operand) = Analyzer::Typecheck::constantIntegerValue(module, operandId) else {
+        return Option::NONE;
+      };
+
+      if (operand == minOf<i64>()) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(0 - operand);
+    }
+
+    /// Reject a constant index that cannot address `size` elements, the way
+    /// the host does at typecheck time for `T[N]`.
+    function checkFixedArrayIndexBounds(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      module: &Ast::Module,
+      span: SourceSpan,
+      indexExprId: Ast::ExpressionId,
+      size: u64,
+    ): void {
+      let Option::SOME(index) = Analyzer::Typecheck::constantIntegerValue(module, indexExprId) else {
+        return;
+      };
+
+      if (index < 0 || (index as u64) >= size) {
+        Analyzer::Typecheck::emitIndexOutOfBounds(state, span, index, size);
+      }
+    }
+
     function checkExpr(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -4413,6 +4497,10 @@ export namespace Analyzer {
           let Option::SOME(baseTypeNode) = typeStore.get(resolvedBase.typeId) else {
             return Option::NONE;
           };
+
+          if (let Analyzer::Type::FixedArray(_, size) = baseTypeNode) {
+            Analyzer::Typecheck::checkFixedArrayIndexBounds(state, module, value.span, value.index, size);
+          }
 
           let elementTypeOpt: Option<Analyzer::TypeId> = match (baseTypeNode) {
             Analyzer::Type::Slice(element) -> Option::SOME(element),
