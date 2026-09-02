@@ -4140,3 +4140,93 @@ function parserParsesChainedLetConditions(): void {
     _ -> @panic("root is not a function"),
   };
 }
+
+/// Reads the name of the atom literal expression `id` denotes.
+function atomLiteralName(module: &Ast::Module, id: Ast::ExpressionId): String {
+  return match (expectExpression(module, id)) {
+    Ast::Expression::Node::Literal(literal) -> match (&literal.value) {
+      Ast::Expression::LiteralValue::Atom(name) -> name.clone(),
+      _ -> @panic("literal is not an atom"),
+    },
+    _ -> @panic("expression is not a literal"),
+  };
+}
+
+/// Scenario: `:name` parses as an atom literal in expression position and in a
+/// match pattern, while `::` still separates path segments.
+/// Spec: GRAMMAR.md `<atom>`; parity fixture e2e_ok::atom_literal.
+@test
+function parserParsesAtomLiterals(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_atom_literal.ign",
+    "function main(): i32 { let a: atom = :foo; return match (a) { :foo -> 1, _ -> 0, }; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing atom function root"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let letId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing atom let statement"),
+          };
+          let returnId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing atom return statement"),
+          };
+
+          match (expectStatement(&module, letId)) {
+            Ast::Statement::Node::Let(letStatement) -> {
+              let valueId: Ast::ExpressionId = match (letStatement.value) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing atom initializer"),
+              };
+
+              Test::assertEq<str>(atomLiteralName(&module, valueId).toStr(), "foo");
+            },
+            _ -> @panic("statement is not a let"),
+          };
+
+          match (expectStatement(&module, returnId)) {
+            Ast::Statement::Node::Return(returnStatement) -> {
+              let matchId: Ast::ExpressionId = match (returnStatement.value) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing match expression"),
+              };
+
+              match (expectExpression(&module, matchId)) {
+                Ast::Expression::Node::Match(matchExpression) -> {
+                  let arm: &Ast::Expression::MatchArm = match (matchExpression.arms.get(0)) {
+                    Option::SOME(value) -> value,
+                    Option::NONE -> @panic("missing match arm"),
+                  };
+
+                  match (expectPattern(&module, arm.pattern)) {
+                    Ast::Pattern::Node::Literal(literal) -> {
+                      Test::assertEq<str>(atomLiteralName(&module, literal.expression).toStr(), "foo");
+                    },
+                    _ -> @panic("arm pattern is not a literal"),
+                  };
+                },
+                _ -> @panic("return value is not a match"),
+              };
+            },
+            _ -> @panic("statement is not a return"),
+          };
+        },
+        _ -> @panic("function body is not a block"),
+      };
+    },
+    _ -> @panic("root is not a function"),
+  };
+}

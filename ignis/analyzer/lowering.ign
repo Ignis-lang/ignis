@@ -711,8 +711,16 @@ export namespace Lowering {
   /// selfhost parser does not, so the typechecker's verdict selects the
   /// variant (with `i32`/`u64`/`f64` fallbacks matching the checker's own
   /// literal defaults).
+  /// Interns an atom's name so the HIR literal carries the same symbol for
+  /// every occurrence of `:name` in the module.
+  function internAtom(symbols: &mut Analyzer::SymbolTable, name: &String): Analyzer::SymbolId {
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+    return symbolsRef.intern(name.toStr());
+  }
+
   function literalKind(
     typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
     value: &Ast::Expression::LiteralValue,
     typeId: Analyzer::TypeId,
   ): Hir::LiteralValue {
@@ -723,6 +731,7 @@ export namespace Lowering {
       Ast::Expression::LiteralValue::Boolean(boolValue) -> Hir::LiteralValue::Boolean(boolValue),
       Ast::Expression::LiteralValue::Character(charValue) -> Hir::LiteralValue::Char(charValue as u32),
       Ast::Expression::LiteralValue::String(text) -> Hir::LiteralValue::String(text.clone()),
+      Ast::Expression::LiteralValue::Atom(name) -> Hir::LiteralValue::Atom(Lowering::internAtom(symbols, &name)),
       Ast::Expression::LiteralValue::Null -> Hir::LiteralValue::Null,
     };
   }
@@ -944,7 +953,7 @@ export namespace Lowering {
 
         let literalType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, literal.expression);
 
-        return Option::SOME(Hir::HirPattern::Literal(Lowering::literalKind(typeStore, &literalExpr.value, literalType)));
+        return Option::SOME(Hir::HirPattern::Literal(Lowering::literalKind(typeStore, symbols, &literalExpr.value, literalType)));
       },
       Ast::Pattern::Node::Path(path) -> {
         return Lowering::lowerVariantPattern(defStore, typeStore, symbols, module, output, locals, patternId, &path, expectedType);
@@ -1180,7 +1189,7 @@ export namespace Lowering {
     match (expression) {
       Ast::Expression::Node::Literal(literal) -> {
         let literalType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
-        let kind: Hir::LiteralValue = Lowering::literalKind(typeStore, &literal.value, literalType);
+        let kind: Hir::LiteralValue = Lowering::literalKind(typeStore, symbols, &literal.value, literalType);
 
         let mut hirRef: &mut Hir::HirStore = hir;
         return hirRef.alloc(Hir::HirNode {

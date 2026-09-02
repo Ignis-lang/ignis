@@ -217,6 +217,13 @@ export namespace Analyzer {
           return Option::SOME(booleanType);
         }
 
+        // Two atoms compare by their interned identity.
+        if (Analyzer::Typecheck::typeIdIsAtom(typeStore, equalityLeftResolved.typeId) && Analyzer::Typecheck::typeIdIsAtom(typeStore, equalityRightResolved.typeId)) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
         Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
         return Option::NONE;
       }
@@ -4520,6 +4527,17 @@ export namespace Analyzer {
       };
     }
 
+    function typeIdIsAtom(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+      let Option::SOME(typeNode) = typeStore.get(typeId) else {
+        return false;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::ATOM -> true,
+        _ -> false,
+      };
+    }
+
     /// Whether `typeId` is an enum none of whose variants carries a payload,
     /// which is what makes `==` well-defined on it (host `is_unit_enum`).
     function isUnitEnumType(
@@ -6938,6 +6956,7 @@ export namespace Analyzer {
         Ast::Expression::LiteralValue::Float(_) -> false,
         Ast::Expression::LiteralValue::Boolean(_) -> false,
         Ast::Expression::LiteralValue::Character(_) -> false,
+        Ast::Expression::LiteralValue::Atom(_) -> false,
         Ast::Expression::LiteralValue::Null -> false,
       };
     }
