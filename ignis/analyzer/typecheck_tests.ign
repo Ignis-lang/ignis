@@ -15258,3 +15258,36 @@ function typecheckAcceptsLastInBoundsConstantIndex(): void {
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
 }
+
+/// Scenario: `@read` handed a literal null. The builtin dereferences its
+/// argument, so the host rejects this at typecheck time.
+@test
+function typecheckRejectsBuiltinReadOfNull(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let value: i32 = @read<i32>(null);\n  return value;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(&output, DiagnosticCode::NULL_DEREFERENCE, "Cannot dereference null pointer");
+}
+
+/// Scenario: `@write` handed a literal null as its destination.
+@test
+function typecheckRejectsBuiltinWriteToNull(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  @write<i32>(null, 10);\n  return 0;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(&output, DiagnosticCode::NULL_DEREFERENCE, "Cannot dereference null pointer");
+}

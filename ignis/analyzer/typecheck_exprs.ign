@@ -4037,6 +4037,46 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
+    /// Whether an expression is the null pointer by inspection.
+    ///
+    /// Like `constantIntegerValue`, this only folds what is written at the
+    /// use site: a `null` literal, possibly parenthesised. A constant holding
+    /// `null` is folded by the later const-eval phase and is not seen here.
+    function isNullLiteral(module: &Ast::Module, exprId: Ast::ExpressionId): boolean {
+      let Option::SOME(expression) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      match (expression) {
+        Ast::Expression::Node::Literal(literal) -> {
+          if (let Ast::Expression::LiteralValue::Null = &literal.value) {
+            return true;
+          }
+
+          return false;
+        },
+        Ast::Expression::Node::Grouped(grouped) -> {
+          return Analyzer::Typecheck::isNullLiteral(module, grouped.expression);
+        },
+        _ -> {
+          return false;
+        },
+      };
+
+      return false;
+    }
+
+    function expressionSpanOr(
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+      fallback: SourceSpan
+    ): SourceSpan {
+      return match (module.expressions.get(exprId)) {
+        Option::SOME(node) -> Ast::Serializer::expressionSpan(node),
+        Option::NONE -> fallback,
+      };
+    }
+
     function literalIntegerValue(value: &Ast::Expression::LiteralValue): Option<i64> {
       match (value) {
         Ast::Expression::LiteralValue::Int(literal) -> {
@@ -6146,6 +6186,19 @@ export namespace Analyzer {
           Option::SOME(expectedArg),
         );
         argIndex += 1;
+      }
+
+      // `@read`/`@write` dereference their first argument, so handing them a
+      // literal null is a dereference the host rejects here rather than at
+      // run time.
+      if (call.name.equals("read") || isWrite) {
+        if (let Option::SOME(pointerArgId) = call.arguments.get(0)) {
+          if (Analyzer::Typecheck::isNullLiteral(module, *pointerArgId)) {
+            let argSpan: SourceSpan = Analyzer::Typecheck::expressionSpanOr(module, *pointerArgId, call.span);
+            Analyzer::Typecheck::emitNullDereference(state, argSpan);
+            return Option::NONE;
+          }
+        }
       }
 
       if (call.name.equals("read")) {
