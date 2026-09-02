@@ -1,0 +1,52 @@
+=== HIR ===
+
+
+--- Definitions ---
+
+fn recast(): i32  [export]
+  body:
+    Block : void
+      statements:
+        Let(x [mut]) : void
+          init:
+            Literal(Int32(42)) : i32
+        Let(p) : void
+          init:
+            Cast(-> *mut i32) : *mut i32
+              Reference(&mut) : &mut i32
+                Variable(x [mut]) : i32
+        Let(q) : void
+          init:
+            Cast(-> *mut u8) : *mut u8
+              Variable(p) : *mut i32
+        Let(r) : void
+          init:
+            Cast(-> *mut i32) : *mut i32
+              Variable(q) : *mut u8
+        Return : never
+          Dereference(*) : i32
+            Variable(r) : *mut i32
+
+fn reinterpret(): i32  [export]
+  body:
+    Block : void
+      statements:
+        Let(bits) : void
+          init:
+            Literal(Int32(1065353216)) : i32
+        Let(value) : void
+          init:
+            BitCast(-> f32) : f32
+              Variable(bits) : i32
+        Return : never
+          BitCast(-> i32) : i32
+            Variable(value) : f32
+
+--- Variable Initializers ---
+
+bits: i32 = Literal(Int32(1065353216))
+p: *mut i32 = Cast(&mut(Variable(x)) as *mut i32)
+q: *mut u8 = Cast(Variable(p) as *mut u8)
+r: *mut i32 = Cast(Variable(q) as *mut i32)
+value: f32 = BitCast(Variable(bits) as f32)
+x: i32 [mut] = Literal(Int32(42))

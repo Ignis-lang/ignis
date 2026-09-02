@@ -1680,38 +1680,48 @@ export namespace Lowering {
       }
     }
 
-    // `minOf<T>()` / `maxOf<T>()` written without `@` are typed from the
-    // callee name alone (typechecker branch 1b) and carry no resolver ref.
-    let mut bareBuiltinName: String = String::create("");
-    if (let Option::SOME(bareCalleeExpr) = module.expressions.get(call.callee)) {
-      if (let Ast::Expression::Node::Variable(bareCallee) = bareCalleeExpr) {
-        bareBuiltinName = bareCallee.name.clone();
-      }
+    // `sizeOf<T>()` / `alignOf<T>()` / `minOf<T>()` / `maxOf<T>()` written
+    // without `@` are typed from the callee name alone (typechecker branch 1b)
+    // and carry no resolver ref.
+    let bareBuiltinName: String = Analyzer::Typecheck::bareBuiltinCalleeName(
+      module,
+      &output.resolvedBodies,
+      call.callee,
+    );
 
-      if (let Ast::Expression::Node::Path(barePath) = bareCalleeExpr) {
-        if (barePath.segments.length() == 1) {
-          if (let Option::SOME(onlySegment) = barePath.segments.get(0)) {
-            bareBuiltinName = onlySegment.clone();
-          }
-        }
-      }
-    }
-
-    if (bareBuiltinName.equals("minOf") || bareBuiltinName.equals("maxOf")) {
-      let Option::SOME(boundType) = callTypeArgs.get(0) else {
+    if (Analyzer::ResolverBodies::isBareBuiltinName(bareBuiltinName.toStr())) {
+      let Option::SOME(operandType) = callTypeArgs.get(0) else {
         return Lowering::errorNode(hir, typeStore, call.span);
       };
 
+      if (bareBuiltinName.equals("sizeOf")) {
+        let mut sizeHirRef: &mut Hir::HirStore = hir;
+        return sizeHirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::SizeOf(*operandType),
+          span: call.span,
+          typeId: Lowering::unsignedInt64Type(typeStore),
+        });
+      }
+
+      if (bareBuiltinName.equals("alignOf")) {
+        let mut alignHirRef: &mut Hir::HirStore = hir;
+        return alignHirRef.alloc(Hir::HirNode {
+          kind: Hir::HirKind::AlignOf(*operandType),
+          span: call.span,
+          typeId: Lowering::unsignedInt64Type(typeStore),
+        });
+      }
+
       let kind: Hir::HirKind = match (bareBuiltinName.equals("minOf")) {
-        true -> Hir::HirKind::MinOf(*boundType),
-        false -> Hir::HirKind::MaxOf(*boundType),
+        true -> Hir::HirKind::MinOf(*operandType),
+        false -> Hir::HirKind::MaxOf(*operandType),
       };
 
       let mut boundHirRef: &mut Hir::HirStore = hir;
       return boundHirRef.alloc(Hir::HirNode {
         kind: kind,
         span: call.span,
-        typeId: *boundType,
+        typeId: *operandType,
       });
     }
 
@@ -2342,11 +2352,9 @@ export namespace Lowering {
   ///
   /// `@sizeOf` / `@alignOf` take their single type argument through the same
   /// annotation resolver the checker uses, `@panic` lowers its message
-  /// operand, and `@trap` / `@unreachable` carry nothing. Every other builtin
-  /// — including the ones with an `HirKind` counterpart such as `@maxOf` /
-  /// `@minOf` / `@bitCast` — is rejected by the typechecker as unsupported,
-  /// so no checked operand or result type exists to lower against and the
-  /// call stays on `Error`.
+  /// operand, and `@trap` / `@unreachable` carry nothing. Every builtin the
+  /// typechecker still rejects as unsupported has no checked operand or result
+  /// type to lower against, so the call stays on `Error`.
   ///
   /// `@typeName` stays on `Error` for a language reason rather than a model
   /// one: the oracle folds it to the printed type name, and the selfhost type
@@ -2561,7 +2569,7 @@ export namespace Lowering {
       });
     }
 
-    if (name.equals("pointerFromInteger") || name.equals("bitCast")) {
+    if (name.equals("pointerFromInteger") || name.equals("bitCast") || name.equals("pointerCast")) {
       let Option::SOME(targetType) = Lowering::builtinTypeArgument(defStore, typeStore, symbols, module, builtinCall) else {
         return Lowering::errorNode(hir, typeStore, builtinCall.span);
       };
@@ -2668,11 +2676,13 @@ export namespace Lowering {
         return Lowering::errorNode(hir, typeStore, builtinCall.span);
       };
 
+      let glueType: Analyzer::TypeId = Analyzer::Typecheck::dropGlueFunctionType(typeStore);
+
       let mut glueHirRef: &mut Hir::HirStore = hir;
       return glueHirRef.alloc(Hir::HirNode {
         kind: Hir::HirKind::BuiltinDropGlue(valueType),
         span: builtinCall.span,
-        typeId: Lowering::voidType(typeStore),
+        typeId: glueType,
       });
     }
 

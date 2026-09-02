@@ -427,6 +427,39 @@ function loweringBuiltinsWithTypeArguments(): void {
   Test::assertSnapshot("lowering-builtins-type-arguments", rendered.toStr());
 }
 
+/// The same two builtins written without the `@` prefix reach the same
+/// `SizeOf` / `AlignOf` nodes through the callee name.
+@test
+function loweringBareBuiltinsWithTypeArguments(): void {
+  let rendered: String = loweringRender(
+    "function sizes(): u64 {\n  let size: u64 = sizeOf<u32>();\n  let align: u64 = alignOf<u32>();\n  return size + align;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-bare-builtins-type-arguments", rendered.toStr());
+}
+
+/// `@bitCast` reinterprets the operand's bits and lowers to `BitCast`;
+/// `@pointerCast` retargets a pointer and lowers to the ordinary `Cast`.
+@test
+function loweringCastBuiltins(): void {
+  let rendered: String = loweringRender(
+    "function reinterpret(): i32 {\n  let bits: i32 = 1065353216;\n  let value: f32 = @bitCast<f32>(bits);\n  return @bitCast<i32>(value);\n}\n\nfunction recast(): i32 {\n  let mut x: i32 = 42;\n  let p: *mut i32 = (&mut x) as *mut i32;\n  let q: *mut u8 = @pointerCast<*mut u8>(p);\n  let r: *mut i32 = @pointerCast<*mut i32>(q);\n  return *r;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-cast-builtins", rendered.toStr());
+}
+
+/// `@dropGlue<T>()` carries the type whose glue is wanted and types as the
+/// `(*mut u8) -> void` function pointer the allocator takes.
+@test
+function loweringDropGlueBuiltin(): void {
+  let rendered: String = loweringRender(
+    "function glue(): (*mut u8) -> void {\n  return @dropGlue<u32>();\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-drop-glue-builtin", rendered.toStr());
+}
+
 /// `@panic` lowers its message operand; `@trap` and `@unreachable` carry
 /// nothing. All three type as `never`.
 @test
