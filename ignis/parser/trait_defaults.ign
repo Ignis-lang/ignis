@@ -1,0 +1,443 @@
+import Ast from "@compiler::ast";
+import SourceSpan from "@compiler::diagnostics";
+import Vector from "std::vector";
+
+import _ from "./declarations";
+
+/// Copies every trait default method body onto the types that declare the
+/// trait with `@implements` and do not declare the method themselves.
+///
+/// The pass runs once the module is fully parsed, so an implementing type can
+/// appear before the trait it implements. The copy is a real method item on
+/// the type, which is what lets binding, resolution, typechecking and lowering
+/// treat an inherited default exactly like a hand-written method.
+///
+/// Only the method item is copied. Its body statement is shared with the trait
+/// declaration, mirroring the host, so two types inheriting the same body
+/// resolve that body's names once. A body that reads `self` therefore belongs
+/// to a single implementing type.
+export namespace ParserTraitDefaults {
+  /// One default method a trait declares with a body.
+  record Entry {
+    public traitName: String;
+    public methodName: String;
+    public methodItemId: Ast::ItemId;
+  }
+
+  /// A default method that still has to be copied onto an implementing type.
+  record Pending {
+    public ownerItemId: Ast::ItemId;
+    public methodItemId: Ast::ItemId;
+  }
+
+  /// Every trait named by an `@implements(...)` attribute, in written order.
+  function implementedTraitNames(metadata: &Ast::Metadata): Vector<String> {
+    let mut names: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < metadata.attributes.length()) {
+      let Option::SOME(attribute) = metadata.attributes.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (!attribute.name.equals("implements")) {
+        index += 1;
+        continue;
+      }
+
+      let mut argumentIndex: u64 = 0;
+
+      while (argumentIndex < attribute.arguments.length()) {
+        if (let Option::SOME(argument) = attribute.arguments.get(argumentIndex)) {
+          names.push(argument.trimAsciiWhitespace());
+        }
+
+        argumentIndex += 1;
+      }
+
+      index += 1;
+    }
+
+    return names;
+  }
+
+  /// The declared name of a method item, when the item is a function.
+  function methodItemName(module: &mut Ast::Module, itemId: Ast::ItemId): Option<String> {
+    let Option::SOME(item) = module.items.get(itemId) else {
+      return Option::NONE;
+    };
+
+    let Ast::Item::Node::Function(method) = item else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(method.name.clone());
+  }
+
+  /// Whether `methods` already declares a method called `name`.
+  function declaresMethod(
+    module: &mut Ast::Module,
+    methods: &Vector<Ast::ItemId>,
+    name: &String,
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < methods.length()) {
+      let Option::SOME(methodId) = methods.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Option::SOME(methodName) = ParserTraitDefaults::methodItemName(module, *methodId)) {
+        if (methodName.equals(name.toStr())) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Collects every trait default in `itemIds`, descending through namespaces
+  /// and exported declarations.
+  function collectEntries(
+    module: &mut Ast::Module,
+    itemIds: &Vector<Ast::ItemId>,
+    entries: &mut Vector<ParserTraitDefaults::Entry>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < itemIds.length()) {
+      let Option::SOME(itemId) = itemIds.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut traitName: Option<String> = Option::NONE;
+      let mut defaultMethods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+      let mut nested: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+
+      if (let Option::SOME(item) = module.items.get(*itemId)) {
+        match (item) {
+          Ast::Item::Node::Trait(trait_) -> {
+            traitName = Option::SOME(trait_.name.clone());
+            defaultMethods = ParserDeclarations::copyItemIds(&trait_.defaultMethods);
+          },
+          Ast::Item::Node::Namespace(namespaceItem) -> {
+            nested = ParserDeclarations::copyItemIds(&namespaceItem.items);
+          },
+          Ast::Item::Node::Export(exportItem) -> {
+            if (let Option::SOME(innerItemId) = exportItem.declaration) {
+              nested.push(innerItemId);
+            }
+          },
+          _ -> {},
+        };
+      }
+
+      if (let Option::SOME(name) = traitName) {
+        let mut methodIndex: u64 = 0;
+
+        while (methodIndex < defaultMethods.length()) {
+          let Option::SOME(methodItemId) = defaultMethods.get(methodIndex) else {
+            methodIndex += 1;
+            continue;
+          };
+
+          if (let Option::SOME(methodName) = ParserTraitDefaults::methodItemName(module, *methodItemId)) {
+            let mut entriesRef: &mut Vector<ParserTraitDefaults::Entry> = entries;
+            entriesRef.push(ParserTraitDefaults::Entry {
+              traitName: name.clone(),
+              methodName: methodName.clone(),
+              methodItemId: *methodItemId,
+            });
+          }
+
+          methodIndex += 1;
+        }
+      }
+
+      if (nested.length() > 0) {
+        ParserTraitDefaults::collectEntries(module, &nested, entries);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Records the defaults an implementing type inherits but does not declare.
+  function collectPendingForType(
+    module: &mut Ast::Module,
+    ownerItemId: Ast::ItemId,
+    implemented: &Vector<String>,
+    methods: &Vector<Ast::ItemId>,
+    entries: &Vector<ParserTraitDefaults::Entry>,
+    pending: &mut Vector<ParserTraitDefaults::Pending>,
+  ): void {
+    let mut implementedIndex: u64 = 0;
+
+    while (implementedIndex < implemented.length()) {
+      let Option::SOME(traitName) = implemented.get(implementedIndex) else {
+        implementedIndex += 1;
+        continue;
+      };
+
+      let mut entryIndex: u64 = 0;
+
+      while (entryIndex < entries.length()) {
+        let Option::SOME(entry) = entries.get(entryIndex) else {
+          entryIndex += 1;
+          continue;
+        };
+
+        if (!entry.traitName.equals(traitName.toStr())) {
+          entryIndex += 1;
+          continue;
+        }
+
+        if (!ParserTraitDefaults::declaresMethod(module, methods, &entry.methodName)) {
+          let mut pendingRef: &mut Vector<ParserTraitDefaults::Pending> = pending;
+          pendingRef.push(ParserTraitDefaults::Pending {
+            ownerItemId: ownerItemId,
+            methodItemId: entry.methodItemId,
+          });
+        }
+
+        entryIndex += 1;
+      }
+
+      implementedIndex += 1;
+    }
+  }
+
+  /// Walks `itemIds` looking for records and enums that inherit a default.
+  function collectPending(
+    module: &mut Ast::Module,
+    itemIds: &Vector<Ast::ItemId>,
+    entries: &Vector<ParserTraitDefaults::Entry>,
+    pending: &mut Vector<ParserTraitDefaults::Pending>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < itemIds.length()) {
+      let Option::SOME(itemId) = itemIds.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut implemented: Vector<String> = Vector::new<String>();
+      let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+      let mut isType: boolean = false;
+      let mut nested: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+
+      if (let Option::SOME(item) = module.items.get(*itemId)) {
+        match (item) {
+          Ast::Item::Node::Record(record_) -> {
+            isType = true;
+            implemented = ParserTraitDefaults::implementedTraitNames(&record_.metadata);
+            methods = ParserDeclarations::copyItemIds(&record_.methods);
+          },
+          Ast::Item::Node::Enum(enum_) -> {
+            isType = true;
+            implemented = ParserTraitDefaults::implementedTraitNames(&enum_.metadata);
+            methods = ParserDeclarations::copyItemIds(&enum_.methods);
+          },
+          Ast::Item::Node::Namespace(namespaceItem) -> {
+            nested = ParserDeclarations::copyItemIds(&namespaceItem.items);
+          },
+          Ast::Item::Node::Export(exportItem) -> {
+            if (let Option::SOME(innerItemId) = exportItem.declaration) {
+              nested.push(innerItemId);
+            }
+          },
+          _ -> {},
+        };
+      }
+
+      if (isType && implemented.length() > 0) {
+        ParserTraitDefaults::collectPendingForType(
+          module,
+          *itemId,
+          &implemented,
+          &methods,
+          entries,
+          pending,
+        );
+      }
+
+      if (nested.length() > 0) {
+        ParserTraitDefaults::collectPending(module, &nested, entries, pending);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Copies a parameter pattern so the materialized method owns its bindings
+  /// instead of sharing them with the trait declaration.
+  function clonePattern(module: &mut Ast::Module, patternId: Ast::PatternId): Ast::PatternId {
+    let mut cloned: Option<Ast::Pattern::Node> = Option::NONE;
+
+    if (let Option::SOME(pattern) = module.patterns.get(patternId)) {
+      match (pattern) {
+        Ast::Pattern::Node::Binding(binding) -> {
+          cloned = Option::SOME(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+            span: binding.span,
+            name: binding.name.clone(),
+            annotation: binding.annotation,
+            metadata: Ast::copyMetadata(&binding.metadata),
+          }));
+        },
+        Ast::Pattern::Node::Wildcard(wildcard) -> {
+          cloned = Option::SOME(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
+            span: wildcard.span,
+          }));
+        },
+        _ -> {},
+      };
+    }
+
+    let Option::SOME(node) = cloned else {
+      return patternId;
+    };
+
+    let mut moduleRef: &mut Ast::Module = module;
+    return moduleRef.addPattern(node);
+  }
+
+  /// Copies a trait default method item, keeping its body statement.
+  function cloneMethodItem(
+    module: &mut Ast::Module,
+    methodItemId: Ast::ItemId,
+  ): Option<Ast::ItemId> {
+    let mut span: Option<SourceSpan> = Option::NONE;
+    let mut body: Option<Ast::StatementId> = Option::NONE;
+    let mut name: String = String::create("");
+    let mut genericParameters: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+    let mut parameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+    let mut returnType: Option<Ast::TypeId> = Option::NONE;
+    let mut metadata: Ast::Metadata = Ast::emptyMetadata();
+
+    if (let Option::SOME(item) = module.items.get(methodItemId)) {
+      if (let Ast::Item::Node::Function(method) = item) {
+        span = Option::SOME(method.span);
+        body = Option::SOME(method.body);
+        name = method.name.clone();
+        genericParameters = Ast::copyGenericParams(&method.genericParameters);
+        parameters = ParserDeclarations::copyPatternIds(&method.parameters);
+        returnType = method.returnType;
+        metadata = Ast::copyMetadata(&method.metadata);
+      }
+    }
+
+    let Option::SOME(methodSpan) = span else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(methodBody) = body else {
+      return Option::NONE;
+    };
+
+    let mut clonedParameters: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+    let mut index: u64 = 0;
+
+    while (index < parameters.length()) {
+      let Option::SOME(patternId) = parameters.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      clonedParameters.push(ParserTraitDefaults::clonePattern(module, *patternId));
+      index += 1;
+    }
+
+    let mut moduleRef: &mut Ast::Module = module;
+
+    return Option::SOME(moduleRef.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+      span: methodSpan,
+      name: name,
+      genericParameters: genericParameters,
+      parameters: clonedParameters,
+      returnType: returnType,
+      body: methodBody,
+      metadata: metadata,
+    })));
+  }
+
+  /// Appends a materialized method to the type that inherits it.
+  function attachMethod(
+    module: &mut Ast::Module,
+    ownerItemId: Ast::ItemId,
+    methodItemId: Ast::ItemId,
+  ): void {
+    let Option::SOME(item) = module.items.getMut(ownerItemId) else {
+      return;
+    };
+
+    match (item) {
+      Ast::Item::Node::Record(record_) -> {
+        let mut methods: Vector<Ast::ItemId> = ParserDeclarations::copyItemIds(&record_.methods);
+        methods.push(methodItemId);
+
+        *item = Ast::Item::Node::Record(Ast::Item::Record {
+          span: record_.span,
+          name: record_.name.clone(),
+          genericParameters: Ast::copyGenericParams(&record_.genericParameters),
+          fields: ParserDeclarations::copyPatternIds(&record_.fields),
+          methods: methods,
+          metadata: Ast::copyMetadata(&record_.metadata),
+        });
+      },
+      Ast::Item::Node::Enum(enum_) -> {
+        let mut methods: Vector<Ast::ItemId> = ParserDeclarations::copyItemIds(&enum_.methods);
+        methods.push(methodItemId);
+
+        *item = Ast::Item::Node::Enum(Ast::Item::Enum {
+          span: enum_.span,
+          name: enum_.name.clone(),
+          genericParameters: Ast::copyGenericParams(&enum_.genericParameters),
+          variants: ParserDeclarations::copyPatternIds(&enum_.variants),
+          methods: methods,
+          metadata: Ast::copyMetadata(&enum_.metadata),
+        });
+      },
+      _ -> {},
+    };
+  }
+
+  /// Materializes every inherited trait default in the parsed module.
+  function materialize(module: &mut Ast::Module): void {
+    let roots: Vector<Ast::ItemId> = ParserDeclarations::copyItemIds(&module.roots);
+    let mut entries: Vector<ParserTraitDefaults::Entry> = Vector::new<ParserTraitDefaults::Entry>();
+
+    ParserTraitDefaults::collectEntries(module, &roots, &mut entries);
+
+    if (entries.length() == 0) {
+      return;
+    }
+
+    let mut pending: Vector<ParserTraitDefaults::Pending> = Vector::new<ParserTraitDefaults::Pending>();
+    ParserTraitDefaults::collectPending(module, &roots, &entries, &mut pending);
+
+    let mut index: u64 = 0;
+
+    while (index < pending.length()) {
+      let Option::SOME(entry) = pending.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let ownerItemId: Ast::ItemId = entry.ownerItemId;
+      let methodItemId: Ast::ItemId = entry.methodItemId;
+
+      if (let Option::SOME(clonedId) = ParserTraitDefaults::cloneMethodItem(module, methodItemId)) {
+        ParserTraitDefaults::attachMethod(module, ownerItemId, clonedId);
+      }
+
+      index += 1;
+    }
+  }
+}

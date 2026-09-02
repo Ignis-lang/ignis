@@ -4304,6 +4304,128 @@ function parserParsesTraitDefaultMethods(): void {
   };
 }
 
+/// Reads the pattern of the first parameter of the method item `id` denotes.
+function traitMethodFirstParameter(module: &Ast::Module, id: Ast::ItemId): Ast::PatternId {
+  match (expectItem(module, id)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (functionItem.parameters.get(0)) {
+        Option::SOME(value) -> {
+          return *value;
+        },
+        Option::NONE -> {
+          @panic("method declares no parameters");
+        },
+      };
+    },
+    _ -> {
+      @panic("item is not a method");
+    },
+  };
+
+  @panic("method declares no parameters");
+}
+
+/// Counts the methods a record item declares.
+function recordMethodCount(module: &Ast::Module, id: Ast::ItemId): u64 {
+  return match (expectItem(module, id)) {
+    Ast::Item::Node::Record(recordItem) -> recordItem.methods.length(),
+    _ -> @panic("item is not a record"),
+  };
+}
+
+/// Reads the method a record item declares at `index`.
+function recordMethodId(module: &Ast::Module, id: Ast::ItemId, index: u64): Ast::ItemId {
+  match (expectItem(module, id)) {
+    Ast::Item::Node::Record(recordItem) -> {
+      match (recordItem.methods.get(index)) {
+        Option::SOME(value) -> {
+          return *value;
+        },
+        Option::NONE -> {
+          @panic("record declares no method at that index");
+        },
+      };
+    },
+    _ -> {
+      @panic("item is not a record");
+    },
+  };
+
+  @panic("record declares no method at that index");
+}
+
+/// Reads the default method a trait item declares at `index`.
+function traitDefaultMethodId(module: &Ast::Module, id: Ast::ItemId, index: u64): Ast::ItemId {
+  match (expectItem(module, id)) {
+    Ast::Item::Node::Trait(traitItem) -> {
+      match (traitItem.defaultMethods.get(index)) {
+        Option::SOME(value) -> {
+          return *value;
+        },
+        Option::NONE -> {
+          @panic("trait declares no default method at that index");
+        },
+      };
+    },
+    _ -> {
+      @panic("item is not a trait");
+    },
+  };
+
+  @panic("trait declares no default method at that index");
+}
+
+/// Scenario: a type that declares a trait with `@implements` and does not
+/// declare one of its default methods inherits the default as a method of its
+/// own, with its own parameter patterns. A type that declares the method keeps
+/// the one it wrote.
+/// Spec: GRAMMAR.md `<trait>`; parity fixture e2e_ok::trait_two_records_same_default.
+@test
+function parserMaterializesTraitDefaultsOnImplementingTypes(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_trait_default_materialization.ign",
+    "trait Answerable { answer(&self): i32 { return 42; } } @implements(Answerable) record Alpha { public x: i32; } @implements(Answerable) record Beta { public y: i32; answer(&self): i32 { return self.y; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 3);
+
+  let traitId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing trait root"),
+  };
+  let alphaId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Alpha"),
+  };
+  let betaId: Ast::ItemId = match (module.roots.get(2)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Beta"),
+  };
+
+  let defaultId: Ast::ItemId = traitDefaultMethodId(&module, traitId, 0);
+
+  Test::assertEq<u64>(recordMethodCount(&module, alphaId), 1);
+
+  let inheritedId: Ast::ItemId = recordMethodId(&module, alphaId, 0);
+  Test::assertEq<str>(traitMethodName(&module, inheritedId).toStr(), "answer");
+  Test::assertEq<u64>(traitMethodBodyLength(&module, inheritedId), 1);
+  Test::assert(inheritedId.raw() != defaultId.raw());
+
+  let inheritedSelf: Ast::PatternId = traitMethodFirstParameter(&module, inheritedId);
+  let defaultSelf: Ast::PatternId = traitMethodFirstParameter(&module, defaultId);
+  Test::assert(inheritedSelf.raw() != defaultSelf.raw());
+
+  Test::assertEq<u64>(recordMethodCount(&module, betaId), 1);
+
+  let overrideId: Ast::ItemId = recordMethodId(&module, betaId, 0);
+  Test::assert(overrideId.raw() != inheritedId.raw());
+  Test::assertEq<str>(traitMethodName(&module, overrideId).toStr(), "answer");
+}
+
 /// Scenario: a static field in a record or an enum is reported as the
 /// unsupported construct it is, instead of as a missing delimiter.
 /// Spec: IGN-172 — static fields are parsed but not bound yet.

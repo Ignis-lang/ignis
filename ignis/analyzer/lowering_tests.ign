@@ -5,6 +5,7 @@ import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
+import Id from "@compiler::ids";
 import Lowering from "./lowering";
 
 function loweringCountErrors(bag: &DiagnosticBag): u64 {
@@ -820,4 +821,88 @@ function loweringLetElseShorthandUnwrapsTheOkVariant(): void {
   );
 
   Test::assertSnapshot("lowering-let-else-shorthand", rendered.toStr());
+}
+
+/// The source every inherited trait default test below lowers.
+function loweringTraitDefaultSource(): str {
+  return "trait HasValue {\n  getValue(&self): i32;\n\n  doubled(&self): i32 {\n    return self.getValue() * 2;\n  }\n}\n\n@implements(HasValue)\nrecord Box {\n  public value: i32;\n\n  getValue(&self): i32 {\n    return self.value;\n  }\n}\n\nfunction main(): i32 {\n  let b: Box = Box { value: 21 };\n  return b.doubled();\n}\n";
+}
+
+/// The definition of the method named `methodName` that a record owns.
+function loweringRecordOwnedMethod(
+  defStore: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+  methodName: str,
+): Option<Analyzer::DefinitionId> {
+  let mut index: u64 = 0;
+
+  while (index < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Method(method) = definition) {
+        if (let Option::SOME(name) = symbols.resolve(method.name)) {
+          if (name.equals(methodName)) {
+            if (let Option::SOME(owner) = defStore.get(method.owner)) {
+              if (let Analyzer::Definition::Record(_) = owner) {
+                return Option::SOME(defId);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// A record that inherits a trait default gets a lowered body for it, so the
+/// emitter has a function to write instead of a call into nothing.
+/// Spec: parity fixture e2e_ok::trait_default_method_uses_self.
+@test
+function loweringInheritedTraitDefaultHasABody(): void {
+  let file: SourceFile = SourceFile::create("lowering_tests.ign", loweringTraitDefaultSource());
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(loweringCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(loweringCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let Option::SOME(inherited) = loweringRecordOwnedMethod(&defStore, &symbols, "doubled") else {
+    @panic("loweringInheritedTraitDefaultHasABody: the record owns no `doubled` method");
+  };
+
+  Test::assert(hir.functionBodies.get(inherited).isSome());
+}
+
+/// The call to an inherited trait default lowers to a method call on the
+/// record, rather than to the error node an unknown method would produce.
+/// Spec: parity fixture e2e_ok::trait_default_method_uses_self.
+@test
+function loweringInheritedTraitDefaultBody(): void {
+  let rendered: String = loweringRender(loweringTraitDefaultSource());
+
+  Test::assertSnapshot("lowering-trait-default-inherited", rendered.toStr());
 }

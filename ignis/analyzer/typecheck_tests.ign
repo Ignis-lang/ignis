@@ -14950,3 +14950,74 @@ function typecheckInstanceMethodOverloadSelectsByArgumentType(): void {
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }
+
+/// Counts the methods named `methodName` that a record owns.
+function typecheckRecordOwnedMethodCount(
+  defStore: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+  methodName: str,
+): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Method(method) = definition) {
+        if (let Option::SOME(name) = symbols.resolve(method.name)) {
+          if (name.equals(methodName)) {
+            if (let Option::SOME(owner) = defStore.get(method.owner)) {
+              if (let Analyzer::Definition::Record(_) = owner) {
+                count += 1;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// Scenario: a record declares a trait with `@implements` and does not declare
+/// one of its default methods. The default becomes a method of the record, so
+/// its body typechecks against the record and a call to it resolves.
+/// Spec: parity fixture e2e_ok::trait_default_method_uses_self.
+@test
+function typecheckInheritsTraitDefaultMethod(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "trait HasValue {\n  getValue(&self): i32;\n\n  doubled(&self): i32 {\n    return self.getValue() * 2;\n  }\n}\n\n@implements(HasValue)\nrecord Box {\n  public value: i32;\n\n  getValue(&self): i32 {\n    return self.value;\n  }\n}\n\nfunction main(): i32 {\n  let b: Box = Box { value: 21 };\n  return b.doubled();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+  Test::assertEq<u64>(typecheckRecordOwnedMethodCount(&defStore, &symbols, "doubled"), 1);
+}
+
+/// Scenario: a record that declares a trait default itself keeps its own body
+/// and does not gain a second copy of the method.
+/// Spec: parity fixture e2e_ok::trait_override_default.
+@test
+function typecheckTraitDefaultOverrideWins(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "trait Describable {\n  describe(&self): i32 {\n    return 0;\n  }\n}\n\n@implements(Describable)\nrecord Item {\n  public value: i32;\n\n  describe(&self): i32 {\n    return self.value;\n  }\n}\n\nfunction main(): i32 {\n  let item: Item = Item { value: 7 };\n  return item.describe();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+  Test::assertEq<u64>(typecheckRecordOwnedMethodCount(&defStore, &symbols, "describe"), 1);
+}
