@@ -4,6 +4,7 @@ import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
+import Capture from "./capture";
 import Lowering from "./lowering";
 import Mono from "./mono";
 
@@ -35,7 +36,10 @@ function monoContains(haystack: &String, needle: str): boolean {
 
 /// Parses, analyzes and lowers `source`, runs monomorphization over the
 /// resulting HIR and renders the monomorphized store.
-function monoRender(source: str): String {
+///
+/// `withCaptures` runs capture analysis first, the order the driver uses:
+/// closures reach monomorphization already carrying an environment layout.
+function monoRenderWith(source: str, withCaptures: boolean): String {
   let file: SourceFile = SourceFile::create("mono_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
@@ -55,7 +59,7 @@ function monoRender(source: str): String {
 
   Test::assertEq<u64>(monoCountErrors(&output.diagnostics), 0);
 
-  let hir: Hir::HirStore = Lowering::lowerModule(
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
@@ -63,9 +67,24 @@ function monoRender(source: str): String {
     &output,
   );
 
+  if (withCaptures) {
+    let captureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(
+      &mut defStore,
+      &mut typeStore,
+      &mut symbols,
+      &mut hir,
+    );
+
+    Test::assertEq<u64>(monoCountErrors(&captureDiagnostics), 0);
+  }
+
   let monoResult: Mono::MonoOutput = Mono::run(&mut defStore, &mut typeStore, &mut symbols, &hir);
 
   return Hir::Display::printHir(&monoResult.hir, &typeStore, &defStore, &symbols);
+}
+
+function monoRender(source: str): String {
+  return monoRenderWith(source, false);
 }
 
 @test
@@ -97,4 +116,25 @@ function monoLeavesBuiltinEqPendingWithoutEqTrait(): void {
 
   Test::assert(monoContains(&rendered, "BuiltinEq"));
   Test::assert(monoContains(&rendered, "pending"));
+}
+
+@test
+function monoKeepsClosureCapturesAcrossTheClone(): void {
+  let rendered: String = monoRenderWith(
+    "function main(): i32 {\n  let x: i32 = 10;\n  let addX = (y: i32): i32 -> x + y;\n\n  return addX(32);\n}\n",
+    true,
+  );
+
+  Test::assert(monoContains(&rendered, "captures: 1"));
+  Test::assert(!monoContains(&rendered, "captures: 0"));
+}
+
+@test
+function monoLeavesAModuleConstantOutOfTheEnvironment(): void {
+  let rendered: String = monoRenderWith(
+    "const DOT: u8 = 46;\n\nfunction main(): boolean {\n  let matches = (b: u8): boolean -> b == DOT;\n\n  return matches(46);\n}\n",
+    true,
+  );
+
+  Test::assert(monoContains(&rendered, "captures: 0"));
 }

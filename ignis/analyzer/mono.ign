@@ -712,6 +712,54 @@ export namespace Mono {
     };
   }
 
+  /// Carries a closure's environment layout across the clone. Capture analysis
+  /// runs before monomorphization, so the cloned closure keeps the layout it
+  /// was given, with every source definition remapped like the body that reads
+  /// it.
+  function copyCaptures(
+    state: &mut MonoState,
+    source: &Vector<Hir::HirCapture>,
+  ): Vector<Hir::HirCapture> {
+    let mut result: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(capture) = source.get(index)) {
+        result.push(Hir::HirCapture {
+          sourceDef: Mono::remapDef(state, capture.sourceDef),
+          fieldIndex: capture.fieldIndex,
+          mode: capture.mode,
+          typeInEnv: capture.typeInEnv,
+        });
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function copyCaptureOverrides(
+    state: &mut MonoState,
+    source: &Vector<Hir::HirCaptureOverride>,
+  ): Vector<Hir::HirCaptureOverride> {
+    let mut result: Vector<Hir::HirCaptureOverride> = Vector::new<Hir::HirCaptureOverride>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(override_) = source.get(index)) {
+        result.push(Hir::HirCaptureOverride {
+          sourceDef: Mono::remapDef(state, override_.sourceDef),
+          mode: override_.mode,
+        });
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
   /// Remaps a definition reference through the active body remap.
   function remapDef(state: &mut MonoState, defId: Analyzer::DefinitionId): Analyzer::DefinitionId {
     return match (Mono::remapLookup(state, defId)) {
@@ -1657,11 +1705,11 @@ export namespace Mono {
             params: params,
             returnType: Mono::substituteType(defStore, typeStore, symbols, state, subst, closureNode.returnType),
             body: body,
-            captures: Vector::new<Hir::HirCapture>(),
+            captures: Mono::copyCaptures(state, &closureNode.captures),
             escapes: closureNode.escapes,
             thunkDef: closureNode.thunkDef,
             dropDef: closureNode.dropDef,
-            captureOverrides: Vector::new<Hir::HirCaptureOverride>(),
+            captureOverrides: Mono::copyCaptureOverrides(state, &closureNode.captureOverrides),
           });
         },
         Hir::HirKind::Cast(castNode) -> {

@@ -990,6 +990,61 @@ export namespace CodegenC {
     return `__ignis_closure_env_${thunk.raw()}`;
   }
 
+  /// The environment struct name of the function being emitted, when that
+  /// function is a thunk the closure prepass registered an environment for.
+  function currentEnvName(
+    closures: &CodegenC::ClosureTables,
+    defId: Analyzer::DefinitionId,
+  ): Option<String> {
+    let mut index: u64 = 0;
+
+    while (index < closures.envs.length()) {
+      if (let Option::SOME(env) = closures.envs.get(index)) {
+        if (env.thunk == defId.raw()) {
+          return Option::SOME(CodegenC::closureEnvName(defId));
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Whether an operand is the `*u8` environment pointer a thunk receives.
+  /// Reading a field out of it needs the environment struct type back, which
+  /// the pointer itself does not carry.
+  function operandIsEnvironmentPointer(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): boolean {
+    let Option::SOME(typeId) = CodegenC::operandType(function_, operand) else {
+      return false;
+    };
+
+    let mut pointee: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+      if (let Analyzer::Type::Pointer(pointerType) = typeNode) {
+        pointee = Option::SOME(pointerType.pointee);
+      }
+    }
+
+    let Option::SOME(pointeeType) = pointee else {
+      return false;
+    };
+
+    let Option::SOME(pointeeNode) = typeStore.get(pointeeType) else {
+      return false;
+    };
+
+    return match (pointeeNode) {
+      Analyzer::Type::U8 -> true,
+      _ -> false,
+    };
+  }
+
   /// The type an operand evaluates to, as far as the emitter can tell. A
   /// function or global reference has no type here; the caller only asks for
   /// closure captures, which are never either.
@@ -1279,7 +1334,14 @@ export namespace CodegenC {
       },
       Lir::Instr::GetFieldPtr(node) -> {
         let base: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.base);
-        let line: String = `    t${node.dest.raw()} = &((${base.toStr()})->field_${node.fieldIndex});\n`;
+        let mut line: String = `    t${node.dest.raw()} = &((${base.toStr()})->field_${node.fieldIndex});\n`;
+
+        if (CodegenC::operandIsEnvironmentPointer(typeStore, function_, &node.base)) {
+          if (let Option::SOME(envName) = CodegenC::currentEnvName(closures, function_.defId)) {
+            line = `    t${node.dest.raw()} = &(((struct ${envName.toStr()}*)${base.toStr()})->field_${node.fieldIndex});\n`;
+          }
+        }
+
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },

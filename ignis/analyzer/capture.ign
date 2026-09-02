@@ -81,7 +81,12 @@ export namespace Capture {
   /// A definition is capturable when it names a runtime value. Functions,
   /// types and constants are reached by name at any depth and never enter an
   /// environment.
+  ///
+  /// Locals, parameters and module constants share the `Variable` definition
+  /// kind, so a constant is told apart by the initializer lowering recorded
+  /// for it, or by the extern flag a declared-only constant carries.
   function isCapturable(
+    hir: &mut Hir::HirStore,
     defStore: &mut Analyzer::DefinitionStore,
     defId: Analyzer::DefinitionId,
   ): boolean {
@@ -89,10 +94,17 @@ export namespace Capture {
       return false;
     };
 
-    return match (definition) {
-      Analyzer::Definition::Variable(_) -> true,
-      _ -> false,
-    };
+    let mut isVariable: boolean = false;
+
+    if (let Analyzer::Definition::Variable(variableDef) = definition) {
+      isVariable = !variableDef.isExtern;
+    }
+
+    if (!isVariable) {
+      return false;
+    }
+
+    return hir.constantInit(defId).isNone();
   }
 
   function variableType(
@@ -983,6 +995,7 @@ export namespace Capture {
   /// Records a free variable, in first-reference order, skipping locals,
   /// duplicates and definitions that name no runtime value.
   function recordFreeVar(
+    hir: &mut Hir::HirStore,
     defStore: &mut Analyzer::DefinitionStore,
     locals: &mut Vector<u32>,
     freeVars: &mut Vector<Analyzer::DefinitionId>,
@@ -997,7 +1010,7 @@ export namespace Capture {
       return;
     }
 
-    if (!Capture::isCapturable(defStore, defId)) {
+    if (!Capture::isCapturable(hir, defStore, defId)) {
       return;
     }
 
@@ -1040,7 +1053,7 @@ export namespace Capture {
 
     match (&node.kind) {
       Hir::HirKind::Variable(defId) -> {
-        Capture::recordFreeVar(defStore, locals, freeVars, seen, defId);
+        Capture::recordFreeVar(hir, defStore, locals, freeVars, seen, defId);
       },
       // An inner closure was processed first, so its capture list already
       // names everything it needs from this scope.
@@ -1049,7 +1062,7 @@ export namespace Capture {
 
         while (index < closureNode.captures.length()) {
           if (let Option::SOME(capture) = closureNode.captures.get(index)) {
-            Capture::recordFreeVar(defStore, locals, freeVars, seen, capture.sourceDef);
+            Capture::recordFreeVar(hir, defStore, locals, freeVars, seen, capture.sourceDef);
           }
 
           index += 1;
