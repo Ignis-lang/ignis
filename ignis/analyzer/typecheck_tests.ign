@@ -14955,6 +14955,28 @@ function typecheckInstanceMethodOverloadSelectsByArgumentType(): void {
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }
 
+/// Scenario: a free overload set and a method overload set, each mixing a
+/// concrete candidate with a generic one. The free set's generic parameter
+/// mentions the type parameter, so a reference argument takes it whether the
+/// type argument is written or left to inference. The method set's generic
+/// candidate takes a concrete `u64`, so a `Layout` argument leaves it out
+/// rather than tying it with the candidate that fits. The bindings annotate
+/// the return types apart, so selecting the wrong candidate is a mismatch.
+@test
+function typecheckOverloadSelectsGenericCandidateForReferenceArgument(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Square {\n  side: i32;\n}\n\nrecord Layout {\n  public size: u64;\n}\n\nrecord Arena {\n  public capacity: u64;\n\n  allocate(&self, layout: Layout): u64 {\n    return layout.size;\n  }\n\n  allocate<T>(&self, count: u64): u64 {\n    return count + self.capacity;\n  }\n}\n\nfunction pick(value: i32): i32 {\n  return value;\n}\n\nfunction pick<T>(value: &T): u32 {\n  return 7 as u32;\n}\n\nfunction usePick(): i32 {\n  let square: Square = Square { side: 3 };\n  let arena: Arena = Arena { capacity: 2 as u64 };\n  let concrete: i32 = pick(1);\n  let written: u32 = pick<Square>(&square);\n  let inferred: u32 = pick(&square);\n  let byLayout: u64 = arena.allocate(Layout { size: 8 as u64 });\n  let byCount: u64 = arena.allocate<Square>(4 as u64);\n  return concrete + (written as i32) + (inferred as i32) + ((byLayout + byCount) as i32);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
 /// Counts the methods named `methodName` that a record owns.
 function typecheckRecordOwnedMethodCount(
   defStore: &Analyzer::DefinitionStore,
