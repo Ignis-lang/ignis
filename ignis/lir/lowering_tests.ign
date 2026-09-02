@@ -144,6 +144,9 @@ function lirRenderDrops(
             Lir::Instr::DropClosure(_) -> {
               rendered.pushStr("    drop-closure\n");
             },
+            Lir::Instr::MarkMoved(_) -> {
+              rendered.pushStr("    mark-moved\n");
+            },
             _ -> {},
           };
         }
@@ -261,4 +264,17 @@ function lirLoweringMarksBindingsThroughReferenceAsAliases(): void {
   );
 
   Test::assertSnapshot("lir-lowering-binding-through-reference", rendered.toStr());
+}
+
+/// Scenario: a record literal takes a droppable field out of a local by
+/// value. The load is followed by a move barrier so the local's scope-end
+/// drop skips the field; a read through a reference gets no barrier.
+/// Spec: IGN-39 — `should_mark_field_moved`.
+@test
+function lirLoweringMarksMovedFieldsOutOfOwnedBases(): void {
+  let rendered: String = lirRenderLoweredDrops(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nrecord Holder {\n  public item: Owned;\n  public count: u32;\n}\n\nrecord Output {\n  public item: Owned;\n}\n\nfunction take(holder: Holder): Output {\n  return Output { item: holder.item };\n}\n\nfunction peek(holder: &Holder): u32 {\n  return holder.count;\n}\n",
+  );
+
+  Test::assertSnapshot("lir-lowering-mark-moved-field", rendered.toStr());
 }
