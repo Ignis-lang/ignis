@@ -1075,6 +1075,54 @@ export namespace CodegenC {
     return Option::NONE;
   }
 
+  /// How an indexed base reaches its elements: a slice value carries them in
+  /// its `data` member, a pointer or reference to one reaches that member
+  /// through an arrow, and anything else indexes directly.
+  enum SliceBaseShape {
+    Value,
+    Indirect,
+    NotASlice,
+  }
+
+  function sliceBaseShape(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): CodegenC::SliceBaseShape {
+    let Option::SOME(typeId) = CodegenC::operandType(function_, operand) else {
+      return CodegenC::SliceBaseShape::NotASlice;
+    };
+
+    let mut innerType: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+      match (typeNode) {
+        Analyzer::Type::Slice(_) -> {
+          return CodegenC::SliceBaseShape::Value;
+        },
+        Analyzer::Type::Pointer(pointer) -> {
+          innerType = Option::SOME(pointer.pointee);
+        },
+        Analyzer::Type::Reference(reference) -> {
+          innerType = Option::SOME(reference.referent);
+        },
+        _ -> {},
+      };
+    }
+
+    let Option::SOME(inner) = innerType else {
+      return CodegenC::SliceBaseShape::NotASlice;
+    };
+
+    if (let Option::SOME(innerNode) = typeStore.get(inner)) {
+      if (let Analyzer::Type::Slice(_) = innerNode) {
+        return CodegenC::SliceBaseShape::Indirect;
+      }
+    }
+
+    return CodegenC::SliceBaseShape::NotASlice;
+  }
+
   function isEqualityOperation(op: &Hir::BinaryOperation): boolean {
     return match (op) {
       Hir::BinaryOperation::Equal | Hir::BinaryOperation::NotEqual -> true,
@@ -1351,7 +1399,18 @@ export namespace CodegenC {
       Lir::Instr::GetElementPtr(node) -> {
         let base: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.base);
         let index: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.index);
-        let line: String = `    t${node.dest.raw()} = &(${base.toStr()}[${index.toStr()}]);\n`;
+
+        // A slice is a struct, so the element lives behind its `data` member
+        // rather than at the struct itself. An array or pointer base indexes
+        // directly.
+        let sliceBase: CodegenC::SliceBaseShape = CodegenC::sliceBaseShape(typeStore, function_, &node.base);
+
+        let line: String = match (sliceBase) {
+          CodegenC::SliceBaseShape::Value -> `    t${node.dest.raw()} = &((${base.toStr()}).data[${index.toStr()}]);\n`,
+          CodegenC::SliceBaseShape::Indirect -> `    t${node.dest.raw()} = &((${base.toStr()})->data[${index.toStr()}]);\n`,
+          CodegenC::SliceBaseShape::NotASlice -> `    t${node.dest.raw()} = &(${base.toStr()}[${index.toStr()}]);\n`,
+        };
+
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },

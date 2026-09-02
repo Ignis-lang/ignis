@@ -383,6 +383,126 @@ function lirRenderLoweredLocals(source: str): String {
   return lirRenderLocalsAndStores(&defStore, &typeStore, &symbols, &lowered.program);
 }
 
+/// How many `MakeSlice` instructions the whole program carries.
+function lirCountMakeSlice(program: &Lir::LirProgram): u64 {
+  let mut count: u64 = 0;
+  let mut functionIndex: u64 = 0;
+
+  while (functionIndex < program.functions.length()) {
+    let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+      functionIndex += 1;
+      continue;
+    };
+
+    let mut blockIndex: u64 = 0;
+
+    while (blockIndex < function_.blocks.length()) {
+      let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+        blockIndex += 1;
+        continue;
+      };
+
+      let mut instrIndex: u64 = 0;
+
+      while (instrIndex < block.instructions.length()) {
+        if (let Option::SOME(instruction) = block.instructions.get(instrIndex)) {
+          if (let Lir::Instr::MakeSlice(_) = instruction) {
+            count += 1;
+          }
+        }
+
+        instrIndex += 1;
+      }
+
+      blockIndex += 1;
+    }
+
+    functionIndex += 1;
+  }
+
+  return count;
+}
+
+/// Runs the whole front end over `source` and counts the slices LIR lowering
+/// built for it.
+function lirCountLoweredMakeSlice(source: str): u64 {
+  let file: SourceFile = SourceFile::create("lowering_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(lirCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(lirCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(lirCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &hir,
+  );
+
+  Test::assertEq<u64>(lirCountErrors(&checked.diagnostics), 0);
+
+  let constValues: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap {
+    defIdRaws: Vector::new<u32>(),
+    values: Vector::new<Analyzer::ConstEval::ConstValue>(),
+  };
+
+  let lowered: LirLowering::LowerModuleResult = LirLowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &hir,
+    &checked.dropSchedules,
+    &constValues,
+  );
+
+  return lirCountMakeSlice(&lowered.program);
+}
+
+/// Scenario: an array flows into a slice parameter, a slice return type and a
+/// slice-annotated binding. Each of the three positions needs the slice built
+/// from the array's data pointer and its static length.
+/// Spec: IGN-170 — array values satisfy a slice of the same element type.
+@test
+function lirLoweringBuildsSlicesWhereArraysFlowIntoSlicePositions(): void {
+  let built: u64 = lirCountLoweredMakeSlice(
+    "function first(values: i32[]): i32 {\n  return values[0];\n}\n\nfunction view(): i32[] {\n  let data: i32[2] = [4, 5];\n  return data;\n}\n\nfunction run(): i32 {\n  let data: i32[2] = [1, 2];\n  let held: i32[] = data;\n\n  return first(data) + held[1];\n}\n",
+  );
+
+  Test::assertEq<u64>(built, 3);
+}
+
+/// Scenario: an array bound to an array annotation and passed to an array
+/// parameter. Nothing asks for a slice, so no slice is built.
+/// Spec: IGN-170 — array values satisfy a slice of the same element type.
+@test
+function lirLoweringBuildsNoSliceWhenNoPositionAsksForOne(): void {
+  let built: u64 = lirCountLoweredMakeSlice(
+    "function first(values: i32[2]): i32 {\n  return values[0];\n}\n\nfunction run(): i32 {\n  let data: i32[2] = [1, 2];\n\n  return first(data);\n}\n",
+  );
+
+  Test::assertEq<u64>(built, 0);
+}
+
 /// Scenario: a binding whose initializer diverges, an assignment whose value
 /// diverges, and a `let mut x;` waiting for its first assignment.
 /// Spec: the slot carries the type the binding was declared with, and a store

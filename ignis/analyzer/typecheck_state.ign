@@ -1545,6 +1545,57 @@ export namespace Analyzer {
       return targetSigned == sourceSigned;
     }
 
+    /// Whether an array value may be supplied where a slice of the same
+    /// element type is required.
+    ///
+    /// Mirrors the reference analyzer's `TypeStore::is_assignable`: an array
+    /// knows its own length, so the slice is built from the array's data
+    /// pointer and that length at the coercion site. The reverse never holds,
+    /// because a slice carries no static size.
+    function fixedArrayCoercesToSlice(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      target: Analyzer::TypeId,
+      source: Analyzer::TypeId,
+    ): boolean {
+      let targetResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, target);
+      if (targetResolved.cycleAlias.isSome()) {
+        return false;
+      }
+
+      let sourceResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, source);
+      if (sourceResolved.cycleAlias.isSome()) {
+        return false;
+      }
+
+      let mut targetElement: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(targetNode) = typeStore.get(targetResolved.typeId)) {
+        if (let Analyzer::Type::Slice(element) = targetNode) {
+          targetElement = Option::SOME(element);
+        }
+      }
+
+      let mut sourceElement: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(sourceNode) = typeStore.get(sourceResolved.typeId)) {
+        if (let Analyzer::Type::FixedArray(element, _) = sourceNode) {
+          sourceElement = Option::SOME(element);
+        }
+      }
+
+      let Option::SOME(targetElementId) = targetElement else {
+        return false;
+      };
+      let Option::SOME(sourceElementId) = sourceElement else {
+        return false;
+      };
+
+      return Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, targetElementId, sourceElementId);
+    }
+
     /// The type two integer operands share, or `Option::NONE` when they share
     /// none.
     ///
