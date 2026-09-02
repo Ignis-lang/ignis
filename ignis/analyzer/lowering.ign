@@ -3203,6 +3203,16 @@ export namespace Lowering {
 
     match (rightExpr) {
       Ast::Expression::Node::Call(call) -> {
+        // A member-access callee carries no resolver ref (ADR-B7), so the
+        // caller handles it before asking for a placement: without a
+        // placeholder by prepending the piped value, with one by lowering the
+        // call whole around it.
+        if (let Option::SOME(calleeExpr) = module.expressions.get(call.callee)) {
+          if (let Ast::Expression::Node::MemberAccess(_) = calleeExpr) {
+            return Option::NONE;
+          }
+        }
+
         let extraArgs: Vector<Ast::ExpressionId> = Lowering::copyExpressionIds(&call.arguments);
         let replaceAt: Option<u64> = Lowering::directPlaceholderIndex(module, &extraArgs);
 
@@ -3296,6 +3306,35 @@ export namespace Lowering {
               );
             }
           }
+        }
+
+        // `value |> obj.method` is the same call written without parentheses,
+        // as `checkPipeBareMethod` checks it. The method takes no argument of
+        // its own, so a call with an empty list stands in for the one the
+        // source did not write.
+        if (let Ast::Expression::Node::MemberAccess(rightMember) = rightExpr) {
+          let bareCall: Ast::Expression::Call = Ast::Expression::Call {
+            span: rightMember.span,
+            callee: rightExprId,
+            typeArguments: Vector::new<Ast::TypeId>(),
+            arguments: Vector::new<Ast::ExpressionId>(),
+          };
+
+          let piped: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, pipe.left);
+
+          return Lowering::lowerMethodCall(
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            output,
+            locals,
+            hir,
+            rightExprId,
+            &bareCall,
+            &rightMember,
+            Option::SOME(piped),
+          );
         }
       }
     }

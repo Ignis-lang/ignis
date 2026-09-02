@@ -94,6 +94,19 @@ function loweringGenericRecordInitWithExplicitTypeArguments(): void {
   Test::assertSnapshot("lowering-generic-record-init-type-arguments", rendered.toStr());
 }
 
+/// Scenario: a method reached through `|>` written bare, and written with the
+/// piped value placed by a `_` at either end of the argument list.
+/// Spec: all three lower to the method call the source means, rather than
+/// falling back to an error node the emitter cannot write C for.
+@test
+function loweringPipeIntoMethodShapes(): void {
+  let rendered: String = loweringRender(
+    "record Math {\n  public base: i32;\n\n  sub(&self, a: i32, b: i32): i32 {\n    return self.base + a - b;\n  }\n\n  add(&self, x: i32): i32 {\n    return self.base + x;\n  }\n}\n\nfunction bare(m: Math): i32 {\n  return 5 |> m.add;\n}\n\nfunction placeholderFirst(m: Math): i32 {\n  return 7 |> m.sub(_, 3);\n}\n\nfunction placeholderLast(m: Math): i32 {\n  return 7 |> m.sub(3, _);\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-pipe-method-shapes", rendered.toStr());
+}
+
 @test
 function loweringIfElseBranches(): void {
   let rendered: String = loweringRender(
