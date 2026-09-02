@@ -9,6 +9,7 @@ from "@compiler::diagnostics";
 
 import Ast from "@compiler::ast";
 import HashMap from "std::collections";
+import Char from "std::char";
 
 /// Pass-1 binder for the Ignis selfhost compiler.
 ///
@@ -213,6 +214,8 @@ export namespace Analyzer {
         implementsCopy: false,
         implementsDrop: false,
         implementedTraits: Vector::new<String>(),
+        packed: false,
+        alignment: Option::NONE,
       };
       return defsRef.push(Analyzer::Definition::Record(placeholder));
     }
@@ -624,6 +627,94 @@ export namespace Analyzer {
       return names;
     }
 
+    /// Whether the item carries `@packed`. The attribute takes no arguments;
+    /// a form that carries any is ignored, as in the host.
+    function packedAttribute(metadata: &Ast::Metadata): boolean {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (attribute.name.equals("packed") && attribute.arguments.isEmpty()) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// The alignment `@aligned(N)` asks for, in bytes.
+    ///
+    /// Attribute arguments arrive from the parser as raw lexeme text, so the
+    /// count is read back from its decimal digits. A form that does not carry
+    /// exactly one power-of-two decimal argument is ignored, as in the host,
+    /// which reports it and emits no attribute.
+    function alignmentAttribute(metadata: &Ast::Metadata): Option<u64> {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (!attribute.name.equals("aligned") || attribute.arguments.length() != 1) {
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(argument) = attribute.arguments.get(0) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(value) = Analyzer::Binder::parseDecimal(argument) else {
+          index += 1;
+          continue;
+        };
+
+        if (value == 0 || (value & (value - 1)) != 0) {
+          index += 1;
+          continue;
+        }
+
+        return Option::SOME(value);
+      }
+
+      return Option::NONE;
+    }
+
+    /// A non-empty run of ASCII decimal digits read as a `u64`; `NONE` for any
+    /// other text.
+    function parseDecimal(text: &String): Option<u64> {
+      if (text.length() == 0) {
+        return Option::NONE;
+      }
+
+      let mut value: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < text.length()) {
+        let Option::SOME(character) = text.charAt(index) else {
+          return Option::NONE;
+        };
+
+        let Option::SOME(digit) = Char::asciiDigitValue(character) else {
+          return Option::NONE;
+        };
+
+        value = value * 10 + digit;
+        index += 1;
+      }
+
+      return Option::SOME(value);
+    }
+
     /// The type named by `@extension(Type)`, as raw attribute text.
     ///
     /// `@extension(Type, mut)` carries a second argument the selfhost does not
@@ -1001,6 +1092,7 @@ export namespace Analyzer {
                   fieldType: sentinelId,
                   owner: owner,
                   index: out.length() as u32,
+                  alignment: Analyzer::Binder::alignmentAttribute(&b.metadata),
                 };
                 let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
                 let fieldId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Field(fieldDef));
@@ -1624,6 +1716,8 @@ export namespace Analyzer {
         implementsCopy: Analyzer::Binder::implementsLangTrait(&rec.metadata, "Copy"),
         implementsDrop: Analyzer::Binder::implementsLangTrait(&rec.metadata, "Drop"),
         implementedTraits: Analyzer::Binder::implementedTraitNames(&rec.metadata),
+        packed: Analyzer::Binder::packedAttribute(&rec.metadata),
+        alignment: Analyzer::Binder::alignmentAttribute(&rec.metadata),
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       defsRef.replace(defId, Analyzer::Definition::Record(newRec));

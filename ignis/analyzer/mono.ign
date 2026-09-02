@@ -913,6 +913,8 @@ export namespace Mono {
           implementsCopy: false,
           implementsDrop: false,
           implementedTraits: Vector::new<String>(),
+          packed: false,
+          alignment: Option::NONE,
         }));
       } else {
         shellId = defStoreRef.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
@@ -2314,6 +2316,7 @@ export namespace Mono {
       let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
       let mut mutable: boolean = false;
       let mut fieldIndex: u32 = 0;
+      let mut fieldAlignment: Option<u64> = Option::NONE;
       let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
       let mut tagValue: u32 = 0;
 
@@ -2361,6 +2364,7 @@ export namespace Mono {
             declaredType = fieldDef.fieldType;
             owner = fieldDef.owner;
             fieldIndex = fieldDef.index;
+            fieldAlignment = fieldDef.alignment;
           },
           Analyzer::Definition::Variant(variantDef) -> {
             kind = 5;
@@ -2447,6 +2451,7 @@ export namespace Mono {
           fieldType: concreteDeclared,
           owner: owner,
           index: fieldIndex,
+          alignment: fieldAlignment,
         }));
 
         rawId += 1;
@@ -2533,6 +2538,8 @@ export namespace Mono {
     let mut implementsCopy: boolean = false;
     let mut implementsDrop: boolean = false;
     let mut implementedTraits: Vector<String> = Vector::new<String>();
+    let mut packed: boolean = false;
+    let mut alignment: Option<u64> = Option::NONE;
 
     if (let Option::SOME(definition) = defStore.get(genericDefId)) {
       if (let Analyzer::Definition::Record(recordDef) = definition) {
@@ -2540,6 +2547,8 @@ export namespace Mono {
         implementsCopy = recordDef.implementsCopy;
         implementsDrop = recordDef.implementsDrop;
         implementedTraits = Mono::copyTraitNames(&recordDef.implementedTraits);
+        packed = recordDef.packed;
+        alignment = recordDef.alignment;
         fieldDefs = Mono::copyDefIdList(&recordDef.fields);
       }
     }
@@ -2559,6 +2568,7 @@ export namespace Mono {
       let mut clonedName: Analyzer::SymbolId = nameSym;
       let mut clonedType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
       let mut clonedIndex: u32 = 0;
+      let mut clonedAlignment: Option<u64> = Option::NONE;
       let mut haveField: boolean = false;
 
       if (let Option::SOME(fieldDefinition) = defStore.get(*fieldDefId)) {
@@ -2566,6 +2576,7 @@ export namespace Mono {
           clonedName = fieldDef.name;
           clonedType = Mono::substituteType(defStore, typeStore, symbols, state, subst, fieldDef.fieldType);
           clonedIndex = fieldDef.index;
+          clonedAlignment = fieldDef.alignment;
           haveField = true;
         }
       }
@@ -2577,6 +2588,7 @@ export namespace Mono {
           fieldType: clonedType,
           owner: concreteId,
           index: clonedIndex,
+          alignment: clonedAlignment,
         })));
       }
 
@@ -2595,6 +2607,8 @@ export namespace Mono {
       implementsCopy: implementsCopy,
       implementsDrop: implementsDrop,
       implementedTraits: implementedTraits,
+      packed: packed,
+      alignment: alignment,
     }));
 
     let _ = state;

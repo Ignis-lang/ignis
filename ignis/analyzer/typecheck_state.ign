@@ -34,6 +34,21 @@ export namespace Analyzer {
       public typeArgs: Vector<Vector<Analyzer::TypeId>>;
     }
 
+    /// Side map from a local binding's binding-site raw `PatternId` to the
+    /// type the checker settled on for it.
+    ///
+    /// The Rust oracle reads this off the local's `DefinitionKind::Variable`,
+    /// which its binder creates. The selfhost binder creates no definition
+    /// for a local, and the checker's own scope stack is popped when the
+    /// scope closes, so the settled type is logged here for HIR lowering: it
+    /// is the annotation when one is written, and the type the first
+    /// assignment supplied for a `let mut x;`, neither of which the
+    /// initializer expression's own type answers.
+    record LocalTypeMap {
+      public patterns: Vector<u32>;
+      public typeIds: Vector<Analyzer::TypeId>;
+    }
+
     /// Declaration and use log for local bindings, produced by typecheck and
     /// consumed by the lint phase.
     ///
@@ -70,6 +85,7 @@ export namespace Analyzer {
       public callTargets: Analyzer::Typecheck::CallTargetMap;
       public callTypeArgs: Analyzer::Typecheck::CallTypeArgsMap;
       public localUses: Analyzer::Typecheck::LocalBindingUses;
+      public localTypes: Analyzer::Typecheck::LocalTypeMap;
     }
 
     record TypecheckState {
@@ -89,6 +105,10 @@ export namespace Analyzer {
       /// Parallel to `localTypeIds`: true while the binding is waiting for its
       /// first assignment to decide its type.
       public localPendingFlags: Vector<boolean>;
+      /// Binding-site log feeding `LocalTypeMap`. Like `declaredBindings`
+      /// below, these two vectors survive the scope stack being popped.
+      public bindingTypePatterns: Vector<u32>;
+      public bindingTypeIds: Vector<Analyzer::TypeId>;
       /// Binding-site log feeding `LocalBindingUses`. Unlike the `local*`
       /// scope stack above, these five vectors are never reset per function:
       /// the lint phase reports module-wide.
@@ -1769,6 +1789,36 @@ export namespace Analyzer {
 
     /// Log a binding site with its declaration span and declared mutability.
     /// Idempotent, so a binding reached twice is reported once.
+    /// Log the settled type of the binding site `bindingRaw`, replacing an
+    /// earlier entry so a pending binding ends up with the type its first
+    /// assignment supplied rather than the placeholder.
+    function recordBindingType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      bindingRaw: u32,
+      typeId: Analyzer::TypeId,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < state.bindingTypePatterns.length()) {
+        let Option::SOME(existing) = state.bindingTypePatterns.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (*existing == bindingRaw) {
+          let mut foundRef: &mut Analyzer::Typecheck::TypecheckState = state;
+          foundRef.bindingTypeIds.set(index, typeId);
+          return;
+        }
+
+        index += 1;
+      }
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.bindingTypePatterns.push(bindingRaw);
+      stateRef.bindingTypeIds.push(typeId);
+    }
+
     function markBindingDeclared(
       state: &mut Analyzer::Typecheck::TypecheckState,
       bindingRaw: u32,
@@ -1928,6 +1978,7 @@ export namespace Analyzer {
       stateRef.localTypeIds.push(typeId);
       stateRef.localMutableFlags.push(mutable);
       stateRef.localPendingFlags.push(false);
+      Analyzer::Typecheck::recordBindingType(state, patternId.raw(), typeId);
       return true;
     }
 
@@ -1987,9 +2038,22 @@ export namespace Analyzer {
           return false;
         }
 
+        let mut patternRaw: u32 = 0;
+        let mut havePattern: boolean = false;
+
+        if (let Option::SOME(patternId) = state.localPatternIds.get(index)) {
+          patternRaw = patternId.raw();
+          havePattern = true;
+        }
+
         let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
         stateRef.localTypeIds.set(index, typeId);
         stateRef.localPendingFlags.set(index, false);
+
+        if (havePattern) {
+          Analyzer::Typecheck::recordBindingType(state, patternRaw, typeId);
+        }
+
         return true;
       }
 

@@ -640,6 +640,8 @@ function binderReplaceRoundTrip(): void {
     implementsCopy: false,
     implementsDrop: false,
     implementedTraits: Vector::new<String>(),
+    packed: false,
+    alignment: Option::NONE,
   };
   let defId: Analyzer::DefinitionId = defStore.push(Analyzer::Definition::Record(placeholder));
 
@@ -655,6 +657,8 @@ function binderReplaceRoundTrip(): void {
     implementsCopy: false,
     implementsDrop: false,
     implementedTraits: Vector::new<String>(),
+    packed: false,
+    alignment: Option::NONE,
   };
   let replaced: boolean = defStore.replace(defId, Analyzer::Definition::Record(updated));
 
@@ -859,6 +863,199 @@ function binderRecordsEveryImplementedTraitName(): void {
       _ -> @panic("expected Record"),
     },
     Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+}
+
+/// Scenario: record carrying `@packed` and `@aligned(16)`, with a field
+/// carrying `@aligned(64)`.
+/// Spec: the layout the attributes ask for reaches the RecordDef and the
+/// FieldDef, so codegen can put it on the C struct.
+@test
+function binderRecordsLayoutAttributes(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut alignedArguments: Vector<String> = Vector::new<String>();
+  alignedArguments.push(String::create("16"));
+
+  let mut recordAttributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  recordAttributes.push(Ast::Attribute {
+    span: dummySpan(),
+    name: String::create("packed"),
+    arguments: Vector::new<String>(),
+  });
+  recordAttributes.push(Ast::Attribute {
+    span: dummySpan(),
+    name: String::create("aligned"),
+    arguments: alignedArguments,
+  });
+
+  let mut fieldAlignedArguments: Vector<String> = Vector::new<String>();
+  fieldAlignedArguments.push(String::create("64"));
+
+  let mut fieldAttributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  fieldAttributes.push(Ast::Attribute {
+    span: dummySpan(),
+    name: String::create("aligned"),
+    arguments: fieldAlignedArguments,
+  });
+
+  let fieldId: Ast::PatternId = module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+    span: dummySpan(),
+    name: String::create("value"),
+    annotation: Option::NONE,
+    metadata: Ast::Metadata {
+      attributes: fieldAttributes,
+      modifiers: Vector::new<Ast::Modifier>(),
+    },
+  }));
+
+  let mut fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
+  fields.push(fieldId);
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Layout"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: fields,
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::Metadata {
+      attributes: recordAttributes,
+      modifiers: Vector::new<Ast::Modifier>(),
+    },
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let _pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("record not found in pass-1 output");
+  };
+
+  let mut fieldDefId: Analyzer::DefinitionId = defIdFound;
+
+  match (defStore.get(defIdFound)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(rec) -> {
+        Test::assertEq<boolean>(rec.packed, true);
+        Test::assertEq<u64>(unwrapAlignment(rec.alignment), 16);
+
+        let Option::SOME(firstField) = rec.fields.get(0) else {
+          @panic("expected one bound field");
+        };
+
+        fieldDefId = *firstField;
+      },
+      _ -> @panic("expected Record"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+
+  match (defStore.get(fieldDefId)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Field(field) -> {
+        Test::assertEq<u64>(unwrapAlignment(field.alignment), 64);
+      },
+      _ -> @panic("expected Field"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+}
+
+/// Scenario: `@packed(1)` and `@aligned(24)`, forms the host reports and emits
+/// no attribute for.
+/// Spec: neither reaches the definition, so codegen writes no layout suffix.
+@test
+function binderIgnoresMalformedLayoutAttributes(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut packedArguments: Vector<String> = Vector::new<String>();
+  packedArguments.push(String::create("1"));
+
+  let mut alignedArguments: Vector<String> = Vector::new<String>();
+  alignedArguments.push(String::create("24"));
+
+  let mut recordAttributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  recordAttributes.push(Ast::Attribute {
+    span: dummySpan(),
+    name: String::create("packed"),
+    arguments: packedArguments,
+  });
+  recordAttributes.push(Ast::Attribute {
+    span: dummySpan(),
+    name: String::create("aligned"),
+    arguments: alignedArguments,
+  });
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Layout"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::Metadata {
+      attributes: recordAttributes,
+      modifiers: Vector::new<Ast::Modifier>(),
+    },
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let _pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("record not found in pass-1 output");
+  };
+
+  match (defStore.get(defIdFound)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(rec) -> {
+        Test::assertEq<boolean>(rec.packed, false);
+        Test::assertEq<u64>(unwrapAlignment(rec.alignment), 0);
+      },
+      _ -> @panic("expected Record"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
+}
+
+/// The recorded alignment, or 0 when the item asked for none.
+function unwrapAlignment(alignment: Option<u64>): u64 {
+  return match (alignment) {
+    Option::SOME(value) -> value,
+    Option::NONE -> 0,
   };
 }
 

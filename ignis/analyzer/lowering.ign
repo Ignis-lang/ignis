@@ -276,6 +276,32 @@ export namespace Lowering {
     return Lowering::voidType(typeStore);
   }
 
+  /// The type the checker settled on for the binding site `patternId`.
+  function lookupLocalBindingType(
+    typecheck: &Analyzer::Typecheck::TypecheckOutput,
+    patternId: Ast::PatternId,
+  ): Option<Analyzer::TypeId> {
+    let mut index: u64 = 0;
+
+    while (index < typecheck.localTypes.patterns.length()) {
+      let Option::SOME(candidate) = typecheck.localTypes.patterns.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (*candidate == patternId.raw()) {
+        return match (typecheck.localTypes.typeIds.get(index)) {
+          Option::SOME(typeId) -> Option::SOME(*typeId),
+          Option::NONE -> Option::NONE,
+        };
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
   /// Single fallback for every construct outside this slice. The selfhost
   /// type model has no error type, so the node types as `void`.
   function errorNode(
@@ -2214,9 +2240,10 @@ export namespace Lowering {
   /// The record definition is re-derived from the checked type of the whole
   /// initializer instead of from the path expression: the selfhost
   /// typechecker records the record type on this node, and the oracle's
-  /// `resolve_record_path_for_lowering` has no selfhost counterpart.
-  /// Explicit type arguments are rejected outright by the typechecker
-  /// ("generic record initializers"), so they stay on `Error`.
+  /// `resolve_record_path_for_lowering` has no selfhost counterpart. That
+  /// also covers `Rec<T> { ... }`: the written type arguments are already
+  /// folded into the checked type, so the explicit and inferred forms lower
+  /// through the same path.
   function lowerRecordInit(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -2228,10 +2255,6 @@ export namespace Lowering {
     exprId: Ast::ExpressionId,
     recordInit: &Ast::Expression::RecordInit,
   ): Hir::HirId {
-    if (recordInit.typeArguments.length() > 0) {
-      return Lowering::errorNode(hir, typeStore, recordInit.span);
-    }
-
     let resultType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
 
     let Option::SOME(recordDef) = Lowering::nominalDefinition(defStore, typeStore, resultType) else {
@@ -3160,6 +3183,10 @@ export namespace Lowering {
   /// slice does not lower — a lambda, a bare method, a record initializer, a
   /// vector literal, a builtin call, or a `_` nested deeper than a direct
   /// argument of the right-side call.
+  ///
+  /// A generic callee is placed like any other. Its type arguments, written or
+  /// inferred, come off the checker's table keyed by the right side, so the
+  /// placement does not have to carry them.
   function pipePlacement(
     module: &Ast::Module,
     pipe: &Ast::Expression::Pipe,
@@ -3176,8 +3203,14 @@ export namespace Lowering {
 
     match (rightExpr) {
       Ast::Expression::Node::Call(call) -> {
-        if (call.typeArguments.length() > 0) {
-          return Option::NONE;
+        // A member-access callee carries no resolver ref (ADR-B7), so the
+        // caller handles it before asking for a placement: without a
+        // placeholder by prepending the piped value, with one by lowering the
+        // call whole around it.
+        if (let Option::SOME(calleeExpr) = module.expressions.get(call.callee)) {
+          if (let Ast::Expression::Node::MemberAccess(_) = calleeExpr) {
+            return Option::NONE;
+          }
         }
 
         let extraArgs: Vector<Ast::ExpressionId> = Lowering::copyExpressionIds(&call.arguments);
@@ -3274,6 +3307,56 @@ export namespace Lowering {
             }
           }
         }
+
+        // A lambda on the right side is the closure the pipe calls, with the
+        // piped value as its only argument. It has no name to resolve, so no
+        // placement describes it.
+        if (let Ast::Expression::Node::Lambda(_) = rightExpr) {
+          let closureCallee: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, rightExprId);
+          let piped: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, pipe.left);
+
+          let mut lambdaArgs: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+          lambdaArgs.push(piped);
+
+          return Lowering::allocPipeClosureCall(
+            typeStore,
+            output,
+            hir,
+            exprId,
+            closureCallee,
+            lambdaArgs,
+            pipe.span,
+          );
+        }
+
+        // `value |> obj.method` is the same call written without parentheses,
+        // as `checkPipeBareMethod` checks it. The method takes no argument of
+        // its own, so a call with an empty list stands in for the one the
+        // source did not write.
+        if (let Ast::Expression::Node::MemberAccess(rightMember) = rightExpr) {
+          let bareCall: Ast::Expression::Call = Ast::Expression::Call {
+            span: rightMember.span,
+            callee: rightExprId,
+            typeArguments: Vector::new<Ast::TypeId>(),
+            arguments: Vector::new<Ast::ExpressionId>(),
+          };
+
+          let piped: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, pipe.left);
+
+          return Lowering::lowerMethodCall(
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            output,
+            locals,
+            hir,
+            rightExprId,
+            &bareCall,
+            &rightMember,
+            Option::SOME(piped),
+          );
+        }
       }
     }
 
@@ -3301,6 +3384,44 @@ export namespace Lowering {
       return Lowering::errorNode(hir, typeStore, pipe.span);
     };
 
+    // A callee that resolves to a local holds a function-typed value, so the
+    // call goes through the value rather than a definition, as the direct call
+    // path does for the same shape.
+    if (let Analyzer::ResolverBodies::ResolvedRef::Local(localId) = &resolved) {
+      let Option::SOME(closureCallee) = Lowering::lowerPipeClosureCallee(
+        defStore,
+        typeStore,
+        locals,
+        hir,
+        localId,
+        pipe.span,
+      ) else {
+        return Lowering::errorNode(hir, typeStore, pipe.span);
+      };
+
+      let closureArgs: Vector<Hir::HirId> = Lowering::lowerPipeArguments(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output,
+        locals,
+        hir,
+        pipe,
+        &placement,
+      );
+
+      return Lowering::allocPipeClosureCall(
+        typeStore,
+        output,
+        hir,
+        exprId,
+        closureCallee,
+        closureArgs,
+        pipe.span,
+      );
+    }
+
     let Analyzer::ResolverBodies::ResolvedRef::Definition(calleeDef) = resolved else {
       return Lowering::errorNode(hir, typeStore, pipe.span);
     };
@@ -3319,6 +3440,57 @@ export namespace Lowering {
       return Lowering::errorNode(hir, typeStore, pipe.span);
     }
 
+    let args: Vector<Hir::HirId> = Lowering::lowerPipeArguments(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      output,
+      locals,
+      hir,
+      pipe,
+      &placement,
+    );
+
+    let pipeType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
+      Option::SOME(typeId) -> typeId,
+      Option::NONE -> calleeReturnType,
+    };
+
+    // The checker records what a generic pipe callee was specialized with
+    // against the right side, whether the call site wrote the arguments or the
+    // piped value supplied them.
+    let typeArgs: Vector<Analyzer::TypeId> = match (Lowering::lookupCallTypeArgs(&output.typecheck, pipe.right)) {
+      Option::SOME(recorded) -> recorded,
+      Option::NONE -> Vector::new<Analyzer::TypeId>(),
+    };
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Call(Hir::HirCall {
+        callee: calleeDef,
+        typeArgs: typeArgs,
+        args: args,
+      }),
+      span: pipe.span,
+      typeId: pipeType,
+    });
+  }
+
+  /// The argument list a placed pipe call receives: the piped value either
+  /// prepended or substituted for the `_` that named its position, with the
+  /// arguments written at the call site around it.
+  function lowerPipeArguments(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    pipe: &Ast::Expression::Pipe,
+    placement: &Lowering::PipePlacement,
+  ): Vector<Hir::HirId> {
     let piped: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, pipe.left);
 
     let mut args: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
@@ -3349,20 +3521,63 @@ export namespace Lowering {
       index += 1;
     }
 
-    let pipeType: Analyzer::TypeId = match (Lowering::lookupExprType(&output.typecheck, exprId)) {
-      Option::SOME(typeId) -> typeId,
-      Option::NONE -> calleeReturnType,
+    return args;
+  }
+
+  /// The closure value a pipe's callee names, typed from the binding rather
+  /// than from the checker's table.
+  ///
+  /// `checkPipePrepend` records the call's *result* type against the right
+  /// side, and for `value |> f` the right side is `f` itself, so the ordinary
+  /// name lowering would type the callee as whatever the call returns.
+  function lowerPipeClosureCallee(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    localId: Analyzer::ResolverBodies::LocalId,
+    span: SourceSpan,
+  ): Option<Hir::HirId> {
+    let Option::SOME(defId) = Lowering::lookupLocal(locals, localId) else {
+      return Option::NONE;
     };
+
+    let mut calleeType: Analyzer::TypeId = Lowering::voidType(typeStore);
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Variable(variableDef) = definition) {
+        calleeType = variableDef.declaredType;
+      }
+    }
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return Option::SOME(hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Variable(defId),
+      span: span,
+      typeId: calleeType,
+    }));
+  }
+
+  /// Allocates the `CallClosure` a pipe into a closure value becomes.
+  function allocPipeClosureCall(
+    typeStore: &mut Analyzer::TypeStore,
+    output: &Analyzer::AnalyzerOutput,
+    hir: &mut Hir::HirStore,
+    exprId: Ast::ExpressionId,
+    callee: Hir::HirId,
+    args: Vector<Hir::HirId>,
+    span: SourceSpan,
+  ): Hir::HirId {
+    let resultType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
 
     let mut hirRef: &mut Hir::HirStore = hir;
     return hirRef.alloc(Hir::HirNode {
-      kind: Hir::HirKind::Call(Hir::HirCall {
-        callee: calleeDef,
-        typeArgs: Vector::new<Analyzer::TypeId>(),
+      kind: Hir::HirKind::CallClosure(Hir::HirCallClosure {
+        callee: callee,
         args: args,
       }),
-      span: pipe.span,
-      typeId: pipeType,
+      span: span,
+      typeId: resultType,
     });
   }
 
@@ -3636,6 +3851,14 @@ export namespace Lowering {
     if (let Option::SOME(valueId) = value) {
       init = Option::SOME(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, valueId));
       bindingType = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, valueId);
+    }
+
+    // The slot holds what the binding was declared to hold, which is not the
+    // initializer's own type when the initializer diverges (`let x: u64 =
+    // @panic(...)`) and is not known here at all for a `let mut x;` waiting
+    // on its first assignment.
+    if (let Option::SOME(settled) = Lowering::lookupLocalBindingType(&output.typecheck, patternId)) {
+      bindingType = settled;
     }
 
     let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
