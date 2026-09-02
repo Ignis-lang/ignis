@@ -23,9 +23,10 @@ import Vector from "std::vector";
 ///     method receivers, and the assign-while-borrowed rule (A0036, A0037,
 ///     A0038, A0047),
 ///   - `crates/ignis_analyzer/src/ownership_hir.rs` contributes the move
-///     state machine (`Valid`/`Returned`/`Moved`), the consumption sites, the
-///     branch join that reports an inconsistent move, and the two-pass loop
-///     body walk (O0001, O0003).
+///     state machine (`Valid`/`Returned`/`Moved`/`Dropped`), the consumption
+///     sites, manual `.drop()`, the branch join that reports an inconsistent
+///     move or drop, and the two-pass loop body walk (O0001, O0003, O0006,
+///     O0007, O0008, O0010).
 ///
 /// The same walk also produces the drop schedules (IGN-39) that
 /// `ownership_hir.rs` records alongside its diagnostics: which locals a scope
@@ -46,13 +47,18 @@ import Vector from "std::vector";
 ///
 /// Deliberate scope limits of this slice, each of them an oracle rule that is
 /// not ported yet rather than a rule that is weakened:
-///   - Closures and captures: the selfhost `HirKind` has no `Closure`
-///     variant, so `try_record_closure_capture_borrows` and the by-value
-///     capture consumption have nothing to walk.
-///   - Manual `.drop()`, `deallocate`, pointer aliasing, and the interprocedural
-///     `&mut`-parameter drop summaries, together with the `Dropped`/`Freed`
-///     states and the diagnostics that depend on them (double free, use after
-///     free, use after drop, FFI leak).
+///   - Closure capture borrows: the by-value captures an environment takes are
+///     consumed, and a closure local is owned so its environment is torn down,
+///     but `try_record_closure_capture_borrows` is not ported, so a by-ref
+///     capture takes no borrow of its source.
+///   - `deallocate` and the pointer alias sets behind it, together with the
+///     `Freed` state and the diagnostics that depend on it (double free, use
+///     after free, FFI leak). `MOVE_FREED` exists for the state ranking alone
+///     and is never produced.
+///   - The interprocedural `&mut`-parameter drop summaries, which let the
+///     oracle see that a callee dropped through a reference it was handed.
+///   - Synthetic temporaries: neither oracle tracks a value that never reaches
+///     a named local, and neither does this walk.
 ///   - `str`-view lifetimes (A0202), slice-view borrows, and return-of-local
 ///     reference (A0043): all three need `needs_drop`-aware view tracking plus
 ///     the variable-initializer chain, and the selfhost lowering does not
@@ -78,24 +84,28 @@ import Vector from "std::vector";
 ///     to mirror; leaving aliases opaque would silently stop tracking an
 ///     aliased owned record.
 ///   - Drop schedules cover every construct the selfhost HIR lowers today, but
-///     three oracle inputs to them are missing with the states behind them:
-///     the field-owner drop suppression (`drop_suppressed_vars`), which needs
-///     the move-out-of-field bookkeeping; the `Dropped`/`Freed` states, whose
-///     locals the oracle also leaves out of a drop list; and closure
-///     environments, which the selfhost `HirKind` has no variant for. Each one
-///     can only add drops that should have been suppressed, never drop
-///     something the oracle keeps.
+///     two oracle inputs to them are still missing: the field-owner drop
+///     suppression (`drop_suppressed_vars`), which needs the move-out-of-field
+///     bookkeeping, and the `Freed` state, whose locals the oracle also leaves
+///     out of a drop list. Either one can only add a drop that should have been
+///     suppressed, never drop something the oracle keeps.
 ///   - `match` consumes a moved scrutinee variable unconditionally. The
 ///     oracle first asks whether an arm pattern moves an owned payload out and
 ///     splits into a borrowed-base rejection, a field-owner drop suppression,
 ///     and this consumption; only the consumption is ported.
 export namespace Borrowck {
   /// Move state of one local, ordered by restrictiveness so that a plain
-  /// numeric maximum implements the oracle's `most_restrictive`.
-  /// Mirrors the subset of `OwnershipState` this slice models.
+  /// numeric maximum implements the oracle's `most_restrictive`, whose
+  /// ranking is `Valid < Returned < Freed < Moved < Dropped`.
+  ///
+  /// `MOVE_FREED` is never produced here: it belongs to `deallocate`, which is
+  /// not ported. It keeps its rank so the ordering of the states around it
+  /// matches the oracle and so a later port needs no renumbering.
   const MOVE_VALID: u32 = 0;
   const MOVE_RETURNED: u32 = 1;
-  const MOVE_MOVED: u32 = 2;
+  const MOVE_FREED: u32 = 2;
+  const MOVE_MOVED: u32 = 3;
+  const MOVE_DROPPED: u32 = 4;
 
   /// Borrow state encoding for one local, mirroring `BorrowState`:
   /// `0` is unborrowed, `1` is the single mutable borrow, and any value `n`
@@ -185,6 +195,12 @@ export namespace Borrowck {
     /// the expression that took it because the body runs at scope exit.
     public inDefer: boolean;
 
+    /// True while walking the body of an instance `drop` method of a `Drop`
+    /// type, where `self.field.drop()` is the recursive teardown the type
+    /// owes rather than an untracked manual drop. Mirrors
+    /// `is_inside_drop_method`.
+    public inDropMethod: boolean;
+
     public static init(): State {
       return State {
         borrowDefs: Vector::new<u32>(),
@@ -205,6 +221,7 @@ export namespace Borrowck {
         borrowedBindings: Vector::new<u32>(),
         reachable: true,
         inDefer: false,
+        inDropMethod: false,
       };
     }
 
@@ -248,6 +265,10 @@ export namespace Borrowck {
 
     public setInDefer(&mut self, value: boolean): void {
       self.inDefer = value;
+    }
+
+    public setInDropMethod(&mut self, value: boolean): void {
+      self.inDropMethod = value;
     }
 
     public borrowValue(&self, defRaw: u32): u32 {
@@ -1186,6 +1207,137 @@ export namespace Borrowck {
     };
   }
 
+  // --- manual drop queries -----------------------------------------------------------
+
+  /// Whether `methodDefId` is the `drop` method of a type that declares
+  /// `@implements(Drop)`. Mirrors `is_drop_method`; the oracle also accepts a
+  /// `__drop` name suffix, which only its monomorphizer produces and which no
+  /// selfhost phase spells.
+  function isDropMethod(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    methodDefId: Analyzer::DefinitionId,
+  ): boolean {
+    let mut owner: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut nameSymbol: Option<Analyzer::SymbolId> = Option::NONE;
+
+    if (let Option::SOME(definition) = defStore.get(methodDefId)) {
+      match (definition) {
+        Analyzer::Definition::Method(methodDef) -> {
+          owner = Option::SOME(methodDef.owner);
+          nameSymbol = Option::SOME(methodDef.name);
+        },
+        _ -> {},
+      };
+    }
+
+    let Option::SOME(ownerDefId) = owner else {
+      return false;
+    };
+    let Option::SOME(name) = nameSymbol else {
+      return false;
+    };
+
+    let mut named: boolean = false;
+
+    if (let Option::SOME(text) = symbols.resolve(name)) {
+      named = String::create(text).equals("drop");
+    }
+
+    if (!named) {
+      return false;
+    }
+
+    return Borrowck::recordImplementsDrop(defStore, ownerDefId) || Borrowck::enumImplementsDrop(defStore, ownerDefId);
+  }
+
+  /// Whether `methodDefId` is a `drop` method bound to a receiver, which is
+  /// what makes its body the recursive teardown of the type. Mirrors
+  /// `is_inside_drop_method`, evaluated once per body instead of per call.
+  function isInstanceDropMethod(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    methodDefId: Analyzer::DefinitionId,
+  ): boolean {
+    let mut isStatic: boolean = true;
+
+    if (let Option::SOME(definition) = defStore.get(methodDefId)) {
+      match (definition) {
+        Analyzer::Definition::Method(methodDef) -> {
+          isStatic = methodDef.isStatic;
+        },
+        _ -> {},
+      };
+    }
+
+    if (isStatic) {
+      return false;
+    }
+
+    return Borrowck::isDropMethod(defStore, symbols, methodDefId);
+  }
+
+  /// Whether a place expression bottoms out at a local. Mirrors
+  /// `hir_roots_at_variable`.
+  function hirRootsAtVariable(hir: &Hir::HirStore, nodeId: Hir::HirId): boolean {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return false;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Variable(_) -> true,
+      Hir::HirKind::Reference(reference) -> Borrowck::hirRootsAtVariable(hir, reference.expression),
+      Hir::HirKind::Dereference(inner) -> Borrowck::hirRootsAtVariable(hir, inner),
+      Hir::HirKind::FieldAccess(access) -> Borrowck::hirRootsAtVariable(hir, access.base),
+      _ -> false,
+    };
+  }
+
+  /// Whether a `.drop()` receiver is a field of a local, which is the shape a
+  /// `Drop` type's own teardown takes. Mirrors `is_field_drop_on_variable`.
+  function isFieldDropOnVariable(hir: &Hir::HirStore, receiver: Hir::HirId): boolean {
+    let Option::SOME(node) = hir.get(receiver) else {
+      return false;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Reference(reference) -> Borrowck::isFieldDropOnVariable(hir, reference.expression),
+      Hir::HirKind::FieldAccess(access) -> Borrowck::hirRootsAtVariable(hir, access.base),
+      _ -> false,
+    };
+  }
+
+  /// The local a `.drop()` receiver names, when it names one directly. Mirrors
+  /// `extract_receiver_variable`, which deliberately stops at one level of
+  /// reference so that a field, an index, or a call result stays untracked.
+  function extractReceiverVariable(
+    hir: &Hir::HirStore,
+    receiver: Hir::HirId,
+  ): Option<Analyzer::DefinitionId> {
+    let Option::SOME(node) = hir.get(receiver) else {
+      return Option::NONE;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Variable(defId) -> Option::SOME(defId),
+      Hir::HirKind::Reference(reference) -> Borrowck::variableOf(hir, reference.expression),
+      _ -> Option::NONE,
+    };
+  }
+
+  /// The local a node names when it is a bare variable, without following any
+  /// place chain.
+  function variableOf(hir: &Hir::HirStore, nodeId: Hir::HirId): Option<Analyzer::DefinitionId> {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return Option::NONE;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Variable(defId) -> Option::SOME(defId),
+      _ -> Option::NONE,
+    };
+  }
+
   /// The binding a match arm hands to the match result, if its value is one
   /// directly. Mirrors `arm_result_binding`, including the walk through
   /// block tails.
@@ -1270,6 +1422,20 @@ export namespace Borrowck {
     labelMessage: str,
   ): void {
     let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, code, message, span);
+    diagnostic.addLabel(LabelKind::PRIMARY, span, labelMessage);
+
+    let mut bag: &mut DiagnosticBag = diagnostics;
+    bag.push(diagnostic);
+  }
+
+  function emitWarning(
+    diagnostics: &mut DiagnosticBag,
+    span: SourceSpan,
+    code: str,
+    message: str,
+    labelMessage: str,
+  ): void {
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::WARNING, code, message, span);
     diagnostic.addLabel(LabelKind::PRIMARY, span, labelMessage);
 
     let mut bag: &mut DiagnosticBag = diagnostics;
@@ -1416,6 +1582,21 @@ export namespace Borrowck {
       return;
     };
 
+    if (value == Borrowck::MOVE_DROPPED) {
+      let droppedName: String = Borrowck::definitionName(defStore, symbols, defId);
+      let droppedMessage: String = `Use of dropped value '${droppedName}'`;
+
+      Borrowck::emitError(
+        diagnostics,
+        span,
+        DiagnosticCode::USE_AFTER_DROP,
+        droppedMessage.toStr(),
+        "value used here after it was dropped",
+      );
+
+      return;
+    }
+
     if (value != Borrowck::MOVE_MOVED) {
       return;
     }
@@ -1449,13 +1630,67 @@ export namespace Borrowck {
   /// is, because `checkUse` has already reported it. Mirrors `try_consume`.
   function tryConsume(state: &mut Borrowck::State, defId: Analyzer::DefinitionId): void {
     if (let Option::SOME(value) = state.moveValue(defId.raw())) {
-      if (value == Borrowck::MOVE_MOVED) {
+      if (value == Borrowck::MOVE_MOVED || value == Borrowck::MOVE_DROPPED || value == Borrowck::MOVE_FREED) {
         return;
       }
     }
 
     let mut stateRef: &mut Borrowck::State = state;
     stateRef.setMoveValue(defId.raw(), Borrowck::MOVE_MOVED);
+  }
+
+  /// Applies a manual `.drop()` to the local its receiver names. A live local
+  /// becomes `Dropped`, which takes it out of every later drop list and makes a
+  /// later read a use after drop; an already invalid state is reported instead.
+  /// Mirrors `handle_manual_drop`, minus the `Freed` arm that `deallocate`
+  /// would produce.
+  function handleManualDrop(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    defId: Analyzer::DefinitionId,
+    span: SourceSpan,
+  ): void {
+    let current: u32 = match (state.moveValue(defId.raw())) {
+      Option::SOME(value) -> value,
+      Option::NONE -> Borrowck::MOVE_VALID,
+    };
+
+    if (current == Borrowck::MOVE_DROPPED) {
+      let droppedName: String = Borrowck::definitionName(defStore, symbols, defId);
+      let droppedMessage: String = `Value '${droppedName}' has already been dropped`;
+
+      Borrowck::emitError(
+        diagnostics,
+        span,
+        DiagnosticCode::DOUBLE_DROP,
+        droppedMessage.toStr(),
+        "this value was already dropped",
+      );
+
+      return;
+    }
+
+    // A returned local left this scope, so dropping it here tears down storage
+    // the caller owns: the oracle models that as a use after move.
+    if (current == Borrowck::MOVE_MOVED || current == Borrowck::MOVE_RETURNED) {
+      let movedName: String = Borrowck::definitionName(defStore, symbols, defId);
+      let movedMessage: String = `Use of moved value '${movedName}'`;
+
+      Borrowck::emitError(
+        diagnostics,
+        span,
+        DiagnosticCode::USE_AFTER_MOVE,
+        movedMessage.toStr(),
+        "value used here after it was moved",
+      );
+
+      return;
+    }
+
+    let mut stateRef: &mut Borrowck::State = state;
+    stateRef.setMoveValue(defId.raw(), Borrowck::MOVE_DROPPED);
   }
 
   /// Declares a local as owned by the innermost scope. Mirrors
@@ -1758,6 +1993,7 @@ export namespace Borrowck {
       }
 
       let hasMoved: boolean = Borrowck::containsRaw(&mut observed, Borrowck::MOVE_MOVED);
+      let hasDropped: boolean = Borrowck::containsRaw(&mut observed, Borrowck::MOVE_DROPPED);
       let hasValid: boolean = Borrowck::containsRaw(&mut observed, Borrowck::MOVE_VALID);
 
       if (hasMoved && hasValid) {
@@ -1774,7 +2010,24 @@ export namespace Borrowck {
         );
       }
 
-      if (hasMoved) {
+      if (hasDropped && hasValid) {
+        let droppedDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*defRaw);
+        let droppedName: String = Borrowck::definitionName(defStore, symbols, droppedDefId);
+        let droppedMessage: String = `Variable '${droppedName}' is dropped in one branch but not the other`;
+
+        Borrowck::emitError(
+          diagnostics,
+          span,
+          DiagnosticCode::INCONSISTENT_DROP_IN_BRANCHES,
+          droppedMessage.toStr(),
+          "branches disagree on whether this value was dropped",
+        );
+      }
+
+      if (hasDropped) {
+        let mut droppedRef: &mut Borrowck::State = state;
+        droppedRef.setMoveValue(*defRaw, Borrowck::MOVE_DROPPED);
+      } else if (hasMoved) {
         let mut movedRef: &mut Borrowck::State = state;
         movedRef.setMoveValue(*defRaw, Borrowck::MOVE_MOVED);
       }
@@ -1990,15 +2243,13 @@ export namespace Borrowck {
       },
       // The body is checked on its own as the thunk function, so walking into it
       // here would check it twice against the wrong scope. Mirrors the reference
-      // borrow checker's empty `Closure` arm.
-      Hir::HirKind::Closure(_) -> {},
+      // borrow checker's empty `Closure` arm; the ownership oracle still
+      // consumes what the environment takes by value.
+      Hir::HirKind::Closure(closure) -> {
+        Borrowck::checkClosureCaptures(defStore, typeStore, state, diagnostics, &closure.captures, span);
+      },
       Hir::HirKind::MethodCall(call) -> {
-        if (let Option::SOME(receiver) = call.receiver) {
-          Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, receiver);
-          Borrowck::checkReceiverBorrow(defStore, symbols, hir, state, diagnostics, receiver, call.method, span);
-        }
-
-        Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, span);
+        Borrowck::checkMethodCall(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call, span);
       },
 
       Hir::HirKind::Let(letNode) -> {
@@ -2082,6 +2333,128 @@ export namespace Borrowck {
         leaveRef.setInDefer(saved);
       },
     };
+  }
+
+  /// Consumes what a closure environment takes by value. Mirrors the
+  /// ownership oracle's `Closure` arm: a by-value capture of an owning local
+  /// moves it into the environment, and a binding that lives in borrowed
+  /// storage cannot be moved there any more than it can be moved into a `let`.
+  function checkClosureCaptures(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    captures: &Vector<Hir::HirCapture>,
+    span: SourceSpan,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < captures.length()) {
+      if (let Option::SOME(capture) = captures.get(index)) {
+        if (Borrowck::captureIsByValue(&capture.mode)) {
+          if (Borrowck::definitionNeedsDrop(defStore, typeStore, capture.sourceDef)) {
+            if (state.isBorrowedBinding(capture.sourceDef.raw())) {
+              Borrowck::emitCannotMoveOutOfBorrow(diagnostics, span);
+            }
+
+            Borrowck::tryConsume(state, capture.sourceDef);
+          }
+        }
+      }
+
+      index += 1;
+    }
+  }
+
+  function captureIsByValue(mode: &Hir::CaptureMode): boolean {
+    return match (mode) {
+      Hir::CaptureMode::ByValue -> true,
+      Hir::CaptureMode::ByRef -> false,
+      Hir::CaptureMode::ByMutRef -> false,
+    };
+  }
+
+  /// Walks a method call. A `.drop()` on a `Drop` type is the manual teardown
+  /// of its receiver rather than an ordinary call: the ownership oracle routes
+  /// the receiver through `handle_manual_drop` and consumes no argument.
+  ///
+  /// The receiver of such a call is not walked as a use, because
+  /// `handleManualDrop` reports its invalid states itself and walking it would
+  /// report the same local twice. Its borrow is still taken and released, which
+  /// is what the borrow oracle does for every receiver including this one.
+  function checkMethodCall(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
+    call: &Hir::HirMethodCall,
+    span: SourceSpan,
+  ): void {
+    let mut isDrop: boolean = false;
+
+    if (let Option::SOME(receiver) = call.receiver) {
+      isDrop = Borrowck::isDropMethod(defStore, symbols, call.method);
+
+      let mut droppedTarget: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (isDrop) {
+        droppedTarget = Borrowck::extractReceiverVariable(hir, receiver);
+      }
+
+      if (let Option::SOME(target) = droppedTarget) {
+        Borrowck::handleManualDrop(defStore, symbols, state, diagnostics, target, span);
+      } else {
+        if (isDrop && !(state.inDropMethod && Borrowck::isFieldDropOnVariable(hir, receiver))) {
+          Borrowck::emitWarning(
+            diagnostics,
+            span,
+            DiagnosticCode::DROP_ON_COMPLEX_RECEIVER,
+            ".drop() on complex receiver is not tracked at compile time",
+            "no compile-time state follows this receiver",
+          );
+        }
+
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, receiver);
+      }
+
+      Borrowck::checkReceiverBorrow(defStore, symbols, hir, state, diagnostics, receiver, call.method, span);
+    }
+
+    if (isDrop) {
+      Borrowck::checkDropArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, span);
+      return;
+    }
+
+    Borrowck::checkCallArguments(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call.args, span);
+  }
+
+  /// Walks the arguments of a manual `.drop()`: checked and borrow-checked like
+  /// any other call, but never consumed, because the call takes ownership of
+  /// nothing beyond the receiver it tears down.
+  function checkDropArguments(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
+    args: &Vector<Hir::HirId>,
+    span: SourceSpan,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < args.length()) {
+      if (let Option::SOME(argument) = args.get(index)) {
+        Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, *argument);
+        Borrowck::checkTemporaryBorrow(defStore, symbols, hir, state, diagnostics, *argument, span);
+      }
+
+      index += 1;
+    }
   }
 
   /// Walks operands that a composite value takes ownership of: vector and
@@ -2223,9 +2596,29 @@ export namespace Borrowck {
       Borrowck::recordLetBorrow(defStore, symbols, hir, state, diagnostics, value, span);
     }
 
-    if (Borrowck::definitionNeedsDrop(defStore, typeStore, letNode.name)) {
+    // A closure local owns its environment even when its type needs no drop of
+    // its own, and LIR lowering tears that environment down from the same drop
+    // schedule. Mirrors the `is_closure` disjunct of the oracle's `Let` arm.
+    let mut holdsClosure: boolean = false;
+
+    if (let Option::SOME(value) = letNode.value) {
+      holdsClosure = Borrowck::nodeIsClosure(hir, value);
+    }
+
+    if (holdsClosure || Borrowck::definitionNeedsDrop(defStore, typeStore, letNode.name)) {
       Borrowck::declareOwned(state, letNode.name);
     }
+  }
+
+  function nodeIsClosure(hir: &Hir::HirStore, nodeId: Hir::HirId): boolean {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return false;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Closure(_) -> true,
+      _ -> false,
+    };
   }
 
   /// A binding initialized with a reference expression keeps that borrow alive
@@ -2294,8 +2687,11 @@ export namespace Borrowck {
           overwriteRef.appendOverwrite(nodeId, target);
         }
 
+        // Re-initialization revives a moved or manually dropped local, and
+        // the overwrite drop above was already skipped for both, because
+        // neither still holds a value. Mirrors `check_assign`.
         if (let Option::SOME(value) = state.moveValue(target.raw())) {
-          if (value == Borrowck::MOVE_MOVED) {
+          if (value == Borrowck::MOVE_MOVED || value == Borrowck::MOVE_DROPPED) {
             let mut reviveRef: &mut Borrowck::State = state;
             reviveRef.setMoveValue(target.raw(), Borrowck::MOVE_VALID);
           }
@@ -2776,6 +3172,7 @@ export namespace Borrowck {
   ): void {
     let mut state: Borrowck::State = Borrowck::State::init();
     state.pushScope(0, false, false);
+    state.setInDropMethod(Borrowck::isInstanceDropMethod(defStore, symbols, functionId));
 
     let mut index: u64 = 0;
 

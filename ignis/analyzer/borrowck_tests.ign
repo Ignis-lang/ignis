@@ -5,6 +5,7 @@ import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
 import Lowering from "./lowering";
+import Capture from "./capture";
 import Borrowck from "./borrowck";
 
 function borrowckCountErrors(bag: &DiagnosticBag): u64 {
@@ -75,13 +76,24 @@ function borrowckDiagnostics(source: str): DiagnosticBag {
 
   Test::assertEq<u64>(borrowckCountErrors(&output.diagnostics), 0);
 
-  let hir: Hir::HirStore = Lowering::lowerModule(
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
     &parsed.module,
     &output,
   );
+
+  // Closure environments only exist once capture analysis has filled them in,
+  // and the driver runs it between lowering and the ownership walk.
+  let captureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &mut hir,
+  );
+
+  Test::assertEq<u64>(borrowckCountErrors(&captureDiagnostics), 0);
 
   let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
     &mut defStore,
@@ -604,13 +616,24 @@ function borrowckSchedules(source: str): String {
 
   Test::assertEq<u64>(borrowckCountErrors(&output.diagnostics), 0);
 
-  let hir: Hir::HirStore = Lowering::lowerModule(
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
     &parsed.module,
     &output,
   );
+
+  // Closure environments only exist once capture analysis has filled them in,
+  // and the driver runs it between lowering and the ownership walk.
+  let captureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &mut hir,
+  );
+
+  Test::assertEq<u64>(borrowckCountErrors(&captureDiagnostics), 0);
 
   let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
     &mut defStore,
@@ -768,4 +791,78 @@ function borrowckSchedulesBreakDrops(): void {
   );
 
   Test::assertEq<str>(rendered.toStr(), "scope-end: value\nexit break: value\n");
+}
+
+/// Scenario: a local torn down by a manual `.drop()` owes no drop at the end
+/// of its scope, because the value it held is already gone.
+/// Spec: IGN-39 — `handle_manual_drop` takes the local out of every drop list.
+@test
+function borrowckSchedulesOmitsManuallyDroppedLocal(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nfunction run(): u32 {\n  let mut value: Owned = Owned { id: 1 };\n  value.drop();\n\n  return 0;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "");
+}
+
+/// Scenario: reading a local after a manual `.drop()` reads storage that was
+/// already torn down.
+/// Spec: IGN-39 — O0006.
+@test
+function borrowckReportsUseAfterManualDrop(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nfunction run(): u32 {\n  let mut value: Owned = Owned { id: 1 };\n  value.drop();\n\n  return value.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::USE_AFTER_DROP), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
+/// Scenario: assigning a fresh value to a manually dropped local revives it,
+/// so reading it afterwards is clean and the new value is dropped at the end
+/// of the scope. The overwrite itself drops nothing, because the local held
+/// no value when it was written.
+/// Spec: IGN-39 — the re-initialization arm of `check_assign`.
+@test
+function borrowckRevivesManuallyDroppedLocalOnAssign(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nfunction run(): u32 {\n  let mut value: Owned = Owned { id: 1 };\n  value.drop();\n  value = Owned { id: 2 };\n\n  return value.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nfunction run(): u32 {\n  let mut value: Owned = Owned { id: 1 };\n  value.drop();\n  value = Owned { id: 2 };\n\n  return value.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: value\nexit return: value\n");
+}
+
+/// Scenario: a closure that captures an owning local by value moves it into
+/// its environment, so the source owes no drop and the closure local owes the
+/// teardown of the environment instead.
+/// Spec: IGN-39 — the by-value capture arm of the ownership oracle.
+@test
+function borrowckSchedulesClosureByValueCapture(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nfunction run(): u32 {\n  let value: Owned = Owned { id: 1 };\n  let read = (): u32 -> {\n    let taken: Owned = value;\n\n    return taken.id;\n  };\n\n  return read();\n}\n",
+  );
+
+  Test::assertEq<str>(
+    rendered.toStr(),
+    "scope-end: read\nscope-end: taken\nexit return: read\nexit return: taken\n",
+  );
+}
+
+/// Scenario: a pattern binding destructured out of a reference lives in
+/// borrowed storage, so a closure cannot move it into its environment.
+/// Spec: IGN-39 — O0002 on a by-value capture.
+@test
+function borrowckReportsClosureCaptureOfBorrowedBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nenum Node {\n  ITEM(Owned),\n  OTHER,\n}\n\nfunction run(node: &Node): u32 {\n  let Node::ITEM(item) = node else {\n    return 0;\n  };\n\n  let read = (): u32 -> {\n    let taken: Owned = item;\n\n    return taken.id;\n  };\n\n  return read();\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
 }
