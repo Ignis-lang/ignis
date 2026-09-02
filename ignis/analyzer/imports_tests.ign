@@ -1288,3 +1288,52 @@ function analyzeProgramBindsNamedReExportInTheReExportingModule(): void {
 
   Test::assertEq<str>(importsDiagnosticCodes(reExporting).toStr(), "");
 }
+
+/// Scenario: a generic function bounds its parameter by a trait another module
+/// declares and calls that trait's method on a `&T` receiver. The bound is
+/// written as a name, so the trait has to be found through the program's
+/// definitions rather than the declaring module's own.
+@test
+function analyzeProgramResolvesATraitBoundMethodDeclaredInAnotherModule(): void {
+  let traitSource: str = "export trait Shape {\n  area(&self): i32;\n}\n";
+  let callerSource: str = "import Shape from \"a.ign\";\n\nrecord Square {\n  side: i32;\n\n  public area(&self): i32 {\n    return self.side * self.side;\n  }\n}\n\nfunction total<T: Shape>(value: &T): i32 {\n  return value.area();\n}\n";
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoSources(
+    "a.ign",
+    traitSource,
+    "b.ign",
+    callerSource,
+  );
+
+  let Option::SOME(caller) = records.get(1) else {
+    @panic("missing caller analysis record");
+  };
+
+  Test::assertEq<str>(importsDiagnosticCodes(caller).toStr(), "");
+}
+
+/// Scenario: two modules each declare a generic parameter named `T` bounded by
+/// a different trait. Each call must answer from the bound its own declaration
+/// wrote, not from whichever bounded `T` the program defined first.
+@test
+function analyzeProgramScopesATraitBoundToTheDeclarationThatWroteIt(): void {
+  let firstSource: str = "export trait Named {\n  label(&self): i32;\n}\n\nexport trait Shape {\n  area(&self): i32;\n}\n\nrecord Tag {\n  value: i32;\n\n  public label(&self): i32 {\n    return self.value;\n  }\n}\n\nfunction describe<T: Named>(value: &T): i32 {\n  return value.label();\n}\n\nfunction describeTag(): i32 {\n  let tag: Tag = Tag { value: 2 };\n\n  return describe<Tag>(&tag);\n}\n";
+  let secondSource: str = "import Shape from \"a.ign\";\n\nrecord Square {\n  side: i32;\n\n  public area(&self): i32 {\n    return self.side * self.side;\n  }\n}\n\nfunction total<T: Shape>(value: &T): i32 {\n  return value.area();\n}\n\nfunction totalSquare(): i32 {\n  let square: Square = Square { side: 7 };\n\n  return total<Square>(&square);\n}\n";
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoSources(
+    "a.ign",
+    firstSource,
+    "b.ign",
+    secondSource,
+  );
+
+  let Option::SOME(first) = records.get(0) else {
+    @panic("missing first analysis record");
+  };
+  let Option::SOME(second) = records.get(1) else {
+    @panic("missing second analysis record");
+  };
+
+  Test::assertEq<str>(importsDiagnosticCodes(first).toStr(), "");
+  Test::assertEq<str>(importsDiagnosticCodes(second).toStr(), "");
+}

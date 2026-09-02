@@ -2480,6 +2480,7 @@ export namespace Analyzer {
       nonOwnerMessage: str,
       genericMessage: str,
     ): Option<Analyzer::Typecheck::RequiredMethodOwner> {
+      let enclosing: Analyzer::DefinitionId = state.currentFunction;
       let resolvedType: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
       if (let Option::SOME(aliasDefId) = resolvedType.cycleAlias) {
         Analyzer::Typecheck::emitCyclicTypeAlias(state, typeStore, span, aliasDefId);
@@ -2593,7 +2594,7 @@ export namespace Analyzer {
         // trait stands in as the owner here; monomorphization re-dispatches the
         // call to the concrete implementation once the parameter is substituted.
         Analyzer::Type::Param(symbol) -> {
-          let Option::SOME(traitDefId) = Analyzer::Typecheck::traitBoundOwnerFor(defStore, symbols, symbol) else {
+          let Option::SOME(traitDefId) = Analyzer::Typecheck::traitBoundOwnerFor(defStore, symbols, enclosing, symbol) else {
             Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
             return Option::NONE;
           };
@@ -2621,26 +2622,91 @@ export namespace Analyzer {
       @panic("unreachable: requireMethodOwner match did not return");
     }
 
-    /// The first trait a type parameter named `symbol` is bounded by.
+    /// The type-parameter definitions nameable inside `enclosing`: the callable's
+    /// own parameters first, then those of the record, enum or trait declaring it,
+    /// so an inner parameter shadows an outer one written with the same name.
+    function typeParamsInScope(
+      defStore: &mut Analyzer::DefinitionStore,
+      enclosing: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let mut scoped: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut ownerOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      if (let Option::SOME(def) = defStore.get(enclosing)) {
+        match (def) {
+          Analyzer::Definition::Function(function_) -> {
+            scoped = Analyzer::Typecheck::copyDefinitionIdVector(&function_.typeParams);
+          },
+          Analyzer::Definition::Method(method) -> {
+            scoped = Analyzer::Typecheck::copyDefinitionIdVector(&method.typeParams);
+            ownerOpt = Option::SOME(method.owner);
+          },
+          _ -> {},
+        };
+      }
+
+      if (let Option::SOME(ownerDefId) = ownerOpt) {
+        let mut ownerParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+        if (let Option::SOME(ownerDef) = defStore.get(ownerDefId)) {
+          match (ownerDef) {
+            Analyzer::Definition::Record(record_) -> {
+              ownerParams = Analyzer::Typecheck::copyDefinitionIdVector(&record_.typeParams);
+            },
+            Analyzer::Definition::Enum(enum_) -> {
+              ownerParams = Analyzer::Typecheck::copyDefinitionIdVector(&enum_.typeParams);
+            },
+            Analyzer::Definition::Trait(trait_) -> {
+              ownerParams = Analyzer::Typecheck::copyDefinitionIdVector(&trait_.typeParams);
+            },
+            _ -> {},
+          };
+        }
+
+        let mut ownerIndex: u64 = 0;
+
+        while (ownerIndex < ownerParams.length()) {
+          if (let Option::SOME(paramDefId) = ownerParams.get(ownerIndex)) {
+            scoped.push(*paramDefId);
+          }
+
+          ownerIndex += 1;
+        }
+      }
+
+      return scoped;
+    }
+
+    /// The first trait the type parameter named `symbol` is bounded by, as seen
+    /// from `enclosing` — the callable whose body is being checked.
     ///
-    /// Bounds are held as written names, so this resolves both the parameter and
-    /// the bound by name. A parameter with no bound, or a bound naming something
-    /// that is not a trait, has no owner to answer methods.
+    /// Only the parameters in scope can answer: two generic declarations may both
+    /// name a parameter `T` and bound it by different traits, so a store-wide
+    /// search by name would let one declaration's bound decide another's method
+    /// lookup. Bounds themselves are held as written names, so the bound is still
+    /// matched by name against the trait declarations in the store. A parameter
+    /// with no bound, or a bound naming something that is not a trait, has no
+    /// owner to answer methods.
     function traitBoundOwnerFor(
       defStore: &mut Analyzer::DefinitionStore,
       symbols: &mut Analyzer::SymbolTable,
+      enclosing: Analyzer::DefinitionId,
       symbol: Analyzer::SymbolId,
     ): Option<Analyzer::DefinitionId> {
+      let scoped: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::typeParamsInScope(defStore, enclosing);
       let mut boundNames: Vector<String> = Vector::new<String>();
       let mut index: u64 = 0;
 
-      while (index < defStore.length()) {
-        let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+      while (index < scoped.length()) {
+        let Option::SOME(paramDefId) = scoped.get(index) else {
+          index += 1;
+          continue;
+        };
 
-        if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(defId)) {
-          if (typeParam.name.raw() == symbol.raw() && typeParam.bounds.length() > 0) {
+        if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*paramDefId)) {
+          if (typeParam.name.raw() == symbol.raw()) {
             boundNames = Analyzer::Typecheck::copyStringVector(&typeParam.bounds);
-            index = defStore.length();
+            index = scoped.length();
             continue;
           }
         }
