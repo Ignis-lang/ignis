@@ -1141,6 +1141,17 @@ export namespace ParserDeclarations {
       };
       fields.push(field);
 
+      if (parserRef.atPunctuation(Punctuation::EQUAL)) {
+        parserRef.emitDiagnostic(
+          parserRef.current().span,
+          DiagnosticCode::UNSUPPORTED_CONSTRUCT,
+          "parser does not support field initializers",
+          "a record field with a value declares a static field, which the selfhost does not bind yet",
+        );
+        ParserRecovery::synchronizeTopLevel(parserRef);
+        break;
+      }
+
       if (parserRef.consumePunctuation(Punctuation::SEMICOLON).isSome() || parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
         continue;
       }
@@ -1217,6 +1228,17 @@ export namespace ParserDeclarations {
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
       let memberMetadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
       parserRef.skipTrivia();
+
+      if (ParserDeclarations::recordMemberLooksLikeField(parserRef)) {
+        parserRef.emitDiagnostic(
+          parserRef.current().span,
+          DiagnosticCode::UNSUPPORTED_CONSTRUCT,
+          "parser does not support enum static fields",
+          "an enum member written `name: Type = value;` is a static field, which the selfhost does not bind yet",
+        );
+        ParserRecovery::synchronizeTopLevel(parserRef);
+        break;
+      }
 
       if (ParserDeclarations::enumMemberLooksLikeMethod(parserRef)) {
         let methodId = ParserDeclarations::parseMethodLikeItem(parserRef, Ast::copyMetadata(&memberMetadata), false)!;

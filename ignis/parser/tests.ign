@@ -4303,3 +4303,45 @@ function parserParsesTraitDefaultMethods(): void {
     _ -> @panic("root is not a trait"),
   };
 }
+
+/// Scenario: a static field in a record or an enum is reported as the
+/// unsupported construct it is, instead of as a missing delimiter.
+/// Spec: IGN-172 — static fields are parsed but not bound yet.
+@test
+function parserReportsStaticFieldsAsUnsupported(): void {
+  let recordSource: SourceFile = SourceFile::create(
+    "fixtures/parser_record_static_field.ign",
+    "record Config { static MAX_SIZE: i32 = 1024; }"
+  );
+  let mut recordModule: Ast::Module = Ast::Module::init();
+  let mut recordDiagnostics = DiagnosticBag::init();
+  Parser::parseInto(&recordSource, &mut recordModule, &mut recordDiagnostics);
+
+  Test::assert(recordDiagnostics.length() >= 1);
+
+  let recordDiagnostic: &Diagnostic = match (recordDiagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing record static field diagnostic"),
+  };
+
+  Test::assertEq<str>(recordDiagnostic.code, "A0053");
+  Test::assertEq<str>(recordDiagnostic.messageText(), "parser does not support field initializers");
+
+  let enumSource: SourceFile = SourceFile::create(
+    "fixtures/parser_enum_static_field.ign",
+    "enum Priority { Low, High, DEFAULT_LEVEL: i32 = 1; }"
+  );
+  let mut enumModule: Ast::Module = Ast::Module::init();
+  let mut enumDiagnostics = DiagnosticBag::init();
+  Parser::parseInto(&enumSource, &mut enumModule, &mut enumDiagnostics);
+
+  Test::assert(enumDiagnostics.length() >= 1);
+
+  let enumDiagnostic: &Diagnostic = match (enumDiagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing enum static field diagnostic"),
+  };
+
+  Test::assertEq<str>(enumDiagnostic.code, "A0053");
+  Test::assertEq<str>(enumDiagnostic.messageText(), "parser does not support enum static fields");
+}
