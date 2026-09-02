@@ -451,13 +451,48 @@ function loweringMaxOfBuiltinLowersToMaxOf(): void {
   Test::assertSnapshot("lowering-maxof-builtin", rendered.toStr());
 }
 
-/// `for ... of` has no lowering: the oracle's desugar reads the binding
-/// definition and the iterable record's data/len field indexes out of tables
-/// the selfhost checker does not produce.
+/// `for ... of` over a fixed array desugars into the oracle's index loop:
+/// `let __for_of_i = 0`, `__for_of_i < <length>`, `__for_of_i += 1`, and a
+/// body that binds the element read out of the array.
 @test
-function loweringForOfFallsBackToError(): void {
+function loweringForOfFixedArrayDesugarsToIndexLoop(): void {
   let rendered: String = loweringRender(
-    "function firstItem(): u32 {\n  let items: u32[3] = [1, 2, 3];\n  for (let item of items) {\n    return item;\n  }\n\n  return 0;\n}\n",
+    "function total(): u32 {\n  let items: u32[3] = [1, 2, 3];\n  let mut sum: u32 = 0;\n  for (let item of items) {\n    sum += item;\n  }\n\n  return sum;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-for-of-fixed-array", rendered.toStr());
+}
+
+/// A `&mut` annotation on the loop pattern binds the element's address, so
+/// the body writes through the array instead of through a copy.
+@test
+function loweringForOfMutableReferenceBindsElementAddress(): void {
+  let rendered: String = loweringRender(
+    "function bump(): u32 {\n  let mut items: u32[2] = [1, 2];\n  for (let item: &mut u32 of items) {\n    *item = *item + 1;\n  }\n\n  return items[0];\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-for-of-mut-ref", rendered.toStr());
+}
+
+/// A record with `data: *mut i32` and `length: u64` iterates through the
+/// iterable-record protocol: both fields are read once into locals ahead of
+/// the loop, which then indexes the data pointer.
+@test
+function loweringForOfIterableRecordHoistsDataAndLength(): void {
+  let rendered: String = loweringRender(
+    "record IntVector {\n  public data: *mut i32;\n  public length: u64;\n}\n\nfunction total(vector: IntVector): i32 {\n  let mut sum: i32 = 0;\n  for (let item of vector) {\n    sum += item;\n  }\n\n  return sum;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-for-of-iterable-record", rendered.toStr());
+}
+
+/// The typechecker also accepts a slice as an iterable, but the oracle's
+/// desugar covers fixed arrays and iterable records only, so a slice pins the
+/// whole statement on the `Error` fallback.
+@test
+function loweringForOfOverSliceFallsBackToError(): void {
+  let rendered: String = loweringRender(
+    "function total(items: i32[]): i32 {\n  let mut sum: i32 = 0;\n  for (let item of items) {\n    sum += item;\n  }\n\n  return sum;\n}\n",
   );
 
   Test::assertSnapshot("lowering-for-of-error", rendered.toStr());
