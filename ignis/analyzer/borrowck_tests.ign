@@ -683,6 +683,19 @@ function borrowckSchedulesLetElseBinding(): void {
   Test::assertEq<str>(rendered.toStr(), "scope-end: payload\nexit return: input\nexit return: payload\n");
 }
 
+/// Scenario: the same let-else over a generic enum instance. The binding's
+/// type comes from the instance's type argument, so it is owning and the
+/// scrutinee is consumed exactly as with a plain enum.
+/// Spec: IGN-39 — variant pattern bindings take the instantiated payload type.
+@test
+function borrowckSchedulesLetElseOnGenericInstance(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe<T> {\n  SOME(T),\n  NONE,\n}\n\nfunction run(input: Maybe<Owned>): u32 {\n  let Maybe::SOME(payload) = input else {\n    return 0;\n  };\n\n  return payload.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: payload\nexit return: input\nexit return: payload\n");
+}
+
 /// Scenario: overwriting a local that still holds a value schedules a drop of
 /// the old value before the store.
 /// Spec: IGN-39 — `on_overwrite`.

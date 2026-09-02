@@ -916,7 +916,7 @@ export namespace Lowering {
         return Option::SOME(Hir::HirPattern::Literal(Lowering::literalKind(typeStore, &literalExpr.value, literalType)));
       },
       Ast::Pattern::Node::Path(path) -> {
-        return Lowering::lowerVariantPattern(defStore, typeStore, symbols, module, output, locals, patternId, &path);
+        return Lowering::lowerVariantPattern(defStore, typeStore, symbols, module, output, locals, patternId, &path, expectedType);
       },
       Ast::Pattern::Node::Tuple(tuple) -> {
         let elementTypes: Vector<Analyzer::TypeId> = Lowering::tupleElementTypes(typeStore, expectedType);
@@ -1015,6 +1015,61 @@ export namespace Lowering {
   /// patterns and unresolved paths have no `HirPattern` counterpart and
   /// return `NONE`, unlike the Rust oracle's silent `Wildcard` fallback:
   /// a wildcard would change which values the pattern accepts.
+  /// The payload types of a variant as the scrutinee instantiates them: when
+  /// the scrutinee (after stripping references) is an instance of the enum,
+  /// its type parameters are replaced with the instance's arguments;
+  /// otherwise the declared payload types are returned as they are.
+  function instantiatedPayloadTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    enumDef: Analyzer::DefinitionId,
+    payload: &Vector<Analyzer::TypeId>,
+    scrutineeType: Analyzer::TypeId,
+  ): Vector<Analyzer::TypeId> {
+    let declared: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyVariantPayloadTypeIds(payload);
+    let valueType: Analyzer::TypeId = Analyzer::Typecheck::derefReceiverType(defStore, typeStore, scrutineeType);
+
+    let Option::SOME(typeNode) = typeStore.get(valueType) else {
+      return declared;
+    };
+
+    let Analyzer::Type::Instance(instance) = typeNode else {
+      return declared;
+    };
+
+    if (instance.definition.raw() != enumDef.raw()) {
+      return declared;
+    }
+
+    let typeArguments: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyVariantPayloadTypeIds(&instance.typeArguments);
+
+    let mut typeParamSymbols: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+
+    if (let Option::SOME(definition) = defStore.get(enumDef)) {
+      if (let Analyzer::Definition::Enum(enum_) = definition) {
+        typeParamSymbols = Analyzer::Typecheck::ownerTypeParamSymbols(defStore, &enum_.typeParams);
+      }
+    }
+
+    if (typeParamSymbols.length() == 0 || typeParamSymbols.length() != typeArguments.length()) {
+      return declared;
+    }
+
+    let mut substituted: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < declared.length()) {
+      if (let Option::SOME(payloadType) = declared.get(index)) {
+        let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        substituted.push(typeStoreRef.substitute(*payloadType, &typeParamSymbols, &typeArguments));
+      }
+
+      index += 1;
+    }
+
+    return substituted;
+  }
+
   function lowerVariantPattern(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1024,6 +1079,7 @@ export namespace Lowering {
     locals: &mut Lowering::LocalMap,
     patternId: Ast::PatternId,
     path: &Ast::Pattern::Path,
+    expectedType: Analyzer::TypeId,
   ): Option<Hir::HirPattern> {
     let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(variantDef)) = Analyzer::ResolverBodies::findPatternRef(
       &output.resolvedBodies.bodyResolution,
@@ -1042,6 +1098,16 @@ export namespace Lowering {
       return Option::NONE;
     };
 
+    // The variant declares its payload in terms of the enum's type parameters;
+    // a binding takes the type the scrutinee instantiates them with.
+    let payloadTypes: Vector<Analyzer::TypeId> = Lowering::instantiatedPayloadTypes(
+      defStore,
+      typeStore,
+      info.enumDef,
+      &info.payload,
+      expectedType,
+    );
+
     let Option::SOME(args) = Lowering::lowerPatternList(
       defStore,
       typeStore,
@@ -1050,7 +1116,7 @@ export namespace Lowering {
       output,
       locals,
       &path.arguments,
-      &info.payload,
+      &payloadTypes,
     ) else {
       return Option::NONE;
     };
