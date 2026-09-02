@@ -13,8 +13,9 @@ import Vector from "std::vector";
 ///     (bodies only), namespaces and exports recursed into for the callables
 ///     they contain,
 ///   - statements: let (annotated or inferred), assignment, expression
-///     statement, block, if/else, while, C-style `for`, `defer`, return,
-///     break, continue, `let ... else`,
+///     statement, block, if/else, while, C-style `for`, `for ... of` over a
+///     fixed array or an iterable record, `defer`, return, break, continue,
+///     `let ... else`,
 ///   - expressions: literals, variable references, binary ops, unary ops,
 ///     grouping (transparent), calls to free functions, static method calls
 ///     through a path, instance method calls, record field reads, record
@@ -26,12 +27,12 @@ import Vector from "std::vector";
 ///   - patterns: wildcard, binding, literal, enum variant (with nested
 ///     destructuring), tuple, and or-patterns.
 ///
-/// Everything else (closures, `for ... of`, the builtins the selfhost
-/// typechecker rejects, enum variant construction, record destructuring
-/// patterns, ...) lowers to a single explicit `HirKind::Error` fallback,
-/// mirroring the Rust oracle's error nodes. A pattern outside the supported
-/// set sends its whole enclosing construct to that fallback rather than
-/// lowering partially, because `HirPattern` has no error form.
+/// Everything else (closures, the builtins the selfhost typechecker rejects,
+/// enum variant construction, record destructuring patterns, ...) lowers to
+/// a single explicit `HirKind::Error` fallback, mirroring the Rust oracle's
+/// error nodes. A pattern outside the supported set sends its whole
+/// enclosing construct to that fallback rather than lowering partially,
+/// because `HirPattern` has no error form.
 ///
 /// Deviations from the Rust oracle, rooted in selfhost model gaps:
 ///   - The selfhost `Type` enum has no error type, so `Error` fallback nodes
@@ -56,13 +57,12 @@ import Vector from "std::vector";
 ///     payload type void", this module asks for payload arity instead: an
 ///     unannotated slot still keeps a `VOID` placeholder, so arity is the
 ///     reliable question.
-///   - `for ... of` has no lowering at all. The oracle's desugar reads the
-///     binding `DefinitionId` (and through it the by-value/by-ref binding
-///     type) out of a `for_of_binding_defs` table the checker fills, plus the
-///     `data`/`len` field indexes of an iterable record. The selfhost
-///     `TypecheckOutput` carries neither, and the binding type is never
-///     recorded anywhere lowering can read, so the whole statement pins on
-///     `Error` instead of guessing an iteration shape.
+///   - The `for ... of` desugar reads the binding `DefinitionId` out of a
+///     `for_of_binding_defs` table in the oracle. The selfhost
+///     `TypecheckOutput` has no such table, so the binding is declared here
+///     like any other pattern binding and its by-value/by-ref shape is
+///     re-derived from the loop pattern's annotation, the same question
+///     `resolveForOfBindingType` answers in the checker.
 ///   - `defer` carries a statement in the selfhost AST and an expression in
 ///     the Rust one. The `Expression` statement the parser wraps the deferred
 ///     expression in is unwrapped here, exactly like `checkDeferStmt` does, so
@@ -86,6 +86,10 @@ export namespace Lowering {
     /// Ambient-pipe LHS stack, the oracle's `pipe_lhs_hir_stack`: a
     /// placeholder inside a pipe RHS reads its piped value from the top.
     public pipedValues: Vector<Hir::HirId>;
+    /// Counter behind the names of the locals a desugar introduces, the
+    /// oracle's `lowering_counter`. Nested desugars of the same shape would
+    /// otherwise share a name.
+    public syntheticCounter: u32;
 
     public static init(): LocalMap {
       return LocalMap {
@@ -94,6 +98,7 @@ export namespace Lowering {
         defs: Vector::new<Analyzer::DefinitionId>(),
         currentReturnType: Option::NONE,
         pipedValues: Vector::new<Hir::HirId>(),
+        syntheticCounter: 0,
       };
     }
   }
@@ -3768,6 +3773,773 @@ export namespace Lowering {
     });
   }
 
+  // =========================================================================
+  // `for ... of`
+  // =========================================================================
+
+  /// Element type and constant length of a fixed-array iterable.
+  record ForOfFixed {
+    public elementType: Analyzer::TypeId;
+    public length: u64;
+  }
+
+  /// Element type of an iterable record, plus the positions its desugared
+  /// loop reads `data` and `length` from.
+  record ForOfRecord {
+    public elementType: Analyzer::TypeId;
+    public dataType: Analyzer::TypeId;
+    public dataIndex: u32;
+    public lengthIndex: u32;
+  }
+
+  /// Loop-pattern shape: a `&`/`&mut` annotation binds each element by
+  /// reference, every other annotation binds it by value.
+  record ForOfBindingShape {
+    public name: String;
+    public byRef: boolean;
+    public mutableRef: boolean;
+  }
+
+  /// Induction variable of a desugared `for ... of`: its definition plus the
+  /// `let __i = 0` and `__i += 1` nodes the loop header carries.
+  record ForOfIndex {
+    public defId: Analyzer::DefinitionId;
+    public init: Hir::HirId;
+    public update: Hir::HirId;
+  }
+
+  /// Iterable operand of a desugared `for ... of`, and the `let` that hoisted
+  /// it when it was not already a plain name.
+  record ForOfIterable {
+    public value: Hir::HirId;
+    public temporary: Option<Hir::HirId>;
+  }
+
+  function nextSyntheticId(locals: &mut Lowering::LocalMap): u32 {
+    let mut localsRef: &mut Lowering::LocalMap = locals;
+    let id: u32 = localsRef.syntheticCounter;
+
+    localsRef.syntheticCounter = id + 1;
+
+    return id;
+  }
+
+  /// Allocates a `Definition::Variable` for a local a desugar introduces.
+  /// Unlike `declarePatternBinding` there is no pattern behind it, so nothing
+  /// is registered in the `LocalMap`: references are emitted by definition id.
+  function declareSyntheticLocal(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    name: str,
+    declaredType: Analyzer::TypeId,
+    mutable: boolean,
+  ): Analyzer::DefinitionId {
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let nameSym: Analyzer::SymbolId = symbolsRef.intern(name);
+
+    let mut defStoreRef: &mut Analyzer::DefinitionStore = defStore;
+
+    return defStoreRef.push(Analyzer::Definition::Variable(Analyzer::VariableDef {
+      name: nameSym,
+      visibility: Analyzer::Visibility::PRIVATE,
+      declaredType: declaredType,
+      mutable: mutable,
+      takes: false,
+      noEscape: false,
+      isExtern: false,
+    }));
+  }
+
+  function forOfFixedShape(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Option<Lowering::ForOfFixed> {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+    if (resolved.cycleAlias.isSome()) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+      return Option::NONE;
+    };
+
+    if (let Analyzer::Type::FixedArray(element, length) = typeNode) {
+      return Option::SOME(Lowering::ForOfFixed {
+        elementType: element,
+        length: length,
+      });
+    }
+
+    return Option::NONE;
+  }
+
+  /// Iterable-record protocol, the lowering side of the typechecker's
+  /// `recordIterableElementType`: a `data: *T` field and a `length: u64`
+  /// field, both matched behind their alias chains. Only a `Record` type
+  /// qualifies, so a still-generic `Instance` falls back like in the oracle.
+  function forOfRecordShape(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    typeId: Analyzer::TypeId,
+  ): Option<Lowering::ForOfRecord> {
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+
+    if (resolved.cycleAlias.isSome()) {
+      return Option::NONE;
+    }
+
+    let recordType: Analyzer::TypeId = resolved.typeId;
+    let mut isRecord: boolean = false;
+
+    if (let Option::SOME(typeNode) = typeStore.get(recordType)) {
+      if (let Analyzer::Type::Record(_) = typeNode) {
+        isRecord = true;
+      }
+    }
+
+    if (!isRecord) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(dataField) = Lowering::recordFieldLocation(defStore, typeStore, symbols, recordType, "data") else {
+      return Option::NONE;
+    };
+    let Option::SOME(lengthField) = Lowering::recordFieldLocation(defStore, typeStore, symbols, recordType, "length") else {
+      return Option::NONE;
+    };
+
+    let dataResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, dataField.fieldType);
+
+    if (dataResolved.cycleAlias.isSome()) {
+      return Option::NONE;
+    }
+
+    let mut elementTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(dataNode) = typeStore.get(dataResolved.typeId)) {
+      if (let Analyzer::Type::Pointer(pointer) = dataNode) {
+        elementTypeOpt = Option::SOME(pointer.pointee);
+      }
+    }
+
+    let lengthResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, lengthField.fieldType);
+
+    if (lengthResolved.cycleAlias.isSome()) {
+      return Option::NONE;
+    }
+
+    let mut hasLength: boolean = false;
+
+    if (let Option::SOME(lengthNode) = typeStore.get(lengthResolved.typeId)) {
+      if (let Analyzer::Type::U64 = lengthNode) {
+        hasLength = true;
+      }
+    }
+
+    if (!hasLength) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(elementType) = elementTypeOpt else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(Lowering::ForOfRecord {
+      elementType: elementType,
+      dataType: dataField.fieldType,
+      dataIndex: dataField.index,
+      lengthIndex: lengthField.index,
+    });
+  }
+
+  function forOfBindingShape(
+    module: &Ast::Module,
+    patternId: Ast::PatternId,
+  ): Option<Lowering::ForOfBindingShape> {
+    let Option::SOME(pattern) = module.patterns.get(patternId) else {
+      return Option::NONE;
+    };
+
+    let Ast::Pattern::Node::Binding(binding) = pattern else {
+      return Option::NONE;
+    };
+
+    let mut byRef: boolean = false;
+    let mut mutableRef: boolean = false;
+
+    if (let Option::SOME(annotationId) = binding.annotation) {
+      if (let Option::SOME(annotation) = module.types.get(annotationId)) {
+        if (let Ast::Type::Node::Reference(reference) = annotation) {
+          byRef = true;
+          mutableRef = reference.mutable;
+        }
+      }
+    }
+
+    return Option::SOME(Lowering::ForOfBindingShape {
+      name: binding.name.clone(),
+      byRef: byRef,
+      mutableRef: mutableRef,
+    });
+  }
+
+  /// Lowers the iterable operand. A plain name is used as-is; anything else
+  /// is hoisted into a temporary so the loop reads one evaluation of it.
+  /// The oracle asks whether the iterable is a `Variable` expression; the
+  /// selfhost parser also spells a bare identifier as a one-segment `Path`,
+  /// and both reach `lowerNameRef`.
+  function lowerForOfIterable(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    iterableId: Ast::ExpressionId,
+    iterableType: Analyzer::TypeId,
+    span: SourceSpan,
+    synthId: u32,
+  ): Lowering::ForOfIterable {
+    let mut isName: boolean = false;
+
+    if (let Option::SOME(node) = module.expressions.get(iterableId)) {
+      if (let Ast::Expression::Node::Variable(_) = node) {
+        isName = true;
+      } else if (let Ast::Expression::Node::Path(path) = node) {
+        isName = path.segments.length() == 1;
+      }
+    }
+
+    if (isName) {
+      return Lowering::ForOfIterable {
+        value: Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, iterableId),
+        temporary: Option::NONE,
+      };
+    }
+
+    let name: String = `__for_of_tmp_${synthId}`;
+    let defId: Analyzer::DefinitionId = Lowering::declareSyntheticLocal(defStore, symbols, name.toStr(), iterableType, false);
+
+    let value: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, iterableId);
+
+    let mut letHirRef: &mut Hir::HirStore = hir;
+    let letNode: Hir::HirId = letHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Let(Hir::HirLet {
+        name: defId,
+        value: Option::SOME(value),
+      }),
+      span: span,
+      typeId: Lowering::voidType(typeStore),
+    });
+
+    let mut referenceHirRef: &mut Hir::HirStore = hir;
+    let reference: Hir::HirId = referenceHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Variable(defId),
+      span: span,
+      typeId: iterableType,
+    });
+
+    return Lowering::ForOfIterable {
+      value: reference,
+      temporary: Option::SOME(letNode),
+    };
+  }
+
+  /// `let __i: u64 = 0` plus `__i += 1`, shared by both iteration shapes.
+  function lowerForOfIndex(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    synthId: u32,
+  ): Lowering::ForOfIndex {
+    let u64Type: Analyzer::TypeId = Lowering::unsignedInt64Type(typeStore);
+    let voidTypeId: Analyzer::TypeId = Lowering::voidType(typeStore);
+
+    let name: String = `__for_of_i_${synthId}`;
+    let defId: Analyzer::DefinitionId = Lowering::declareSyntheticLocal(defStore, symbols, name.toStr(), u64Type, true);
+
+    let mut zeroHirRef: &mut Hir::HirStore = hir;
+    let zero: Hir::HirId = zeroHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Literal(Hir::LiteralValue::UnsignedInt64(0)),
+      span: span,
+      typeId: u64Type,
+    });
+
+    let mut initHirRef: &mut Hir::HirStore = hir;
+    let init: Hir::HirId = initHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Let(Hir::HirLet {
+        name: defId,
+        value: Option::SOME(zero),
+      }),
+      span: span,
+      typeId: voidTypeId,
+    });
+
+    let mut targetHirRef: &mut Hir::HirStore = hir;
+    let target: Hir::HirId = targetHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Variable(defId),
+      span: span,
+      typeId: u64Type,
+    });
+
+    let mut oneHirRef: &mut Hir::HirStore = hir;
+    let one: Hir::HirId = oneHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Literal(Hir::LiteralValue::UnsignedInt64(1)),
+      span: span,
+      typeId: u64Type,
+    });
+
+    let mut updateHirRef: &mut Hir::HirStore = hir;
+    let update: Hir::HirId = updateHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Assign(Hir::HirAssign {
+        target: target,
+        value: one,
+        operation: Option::SOME(Hir::BinaryOperation::Add),
+      }),
+      span: span,
+      typeId: voidTypeId,
+    });
+
+    return Lowering::ForOfIndex {
+      defId: defId,
+      init: init,
+      update: update,
+    };
+  }
+
+  /// `__i < <length>`, with the length operand supplied by the caller.
+  function lowerForOfCondition(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    indexDef: Analyzer::DefinitionId,
+    length: Hir::HirId,
+  ): Hir::HirId {
+    let u64Type: Analyzer::TypeId = Lowering::unsignedInt64Type(typeStore);
+
+    let mut indexHirRef: &mut Hir::HirStore = hir;
+    let index: Hir::HirId = indexHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Variable(indexDef),
+      span: span,
+      typeId: u64Type,
+    });
+
+    let mut conditionHirRef: &mut Hir::HirStore = hir;
+
+    return conditionHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Binary(Hir::HirBinary {
+        operation: Hir::BinaryOperation::LessThan,
+        left: index,
+        right: length,
+      }),
+      span: span,
+      typeId: Lowering::booleanType(typeStore),
+    });
+  }
+
+  /// `{ let <binding> = <base>[__i]; <body> }`, the block the desugared loop
+  /// runs each iteration. A by-reference binding takes the address of the
+  /// element instead of copying it.
+  function lowerForOfBody(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    forOf: &Ast::Statement::ForOf,
+    binding: &Lowering::ForOfBindingShape,
+    elementType: Analyzer::TypeId,
+    base: Hir::HirId,
+    indexDef: Analyzer::DefinitionId,
+  ): Hir::HirId {
+    let span: SourceSpan = forOf.span;
+    let u64Type: Analyzer::TypeId = Lowering::unsignedInt64Type(typeStore);
+    let voidTypeId: Analyzer::TypeId = Lowering::voidType(typeStore);
+
+    let mut indexHirRef: &mut Hir::HirStore = hir;
+    let index: Hir::HirId = indexHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Variable(indexDef),
+      span: span,
+      typeId: u64Type,
+    });
+
+    let mut accessHirRef: &mut Hir::HirStore = hir;
+    let access: Hir::HirId = accessHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Index(Hir::HirIndex {
+        base: base,
+        index: index,
+      }),
+      span: span,
+      typeId: elementType,
+    });
+
+    let mut element: Hir::HirId = access;
+    let mut bindingType: Analyzer::TypeId = elementType;
+
+    if (binding.byRef) {
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+
+      if (binding.mutableRef) {
+        bindingType = typeStoreRef.mutableReference(elementType);
+      } else {
+        bindingType = typeStoreRef.reference(elementType);
+      }
+
+      let mut referenceHirRef: &mut Hir::HirStore = hir;
+      element = referenceHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Reference(Hir::HirReference {
+          expression: access,
+          mutable: binding.mutableRef,
+        }),
+        span: span,
+        typeId: bindingType,
+      });
+    }
+
+    let bindingDef: Analyzer::DefinitionId = Lowering::declarePatternBinding(
+      defStore,
+      symbols,
+      output,
+      locals,
+      forOf.pattern,
+      binding.name.toStr(),
+      bindingType,
+    );
+
+    let mut bindingHirRef: &mut Hir::HirStore = hir;
+    let bindingLet: Hir::HirId = bindingHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Let(Hir::HirLet {
+        name: bindingDef,
+        value: Option::SOME(element),
+      }),
+      span: span,
+      typeId: voidTypeId,
+    });
+
+    let body: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, forOf.body);
+
+    let mut statements: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    statements.push(bindingLet);
+    statements.push(body);
+
+    let mut blockHirRef: &mut Hir::HirStore = hir;
+
+    return blockHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Block(Hir::HirBlock {
+        statements: statements,
+        expression: Option::NONE,
+      }),
+      span: span,
+      typeId: voidTypeId,
+    });
+  }
+
+  function forOfLoopNode(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    index: &Lowering::ForOfIndex,
+    condition: Hir::HirId,
+    body: Hir::HirId,
+  ): Hir::HirId {
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Loop(Hir::HirLoop {
+        condition: Hir::LoopKind::For(Hir::ForLoop {
+          init: Option::SOME(index.init),
+          condition: Option::SOME(condition),
+          update: Option::SOME(index.update),
+        }),
+        body: body,
+      }),
+      span: span,
+      typeId: Lowering::voidType(typeStore),
+    });
+  }
+
+  /// Wraps the loop in a block when the desugar had to introduce statements
+  /// ahead of it, and returns the bare loop otherwise.
+  function forOfBlockNode(
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &mut Hir::HirStore,
+    span: SourceSpan,
+    prefix: Vector<Hir::HirId>,
+    loopNode: Hir::HirId,
+  ): Hir::HirId {
+    let mut statements: Vector<Hir::HirId> = prefix;
+
+    if (statements.length() == 0) {
+      return loopNode;
+    }
+
+    statements.push(loopNode);
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Block(Hir::HirBlock {
+        statements: statements,
+        expression: Option::NONE,
+      }),
+      span: span,
+      typeId: Lowering::voidType(typeStore),
+    });
+  }
+
+  /// Desugars a fixed-array `for ... of` into `for (let __i = 0; __i < <n>;
+  /// __i += 1) { let <binding> = <array>[__i]; <body> }`.
+  function lowerForOfFixed(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    forOf: &Ast::Statement::ForOf,
+    binding: &Lowering::ForOfBindingShape,
+    shape: Lowering::ForOfFixed,
+    iterable: Hir::HirId,
+    synthId: u32,
+  ): Hir::HirId {
+    let span: SourceSpan = forOf.span;
+    let index: Lowering::ForOfIndex = Lowering::lowerForOfIndex(defStore, typeStore, symbols, hir, span, synthId);
+
+    let mut lengthHirRef: &mut Hir::HirStore = hir;
+    let length: Hir::HirId = lengthHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Literal(Hir::LiteralValue::UnsignedInt64(shape.length)),
+      span: span,
+      typeId: Lowering::unsignedInt64Type(typeStore),
+    });
+
+    let condition: Hir::HirId = Lowering::lowerForOfCondition(typeStore, hir, span, index.defId, length);
+    let body: Hir::HirId = Lowering::lowerForOfBody(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      output,
+      locals,
+      hir,
+      forOf,
+      binding,
+      shape.elementType,
+      iterable,
+      index.defId,
+    );
+
+    return Lowering::forOfLoopNode(typeStore, hir, span, &index, condition, body);
+  }
+
+  /// Desugars an iterable-record `for ... of`: `data` and `length` are read
+  /// once into locals, then the loop indexes the data pointer.
+  function lowerForOfRecord(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    forOf: &Ast::Statement::ForOf,
+    binding: &Lowering::ForOfBindingShape,
+    shape: Lowering::ForOfRecord,
+    iterable: Hir::HirId,
+    synthId: u32,
+    prefix: &mut Vector<Hir::HirId>,
+  ): Hir::HirId {
+    let span: SourceSpan = forOf.span;
+    let u64Type: Analyzer::TypeId = Lowering::unsignedInt64Type(typeStore);
+    let voidTypeId: Analyzer::TypeId = Lowering::voidType(typeStore);
+
+    let dataName: String = `__for_of_data_${synthId}`;
+    let dataDef: Analyzer::DefinitionId = Lowering::declareSyntheticLocal(defStore, symbols, dataName.toStr(), shape.dataType, false);
+
+    let mut dataAccessHirRef: &mut Hir::HirStore = hir;
+    let dataAccess: Hir::HirId = dataAccessHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::FieldAccess(Hir::HirFieldAccess {
+        base: iterable,
+        fieldIndex: shape.dataIndex,
+      }),
+      span: span,
+      typeId: shape.dataType,
+    });
+
+    let mut dataLetHirRef: &mut Hir::HirStore = hir;
+    let dataLet: Hir::HirId = dataLetHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Let(Hir::HirLet {
+        name: dataDef,
+        value: Option::SOME(dataAccess),
+      }),
+      span: span,
+      typeId: voidTypeId,
+    });
+
+    let lengthName: String = `__for_of_len_${synthId}`;
+    let lengthDef: Analyzer::DefinitionId = Lowering::declareSyntheticLocal(defStore, symbols, lengthName.toStr(), u64Type, false);
+
+    let mut lengthAccessHirRef: &mut Hir::HirStore = hir;
+    let lengthAccess: Hir::HirId = lengthAccessHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::FieldAccess(Hir::HirFieldAccess {
+        base: iterable,
+        fieldIndex: shape.lengthIndex,
+      }),
+      span: span,
+      typeId: u64Type,
+    });
+
+    let mut lengthLetHirRef: &mut Hir::HirStore = hir;
+    let lengthLet: Hir::HirId = lengthLetHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Let(Hir::HirLet {
+        name: lengthDef,
+        value: Option::SOME(lengthAccess),
+      }),
+      span: span,
+      typeId: voidTypeId,
+    });
+
+    let mut prefixRef: &mut Vector<Hir::HirId> = prefix;
+    prefixRef.push(dataLet);
+    prefixRef.push(lengthLet);
+
+    let index: Lowering::ForOfIndex = Lowering::lowerForOfIndex(defStore, typeStore, symbols, hir, span, synthId);
+
+    let mut lengthVarHirRef: &mut Hir::HirStore = hir;
+    let lengthVar: Hir::HirId = lengthVarHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Variable(lengthDef),
+      span: span,
+      typeId: u64Type,
+    });
+
+    let condition: Hir::HirId = Lowering::lowerForOfCondition(typeStore, hir, span, index.defId, lengthVar);
+
+    let mut dataVarHirRef: &mut Hir::HirStore = hir;
+    let dataVar: Hir::HirId = dataVarHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Variable(dataDef),
+      span: span,
+      typeId: shape.dataType,
+    });
+
+    let body: Hir::HirId = Lowering::lowerForOfBody(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      output,
+      locals,
+      hir,
+      forOf,
+      binding,
+      shape.elementType,
+      dataVar,
+      index.defId,
+    );
+
+    return Lowering::forOfLoopNode(typeStore, hir, span, &index, condition, body);
+  }
+
+  /// Desugars `for ... of` into an index loop, mirroring the Rust oracle's
+  /// `lower_for_of`. A fixed array compares the induction variable against
+  /// its constant length and indexes the array; an iterable record hoists
+  /// `data` and `length` into locals and indexes the data pointer. Every
+  /// other iterable shape, and every loop pattern that is not a plain
+  /// binding, falls back to `Error` like the oracle does.
+  function lowerForOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    forOf: &Ast::Statement::ForOf,
+  ): Hir::HirId {
+    let span: SourceSpan = forOf.span;
+
+    let Option::SOME(binding) = Lowering::forOfBindingShape(module, forOf.pattern) else {
+      return Lowering::errorNode(hir, typeStore, span);
+    };
+
+    let iterableType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, forOf.iterable);
+    let fixedShape: Option<Lowering::ForOfFixed> = Lowering::forOfFixedShape(defStore, typeStore, iterableType);
+    let recordShape: Option<Lowering::ForOfRecord> = Lowering::forOfRecordShape(defStore, typeStore, symbols, iterableType);
+
+    if (fixedShape.isNone() && recordShape.isNone()) {
+      return Lowering::errorNode(hir, typeStore, span);
+    }
+
+    let synthId: u32 = Lowering::nextSyntheticId(locals);
+    let iterable: Lowering::ForOfIterable = Lowering::lowerForOfIterable(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      output,
+      locals,
+      hir,
+      forOf.iterable,
+      iterableType,
+      span,
+      synthId,
+    );
+
+    let mut prefix: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    if (let Option::SOME(temporary) = iterable.temporary) {
+      prefix.push(temporary);
+    }
+
+    if (let Option::SOME(shape) = fixedShape) {
+      let loopNode: Hir::HirId = Lowering::lowerForOfFixed(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output,
+        locals,
+        hir,
+        forOf,
+        &binding,
+        shape,
+        iterable.value,
+        synthId,
+      );
+
+      return Lowering::forOfBlockNode(typeStore, hir, span, prefix, loopNode);
+    }
+
+    let Option::SOME(shape) = recordShape else {
+      return Lowering::errorNode(hir, typeStore, span);
+    };
+
+    let loopNode: Hir::HirId = Lowering::lowerForOfRecord(
+      defStore,
+      typeStore,
+      symbols,
+      module,
+      output,
+      locals,
+      hir,
+      forOf,
+      &binding,
+      shape,
+      iterable.value,
+      synthId,
+      &mut prefix,
+    );
+
+    return Lowering::forOfBlockNode(typeStore, hir, span, prefix, loopNode);
+  }
+
   function lowerStmt(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3943,7 +4715,7 @@ export namespace Lowering {
         });
       },
       Ast::Statement::Node::ForOf(forOf) -> {
-        return Lowering::errorNode(hir, typeStore, forOf.span);
+        return Lowering::lowerForOf(defStore, typeStore, symbols, module, output, locals, hir, &forOf);
       },
       Ast::Statement::Node::Defer(deferStmt) -> {
         return Lowering::lowerDefer(defStore, typeStore, symbols, module, output, locals, hir, &deferStmt);
