@@ -3183,6 +3183,10 @@ export namespace Lowering {
   /// slice does not lower — a lambda, a bare method, a record initializer, a
   /// vector literal, a builtin call, or a `_` nested deeper than a direct
   /// argument of the right-side call.
+  ///
+  /// A generic callee is placed like any other. Its type arguments, written or
+  /// inferred, come off the checker's table keyed by the right side, so the
+  /// placement does not have to carry them.
   function pipePlacement(
     module: &Ast::Module,
     pipe: &Ast::Expression::Pipe,
@@ -3199,10 +3203,6 @@ export namespace Lowering {
 
     match (rightExpr) {
       Ast::Expression::Node::Call(call) -> {
-        if (call.typeArguments.length() > 0) {
-          return Option::NONE;
-        }
-
         let extraArgs: Vector<Ast::ExpressionId> = Lowering::copyExpressionIds(&call.arguments);
         let replaceAt: Option<u64> = Lowering::directPlaceholderIndex(module, &extraArgs);
 
@@ -3377,11 +3377,19 @@ export namespace Lowering {
       Option::NONE -> calleeReturnType,
     };
 
+    // The checker records what a generic pipe callee was specialized with
+    // against the right side, whether the call site wrote the arguments or the
+    // piped value supplied them.
+    let typeArgs: Vector<Analyzer::TypeId> = match (Lowering::lookupCallTypeArgs(&output.typecheck, pipe.right)) {
+      Option::SOME(recorded) -> recorded,
+      Option::NONE -> Vector::new<Analyzer::TypeId>(),
+    };
+
     let mut hirRef: &mut Hir::HirStore = hir;
     return hirRef.alloc(Hir::HirNode {
       kind: Hir::HirKind::Call(Hir::HirCall {
         callee: calleeDef,
-        typeArgs: Vector::new<Analyzer::TypeId>(),
+        typeArgs: typeArgs,
         args: args,
       }),
       span: pipe.span,

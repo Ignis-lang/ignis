@@ -811,6 +811,52 @@ function assertExprType(
   Test::assertEq<u32>(actual.raw(), expected.raw());
 }
 
+/// Assert the checker recorded exactly `expected` as the type arguments of
+/// the call at `exprId`, in that order.
+function assertCallTypeArgs(
+  output: &Analyzer::AnalyzerOutput,
+  exprId: Ast::ExpressionId,
+  expected: &Vector<Analyzer::TypeId>,
+): void {
+  let mut index: u64 = 0;
+
+  while (index < output.typecheck.callTypeArgs.nodeIds.length()) {
+    let Option::SOME(nodeId) = output.typecheck.callTypeArgs.nodeIds.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (*nodeId != exprId.raw()) {
+      index += 1;
+      continue;
+    }
+
+    let Option::SOME(actual) = output.typecheck.callTypeArgs.typeArgs.get(index) else {
+      @panic("assertCallTypeArgs: type argument list not found");
+    };
+
+    Test::assertEq<u64>(actual.length(), expected.length());
+
+    let mut argIndex: u64 = 0;
+
+    while (argIndex < expected.length()) {
+      let Option::SOME(expectedArg) = expected.get(argIndex) else {
+        @panic("assertCallTypeArgs: missing expected type argument");
+      };
+      let Option::SOME(actualArg) = actual.get(argIndex) else {
+        @panic("assertCallTypeArgs: missing recorded type argument");
+      };
+
+      Test::assertEq<u32>(actualArg.raw(), expectedArg.raw());
+      argIndex += 1;
+    }
+
+    return;
+  }
+
+  @panic("assertCallTypeArgs: no type arguments recorded for this call");
+}
+
 function assertSingleDiagnosticCode(output: &Analyzer::AnalyzerOutput, code: str): void {
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
   let Option::SOME(diagnostic) = output.typecheck.diagnostics.get(0) else {
@@ -10249,6 +10295,13 @@ function typecheckPipeIntoGenericFunctionInfersTypeArgument(): void {
 
   Test::assertEq<u64>(output.diagnostics.length(), 0);
   assertExprType(&output, pipeExpr, typeStore.intern(Analyzer::Type::I32));
+
+  // Monomorphization instantiates the callee from this entry, so inferring
+  // `T = i32` is only half the answer: it has to be recorded against the
+  // right side, which is the call the pipe makes.
+  let mut expectedTypeArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+  expectedTypeArgs.push(typeStore.intern(Analyzer::Type::I32));
+  assertCallTypeArgs(&output, calleeExpr, &expectedTypeArgs);
 }
 
 function typecheckAddTupleExpr(

@@ -1281,6 +1281,23 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
+      return Option::SOME(Analyzer::Typecheck::substituteSignature(
+        typeStore,
+        paramSymbols,
+        &typeArguments,
+        paramTypes,
+        returnType,
+      ));
+    }
+
+    /// A signature with `paramSymbols` replaced by `typeArguments` throughout.
+    function substituteSignature(
+      typeStore: &mut Analyzer::TypeStore,
+      paramSymbols: &Vector<Analyzer::SymbolId>,
+      typeArguments: &Vector<Analyzer::TypeId>,
+      paramTypes: &Vector<Analyzer::TypeId>,
+      returnType: Analyzer::TypeId,
+    ): Analyzer::Typecheck::CalleeSignature {
       let mut specializedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
       let mut index: u64 = 0;
 
@@ -1292,18 +1309,17 @@ export namespace Analyzer {
 
         let declaredType: Analyzer::TypeId = *paramType;
         let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
-        specializedParams.push(typeStoreParamRef.substitute(declaredType, paramSymbols, &typeArguments));
+        specializedParams.push(typeStoreParamRef.substitute(declaredType, paramSymbols, typeArguments));
 
         index += 1;
       }
 
       let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
-      let specializedReturn: Analyzer::TypeId = typeStoreReturnRef.substitute(returnType, paramSymbols, &typeArguments);
 
-      return Option::SOME(Analyzer::Typecheck::CalleeSignature {
+      return Analyzer::Typecheck::CalleeSignature {
         paramTypes: specializedParams,
-        returnType: specializedReturn,
-      });
+        returnType: typeStoreReturnRef.substitute(returnType, paramSymbols, typeArguments),
+      };
     }
 
     /// Typecheck a direct call to a resolved function, specializing its signature first
@@ -5888,6 +5904,11 @@ export namespace Analyzer {
     record PipeCallee {
       public signature: Analyzer::Typecheck::CalleeSignature;
       public checkArguments: boolean;
+      /// The types the callee's type parameters stand for, in declaration
+      /// order, whether they were written or inferred from the piped value.
+      /// Empty for a callee that declares none. Monomorphization needs them
+      /// to instantiate the callee the pipe calls.
+      public typeArgs: Vector<Analyzer::TypeId>;
     }
 
     /// The type-parameter symbols a callee declares, in declaration order.
@@ -5946,7 +5967,7 @@ export namespace Analyzer {
       paramTypes: &Vector<Analyzer::TypeId>,
       returnType: Analyzer::TypeId,
       leftType: Analyzer::TypeId,
-    ): Option<Analyzer::Typecheck::CalleeSignature> {
+    ): Option<Analyzer::Typecheck::SpecializedCallee> {
       let paramSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, defId);
 
       if (paramSymbols.length() == 0) {
@@ -5967,29 +5988,25 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      let mut specializedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
-      let mut index: u64 = 0;
+      let signature: Analyzer::Typecheck::CalleeSignature = Analyzer::Typecheck::substituteSignature(
+        typeStore,
+        &paramSymbols,
+        &typeArguments,
+        paramTypes,
+        returnType,
+      );
 
-      while (index < paramTypes.length()) {
-        let Option::SOME(paramType) = paramTypes.get(index) else {
-          index += 1;
-          continue;
-        };
-
-        let declaredType: Analyzer::TypeId = *paramType;
-        let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
-        specializedParams.push(typeStoreParamRef.substitute(declaredType, &paramSymbols, &typeArguments));
-
-        index += 1;
-      }
-
-      let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
-      let specializedReturn: Analyzer::TypeId = typeStoreReturnRef.substitute(returnType, &paramSymbols, &typeArguments);
-
-      return Option::SOME(Analyzer::Typecheck::CalleeSignature {
-        paramTypes: specializedParams,
-        returnType: specializedReturn,
+      return Option::SOME(Analyzer::Typecheck::SpecializedCallee {
+        signature: signature,
+        typeArgs: typeArguments,
       });
+    }
+
+    /// A specialized signature together with the type arguments that produced
+    /// it, in the callee's declaration order.
+    record SpecializedCallee {
+      public signature: Analyzer::Typecheck::CalleeSignature;
+      public typeArgs: Vector<Analyzer::TypeId>;
     }
 
     /// Resolve what `calleeExprId` names and flatten its signature.
@@ -6084,6 +6101,7 @@ export namespace Analyzer {
       return Option::SOME(Analyzer::Typecheck::PipeCallee {
         signature: specialized,
         checkArguments: true,
+        typeArgs: Vector::new<Analyzer::TypeId>(),
       });
     }
 
@@ -6167,10 +6185,11 @@ export namespace Analyzer {
                   returnType: signature.returnType,
                 },
                 checkArguments: false,
+                typeArgs: Vector::new<Analyzer::TypeId>(),
               });
             }
 
-            let Option::SOME(written) = Analyzer::Typecheck::specializeSignatureFromWrittenTypeArguments(
+            let Option::SOME(writtenArgs) = Analyzer::Typecheck::resolveWrittenTypeArguments(
               state,
               defStore,
               typeStore,
@@ -6178,16 +6197,22 @@ export namespace Analyzer {
               module,
               span,
               typeArgumentIds,
-              &writtenParamSymbols,
-              &paramTypes,
-              signature.returnType,
             ) else {
               return Option::NONE;
             };
 
+            let written: Analyzer::Typecheck::CalleeSignature = Analyzer::Typecheck::substituteSignature(
+              typeStore,
+              &writtenParamSymbols,
+              &writtenArgs,
+              &paramTypes,
+              signature.returnType,
+            );
+
             return Option::SOME(Analyzer::Typecheck::PipeCallee {
               signature: written,
               checkArguments: true,
+              typeArgs: writtenArgs,
             });
           }
 
@@ -6205,8 +6230,9 @@ export namespace Analyzer {
             leftType,
           )) {
             return Option::SOME(Analyzer::Typecheck::PipeCallee {
-              signature: specialized,
+              signature: specialized.signature,
               checkArguments: true,
+              typeArgs: specialized.typeArgs,
             });
           }
 
@@ -6216,6 +6242,7 @@ export namespace Analyzer {
               returnType: signature.returnType,
             },
             checkArguments: true,
+            typeArgs: Vector::new<Analyzer::TypeId>(),
           });
         },
         Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> {
@@ -6258,6 +6285,7 @@ export namespace Analyzer {
               returnType: functionType.returnType,
             },
             checkArguments: true,
+            typeArgs: Vector::new<Analyzer::TypeId>(),
           });
         },
         Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {
@@ -6306,6 +6334,13 @@ export namespace Analyzer {
       };
 
       let signature: Analyzer::Typecheck::CalleeSignature = callee.signature;
+
+      // Monomorphization reads the callee's type arguments off the right side,
+      // which is the call the pipe makes. Written and inferred ones are
+      // recorded the same way, as the direct call path records both.
+      if (callee.typeArgs.length() > 0) {
+        Analyzer::Typecheck::recordCallTypeArgs(state, pipe.right, &callee.typeArgs);
+      }
 
       // The type arguments were already reported as wrong, and every parameter type
       // still mentions the type parameters they were meant to bind.
