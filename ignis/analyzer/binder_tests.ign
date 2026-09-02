@@ -639,6 +639,7 @@ function binderReplaceRoundTrip(): void {
     typeId: sentinelId,
     implementsCopy: false,
     implementsDrop: false,
+    implementedTraits: Vector::new<String>(),
   };
   let defId: Analyzer::DefinitionId = defStore.push(Analyzer::Definition::Record(placeholder));
 
@@ -653,6 +654,7 @@ function binderReplaceRoundTrip(): void {
     typeId: sentinelId,
     implementsCopy: false,
     implementsDrop: false,
+    implementedTraits: Vector::new<String>(),
   };
   let replaced: boolean = defStore.replace(defId, Analyzer::Definition::Record(updated));
 
@@ -777,6 +779,87 @@ function binderCompleteRecordZeroFields(): void {
 
   // No diagnostics.
   Test::assertEq<u64>(_pass2.diagnostics.length(), 0);
+}
+
+/// Assert the trait name recorded at `index` matches `expected`.
+function assertTraitNameAt(traits: &Vector<String>, index: u64, expected: str): void {
+  let Option::SOME(name) = traits.get(index) else {
+    @panic("expected an implemented trait name at this index");
+  };
+
+  Test::assertEq<boolean>(name.equals(expected), true);
+}
+
+/// Scenario: record carrying `@implements(Drop, Clone, Eq)`.
+/// Spec: every argument of the attribute is recorded on the RecordDef, in
+/// written order.
+@test
+function binderRecordsEveryImplementedTraitName(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("Drop"));
+  arguments.push(String::create("Clone"));
+  arguments.push(String::create("Eq"));
+
+  let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  attributes.push(Ast::Attribute {
+    span: dummySpan(),
+    name: String::create("implements"),
+    arguments: arguments,
+  });
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::Metadata {
+      attributes: attributes,
+      modifiers: Vector::new<Ast::Modifier>(),
+    },
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let _pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("record not found in pass-1 output");
+  };
+
+  match (defStore.get(defIdFound)) {
+    Option::SOME(def) -> match (def) {
+      Analyzer::Definition::Record(rec) -> {
+        Test::assertEq<u64>(rec.implementedTraits.length(), 3);
+        assertTraitNameAt(&rec.implementedTraits, 0, "Drop");
+        assertTraitNameAt(&rec.implementedTraits, 1, "Clone");
+        assertTraitNameAt(&rec.implementedTraits, 2, "Eq");
+
+        Test::assertEq<boolean>(rec.implementsDrop, true);
+        Test::assertEq<boolean>(rec.implementsCopy, false);
+      },
+      _ -> @panic("expected Record"),
+    },
+    Option::NONE -> @panic("defStore.get returned NONE"),
+  };
 }
 
 /// Phase 2.3 RED: Record with 2 named fields is completed correctly.

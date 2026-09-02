@@ -212,6 +212,7 @@ export namespace Analyzer {
         typeId: sentinelId,
         implementsCopy: false,
         implementsDrop: false,
+        implementedTraits: Vector::new<String>(),
       };
       return defsRef.push(Analyzer::Definition::Record(placeholder));
     }
@@ -242,6 +243,7 @@ export namespace Analyzer {
         typeId: sentinelId,
         implementsCopy: false,
         implementsDrop: false,
+        implementedTraits: Vector::new<String>(),
       };
       return defsRef.push(Analyzer::Definition::Enum(placeholder));
     }
@@ -583,6 +585,43 @@ export namespace Analyzer {
       }
 
       return false;
+    }
+
+    /// Every trait named by an `@implements(...)` attribute on the item, in the
+    /// order they are written, with surrounding whitespace trimmed.
+    ///
+    /// Attribute arguments arrive from the parser as raw lexeme text, so the
+    /// names are collected as strings rather than resolved to definitions.
+    function implementedTraitNames(metadata: &Ast::Metadata): Vector<String> {
+      let mut names: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let name: &String = &attribute.name;
+        if (!name.equals("implements")) {
+          index += 1;
+          continue;
+        }
+
+        let mut argumentIndex: u64 = 0;
+
+        while (argumentIndex < attribute.arguments.length()) {
+          if (let Option::SOME(argument) = attribute.arguments.get(argumentIndex)) {
+            names.push(argument.trimAsciiWhitespace());
+          }
+
+          argumentIndex += 1;
+        }
+
+        index += 1;
+      }
+
+      return names;
     }
 
     /// The type named by `@extension(Type)`, as raw attribute text.
@@ -1584,6 +1623,7 @@ export namespace Analyzer {
         typeId: realTypeId,
         implementsCopy: Analyzer::Binder::implementsLangTrait(&rec.metadata, "Copy"),
         implementsDrop: Analyzer::Binder::implementsLangTrait(&rec.metadata, "Drop"),
+        implementedTraits: Analyzer::Binder::implementedTraitNames(&rec.metadata),
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       defsRef.replace(defId, Analyzer::Definition::Record(newRec));
@@ -1668,6 +1708,7 @@ export namespace Analyzer {
         typeId: realTypeId,
         implementsCopy: Analyzer::Binder::implementsLangTrait(&en.metadata, "Copy"),
         implementsDrop: Analyzer::Binder::implementsLangTrait(&en.metadata, "Drop"),
+        implementedTraits: Analyzer::Binder::implementedTraitNames(&en.metadata),
       };
       let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
       defsRef.replace(defId, Analyzer::Definition::Enum(newEnum));
