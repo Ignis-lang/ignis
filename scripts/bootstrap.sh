@@ -20,6 +20,9 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BOOTSTRAP_ROOT="${PROJECT_ROOT}/build/bootstrap"
 ENTRY="${PROJECT_ROOT}/ignis/main.ign"
 STAGE0="${IGNIS_STAGE0:-ignis}"
+GATES_DIR="${BOOTSTRAP_ROOT}/gates"
+STAGE1_MEASURE="stage1-measure"
+G4_THRESHOLD="1.25"
 
 usage() {
   cat <<EOF
@@ -32,6 +35,7 @@ Commands:
   all      stage1, stage2, stage3 in order.
   parity   Run the host e2e corpus through stage2 (builds stage2 first when missing).
   gate-g5  Run the host error corpus through stage2 and write gates/G5.json.
+  gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
   status   Show which stage artifacts exist.
   clean    Remove build/bootstrap.
 
@@ -62,8 +66,13 @@ compile_stage() {
   info "${stage}: compiling ${ENTRY#"$PROJECT_ROOT/"} with ${compiler}"
 
   # The selfhost driver writes `selfhost_emit.c` and `selfhost_emit.o` into the
-  # working directory, so each stage runs inside its own directory.
-  if ! (cd "$dir" && "$compiler" "$ENTRY" -o "$dir/ignis") 2>&1 | tee "$dir/log.txt"; then
+  # working directory, so each stage runs inside its own directory. The
+  # measurement wrapper only observes the run; it does not touch the emitted C.
+  if ! python3 "${SCRIPT_DIR}/measure_run.py" \
+    --cwd "$dir" \
+    --out "$dir/measure.json" \
+    --label "$stage" \
+    -- "$compiler" "$ENTRY" -o "$dir/ignis" 2>&1 | tee "$dir/log.txt"; then
     fail "${stage}: the compiler reported errors, see ${dir}/log.txt"
   fi
 
@@ -105,6 +114,14 @@ ensure_stage() {
 build_stage2() {
   ensure_stage stage1
   compile_stage stage2 "$(stage_bin stage1)"
+}
+
+# stage1 is a copy of the host build, so it is never measured while it is
+# produced. The G4 baseline is stage1 compiling the same corpus every other
+# stage compiles, in its own directory so it cannot disturb the ladder.
+build_stage1_measure() {
+  ensure_stage stage1
+  compile_stage "$STAGE1_MEASURE" "$(stage_bin stage1)"
 }
 
 build_stage3() {
@@ -201,6 +218,72 @@ PYTHON
   info "gate-g5: ${status} -> ${gate_file} (report ${report})"
 }
 
+# G4: the selfhost-built compiler (stage2) compiling the selfhost corpus must
+# stay within G4_THRESHOLD of the host-built compiler (stage1) in peak RSS and
+# wall time.
+run_gate_g4() {
+  local baseline candidate
+  baseline="$(stage_dir "$STAGE1_MEASURE")/measure.json"
+  candidate="$(stage_dir stage2)/measure.json"
+
+  [[ -f "$candidate" ]] || build_stage2
+  [[ -f "$baseline" ]] || build_stage1_measure
+
+  mkdir -p "$GATES_DIR"
+
+  python3 - "$baseline" "$candidate" "${GATES_DIR}/G4.json" "$G4_THRESHOLD" <<'PY'
+import json
+import sys
+
+baseline_path, candidate_path, out_path, threshold_text = sys.argv[1:5]
+threshold = float(threshold_text)
+
+with open(baseline_path, encoding="utf-8") as handle:
+  baseline = json.load(handle)
+with open(candidate_path, encoding="utf-8") as handle:
+  candidate = json.load(handle)
+
+rss_ratio = candidate["rss_kb"] / baseline["rss_kb"]
+wall_ratio = candidate["wall_s"] / baseline["wall_s"]
+
+within_budget = rss_ratio <= threshold and wall_ratio <= threshold
+status = "pass" if within_budget else "fail"
+
+summary = (
+  f"stage2 vs stage1: rss {rss_ratio:.2f}x, wall {wall_ratio:.2f}x "
+  f"(threshold {threshold:.2f}x)"
+)
+
+report = {
+  "gate": "G4",
+  "status": status,
+  "summary": summary,
+  "details": {
+    "threshold": threshold,
+    "baseline": {
+      "stage": "stage1-measure",
+      "rss_kb": baseline["rss_kb"],
+      "wall_s": baseline["wall_s"],
+    },
+    "candidate": {
+      "stage": "stage2",
+      "rss_kb": candidate["rss_kb"],
+      "wall_s": candidate["wall_s"],
+    },
+    "rss_ratio": round(rss_ratio, 4),
+    "wall_ratio": round(wall_ratio, 4),
+  },
+}
+
+with open(out_path, "w", encoding="utf-8") as handle:
+  json.dump(report, handle, indent=2)
+  handle.write("\n")
+
+print(f"G4 {status}: {summary}")
+sys.exit(0 if within_budget else 1)
+PY
+}
+
 show_status() {
   local stage
   for stage in stage1 stage2 stage3; do
@@ -226,6 +309,7 @@ main() {
       ;;
     parity) run_parity ;;
     gate-g5) run_gate_g5 ;;
+    gate-g4) run_gate_g4 ;;
     status) show_status ;;
     clean) rm -rf "$BOOTSTRAP_ROOT"; info "removed ${BOOTSTRAP_ROOT}" ;;
     -h|--help|help|"") usage ;;
