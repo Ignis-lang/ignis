@@ -1,0 +1,90 @@
+import Test from "std::test";
+
+import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import ParseOutput, Parser from "@compiler::parser";
+import Lowering from "./lowering";
+import Mono from "./mono";
+
+function monoCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function monoContains(haystack: &String, needle: str): boolean {
+  let target: String = String::create(needle);
+
+  return haystack.contains(&target);
+}
+
+/// Parses, analyzes and lowers `source`, runs monomorphization over the
+/// resulting HIR and renders the monomorphized store.
+function monoRender(source: str): String {
+  let file: SourceFile = SourceFile::create("mono_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(monoCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(monoCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(monoCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let monoResult: Mono::MonoOutput = Mono::run(&mut defStore, &mut typeStore, &mut symbols, &hir);
+
+  return Hir::Display::printHir(&monoResult.hir, &typeStore, &defStore, &symbols);
+}
+
+@test
+function monoResolvesBuiltinEqToRecordMethod(): void {
+  let rendered: String = monoRender(
+    "@implements(Eq)\n@implements(Copy)\nrecord Point {\n  public x: i32;\n\n  public equals(&self, other: &Point): boolean {\n    return self.x == other.x;\n  }\n}\n\nfunction samePoint(a: Point, b: Point): boolean {\n  return @eq<Point>(a, b);\n}\n",
+  );
+
+  Test::assert(monoContains(&rendered, "BuiltinEq"));
+  Test::assert(monoContains(&rendered, "method("));
+  Test::assert(!monoContains(&rendered, "pending"));
+}
+
+@test
+function monoLeavesBuiltinEqPendingWithoutEqualsMethod(): void {
+  let rendered: String = monoRender(
+    "@implements(Copy)\nrecord Plain {\n  public x: i32;\n}\n\nfunction samePlain(a: Plain, b: Plain): boolean {\n  return @eq<Plain>(a, b);\n}\n",
+  );
+
+  Test::assert(monoContains(&rendered, "BuiltinEq"));
+  Test::assert(monoContains(&rendered, "pending"));
+}
