@@ -2467,6 +2467,16 @@ export namespace Borrowck {
     // lives — which here is the enclosing scope, not one arm.
     let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, letElse.value);
 
+    // A binding that takes an owned payload out of the scrutinee leaves the
+    // scrutinee variable without it: the variable is consumed here so its
+    // scope-end drop does not free the payload a second time. Mirrors the
+    // scrutinee consumption in the oracle's `LetElse` arm.
+    if (bindings.length() > 0 && !bindsBorrowedPayloads) {
+      if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, letElse.value)) {
+        Borrowck::tryConsume(state, source);
+      }
+    }
+
     let mut index: u64 = 0;
 
     while (index < bindings.length()) {

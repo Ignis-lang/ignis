@@ -671,6 +671,8 @@ function borrowckSchedulesMatchArmBinding(): void {
 /// Scenario: a let-else binding belongs to the enclosing scope, so it is
 /// dropped at that scope's end and at every exit that leaves it, while the
 /// diverging else block only owes what was live before the binding existed.
+/// Taking the payload consumes the scrutinee, so no exit after the binding
+/// drops it again.
 /// Spec: IGN-39 — let-else bindings are declared owned, not arm-scoped.
 @test
 function borrowckSchedulesLetElseBinding(): void {
@@ -678,7 +680,7 @@ function borrowckSchedulesLetElseBinding(): void {
     "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nfunction run(input: Maybe): u32 {\n  let Maybe::SOME(payload) = input else {\n    return 0;\n  };\n\n  return payload.id;\n}\n",
   );
 
-  Test::assertEq<str>(rendered.toStr(), "scope-end: payload\nexit return: input\nexit return: payload, input\nexit fn-end run: input\n");
+  Test::assertEq<str>(rendered.toStr(), "scope-end: payload\nexit return: input\nexit return: payload\n");
 }
 
 /// Scenario: overwriting a local that still holds a value schedules a drop of
