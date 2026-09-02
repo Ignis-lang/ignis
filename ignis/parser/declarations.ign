@@ -1211,17 +1211,10 @@ export namespace ParserDeclarations {
         Option::NONE -> endSpan,
       };
 
-      if (parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
-        if (parserRef.atPunctuation(Punctuation::RIGHT_BRACE)) {
-          break;
-        }
-        continue;
-      }
-
-      if (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE)) {
-        parserRef.emitDiagnostic(parserRef.current().span, DiagnosticCode::EXPECTED_DELIMITER, "expected variant delimiter", "enum variants must be separated by ','");
-        return Option::NONE;
-      }
+      // The comma between variants is optional, exactly as in the host parser:
+      // a variant may be followed by the next variant, by a method, or by the
+      // closing brace.
+      let _comma: Option<Token> = parserRef.consumePunctuation(Punctuation::COMMA);
     }
 
     let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after enum variants")!;
