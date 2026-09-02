@@ -689,6 +689,30 @@ def build_report(results: list[CaseResult], counts: dict[str, int], corpus: str)
   return "\n".join(lines) + "\n"
 
 
+def build_gate(results: list[CaseResult], counts: dict[str, int]) -> dict:
+  """Describe the corpus run as a bootstrap gate result (G2)."""
+  failing = [result for result in results if result.classification not in (CLASS_PASS, CLASS_SKIPPED)]
+  skipped = [result for result in results if result.classification == CLASS_SKIPPED]
+  total = len(results)
+  passed = counts.get(CLASS_PASS, 0)
+  status = "pass" if total > 0 and passed == total else "fail"
+
+  return {
+    "gate": "G2",
+    "status": status,
+    "summary": f"e2e parity {passed}/{total}",
+    "details": {
+      "counts": {classification: counts.get(classification, 0) for classification in CLASS_ORDER},
+      "total": total,
+      "failing": [
+        {"case": result.case.name, "classification": result.classification, "reason": result.reason}
+        for result in failing
+      ],
+      "skipped": [{"case": result.case.name, "reason": result.reason} for result in skipped],
+    },
+  }
+
+
 def main() -> int:
   parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   parser.add_argument("--compiler", required=True, help="selfhost-built compiler binary")
@@ -704,6 +728,7 @@ def main() -> int:
   parser.add_argument("--report", help="write a Markdown report to this path")
   parser.add_argument("--counts-json", help="write the per-class counts to this path as JSON")
   parser.add_argument("--work-dir", help="directory for the generated projects")
+  parser.add_argument("--gate-json", help="write the G2 bootstrap gate result to this path")
   arguments = parser.parse_args()
 
   corpus = arguments.corpus
@@ -801,6 +826,11 @@ def main() -> int:
       encoding="utf-8",
     )
     print(f"[parity] counts written to {counts_path}")
+  if arguments.gate_json:
+    gate_path = Path(arguments.gate_json).resolve()
+    gate_path.parent.mkdir(parents=True, exist_ok=True)
+    gate_path.write_text(json.dumps(build_gate(results, counts), indent=2) + "\n", encoding="utf-8")
+    print(f"[parity] gate result written to {gate_path}")
 
   return 0 if not failing else 1
 

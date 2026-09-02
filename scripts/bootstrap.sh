@@ -12,17 +12,39 @@
 # (`selfhost_emit.c`), the object file and the linked binary, plus a `log.txt`
 # with the compiler's phase report. `stage3` passing is the fixed-point gate:
 # the compiler built from stage1's output reproduces that output.
+#
+# The promotion gates each write build/bootstrap/gates/<gate>.json with
+# {"gate", "status", "summary", "details"}:
+#
+#   G1  fixed point: stage3's emitted C is identical to stage2's
+#   G2  e2e parity: the host corpus passes under stage2
+#   G3  the selfhost test suite under stage2 matches the host's result
+#   G4  resource budget: stage2 within 1.25x of the host
+#   G5  diagnostics: stage2's messages equal or better than the host's
+#
+# `gates` runs all of them and then `report`, which turns the gate files into
+# build/bootstrap/report.md and build/bootstrap/promotion.json.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 BOOTSTRAP_ROOT="${PROJECT_ROOT}/build/bootstrap"
+GATES_DIR="${BOOTSTRAP_ROOT}/gates"
 ENTRY="${PROJECT_ROOT}/ignis/main.ign"
 STAGE0="${IGNIS_STAGE0:-ignis}"
 GATES_DIR="${BOOTSTRAP_ROOT}/gates"
 STAGE1_MEASURE="stage1-measure"
 G4_THRESHOLD="1.25"
+SELF="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+
+# Gate identifiers in report order. G4 and G5 have their own subcommands; when
+# those are absent `gates` still records a result for them.
+GATE_IDS=(G1 G2 G3 G4 G5)
+
+# The selfhost test suite runs a full analysis of `ignis/` before it links, and
+# a hung run still has to leave a gate result behind.
+GATE_G3_TIMEOUT_SECONDS=10800
 
 usage() {
   cat <<EOF
@@ -31,11 +53,14 @@ Usage: $(basename "$0") <command>
 Commands:
   stage1   Build stage1 with the host compiler (\$IGNIS_STAGE0, default: \`ignis\` on PATH).
   stage2   Build stage2 with stage1 (builds stage1 first when missing).
-  stage3   Build stage3 with stage2 and check that its C matches stage2's (fixed point).
+  stage3   Build stage3 with stage2 and check that its C matches stage2's (fixed point, G1).
   all      stage1, stage2, stage3 in order.
-  parity   Run the host e2e corpus through stage2 (builds stage2 first when missing).
+  parity   Run the host e2e corpus through stage2 (builds stage2 first when missing, G2).
+  gate-g3  Run the selfhost test suite under stage2 and under the host and compare them (G3).
   gate-g5  Run the host error corpus through stage2 and write gates/G5.json.
   gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
+  gates    Run every stage and gate in order, then write the promotion report.
+  report   Turn build/bootstrap/gates/*.json into report.md and promotion.json.
   status   Show which stage artifacts exist.
   clean    Remove build/bootstrap.
 
@@ -49,6 +74,70 @@ fail() { echo "[bootstrap] error: $*" >&2; exit 1; }
 
 stage_dir() { echo "${BOOTSTRAP_ROOT}/$1"; }
 stage_bin() { echo "$(stage_dir "$1")/ignis"; }
+
+# Build a flat JSON object from alternating key and value arguments.
+json_object() {
+  python3 -c '
+import json
+import sys
+
+print(json.dumps(dict(zip(sys.argv[1::2], sys.argv[2::2]))))
+' "$@"
+}
+
+file_md5() {
+  if [[ -f "$1" ]]; then
+    md5sum "$1" | cut -d' ' -f1
+  else
+    echo ""
+  fi
+}
+
+# Write a gate result to build/bootstrap/gates/<gate>.json.
+#
+#   $1  gate id (G1..G5)
+#   $2  status: pass, fail or skipped
+#   $3  one-line summary
+#   $4  details as a JSON object (optional)
+write_gate() {
+  local gate="$1"
+  local status="$2"
+  local summary="$3"
+  local details="${4-}"
+
+  [[ -n "$details" ]] || details='{}'
+
+  mkdir -p "$GATES_DIR"
+
+  GATE_ID="$gate" \
+  GATE_STATUS="$status" \
+  GATE_SUMMARY="$summary" \
+  GATE_DETAILS="$details" \
+    python3 -c '
+import json
+import os
+import sys
+
+raw = os.environ["GATE_DETAILS"]
+
+try:
+  details = json.loads(raw)
+except json.JSONDecodeError:
+  details = {"raw": raw}
+
+payload = {
+  "gate": os.environ["GATE_ID"],
+  "status": os.environ["GATE_STATUS"],
+  "summary": os.environ["GATE_SUMMARY"],
+  "details": details,
+}
+
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+  handle.write(json.dumps(payload, indent=2) + "\n")
+' "${GATES_DIR}/${gate}.json"
+
+  info "gate ${gate}: ${status} — ${summary}"
+}
 
 # Compile the selfhost entry with a given compiler binary into a stage directory.
 #
@@ -124,19 +213,49 @@ build_stage1_measure() {
   compile_stage "$STAGE1_MEASURE" "$(stage_bin stage1)"
 }
 
+gate_g1_details() {
+  STAGE2_C="$1" \
+  STAGE3_C="$2" \
+  STAGE2_MD5="$(file_md5 "$1")" \
+  STAGE3_MD5="$(file_md5 "$2")" \
+    python3 -c '
+import json
+import os
+
+print(json.dumps({
+  "stage2_c": os.environ["STAGE2_C"],
+  "stage3_c": os.environ["STAGE3_C"],
+  "stage2_md5": os.environ["STAGE2_MD5"] or None,
+  "stage3_md5": os.environ["STAGE3_MD5"] or None,
+}))
+'
+}
+
 build_stage3() {
   ensure_stage stage2
-  compile_stage stage3 "$(stage_bin stage2)"
 
-  local stage2_c stage3_c
+  local stage2_c stage3_c stage2_md5 stage3_md5
   stage2_c="$(stage_dir stage2)/selfhost_emit.c"
   stage3_c="$(stage_dir stage3)/selfhost_emit.c"
 
+  # A compilation error is a failed fixed-point gate rather than a missing one,
+  # so G1 is written before the failure is propagated.
+  if ! (compile_stage stage3 "$(stage_bin stage2)"); then
+    write_gate G1 fail "stage3 did not compile" "$(gate_g1_details "$stage2_c" "$stage3_c")"
+    fail "stage3: the compiler reported errors, see $(stage_dir stage3)/log.txt"
+  fi
+
+  stage2_md5="$(file_md5 "$stage2_c")"
+  stage3_md5="$(file_md5 "$stage3_c")"
+
   # stage2's C was emitted by stage1 and stage3's C by stage2. Equal output
   # from two different binaries compiling the same source is the fixed point.
-  if cmp -s "$stage2_c" "$stage3_c"; then
-    info "stage3: fixed point reached, emitted C is identical ($(md5sum "$stage3_c" | cut -c1-32))"
+  if [[ -n "$stage2_md5" && "$stage2_md5" == "$stage3_md5" ]]; then
+    write_gate G1 pass "stage3 C is identical to stage2 (${stage3_md5})" \
+      "$(gate_g1_details "$stage2_c" "$stage3_c")"
+    info "stage3: fixed point reached, emitted C is identical (${stage3_md5})"
   else
+    write_gate G1 fail "stage3 C differs from stage2" "$(gate_g1_details "$stage2_c" "$stage3_c")"
     fail "stage3: emitted C differs from stage2 (diff ${stage2_c} ${stage3_c})"
   fi
 }
@@ -148,14 +267,98 @@ run_parity() {
 
   info "parity: running the host e2e corpus through $(stage_bin stage2)"
 
+  mkdir -p "$GATES_DIR"
+
   # A non-zero exit only means some cases diverge; the report is the product.
   python3 "${SCRIPT_DIR}/selfhost_e2e_parity.py" \
     --compiler "$(stage_bin stage2)" \
     --std "${PROJECT_ROOT}/std" \
     --work-dir "${BOOTSTRAP_ROOT}/parity" \
-    --report "$report" || true
+    --report "$report" \
+    --gate-json "${GATES_DIR}/G2.json" || true
 
   info "parity: report -> ${report}"
+
+  if [[ ! -f "${GATES_DIR}/G2.json" ]]; then
+    write_gate G2 fail "the parity run produced no gate result" \
+      "$(json_object report "$report")"
+  fi
+}
+
+# G3: the selfhost test suite has to report the same result under stage2 as it
+# does under the host compiler. Both runs write their output next to each other
+# and only the test lines and the summary block are compared, so the timings and
+# the phase reports around them do not matter.
+run_gate_g3() {
+  ensure_stage stage2
+
+  local dir="${BOOTSTRAP_ROOT}/stage2-tests"
+  local stage2_log="${dir}/log.txt"
+  local host_log="${dir}/log-host.txt"
+  local host_bin
+  local stage2_status=0
+  local host_status=0
+
+  mkdir -p "$dir" "$GATES_DIR"
+
+  host_bin="$(command -v "$STAGE0" || true)"
+
+  if [[ -z "$host_bin" ]]; then
+    write_gate G3 fail "host compiler not found: ${STAGE0}" \
+      "$(json_object stage2_log "$stage2_log" host_log "$host_log")"
+    return 0
+  fi
+
+  info "gate-g3: running the selfhost test suite under stage2"
+
+  timeout "$GATE_G3_TIMEOUT_SECONDS" \
+    env IGNIS_STD_PATH="${PROJECT_ROOT}/std" \
+    "$(stage_bin stage2)" test "$ENTRY" -o "$dir" >"$stage2_log" 2>&1 || stage2_status=$?
+
+  info "gate-g3: running the selfhost test suite under ${host_bin}"
+
+  timeout "$GATE_G3_TIMEOUT_SECONDS" \
+    env IGNIS_STD_PATH="${PROJECT_ROOT}/std" \
+    "$host_bin" test "$ENTRY" >"$host_log" 2>&1 || host_status=$?
+
+  python3 "${SCRIPT_DIR}/bootstrap_report.py" gate-g3 \
+    --stage2-log "$stage2_log" \
+    --host-log "$host_log" \
+    --stage2-status "$stage2_status" \
+    --host-status "$host_status" \
+    --timeout-seconds "$GATE_G3_TIMEOUT_SECONDS" \
+    --output "${GATES_DIR}/G3.json"
+
+  info "gate-g3: result -> ${GATES_DIR}/G3.json"
+}
+
+run_report() {
+  mkdir -p "$GATES_DIR"
+
+  python3 "${SCRIPT_DIR}/bootstrap_report.py" report \
+    --bootstrap-root "$BOOTSTRAP_ROOT" \
+    --project-root "$PROJECT_ROOT"
+}
+
+# Run every stage and gate, then the report. A failing step never stops the run:
+# the report is the product and a missing gate result is recorded as skipped.
+run_gates() {
+  rm -rf "$GATES_DIR"
+  mkdir -p "$GATES_DIR"
+
+  local step
+  for step in stage1 stage2 parity stage3 gate-g4 gate-g5 gate-g3; do
+    info "gates: ${step}"
+    "$SELF" "$step" || info "gates: ${step} exited non-zero, continuing"
+  done
+
+  local gate
+  for gate in "${GATE_IDS[@]}"; do
+    [[ -f "${GATES_DIR}/${gate}.json" ]] ||
+      write_gate "$gate" skipped "no ${gate} result was produced by this run"
+  done
+
+  run_report
 }
 
 # G5: the selfhost's diagnostics must be equal or better than the host's over
@@ -310,6 +513,9 @@ main() {
     parity) run_parity ;;
     gate-g5) run_gate_g5 ;;
     gate-g4) run_gate_g4 ;;
+    gate-g3) run_gate_g3 ;;
+    gates) run_gates ;;
+    report) run_report ;;
     status) show_status ;;
     clean) rm -rf "$BOOTSTRAP_ROOT"; info "removed ${BOOTSTRAP_ROOT}" ;;
     -h|--help|help|"") usage ;;
