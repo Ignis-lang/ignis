@@ -350,6 +350,214 @@ export namespace Analyzer {
       }
     }
 
+    /// Typecheck the value of every static field a record declares, against the
+    /// type the field annotates. The definitions sit in `RecordDef.staticFields`
+    /// in declaration order, so they are walked alongside the written fields.
+    function checkRecordStaticFields(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      recordDefId: Analyzer::DefinitionId,
+      record_: &Ast::Item::Record,
+    ): void {
+      let staticDefIds: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::recordStaticFieldDefs(defStore, recordDefId);
+
+      if (staticDefIds.length() == 0) {
+        return;
+      }
+
+      let mut staticIndex: u64 = 0;
+      let mut patternIndex: u64 = 0;
+
+      while (patternIndex < record_.fields.length()) {
+        let Option::SOME(fieldPatId) = record_.fields.get(patternIndex) else {
+          patternIndex += 1;
+          continue;
+        };
+
+        if (!Analyzer::Binder::fieldPatternIsStatic(module, *fieldPatId)) {
+          patternIndex += 1;
+          continue;
+        }
+
+        let Option::SOME(staticDefId) = staticDefIds.get(staticIndex) else {
+          patternIndex += 1;
+          staticIndex += 1;
+          continue;
+        };
+
+        if (let Option::SOME(pattern) = module.patterns.get(*fieldPatId)) {
+          if (let Ast::Pattern::Node::Binding(binding) = pattern) {
+            if (let Option::SOME(valueExprId) = binding.initializer) {
+              Analyzer::Typecheck::checkStaticFieldValue(
+                state,
+                defStore,
+                typeStore,
+                symbols,
+                module,
+                resolvedBodies,
+                *staticDefId,
+                valueExprId,
+                binding.span,
+              );
+            }
+          }
+        }
+
+        staticIndex += 1;
+        patternIndex += 1;
+      }
+    }
+
+    /// Typecheck the value of every static field an enum declares. The members
+    /// carry variants and static fields together, so the definitions are walked
+    /// alongside them on their own counter.
+    function checkEnumStaticFields(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      enumDefId: Analyzer::DefinitionId,
+      enum_: &Ast::Item::Enum,
+    ): void {
+      let staticDefIds: Vector<Analyzer::DefinitionId> = Analyzer::Typecheck::enumStaticFieldDefs(defStore, enumDefId);
+
+      if (staticDefIds.length() == 0) {
+        return;
+      }
+
+      let mut staticIndex: u64 = 0;
+      let mut patternIndex: u64 = 0;
+
+      while (patternIndex < enum_.variants.length()) {
+        let Option::SOME(memberPatId) = enum_.variants.get(patternIndex) else {
+          patternIndex += 1;
+          continue;
+        };
+
+        if (!Analyzer::Binder::variantPatternIsStaticField(module, *memberPatId)) {
+          patternIndex += 1;
+          continue;
+        }
+
+        let Option::SOME(staticDefId) = staticDefIds.get(staticIndex) else {
+          patternIndex += 1;
+          staticIndex += 1;
+          continue;
+        };
+
+        if (let Option::SOME(pattern) = module.patterns.get(*memberPatId)) {
+          if (let Ast::Pattern::Node::Binding(binding) = pattern) {
+            if (let Option::SOME(valueExprId) = binding.initializer) {
+              Analyzer::Typecheck::checkStaticFieldValue(
+                state,
+                defStore,
+                typeStore,
+                symbols,
+                module,
+                resolvedBodies,
+                *staticDefId,
+                valueExprId,
+                binding.span,
+              );
+            }
+          }
+        }
+
+        staticIndex += 1;
+        patternIndex += 1;
+      }
+    }
+
+    /// The enum's static field definitions, in declaration order.
+    function enumStaticFieldDefs(
+      defStore: &mut Analyzer::DefinitionStore,
+      enumDefId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let Option::SOME(definition) = defStore.get(enumDefId) else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      let Analyzer::Definition::Enum(enum_) = definition else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      return Analyzer::Typecheck::copyDefinitionIdVector(&enum_.staticFields);
+    }
+
+    /// The record's static field definitions, in declaration order.
+    function recordStaticFieldDefs(
+      defStore: &mut Analyzer::DefinitionStore,
+      recordDefId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let Option::SOME(definition) = defStore.get(recordDefId) else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      let Analyzer::Definition::Record(record_) = definition else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      return Analyzer::Typecheck::copyDefinitionIdVector(&record_.staticFields);
+    }
+
+    /// Typecheck one static field's value against its declared type, in the
+    /// same value-only context a module constant is checked in.
+    function checkStaticFieldValue(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      staticDefId: Analyzer::DefinitionId,
+      valueExprId: Ast::ExpressionId,
+      span: SourceSpan,
+    ): void {
+      let Option::SOME(definition) = defStore.get(staticDefId) else {
+        return;
+      };
+
+      let Analyzer::Definition::Variable(variableDef) = definition else {
+        return;
+      };
+
+      let declaredType: Analyzer::TypeId = variableDef.declaredType;
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.currentFunction = staticDefId;
+      stateRef.currentReturnType = declaredType;
+      stateRef.loopDepth = 0;
+      stateRef.scopeMarks = Vector::new<u64>();
+      stateRef.localPatternIds = Vector::new<Ast::PatternId>();
+      stateRef.localFunctionIds = Vector::new<Analyzer::DefinitionId>();
+      stateRef.localIndexes = Vector::new<u32>();
+      stateRef.localTypeIds = Vector::new<Analyzer::TypeId>();
+      stateRef.localMutableFlags = Vector::new<boolean>();
+
+      let actualTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        valueExprId,
+        Option::SOME(declaredType),
+      );
+
+      if (let Option::SOME(actualType) = actualTypeOpt) {
+        if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, declaredType, actualType)) {
+          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, declaredType, actualType);
+        }
+      }
+    }
+
     /// Resolve the `DefinitionId` for an owner-local method item and reuse
     /// `checkFunctionItem` to typecheck its body. `extractFunctionSignature`
     /// handles `Definition::Method`, so method bodies are checked exactly like
@@ -540,6 +748,17 @@ export namespace Analyzer {
               recordDefId,
               record_.span,
             );
+
+            Analyzer::Typecheck::checkRecordStaticFields(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              resolvedBodies,
+              recordDefId,
+              &record_,
+            );
           }
 
           Analyzer::Typecheck::checkOwnerMethods(
@@ -563,6 +782,17 @@ export namespace Analyzer {
               symbols,
               enumDefId,
               enum_.span,
+            );
+
+            Analyzer::Typecheck::checkEnumStaticFields(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              resolvedBodies,
+              enumDefId,
+              &enum_,
             );
           }
 

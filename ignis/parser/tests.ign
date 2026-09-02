@@ -4304,44 +4304,226 @@ function parserParsesTraitDefaultMethods(): void {
   };
 }
 
-/// Scenario: a static field in a record or an enum is reported as the
-/// unsupported construct it is, instead of as a missing delimiter.
-/// Spec: IGN-172 — static fields are parsed but not bound yet.
-@test
-function parserReportsStaticFieldsAsUnsupported(): void {
-  let recordSource: SourceFile = SourceFile::create(
-    "fixtures/parser_record_static_field.ign",
-    "record Config { static MAX_SIZE: i32 = 1024; }"
-  );
-  let mut recordModule: Ast::Module = Ast::Module::init();
-  let mut recordDiagnostics = DiagnosticBag::init();
-  Parser::parseInto(&recordSource, &mut recordModule, &mut recordDiagnostics);
-
-  Test::assert(recordDiagnostics.length() >= 1);
-
-  let recordDiagnostic: &Diagnostic = match (recordDiagnostics.get(0)) {
-    Option::SOME(value) -> value,
-    Option::NONE -> @panic("missing record static field diagnostic"),
+/// Reads the pattern of the first parameter of the method item `id` denotes.
+function traitMethodFirstParameter(module: &Ast::Module, id: Ast::ItemId): Ast::PatternId {
+  match (expectItem(module, id)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (functionItem.parameters.get(0)) {
+        Option::SOME(value) -> {
+          return *value;
+        },
+        Option::NONE -> {
+          @panic("method declares no parameters");
+        },
+      };
+    },
+    _ -> {
+      @panic("item is not a method");
+    },
   };
 
-  Test::assertEq<str>(recordDiagnostic.code, "A0053");
-  Test::assertEq<str>(recordDiagnostic.messageText(), "parser does not support field initializers");
+  @panic("method declares no parameters");
+}
 
-  let enumSource: SourceFile = SourceFile::create(
+/// Counts the methods a record item declares.
+function recordMethodCount(module: &Ast::Module, id: Ast::ItemId): u64 {
+  return match (expectItem(module, id)) {
+    Ast::Item::Node::Record(recordItem) -> recordItem.methods.length(),
+    _ -> @panic("item is not a record"),
+  };
+}
+
+/// Reads the method a record item declares at `index`.
+function recordMethodId(module: &Ast::Module, id: Ast::ItemId, index: u64): Ast::ItemId {
+  match (expectItem(module, id)) {
+    Ast::Item::Node::Record(recordItem) -> {
+      match (recordItem.methods.get(index)) {
+        Option::SOME(value) -> {
+          return *value;
+        },
+        Option::NONE -> {
+          @panic("record declares no method at that index");
+        },
+      };
+    },
+    _ -> {
+      @panic("item is not a record");
+    },
+  };
+
+  @panic("record declares no method at that index");
+}
+
+/// Reads the default method a trait item declares at `index`.
+function traitDefaultMethodId(module: &Ast::Module, id: Ast::ItemId, index: u64): Ast::ItemId {
+  match (expectItem(module, id)) {
+    Ast::Item::Node::Trait(traitItem) -> {
+      match (traitItem.defaultMethods.get(index)) {
+        Option::SOME(value) -> {
+          return *value;
+        },
+        Option::NONE -> {
+          @panic("trait declares no default method at that index");
+        },
+      };
+    },
+    _ -> {
+      @panic("item is not a trait");
+    },
+  };
+
+  @panic("trait declares no default method at that index");
+}
+
+/// Scenario: a type that declares a trait with `@implements` and does not
+/// declare one of its default methods inherits the default as a method of its
+/// own, with its own parameter patterns. A type that declares the method keeps
+/// the one it wrote.
+/// Spec: GRAMMAR.md `<trait>`; parity fixture e2e_ok::trait_two_records_same_default.
+@test
+function parserMaterializesTraitDefaultsOnImplementingTypes(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_trait_default_materialization.ign",
+    "trait Answerable { answer(&self): i32 { return 42; } } @implements(Answerable) record Alpha { public x: i32; } @implements(Answerable) record Beta { public y: i32; answer(&self): i32 { return self.y; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 3);
+
+  let traitId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing trait root"),
+  };
+  let alphaId: Ast::ItemId = match (module.roots.get(1)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Alpha"),
+  };
+  let betaId: Ast::ItemId = match (module.roots.get(2)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record Beta"),
+  };
+
+  let defaultId: Ast::ItemId = traitDefaultMethodId(&module, traitId, 0);
+
+  Test::assertEq<u64>(recordMethodCount(&module, alphaId), 1);
+
+  let inheritedId: Ast::ItemId = recordMethodId(&module, alphaId, 0);
+  Test::assertEq<str>(traitMethodName(&module, inheritedId).toStr(), "answer");
+  Test::assertEq<u64>(traitMethodBodyLength(&module, inheritedId), 1);
+  Test::assert(inheritedId.raw() != defaultId.raw());
+
+  let inheritedSelf: Ast::PatternId = traitMethodFirstParameter(&module, inheritedId);
+  let defaultSelf: Ast::PatternId = traitMethodFirstParameter(&module, defaultId);
+  Test::assert(inheritedSelf.raw() != defaultSelf.raw());
+
+  Test::assertEq<u64>(recordMethodCount(&module, betaId), 1);
+
+  let overrideId: Ast::ItemId = recordMethodId(&module, betaId, 0);
+  Test::assert(overrideId.raw() != inheritedId.raw());
+  Test::assertEq<str>(traitMethodName(&module, overrideId).toStr(), "answer");
+}
+
+/// Reads the initializer of the binding pattern `id` denotes.
+function bindingInitializer(module: &Ast::Module, id: Ast::PatternId): Option<Ast::ExpressionId> {
+  match (expectPattern(module, id)) {
+    Ast::Pattern::Node::Binding(binding) -> {
+      return binding.initializer;
+    },
+    _ -> {
+      @panic("pattern is not a binding");
+    },
+  };
+
+  return Option::NONE;
+}
+
+/// Reads the name of the binding pattern `id` denotes.
+function bindingName(module: &Ast::Module, id: Ast::PatternId): String {
+  return match (expectPattern(module, id)) {
+    Ast::Pattern::Node::Binding(binding) -> binding.name.clone(),
+    _ -> @panic("pattern is not a binding"),
+  };
+}
+
+/// Scenario: a record field written `static NAME: Type = value;` keeps its
+/// value on the binding, and a plain field keeps none.
+/// Spec: parity fixture e2e_ok::record_static_field.
+@test
+function parserParsesRecordStaticFields(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_record_static_field.ign",
+    "record Config { public limit: i32; static MAX_SIZE: i32 = 1024; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let recordId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record root"),
+  };
+
+  match (expectItem(&module, recordId)) {
+    Ast::Item::Node::Record(recordItem) -> {
+      Test::assertEq<u64>(recordItem.fields.length(), 2);
+
+      let plainId: Ast::PatternId = match (recordItem.fields.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing plain field"),
+      };
+      let staticId: Ast::PatternId = match (recordItem.fields.get(1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing static field"),
+      };
+
+      Test::assertEq<str>(bindingName(&module, plainId).toStr(), "limit");
+      Test::assert(bindingInitializer(&module, plainId).isNone());
+
+      Test::assertEq<str>(bindingName(&module, staticId).toStr(), "MAX_SIZE");
+      Test::assert(bindingInitializer(&module, staticId).isSome());
+    },
+    _ -> @panic("root is not a record"),
+  };
+}
+
+/// Scenario: an enum member written `NAME: Type = value;` is a static field.
+/// It joins the variant list carrying its value, and the unit variants around
+/// it stay variants.
+/// Spec: parity fixture e2e_ok::enum_static_field.
+@test
+function parserParsesEnumStaticFields(): void {
+  let source: SourceFile = SourceFile::create(
     "fixtures/parser_enum_static_field.ign",
     "enum Priority { Low, High, DEFAULT_LEVEL: i32 = 1; }"
   );
-  let mut enumModule: Ast::Module = Ast::Module::init();
-  let mut enumDiagnostics = DiagnosticBag::init();
-  Parser::parseInto(&enumSource, &mut enumModule, &mut enumDiagnostics);
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
 
-  Test::assert(enumDiagnostics.length() >= 1);
+  Test::assertEq<u64>(diagnostics.length(), 0);
 
-  let enumDiagnostic: &Diagnostic = match (enumDiagnostics.get(0)) {
-    Option::SOME(value) -> value,
-    Option::NONE -> @panic("missing enum static field diagnostic"),
+  let enumId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing enum root"),
   };
 
-  Test::assertEq<str>(enumDiagnostic.code, "A0053");
-  Test::assertEq<str>(enumDiagnostic.messageText(), "parser does not support enum static fields");
+  match (expectItem(&module, enumId)) {
+    Ast::Item::Node::Enum(enumItem) -> {
+      Test::assertEq<u64>(enumItem.variants.length(), 3);
+
+      let staticId: Ast::PatternId = match (enumItem.variants.get(2)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing enum static field"),
+      };
+
+      Test::assertEq<str>(bindingName(&module, staticId).toStr(), "DEFAULT_LEVEL");
+      Test::assert(bindingInitializer(&module, staticId).isSome());
+    },
+    _ -> @panic("root is not an enum"),
+  };
 }
