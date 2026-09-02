@@ -14,6 +14,13 @@ export namespace ParserDeclarations {
     public span: SourceSpan;
   }
 
+  /// A parsed method-like declaration together with whether it carries a body.
+  /// A trait member without one is a required method; with one it is a default.
+  record ParsedMethod {
+    public id: Ast::ItemId;
+    public hasBody: boolean;
+  }
+
   function patternSpan(node: &Ast::Pattern::Node): SourceSpan {
     return match (node) {
       Ast::Pattern::Node::Wildcard(value) -> value.span,
@@ -557,11 +564,14 @@ export namespace ParserDeclarations {
     return ParserDeclarations::parseBindingPatternWithMetadata(parserRef, metadata);
   }
 
-  function parseMethodLikeItem(
+  /// Parses a method-like declaration: `name<T>(params): ReturnType` followed
+  /// by a body, or — when `bodyOptional` is set, which is what a trait member
+  /// allows — by `;` for a signature with no default.
+  function parseMethodLikeItemDetailed(
     parser: &mut ParserShared::State,
     metadata: Ast::Metadata,
-    signatureOnly: boolean
-  ): Option<Ast::ItemId> {
+    bodyOptional: boolean
+  ): Option<ParsedMethod> {
     let mut parserRef: &mut ParserShared::State = parser;
 
     let nameToken = parserRef.expectIdentifier("expected trait method name")!;
@@ -608,9 +618,12 @@ export namespace ParserDeclarations {
       tail: Option::NONE,
     }));
 
-    if (signatureOnly) {
+    let mut hasBody: boolean = true;
+
+    if (bodyOptional && !parserRef.atPunctuation(Punctuation::LEFT_BRACE)) {
       let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after trait method signature")!;
       endSpan = semicolon.span;
+      hasBody = false;
       body = parserRef.module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
         span: semicolon.span,
         statements: Vector::new<Ast::StatementId>(),
@@ -625,22 +638,37 @@ export namespace ParserDeclarations {
       };
     }
 
-    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
-      span: ParserShared::mergeSpans(nameToken.span, endSpan),
-      name: nameToken.lexemeString(),
-      genericParameters: Ast::copyGenericParams(&genericParameters),
-      parameters: ParserDeclarations::copyPatternIds(&parameters),
-      returnType: returnType,
-      body: body,
-      metadata: Ast::copyMetadata(&metadata),
-    })));
+    return Option::SOME(ParsedMethod {
+      id: parserRef.module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+        span: ParserShared::mergeSpans(nameToken.span, endSpan),
+        name: nameToken.lexemeString(),
+        genericParameters: Ast::copyGenericParams(&genericParameters),
+        parameters: ParserDeclarations::copyPatternIds(&parameters),
+        returnType: returnType,
+        body: body,
+        metadata: Ast::copyMetadata(&metadata),
+      })),
+      hasBody: hasBody,
+    });
   }
 
-  function parseTraitMethodItem(parser: &mut ParserShared::State): Option<Ast::ItemId> {
+  /// Parses a method-like declaration and keeps only its item id.
+  function parseMethodLikeItem(
+    parser: &mut ParserShared::State,
+    metadata: Ast::Metadata,
+    bodyOptional: boolean
+  ): Option<Ast::ItemId> {
+    let parsed = ParserDeclarations::parseMethodLikeItemDetailed(parser, metadata, bodyOptional)!;
+    return Option::SOME(parsed.id);
+  }
+
+  /// Parses one trait member: a signature ending in `;`, or a default method
+  /// whose body follows the signature.
+  function parseTraitMethodItem(parser: &mut ParserShared::State): Option<ParsedMethod> {
     let parserRef: &mut ParserShared::State = parser;
     let metadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
 
-    return ParserDeclarations::parseMethodLikeItem(parserRef, metadata, true);
+    return ParserDeclarations::parseMethodLikeItemDetailed(parserRef, metadata, true);
   }
 
   function parseImportBinding(parser: &mut ParserShared::State): Option<Ast::ImportBinding> {
@@ -1230,6 +1258,49 @@ export namespace ParserDeclarations {
     })));
   }
 
+  /// Copies a method declaration without its body.
+  ///
+  /// A trait's default body belongs to the implementing types, not to the
+  /// trait, so `Item::Trait.methods` carries signatures only and the body
+  /// stays reachable through `Item::Trait.defaultMethods`.
+  function signatureTwinOf(
+    parser: &mut ParserShared::State,
+    methodId: Ast::ItemId
+  ): Option<Ast::ItemId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(item) = parserRef.module.items.get(methodId) else {
+      return Option::NONE;
+    };
+
+    let Ast::Item::Node::Function(method) = item else {
+      return Option::NONE;
+    };
+
+    let span: SourceSpan = method.span;
+    let name: String = method.name.clone();
+    let genericParameters: Vector<Ast::GenericParam> = Ast::copyGenericParams(&method.genericParameters);
+    let parameters: Vector<Ast::PatternId> = ParserDeclarations::copyPatternIds(&method.parameters);
+    let returnType: Option<Ast::TypeId> = method.returnType;
+    let metadata: Ast::Metadata = Ast::copyMetadata(&method.metadata);
+
+    let body: Ast::StatementId = parserRef.module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+      span: span,
+      statements: Vector::new<Ast::StatementId>(),
+      tail: Option::NONE,
+    }));
+
+    return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+      span: span,
+      name: name,
+      genericParameters: genericParameters,
+      parameters: parameters,
+      returnType: returnType,
+      body: body,
+      metadata: metadata,
+    })));
+  }
+
   function parseTraitItem(
     parser: &mut ParserShared::State,
     metadata: Ast::Metadata
@@ -1244,11 +1315,18 @@ export namespace ParserDeclarations {
       return Option::NONE;
     };
     let mut methods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+    let mut defaultMethods: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
-      let methodId = ParserDeclarations::parseTraitMethodItem(parserRef)!;
+      let method = ParserDeclarations::parseTraitMethodItem(parserRef)!;
 
-      methods.push(methodId);
+      if (method.hasBody) {
+        defaultMethods.push(method.id);
+        methods.push(ParserDeclarations::signatureTwinOf(parserRef, method.id)!);
+        continue;
+      }
+
+      methods.push(method.id);
     }
 
     let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after trait body")!;
@@ -1258,6 +1336,7 @@ export namespace ParserDeclarations {
       name: nameToken.lexemeString(),
       genericParameters: Ast::copyGenericParams(&genericParameters),
       methods: ParserDeclarations::copyItemIds(&methods),
+      defaultMethods: ParserDeclarations::copyItemIds(&defaultMethods),
       metadata: Ast::copyMetadata(&metadata),
     })));
   }

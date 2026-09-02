@@ -4230,3 +4230,76 @@ function parserParsesAtomLiterals(): void {
     _ -> @panic("root is not a function"),
   };
 }
+
+/// Reads the name of the method item `id` denotes.
+function traitMethodName(module: &Ast::Module, id: Ast::ItemId): String {
+  return match (expectItem(module, id)) {
+    Ast::Item::Node::Function(functionItem) -> functionItem.name.clone(),
+    _ -> @panic("item is not a method"),
+  };
+}
+
+/// Counts the statements in the body of the method item `id` denotes.
+function traitMethodBodyLength(module: &Ast::Module, id: Ast::ItemId): u64 {
+  let bodyId: Ast::StatementId = match (expectItem(module, id)) {
+    Ast::Item::Node::Function(functionItem) -> functionItem.body,
+    _ -> @panic("item is not a method"),
+  };
+
+  return match (expectStatement(module, bodyId)) {
+    Ast::Statement::Node::Block(block) -> block.statements.length(),
+    _ -> @panic("method body is not a block"),
+  };
+}
+
+/// Scenario: a trait member may end in `;` (required) or carry a body
+/// (default). The default's body hangs off `defaultMethods`, while `methods`
+/// keeps signatures only.
+/// Spec: GRAMMAR.md `<trait>`; parity fixture e2e_ok::trait_default_method.
+@test
+function parserParsesTraitDefaultMethods(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_trait_default_method.ign",
+    "trait HasValue { getValue(&self): i32; doubled(&self): i32 { return self.getValue() * 2; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let traitId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing trait root"),
+  };
+
+  match (expectItem(&module, traitId)) {
+    Ast::Item::Node::Trait(traitItem) -> {
+      Test::assertEq<u64>(traitItem.methods.length(), 2);
+      Test::assertEq<u64>(traitItem.defaultMethods.length(), 1);
+
+      let requiredId: Ast::ItemId = match (traitItem.methods.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing required trait method"),
+      };
+      let signatureId: Ast::ItemId = match (traitItem.methods.get(1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing default trait method signature"),
+      };
+      let defaultId: Ast::ItemId = match (traitItem.defaultMethods.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing default trait method"),
+      };
+
+      Test::assertEq<str>(traitMethodName(&module, requiredId).toStr(), "getValue");
+      Test::assertEq<str>(traitMethodName(&module, signatureId).toStr(), "doubled");
+      Test::assertEq<str>(traitMethodName(&module, defaultId).toStr(), "doubled");
+
+      Test::assertEq<u64>(traitMethodBodyLength(&module, requiredId), 0);
+      Test::assertEq<u64>(traitMethodBodyLength(&module, signatureId), 0);
+      Test::assertEq<u64>(traitMethodBodyLength(&module, defaultId), 1);
+    },
+    _ -> @panic("root is not a trait"),
+  };
+}
