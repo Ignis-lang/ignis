@@ -5636,8 +5636,10 @@ function typecheckUnknownQualifiedAnnotationProducesUnsupportedDiagnostic(): voi
   assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support unsupported local annotation type");
 }
 
+/// An annotated `let ... else` is the try shorthand, so a plain `i32` value
+/// has no ok payload for the binding to take.
 @test
-function typecheckLetElseAnnotatedBindingChecksElseAndBindsPattern(): void {
+function typecheckLetElseAnnotatedBindingRequiresATryValue(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -5666,8 +5668,7 @@ function typecheckLetElseAnnotatedBindingChecksElseAndBindsPattern(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  Test::assertEq<u64>(output.diagnostics.length(), 0);
-  assertExprType(&output, xUse, typeStore.intern(Analyzer::Type::I32));
+  assertContainsDiagnosticCode(&output, DiagnosticCode::LET_ELSE_BINDING_REQUIRES_TRY_TYPE);
 }
 
 @test
@@ -5700,7 +5701,7 @@ function typecheckLetElseChecksElseBranchDiagnostics(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `i32`, found `boolean`");
+  assertContainsDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
 }
 
 @test
@@ -5737,8 +5738,10 @@ function typecheckLetElseUnannotatedBindingUsesValueType(): void {
   assertExprType(&output, xUse, typeStore.intern(Analyzer::Type::I32));
 }
 
+/// An annotated `let ... else` over a non-try value reports the missing try
+/// type rather than comparing the annotation against the value.
 @test
-function typecheckLetElseAnnotatedBindingReportsValueMismatch(): void {
+function typecheckLetElseAnnotatedBindingOverANonTryValueReportsTheTryRequirement(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -5762,7 +5765,7 @@ function typecheckLetElseAnnotatedBindingReportsValueMismatch(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `boolean`, found `i32`");
+  assertContainsDiagnosticCode(&output, DiagnosticCode::LET_ELSE_BINDING_REQUIRES_TRY_TYPE);
 }
 
 @test
@@ -14549,6 +14552,40 @@ function typecheckGenericEnumInstanceDestructuringBindsSubstitutedPayload(): voi
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: the annotated `let ... else` shorthand binds the ok payload of a
+/// `@lang(try)` initializer, so an `i32` annotation matches `Result<i32, i32>`.
+@test
+function typecheckLetElseShorthandBindsTheOkPayload(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@lang(try)\nenum Res<T, E> {\n  OK(T),\n  ERROR(E),\n}\n\nfunction parse(ok: boolean): Res<i32, i32> {\n  if (ok) {\n    return Res::OK(7);\n  }\n\n  return Res::ERROR(1);\n}\n\nfunction main(): i32 {\n  let value: i32 = parse(true) else {\n    return 1;\n  };\n\n  return value;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: the annotation still has to accept the ok payload, so annotating
+/// the shorthand with an unrelated type is reported.
+@test
+function typecheckLetElseShorthandRejectsAnAnnotationTheOkPayloadDoesNotSatisfy(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@lang(try)\nenum Res<T, E> {\n  OK(T),\n  ERROR(E),\n}\n\nfunction parse(ok: boolean): Res<i32, i32> {\n  if (ok) {\n    return Res::OK(7);\n  }\n\n  return Res::ERROR(1);\n}\n\nfunction main(): i32 {\n  let value: boolean = parse(true) else {\n    return 1;\n  };\n\n  return 0;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
 }
 
 /// Scenario: a bounded type parameter answers the methods its bound declares,

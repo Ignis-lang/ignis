@@ -682,3 +682,15 @@ function loweringAtomLiteralsInternOnce(): void {
 
   Test::assertSnapshot("lowering-atom-literal", rendered.toStr());
 }
+
+/// The annotated `let ... else` shorthand lowers to a `LetElse` whose pattern
+/// destructures the scrutinee's ok variant into the written binding, rather
+/// than matching the binding against the try enum itself.
+@test
+function loweringLetElseShorthandUnwrapsTheOkVariant(): void {
+  let rendered: String = loweringRender(
+    "@lang(try)\nenum Res<T, E> {\n  OK(T),\n  ERROR(E),\n}\n\nfunction parse(ok: boolean): Res<u32, u32> {\n  if (ok) {\n    return Res::OK(7);\n  }\n\n  return Res::ERROR(1);\n}\n\nfunction go(): u32 {\n  let value: u32 = parse(true) else {\n    return 0;\n  };\n\n  return value;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-let-else-shorthand", rendered.toStr());
+}
