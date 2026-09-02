@@ -685,6 +685,8 @@ function borrowckSchedulesMatchArmBinding(): void {
 /// Scenario: a let-else binding belongs to the enclosing scope, so it is
 /// dropped at that scope's end and at every exit that leaves it, while the
 /// diverging else block only owes what was live before the binding existed.
+/// Taking the payload consumes the scrutinee, so no exit after the binding
+/// drops it again.
 /// Spec: IGN-39 — let-else bindings are declared owned, not arm-scoped.
 @test
 function borrowckSchedulesLetElseBinding(): void {
@@ -692,7 +694,33 @@ function borrowckSchedulesLetElseBinding(): void {
     "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nfunction run(input: Maybe): u32 {\n  let Maybe::SOME(payload) = input else {\n    return 0;\n  };\n\n  return payload.id;\n}\n",
   );
 
-  Test::assertEq<str>(rendered.toStr(), "scope-end: payload\nexit return: input\nexit return: payload, input\nexit fn-end run: input\n");
+  Test::assertEq<str>(rendered.toStr(), "scope-end: payload\nexit return: input\nexit return: payload\n");
+}
+
+/// Scenario: the same let-else over a generic enum instance. The binding's
+/// type comes from the instance's type argument, so it is owning and the
+/// scrutinee is consumed exactly as with a plain enum.
+/// Spec: IGN-39 — variant pattern bindings take the instantiated payload type.
+@test
+function borrowckSchedulesLetElseOnGenericInstance(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe<T> {\n  SOME(T),\n  NONE,\n}\n\nfunction run(input: Maybe<Owned>): u32 {\n  let Maybe::SOME(payload) = input else {\n    return 0;\n  };\n\n  return payload.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: payload\nexit return: input\nexit return: payload\n");
+}
+
+/// Scenario: a let-else that destructures through a reference binds a payload
+/// that still lives in the referenced storage. The binding owns nothing, so
+/// it is never dropped, and the reference is not consumed.
+/// Spec: IGN-39 — borrowed pattern bindings get no drop of their own.
+@test
+function borrowckSchedulesLetElseThroughReference(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Node {\n  IMPORT(Owned),\n  OTHER,\n}\n\nenum Maybe<T> {\n  SOME(T),\n  NONE,\n}\n\nfunction run(input: Maybe<&Node>): u32 {\n  let Maybe::SOME(node) = input else {\n    return 0;\n  };\n\n  let Node::IMPORT(item) = node else {\n    return 1;\n  };\n\n  return item.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "");
 }
 
 /// Scenario: overwriting a local that still holds a value schedules a drop of

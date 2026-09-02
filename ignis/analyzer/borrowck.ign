@@ -2467,20 +2467,33 @@ export namespace Borrowck {
     // lives — which here is the enclosing scope, not one arm.
     let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, letElse.value);
 
+    // A binding that takes an owned payload out of the scrutinee leaves the
+    // scrutinee variable without it: the variable is consumed here so its
+    // scope-end drop does not free the payload a second time. Mirrors the
+    // scrutinee consumption in the oracle's `LetElse` arm.
+    if (bindings.length() > 0 && !bindsBorrowedPayloads) {
+      if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, letElse.value)) {
+        Borrowck::tryConsume(state, source);
+      }
+    }
+
     let mut index: u64 = 0;
 
     while (index < bindings.length()) {
       if (let Option::SOME(defRaw) = bindings.get(index)) {
         if (bindsBorrowedPayloads) {
+          // The payload stays in the referenced storage: the binding is live
+          // but owns nothing, so it gets no drop of its own.
           let mut borrowedRef: &mut Borrowck::State = state;
+          borrowedRef.setMoveValue(*defRaw, Borrowck::MOVE_VALID);
           borrowedRef.markBorrowedBinding(*defRaw);
+        } else {
+          // Unlike a match arm binding, a let-else binding outlives the
+          // construct and belongs to the enclosing scope, so it is declared
+          // owned there and dropped at that scope's end. Mirrors
+          // `declare_owned_pattern_bindings`.
+          Borrowck::declareOwned(state, Id::fromRaw<Analyzer::DefinitionTag>(*defRaw));
         }
-
-        // Unlike a match arm binding, a let-else binding outlives the
-        // construct and belongs to the enclosing scope, so it is declared
-        // owned there and dropped at that scope's end. Mirrors
-        // `declare_owned_pattern_bindings`.
-        Borrowck::declareOwned(state, Id::fromRaw<Analyzer::DefinitionTag>(*defRaw));
       }
 
       index += 1;

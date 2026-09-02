@@ -2064,6 +2064,93 @@ export namespace CodegenC {
     enumTailRef.pushStr("};\n");
   }
 
+  /// Local slots this function drops through an `Instr::Drop`.
+  function dropScheduledLocals(function_: &Lir::FunctionLir): Vector<u32> {
+    let mut scheduled: Vector<u32> = Vector::new<u32>();
+    let mut blockIndex: u64 = 0;
+
+    while (blockIndex < function_.blocks.length()) {
+      let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+        blockIndex += 1;
+        continue;
+      };
+
+      let mut instrIndex: u64 = 0;
+
+      while (instrIndex < block.instructions.length()) {
+        if (let Option::SOME(instr) = block.instructions.get(instrIndex)) {
+          if (let Lir::Instr::Drop(node) = instr) {
+            scheduled.push(node.local.raw());
+          }
+        }
+
+        instrIndex += 1;
+      }
+
+      blockIndex += 1;
+    }
+
+    return scheduled;
+  }
+
+  function containsLocalRaw(locals: &Vector<u32>, raw: u32): boolean {
+    let mut index: u64 = 0;
+
+    while (index < locals.length()) {
+      if (let Option::SOME(entry) = locals.get(index)) {
+        if (*entry == raw) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Zero every droppable local and mark it dropped before the first block
+  /// runs, so a drop that reaches a slot no store initialized is a no-op
+  /// instead of a free of stack garbage. Mirrors the oracle's
+  /// `emit_locals` prologue.
+  function emitUninitializedLocals(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    output: &mut String,
+    function_: &Lir::FunctionLir,
+  ): void {
+    let scheduled: Vector<u32> = CodegenC::dropScheduledLocals(function_);
+    let mut localIndex: u64 = 0;
+
+    while (localIndex < function_.locals.length()) {
+      let Option::SOME(local) = function_.locals.get(localIndex) else {
+        localIndex += 1;
+        continue;
+      };
+
+      if (local.borrowedAlias || CodegenC::isVoidType(typeStore, local.ty) || CodegenC::fixedArrayShape(typeStore, local.ty).isSome()) {
+        localIndex += 1;
+        continue;
+      }
+
+      let droppable: boolean = CodegenC::containsLocalRaw(&scheduled, localIndex as u32) || Borrowck::needsDropType(defStore, typeStore, local.ty);
+
+      if (!droppable) {
+        localIndex += 1;
+        continue;
+      }
+
+      let access: String = `l${localIndex}`;
+      let clear: String = `    __builtin_memset((void*)&${access.toStr()}, 0, sizeof(${access.toStr()}));\n`;
+
+      let mut clearRef: &mut String = output;
+      clearRef.pushStr(clear.toStr());
+
+      CodegenC::emitUninitializedDropState(defStore, typeStore, output, &access, local.ty);
+      localIndex += 1;
+    }
+  }
+
   function emitFunction(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -2103,6 +2190,8 @@ export namespace CodegenC {
 
       localIndex += 1;
     }
+
+    CodegenC::emitUninitializedLocals(defStore, typeStore, output, function_);
 
     // Parameters already occupy `t0..tn-1` as the signature declares them.
     let mut tempIndex: u64 = function_.params.length();
