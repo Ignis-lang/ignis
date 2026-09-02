@@ -633,6 +633,18 @@ export namespace Capture {
       initIndex += 1;
     }
 
+    // A module constant's initializer is lowered at each use site, so a lambda
+    // written there needs its thunk as much as one inside a function body.
+    let mut constIndex: u64 = 0;
+
+    while (constIndex < hir.constantInits.length()) {
+      if (let Option::SOME(initId) = hir.constantInits.valueAt(constIndex)) {
+        Capture::collectClosuresPostorder(hir, initId, &mut result, &mut visited);
+      }
+
+      constIndex += 1;
+    }
+
     return result;
   }
 

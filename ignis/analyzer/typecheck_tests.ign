@@ -15117,3 +15117,38 @@ function typecheckRejectsStaticFieldValueOfTheWrongType(): void {
   Test::assert(typecheckCountErrors(&output.diagnostics) > 0);
   Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::TYPE_MISMATCH);
 }
+
+/// Scenario: a module-level constant of function type is called directly. Its
+/// declared type carries the whole signature, so the call is checked against
+/// that rather than rejected as one through a non-function definition.
+@test
+function typecheckAcceptsCallThroughAFunctionTypedConstant(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "const add: (i32, i32) -> i32 = (a: i32, b: i32): i32 -> a + b;\n\nfunction main(): i32 {\n  return add(2, 3);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: the same constant called with the wrong argument count. The
+/// signature behind the constant is what the arity is measured against.
+@test
+function typecheckRejectsWrongArityThroughAFunctionTypedConstant(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "const add: (i32, i32) -> i32 = (a: i32, b: i32): i32 -> a + b;\n\nfunction main(): i32 {\n  return add(2);\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+}

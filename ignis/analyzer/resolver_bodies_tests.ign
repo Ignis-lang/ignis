@@ -4400,6 +4400,7 @@ function emptyResolverBodiesState(): Analyzer::ResolverBodies::ResolverBodiesSta
     programSyms: Vector::new<Analyzer::SymbolId>(),
     programDefs: Vector::new<Analyzer::DefinitionId>(),
     programQualifiedNames: Vector::new<String>(),
+    namespaceChain: Vector::new<String>(),
     currentFunction: sentinel,
     localStack: Analyzer::ResolverBodies::LocalStack {
       scopeStarts: Vector::new<u64>(),
@@ -4914,4 +4915,264 @@ function resolveBodiesPartialNamespaceQualifiedFunctionResolves(): void {
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   let _fnDefId: Analyzer::DefinitionId = assertResolvesToFunction(&mut defStore, ref_);
+}
+
+/// Assert a ResolvedRef is Definition(Variable) and return its DefinitionId.
+function assertResolvesToVariable(
+  defStore: &mut Analyzer::DefinitionStore,
+  r: Analyzer::ResolverBodies::ResolvedRef,
+): Analyzer::DefinitionId {
+  let defId: Analyzer::DefinitionId = assertDefinitionRef(r);
+
+  if (let Option::SOME(Analyzer::Definition::Variable(_)) = defStore.get(defId)) {
+    return defId;
+  }
+
+  @panic("assertResolvesToVariable: expected Definition(Variable)");
+}
+
+/// Add `record Point {}` as a root item: the top-level decoy a namespace member
+/// of the same name has to outrank.
+function addTopLevelPointRecord(module: &mut Ast::Module): void {
+  let mut moduleRef: &mut Ast::Module = module;
+  moduleRef.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create("Point"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Scenario: `Holder::Point` where `Holder` declares a constant `Point` and a
+/// record `Point` also exists at top level. The namespace's own declaration
+/// answers the written path; the flat member fallback returned the record and
+/// left the constant unreachable.
+@test
+function resolveBodiesNamespaceConstantOutranksSameNamedRecord(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  addTopLevelPointRecord(&mut module);
+
+  // namespace Holder { const Point: i32 = 99; }
+  let i32TypeId: Ast::TypeId = addPathType(&mut module, "i32");
+  let constValue: Ast::ExpressionId = addIntLiteral(&mut module, 99);
+  let constId: Ast::ItemId = module.addItem(Ast::Item::Node::Constant(Ast::Item::Constant {
+    span: bodiesDummySpan(),
+    name: String::create("Point"),
+    annotation: Option::SOME(i32TypeId),
+    value: constValue,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut holderItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  holderItems.push(constId);
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create("Holder"),
+    items: holderItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { Holder::Point; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "Holder", "Point");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  let _constDefId: Analyzer::DefinitionId = assertResolvesToVariable(&mut defStore, ref_);
+}
+
+/// Scenario: the same precedence with a namespace function rather than a
+/// constant. `Holder::Point` reaching the top-level record instead turns the
+/// call into one through a non-function definition.
+@test
+function resolveBodiesNamespaceFunctionOutranksSameNamedRecord(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  addTopLevelPointRecord(&mut module);
+
+  // namespace Holder { function Point(): void { return; } }
+  let mut pointBody: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  pointBody.push(addReturn(&mut module));
+  let pointId: Ast::ItemId = addMethodItem(&mut module, "Point", Vector::new<Ast::PatternId>(), pointBody);
+
+  let mut holderItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  holderItems.push(pointId);
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create("Holder"),
+    items: holderItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // function f(): void { Holder::Point; return; }
+  let pathExpr: Ast::ExpressionId = addPathExpr2(&mut module, "Holder", "Point");
+  addPathExprStmtFunction(&mut module, "f", pathExpr);
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = runResolveBodies(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
+  let _fnDefId: Analyzer::DefinitionId = assertResolvesToFunction(&mut defStore, ref_);
+}
+
+/// Add (as a non-root item) an empty `record <name> {}`.
+function addNestedEmptyRecord(module: &mut Ast::Module, name: str): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: bodiesDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Add (as a non-root item) `function <name>(): void { <initPath> { }; return; }`
+/// around an already-added record-initializer path expression.
+function addRecordInitFunctionItem(
+  module: &mut Ast::Module,
+  name: str,
+  initPath: Ast::ExpressionId,
+): Ast::ItemId {
+  let mut initRef: &mut Ast::Module = module;
+  let initExpr: Ast::ExpressionId = initRef.addExpression(Ast::Expression::Node::RecordInit(Ast::Expression::RecordInit {
+    span: bodiesDummySpan(),
+    path: initPath,
+    typeArguments: Vector::new<Ast::TypeId>(),
+    fields: Vector::new<Ast::Expression::RecordInitField>(),
+  }));
+
+  let mut stmtRef: &mut Ast::Module = module;
+  let exprStmt: Ast::StatementId = stmtRef.addStatement(Ast::Statement::Node::Expression(Ast::Statement::Expression {
+    span: bodiesDummySpan(),
+    expression: initExpr,
+  }));
+
+  let mut bodyStmts: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
+  bodyStmts.push(exprStmt);
+  bodyStmts.push(addReturn(module));
+  let bodyBlock: Ast::StatementId = addBlock(module, bodyStmts);
+
+  let mut fnRef: &mut Ast::Module = module;
+  return fnRef.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: bodiesDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: bodyBlock,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Scenario: `namespace First { record Point {} }` and
+/// `namespace Second { record Point {} function make(): void { Point {}; } }`.
+///
+/// The bare literal path in `Second::make` names the `Point` its own namespace
+/// declares. The flat global index keys on the bare name alone and handed both
+/// namespaces the first `Point`, so the two collapsed into one and the program
+/// failed on a mismatch between two types that print identically.
+@test
+function resolveBodiesRecordLiteralPrefersItsOwnNamespace(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let firstPointId: Ast::ItemId = addNestedEmptyRecord(&mut module, "Point");
+  let mut firstItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  firstItems.push(firstPointId);
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create("First"),
+    items: firstItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let secondPointId: Ast::ItemId = addNestedEmptyRecord(&mut module, "Point");
+  let initPath: Ast::ExpressionId = addVariable(&mut module, "Point");
+  let makeId: Ast::ItemId = addRecordInitFunctionItem(&mut module, "make", initPath);
+
+  let mut secondItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  secondItems.push(secondPointId);
+  secondItems.push(makeId);
+  module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: bodiesDummySpan(),
+    name: String::create("Second"),
+    items: secondItems,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // The written-path index the driver builds. A bare name inside a namespace
+  // is read against it, and single-module analysis leaves it empty.
+  let direct: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
+    &mut defStore,
+    &module,
+    &pass1,
+    &pass2,
+  );
+  let mut programIndex: Analyzer::Imports::ProgramQualifiedIndex = Analyzer::Imports::emptyProgramQualifiedIndex();
+  Analyzer::appendDirectToProgramIndex(&mut programIndex, &direct);
+  let overlay: Analyzer::Imports::ImportOverlay = Analyzer::Imports::emptyOverlay();
+
+  let output: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodiesWithImports(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+    &overlay,
+    &programIndex,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let Option::SOME(secondPointDefId) = Analyzer::Binder::findDef(&pass1, secondPointId.raw()) else {
+    @panic("Second::Point was not bound");
+  };
+
+  let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, initPath);
+  let resolvedDefId: Analyzer::DefinitionId = assertDefinitionRef(ref_);
+  Test::assertEq<u32>(resolvedDefId.raw(), secondPointDefId.raw());
 }

@@ -3424,6 +3424,7 @@ function globalLookupPrefersPass1OverPass2DuplicateName(): void {
     programSyms: Vector::new<Analyzer::SymbolId>(),
     programDefs: Vector::new<Analyzer::DefinitionId>(),
     programQualifiedNames: Vector::new<String>(),
+    namespaceChain: Vector::new<String>(),
   };
 
   Analyzer::Resolver::buildGlobalNameIndex(&mut state, &mut defStore, &pass1);
@@ -3441,4 +3442,136 @@ function globalLookupPrefersPass1OverPass2DuplicateName(): void {
     Option::SOME(_) -> @panic("expected globalLookup to miss an unknown symbol"),
     Option::NONE -> {},
   };
+}
+
+/// Add (as a non-root item) an empty `record <name> {}`.
+function addNestedEmptyRecordForResolver(module: &mut Ast::Module, name: str): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: resolverDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Add (as a non-root item) `function <name>(): <returnTypeName> { }`.
+function addNestedFunctionItem(
+  module: &mut Ast::Module,
+  name: str,
+  returnTypeName: str,
+): Ast::ItemId {
+  let returnAnnotation: Ast::TypeId = addPathType(module, returnTypeName);
+
+  let mut bodyRef: &mut Ast::Module = module;
+  let bodyId: Ast::StatementId = bodyRef.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    span: resolverDummySpan(),
+    statements: Vector::new<Ast::StatementId>(),
+    tail: Option::NONE,
+  }));
+
+  let mut fnRef: &mut Ast::Module = module;
+  return fnRef.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: resolverDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::SOME(returnAnnotation),
+    body: bodyId,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Add `namespace <name> { <items> }` as a root item.
+function addRootNamespace(module: &mut Ast::Module, name: str, items: Vector<Ast::ItemId>): void {
+  let mut moduleRef: &mut Ast::Module = module;
+  moduleRef.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: resolverDummySpan(),
+    name: String::create(name),
+    items: items,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// Scenario: `namespace First { record Point {} }` and
+/// `namespace Second { record Point {} function make(): Point {} }`.
+///
+/// The bare annotation in `Second::make` names the `Point` its own namespace
+/// declares. The flat type-name index keys on the bare name alone, so both
+/// namespaces were handed the first `Point` and the two records collapsed.
+@test
+function resolverBareAnnotationPrefersItsOwnNamespace(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let firstPointId: Ast::ItemId = addNestedEmptyRecordForResolver(&mut module, "Point");
+  let mut firstItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  firstItems.push(firstPointId);
+  addRootNamespace(&mut module, "First", firstItems);
+
+  let secondPointId: Ast::ItemId = addNestedEmptyRecordForResolver(&mut module, "Point");
+  let makeId: Ast::ItemId = addNestedFunctionItem(&mut module, "make", "Point");
+  let mut secondItems: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  secondItems.push(secondPointId);
+  secondItems.push(makeId);
+  addRootNamespace(&mut module, "Second", secondItems);
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+  let pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  // The written-path index the driver builds. A bare annotation inside a
+  // namespace is read against it, and single-module analysis leaves it empty.
+  let direct: Analyzer::Imports::DirectDeclarationIndex = Analyzer::buildDirectDeclarationIndex(
+    &mut defStore,
+    &module,
+    &pass1,
+    &pass2,
+  );
+  let mut programIndex: Analyzer::Imports::ProgramQualifiedIndex = Analyzer::Imports::emptyProgramQualifiedIndex();
+  Analyzer::appendDirectToProgramIndex(&mut programIndex, &direct);
+  let overlay: Analyzer::Imports::ImportOverlay = Analyzer::Imports::emptyOverlay();
+
+  let output: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypesWithImports(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+    &pass2,
+    &overlay,
+    &programIndex,
+  );
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let Option::SOME(secondPointDefId) = Analyzer::Binder::findDef(&pass1, secondPointId.raw()) else {
+    @panic("Second::Point was not bound");
+  };
+  let expectedTypeId: Analyzer::TypeId = typeStore.recordType(secondPointDefId);
+
+  let Option::SOME(makeDefId) = Analyzer::Binder::findDef(&pass2, makeId.raw()) else {
+    @panic("Second::make was not bound");
+  };
+  let Option::SOME(Analyzer::Definition::Function(makeDef)) = defStore.get(makeDefId) else {
+    @panic("Second::make is not a function definition");
+  };
+
+  Test::assertEq<u32>(makeDef.returnType.raw(), expectedTypeId.raw());
 }
