@@ -30,6 +30,7 @@ Commands:
   stage2   Build stage2 with stage1 (builds stage1 first when missing).
   stage3   Build stage3 with stage2 and check that its C matches stage2's (fixed point).
   all      stage1, stage2, stage3 in order.
+  parity   Run the host e2e corpus through stage2 (builds stage2 first when missing).
   status   Show which stage artifacts exist.
   clean    Remove build/bootstrap.
 
@@ -122,6 +123,23 @@ build_stage3() {
   fi
 }
 
+run_parity() {
+  ensure_stage stage2
+
+  local report="${BOOTSTRAP_ROOT}/parity.md"
+
+  info "parity: running the host e2e corpus through $(stage_bin stage2)"
+
+  # A non-zero exit only means some cases diverge; the report is the product.
+  python3 "${SCRIPT_DIR}/selfhost_e2e_parity.py" \
+    --compiler "$(stage_bin stage2)" \
+    --std "${PROJECT_ROOT}/std" \
+    --work-dir "${BOOTSTRAP_ROOT}/parity" \
+    --report "$report" || true
+
+  info "parity: report -> ${report}"
+}
+
 show_status() {
   local stage
   for stage in stage1 stage2 stage3; do
@@ -145,6 +163,7 @@ main() {
       build_stage2
       build_stage3
       ;;
+    parity) run_parity ;;
     status) show_status ;;
     clean) rm -rf "$BOOTSTRAP_ROOT"; info "removed ${BOOTSTRAP_ROOT}" ;;
     -h|--help|help|"") usage ;;
