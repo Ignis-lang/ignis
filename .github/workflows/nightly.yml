@@ -143,13 +143,17 @@ jobs:
           # The release is reused rather than deleted, so its old assets have to
           # go explicitly or they accumulate under names that no longer match the
           # commit. A missing release is the first run, not an error.
+          #
+          # Only this job's own assets are pruned. The bootstrap job keeps the
+          # promotion streak and the last promoted selfhost binary on the same
+          # release, and those must survive a run that is not a candidate.
           RELEASE_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" 2>/dev/null || true)
           if [ -z "$RELEASE_JSON" ]; then
             echo "No nightly release yet; nothing to prune."
             exit 0
           fi
 
-          ASSET_IDS=$(jq -r '.assets[]?.id // empty' <<<"$RELEASE_JSON")
+          ASSET_IDS=$(jq -r '.assets[]? | select(.name | test("^(ignis-nightly-linux-amd64\\.tar\\.gz(\\.sha256)?|ignis-docs\\.tar\\.gz(\\.sha256)?)$")) | .id' <<<"$RELEASE_JSON")
           if [ -z "$ASSET_IDS" ]; then
             echo "Nightly release has no assets to prune."
             exit 0
