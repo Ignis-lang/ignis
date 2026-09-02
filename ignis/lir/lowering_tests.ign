@@ -218,3 +218,18 @@ function lirLoweringEmitsScheduledDrops(): void {
 
   Test::assertSnapshot("lir-lowering-scheduled-drops", rendered.toStr());
 }
+
+/// Scenario: values of an owning type produced by an expression and bound to
+/// nothing — discarded at block end, discarded inside a loop that then
+/// continues, and discarded before an early return. The last function reads a
+/// named local as a statement, which owns nothing new and must not add a
+/// second drop.
+/// Spec: IGN-39 — owned temporaries reach the LIR as unnamed dropped locals.
+@test
+function lirLoweringDropsOwnedTemporaries(): void {
+  let rendered: String = lirRenderLoweredDrops(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction make(id: u32): Owned {\n  return Owned { id: id };\n}\n\nfunction discarded(): void {\n  make(1);\n}\n\nfunction discardedInLoop(limit: u32): void {\n  let mut index: u32 = 0;\n\n  while (index < limit) {\n    make(index);\n    index += 1;\n    continue;\n  }\n}\n\nfunction discardedBeforeReturn(flag: boolean): u32 {\n  make(7);\n\n  if (flag) {\n    return 1;\n  }\n\n  return 0;\n}\n\nfunction boundThenRead(): void {\n  let bound: Owned = make(3);\n  bound;\n}\n",
+  );
+
+  Test::assertSnapshot("lir-lowering-owned-temporaries", rendered.toStr());
+}

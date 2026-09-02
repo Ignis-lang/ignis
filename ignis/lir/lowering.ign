@@ -25,6 +25,19 @@ export namespace LirLowering {
     public terminated: boolean;
     public breakBlockRaws: Vector<u32>;
     public continueBlockRaws: Vector<u32>;
+    /// Open synthetic frame count at each loop entry, parallel to
+    /// `breakBlockRaws`, so a `break` or `continue` drops every temporary the
+    /// loop body opened without touching the ones outside the loop.
+    public loopSyntheticDepths: Vector<u64>;
+    /// Unnamed locals holding owned temporaries the lowering spilled, flat
+    /// across every open block. `syntheticFrameStarts` records where each
+    /// block's own run begins, which is what makes a suffix drop possible.
+    public syntheticLocalRaws: Vector<u32>;
+    public syntheticFrameStarts: Vector<u64>;
+    /// Temps produced by a plain `Load` of a local. Such a temp aliases a
+    /// value that already carries its own scheduled drop, so spilling it
+    /// would drop the same value twice.
+    public loadAliasTempRaws: Vector<u32>;
     /// Definitions whose local slot holds a pointer to the original place
     /// rather than a copy: the by-mutable-reference captures of a thunk.
     public byrefCaptureRaws: Vector<u32>;
@@ -47,6 +60,10 @@ export namespace LirLowering {
         terminated: false,
         breakBlockRaws: Vector::new<u32>(),
         continueBlockRaws: Vector::new<u32>(),
+        loopSyntheticDepths: Vector::new<u64>(),
+        syntheticLocalRaws: Vector::new<u32>(),
+        syntheticFrameStarts: Vector::new<u64>(),
+        loadAliasTempRaws: Vector::new<u32>(),
         byrefCaptureRaws: Vector::new<u32>(),
         closureLocalDefRaws: Vector::new<u32>(),
         closureLocalTypeRaws: Vector::new<u32>(),
@@ -302,6 +319,217 @@ export namespace LirLowering {
       name: Option::NONE,
       borrowedAlias: false,
     });
+  }
+
+  /// Opens the synthetic-temp run of one block scope.
+  function pushSyntheticFrame(state: &mut LirLowering::LowerState): void {
+    state.syntheticFrameStarts.push(state.syntheticLocalRaws.length());
+  }
+
+  /// Closes the innermost run, discarding the locals it recorded. The drops
+  /// themselves were emitted before the block ended or by the exit that left
+  /// it, so nothing is owed here.
+  function popSyntheticFrame(state: &mut LirLowering::LowerState): void {
+    let Option::SOME(start) = state.syntheticFrameStarts.pop() else {
+      return;
+    };
+
+    while (state.syntheticLocalRaws.length() > start) {
+      let _ = state.syntheticLocalRaws.pop();
+    }
+  }
+
+  /// Records an unnamed local as owned by the innermost block. A local
+  /// allocated with no block open has no scope to die at.
+  function registerSyntheticLocal(state: &mut LirLowering::LowerState, local: Lir::LocalId): void {
+    if (state.syntheticFrameStarts.length() == 0) {
+      return;
+    }
+
+    state.syntheticLocalRaws.push(local.raw());
+  }
+
+  function markLoadAliasTemp(state: &mut LirLowering::LowerState, temp: Lir::TempId): void {
+    state.loadAliasTempRaws.push(temp.raw());
+  }
+
+  function isLoadAliasTemp(state: &mut LirLowering::LowerState, temp: Lir::TempId): boolean {
+    let mut index: u64 = 0;
+
+    while (index < state.loadAliasTempRaws.length()) {
+      if (let Option::SOME(raw) = state.loadAliasTempRaws.get(index)) {
+        if (*raw == temp.raw()) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Where the innermost open run starts, or the end of the list when no
+  /// block is open.
+  function currentSyntheticFrameStart(state: &mut LirLowering::LowerState): u64 {
+    let length: u64 = state.syntheticFrameStarts.length();
+
+    if (length == 0) {
+      return state.syntheticLocalRaws.length();
+    }
+
+    let Option::SOME(start) = state.syntheticFrameStarts.get(length - 1) else {
+      return state.syntheticLocalRaws.length();
+    };
+
+    return *start;
+  }
+
+  /// Where the run of the block that was innermost at a loop's entry starts.
+  function syntheticFrameStartAtDepth(state: &mut LirLowering::LowerState, depth: u64): u64 {
+    if (depth >= state.syntheticFrameStarts.length()) {
+      return state.syntheticLocalRaws.length();
+    }
+
+    let Option::SOME(start) = state.syntheticFrameStarts.get(depth) else {
+      return state.syntheticLocalRaws.length();
+    };
+
+    return *start;
+  }
+
+  /// Open frame count recorded when the innermost loop was entered.
+  function currentLoopSyntheticDepth(state: &mut LirLowering::LowerState): u64 {
+    let length: u64 = state.loopSyntheticDepths.length();
+
+    if (length == 0) {
+      return 0;
+    }
+
+    let Option::SOME(depth) = state.loopSyntheticDepths.get(length - 1) else {
+      return 0;
+    };
+
+    return *depth;
+  }
+
+  /// Drops the synthetic temporaries recorded from `start` onwards, newest
+  /// first, so an inner temporary dies before the one it was built from.
+  function emitSyntheticDropsFrom(
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    start: u64,
+  ): void {
+    let mut index: u64 = state.syntheticLocalRaws.length();
+
+    while (index > start) {
+      index -= 1;
+
+      let mut localRaw: u32 = 0;
+      let mut found: boolean = false;
+
+      if (let Option::SOME(raw) = state.syntheticLocalRaws.get(index)) {
+        localRaw = *raw;
+        found = true;
+      }
+
+      if (found) {
+        LirLowering::pushInstr(function_, state, Lir::Instr::Drop(Lir::InstrDrop {
+          local: Id::fromRaw<Lir::LocalTag>(localRaw),
+        }));
+      }
+    }
+  }
+
+  function emitCurrentSyntheticDrops(
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+  ): void {
+    let start: u64 = LirLowering::currentSyntheticFrameStart(state);
+
+    LirLowering::emitSyntheticDropsFrom(function_, state, start);
+  }
+
+  function emitAllSyntheticDrops(
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+  ): void {
+    LirLowering::emitSyntheticDropsFrom(function_, state, 0);
+  }
+
+  /// Spills an owned temporary into an unnamed local the innermost block will
+  /// drop. A temp that only aliases a named local is left alone: that local
+  /// already carries its own scheduled drop.
+  function spillIfOwnedTemp(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    operand: Lir::Operand,
+    ty: Analyzer::TypeId,
+  ): Lir::Operand {
+    let mut tempRaw: u32 = 0;
+    let mut isTemp: boolean = false;
+
+    if (let Lir::Operand::Temp(tempId) = &operand) {
+      tempRaw = tempId.raw();
+      isTemp = true;
+    }
+
+    if (!isTemp) {
+      return operand;
+    }
+
+    if (!Borrowck::needsDropType(defStore, typeStore, ty)) {
+      return operand;
+    }
+
+    if (LirLowering::isLoadAliasTemp(state, Id::fromRaw<Lir::TempTag>(tempRaw))) {
+      return operand;
+    }
+
+    let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, ty);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+      dest: local,
+      value: operand,
+    }));
+
+    LirLowering::registerSyntheticLocal(state, local);
+
+    return Lir::Operand::Local(local);
+  }
+
+  /// An extern callee never takes ownership of what it is handed, so an owned
+  /// argument stays this frame's to drop. A call into Ignis code moves it.
+  function spillOwnedCallArgument(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    operand: Lir::Operand,
+    ty: Analyzer::TypeId,
+    calleeIsExtern: boolean,
+  ): Lir::Operand {
+    if (!calleeIsExtern) {
+      return operand;
+    }
+
+    return LirLowering::spillIfOwnedTemp(defStore, typeStore, function_, state, operand, ty);
+  }
+
+  function calleeIsExtern(
+    defStore: &mut Analyzer::DefinitionStore,
+    calleeDef: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(calleeDef) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Function(functionDef) -> functionDef.isExtern,
+      _ -> false,
+    };
   }
 
   function isByrefCapture(
@@ -735,6 +963,8 @@ export namespace LirLowering {
             source: slot,
           }));
 
+          LirLowering::markLoadAliasTemp(state, dest);
+
           return Lir::Operand::Temp(dest);
         }
 
@@ -765,12 +995,21 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::Call(call) -> {
+        let isExtern: boolean = LirLowering::calleeIsExtern(defStore, call.callee);
         let mut args: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
         let mut argIndex: u64 = 0;
 
         while (argIndex < call.args.length()) {
           if (let Option::SOME(argId) = call.args.get(argIndex)) {
-            args.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId));
+            let mut argType: Analyzer::TypeId = nodeType;
+
+            if (let Option::SOME(argNode) = hirStore.get(*argId)) {
+              argType = argNode.typeId;
+            }
+
+            let argValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId);
+
+            args.push(LirLowering::spillOwnedCallArgument(defStore, typeStore, function_, state, argValue, argType, isExtern));
           }
 
           argIndex += 1;
@@ -827,6 +1066,8 @@ export namespace LirLowering {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::Block(block) -> {
+        LirLowering::pushSyntheticFrame(state);
+
         let mut statementIndex: u64 = 0;
 
         while (statementIndex < block.statements.length()) {
@@ -848,12 +1089,24 @@ export namespace LirLowering {
         if (!state.terminated) {
           LirLowering::emitScopeEndDefers(defStore, typeStore, hirStore, dropSchedules, function_, state, hirId);
           LirLowering::emitScopeEndDrops(dropSchedules, function_, state, hirId);
+          LirLowering::emitCurrentSyntheticDrops(function_, state);
         }
+
+        LirLowering::popSyntheticFrame(state);
 
         return blockValue;
       },
       Hir::HirKind::ExpressionStatement(innerId) -> {
-        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, innerId);
+        let mut innerType: Analyzer::TypeId = nodeType;
+
+        if (let Option::SOME(innerNode) = hirStore.get(innerId)) {
+          innerType = innerNode.typeId;
+        }
+
+        // A discarded value of an owning type is nobody else's to free, so it
+        // becomes a temporary this block drops.
+        let innerValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, innerId);
+        let _ = LirLowering::spillIfOwnedTemp(defStore, typeStore, function_, state, innerValue, innerType);
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
@@ -871,6 +1124,7 @@ export namespace LirLowering {
 
         LirLowering::emitExitDefers(defStore, typeStore, hirStore, dropSchedules, function_, state, &returnKey);
         LirLowering::emitExitDrops(dropSchedules, function_, state, &returnKey);
+        LirLowering::emitAllSyntheticDrops(function_, state);
 
         LirLowering::terminate(function_, state, Lir::Terminator::Return(returned));
 
@@ -1386,9 +1640,12 @@ export namespace LirLowering {
         if (breakLength > 0) {
           if (let Option::SOME(targetRaw) = state.breakBlockRaws.get(breakLength - 1)) {
             let breakKey: Hir::ExitKey = Hir::ExitKey::Break(hirId);
+            let loopDepth: u64 = LirLowering::currentLoopSyntheticDepth(state);
+            let syntheticStart: u64 = LirLowering::syntheticFrameStartAtDepth(state, loopDepth);
 
             LirLowering::emitExitDefers(defStore, typeStore, hirStore, dropSchedules, function_, state, &breakKey);
             LirLowering::emitExitDrops(dropSchedules, function_, state, &breakKey);
+            LirLowering::emitSyntheticDropsFrom(function_, state, syntheticStart);
 
             LirLowering::terminate(function_, state, Lir::Terminator::Goto(Id::fromRaw<Lir::BlockTag>(*targetRaw)));
           }
@@ -1402,9 +1659,12 @@ export namespace LirLowering {
         if (continueLength > 0) {
           if (let Option::SOME(targetRaw) = state.continueBlockRaws.get(continueLength - 1)) {
             let continueKey: Hir::ExitKey = Hir::ExitKey::Continue(hirId);
+            let loopDepth: u64 = LirLowering::currentLoopSyntheticDepth(state);
+            let syntheticStart: u64 = LirLowering::syntheticFrameStartAtDepth(state, loopDepth);
 
             LirLowering::emitExitDefers(defStore, typeStore, hirStore, dropSchedules, function_, state, &continueKey);
             LirLowering::emitExitDrops(dropSchedules, function_, state, &continueKey);
+            LirLowering::emitSyntheticDropsFrom(function_, state, syntheticStart);
 
             LirLowering::terminate(function_, state, Lir::Terminator::Goto(Id::fromRaw<Lir::BlockTag>(*targetRaw)));
           }
@@ -1564,6 +1824,12 @@ export namespace LirLowering {
       dest: spill,
       value: value,
     }));
+
+    // The spilled copy of an owning rvalue belongs to nobody else: only this
+    // frame can free it once the address stops being read.
+    if (Borrowck::needsDropType(defStore, typeStore, nodeType)) {
+      LirLowering::registerSyntheticLocal(state, spill);
+    }
 
     let mut spillPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
     let spillPtrType: Analyzer::TypeId = spillPtrTypeStoreRef.pointer(nodeType);
@@ -3133,6 +3399,7 @@ export namespace LirLowering {
 
         state.breakBlockRaws.push(exitBlock.raw());
         state.continueBlockRaws.push(bodyBlock.raw());
+        state.loopSyntheticDepths.push(state.syntheticFrameStarts.length());
 
         LirLowering::terminate(function_, state, Lir::Terminator::Goto(bodyBlock));
 
@@ -3150,6 +3417,7 @@ export namespace LirLowering {
 
         state.breakBlockRaws.push(exitBlock.raw());
         state.continueBlockRaws.push(continueBlock.raw());
+        state.loopSyntheticDepths.push(state.syntheticFrameStarts.length());
 
         LirLowering::terminate(function_, state, Lir::Terminator::Goto(headerBlock));
 
@@ -3179,6 +3447,7 @@ export namespace LirLowering {
 
         state.breakBlockRaws.push(exitBlock.raw());
         state.continueBlockRaws.push(continueBlock.raw());
+        state.loopSyntheticDepths.push(state.syntheticFrameStarts.length());
 
         if (let Option::SOME(initId) = forNode.init) {
           let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, initId);
@@ -3221,6 +3490,7 @@ export namespace LirLowering {
 
     let _breakPopped = state.breakBlockRaws.pop();
     let _continuePopped = state.continueBlockRaws.pop();
+    let _depthPopped = state.loopSyntheticDepths.pop();
 
     LirLowering::switchToBlock(state, exitBlock);
   }
