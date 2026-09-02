@@ -737,6 +737,7 @@ export namespace Analyzer {
             return Option::NONE;
           };
           staticDefId = selected;
+          Analyzer::Typecheck::recordCallTarget(state, callExprId, selected);
         }
 
         let methodInfoOpt: Option<Analyzer::Typecheck::MethodCallInfo> = Analyzer::Typecheck::lookupMethodDefInfo(defStore, staticDefId);
@@ -917,6 +918,7 @@ export namespace Analyzer {
           return Option::NONE;
         };
         selectedFunctionDefId = selected;
+        Analyzer::Typecheck::recordCallTarget(state, callExprId, selected);
       }
 
       let signatureOpt: Option<Analyzer::Typecheck::FunctionSignature> = Analyzer::Typecheck::extractFunctionSignature(
@@ -1394,6 +1396,8 @@ export namespace Analyzer {
               let mut typeStoreRetRef: &mut Analyzer::TypeStore = typeStore;
               let specializedReturn: Analyzer::TypeId = typeStoreRetRef.substitute(signature.returnType, &inferSymbols, &resolvedArgs);
 
+              Analyzer::Typecheck::recordCallTypeArgs(state, callExprId, &resolvedArgs);
+
               return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
                 state,
                 defStore,
@@ -1713,6 +1717,7 @@ export namespace Analyzer {
           return Option::NONE;
         };
         instanceOpt = Option::SOME(selected);
+        Analyzer::Typecheck::recordCallTarget(state, callExprId, selected);
       } else if (let Option::SOME(single) = candidateSet.get(0)) {
         instanceOpt = Option::SOME(*single);
       }

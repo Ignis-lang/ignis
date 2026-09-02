@@ -593,6 +593,10 @@ export namespace Hir {
     public nodes: Vector<Hir::HirNode>;
     public functionBodies: Hir::HirDefMap;
     public variablesInits: Hir::HirDefMap;
+    /// Initializers of module-level constants, kept apart from the local
+    /// `let` initializers in `variablesInits` because they sit outside any
+    /// function body and must survive monomorphization on their own.
+    public constantInits: Hir::HirDefMap;
     public items: Vector<Analyzer::DefinitionId>;
     public entryPoint: Option<Analyzer::DefinitionId>;
 
@@ -601,6 +605,7 @@ export namespace Hir {
         nodes: Vector::new<Hir::HirNode>(),
         functionBodies: Hir::HirDefMap::init(),
         variablesInits: Hir::HirDefMap::init(),
+        constantInits: Hir::HirDefMap::init(),
         items: Vector::new<Analyzer::DefinitionId>(),
         entryPoint: Option::NONE,
       };
@@ -640,6 +645,14 @@ export namespace Hir {
 
     public variableInit(&self, defId: Analyzer::DefinitionId): Option<Hir::HirId> {
       return self.variablesInits.get(defId);
+    }
+
+    public setConstantInit(&mut self, defId: Analyzer::DefinitionId, init: Hir::HirId): void {
+      self.constantInits.set(defId, init);
+    }
+
+    public constantInit(&self, defId: Analyzer::DefinitionId): Option<Hir::HirId> {
+      return self.constantInits.get(defId);
     }
 
     public addItem(&mut self, defId: Analyzer::DefinitionId): void {

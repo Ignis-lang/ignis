@@ -28,8 +28,11 @@ export namespace LirLowering {
     /// Definitions whose local slot holds a pointer to the original place
     /// rather than a copy: the by-mutable-reference captures of a thunk.
     public byrefCaptureRaws: Vector<u32>;
+    /// Evaluated module constants, so a reference to one folds into a LIR
+    /// constant instead of naming a global the emitter has no definition for.
+    public constValues: Analyzer::ConstEval::ConstValueMap;
 
-    public static init(): LowerState {
+    public static init(constValues: &Analyzer::ConstEval::ConstValueMap): LowerState {
       return LowerState {
         unsupported: 0,
         localDefRaws: Vector::new<u32>(),
@@ -39,6 +42,7 @@ export namespace LirLowering {
         breakBlockRaws: Vector::new<u32>(),
         continueBlockRaws: Vector::new<u32>(),
         byrefCaptureRaws: Vector::new<u32>(),
+        constValues: LirLowering::copyConstValueMap(constValues),
       };
     }
   }
@@ -149,6 +153,107 @@ export namespace LirLowering {
 
     block.terminator = terminator;
     state.terminated = true;
+  }
+
+  function copyConstValueMap(
+    map: &Analyzer::ConstEval::ConstValueMap
+  ): Analyzer::ConstEval::ConstValueMap {
+    let mut defIdRaws: Vector<u32> = Vector::new<u32>();
+    let mut values: Vector<Analyzer::ConstEval::ConstValue> = Vector::new<Analyzer::ConstEval::ConstValue>();
+    let mut index: u64 = 0;
+
+    while (index < map.defIdRaws.length()) {
+      let Option::SOME(defIdRaw) = map.defIdRaws.get(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(value) = map.values.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      defIdRaws.push(*defIdRaw);
+      values.push(Analyzer::ConstEval::copyConstValue(value));
+      index += 1;
+    }
+
+    return Analyzer::ConstEval::ConstValueMap { defIdRaws: defIdRaws, values: values };
+  }
+
+  function isUnsignedIntegerType(
+    typeStore: &mut Analyzer::TypeStore,
+    ty: Analyzer::TypeId
+  ): boolean {
+    if (let Option::SOME(typeNode) = typeStore.get(ty)) {
+      return match (typeNode) {
+        Analyzer::Type::U8 | Analyzer::Type::U16 | Analyzer::Type::U32 | Analyzer::Type::U64 -> true,
+        _ -> false,
+      };
+    }
+
+    return false;
+  }
+
+  function integerConst(bits: i64, isUnsigned: boolean, ty: Analyzer::TypeId): Lir::ConstValue {
+    if (isUnsigned) {
+      return Lir::ConstValue::UInt(bits as u64, ty);
+    }
+
+    return Lir::ConstValue::Int(bits, ty);
+  }
+
+  /// The folded operand for a reference to a constant with an evaluated value.
+  /// The analyzer keeps every integer as an `i64` bit pattern, so an unsigned
+  /// constant is reinterpreted here, the way the oracle does, to keep C from
+  /// applying signed semantics to it.
+  function foldedConstOperand(
+    typeStore: &mut Analyzer::TypeStore,
+    state: &mut LirLowering::LowerState,
+    defId: Analyzer::DefinitionId,
+    ty: Analyzer::TypeId,
+  ): Option<Lir::Operand> {
+    let Option::SOME(value) = Analyzer::ConstEval::findConstValue(&mut state.constValues, defId.raw()) else {
+      return Option::NONE;
+    };
+
+    let isUnsigned: boolean = LirLowering::isUnsignedIntegerType(typeStore, ty);
+
+    let constant: Lir::ConstValue = match (value) {
+      Analyzer::ConstEval::ConstValue::Int(i) -> LirLowering::integerConst(i, isUnsigned, ty),
+      Analyzer::ConstEval::ConstValue::Float(f) -> Lir::ConstValue::Float(f, ty),
+      Analyzer::ConstEval::ConstValue::Bool(b) -> Lir::ConstValue::Bool(b, ty),
+      Analyzer::ConstEval::ConstValue::Char(c) -> Lir::ConstValue::Char(c as u32, ty),
+      Analyzer::ConstEval::ConstValue::Str(s) -> Lir::ConstValue::Str(s, ty),
+      Analyzer::ConstEval::ConstValue::Null -> Lir::ConstValue::Null(ty),
+    };
+
+    return Option::SOME(Lir::Operand::Const(constant));
+  }
+
+  function implicitTerminator(
+    returnsVoid: boolean,
+    bodyIsUndef: boolean,
+    bodyValue: Lir::Operand
+  ): Lir::Terminator {
+    if (returnsVoid) {
+      return Lir::Terminator::Return(Option::NONE);
+    }
+
+    if (bodyIsUndef) {
+      return Lir::Terminator::Unreachable;
+    }
+
+    return Lir::Terminator::Return(Option::SOME(bodyValue));
+  }
+
+  function isUndefOperand(operand: &Lir::Operand): boolean {
+    if (let Lir::Operand::Const(value) = operand) {
+      if (let Lir::ConstValue::Undef(_) = value) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   function isVoidType(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
@@ -433,6 +538,16 @@ export namespace LirLowering {
           }));
 
           return Lir::Operand::Temp(dest);
+        }
+
+        if (let Option::SOME(folded) = LirLowering::foldedConstOperand(typeStore, state, defId, nodeType)) {
+          return folded;
+        }
+
+        // A constant without a folded value still has its initializer; the
+        // oracle lowers that expression at the use site.
+        if (let Option::SOME(initId) = hirStore.constantInit(defId)) {
+          return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, initId);
         }
 
         return Lir::Operand::GlobalRef(defId);
@@ -840,7 +955,7 @@ export namespace LirLowering {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::FieldAccess(fieldNode) -> {
-        let basePtr: Lir::Operand = LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, fieldNode.base);
+        let basePtr: Lir::Operand = LirLowering::lowerBasePtr(defStore, typeStore, hirStore, function_, state, fieldNode.base);
 
         let mut fieldPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
         let fieldPtrType: Analyzer::TypeId = fieldPtrTypeStoreRef.pointer(nodeType);
@@ -863,7 +978,7 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::Reference(referenceNode) -> {
-        return LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, referenceNode.expression);
+        return LirLowering::lowerBasePtr(defStore, typeStore, hirStore, function_, state, referenceNode.expression);
       },
       Hir::HirKind::RecordInit(recordNode) -> {
         let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
@@ -1021,6 +1136,14 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::StaticAccess(defId) -> {
+        if (let Option::SOME(folded) = LirLowering::foldedConstOperand(typeStore, state, defId, nodeType)) {
+          return folded;
+        }
+
+        if (let Option::SOME(initId) = hirStore.constantInit(defId)) {
+          return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, initId);
+        }
+
         return Lir::Operand::GlobalRef(defId);
       },
       Hir::HirKind::Assign(assignNode) -> {
@@ -1084,6 +1207,31 @@ export namespace LirLowering {
   /// lvalue paths: a pointer-typed base passes through, a local variable
   /// takes its address, a nested field access chains `GetFieldPtr`, and any
   /// other value spills to a synthetic local first.
+  /// The pointer a field access or reference starts from. A pointer-typed
+  /// expression is already that pointer (auto-deref of `self.field` through
+  /// `&mut T`); anything else is a place whose address is taken. An
+  /// assignment target never comes through here: a pointer-typed field is a
+  /// place to store into, not a pointer to store through.
+  function lowerBasePtr(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    hirId: Hir::HirId,
+  ): Lir::Operand {
+    let Option::SOME(node) = hirStore.get(hirId) else {
+      state.unsupported += 1;
+      return Lir::Operand::Const(Lir::ConstValue::Undef(function_.returnType));
+    };
+
+    if (LirLowering::isPointerLikeType(typeStore, node.typeId)) {
+      return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hirId);
+    }
+
+    return LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, hirId);
+  }
+
   function lowerPlacePtr(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1099,10 +1247,6 @@ export namespace LirLowering {
 
     let nodeType: Analyzer::TypeId = node.typeId;
     let nodeSpan: SourceSpan = node.span;
-
-    if (LirLowering::isPointerLikeType(typeStore, nodeType)) {
-      return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hirId);
-    }
 
     if (let Hir::HirKind::Variable(defId) = &node.kind) {
       if (let Option::SOME(slot) = LirLowering::lookupLocal(state, defId)) {
@@ -1144,7 +1288,7 @@ export namespace LirLowering {
     }
 
     if (let Hir::HirKind::FieldAccess(fieldNode) = &node.kind) {
-      let basePtr: Lir::Operand = LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, fieldNode.base);
+      let basePtr: Lir::Operand = LirLowering::lowerBasePtr(defStore, typeStore, hirStore, function_, state, fieldNode.base);
 
       let mut fieldPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
       let fieldPtrType: Analyzer::TypeId = fieldPtrTypeStoreRef.pointer(nodeType);
@@ -1158,6 +1302,26 @@ export namespace LirLowering {
       }));
 
       return Lir::Operand::Temp(fieldPtr);
+    }
+
+    // `&base[index]` is the element's own address, never a copy of it: a
+    // spilled copy would hand the caller a pointer into this frame.
+    if (let Hir::HirKind::Index(indexNode) = &node.kind) {
+      let base: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, indexNode.base);
+      let indexOperand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, indexNode.index);
+
+      let mut elementPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let elementPtrType: Analyzer::TypeId = elementPtrTypeStoreRef.pointer(nodeType);
+      let elementPtr: Lir::TempId = LirLowering::freshTemp(function_, elementPtrType, nodeSpan);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::GetElementPtr(Lir::InstrGetElementPtr {
+        dest: elementPtr,
+        base: base,
+        index: indexOperand,
+        elementType: nodeType,
+      }));
+
+      return Lir::Operand::Temp(elementPtr);
     }
 
     let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hirId);
@@ -1916,6 +2080,7 @@ export namespace LirLowering {
   function lowerPatternCheck(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     value: &Lir::Operand,
@@ -1967,13 +2132,21 @@ export namespace LirLowering {
           span,
         );
 
+        let mut constantOperand: Lir::Operand = Lir::Operand::GlobalRef(defId);
+
+        if (let Option::SOME(folded) = LirLowering::foldedConstOperand(typeStore, state, defId, valueType)) {
+          constantOperand = folded;
+        } else if (let Option::SOME(initId) = hirStore.constantInit(defId)) {
+          constantOperand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, initId);
+        }
+
         let dest: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
           dest: dest,
           op: Hir::BinaryOperation::Equal,
           left: matchValue,
-          right: Lir::Operand::GlobalRef(defId),
+          right: constantOperand,
         }));
 
         return Lir::Operand::Temp(dest);
@@ -2085,6 +2258,7 @@ export namespace LirLowering {
             nested = LirLowering::lowerPatternCheck(
               defStore,
               typeStore,
+              hirStore,
               function_,
               state,
               &fieldOperand,
@@ -2122,6 +2296,7 @@ export namespace LirLowering {
           let check: Lir::Operand = LirLowering::lowerPatternCheck(
             defStore,
             typeStore,
+            hirStore,
             function_,
             state,
             value,
@@ -2173,6 +2348,7 @@ export namespace LirLowering {
   function lowerTupleMatchPatternCheck(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     elementLocals: &Vector<Lir::LocalId>,
@@ -2219,6 +2395,7 @@ export namespace LirLowering {
           let nested: Lir::Operand = LirLowering::lowerPatternCheck(
             defStore,
             typeStore,
+            hirStore,
             function_,
             state,
             &elementOperand,
@@ -2255,6 +2432,7 @@ export namespace LirLowering {
           let nested: Lir::Operand = LirLowering::lowerTupleMatchPatternCheck(
             defStore,
             typeStore,
+            hirStore,
             function_,
             state,
             elementLocals,
@@ -2427,6 +2605,7 @@ export namespace LirLowering {
         matches = LirLowering::lowerTupleMatchPatternCheck(
           defStore,
           typeStore,
+          hirStore,
           function_,
           state,
           &elementLocals,
@@ -2446,6 +2625,7 @@ export namespace LirLowering {
         matches = LirLowering::lowerPatternCheck(
           defStore,
           typeStore,
+          hirStore,
           function_,
           state,
           &scrutineeOperand,
@@ -2548,6 +2728,7 @@ export namespace LirLowering {
     let matches: Lir::Operand = LirLowering::lowerPatternCheck(
       defStore,
       typeStore,
+      hirStore,
       function_,
       state,
       &scrutineeOperand,
@@ -2865,6 +3046,7 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    constValues: &Analyzer::ConstEval::ConstValueMap,
   ): LirLowering::LowerModuleResult {
     let mut program: Lir::LirProgram = Lir::LirProgram::init();
     let tables: LirLowering::ClosureTables = LirLowering::collectClosureTables(hirStore);
@@ -2905,7 +3087,7 @@ export namespace LirLowering {
       let entry: Lir::BlockId = function_.allocBlock(Lir::Block::create(String::create("entry")));
       function_.entryBlock = entry;
 
-      let mut state: LirLowering::LowerState = LirLowering::LowerState::init();
+      let mut state: LirLowering::LowerState = LirLowering::LowerState::init(constValues);
 
       LirLowering::registerParams(defStore, &mut function_, &mut state, &paramDefs);
 
@@ -2923,7 +3105,19 @@ export namespace LirLowering {
         LirLowering::emitDropFunctionBody(defStore, typeStore, &mut function_, &mut state, &paramDefs, &dropCaptures);
       }
 
-      let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, &mut function_, &mut state, bodyId);
+      let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, &mut function_, &mut state, bodyId);
+
+      // A body that falls off its end returns implicitly: nothing for a void
+      // function, its value otherwise. The value is the block's tail, which
+      // is how an expression-bodied lambda's thunk returns its result.
+      // A block whose every path already returned leaves an `Undef` behind;
+      // its merge block is unreachable rather than a return of nothing.
+      let returnsVoid: boolean = LirLowering::isVoidType(typeStore, returnType);
+      let bodyIsUndef: boolean = LirLowering::isUndefOperand(&bodyValue);
+      let implicitTerminator: Lir::Terminator = LirLowering::implicitTerminator(returnsVoid, bodyIsUndef, bodyValue);
+
+      // `terminate` drops the terminator when the block already has one.
+      LirLowering::terminate(&mut function_, &mut state, implicitTerminator);
 
       unsupported += state.unsupported;
       loweredFunctions += 1;

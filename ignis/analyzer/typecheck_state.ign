@@ -18,6 +18,22 @@ export namespace Analyzer {
       public typeIds: Vector<Analyzer::TypeId>;
     }
 
+    /// Side map from a call expression's raw id to the overload the
+    /// arguments selected. The resolver stops at the first same-name
+    /// definition, so lowering needs this to call the right sibling.
+    record CallTargetMap {
+      public nodeIds: Vector<u32>;
+      public defIds: Vector<Analyzer::DefinitionId>;
+    }
+
+    /// Side map from a call expression's raw id to the type arguments the
+    /// typechecker inferred for a generic callee called without written
+    /// ones. Monomorphization needs them to instantiate the callee.
+    record CallTypeArgsMap {
+      public nodeIds: Vector<u32>;
+      public typeArgs: Vector<Vector<Analyzer::TypeId>>;
+    }
+
     /// Declaration and use log for local bindings, produced by typecheck and
     /// consumed by the lint phase.
     ///
@@ -51,12 +67,16 @@ export namespace Analyzer {
     record TypecheckOutput {
       public diagnostics: DiagnosticBag;
       public exprTypes: Analyzer::Typecheck::ExprTypeMap;
+      public callTargets: Analyzer::Typecheck::CallTargetMap;
+      public callTypeArgs: Analyzer::Typecheck::CallTypeArgsMap;
       public localUses: Analyzer::Typecheck::LocalBindingUses;
     }
 
     record TypecheckState {
       public diagnostics: DiagnosticBag;
       public exprTypes: Analyzer::Typecheck::ExprTypeMap;
+      public callTargets: Analyzer::Typecheck::CallTargetMap;
+      public callTypeArgs: Analyzer::Typecheck::CallTypeArgsMap;
       public currentFunction: Analyzer::DefinitionId;
       public currentReturnType: Analyzer::TypeId;
       public loopDepth: u64;
@@ -554,6 +574,7 @@ export namespace Analyzer {
             mutable: v.mutable,
             takes: false,
             noEscape: false,
+            isExtern: false,
           };
           let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
           defsRef.replace(varDefId, Analyzer::Definition::Variable(updated));
@@ -578,6 +599,37 @@ export namespace Analyzer {
       let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
       stateRef.exprTypes.nodeIds.push(exprId.raw());
       stateRef.exprTypes.typeIds.push(typeId);
+    }
+
+    function recordCallTarget(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      exprId: Ast::ExpressionId,
+      defId: Analyzer::DefinitionId,
+    ): void {
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.callTargets.nodeIds.push(exprId.raw());
+      stateRef.callTargets.defIds.push(defId);
+    }
+
+    function recordCallTypeArgs(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      exprId: Ast::ExpressionId,
+      typeArgs: &Vector<Analyzer::TypeId>,
+    ): void {
+      let mut copied: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut index: u64 = 0;
+
+      while (index < typeArgs.length()) {
+        if (let Option::SOME(typeArg) = typeArgs.get(index)) {
+          copied.push(*typeArg);
+        }
+
+        index += 1;
+      }
+
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.callTypeArgs.nodeIds.push(exprId.raw());
+      stateRef.callTypeArgs.typeArgs.push(copied);
     }
 
     function lookupRecordedExprType(

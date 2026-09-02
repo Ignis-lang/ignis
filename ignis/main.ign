@@ -46,6 +46,47 @@ function countBySeverity(bag: &DiagnosticBag, target: Severity): u64 {
 }
 
 /// Format a per-phase status line like `  lex  : ok (0 errors, 0 warnings)`.
+/// Merge every module's evaluated constants into one map for LIR lowering,
+/// which runs over the whole monomorphized program at once.
+function collectProgramConstValues(
+  records: &Vector<Analyzer::ModuleAnalysisRecord>,
+): Analyzer::ConstEval::ConstValueMap {
+  let mut merged: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap {
+    defIdRaws: Vector::new<u32>(),
+    values: Vector::new<Analyzer::ConstEval::ConstValue>(),
+  };
+  let mut recordIndex: u64 = 0;
+
+  while (recordIndex < records.length()) {
+    let Option::SOME(analysisRecord) = records.get(recordIndex) else {
+      recordIndex += 1;
+      continue;
+    };
+
+    let moduleValues: &Analyzer::ConstEval::ConstValueMap = &analysisRecord.output.constValues.values;
+    let mut valueIndex: u64 = 0;
+
+    while (valueIndex < moduleValues.defIdRaws.length()) {
+      let Option::SOME(defIdRaw) = moduleValues.defIdRaws.get(valueIndex) else {
+        valueIndex += 1;
+        continue;
+      };
+      let Option::SOME(value) = moduleValues.values.get(valueIndex) else {
+        valueIndex += 1;
+        continue;
+      };
+
+      merged.defIdRaws.push(*defIdRaw);
+      merged.values.push(Analyzer::ConstEval::copyConstValue(value));
+      valueIndex += 1;
+    }
+
+    recordIndex += 1;
+  }
+
+  return merged;
+}
+
 function formatPhaseLine(name: str, errors: u64, warnings: u64): String {
   let status: str = errors == 0 ? "ok" : "fail";
 
@@ -385,10 +426,13 @@ function compileFile(path: &String): i32 {
 
     Io::println(`  mono: ${monoResult.instantiations} instantiations, ${monoResult.hir.nodes.length()} nodes, ${monoGenericNodes} generic nodes left`);
 
+    let programConstValues: Analyzer::ConstEval::ConstValueMap = collectProgramConstValues(&records);
+
     let lirResult: LirLowering::LowerModuleResult = LirLowering::lowerModule(
       &mut defStore,
       &mut typeStore,
       &monoResult.hir,
+      &programConstValues,
     );
 
     lirUnsupported += lirResult.unsupported;

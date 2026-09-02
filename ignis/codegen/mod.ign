@@ -117,19 +117,35 @@ export namespace CodegenC {
     return CodegenC::sanitize(text);
   }
 
-  /// The C symbol for a definition. Extern functions keep the name the C side
-  /// already defines; everything else is suffixed with its definition id.
+  /// The C symbol for a definition. Extern functions and constants keep the
+  /// name the C side already defines; everything else is suffixed with its
+  /// definition id.
   function mangledName(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
     defId: Analyzer::DefinitionId,
   ): String {
     let mut isExtern: boolean = false;
+    let mut externName: Option<String> = Option::NONE;
 
     if (let Option::SOME(definition) = defStore.get(defId)) {
-      if (let Analyzer::Definition::Function(functionDef) = definition) {
-        isExtern = functionDef.isExtern;
-      }
+      match (definition) {
+        Analyzer::Definition::Function(functionDef) -> {
+          isExtern = functionDef.isExtern;
+
+          if (let Option::SOME(name) = &functionDef.externName) {
+            externName = Option::SOME(name.clone());
+          }
+        },
+        Analyzer::Definition::Variable(variableDef) -> {
+          isExtern = variableDef.isExtern;
+        },
+        _ -> {},
+      };
+    }
+
+    if (let Option::SOME(name) = externName) {
+      return name;
     }
 
     let base: String = CodegenC::definitionName(defStore, symbols, defId);
@@ -250,11 +266,20 @@ export namespace CodegenC {
           shape = 3;
         }
       },
+      Analyzer::Type::Slice(_) -> {
+        shape = 4;
+      },
       _ -> {},
     };
 
     if (shape == 3) {
       let name: String = CodegenC::closureStructName(typeId);
+
+      return `struct ${name.toStr()}`;
+    }
+
+    if (shape == 4) {
+      let name: String = CodegenC::sliceStructName(typeId);
 
       return `struct ${name.toStr()}`;
     }
@@ -952,6 +977,66 @@ export namespace CodegenC {
     return Option::NONE;
   }
 
+  function isEqualityOperation(op: &Hir::BinaryOperation): boolean {
+    return match (op) {
+      Hir::BinaryOperation::Equal | Hir::BinaryOperation::NotEqual -> true,
+      _ -> false,
+    };
+  }
+
+  /// Whether an operand is an enum none of whose variants carries a payload.
+  function isUnitEnumOperand(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): boolean {
+    let Option::SOME(typeId) = CodegenC::operandType(function_, operand) else {
+      return false;
+    };
+
+    let mut enumDefId: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+      if (let Analyzer::Type::Enum(defId) = typeNode) {
+        enumDefId = Option::SOME(defId);
+      }
+    }
+
+    let Option::SOME(defId) = enumDefId else {
+      return false;
+    };
+
+    let mut variants: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Enum(enumDef) = definition) {
+        variants = CodegenC::copyDefIds(&enumDef.variants);
+      }
+    }
+
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < variants.length()) {
+      let Option::SOME(variantId) = variants.get(variantIndex) else {
+        variantIndex += 1;
+        continue;
+      };
+
+      if (let Option::SOME(variantDefinition) = defStore.get(*variantId)) {
+        if (let Analyzer::Definition::Variant(variantDef) = variantDefinition) {
+          if (variantDef.payload.length() > 0) {
+            return false;
+          }
+        }
+      }
+
+      variantIndex += 1;
+    }
+
+    return true;
+  }
+
   /// The C name of the drop-glue helper for a type. The type store is
   /// deduplicated, so the raw type id already identifies the type uniquely
   /// within one translation unit.
@@ -1069,7 +1154,15 @@ export namespace CodegenC {
       },
       Lir::Instr::Store(node) -> {
         let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.value);
-        let line: String = `    l${node.dest.raw()} = ${value.toStr()};\n`;
+        let mut line: String = `    l${node.dest.raw()} = ${value.toStr()};\n`;
+
+        if (let Option::SOME(data) = function_.locals.get(node.dest.raw() as u64)) {
+          if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, data.ty)) {
+            let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
+            line = `    memcpy(l${node.dest.raw()}, ${value.toStr()}, ${array.size} * sizeof(${elementText.toStr()}));\n`;
+          }
+        }
+
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -1104,7 +1197,15 @@ export namespace CodegenC {
         } else {
           let left: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.left);
           let right: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.right);
-          let line: String = `    t${node.dest.raw()} = ${left.toStr()} ${operator} ${right.toStr()};\n`;
+          // Equality on a payload-free enum compares tags: the C struct has
+          // no `==` of its own.
+          let mut tagSuffix: str = "";
+
+          if (CodegenC::isEqualityOperation(&node.op) && CodegenC::isUnitEnumOperand(defStore, typeStore, function_, &node.left)) {
+            tagSuffix = ".tag";
+          }
+
+          let line: String = `    t${node.dest.raw()} = ${left.toStr()}${tagSuffix} ${operator} ${right.toStr()}${tagSuffix};\n`;
           let mut outputRef: &mut String = output;
           outputRef.pushStr(line.toStr());
         }
@@ -1124,7 +1225,15 @@ export namespace CodegenC {
         outputRef.pushStr(line.toStr());
       },
       Lir::Instr::AddrOfLocal(node) -> {
-        let line: String = `    t${node.dest.raw()} = &l${node.local.raw()};\n`;
+        let mut line: String = `    t${node.dest.raw()} = &l${node.local.raw()};\n`;
+
+        // An array local's name already decays to the pointer.
+        if (let Option::SOME(data) = function_.locals.get(node.local.raw() as u64)) {
+          if (CodegenC::fixedArrayShape(typeStore, data.ty).isSome()) {
+            line = `    t${node.dest.raw()} = l${node.local.raw()};\n`;
+          }
+        }
+
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -1150,8 +1259,11 @@ export namespace CodegenC {
       Lir::Instr::EnumGetPayloadField(node) -> {
         let source: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.source);
         let line: String = `    t${node.dest.raw()} = (${source.toStr()}).payload.variant_${node.variantTag}.field_${node.fieldIndex};\n`;
-        let mut outputRef: &mut String = output;
-        outputRef.pushStr(line.toStr());
+
+        if (!CodegenC::tempIsVoid(typeStore, function_, node.dest)) {
+          let mut outputRef: &mut String = output;
+          outputRef.pushStr(line.toStr());
+        }
       },
       Lir::Instr::InitEnumVariant(node) -> {
         let destination: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.destPtr);
@@ -1160,13 +1272,17 @@ export namespace CodegenC {
         outputRef.pushStr(header.toStr());
 
         let mut payloadIndex: u64 = 0;
+        let mut fieldIndex: u64 = 0;
 
         while (payloadIndex < node.payload.length()) {
           if (let Option::SOME(payloadOperand) = node.payload.get(payloadIndex)) {
-            let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, payloadOperand);
-            let line: String = `    (${destination.toStr()})->payload.variant_${node.variantTag}.field_${payloadIndex} = ${value.toStr()};\n`;
-            let mut payloadRef: &mut String = output;
-            payloadRef.pushStr(line.toStr());
+            if (!CodegenC::operandIsVoid(typeStore, function_, payloadOperand)) {
+              let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, payloadOperand);
+              let line: String = `    (${destination.toStr()})->payload.variant_${node.variantTag}.field_${fieldIndex} = ${value.toStr()};\n`;
+              let mut payloadRef: &mut String = output;
+              payloadRef.pushStr(line.toStr());
+              fieldIndex += 1;
+            }
           }
 
           payloadIndex += 1;
@@ -1234,7 +1350,7 @@ export namespace CodegenC {
       },
       Lir::Instr::PanicMessage(node) -> {
         let escaped: String = CodegenC::escapeStringLiteral(&node.message);
-        let line: String = `    ignis_panic("${escaped.toStr()}");\n`;
+        let line: String = `    fprintf(stderr, "panic: %s\\n", "${escaped.toStr()}");\n    exit(101);\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -1861,7 +1977,7 @@ export namespace CodegenC {
       if (let Option::SOME(variantDefId) = members.get(probeIndex)) {
         if (let Option::SOME(variantDefinition) = defStore.get(*variantDefId)) {
           if (let Analyzer::Definition::Variant(variantDef) = variantDefinition) {
-            if (variantDef.payload.length() > 0) {
+            if (CodegenC::countNonVoid(typeStore, &variantDef.payload) > 0) {
               hasPayload = true;
             }
           }
@@ -1892,9 +2008,13 @@ export namespace CodegenC {
 
             let mut payloadIndex: u64 = 0;
 
+            // A `void` payload (`Result<void, E>`'s OK) has no C field, as in
+            // the host; the remaining fields are numbered without it.
             while (payloadIndex < variantDef.payload.length()) {
               if (let Option::SOME(payloadType) = variantDef.payload.get(payloadIndex)) {
-                payloadTypes.push(*payloadType);
+                if (!CodegenC::isVoidType(typeStore, *payloadType)) {
+                  payloadTypes.push(*payloadType);
+                }
               }
 
               payloadIndex += 1;
@@ -1964,7 +2084,15 @@ export namespace CodegenC {
     while (localIndex < function_.locals.length()) {
       if (let Option::SOME(local) = function_.locals.get(localIndex)) {
         // A slot holding the result of a void call has no declaration to make.
-        if (!CodegenC::isVoidType(typeStore, local.ty)) {
+        // A fixed array is the one local declared with its element type and
+        // size, since its uses read it as a decayed pointer.
+        if (let Option::SOME(array) = CodegenC::fixedArrayShape(typeStore, local.ty)) {
+          let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, array.element);
+          let line: String = `    ${elementText.toStr()} l${localIndex}[${array.size}];\n`;
+
+          let mut localRef: &mut String = output;
+          localRef.pushStr(line.toStr());
+        } else if (!CodegenC::isVoidType(typeStore, local.ty)) {
           let typeText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, local.ty);
           let line: String = `    ${typeText.toStr()} l${localIndex};\n`;
 
@@ -2238,6 +2366,56 @@ export namespace CodegenC {
     };
   }
 
+  function countNonVoid(
+    typeStore: &mut Analyzer::TypeStore,
+    types: &Vector<Analyzer::TypeId>
+  ): u64 {
+    let mut count: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < types.length()) {
+      if (let Option::SOME(typeId) = types.get(index)) {
+        if (!CodegenC::isVoidType(typeStore, *typeId)) {
+          count += 1;
+        }
+      }
+
+      index += 1;
+    }
+
+    return count;
+  }
+
+  function operandIsVoid(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    operand: &Lir::Operand,
+  ): boolean {
+    let Option::SOME(typeId) = CodegenC::operandType(function_, operand) else {
+      return false;
+    };
+
+    return CodegenC::isVoidType(typeStore, typeId);
+  }
+
+  record FixedArrayShape {
+    public element: Analyzer::TypeId;
+    public size: u64;
+  }
+
+  function fixedArrayShape(
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId
+  ): Option<CodegenC::FixedArrayShape> {
+    if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+      if (let Analyzer::Type::FixedArray(element, size) = typeNode) {
+        return Option::SOME(CodegenC::FixedArrayShape { element: element, size: size });
+      }
+    }
+
+    return Option::NONE;
+  }
+
   function isVoidType(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
     let Option::SOME(typeNode) = typeStore.get(typeId) else {
       return false;
@@ -2263,6 +2441,63 @@ export namespace CodegenC {
   /// One environment struct per thunk, then one closure struct per signature.
   /// A closure value is the call pointer, an optional drop pointer, and the
   /// environment the two of them share.
+  /// The type store is deduplicated, so the raw type id identifies a slice
+  /// type uniquely within one translation unit.
+  function sliceStructName(typeId: Analyzer::TypeId): String {
+    return `__ignis_slice_t${typeId.raw()}`;
+  }
+
+  /// One `{ data, len }` struct per concrete slice type in the store, as the
+  /// host emits. Slices over a type parameter belong to generic templates
+  /// monomorphization already replaced and get no struct.
+  function emitSliceTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+  ): void {
+    let mut emittedAny: boolean = false;
+    let mut rawId: u32 = 0;
+    let typeCount: u64 = typeStore.length();
+
+    while ((rawId as u64) < typeCount) {
+      let typeId: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(rawId);
+      let mut element: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+        if (let Analyzer::Type::Slice(elementType) = typeNode) {
+          element = Option::SOME(elementType);
+        }
+      }
+
+      let Option::SOME(elementType) = element else {
+        rawId += 1;
+        continue;
+      };
+
+      if (typeStore.containsTypeParam(elementType)) {
+        rawId += 1;
+        continue;
+      }
+
+      if (!emittedAny) {
+        let mut headerRef: &mut String = output;
+        headerRef.pushStr("\n// Slice types\n");
+        emittedAny = true;
+      }
+
+      let name: String = CodegenC::sliceStructName(typeId);
+      let elementText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, elementType);
+      let definition: String = `struct ${name.toStr()} {\n    ${elementText.toStr()}* data;\n    u64 len;\n};\n`;
+
+      let mut outputRef: &mut String = output;
+      outputRef.pushStr(definition.toStr());
+
+      rawId += 1;
+    }
+  }
+
   function emitClosureTypes(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -2365,94 +2600,22 @@ export namespace CodegenC {
 
   /// A declaration for every function the C side defines.
   ///
-  /// An extern function has no body to lower, so it never reaches the LIR
-  /// program and the prototype loop never sees it. Its declaration has to come
-  /// straight out of the definition store.
-  function emitExternDeclarations(
-    defStore: &mut Analyzer::DefinitionStore,
-    typeStore: &mut Analyzer::TypeStore,
-    symbols: &mut Analyzer::SymbolTable,
-    output: &mut String,
-    closures: &CodegenC::ClosureTables,
-  ): void {
-    let mut declarations: String = String::create("");
-    let mut rawId: u64 = 0;
-
-    while (rawId < defStore.length()) {
-      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
-
-      let mut isExtern: boolean = false;
-      let mut returnType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
-      let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
-
-      if (let Option::SOME(definition) = defStore.get(defId)) {
-        if (let Analyzer::Definition::Function(functionDef) = definition) {
-          isExtern = functionDef.isExtern;
-          returnType = functionDef.returnType;
-          params = CodegenC::copyDefIds(&functionDef.params);
-        }
-      }
-
-      if (!isExtern) {
-        rawId += 1;
-        continue;
-      }
-
-      let name: String = CodegenC::mangledName(defStore, symbols, defId);
-
-      // `ignis_rt.h` already declares everything the runtime owns, and it spells
-      // the string and vector types with its own C tags. Redeclaring one here
-      // with the emitter's struct name is a conflicting declaration, not a
-      // missing one.
-      if (name.startsWith("ignis_")) {
-        rawId += 1;
-        continue;
-      }
-
-      let returnText: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, returnType);
-
-      let mut line: String = `extern ${returnText.toStr()} ${name.toStr()}(`;
-
-      if (params.length() == 0) {
-        line.pushStr("void");
-      } else {
-        let mut paramIndex: u64 = 0;
-
-        while (paramIndex < params.length()) {
-          if (let Option::SOME(paramId) = params.get(paramIndex)) {
-            let mut paramType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
-
-            if (let Option::SOME(paramDefinition) = defStore.get(*paramId)) {
-              if (let Analyzer::Definition::Variable(variableDef) = paramDefinition) {
-                paramType = variableDef.declaredType;
-              }
-            }
-
-            if (paramIndex > 0) {
-              line.pushStr(", ");
-            }
-
-            let text: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, paramType);
-            line.pushStr(text.toStr());
-          }
-
-          paramIndex += 1;
-        }
-      }
-
-      line.pushStr(");\n");
-      declarations.pushStr(line.toStr());
-
-      rawId += 1;
-    }
-
-    if (declarations.length() == 0) {
-      return;
-    }
-
+  function emitStdHeaders(output: &mut String): void {
     let mut outputRef: &mut String = output;
-    outputRef.pushStr("\n// Extern declarations\n");
-    outputRef.pushStr(declarations.toStr());
+    outputRef.pushStr("#include <stdlib.h>\n");
+    outputRef.pushStr("#include <string.h>\n");
+    outputRef.pushStr("#include <stdio.h>\n");
+    outputRef.pushStr("#include <errno.h>\n");
+    outputRef.pushStr("#include <ctype.h>\n");
+    outputRef.pushStr("#include <time.h>\n");
+    outputRef.pushStr("#include <signal.h>\n");
+    outputRef.pushStr("#include <unistd.h>\n");
+    outputRef.pushStr("#include <sys/mman.h>\n");
+    outputRef.pushStr("#include <sys/wait.h>\n");
+    outputRef.pushStr("#include <sys/stat.h>\n");
+    outputRef.pushStr("#include <dirent.h>\n");
+    outputRef.pushStr("#include <fcntl.h>\n");
+    outputRef.pushStr("#include <math.h>\n\n");
   }
 
   /// One `static void <name>(u8*)` helper per type a `DropGlue` instruction
@@ -2562,12 +2725,12 @@ export namespace CodegenC {
 
     source.pushStr("#include \"ignis_rt.h\"\n");
 
-    // `ignis_rt.h` already pulls stdint, stdlib and float.h. `memcpy` and `pow`
-    // come from these two, and the Rust emitter only includes them when an
-    // instruction needs them. Scanning the program for that is a refinement the
-    // measured loop does not need yet.
-    source.pushStr("#include <string.h>\n");
-    source.pushStr("#include <math.h>\n\n");
+    // The host includes the headers each linked std module names in
+    // `std/manifest.toml`; this is that list for `libc` and `math`, which every
+    // program pulls through the prelude. An extern function is then declared
+    // by its header, never by the emitter, since a second declaration with the
+    // emitter's spelling of the parameter types conflicts with the header's.
+    CodegenC::emitStdHeaders(&mut source);
 
     let tables: CodegenC::ClosureTables = CodegenC::collectClosureTables(defStore, typeStore, program);
     let closures: &CodegenC::ClosureTables = &tables;
@@ -2600,11 +2763,11 @@ export namespace CodegenC {
       definitionIndex += 1;
     }
 
+    CodegenC::emitSliceTypes(defStore, typeStore, symbols, &mut source, closures);
+
     CodegenC::emitClosureTypes(defStore, typeStore, symbols, &mut source, closures);
 
     CodegenC::emitDropGlueHelpers(defStore, typeStore, symbols, &mut source, closures, program);
-
-    CodegenC::emitExternDeclarations(defStore, typeStore, symbols, &mut source, closures);
 
     source.pushStr("\n// Function prototypes\n");
 
@@ -2649,11 +2812,65 @@ export namespace CodegenC {
       bodyIndex += 1;
     }
 
+    CodegenC::emitEntryWrapper(defStore, typeStore, symbols, &mut source, program);
+
     return CodegenC::EmitOutput {
       source: source,
       unsupported: unsupported,
       functions: functions,
     };
+  }
+
+  /// The C `main` around the program's entry point, as the host writes it:
+  /// the runtime is initialised with the process arguments, then the user's
+  /// `main` runs with no arguments or with `(argc, argv)`, and an `i32`
+  /// result becomes the exit code while a `void` one exits 0. A `Result`
+  /// entry point is outside what this emitter covers and returns 1.
+  function emitEntryWrapper(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    program: &Lir::LirProgram,
+  ): void {
+    let Option::SOME(entryDef) = program.entryPoint else {
+      return;
+    };
+    let Option::SOME(entry) = program.functions.get(entryDef) else {
+      return;
+    };
+
+    let name: String = CodegenC::mangledName(defStore, symbols, entryDef);
+    let mut call: String = `${name.toStr()}()`;
+
+    if (entry.params.length() == 2) {
+      call = `${name.toStr()}((i32)argc, (const char**)argv)`;
+    }
+
+    let mut body: String = String::create("");
+
+    if (CodegenC::isVoidType(typeStore, entry.returnType)) {
+      body = `    ${call.toStr()};\n    return 0;\n`;
+    } else if (CodegenC::isI32Type(typeStore, entry.returnType)) {
+      body = `    return ${call.toStr()};\n`;
+    } else {
+      body = `    (void)${call.toStr()};\n    return 1;\n`;
+    }
+
+    let wrapper: String = `\nint main(int argc, char** argv) {\n    ignis_runtime_init((i32)argc, argv);\n${body.toStr()}}\n`;
+
+    let mut outputRef: &mut String = output;
+    outputRef.pushStr(wrapper.toStr());
+  }
+
+  function isI32Type(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+    if (let Option::SOME(typeNode) = typeStore.get(typeId)) {
+      if (let Analyzer::Type::I32 = typeNode) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /// `containsRaw` over a shared reference. Ignis has no `&mut T` to `&T`

@@ -112,10 +112,20 @@ export namespace Mono {
     /// Parallel to `cacheKeys`: whether the body was already substituted.
     public cacheProcessed: Vector<boolean>;
     public worklist: Vector<Mono::InstanceKey>;
-    /// Def remap for the body currently being cloned (params and locals of
-    /// the generic def to their concrete clones).
+    /// Parallel to `cacheKeys`: the remap scope of the instantiation, `0`
+    /// for type shells, which carry no body.
+    public cacheScopes: Vector<u64>;
+    /// Def remap for the bodies being cloned (params and locals of the
+    /// generic def to their concrete clones). One generic def is cloned once
+    /// per instantiation, so every entry is tagged with the scope of the
+    /// instantiation that owns it and lookups only see the current scope.
     public remapFrom: Vector<u32>;
     public remapTo: Vector<Analyzer::DefinitionId>;
+    public remapScope: Vector<u64>;
+    public currentScope: u64;
+    public nextScope: u64;
+    /// Scope of the last shell `createConcreteDefShell` produced.
+    public lastShellScope: u64;
     /// Bodies already copied into the output store.
     public copiedDefs: Vector<u32>;
 
@@ -125,8 +135,13 @@ export namespace Mono {
         cacheConcreteDefs: Vector::new<Analyzer::DefinitionId>(),
         cacheProcessed: Vector::new<boolean>(),
         worklist: Vector::new<Mono::InstanceKey>(),
+        cacheScopes: Vector::new<u64>(),
         remapFrom: Vector::new<u32>(),
         remapTo: Vector::new<Analyzer::DefinitionId>(),
+        remapScope: Vector::new<u64>(),
+        currentScope: 0,
+        nextScope: 1,
+        lastShellScope: 0,
         copiedDefs: Vector::new<u32>(),
       };
     }
@@ -178,6 +193,13 @@ export namespace Mono {
     state.worklist.push(key);
   }
 
+  function remapScopeAt(state: &mut MonoState, index: u64): u64 {
+    return match (state.remapScope.get(index)) {
+      Option::SOME(scope) -> *scope,
+      Option::NONE -> 0,
+    };
+  }
+
   function remapLookup(
     state: &mut MonoState,
     defId: Analyzer::DefinitionId
@@ -186,7 +208,7 @@ export namespace Mono {
 
     while (index < state.remapFrom.length()) {
       if (let Option::SOME(fromRaw) = state.remapFrom.get(index)) {
-        if (*fromRaw == defId.raw()) {
+        if (*fromRaw == defId.raw() && Mono::remapScopeAt(state, index) == state.currentScope) {
           if (let Option::SOME(target) = state.remapTo.get(index)) {
             return Option::SOME(*target);
           }
@@ -553,6 +575,7 @@ export namespace Mono {
           mutable: clonedMutable,
           takes: clonedTakes,
           noEscape: clonedNoEscape,
+          isExtern: false,
         })));
       }
     }
@@ -563,6 +586,7 @@ export namespace Mono {
 
     state.remapFrom.push(paramDefId.raw());
     state.remapTo.push(clonedId);
+    state.remapScope.push(state.currentScope);
 
     return clonedId;
   }
@@ -580,6 +604,13 @@ export namespace Mono {
     let mangled: String = Mono::mangleName(defStore, typeStore, symbols, key);
     let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
     let nameSym: Analyzer::SymbolId = symbolsRef.intern(mangled.toStr());
+
+    // A shell can be created while another body is being cloned, so the
+    // caller's scope is restored on the way out.
+    let savedScope: u64 = state.currentScope;
+    let scope: u64 = state.nextScope;
+    state.nextScope += 1;
+    state.currentScope = scope;
 
     let subst: Mono::SubstTable = Mono::buildSubstitution(defStore, key);
 
@@ -625,6 +656,9 @@ export namespace Mono {
 
     let substitutedReturn: Analyzer::TypeId = Mono::substituteType(defStore, typeStore, symbols, state, &subst, returnType);
 
+    state.currentScope = savedScope;
+    state.lastShellScope = scope;
+
     let mut defStoreRef: &mut Analyzer::DefinitionStore = defStore;
 
     if (isMethod) {
@@ -652,6 +686,7 @@ export namespace Mono {
       deprecatedMessage: Option::NONE,
       extensionTarget: Option::NONE,
       isExtern: false,
+      externName: Option::NONE,
     }));
   }
 
@@ -853,6 +888,7 @@ export namespace Mono {
 
       // Type shells never carry a body to substitute.
       state.cacheProcessed.push(true);
+      state.cacheScopes.push(0);
 
       if (isRecord) {
         let _ = Mono::instantiateRecord(defStore, typeStore, symbols, state, &subst, nameSym, genericDefId, shellId);
@@ -868,6 +904,7 @@ export namespace Mono {
     state.cacheKeys.push(key);
     state.cacheConcreteDefs.push(concreteId);
     state.cacheProcessed.push(false);
+    state.cacheScopes.push(state.lastShellScope);
 
     return concreteId;
   }
@@ -1704,7 +1741,17 @@ export namespace Mono {
 
     let subst: Mono::SubstTable = Mono::buildSubstitution(defStore, &key);
 
+    let mut scope: u64 = 0;
+    if (let Option::SOME(cachedScope) = state.cacheScopes.get(cacheIndex)) {
+      scope = *cachedScope;
+    }
+
+    let savedScope: u64 = state.currentScope;
+    state.currentScope = scope;
+
     let clonedBody: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, &subst, bodyId);
+
+    state.currentScope = savedScope;
 
     let mut outputHirRef: &mut Hir::HirStore = outputHir;
     outputHirRef.functionBodies.set(concreteId, clonedBody);
@@ -1756,6 +1803,29 @@ export namespace Mono {
       }
 
       itemIndex += 1;
+    }
+
+    // A use of a module constant const-eval could not fold lowers its
+    // initializer in place, so the output store needs those expressions too.
+    // Constants are never generic.
+    let mut initIndex: u64 = 0;
+
+    while (initIndex < inputHir.constantInits.length()) {
+      let Option::SOME(constDef) = inputHir.constantInits.keyAt(initIndex) else {
+        initIndex += 1;
+        continue;
+      };
+      let Option::SOME(initId) = inputHir.constantInits.valueAt(initIndex) else {
+        initIndex += 1;
+        continue;
+      };
+
+      let clonedInit: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, &mut outputHir, &mut state, &emptyTable, initId);
+
+      let mut initHirRef: &mut Hir::HirStore = &mut outputHir;
+      initHirRef.setConstantInit(constDef, clonedInit);
+
+      initIndex += 1;
     }
 
     Mono::drainPending(defStore, typeStore, symbols, inputHir, &mut outputHir, &mut state);
@@ -1847,6 +1917,7 @@ export namespace Mono {
       let mut isStatic: boolean = false;
       let mut selfMutable: boolean = false;
       let mut isExtern: boolean = false;
+      let mut externName: Option<String> = Option::NONE;
       let mut takes: boolean = false;
       let mut noEscape: boolean = false;
       let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
@@ -1868,6 +1939,7 @@ export namespace Mono {
             deprecatedMessage = Mono::copyOptionalString(&functionDef.deprecatedMessage);
             extensionTarget = Mono::copyOptionalString(&functionDef.extensionTarget);
             isExtern = functionDef.isExtern;
+            externName = Mono::copyOptionalString(&functionDef.externName);
           },
           Analyzer::Definition::Method(methodDef) -> {
             kind = 2;
@@ -1890,6 +1962,7 @@ export namespace Mono {
             mutable = variableDef.mutable;
             takes = variableDef.takes;
             noEscape = variableDef.noEscape;
+            isExtern = variableDef.isExtern;
           },
           Analyzer::Definition::Field(fieldDef) -> {
             kind = 4;
@@ -1928,6 +2001,7 @@ export namespace Mono {
           deprecatedMessage: deprecatedMessage,
           extensionTarget: extensionTarget,
           isExtern: isExtern,
+          externName: externName,
         }));
 
         rawId += 1;
@@ -1966,6 +2040,7 @@ export namespace Mono {
           mutable: mutable,
           takes: takes,
           noEscape: noEscape,
+          isExtern: isExtern,
         }));
 
         rawId += 1;
