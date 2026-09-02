@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+#
+# Bootstrap ladder for the self-hosted Ignis compiler.
+#
+#   stage0  the host compiler (Rust, `cargo build -p ignis`) — never built here
+#   stage1  `ignis/` compiled by stage0          -> build/bootstrap/stage1/ignis
+#   stage2  `ignis/` compiled by stage1          -> build/bootstrap/stage2/ignis
+#   stage3  `ignis/` compiled by stage2, and its emitted C compared byte for
+#           byte with stage2's emitted C         -> build/bootstrap/stage3/ignis
+#
+# Each stage directory holds the C the previous stage emitted
+# (`selfhost_emit.c`), the object file and the linked binary, plus a `log.txt`
+# with the compiler's phase report. `stage3` passing is the fixed-point gate:
+# the compiler built from stage1's output reproduces that output.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+BOOTSTRAP_ROOT="${PROJECT_ROOT}/build/bootstrap"
+ENTRY="${PROJECT_ROOT}/ignis/main.ign"
+STAGE0="${IGNIS_STAGE0:-ignis}"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <command>
+
+Commands:
+  stage1   Build stage1 with the host compiler (\$IGNIS_STAGE0, default: \`ignis\` on PATH).
+  stage2   Build stage2 with stage1 (builds stage1 first when missing).
+  stage3   Build stage3 with stage2 and check that its C matches stage2's (fixed point).
+  all      stage1, stage2, stage3 in order.
+  status   Show which stage artifacts exist.
+  clean    Remove build/bootstrap.
+
+Every stage compiles ${ENTRY#"$PROJECT_ROOT/"} and writes its artifacts under
+build/bootstrap/<stage>/. A self-compilation takes several minutes per stage.
+EOF
+}
+
+info() { echo "[bootstrap] $*" >&2; }
+fail() { echo "[bootstrap] error: $*" >&2; exit 1; }
+
+stage_dir() { echo "${BOOTSTRAP_ROOT}/$1"; }
+stage_bin() { echo "$(stage_dir "$1")/ignis"; }
+
+# Compile the selfhost entry with a given compiler binary into a stage directory.
+#
+#   $1  stage name (output directory under build/bootstrap)
+#   $2  compiler binary to run
+compile_stage() {
+  local stage="$1"
+  local compiler="$2"
+  local dir
+  dir="$(stage_dir "$stage")"
+
+  rm -rf "$dir"
+  mkdir -p "$dir"
+
+  info "${stage}: compiling ${ENTRY#"$PROJECT_ROOT/"} with ${compiler}"
+
+  # The selfhost driver writes `selfhost_emit.c` and `selfhost_emit.o` into the
+  # working directory, so each stage runs inside its own directory.
+  if ! (cd "$dir" && "$compiler" "$ENTRY" -o "$dir/ignis") 2>&1 | tee "$dir/log.txt"; then
+    fail "${stage}: the compiler reported errors, see ${dir}/log.txt"
+  fi
+
+  [[ -x "$dir/ignis" ]] || fail "${stage}: no binary produced, see ${dir}/log.txt"
+
+  info "${stage}: ok -> ${dir}/ignis"
+}
+
+build_stage1() {
+  local stage0_bin
+  stage0_bin="$(command -v "$STAGE0" || true)"
+  [[ -n "$stage0_bin" ]] || fail "stage0 compiler not found: ${STAGE0} (set IGNIS_STAGE0)"
+
+  local dir
+  dir="$(stage_dir stage1)"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+
+  info "stage1: building with ${stage0_bin}"
+
+  # The host compiler reads ignis.toml and writes build/selfhost/bin/ignis; the
+  # stage directory keeps a copy so later stages never depend on that path.
+  if ! (cd "$PROJECT_ROOT" && "$stage0_bin" build) 2>&1 | tee "$dir/log.txt"; then
+    fail "stage1: the host compiler reported errors, see ${dir}/log.txt"
+  fi
+
+  local host_out="${PROJECT_ROOT}/build/selfhost/bin/ignis"
+  [[ -x "$host_out" ]] || fail "stage1: ${host_out} was not produced"
+
+  cp "$host_out" "$dir/ignis"
+  info "stage1: ok -> ${dir}/ignis"
+}
+
+ensure_stage() {
+  local stage="$1"
+  [[ -x "$(stage_bin "$stage")" ]] || "build_${stage}"
+}
+
+build_stage2() {
+  ensure_stage stage1
+  compile_stage stage2 "$(stage_bin stage1)"
+}
+
+build_stage3() {
+  ensure_stage stage2
+  compile_stage stage3 "$(stage_bin stage2)"
+
+  local stage2_c stage3_c
+  stage2_c="$(stage_dir stage2)/selfhost_emit.c"
+  stage3_c="$(stage_dir stage3)/selfhost_emit.c"
+
+  # stage2's C was emitted by stage1 and stage3's C by stage2. Equal output
+  # from two different binaries compiling the same source is the fixed point.
+  if cmp -s "$stage2_c" "$stage3_c"; then
+    info "stage3: fixed point reached, emitted C is identical ($(md5sum "$stage3_c" | cut -c1-32))"
+  else
+    fail "stage3: emitted C differs from stage2 (diff ${stage2_c} ${stage3_c})"
+  fi
+}
+
+show_status() {
+  local stage
+  for stage in stage1 stage2 stage3; do
+    if [[ -x "$(stage_bin "$stage")" ]]; then
+      echo "${stage}: $(stage_bin "$stage")"
+    else
+      echo "${stage}: missing"
+    fi
+  done
+}
+
+main() {
+  local command="${1:-}"
+
+  case "$command" in
+    stage1) build_stage1 ;;
+    stage2) build_stage2 ;;
+    stage3) build_stage3 ;;
+    all)
+      build_stage1
+      build_stage2
+      build_stage3
+      ;;
+    status) show_status ;;
+    clean) rm -rf "$BOOTSTRAP_ROOT"; info "removed ${BOOTSTRAP_ROOT}" ;;
+    -h|--help|help|"") usage ;;
+    *)
+      usage
+      fail "unknown command: ${command}"
+      ;;
+  esac
+}
+
+main "$@"

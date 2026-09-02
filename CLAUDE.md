@@ -66,6 +66,11 @@ ignis build path/to/file.ign                   # Compile single file
 ignis check                                    # Type-check only (no codegen)
 ignis build-std                                # Build standard library archive
 
+# Selfhost bootstrap ladder (stage1 = host-built selfhost, stage2 = built by stage1,
+# stage3 = built by stage2 and byte-compared with stage2's emitted C)
+scripts/bootstrap.sh all                       # stage1 -> stage2 -> stage3 fixed-point gate
+scripts/bootstrap.sh status                    # which build/bootstrap/<stage>/ignis exist
+
 # Language-level tests
 ignis test                                     # Run project tests
 ignis test path/to/file.ign                    # Run tests from a single file
