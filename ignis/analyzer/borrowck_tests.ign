@@ -696,6 +696,19 @@ function borrowckSchedulesLetElseOnGenericInstance(): void {
   Test::assertEq<str>(rendered.toStr(), "scope-end: payload\nexit return: input\nexit return: payload\n");
 }
 
+/// Scenario: a let-else that destructures through a reference binds a payload
+/// that still lives in the referenced storage. The binding owns nothing, so
+/// it is never dropped, and the reference is not consumed.
+/// Spec: IGN-39 — borrowed pattern bindings get no drop of their own.
+@test
+function borrowckSchedulesLetElseThroughReference(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Node {\n  IMPORT(Owned),\n  OTHER,\n}\n\nenum Maybe<T> {\n  SOME(T),\n  NONE,\n}\n\nfunction run(input: Maybe<&Node>): u32 {\n  let Maybe::SOME(node) = input else {\n    return 0;\n  };\n\n  let Node::IMPORT(item) = node else {\n    return 1;\n  };\n\n  return item.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "");
+}
+
 /// Scenario: overwriting a local that still holds a value schedules a drop of
 /// the old value before the store.
 /// Spec: IGN-39 — `on_overwrite`.
