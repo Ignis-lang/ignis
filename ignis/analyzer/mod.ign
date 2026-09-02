@@ -220,6 +220,8 @@ export namespace Analyzer {
       rootIndex += 1;
     }
 
+    Analyzer::seedNamedReExportOverlay(&mut overlay, module, currentDirect, directs, infos);
+
     return overlay;
   }
 
@@ -519,6 +521,114 @@ export namespace Analyzer {
         true,
       );
       index += 1;
+    }
+  }
+
+  /// Bind locally what `export Name from "path"` re-publishes.
+  ///
+  /// The re-exporting module names the declaration itself — `std/toml/mod.ign`
+  /// re-exports `TomlDocument` and then writes it in its own signatures — so
+  /// the re-export has to seed the overlay the same way an import would.
+  /// Entries are implicit: no import line names them, so the unused-import
+  /// lint has nothing to report.
+  function seedNamedReExportOverlay(
+    overlay: &mut Analyzer::Imports::ImportOverlay,
+    module: &Ast::Module,
+    currentDirect: &Analyzer::Imports::DirectDeclarationIndex,
+    directs: &Vector<Analyzer::Imports::DirectDeclarationIndex>,
+    infos: &Vector<Analyzer::Imports::ModuleInfo>,
+  ): void {
+    let mut rootIndex: u64 = 0;
+
+    while (rootIndex < module.roots.length()) {
+      let Option::SOME(rootId) = module.roots.get(rootIndex) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(item) = module.items.get(*rootId) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Ast::Item::Node::Export(exportItem) = item else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(sourceText) = Ast::copyOptionalString(&exportItem.source) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(recordIndex) = Analyzer::importModuleIndexForSource(infos, &sourceText) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(targetDirect) = directs.get(recordIndex) else {
+        rootIndex += 1;
+        continue;
+      };
+      let targetModuleIndex: u64 = Analyzer::moduleInfoAt(infos, recordIndex).index;
+
+      let mut bindingIndex: u64 = 0;
+      while (bindingIndex < exportItem.items.length()) {
+        let Option::SOME(binding) = exportItem.items.get(bindingIndex) else {
+          bindingIndex += 1;
+          continue;
+        };
+        let Option::SOME(nameText) = Ast::copyOptionalString(&binding.name) else {
+          bindingIndex += 1;
+          continue;
+        };
+
+        let prefix: String = `${nameText.toStr()}::`;
+        let mut declIndex: u64 = 0;
+
+        while (declIndex < targetDirect.qualifiedNames.length()) {
+          let Option::SOME(qualifiedName) = targetDirect.qualifiedNames.get(declIndex) else {
+            declIndex += 1;
+            continue;
+          };
+
+          let matchesName: boolean = qualifiedName.equals(nameText.toStr()) || qualifiedName.startsWith(prefix.toStr());
+
+          if (!matchesName) {
+            declIndex += 1;
+            continue;
+          }
+
+          let Option::SOME(memberSym) = targetDirect.syms.get(declIndex) else {
+            declIndex += 1;
+            continue;
+          };
+          let Option::SOME(memberDef) = targetDirect.defs.get(declIndex) else {
+            declIndex += 1;
+            continue;
+          };
+
+          if (Analyzer::Imports::directIndexSpan(currentDirect, *memberSym).isSome()) {
+            declIndex += 1;
+            continue;
+          }
+
+          if (Analyzer::overlayHasQualifiedEntry(overlay, *memberSym, qualifiedName)) {
+            declIndex += 1;
+            continue;
+          }
+
+          Analyzer::Imports::appendQualifiedOverlayEntry(
+            overlay,
+            *memberSym,
+            *memberDef,
+            binding.span,
+            targetModuleIndex,
+            qualifiedName.clone(),
+            true,
+          );
+          declIndex += 1;
+        }
+
+        bindingIndex += 1;
+      }
+
+      rootIndex += 1;
     }
   }
 

@@ -1264,3 +1264,25 @@ function analyzeProgramKeepsAnotherModulesPrivateHelperOutOfTheOverloadSet(): vo
   Test::assertEq<str>(importsDiagnosticCodes(first).toStr(), "");
   Test::assertEq<str>(importsDiagnosticCodes(second).toStr(), "");
 }
+
+/// Scenario: a module re-exports a record it does not declare and then writes
+/// that name in its own signature. The re-export binds the name locally, the
+/// same way an import would.
+@test
+function analyzeProgramBindsNamedReExportInTheReExportingModule(): void {
+  let declaringSource: str = "export record Thing {\n  public value: i32;\n}\n";
+  let reExportingSource: str = "export Thing from \"a.ign\";\n\nexport function makeThing(): Thing {\n  return Thing { value: 7 };\n}\n";
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoSources(
+    "a.ign",
+    declaringSource,
+    "b.ign",
+    reExportingSource,
+  );
+
+  let Option::SOME(reExporting) = records.get(1) else {
+    @panic("missing re-exporting analysis record");
+  };
+
+  Test::assertEq<str>(importsDiagnosticCodes(reExporting).toStr(), "");
+}
