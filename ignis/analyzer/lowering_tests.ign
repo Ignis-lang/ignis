@@ -73,6 +73,133 @@ function loweringRender(source: str): String {
   return loweringRenderChecked(source, true);
 }
 
+/// Renders every capture override the closures of `source` carry, in the
+/// order lowering collected them. The HIR printer does not show them, and a
+/// count alone would not tell a `@move` from a `@ref`.
+function loweringRenderCaptureOverrides(source: str): String {
+  let file: SourceFile = SourceFile::create("lowering_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(loweringCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(loweringCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(loweringCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let mut rendered: String = String::create("");
+  let mut nodeIndex: u64 = 0;
+
+  while (nodeIndex < hir.nodes.length()) {
+    let Option::SOME(node) = hir.nodes.get(nodeIndex) else {
+      nodeIndex += 1;
+      continue;
+    };
+
+    if (let Hir::HirKind::Closure(closure) = &node.kind) {
+      let mut overrideIndex: u64 = 0;
+
+      while (overrideIndex < closure.captureOverrides.length()) {
+        let Option::SOME(override_) = closure.captureOverrides.get(overrideIndex) else {
+          overrideIndex += 1;
+          continue;
+        };
+
+        let modeText: str = match (override_.mode) {
+          Hir::CaptureMode::ByValue -> "ByValue",
+          Hir::CaptureMode::ByRef -> "ByRef",
+          Hir::CaptureMode::ByMutRef -> "ByMutRef",
+        };
+
+        let mut name: String = String::create("<unknown>");
+
+        if (let Option::SOME(definition) = defStore.get(override_.sourceDef)) {
+          if (let Option::SOME(text) = symbols.resolve(definition.name())) {
+            name = String::create(text);
+          }
+        }
+
+        rendered.pushStr(name.toStr());
+        rendered.pushStr(": ");
+        rendered.pushStr(modeText);
+        rendered.pushStr("\n");
+
+        overrideIndex += 1;
+      }
+    }
+
+    nodeIndex += 1;
+  }
+
+  return rendered;
+}
+
+/// Scenario: a local binding takes a record's name, and a record literal of
+/// that name is written after it.
+/// Spec: IGN-170 — a value can never be what `Name { ... }` wants, so the
+/// literal reads the name against record declarations instead.
+@test
+function loweringRecordLiteralReadsPastABindingOfTheSameName(): void {
+  let rendered: String = loweringRender(
+    "record Point {\n  public x: i32;\n}\n\nfunction main(): i32 {\n  let Point: i32 = 7;\n  let origin: Point = Point { x: 5 };\n\n  return origin.x * 10 + Point;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-record-literal-past-binding", rendered.toStr());
+}
+
+/// Scenario: `@move` and `@ref` written on the binding a closure reads.
+/// Spec: IGN-170 — the override reaches the closure's own list, and a nested
+/// lambda keeps its overrides out of the enclosing one.
+@test
+function loweringCollectsCaptureOverridesPerClosure(): void {
+  let rendered: String = loweringRenderCaptureOverrides(
+    "function outer(): i32 {\n  let mut x: i32 = 10;\n  let mut y: i32 = 20;\n  let taken = (): i32 -> @move x;\n  let seen = (): i32 -> @ref y;\n\n  return taken() + seen();\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "x: ByValue\ny: ByRef\n");
+}
+
+/// Scenario: a closure with no override written inside it.
+/// Spec: IGN-170 — nothing is collected, so capture analysis keeps deciding
+/// the mode on its own.
+@test
+function loweringCollectsNoCaptureOverridesWhenNoneAreWritten(): void {
+  let rendered: String = loweringRenderCaptureOverrides(
+    "function outer(): i32 {\n  let x: i32 = 10;\n  let read = (): i32 -> x;\n\n  return read();\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "");
+}
+
+/// Scenario: `@typeName<T>()` over a primitive and over a record.
+/// Spec: IGN-170 — the builtin folds to the printed name of its type
+/// argument rather than staying on an error node.
+@test
+function loweringTypeNameFoldsToThePrintedTypeName(): void {
+  let rendered: String = loweringRender(
+    "record Point {\n  public x: i32;\n}\n\nfunction names(): str {\n  let primitive: str = @typeName<i32>();\n  let nominal: str = @typeName<Point>();\n\n  return nominal;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-type-name-builtin", rendered.toStr());
+}
+
 @test
 function loweringLetArithmeticReturn(): void {
   let rendered: String = loweringRender(

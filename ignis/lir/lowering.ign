@@ -570,6 +570,68 @@ export namespace LirLowering {
     };
   }
 
+  /// The declared types of a callee's parameters, in declaration order.
+  ///
+  /// A method's receiver is part of `params`, so the vector lines up with the
+  /// argument list the call site already built. Empty for a callee whose
+  /// definition is not a function or method.
+  function calleeParameterTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    calleeDef: Analyzer::DefinitionId,
+  ): Vector<Analyzer::TypeId> {
+    let mut parameterDefs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(calleeDef)) {
+      match (definition) {
+        Analyzer::Definition::Function(functionDef) -> {
+          let mut index: u64 = 0;
+
+          while (index < functionDef.params.length()) {
+            if (let Option::SOME(paramDefId) = functionDef.params.get(index)) {
+              parameterDefs.push(*paramDefId);
+            }
+
+            index += 1;
+          }
+        },
+        Analyzer::Definition::Method(methodDef) -> {
+          let mut index: u64 = 0;
+
+          while (index < methodDef.params.length()) {
+            if (let Option::SOME(paramDefId) = methodDef.params.get(index)) {
+              parameterDefs.push(*paramDefId);
+            }
+
+            index += 1;
+          }
+        },
+        _ -> {},
+      };
+    }
+
+    let mut types: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut typeIndex: u64 = 0;
+
+    while (typeIndex < parameterDefs.length()) {
+      let Option::SOME(paramDefId) = parameterDefs.get(typeIndex) else {
+        typeIndex += 1;
+        continue;
+      };
+
+      if (let Option::SOME(paramDef) = defStore.get(*paramDefId)) {
+        if (let Analyzer::Definition::Variable(variableDef) = paramDef) {
+          types.push(variableDef.declaredType);
+          typeIndex += 1;
+          continue;
+        }
+      }
+
+      return Vector::new<Analyzer::TypeId>();
+    }
+
+    return types;
+  }
+
   function isByrefCapture(
     state: &mut LirLowering::LowerState,
     defId: Analyzer::DefinitionId,
@@ -856,6 +918,65 @@ export namespace LirLowering {
     });
   }
 
+  /// Builds the slice an array-typed operand stands for when the position it
+  /// flows into asks for a slice of the same element type.
+  ///
+  /// The typechecker accepts that flow without a written conversion, so the
+  /// data pointer and the array's static length have to be packed here.
+  /// Every other pair of types passes the operand through unchanged.
+  function coerceOperandToType(
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    operand: Lir::Operand,
+    sourceType: Analyzer::TypeId,
+    targetType: Analyzer::TypeId,
+    span: SourceSpan,
+  ): Lir::Operand {
+    let mut targetElement: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(targetNode) = typeStore.get(targetType)) {
+      if (let Analyzer::Type::Slice(element) = targetNode) {
+        targetElement = Option::SOME(element);
+      }
+    }
+
+    let Option::SOME(targetElementId) = targetElement else {
+      return operand;
+    };
+
+    let mut sourceElement: Option<Analyzer::TypeId> = Option::NONE;
+    let mut sourceLength: u64 = 0;
+
+    if (let Option::SOME(sourceNode) = typeStore.get(sourceType)) {
+      if (let Analyzer::Type::FixedArray(element, length) = sourceNode) {
+        sourceElement = Option::SOME(element);
+        sourceLength = length;
+      }
+    }
+
+    let Option::SOME(sourceElementId) = sourceElement else {
+      return operand;
+    };
+
+    if (sourceElementId.raw() != targetElementId.raw()) {
+      return operand;
+    }
+
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    let lengthType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::U64);
+    let dest: Lir::TempId = LirLowering::freshTemp(function_, targetType, span);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::MakeSlice(Lir::InstrMakeSlice {
+      dest: dest,
+      data: operand,
+      len: Lir::Operand::Const(Lir::ConstValue::UInt(sourceLength, lengthType)),
+      elementType: targetElementId,
+    }));
+
+    return Lir::Operand::Temp(dest);
+  }
+
   /// Maps a HIR literal to a LIR constant. Every numeric width widens into
   /// the Rust model's `Int`/`UInt`/`Float` carriers with the node's own type.
   function constFromLiteral(
@@ -1034,18 +1155,26 @@ export namespace LirLowering {
       },
       Hir::HirKind::Call(call) -> {
         let isExtern: boolean = LirLowering::calleeIsExtern(defStore, call.callee);
+        let parameterTypes: Vector<Analyzer::TypeId> = LirLowering::calleeParameterTypes(defStore, call.callee);
         let mut args: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
         let mut argIndex: u64 = 0;
 
         while (argIndex < call.args.length()) {
           if (let Option::SOME(argId) = call.args.get(argIndex)) {
             let mut argType: Analyzer::TypeId = nodeType;
+            let mut argSpan: SourceSpan = nodeSpan;
 
             if (let Option::SOME(argNode) = hirStore.get(*argId)) {
               argType = argNode.typeId;
+              argSpan = argNode.span;
             }
 
-            let argValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId);
+            let rawValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId);
+            let mut argValue: Lir::Operand = rawValue;
+
+            if (let Option::SOME(parameterType) = parameterTypes.get(argIndex)) {
+              argValue = LirLowering::coerceOperandToType(typeStore, function_, state, argValue, argType, *parameterType, argSpan);
+            }
 
             args.push(LirLowering::spillOwnedCallArgument(defStore, typeStore, function_, state, argValue, argType, isExtern));
           }
@@ -1093,10 +1222,20 @@ export namespace LirLowering {
             }
           }
 
+          let mut valueType: Analyzer::TypeId = declaredType;
+          let mut valueSpan: SourceSpan = nodeSpan;
+
+          if (let Option::SOME(valueNode) = hirStore.get(valueId)) {
+            valueType = valueNode.typeId;
+            valueSpan = valueNode.span;
+          }
+
           if (let Option::SOME(value) = LirLowering::lowerStoredValue(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId)) {
+            let stored: Lir::Operand = LirLowering::coerceOperandToType(typeStore, function_, state, value, valueType, declaredType, valueSpan);
+
             LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
               dest: slot,
-              value: value,
+              value: stored,
             }));
           }
         }
@@ -1152,7 +1291,18 @@ export namespace LirLowering {
         let mut returned: Option<Lir::Operand> = Option::NONE;
 
         if (let Option::SOME(valueId) = valueOpt) {
-          returned = Option::SOME(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId));
+          let mut valueType: Analyzer::TypeId = nodeType;
+          let mut valueSpan: SourceSpan = nodeSpan;
+
+          if (let Option::SOME(valueNode) = hirStore.get(valueId)) {
+            valueType = valueNode.typeId;
+            valueSpan = valueNode.span;
+          }
+
+          let returnType: Analyzer::TypeId = function_.returnType;
+          let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId);
+
+          returned = Option::SOME(LirLowering::coerceOperandToType(typeStore, function_, state, value, valueType, returnType, valueSpan));
         }
 
         // The returned value is already evaluated, so unwinding here cannot

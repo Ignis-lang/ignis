@@ -3398,6 +3398,106 @@ export namespace Analyzer {
       @panic("unreachable: inferRecordInitTypeArguments match did not return");
     }
 
+    /// Whether `typeId` already names a record, so a record literal written
+    /// over it needs no second reading of its path.
+    function typeNamesARecord(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId,
+    ): boolean {
+      let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
+      if (resolved.cycleAlias.isSome()) {
+        return false;
+      }
+
+      let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+        return false;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::Record(_) -> true,
+        Analyzer::Type::Instance(_) -> true,
+        _ -> false,
+      };
+    }
+
+    /// The record a literal's path names, read as a type rather than as a
+    /// value.
+    ///
+    /// A binding may take a record's name, and expression position finds that
+    /// binding first. A value can never be what `Name { ... }` wants, so the
+    /// name is read again against record declarations alone. The written
+    /// path's last segment decides, the same reading `resolveLocalAnnotation`
+    /// gives a bare annotation.
+    function recordTypeForInitPath(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pathExprId: Ast::ExpressionId,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(pathExpr) = module.expressions.get(pathExprId) else {
+        return Option::NONE;
+      };
+
+      let mut writtenName: Option<String> = Option::NONE;
+
+      match (pathExpr) {
+        Ast::Expression::Node::Variable(variable) -> {
+          writtenName = Option::SOME(variable.name.clone());
+        },
+        Ast::Expression::Node::Path(path) -> {
+          if (path.segments.length() > 0) {
+            if (let Option::SOME(lastSegment) = path.segments.get(path.segments.length() - 1)) {
+              writtenName = Option::SOME(lastSegment.clone());
+            }
+          }
+        },
+        _ -> {},
+      };
+
+      let Option::SOME(name) = writtenName else {
+        return Option::NONE;
+      };
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let symbol: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
+
+      // Module-local first, for the same reason the annotation reader scans
+      // that way: a record of this name declared here outranks one elsewhere.
+      let mut localPass: u64 = 0;
+
+      while (localPass < 2) {
+        let mut index: u64 = 0;
+
+        while (index < defStore.length()) {
+          let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+          if (localPass == 0 && !defStore.defBelongsToActiveModule(defId)) {
+            index += 1;
+            continue;
+          }
+
+          let Option::SOME(def) = defStore.get(defId) else {
+            index += 1;
+            continue;
+          };
+
+          if (def.name().raw() == symbol.raw()) {
+            if (let Analyzer::Definition::Record(record_) = def) {
+              return Option::SOME(record_.typeId);
+            }
+          }
+
+          index += 1;
+        }
+
+        localPass += 1;
+      }
+
+      return Option::NONE;
+    }
+
     function checkRecordInitExpr(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -3418,9 +3518,23 @@ export namespace Analyzer {
         resolvedBodies,
         value.path,
       );
-      let Option::SOME(pathType) = pathTypeOpt else {
+      let Option::SOME(checkedPathType) = pathTypeOpt else {
         return Option::NONE;
       };
+
+      let mut pathType: Analyzer::TypeId = checkedPathType;
+
+      if (!Analyzer::Typecheck::typeNamesARecord(defStore, typeStore, pathType)) {
+        if (let Option::SOME(namedRecordType) = Analyzer::Typecheck::recordTypeForInitPath(
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          value.path,
+        )) {
+          pathType = namedRecordType;
+        }
+      }
 
       let recordDefOpt: Option<Analyzer::Typecheck::RequiredRecordDef> = Analyzer::Typecheck::requireRecordAllowingGeneric(
         state,
@@ -4306,9 +4420,14 @@ export namespace Analyzer {
           return Option::SOME(lambdaType);
         },
         Ast::Expression::Node::CaptureOverride(value) -> {
-          let _innerType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "capture overrides");
-          return Option::NONE;
+          // The override names how the closure holds the binding, not what
+          // the expression is: `@move x` types exactly as `x` does.
+          let Option::SOME(innerType) = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression) else {
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, innerType);
+          return Option::SOME(innerType);
         },
         Ast::Expression::Node::Pipe(value) -> {
           let Option::SOME(pipeType) = Analyzer::Typecheck::checkPipeExpr(
@@ -4400,6 +4519,10 @@ export namespace Analyzer {
       }
 
       if (Analyzer::Typecheck::isImplicitWidening(defStore, typeStore, expected, actual)) {
+        return true;
+      }
+
+      if (Analyzer::Typecheck::fixedArrayCoercesToSlice(state, defStore, typeStore, span, expected, actual)) {
         return true;
       }
 
