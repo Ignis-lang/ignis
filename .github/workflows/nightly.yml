@@ -201,3 +201,66 @@ jobs:
           fi
 
           echo "Website build triggered."
+
+  # The bootstrap ladder is the selfhost fixed-point gate: stage2 (built by the
+  # host-built compiler) and stage3 (built by stage2) must emit the same C.
+  # Each self-compilation takes around fifteen minutes locally, so it runs here
+  # once per green commit instead of on every pull request.
+  bootstrap:
+    name: Bootstrap ladder
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v0-rust"
+          shared-key: "ci-selfhost"
+          cache-targets: true
+          cache-on-failure: true
+
+      # Same pinned tarball as ci.yml: the distribution package hung on an
+      # unresponsive mirror once and burned the whole budget.
+      - name: Install mold
+        timeout-minutes: 3
+        env:
+          MOLD_VERSION: 2.42.0
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-x86_64-linux.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local
+          mold --version
+
+      - name: Build the C runtime archive
+        run: make -C std/runtime
+
+      - name: Build Ignis
+        run: cargo build --locked -p ignis
+
+      - name: Add Ignis to PATH
+        run: echo "${GITHUB_WORKSPACE}/target/debug" >> "$GITHUB_PATH"
+
+      - name: Run the bootstrap ladder
+        run: scripts/bootstrap.sh all
+
+      - name: Upload stage logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-logs
+          path: build/bootstrap/*/log.txt
+          if-no-files-found: ignore
