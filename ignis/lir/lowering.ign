@@ -320,6 +320,24 @@ export namespace LirLowering {
     return false;
   }
 
+  /// Whether a construct of this type yields nothing to store.
+  ///
+  /// `void` has no value, and `never` is the type of a construct every path out
+  /// of which diverges, so neither can reach a merge point with a value. A slot
+  /// for either would be declared with a C type that holds nothing, so no slot
+  /// is allocated and nothing is stored into or loaded from one.
+  function producesNoValue(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
+    if (let Option::SOME(typeNode) = typeStore.get(ty)) {
+      return match (typeNode) {
+        Analyzer::Type::VOID -> true,
+        Analyzer::Type::NEVER -> true,
+        _ -> false,
+      };
+    }
+
+    return false;
+  }
+
   function isReferenceType(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
     if (let Option::SOME(typeNode) = typeStore.get(ty)) {
       if (let Analyzer::Type::Reference(_) = typeNode) {
@@ -3283,12 +3301,10 @@ export namespace LirLowering {
       }));
     }
 
-    let isVoid: boolean = LirLowering::isVoidType(typeStore, nodeType);
-
     let mut resultSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
     let mut hasResult: boolean = false;
 
-    if (!isVoid) {
+    if (!LirLowering::producesNoValue(typeStore, nodeType)) {
       resultSlot = LirLowering::allocSyntheticLocal(function_, nodeType);
       hasResult = true;
     }
@@ -3558,12 +3574,10 @@ export namespace LirLowering {
     let elseBlock: Lir::BlockId = LirLowering::createBlock(function_, "else");
     let mergeBlock: Lir::BlockId = LirLowering::createBlock(function_, "merge");
 
-    let isVoid: boolean = LirLowering::isVoidType(typeStore, nodeType);
-
     let mut resultSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
     let mut hasResult: boolean = false;
 
-    if (!isVoid) {
+    if (!LirLowering::producesNoValue(typeStore, nodeType)) {
       resultSlot = LirLowering::allocSyntheticLocal(function_, nodeType);
       hasResult = true;
     }

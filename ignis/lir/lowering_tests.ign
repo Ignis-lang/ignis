@@ -328,6 +328,129 @@ function lirRenderLoweredDrops(source: str): String {
   return lirRenderDrops(&defStore, &symbols, &lowered.program);
 }
 
+/// Renders every local and temporary slot with the type it was allocated
+/// with, synthetic slots included, so a slot that should never have been
+/// allocated is visible by its type rather than by its absence alone.
+function lirRenderSlotTypes(
+  defStore: &Analyzer::DefinitionStore,
+  typeStore: &Analyzer::TypeStore,
+  symbols: &Analyzer::SymbolTable,
+  program: &Lir::LirProgram,
+): String {
+  let mut rendered: String = String::create("");
+  let mut functionIndex: u64 = 0;
+
+  while (functionIndex < program.functions.length()) {
+    let Option::SOME(defId) = program.functions.defAt(functionIndex) else {
+      functionIndex += 1;
+      continue;
+    };
+    let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+      functionIndex += 1;
+      continue;
+    };
+
+    rendered.pushStr("fn ");
+    rendered.pushStr(lirDefinitionName(defStore, symbols, *defId).toStr());
+    rendered.pushStr("\n");
+
+    let mut localIndex: u64 = 0;
+
+    while (localIndex < function_.locals.length()) {
+      let Option::SOME(local) = function_.locals.get(localIndex) else {
+        localIndex += 1;
+        continue;
+      };
+
+      let slot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(localIndex as u32);
+
+      rendered.pushStr("  local ");
+      rendered.pushStr(lirLocalName(defStore, symbols, function_, slot).toStr());
+      rendered.pushStr(": ");
+      rendered.pushStr(typeStore.nameOf(local.ty).toStr());
+      rendered.pushStr("\n");
+
+      localIndex += 1;
+    }
+
+    let mut tempIndex: u64 = 0;
+
+    while (tempIndex < function_.temps.length()) {
+      let Option::SOME(temp) = function_.temps.get(tempIndex) else {
+        tempIndex += 1;
+        continue;
+      };
+
+      rendered.pushStr("  temp ");
+      rendered.pushStr(`${tempIndex}`.toStr());
+      rendered.pushStr(": ");
+      rendered.pushStr(typeStore.nameOf(temp.ty).toStr());
+      rendered.pushStr("\n");
+
+      tempIndex += 1;
+    }
+
+    functionIndex += 1;
+  }
+
+  return rendered;
+}
+
+/// Runs the whole front end over `source` and renders the type of every slot
+/// LIR lowering allocated.
+function lirRenderLoweredSlotTypes(source: str): String {
+  let file: SourceFile = SourceFile::create("lowering_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(lirCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(lirCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(lirCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &hir,
+  );
+
+  Test::assertEq<u64>(lirCountErrors(&checked.diagnostics), 0);
+
+  let constValues: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap {
+    defIdRaws: Vector::new<u32>(),
+    values: Vector::new<Analyzer::ConstEval::ConstValue>(),
+  };
+
+  let lowered: LirLowering::LowerModuleResult = LirLowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &hir,
+    &checked.dropSchedules,
+    &constValues,
+  );
+
+  return lirRenderSlotTypes(&defStore, &typeStore, &symbols, &lowered.program);
+}
+
 /// Runs the whole front end over `source` and renders the slots LIR lowering
 /// allocated with the stores that reach them.
 function lirRenderLoweredLocals(source: str): String {
@@ -568,4 +691,18 @@ function lirLoweringMarksMovedFieldsOutOfOwnedBases(): void {
   );
 
   Test::assertSnapshot("lir-lowering-mark-moved-field", rendered.toStr());
+}
+
+/// Scenario: a `match` arm whose body is a second `match`, every arm of which
+/// diverges, so the inner one carries the `never` type. A slot for it would be
+/// declared with a C type that holds nothing.
+/// Spec: neither `void` nor `never` reaches a merge point with a value, so
+/// neither allocates a result slot.
+@test
+function lirLoweringAllocatesNoSlotForADivergingMatch(): void {
+  let rendered: String = lirRenderLoweredSlotTypes(
+    "enum Shade {\n  LIGHT,\n  DARK,\n}\n\nenum Holder {\n  FILLED(Shade),\n  EMPTY,\n}\n\nfunction classify(holder: Holder): i32 {\n  match (holder) {\n    Holder::FILLED(inner) -> match (inner) {\n      Shade::LIGHT -> {\n        return 1;\n      },\n      Shade::DARK -> @panic(\"dark\"),\n    },\n    Holder::EMPTY -> @panic(\"empty\"),\n  };\n\n  @panic(\"unreachable classify\");\n}\n",
+  );
+
+  Test::assertSnapshot("lir-lowering-diverging-match-slots", rendered.toStr());
 }
