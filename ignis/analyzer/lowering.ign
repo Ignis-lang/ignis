@@ -1972,7 +1972,7 @@ export namespace Lowering {
     memberAccess: &Ast::Expression::MemberAccess,
     pipedFirstArg: Option<Hir::HirId>,
   ): Hir::HirId {
-    let Option::SOME(callTypeArgs) = Lowering::resolveCallTypeArguments(
+    let Option::SOME(writtenTypeArgs) = Lowering::resolveCallTypeArguments(
       defStore,
       typeStore,
       symbols,
@@ -1981,6 +1981,17 @@ export namespace Lowering {
     ) else {
       return Lowering::errorNode(hir, typeStore, call.span);
     };
+
+    // A method's own type parameters may have been inferred from the argument
+    // types rather than written, and monomorphization keys its instantiation
+    // on them.
+    let mut callTypeArgs: Vector<Analyzer::TypeId> = writtenTypeArgs;
+
+    if (callTypeArgs.length() == 0) {
+      if (let Option::SOME(inferred) = Lowering::lookupCallTypeArgs(&output.typecheck, exprId)) {
+        callTypeArgs = inferred;
+      }
+    }
 
     if (memberAccess.operator != Ast::Expression::AccessOperator::Dot) {
       return Lowering::errorNode(hir, typeStore, call.span);

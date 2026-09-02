@@ -138,3 +138,17 @@ function monoLeavesAModuleConstantOutOfTheEnvironment(): void {
 
   Test::assert(monoContains(&rendered, "captures: 0"));
 }
+
+/// Scenario: a method type parameter inferred from the argument reaches
+/// monomorphization, so the call is keyed on the concrete return type and no
+/// type parameter survives the clone.
+@test
+function monoSpecializesAMethodTypeParameterInferredFromTheArgument(): void {
+  let rendered: String = monoRenderWith(
+    "record Box<T> {\n  value: T;\n\n  transform<U>(&self, f: (T) -> U): U {\n    return f(self.value);\n  }\n}\n\nfunction main(): i32 {\n  let b: Box<i32> = Box { value: 7 };\n  let result: i64 = b.transform((x: i32): i64 -> x as i64 * 6);\n\n  return result as i32;\n}\n",
+    true,
+  );
+
+  Test::assert(monoContains(&rendered, "i64"));
+  Test::assert(!monoContains(&rendered, "param:"));
+}
