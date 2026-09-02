@@ -284,6 +284,12 @@ export namespace Analyzer {
     /// module's declaration over a same-named one from elsewhere.
     defModules: HashMap<u32, u64>;
     activeModule: u64;
+    /// Every declaration the module currently being analyzed can name: its own
+    /// declarations and re-exports, plus what its imports bind. Refreshed for
+    /// each module, and left unpublished when a caller analyzes a single
+    /// module, where nothing can come from elsewhere.
+    visibleDefs: HashMap<u32, boolean>;
+    visibleDefsPublished: boolean;
 
     public static init(): DefinitionStore {
       return DefinitionStore {
@@ -291,6 +297,8 @@ export namespace Analyzer {
         qualifiedNames: HashMap::new<u32, String>(),
         defModules: HashMap::new<u32, u64>(),
         activeModule: 0,
+        visibleDefs: HashMap::new<u32, boolean>(),
+        visibleDefsPublished: false,
       };
     }
 
@@ -314,9 +322,46 @@ export namespace Analyzer {
       return *moduleIndex == self.activeModule;
     }
 
+    /// The module that published `id`, if any.
+    public defModuleOf(&self, id: Analyzer::DefinitionId): Option<u64> {
+      let raw: u32 = id.raw();
+      let Option::SOME(moduleIndex) = self.defModules.get(&raw) else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(*moduleIndex);
+    }
+
     /// Set the module whose bodies are being analyzed.
     public setActiveModule(&mut self, moduleIndex: u64): void {
       self.activeModule = moduleIndex;
+    }
+
+    /// Replace the set of declarations the module being analyzed can name.
+    public setActiveModuleVisibleDefs(&mut self, defs: &Vector<Analyzer::DefinitionId>): void {
+      self.visibleDefs = HashMap::new<u32, boolean>();
+      self.visibleDefsPublished = true;
+
+      let mut index: u64 = 0;
+      while (index < defs.length()) {
+        if (let Option::SOME(defId) = defs.get(index)) {
+          self.visibleDefs.insert(defId.raw(), true);
+        }
+
+        index += 1;
+      }
+    }
+
+    /// Whether `id` is nameable from the module currently being analyzed.
+    /// True while no set has been published, so a single-module analysis keeps
+    /// seeing every definition.
+    public defVisibleInActiveModule(&self, id: Analyzer::DefinitionId): boolean {
+      if (!self.visibleDefsPublished) {
+        return true;
+      }
+
+      let raw: u32 = id.raw();
+      return self.visibleDefs.get(&raw).isSome();
     }
 
     /// Record the written path a declaration is published under. First write

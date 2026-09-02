@@ -2186,9 +2186,37 @@ export namespace Analyzer {
       return symbols.resolve(functionDef.name);
     }
 
+    /// Whether `candidateDefId` can join the overload set the call at
+    /// `functionDefId` resolved into.
+    ///
+    /// A declaration the calling module cannot name is not a candidate, or two
+    /// modules that each keep a private helper under the same name would read
+    /// as one ambiguous overload set. A module-mate of the resolved
+    /// declaration stays in even when the call wrote a qualified path the
+    /// import overlay never binds.
+    function freeFunctionCandidateIsReachable(
+      defStore: &mut Analyzer::DefinitionStore,
+      functionDefId: Analyzer::DefinitionId,
+      candidateDefId: Analyzer::DefinitionId,
+    ): boolean {
+      if (defStore.defVisibleInActiveModule(candidateDefId)) {
+        return true;
+      }
+
+      let Option::SOME(resolvedModule) = defStore.defModuleOf(functionDefId) else {
+        return true;
+      };
+      let Option::SOME(candidateModule) = defStore.defModuleOf(candidateDefId) else {
+        return false;
+      };
+
+      return candidateModule == resolvedModule;
+    }
+
     /// The free-function overload set: every function definition sharing the
     /// name AND the published written path (`Fs::read`), so same-named
-    /// functions in different namespaces stay apart.
+    /// functions in different namespaces stay apart, restricted to what the
+    /// calling module can reach.
     function freeFunctionOverloadCandidates(
       defStore: &mut Analyzer::DefinitionStore,
       functionDefId: Analyzer::DefinitionId,
@@ -2226,8 +2254,13 @@ export namespace Analyzer {
           continue;
         }
 
+        let mut samePath: boolean = false;
         if (let Option::SOME(candidateQualified) = defStore.qualifiedNameOf(candidateDefId)) {
-          if (candidateQualified.equals(qualifiedName.toStr())) {
+          samePath = candidateQualified.equals(qualifiedName.toStr());
+        }
+
+        if (samePath) {
+          if (Analyzer::Typecheck::freeFunctionCandidateIsReachable(defStore, functionDefId, candidateDefId)) {
             out.push(candidateDefId);
           }
         }
