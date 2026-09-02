@@ -40,7 +40,10 @@ TEST_LINE_PATTERN = re.compile(r"^\s*-\s+(?P<name>\S+)\s+\.\.\.\s+(?P<status>ok|
 SUMMARY_COUNT_PATTERN = re.compile(r"^\s*-\s+(?P<count>\d+)\s+(?P<label>total|passed|failed)\s*$")
 SUMMARY_HEADER = "Summary"
 
+ERROR_LINE_PATTERN = re.compile(r"^(Error\[|Error:|error(\[|:))")
+
 LOG_TAIL_LINES = 40
+LOG_ERROR_LINES = 20
 
 
 # =============================================================================
@@ -92,6 +95,29 @@ def log_tail(path: Path) -> list[str]:
   lines = strip_ansi(path.read_text(encoding="utf-8", errors="replace")).splitlines()
 
   return [line.rstrip() for line in lines[-LOG_TAIL_LINES:]]
+
+
+def log_errors(path: Path) -> list[str]:
+  """Pick the error lines out of a run that produced no summary.
+
+  The tail of such a log is usually warnings, so the line that explains the
+  failure would otherwise not reach the report.
+  """
+  if not path.is_file():
+    return []
+
+  found = []
+
+  for line in strip_ansi(path.read_text(encoding="utf-8", errors="replace")).splitlines():
+    stripped = line.strip()
+
+    if ERROR_LINE_PATTERN.match(stripped):
+      found.append(stripped)
+
+    if len(found) == LOG_ERROR_LINES:
+      break
+
+  return found
 
 
 def failing_names(parsed: dict) -> set[str]:
@@ -148,6 +174,7 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
     details["timed_out"] = timed_out
 
   if not has_summary(stage2):
+    details["stage2"]["errors"] = log_errors(stage2_log)
     details["stage2"]["log_tail"] = log_tail(stage2_log)
 
     reason = (
@@ -159,6 +186,7 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
     return {"gate": "G3", "status": STATUS_FAIL, "summary": reason, "details": details}
 
   if not has_summary(host):
+    details["host"]["errors"] = log_errors(host_log)
     details["host"]["log_tail"] = log_tail(host_log)
 
     reason = (
