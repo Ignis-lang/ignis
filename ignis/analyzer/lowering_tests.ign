@@ -107,6 +107,19 @@ function loweringPipeIntoMethodShapes(): void {
   Test::assertSnapshot("lowering-pipe-method-shapes", rendered.toStr());
 }
 
+/// Scenario: a pipe into a lambda written on the spot and a pipe into a local
+/// holding a closure.
+/// Spec: both become a call through the value, and the callee keeps the
+/// binding's function type rather than the type the call returns.
+@test
+function loweringPipeIntoClosureValue(): void {
+  let rendered: String = loweringRender(
+    "function immediate(): i32 {\n  return 10 |> (x: i32): i32 -> x * 3;\n}\n\nfunction throughBinding(): i32 {\n  let f: (i32) -> i32 = (x: i32): i32 -> x + 100;\n  return 5 |> f;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-pipe-closure-value", rendered.toStr());
+}
+
 @test
 function loweringIfElseBranches(): void {
   let rendered: String = loweringRender(
