@@ -1,0 +1,662 @@
+import Ast from "@compiler::ast";
+import Analyzer from "@compiler::analyzer";
+
+import Io from "std::io";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import CodegenC from "../codegen/mod";
+import BuildGraph from "./module_graph";
+
+/// One `@test` function selected for execution.
+///
+/// `fqName` is the name the harness dispatches on and the runner reports;
+/// `symbolName` is the C symbol the emitted translation unit defines for it.
+export record TestCase {
+  public fqName: String;
+  public symbolName: String;
+  /// `<module directory>/__snapshots__`, the directory `std::test` snapshot
+  /// helpers read and write through `IGNIS_TEST_SNAPSHOT_DIR`.
+  public snapshotDir: String;
+
+  public clone(&self): TestCase {
+    return TestCase {
+      fqName: self.fqName.clone(),
+      symbolName: self.symbolName.clone(),
+      snapshotDir: self.snapshotDir.clone(),
+    };
+  }
+}
+
+/// What one harness process reported.
+export record TestOutcome {
+  public fqName: String;
+  public success: boolean;
+  public exitCode: i32;
+  public stdout: String;
+  public stderr: String;
+}
+
+/// Longest failure stream excerpt reported per stream, in characters.
+const FAILED_TEST_OUTPUT_LIMIT: u64 = 240;
+
+function testRunnerEndsWith(value: &String, suffix: str): boolean {
+  let suffixText: String = String::create(suffix);
+
+  if (value.length() < suffixText.length()) {
+    return false;
+  }
+
+  let actual: String = value.substringBytes(value.length() - suffixText.length(), value.length());
+  return actual.equals(&suffixText);
+}
+
+function testRunnerRelativePathText(path: &Path::PathBuf, root: &Path::PathBuf): String {
+  let pathText: String = path.toString();
+  let rootText: String = root.toString();
+
+  if (!pathText.startsWith(rootText.toStr())) {
+    return pathText;
+  }
+
+  let mut start: u64 = rootText.length();
+
+  if (pathText.length() > start) {
+    if (let Option::SOME(separator) = pathText.charAt(start) && separator == '/') {
+      start += 1;
+    }
+  }
+
+  return pathText.substringBytes(start, pathText.length());
+}
+
+/// Drop trailing ASCII whitespace, leaving the leading bytes untouched.
+function testRunnerTrimEnd(value: &String): String {
+  let mut end: u64 = value.length();
+
+  while (end > 0) {
+    let Option::SOME(byte) = value.byteAt(end - 1) else {
+      break;
+    };
+
+    if (byte != 32 && byte != 9 && byte != 10 && byte != 13) {
+      break;
+    }
+
+    end -= 1;
+  }
+
+  return value.substringBytes(0, end);
+}
+
+export namespace TestRunner {
+  /// The `::`-joined module part of a test name, mirroring the host's
+  /// `module_segments`: the module path relative to the source root, without
+  /// the `.ign` extension and without a trailing `mod` segment.
+  function moduleSegments(path: &Path::PathBuf, sourceRoot: &Path::PathBuf): String {
+    let relative: String = testRunnerRelativePathText(path, sourceRoot);
+    let mut stem: String = relative.clone();
+
+    if (testRunnerEndsWith(&stem, ".ign")) {
+      stem = stem.substringBytes(0, stem.length() - 4);
+    }
+
+    if (stem.equals("mod")) {
+      stem = String::new();
+    } else if (testRunnerEndsWith(&stem, "/mod")) {
+      stem = stem.substringBytes(0, stem.length() - 4);
+    }
+
+    let mut segments: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < stem.length()) {
+      let Option::SOME(byte) = stem.byteAt(index) else {
+        break;
+      };
+
+      if (byte == 47) {
+        segments.pushStr("::");
+      } else {
+        segments.pushByte(byte);
+      }
+
+      index += 1;
+    }
+
+    return segments;
+  }
+
+  /// Append `name` to a `::`-separated prefix, skipping the separator when the
+  /// prefix is empty.
+  function joinName(prefix: &String, name: &String): String {
+    if (prefix.length() == 0) {
+      return name.clone();
+    }
+
+    let mut joined: String = prefix.clone();
+    joined.pushStr("::");
+    joined.push(name);
+    return joined;
+  }
+
+  function collectItem(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    pass2: &Analyzer::Binder::BinderOutput,
+    itemId: Ast::ItemId,
+    prefix: &String,
+    snapshotDir: &String,
+    out: &mut Vector<TestCase>,
+  ): void {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return;
+    };
+
+    match (node) {
+      Ast::Item::Node::Function(functionItem) -> {
+        if (!Analyzer::Binder::hasAttribute(&functionItem.metadata, "test")) {
+          return;
+        }
+
+        // A function the binder skipped (an unmet `@configFlag`, a duplicate)
+        // has no definition, so it has no symbol to dispatch to either.
+        let Option::SOME(defId) = Analyzer::Binder::findDef(pass2, itemId.raw()) else {
+          return;
+        };
+
+        let mut outRef: &mut Vector<TestCase> = out;
+        outRef.push(TestCase {
+          fqName: TestRunner::joinName(prefix, &functionItem.name),
+          symbolName: CodegenC::mangledName(defStore, symbols, defId),
+          snapshotDir: snapshotDir.clone(),
+        });
+      },
+      Ast::Item::Node::Namespace(namespaceItem) -> {
+        let childPrefix: String = TestRunner::joinName(prefix, &namespaceItem.name);
+        let mut childIndex: u64 = 0;
+
+        while (childIndex < namespaceItem.items.length()) {
+          if (let Option::SOME(childId) = namespaceItem.items.get(childIndex)) {
+            TestRunner::collectItem(
+              defStore,
+              symbols,
+              module,
+              pass2,
+              *childId,
+              &childPrefix,
+              snapshotDir,
+              out,
+            );
+          }
+
+          childIndex += 1;
+        }
+      },
+      Ast::Item::Node::Export(exportItem) -> {
+        if (let Option::SOME(innerId) = exportItem.declaration) {
+          TestRunner::collectItem(defStore, symbols, module, pass2, innerId, prefix, snapshotDir, out);
+        }
+      },
+      _ -> {},
+    };
+  }
+
+  /// Every `@test` function declared by one project module, named the way the
+  /// host names it: module segments, then the enclosing namespaces, then the
+  /// function.
+  function collectModuleTests(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    pass2: &Analyzer::Binder::BinderOutput,
+    modulePath: &Path::PathBuf,
+    sourceRoot: &Path::PathBuf,
+    out: &mut Vector<TestCase>,
+  ): void {
+    let prefix: String = TestRunner::moduleSegments(modulePath, sourceRoot);
+    let mut snapshotDir: String = String::new();
+
+    if (let Option::SOME(parent) = modulePath.parent()) {
+      snapshotDir = parent.join("__snapshots__").toString();
+    }
+
+    let mut rootIndex: u64 = 0;
+
+    while (rootIndex < module.roots.length()) {
+      if (let Option::SOME(rootId) = module.roots.get(rootIndex)) {
+        TestRunner::collectItem(defStore, symbols, module, pass2, *rootId, &prefix, &snapshotDir, out);
+      }
+
+      rootIndex += 1;
+    }
+  }
+
+  /// The source root a project's test names are relative to: the directory
+  /// holding the entry module the discovery graph is rooted at.
+  function sourceRootOf(graph: &BuildGraph): Path::PathBuf {
+    let Option::SOME(rootIndex) = graph.rootIndex else {
+      return Path::PathBuf::new();
+    };
+    let Option::SOME(node) = graph.nodes.get(rootIndex) else {
+      return Path::PathBuf::new();
+    };
+    let Option::SOME(parent) = node.path.parent() else {
+      return Path::PathBuf::new();
+    };
+
+    return parent;
+  }
+
+  /// Sort by name and keep only the names containing `filter`, as the host's
+  /// `build_test_harness_plan` does. An empty filter keeps everything.
+  function plan(cases: &Vector<TestCase>, filter: &String): Vector<TestCase> {
+    let mut selected: Vector<TestCase> = Vector::new<TestCase>();
+    let mut index: u64 = 0;
+
+    while (index < cases.length()) {
+      let Option::SOME(testCase) = cases.get(index) else {
+        break;
+      };
+
+      if (filter.length() == 0 || testCase.fqName.contains(filter)) {
+        selected.push(testCase.clone());
+      }
+
+      index += 1;
+    }
+
+    TestRunner::sortByName(&mut selected);
+    return selected;
+  }
+
+  /// Stable insertion sort by `fqName`, cloning through `get`/`set` the way
+  /// `Sort::stableStrings` does for owned values.
+  function sortByName(cases: &mut Vector<TestCase>): void {
+    let mut casesRef: &mut Vector<TestCase> = cases;
+    let mut index: u64 = 1;
+
+    while (index < casesRef.length()) {
+      let Option::SOME(currentRef) = casesRef.get(index) else {
+        break;
+      };
+      let current: TestCase = currentRef.clone();
+      let mut scan: i64 = index as i64 - 1;
+
+      while (scan >= 0) {
+        let Option::SOME(existing) = casesRef.get(scan as u64) else {
+          break;
+        };
+
+        if (existing.fqName.compare(&current.fqName) <= 0) {
+          break;
+        }
+
+        let shifted: TestCase = existing.clone();
+
+        if (!casesRef.set((scan + 1) as u64, shifted)) {
+          break;
+        }
+
+        scan -= 1;
+      }
+
+      let _inserted: boolean = casesRef.set((scan + 1) as u64, current);
+      index += 1;
+    }
+  }
+
+  /// The harness translation unit: one `extern` declaration per selected test
+  /// and a `main` that dispatches on `--ignis-test <name>`.
+  ///
+  /// It owns the program's `main`, so the emitted program unit is built
+  /// without its entry wrapper.
+  function harnessSource(cases: &Vector<TestCase>): String {
+    let mut source: String = String::create("#include <stdio.h>\n");
+    source.pushStr("#include <stdlib.h>\n");
+    source.pushStr("#include <string.h>\n");
+    source.pushStr("#include \"ignis_rt.h\"\n\n");
+
+    let mut declarationIndex: u64 = 0;
+
+    while (declarationIndex < cases.length()) {
+      let Option::SOME(testCase) = cases.get(declarationIndex) else {
+        break;
+      };
+
+      source.pushStr(`extern void ${testCase.symbolName.toStr()}(void);\n`.toStr());
+      declarationIndex += 1;
+    }
+
+    source.pushStr("\nint main(int argc, char** argv) {\n");
+    source.pushStr("    ignis_runtime_init((i32)argc, argv);\n");
+    source.pushStr("    if (argc != 3 || strcmp(argv[1], \"--ignis-test\") != 0) {\n");
+    source.pushStr("        fprintf(stderr, \"Error: expected --ignis-test <name>\\n\");\n");
+    source.pushStr("        return 2;\n");
+    source.pushStr("    }\n");
+
+    let mut dispatchIndex: u64 = 0;
+
+    while (dispatchIndex < cases.length()) {
+      let Option::SOME(testCase) = cases.get(dispatchIndex) else {
+        break;
+      };
+
+      source.pushStr(`    if (strcmp(argv[2], "${testCase.fqName.toStr()}") == 0) {\n`.toStr());
+      source.pushStr(`        ${testCase.symbolName.toStr()}();\n`.toStr());
+      source.pushStr("        return 0;\n");
+      source.pushStr("    }\n");
+      dispatchIndex += 1;
+    }
+
+    source.pushStr("    fprintf(stderr, \"Error: unknown test %s\\n\", argv[2]);\n");
+    source.pushStr("    return 2;\n");
+    source.pushStr("}\n");
+
+    return source;
+  }
+
+  /// Run the harness binary once per selected test, with the snapshot context
+  /// the `std::test` helpers read out of the environment.
+  function execute(
+    binaryPath: &Path::PathBuf,
+    cases: &Vector<TestCase>,
+    updateSnapshots: boolean,
+  ): Vector<TestOutcome> {
+    let mut outcomes: Vector<TestOutcome> = Vector::new<TestOutcome>();
+    let updateFlag: str = updateSnapshots ? "1" : "0";
+    let mut index: u64 = 0;
+
+    while (index < cases.length()) {
+      let Option::SOME(testCase) = cases.get(index) else {
+        break;
+      };
+
+      let mut command: Process::Command = Process::Command::new(binaryPath.asStr());
+      command.arg("--ignis-test");
+      command.arg(testCase.fqName.toStr());
+      command.env("IGNIS_TEST_NAME", testCase.fqName.toStr());
+      command.env("IGNIS_TEST_SNAPSHOT_DIR", testCase.snapshotDir.toStr());
+      command.env("IGNIS_TEST_UPDATE_SNAPSHOTS", updateFlag);
+
+      match (command.output()) {
+        Result::OK(output) -> {
+          let status: Process::ExitStatus = output.status();
+
+          outcomes.push(TestOutcome {
+            fqName: testCase.fqName.clone(),
+            success: status.success,
+            exitCode: status.code,
+            stdout: output.stdout(),
+            stderr: output.stderr(),
+          });
+        },
+        Result::ERROR(_) -> {
+          outcomes.push(TestOutcome {
+            fqName: testCase.fqName.clone(),
+            success: false,
+            exitCode: 1,
+            stdout: String::new(),
+            stderr: `failed to run test '${testCase.fqName.toStr()}'`,
+          });
+        },
+      };
+
+      index += 1;
+    }
+
+    return outcomes;
+  }
+
+  /// One failure stream, indented under its label and cut at
+  /// `FAILED_TEST_OUTPUT_LIMIT` characters. An all-whitespace stream is
+  /// omitted entirely.
+  function appendFailedStream(lines: &mut String, label: str, output: &String): void {
+    let trimmed: String = testRunnerTrimEnd(output).trimAsciiWhitespace();
+
+    if (trimmed.length() == 0) {
+      return;
+    }
+
+    let display: String = testRunnerTrimEnd(output);
+    let characters: u64 = display.toChars().length();
+    let mut shown: String = display.clone();
+    let mut truncated: boolean = false;
+
+    if (characters > FAILED_TEST_OUTPUT_LIMIT) {
+      shown = display.substring(0, FAILED_TEST_OUTPUT_LIMIT as i64);
+      truncated = true;
+    }
+
+    let mut linesRef: &mut String = lines;
+    linesRef.pushStr(`  ${label}:\n`.toStr());
+
+    let streamLines: Vector<String> = shown.lines();
+    let mut index: u64 = 0;
+
+    while (index < streamLines.length()) {
+      let Option::SOME(line) = streamLines.get(index) else {
+        break;
+      };
+
+      linesRef.pushStr(`    ${line.toStr()}\n`.toStr());
+      index += 1;
+    }
+
+    if (truncated) {
+      linesRef.pushStr("    [truncated]\n");
+    }
+  }
+
+  /// The host's failure block for one test, newline-terminated per line.
+  function formatFailedTestDetails(outcome: &TestOutcome): String {
+    let mut lines: String = `- ${outcome.fqName.toStr()} (exit code ${outcome.exitCode})\n`;
+
+    TestRunner::appendFailedStream(&mut lines, "stderr", &outcome.stderr);
+    TestRunner::appendFailedStream(&mut lines, "stdout", &outcome.stdout);
+
+    return lines;
+  }
+
+  function countPassed(outcomes: &Vector<TestOutcome>): u64 {
+    let mut passed: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < outcomes.length()) {
+      if (let Option::SOME(outcome) = outcomes.get(index) && outcome.success) {
+        passed += 1;
+      }
+
+      index += 1;
+    }
+
+    return passed;
+  }
+
+  /// Print the run in the host's shape: one line per test, a failure section,
+  /// then the totals. Returns the number of failures.
+  function report(outcomes: &Vector<TestOutcome>, binaryPath: &Path::PathBuf): u64 {
+    let total: u64 = outcomes.length();
+    let passed: u64 = TestRunner::countPassed(outcomes);
+    let failed: u64 = total - passed;
+    let mut index: u64 = 0;
+
+    while (index < outcomes.length()) {
+      let Option::SOME(outcome) = outcomes.get(index) else {
+        break;
+      };
+      let status: str = outcome.success ? "ok" : "FAILED";
+
+      Io::eprintln(`  - ${outcome.fqName.toStr()} ... ${status}`);
+      index += 1;
+    }
+
+    if (failed > 0) {
+      Io::eprintln(String::create("• Failures"));
+
+      let mut failureIndex: u64 = 0;
+
+      while (failureIndex < outcomes.length()) {
+        let Option::SOME(outcome) = outcomes.get(failureIndex) else {
+          break;
+        };
+
+        if (outcome.success) {
+          failureIndex += 1;
+          continue;
+        }
+
+        let details: String = TestRunner::formatFailedTestDetails(outcome);
+        let detailLines: Vector<String> = details.lines();
+        let mut lineIndex: u64 = 0;
+
+        while (lineIndex < detailLines.length()) {
+          let Option::SOME(line) = detailLines.get(lineIndex) else {
+            break;
+          };
+
+          Io::println(`  ${line.toStr()}`);
+          lineIndex += 1;
+        }
+
+        Io::println(String::new());
+        failureIndex += 1;
+      }
+    }
+
+    Io::eprintln(String::create("• Summary"));
+    Io::eprintln(`  - ${total} total`);
+    Io::eprintln(`  - ${passed} passed`);
+    Io::eprintln(`  - ${failed} failed`);
+    Io::eprintln(`  Test binary: ${binaryPath.asStr()}`);
+
+    return failed;
+  }
+}
+
+@test
+function testRunnerNamesModuleSegmentsRelativeToTheSourceRoot(): void {
+  let sourceRoot: Path::PathBuf = Path::PathBuf::create("/project/ignis");
+  let modulePath: Path::PathBuf = Path::PathBuf::create("/project/ignis/syntax/cursor_tests.ign");
+  let segments: String = TestRunner::moduleSegments(&modulePath, &sourceRoot);
+
+  Test::assertEq<str>(segments.toStr(), "syntax::cursor_tests");
+}
+
+@test
+function testRunnerDropsTheTrailingModSegmentFromAModuleName(): void {
+  let sourceRoot: Path::PathBuf = Path::PathBuf::create("/project/ignis");
+  let modulePath: Path::PathBuf = Path::PathBuf::create("/project/ignis/build/mod.ign");
+  let segments: String = TestRunner::moduleSegments(&modulePath, &sourceRoot);
+
+  Test::assertEq<str>(segments.toStr(), "build");
+}
+
+@test
+function testRunnerJoinsNamespacesAndTheFunctionIntoOneTestName(): void {
+  let sourceRoot: Path::PathBuf = Path::PathBuf::create("/project/ignis");
+  let modulePath: Path::PathBuf = Path::PathBuf::create("/project/ignis/analyzer/binder_tests.ign");
+  let moduleName: String = TestRunner::moduleSegments(&modulePath, &sourceRoot);
+  let namespaceName: String = String::create("Inner");
+  let functionName: String = String::create("binderBindConstant");
+  let namespaced: String = TestRunner::joinName(&moduleName, &namespaceName);
+  let fqName: String = TestRunner::joinName(&namespaced, &functionName);
+
+  Test::assertEq<str>(fqName.toStr(), "analyzer::binder_tests::Inner::binderBindConstant");
+}
+
+@test
+function testRunnerPlanSortsByNameAndKeepsOnlyFilterMatches(): void {
+  let mut cases: Vector<TestCase> = Vector::new<TestCase>();
+  cases.push(TestCase {
+    fqName: String::create("b::second"),
+    symbolName: String::create("second_2"),
+    snapshotDir: String::new(),
+  });
+  cases.push(TestCase {
+    fqName: String::create("a::first"),
+    symbolName: String::create("first_1"),
+    snapshotDir: String::new(),
+  });
+  cases.push(TestCase {
+    fqName: String::create("a::third"),
+    symbolName: String::create("third_3"),
+    snapshotDir: String::new(),
+  });
+
+  let filter: String = String::create("a::");
+  let selected: Vector<TestCase> = TestRunner::plan(&cases, &filter);
+  let mut names: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < selected.length()) {
+    let Option::SOME(testCase) = selected.get(index) else {
+      break;
+    };
+
+    if (index > 0) {
+      names.pushStr(",");
+    }
+
+    names.push(&testCase.fqName);
+    index += 1;
+  }
+
+  Test::assertEq<str>(names.toStr(), "a::first,a::third");
+}
+
+@test
+function testRunnerHarnessDispatchesEveryTestByName(): void {
+  let mut cases: Vector<TestCase> = Vector::new<TestCase>();
+  cases.push(TestCase {
+    fqName: String::create("syntax::token_tests::keywordLookup"),
+    symbolName: String::create("keywordLookup_42"),
+    snapshotDir: String::new(),
+  });
+
+  let source: String = TestRunner::harnessSource(&cases);
+
+  let expected: String = String::create("#include <stdio.h>\n")
+    .concat("#include <stdlib.h>\n")
+    .concat("#include <string.h>\n")
+    .concat("#include \"ignis_rt.h\"\n\n")
+    .concat("extern void keywordLookup_42(void);\n")
+    .concat("\nint main(int argc, char** argv) {\n")
+    .concat("    ignis_runtime_init((i32)argc, argv);\n")
+    .concat("    if (argc != 3 || strcmp(argv[1], \"--ignis-test\") != 0) {\n")
+    .concat("        fprintf(stderr, \"Error: expected --ignis-test <name>\\n\");\n")
+    .concat("        return 2;\n")
+    .concat("    }\n")
+    .concat("    if (strcmp(argv[2], \"syntax::token_tests::keywordLookup\") == 0) {\n")
+    .concat("        keywordLookup_42();\n")
+    .concat("        return 0;\n")
+    .concat("    }\n")
+    .concat("    fprintf(stderr, \"Error: unknown test %s\\n\", argv[2]);\n")
+    .concat("    return 2;\n")
+    .concat("}\n");
+
+  Test::assertEq<str>(source.toStr(), expected.toStr());
+}
+
+@test
+function testRunnerFailureDetailsIndentEachStreamUnderItsLabel(): void {
+  let outcome: TestOutcome = TestOutcome {
+    fqName: String::create("a::failing"),
+    success: false,
+    exitCode: 101,
+    stdout: String::new(),
+    stderr: String::create("panic: boom\nat line 3\n"),
+  };
+
+  let details: String = TestRunner::formatFailedTestDetails(&outcome);
+  let expected: String = String::create("- a::failing (exit code 101)\n")
+    .concat("  stderr:\n")
+    .concat("    panic: boom\n")
+    .concat("    at line 3\n");
+
+  Test::assertEq<str>(details.toStr(), expected.toStr());
+}
