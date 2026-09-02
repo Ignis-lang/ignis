@@ -317,9 +317,11 @@ run_gate_g3() {
 
   info "gate-g3: running the selfhost test suite under ${host_bin}"
 
-  timeout "$GATE_G3_TIMEOUT_SECONDS" \
-    env IGNIS_STD_PATH="${PROJECT_ROOT}/std" \
-    "$host_bin" test "$ENTRY" >"$host_log" 2>&1 || host_status=$?
+  # The host runs the suite in project mode. Its single-file mode reads no
+  # ignis.toml, so the `@compiler` alias the selfhost sources import through
+  # would not resolve and the run would end before any test.
+  (cd "$PROJECT_ROOT" && timeout "$GATE_G3_TIMEOUT_SECONDS" "$host_bin" test) \
+    >"$host_log" 2>&1 || host_status=$?
 
   python3 "${SCRIPT_DIR}/bootstrap_report.py" gate-g3 \
     --stage2-log "$stage2_log" \
