@@ -547,7 +547,8 @@ export namespace Analyzer {
       stateRef.diagnostics.push(diag);
     }
 
-    /// Whether the item's attributes carry `@implements(<traitName>)`.
+    /// Whether the item's attributes carry `@implements(<traitName>)`, alone or
+    /// inside a list such as `@implements(Drop, Clone, Eq)`.
     ///
     /// Attribute arguments arrive from the parser as raw lexeme text, so the
     /// trait name is matched as a string rather than as a resolved name.
@@ -566,18 +567,16 @@ export namespace Analyzer {
           continue;
         }
 
-        if (attribute.arguments.length() != 1) {
-          index += 1;
-          continue;
-        }
+        let mut argumentIndex: u64 = 0;
 
-        let Option::SOME(argument) = attribute.arguments.get(0) else {
-          index += 1;
-          continue;
-        };
+        while (argumentIndex < attribute.arguments.length()) {
+          if (let Option::SOME(argument) = attribute.arguments.get(argumentIndex)) {
+            if (argument.equals(traitName)) {
+              return true;
+            }
+          }
 
-        if (argument.equals(traitName)) {
-          return true;
+          argumentIndex += 1;
         }
 
         index += 1;
