@@ -230,6 +230,32 @@ export namespace LirLowering {
     return Option::SOME(Lir::Operand::Const(constant));
   }
 
+  function implicitTerminator(
+    returnsVoid: boolean,
+    bodyIsUndef: boolean,
+    bodyValue: Lir::Operand
+  ): Lir::Terminator {
+    if (returnsVoid) {
+      return Lir::Terminator::Return(Option::NONE);
+    }
+
+    if (bodyIsUndef) {
+      return Lir::Terminator::Unreachable;
+    }
+
+    return Lir::Terminator::Return(Option::SOME(bodyValue));
+  }
+
+  function isUndefOperand(operand: &Lir::Operand): boolean {
+    if (let Lir::Operand::Const(value) = operand) {
+      if (let Lir::ConstValue::Undef(_) = value) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   function isVoidType(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
     if (let Option::SOME(typeNode) = typeStore.get(ty)) {
       if (let Analyzer::Type::VOID = typeNode) {
@@ -3079,18 +3105,19 @@ export namespace LirLowering {
         LirLowering::emitDropFunctionBody(defStore, typeStore, &mut function_, &mut state, &paramDefs, &dropCaptures);
       }
 
-      let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, &mut function_, &mut state, bodyId);
+      let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, &mut function_, &mut state, bodyId);
 
-      // A body that falls off its end returns void implicitly; anything else
-      // reaching here was already rejected by the checker, so the block is
-      // unreachable rather than a return of nothing.
-      if (!state.terminated) {
-        if (LirLowering::isVoidType(typeStore, returnType)) {
-          LirLowering::terminate(&mut function_, &mut state, Lir::Terminator::Return(Option::NONE));
-        } else {
-          LirLowering::terminate(&mut function_, &mut state, Lir::Terminator::Unreachable);
-        }
-      }
+      // A body that falls off its end returns implicitly: nothing for a void
+      // function, its value otherwise. The value is the block's tail, which
+      // is how an expression-bodied lambda's thunk returns its result.
+      // A block whose every path already returned leaves an `Undef` behind;
+      // its merge block is unreachable rather than a return of nothing.
+      let returnsVoid: boolean = LirLowering::isVoidType(typeStore, returnType);
+      let bodyIsUndef: boolean = LirLowering::isUndefOperand(&bodyValue);
+      let implicitTerminator: Lir::Terminator = LirLowering::implicitTerminator(returnsVoid, bodyIsUndef, bodyValue);
+
+      // `terminate` drops the terminator when the block already has one.
+      LirLowering::terminate(&mut function_, &mut state, implicitTerminator);
 
       unsupported += state.unsupported;
       loweredFunctions += 1;
