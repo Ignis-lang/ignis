@@ -3845,3 +3845,81 @@ function parserParsesCStyleForStatements(): void {
     _ -> @panic("root is not a function"),
   };
 }
+
+/// The boolean a `@configFlag(...)` expression statement folded to.
+function configFlagLiteralValue(module: &Ast::Module, statementId: Ast::StatementId): boolean {
+  match (expectStatement(module, statementId)) {
+    Ast::Statement::Node::Expression(expressionStatement) -> {
+      match (expectExpression(module, expressionStatement.expression)) {
+        Ast::Expression::Node::Literal(literal) -> {
+          match (&literal.value) {
+            Ast::Expression::LiteralValue::Boolean(value) -> {
+              return value;
+            },
+            _ -> @panic("expected @configFlag to fold to a boolean literal"),
+          };
+        },
+        _ -> @panic("expected @configFlag to fold to a literal expression"),
+      };
+    },
+    _ -> @panic("expected a @configFlag expression statement"),
+  };
+
+  @panic("unreachable: configFlagLiteralValue did not return");
+}
+
+/// `@configFlag(<condition>)` is answered while parsing, so the directive
+/// never reaches the AST: only the boolean it evaluated to does. The values
+/// below follow the compile-time flags the parser stands in with, which
+/// describe a non-debug build on a glibc x86_64 Linux host.
+@test
+function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_config_flag.ign",
+    "function main(): void { @configFlag(@platform(\"Linux\")); @configFlag(@debug()); @configFlag(!@release()); @configFlag(@feature(\"nonexistent\") || @arch(\"x86_64\")); @configFlag(@target(\"x86_64-unknown-linux-gnu\") && @abi(\"gnu\")); }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing configFlag function root"),
+  };
+
+  let mut expected: Vector<boolean> = Vector::new<boolean>();
+  expected.push(true);
+  expected.push(false);
+  expected.push(false);
+  expected.push(true);
+  expected.push(true);
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), expected.length());
+
+          let mut index: u64 = 0;
+          while (index < expected.length()) {
+            let statementId: Ast::StatementId = match (block.statements.get(index)) {
+              Option::SOME(value) -> *value,
+              Option::NONE -> @panic("missing configFlag statement"),
+            };
+            let expectedValue: boolean = match (expected.get(index)) {
+              Option::SOME(value) -> *value,
+              Option::NONE -> @panic("missing expected configFlag value"),
+            };
+
+            Test::assertEq<boolean>(configFlagLiteralValue(&module, statementId), expectedValue);
+            index += 1;
+          }
+        },
+        _ -> @panic("expected block function body for the configFlag test"),
+      };
+    },
+    _ -> @panic("expected function root for the configFlag test"),
+  };
+}

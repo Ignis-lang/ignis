@@ -946,10 +946,197 @@ export namespace ParserExpressions {
     return Option::SOME(ParserShared::copyTypeIds(&arguments));
   }
 
+  // Compile-time flags the `@configFlag(...)` predicates answer from.
+  //
+  // The self-hosted driver has no compilation-context plumbing: the build
+  // config (`ignis/build/config.ign`) carries a target triple, but nothing
+  // reaches the parser, which is where `@configFlag` folds to a boolean. Until
+  // that plumbing exists these constants stand in for it and describe a
+  // non-debug build on a glibc x86_64 Linux host. Replacing them with threaded
+  // configuration is the only change the predicates below need.
+  const CONFIG_FLAG_OS: str = "linux";
+  const CONFIG_FLAG_ARCH: str = "x86_64";
+  const CONFIG_FLAG_ABI: str = "gnu";
+  const CONFIG_FLAG_TARGET_TRIPLE: str = "x86_64-unknown-linux-gnu";
+  const CONFIG_FLAG_DEBUG: boolean = false;
+
+  /// `@configFlag(<condition>)` in expression position: the condition is
+  /// evaluated while parsing and the call becomes a boolean literal, so
+  /// nothing downstream ever sees the directive.
+  function parseConfigFlagExpression(
+    parser: &mut ParserShared::State,
+    atSpan: SourceSpan,
+  ): Option<ParsedExpression> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after 'configFlag'") else {
+      return Option::NONE;
+    };
+
+    let value: boolean = ParserExpressions::parseCompileConditionOr(parserRef)!;
+
+    let closeParen: Token = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after compile-time condition")!;
+
+    let span: SourceSpan = ParserShared::mergeSpans(atSpan, closeParen.span);
+    let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+      span: span,
+      value: Ast::Expression::LiteralValue::Boolean(value),
+    }));
+
+    return Option::SOME(ParsedExpression {
+      id: expressionId,
+      span: span,
+    });
+  }
+
+  function parseCompileConditionOr(parser: &mut ParserShared::State): Option<boolean> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let mut value: boolean = ParserExpressions::parseCompileConditionAnd(parserRef)!;
+
+    // Both sides are always parsed, so a false left operand still consumes the
+    // right one instead of leaving it for the enclosing expression.
+    while (parserRef.consumePunctuation(Punctuation::OR).isSome()) {
+      let right: boolean = ParserExpressions::parseCompileConditionAnd(parserRef)!;
+      value = value || right;
+    }
+
+    return Option::SOME(value);
+  }
+
+  function parseCompileConditionAnd(parser: &mut ParserShared::State): Option<boolean> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let mut value: boolean = ParserExpressions::parseCompileConditionUnary(parserRef)!;
+
+    while (parserRef.consumePunctuation(Punctuation::AND).isSome()) {
+      let right: boolean = ParserExpressions::parseCompileConditionUnary(parserRef)!;
+      value = value && right;
+    }
+
+    return Option::SOME(value);
+  }
+
+  function parseCompileConditionUnary(parser: &mut ParserShared::State): Option<boolean> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (parserRef.consumePunctuation(Punctuation::BANG).isSome()) {
+      let inner: boolean = ParserExpressions::parseCompileConditionUnary(parserRef)!;
+      return Option::SOME(!inner);
+    }
+
+    return ParserExpressions::parseCompileConditionPrimary(parserRef);
+  }
+
+  function parseCompileConditionPrimary(parser: &mut ParserShared::State): Option<boolean> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (parserRef.consumePunctuation(Punctuation::LEFT_PAREN).isSome()) {
+      let value: boolean = ParserExpressions::parseCompileConditionOr(parserRef)!;
+
+      let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after compile-time condition") else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(value);
+    }
+
+    if (parserRef.atPunctuation(Punctuation::AT)) {
+      return ParserExpressions::parseCompilePredicateCall(parserRef);
+    }
+
+    let span: SourceSpan = parserRef.current().span;
+    parserRef.emitDiagnostic(
+      span,
+      DiagnosticCode::EXPECTED_EXPRESSION,
+      "expected expression",
+      "invalid compile-time condition expression",
+    );
+    return Option::NONE;
+  }
+
+  /// `@debug()` and `@release()` take no argument; `@platform`, `@arch`,
+  /// `@abi`, `@target` and `@feature` take one string literal.
+  function parseCompilePredicateCall(parser: &mut ParserShared::State): Option<boolean> {
+    let mut parserRef: &mut ParserShared::State = parser;
+    let atToken: Token = parserRef.consumePunctuation(Punctuation::AT)!;
+    let nameToken: Token = parserRef.expectIdentifier("expected compile-time predicate name after '@'")!;
+    let name: String = nameToken.lexemeString();
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after compile-time predicate") else {
+      return Option::NONE;
+    };
+
+    if (name.equals("debug") || name.equals("release")) {
+      let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after compile-time predicate") else {
+        return Option::NONE;
+      };
+
+      if (name.equals("debug")) {
+        return Option::SOME(ParserExpressions::CONFIG_FLAG_DEBUG);
+      }
+
+      return Option::SOME(!ParserExpressions::CONFIG_FLAG_DEBUG);
+    }
+
+    parserRef.skipTrivia();
+    let argumentToken: Token = parserRef.current();
+    let mut argumentIsString: boolean = false;
+
+    if (argumentToken.kindValue() == TokenKind::LITERAL) {
+      argumentIsString = argumentToken.literalKindValue() == LiteralKind::STRING;
+    }
+
+    if (!argumentIsString) {
+      parserRef.expected(argumentToken.span, "expected a string argument to the compile-time predicate");
+      return Option::NONE;
+    }
+
+    let argumentLexeme: String = parserRef.bump().lexemeString();
+    let argument: String = ParserShared::decodeEscapes(ParserShared::stripQuotes(&argumentLexeme));
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after compile-time predicate") else {
+      return Option::NONE;
+    };
+
+    // `@platform` and `@abi` fold their argument's case; `@arch` and `@target`
+    // compare it verbatim.
+    if (name.equals("platform")) {
+      return Option::SOME(argument.toLowerCase().equals(ParserExpressions::CONFIG_FLAG_OS));
+    }
+
+    if (name.equals("abi")) {
+      return Option::SOME(argument.toLowerCase().equals(ParserExpressions::CONFIG_FLAG_ABI));
+    }
+
+    if (name.equals("arch")) {
+      return Option::SOME(argument.equals(ParserExpressions::CONFIG_FLAG_ARCH));
+    }
+
+    if (name.equals("target")) {
+      return Option::SOME(argument.equals(ParserExpressions::CONFIG_FLAG_TARGET_TRIPLE));
+    }
+
+    // No build enables features yet, and with no declared feature set every
+    // name counts as known, so an unrecognised one is false rather than an
+    // error — the same answer the reference front end gives by default.
+    if (name.equals("feature")) {
+      return Option::SOME(false);
+    }
+
+    let span: SourceSpan = ParserShared::mergeSpans(atToken.span, nameToken.span);
+    let detail: String = `unknown compile-time predicate \`@${name.toStr()}\``;
+    parserRef.emitDiagnostic(span, DiagnosticCode::EXPECTED_EXPRESSION, "expected expression", detail.toStr());
+    return Option::NONE;
+  }
+
   function parseBuiltinCallExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {
     let mut parserRef: &mut ParserShared::State = parser;
     let atToken = parserRef.consumePunctuation(Punctuation::AT)!;
     let nameToken = parserRef.expectIdentifier("expected builtin name after '@'")!;
+
+    if (nameToken.lexemeString().equals("configFlag")) {
+      return ParserExpressions::parseConfigFlagExpression(parserRef, atToken.span);
+    }
+
     let typeArguments = ParserExpressions::parseTypeArgumentList(parserRef)!;
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after builtin name") else {
       return Option::NONE;
