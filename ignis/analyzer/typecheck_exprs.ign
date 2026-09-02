@@ -658,50 +658,43 @@ export namespace Analyzer {
         }
       }
 
-      // Branch 1b: `minOf<T>()` / `maxOf<T>()` written without `@` — the host
-      // types these from the callee name alone, before any resolution.
-      let mut bareBuiltinName: String = String::create("");
-      if (let Option::SOME(bareCalleeExpr) = module.expressions.get(call.callee)) {
-        if (let Ast::Expression::Node::Variable(bareCallee) = bareCalleeExpr) {
-          bareBuiltinName = bareCallee.name.clone();
+      // Branch 1b: `sizeOf<T>()` / `alignOf<T>()` / `minOf<T>()` / `maxOf<T>()`
+      // written without `@` — the host types these from the callee name alone.
+      // A callee the resolver did bind is a user declaration shadowing the
+      // builtin name, and takes the ordinary call path instead.
+      let bareBuiltinName: String = Analyzer::Typecheck::bareBuiltinCalleeName(module, resolvedBodies, call.callee);
+
+      if (Analyzer::ResolverBodies::isBareBuiltinName(bareBuiltinName.toStr())) {
+        if (call.typeArguments.length() != 1) {
+          Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, bareBuiltinName.toStr(), 1, call.typeArguments.length());
+          return Option::NONE;
         }
 
-        if (let Ast::Expression::Node::Path(barePath) = bareCalleeExpr) {
-          if (barePath.segments.length() == 1) {
-            if (let Option::SOME(onlySegment) = barePath.segments.get(0)) {
-              bareBuiltinName = onlySegment.clone();
-            }
-          }
+        if (call.arguments.length() != 0) {
+          Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 0);
+          return Option::NONE;
         }
-      }
 
-      {
-        {
-          if (bareBuiltinName.equals("minOf") || bareBuiltinName.equals("maxOf")) {
-            if (call.typeArguments.length() != 1) {
-              Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, bareBuiltinName.toStr(), 1, call.typeArguments.length());
-              return Option::NONE;
-            }
+        let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
+          return Option::NONE;
+        };
+        let Option::SOME(operandType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+          let detail: String = `the type argument of \`${bareBuiltinName.toStr()}\``;
+          Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
+          return Option::NONE;
+        };
 
-            if (call.arguments.length() != 0) {
-              Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 0);
-              return Option::NONE;
-            }
-
-            let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
-              return Option::NONE;
-            };
-            let Option::SOME(resultType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
-              let detail: String = `the type argument of \`${bareBuiltinName.toStr()}\``;
-              Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
-              return Option::NONE;
-            };
-
-            Analyzer::Typecheck::recordExprType(state, call.callee, resultType);
-            Analyzer::Typecheck::recordExprType(state, callExprId, resultType);
-            return Option::SOME(resultType);
-          }
+        // `minOf`/`maxOf` yield a value of the type argument; `sizeOf`/`alignOf`
+        // yield the byte count as `u64`.
+        let mut resultType: Analyzer::TypeId = operandType;
+        if (bareBuiltinName.equals("sizeOf") || bareBuiltinName.equals("alignOf")) {
+          let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+          resultType = typeStoreRef.intern(Analyzer::Type::U64);
         }
+
+        Analyzer::Typecheck::recordExprType(state, call.callee, resultType);
+        Analyzer::Typecheck::recordExprType(state, callExprId, resultType);
+        return Option::SOME(resultType);
       }
 
       // Branch 2: a path callee that resolved (at resolver time) directly to a
@@ -5228,6 +5221,14 @@ export namespace Analyzer {
         return Analyzer::Typecheck::checkBuiltinTypeArgResult(state, defStore, typeStore, symbols, module, call);
       }
 
+      if (name.equals("bitCast") || name.equals("pointerCast")) {
+        return Analyzer::Typecheck::checkBuiltinCast(state, defStore, typeStore, symbols, module, resolvedBodies, call);
+      }
+
+      if (name.equals("dropGlue")) {
+        return Analyzer::Typecheck::checkBuiltinDropGlue(state, defStore, typeStore, symbols, module, call);
+      }
+
       if (name.equals("read") || name.equals("write") || name.equals("dropInPlace") || name.equals("eq")) {
         return Analyzer::Typecheck::checkBuiltinPointerFamily(state, defStore, typeStore, symbols, module, resolvedBodies, call);
       }
@@ -5304,6 +5305,169 @@ export namespace Analyzer {
       };
 
       return Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId);
+    }
+
+    /// The single-segment name a call's callee spells, but only when the
+    /// resolver bound it to nothing.
+    ///
+    /// That is the shape a builtin written without `@` arrives in. A callee
+    /// with a resolver reference is a local, parameter or declaration that
+    /// shadows the builtin name, so the empty string is returned for it and the
+    /// call takes the ordinary path.
+    function bareBuiltinCalleeName(
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      calleeId: Ast::ExpressionId,
+    ): String {
+      let empty: String = String::create("");
+
+      if (let Option::SOME(resolved) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, calleeId)) {
+        let bound: boolean = match (resolved) {
+          Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> false,
+          _ -> true,
+        };
+
+        if (bound) {
+          return empty;
+        }
+      }
+
+      let Option::SOME(calleeExpr) = module.expressions.get(calleeId) else {
+        return empty;
+      };
+
+      if (let Ast::Expression::Node::Variable(variable) = calleeExpr) {
+        return variable.name.clone();
+      }
+
+      if (let Ast::Expression::Node::Path(path) = calleeExpr) {
+        if (path.segments.length() == 1) {
+          if (let Option::SOME(onlySegment) = path.segments.get(0)) {
+            return onlySegment.clone();
+          }
+        }
+      }
+
+      return empty;
+    }
+
+    /// `@bitCast<T>(x)` / `@pointerCast<T>(p)`: one type argument, one value
+    /// argument, and the result IS the type argument.
+    ///
+    /// The argument is checked without an expectation, exactly as the reference
+    /// analyzer does: neither cast constrains what it reinterprets from.
+    /// `@pointerCast` additionally requires both sides to be pointers.
+    function checkBuiltinCast(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      call: &Ast::Expression::BuiltinCall,
+    ): Option<Analyzer::TypeId> {
+      if (call.typeArguments.length() != 1) {
+        Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 1, call.typeArguments.length());
+        return Option::NONE;
+      }
+
+      if (call.arguments.length() != 1) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 1);
+        return Option::NONE;
+      }
+
+      let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(targetType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+        let detail: String = `the type argument of \`@${call.name.toStr()}\``;
+        Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
+        return Option::NONE;
+      };
+
+      let Option::SOME(argExprId) = call.arguments.get(0) else {
+        return Option::NONE;
+      };
+
+      let argTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        *argExprId,
+      );
+
+      if (!call.name.equals("pointerCast")) {
+        return Option::SOME(targetType);
+      }
+
+      if (!Analyzer::Typecheck::typeIdIsPointer(typeStore, targetType)) {
+        Analyzer::Typecheck::emitBuiltinTypeConstraint(state, call.span, call.name.toStr(), "expected pointer type argument");
+        return Option::NONE;
+      }
+
+      if (let Option::SOME(argType) = argTypeOpt) {
+        if (!Analyzer::Typecheck::typeIdIsPointer(typeStore, argType)) {
+          Analyzer::Typecheck::emitBuiltinTypeConstraint(state, call.span, call.name.toStr(), "expected pointer argument");
+          return Option::NONE;
+        }
+      }
+
+      return Option::SOME(targetType);
+    }
+
+    /// `@dropGlue<T>()`: one type argument, no value arguments, and the result
+    /// is the drop-glue function pointer `(*mut u8) -> void` that `std::rc`
+    /// hands to its allocator.
+    ///
+    /// A type parameter is accepted as the type argument; monomorphization
+    /// substitutes it later, and the function-pointer type does not depend on
+    /// it either way.
+    function checkBuiltinDropGlue(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      call: &Ast::Expression::BuiltinCall,
+    ): Option<Analyzer::TypeId> {
+      if (call.typeArguments.length() != 1) {
+        Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 1, call.typeArguments.length());
+        return Option::NONE;
+      }
+
+      if (call.arguments.length() != 0) {
+        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 0);
+        return Option::NONE;
+      }
+
+      let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(_valueType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+        let detail: String = `the type argument of \`@${call.name.toStr()}\``;
+        Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
+        return Option::NONE;
+      };
+
+      return Option::SOME(Analyzer::Typecheck::dropGlueFunctionType(typeStore));
+    }
+
+    /// The `(*mut u8) -> void` signature every `@dropGlue<T>()` evaluates to.
+    function dropGlueFunctionType(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      let byteType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::U8);
+      let bytePointerType: Analyzer::TypeId = typeStoreRef.mutablePointer(byteType);
+      let voidType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::VOID);
+
+      let mut params: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      params.push(bytePointerType);
+
+      return typeStoreRef.functionType(params, voidType);
     }
 
     /// `@read<T>(p)`, `@write<T>(p, v)`, `@dropInPlace<T>(p)`, `@eq<T>(a, b)`:

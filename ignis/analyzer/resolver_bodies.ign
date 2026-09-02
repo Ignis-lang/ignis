@@ -1894,6 +1894,23 @@ export namespace Analyzer {
     // Identifier resolution — expression position
     // =========================================================================
 
+    /// Whether `name` is one of the builtins the language also accepts written
+    /// without the `@` prefix, in callee position.
+    ///
+    /// These have no definition to bind to: the typechecker and HIR lowering
+    /// both answer them from the callee name, so the resolver records them as
+    /// unresolved instead of reporting an undeclared variable. A local binding
+    /// of the same name still wins, because the scope lookups run first.
+    function isBareBuiltinName(name: str): boolean {
+      let candidate: String = String::create(name);
+
+      if (candidate.equals("sizeOf") || candidate.equals("alignOf")) {
+        return true;
+      }
+
+      return candidate.equals("minOf") || candidate.equals("maxOf");
+    }
+
     /// Resolve a single-segment identifier in expression position.
     ///
     /// Priority (ADR-B1, REQ-B1):
@@ -1967,10 +1984,10 @@ export namespace Analyzer {
         return;
       }
 
-      // 5. `minOf`/`maxOf` are builtins the host accepts without `@`; the
-      // typechecker answers them from the callee name, so an unresolved
-      // reference here is expected, not an error.
-      if (String::create(name).equals("minOf") || String::create(name).equals("maxOf")) {
+      // 5. `sizeOf`/`alignOf`/`minOf`/`maxOf` are builtins the host accepts
+      // without `@`; the typechecker answers them from the callee name, so an
+      // unresolved reference here is expected, not an error.
+      if (Analyzer::ResolverBodies::isBareBuiltinName(name)) {
         Analyzer::ResolverBodies::recordExprRef(
           state,
           exprId,
