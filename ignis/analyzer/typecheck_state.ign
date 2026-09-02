@@ -3656,6 +3656,24 @@ export namespace Analyzer {
       let name: String = lastSegment.clone();
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let symbol: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
+
+      // The store holds every module's declarations, so a plain first-hit scan
+      // hands a name the prelude also publishes to the prelude. A declaration
+      // in the module being analyzed shadows it.
+      if (let Option::SOME(ownDefId) = Analyzer::Typecheck::findNamedTypeDefinition(defStore, symbol, true)) {
+        return Option::SOME(ownDefId);
+      }
+
+      return Analyzer::Typecheck::findNamedTypeDefinition(defStore, symbol, false);
+    }
+
+    /// First record or enum in the store named `symbol`. When `activeModuleOnly`
+    /// is set, only declarations published by the module being analyzed count.
+    function findNamedTypeDefinition(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbol: Analyzer::SymbolId,
+      activeModuleOnly: boolean,
+    ): Option<Analyzer::DefinitionId> {
       let mut index: u64 = 0;
 
       while (index < defStore.length()) {
@@ -3666,6 +3684,11 @@ export namespace Analyzer {
         };
 
         if (def.name().raw() != symbol.raw()) {
+          index += 1;
+          continue;
+        }
+
+        if (activeModuleOnly && !defStore.defBelongsToActiveModule(defId)) {
           index += 1;
           continue;
         }

@@ -11670,6 +11670,61 @@ function typecheckParseSource(source: str): ParseOutput {
   return parsed;
 }
 
+/// Analyze `preludeSource` as an auto-loaded prelude module followed by
+/// `mainSource`, and return the analysis record of the second module.
+function typecheckAnalyzePreludeAndModule(
+  preludeSource: str,
+  mainSource: str,
+): Analyzer::ModuleAnalysisRecord {
+  let preludeFile: SourceFile = SourceFile::create("prelude.ign", preludeSource);
+  let preludeParsed: ParseOutput = Parser::parseFile(&preludeFile);
+  Test::assertEq<u64>(preludeParsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(preludeParsed.parseDiagnostics.length(), 0);
+
+  let mainFile: SourceFile = SourceFile::create("main.ign", mainSource);
+  let mainParsed: ParseOutput = Parser::parseFile(&mainFile);
+  Test::assertEq<u64>(mainParsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(mainParsed.parseDiagnostics.length(), 0);
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(preludeParsed.module);
+  modules.push(mainParsed.module);
+
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  infos.push(Analyzer::Imports::ModuleInfo {
+    index: 0,
+    pathText: String::create("prelude.ign"),
+    kind: Analyzer::Imports::ModuleKind::PROJECT,
+  });
+  infos.push(Analyzer::Imports::ModuleInfo {
+    index: 1,
+    pathText: String::create("main.ign"),
+    kind: Analyzer::Imports::ModuleKind::PROJECT,
+  });
+
+  let mut preludePaths: Vector<String> = Vector::new<String>();
+  preludePaths.push(String::create("prelude.ign"));
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+    &preludePaths,
+  );
+
+  let Option::SOME(mainRecord) = records.pop() else {
+    @panic("typecheckAnalyzePreludeAndModule: missing main module record");
+  };
+
+  return mainRecord;
+}
+
 function typecheckCountErrors(bag: &DiagnosticBag): u64 {
   let mut count: u64 = 0;
   let mut index: u64 = 0;
@@ -14494,6 +14549,31 @@ function typecheckGenericEnumInstanceDestructuringBindsSubstitutedPayload(): voi
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: a module declaring a generic enum the prelude also publishes uses
+/// its own declaration in a type annotation, so the variant construction infers
+/// its argument against the local enum instead of the prelude's.
+@test
+function typecheckLocalGenericEnumShadowsThePreludeInAnnotations(): void {
+  let analyzed: Analyzer::ModuleAnalysisRecord = typecheckAnalyzePreludeAndModule(
+    "export enum Wrap<T> {\n  FULL(T),\n  EMPTY,\n}\n",
+    "enum Wrap<T> {\n  FULL(T),\n  EMPTY,\n}\n\nfunction build(): Wrap<i32> {\n  return Wrap::FULL(42);\n}\n",
+  );
+
+  Test::assertEq<u64>(typecheckCountErrors(&analyzed.output.diagnostics), 0);
+}
+
+/// Scenario: without a local declaration the prelude's generic enum still
+/// resolves, so preferring the module's own declaration does not hide it.
+@test
+function typecheckPreludeGenericEnumStillResolvesWithoutALocalDeclaration(): void {
+  let analyzed: Analyzer::ModuleAnalysisRecord = typecheckAnalyzePreludeAndModule(
+    "export enum Wrap<T> {\n  FULL(T),\n  EMPTY,\n}\n",
+    "function build(): Wrap<i32> {\n  return Wrap::FULL(42);\n}\n",
+  );
+
+  Test::assertEq<u64>(typecheckCountErrors(&analyzed.output.diagnostics), 0);
 }
 
 /// Scenario: subtracting two pointers over the same pointee yields the `i64`
