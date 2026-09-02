@@ -5636,8 +5636,10 @@ function typecheckUnknownQualifiedAnnotationProducesUnsupportedDiagnostic(): voi
   assertSingleDiagnostic(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT, "typecheck does not support unsupported local annotation type");
 }
 
+/// An annotated `let ... else` is the try shorthand, so a plain `i32` value
+/// has no ok payload for the binding to take.
 @test
-function typecheckLetElseAnnotatedBindingChecksElseAndBindsPattern(): void {
+function typecheckLetElseAnnotatedBindingRequiresATryValue(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -5666,8 +5668,7 @@ function typecheckLetElseAnnotatedBindingChecksElseAndBindsPattern(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  Test::assertEq<u64>(output.diagnostics.length(), 0);
-  assertExprType(&output, xUse, typeStore.intern(Analyzer::Type::I32));
+  assertContainsDiagnosticCode(&output, DiagnosticCode::LET_ELSE_BINDING_REQUIRES_TRY_TYPE);
 }
 
 @test
@@ -5700,7 +5701,7 @@ function typecheckLetElseChecksElseBranchDiagnostics(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `i32`, found `boolean`");
+  assertContainsDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
 }
 
 @test
@@ -5737,8 +5738,10 @@ function typecheckLetElseUnannotatedBindingUsesValueType(): void {
   assertExprType(&output, xUse, typeStore.intern(Analyzer::Type::I32));
 }
 
+/// An annotated `let ... else` over a non-try value reports the missing try
+/// type rather than comparing the annotation against the value.
 @test
-function typecheckLetElseAnnotatedBindingReportsValueMismatch(): void {
+function typecheckLetElseAnnotatedBindingOverANonTryValueReportsTheTryRequirement(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -5762,7 +5765,7 @@ function typecheckLetElseAnnotatedBindingReportsValueMismatch(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "type mismatch: expected `boolean`, found `i32`");
+  assertContainsDiagnosticCode(&output, DiagnosticCode::LET_ELSE_BINDING_REQUIRES_TRY_TYPE);
 }
 
 @test
@@ -11525,12 +11528,12 @@ function typecheckShiftOnFloatProducesDiagnostic(): void {
   assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_BINARY_OPERAND_TYPE);
 }
 
-/// Scenario: `1 << (1 as u64)` with an `i32` lhs and a `u64` rhs is rejected with
-/// `TYPE_MISMATCH`: the selfhost has no integer widening, so shift/bitwise
-/// operands must name the same type like every other binary arm.
+/// Scenario: `1 << (1 as u64)` mixes an `i32` lhs with a `u64` rhs and is
+/// accepted: shift and bitwise operands go through the same common-type rule
+/// as arithmetic, which takes the right operand when neither side widens.
 /// Spec: IGN-30 — shift/bitwise binary operators.
 @test
-function typecheckShiftOnMixedIntegerTypesProducesDiagnostic(): void {
+function typecheckShiftOnMixedIntegerTypesTakesRightOperandType(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -11552,7 +11555,8 @@ function typecheckShiftOnMixedIntegerTypesProducesDiagnostic(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+  assertExprType(&output, shiftExpr, typeStore.intern(Analyzer::Type::U64));
 }
 
 /// Scenario: `let one: u64 = 1;` adopts the annotated integer type for the
@@ -11667,6 +11671,61 @@ function typecheckParseSource(source: str): ParseOutput {
   Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
 
   return parsed;
+}
+
+/// Analyze `preludeSource` as an auto-loaded prelude module followed by
+/// `mainSource`, and return the analysis record of the second module.
+function typecheckAnalyzePreludeAndModule(
+  preludeSource: str,
+  mainSource: str,
+): Analyzer::ModuleAnalysisRecord {
+  let preludeFile: SourceFile = SourceFile::create("prelude.ign", preludeSource);
+  let preludeParsed: ParseOutput = Parser::parseFile(&preludeFile);
+  Test::assertEq<u64>(preludeParsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(preludeParsed.parseDiagnostics.length(), 0);
+
+  let mainFile: SourceFile = SourceFile::create("main.ign", mainSource);
+  let mainParsed: ParseOutput = Parser::parseFile(&mainFile);
+  Test::assertEq<u64>(mainParsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(mainParsed.parseDiagnostics.length(), 0);
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  modules.push(preludeParsed.module);
+  modules.push(mainParsed.module);
+
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  infos.push(Analyzer::Imports::ModuleInfo {
+    index: 0,
+    pathText: String::create("prelude.ign"),
+    kind: Analyzer::Imports::ModuleKind::PROJECT,
+  });
+  infos.push(Analyzer::Imports::ModuleInfo {
+    index: 1,
+    pathText: String::create("main.ign"),
+    kind: Analyzer::Imports::ModuleKind::PROJECT,
+  });
+
+  let mut preludePaths: Vector<String> = Vector::new<String>();
+  preludePaths.push(String::create("prelude.ign"));
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut records: Vector<Analyzer::ModuleAnalysisRecord> = Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+    &preludePaths,
+  );
+
+  let Option::SOME(mainRecord) = records.pop() else {
+    @panic("typecheckAnalyzePreludeAndModule: missing main module record");
+  };
+
+  return mainRecord;
 }
 
 function typecheckCountErrors(bag: &DiagnosticBag): u64 {
@@ -14484,6 +14543,237 @@ function typecheckCharEqualityIsBoolean(): void {
 function typecheckGenericEnumInstanceDestructuringBindsSubstitutedPayload(): void {
   let parsed: ParseOutput = typecheckParseSource(
     "enum Wrap<T> {\n  FULL(T),\n  EMPTY,\n}\n\nfunction unwrap(w: Wrap<u32>): u32 {\n  match (w) {\n    Wrap::FULL(value) -> {\n      return value;\n    },\n    Wrap::EMPTY -> {\n      return 0;\n    },\n  };\n\n  return 0;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: the annotated `let ... else` shorthand binds the ok payload of a
+/// `@lang(try)` initializer, so an `i32` annotation matches `Result<i32, i32>`.
+@test
+function typecheckLetElseShorthandBindsTheOkPayload(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@lang(try)\nenum Res<T, E> {\n  OK(T),\n  ERROR(E),\n}\n\nfunction parse(ok: boolean): Res<i32, i32> {\n  if (ok) {\n    return Res::OK(7);\n  }\n\n  return Res::ERROR(1);\n}\n\nfunction main(): i32 {\n  let value: i32 = parse(true) else {\n    return 1;\n  };\n\n  return value;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: the annotation still has to accept the ok payload, so annotating
+/// the shorthand with an unrelated type is reported.
+@test
+function typecheckLetElseShorthandRejectsAnAnnotationTheOkPayloadDoesNotSatisfy(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@lang(try)\nenum Res<T, E> {\n  OK(T),\n  ERROR(E),\n}\n\nfunction parse(ok: boolean): Res<i32, i32> {\n  if (ok) {\n    return Res::OK(7);\n  }\n\n  return Res::ERROR(1);\n}\n\nfunction main(): i32 {\n  let value: boolean = parse(true) else {\n    return 1;\n  };\n\n  return 0;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
+}
+
+/// Scenario: a bounded type parameter answers the methods its bound declares,
+/// so `value.weigh()` on a `T: Weigh` types against the trait's signature.
+@test
+function typecheckTraitBoundReceiverResolvesTheBoundMethod(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "trait Weigh {\n  weigh(&self): i32;\n}\n\n@implements(Weigh)\nrecord Stone {\n  public grams: i32;\n\n  weigh(&self): i32 {\n    return self.grams * 2;\n  }\n}\n\nfunction total<T: Weigh>(value: &T): i32 {\n  return value.weigh();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: a method the bound does not declare is still unknown on a type
+/// parameter, so the bound opens exactly what the trait names.
+@test
+function typecheckTraitBoundReceiverRejectsAMethodTheBoundDoesNotDeclare(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "trait Weigh {\n  weigh(&self): i32;\n}\n\nfunction total<T: Weigh>(value: &T): i32 {\n  return value.measure();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<boolean>(typecheckCountErrors(&output.diagnostics) > 0, true);
+}
+
+/// Scenario: an unbounded type parameter owns no methods at all, so the call
+/// stays the mismatch it was before bounds were read.
+@test
+function typecheckUnboundedTypeParameterReceiverStaysAnError(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function total<T>(value: &T): i32 {\n  return value.weigh();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<boolean>(typecheckCountErrors(&output.diagnostics) > 0, true);
+}
+
+/// Scenario: a method declaring its own type parameter infers it from the
+/// closure argument's return type, so the call types as that return type
+/// instead of comparing the argument against the bare parameter.
+@test
+function typecheckMethodTypeParameterInfersFromTheArgument(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Box<T> {\n  value: T;\n\n  transform<U>(&self, f: (T) -> U): U {\n    return f(self.value);\n  }\n}\n\nfunction main(): i32 {\n  let b: Box<i32> = Box { value: 7 };\n  let result: i64 = b.transform((x: i32): i64 -> x as i64 * 6);\n\n  return result as i32;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: written method type arguments still win over inference, so an
+/// explicit `<i64>` keeps deciding the call.
+@test
+function typecheckWrittenMethodTypeArgumentsOutrankInference(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Box<T> {\n  value: T;\n\n  transform<U>(&self, f: (T) -> U): U {\n    return f(self.value);\n  }\n}\n\nfunction main(): i32 {\n  let b: Box<i32> = Box { value: 7 };\n  let result: i64 = b.transform<i64>((x: i32): i64 -> x as i64 * 6);\n\n  return result as i32;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: a module declaring a generic enum the prelude also publishes uses
+/// its own declaration in a type annotation, so the variant construction infers
+/// its argument against the local enum instead of the prelude's.
+@test
+function typecheckLocalGenericEnumShadowsThePreludeInAnnotations(): void {
+  let analyzed: Analyzer::ModuleAnalysisRecord = typecheckAnalyzePreludeAndModule(
+    "export enum Wrap<T> {\n  FULL(T),\n  EMPTY,\n}\n",
+    "enum Wrap<T> {\n  FULL(T),\n  EMPTY,\n}\n\nfunction build(): Wrap<i32> {\n  return Wrap::FULL(42);\n}\n",
+  );
+
+  Test::assertEq<u64>(typecheckCountErrors(&analyzed.output.diagnostics), 0);
+}
+
+/// Scenario: without a local declaration the prelude's generic enum still
+/// resolves, so preferring the module's own declaration does not hide it.
+@test
+function typecheckPreludeGenericEnumStillResolvesWithoutALocalDeclaration(): void {
+  let analyzed: Analyzer::ModuleAnalysisRecord = typecheckAnalyzePreludeAndModule(
+    "export enum Wrap<T> {\n  FULL(T),\n  EMPTY,\n}\n",
+    "function build(): Wrap<i32> {\n  return Wrap::FULL(42);\n}\n",
+  );
+
+  Test::assertEq<u64>(typecheckCountErrors(&analyzed.output.diagnostics), 0);
+}
+
+/// Scenario: subtracting two pointers over the same pointee yields the `i64`
+/// element distance instead of a mismatch against the pointer type.
+@test
+function typecheckPointerDifferenceYieldsI64(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function distance(a: *mut i32, b: *mut i32): i64 {\n  return a - b;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: subtracting pointers with unrelated pointees stays an error, so
+/// the difference rule does not swallow a genuine mismatch.
+@test
+function typecheckPointerDifferenceOverDifferentPointeesProducesDiagnostic(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function distance(a: *mut i32, b: *mut u8): i64 {\n  return a - b;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<boolean>(typecheckCountErrors(&output.diagnostics) > 0, true);
+}
+
+/// Scenario: an integer on the left of a pointer addition keeps the pointer
+/// type, mirroring the host's symmetric pointer arithmetic.
+@test
+function typecheckIntegerPlusPointerYieldsPointerType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function offset(p: *mut i32): *mut i32 {\n  return 1 + p;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: bitwise operands of mixed signedness take the right operand's
+/// type through the host's common-type rule instead of demanding an exact
+/// match.
+@test
+function typecheckBitwiseMixedSignednessTakesRightOperandType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "const SIGN_BIT: u32 = 2147483648;\n\nfunction masked(): u32 {\n  return 7 | SIGN_BIT;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: bitwise operands of different widths widen to the wider integer
+/// type.
+@test
+function typecheckBitwiseMixedWidthsWidens(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function combined(wide: u64, narrow: u32): u64 {\n  return wide | narrow;\n}\n",
   );
 
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();

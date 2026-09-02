@@ -161,6 +161,35 @@ export namespace Analyzer {
           return Option::SOME(leftType);
         }
 
+        let rightAliasResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, rightType);
+        let rightIsPointer: boolean = rightAliasResolved.cycleAlias.isNone() && Analyzer::Typecheck::typeIdIsPointer(typeStore, rightAliasResolved.typeId);
+
+        if (rightIsPointer && Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, b.span, leftType)) {
+          Analyzer::Typecheck::recordExprType(state, exprId, rightType);
+          return Option::SOME(rightType);
+        }
+
+        // Pointer difference: `p - q` over a shared pointee measures the
+        // distance in elements, which the host types as `i64`.
+        let bothPointers: boolean = leftAliasResolved.cycleAlias.isNone() && Analyzer::Typecheck::typeIdIsPointer(typeStore, leftAliasResolved.typeId) && rightIsPointer;
+
+        if (bothPointers && Analyzer::Typecheck::isSubtractBinaryOperator(b.operator)) {
+          let leftPointee: Option<Analyzer::TypeId> = Analyzer::Typecheck::pointeeTypeOf(typeStore, leftAliasResolved.typeId);
+          let rightPointee: Option<Analyzer::TypeId> = Analyzer::Typecheck::pointeeTypeOf(typeStore, rightAliasResolved.typeId);
+
+          if (let Option::SOME(leftBase) = leftPointee) {
+            if (let Option::SOME(rightBase) = rightPointee) {
+              if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftBase, rightBase)) {
+                let mut differenceStore: &mut Analyzer::TypeStore = typeStore;
+                let differenceType: Analyzer::TypeId = differenceStore.intern(Analyzer::Type::I64);
+
+                Analyzer::Typecheck::recordExprType(state, exprId, differenceType);
+                return Option::SOME(differenceType);
+              }
+            }
+          }
+        }
+
         // Operands of different widths unify on the wider one, as the
         // reference analyzer's `typecheck_common_type` does.
         if (let Option::SOME(commonType) = Analyzer::Typecheck::commonIntegerType(defStore, typeStore, leftType, rightType)) {
@@ -273,16 +302,21 @@ export namespace Analyzer {
           return Option::NONE;
         }
 
-        // The reference analyzer widens mixed integer operands through its
-        // common-type machinery; the selfhost has none, so both sides must
-        // name the same type, matching every other binary arm here.
-        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType)) {
-          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
-          return Option::NONE;
+        if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType)) {
+          Analyzer::Typecheck::recordExprType(state, exprId, leftType);
+          return Option::SOME(leftType);
         }
 
-        Analyzer::Typecheck::recordExprType(state, exprId, leftType);
-        return Option::SOME(leftType);
+        // Mixed integer widths unify on the wider operand, and a mixed
+        // signedness that cannot widen takes the right operand's type. Both
+        // come from the host's common-type rule.
+        if (let Option::SOME(commonType) = Analyzer::Typecheck::commonIntegerType(defStore, typeStore, leftType, rightType)) {
+          Analyzer::Typecheck::recordExprType(state, exprId, commonType);
+          return Option::SOME(commonType);
+        }
+
+        Analyzer::Typecheck::recordExprType(state, exprId, rightType);
+        return Option::SOME(rightType);
       }
 
       Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
@@ -1383,6 +1417,75 @@ export namespace Analyzer {
       };
     }
 
+    /// Infer what a callee's type parameters stand for from the call's argument
+    /// types, the way the host's unification does: the first argument whose
+    /// declared/actual pair binds every type parameter decides.
+    ///
+    /// `declaredParams` is positional against `call.arguments`, so a method
+    /// passes its parameter types with the receiver already dropped.
+    function inferCallTypeArguments(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      call: &Ast::Expression::Call,
+      paramSymbols: &Vector<Analyzer::SymbolId>,
+      declaredParams: &Vector<Analyzer::TypeId>,
+    ): Option<Vector<Analyzer::TypeId>> {
+      if (paramSymbols.length() == 0 || call.arguments.length() == 0) {
+        return Option::NONE;
+      }
+
+      let mut argumentTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      let mut argumentIndex: u64 = 0;
+
+      while (argumentIndex < call.arguments.length()) {
+        let Option::SOME(argumentExprId) = call.arguments.get(argumentIndex) else {
+          argumentIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(argumentType) = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *argumentExprId) else {
+          return Option::NONE;
+        };
+
+        argumentTypes.push(argumentType);
+        argumentIndex += 1;
+      }
+
+      let mut pairIndex: u64 = 0;
+
+      while (pairIndex < argumentTypes.length() && pairIndex < declaredParams.length()) {
+        let Option::SOME(declaredParam) = declaredParams.get(pairIndex) else {
+          pairIndex += 1;
+          continue;
+        };
+        let Option::SOME(argumentType) = argumentTypes.get(pairIndex) else {
+          pairIndex += 1;
+          continue;
+        };
+
+        // The argument may spell its shape through an alias; unification sees
+        // the resolved form.
+        let resolvedArgument: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, *argumentType);
+        let mut unifiedArgument: Analyzer::TypeId = *argumentType;
+        if (resolvedArgument.cycleAlias.isNone()) {
+          unifiedArgument = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, resolvedArgument.typeId, 0);
+        }
+
+        let typeStoreInferRef: &mut Analyzer::TypeStore = typeStore;
+        if (let Option::SOME(inferred) = typeStoreInferRef.inferTypeArguments(*declaredParam, unifiedArgument, paramSymbols)) {
+          return Option::SOME(inferred);
+        }
+
+        pairIndex += 1;
+      }
+
+      return Option::NONE;
+    }
+
     /// Typecheck a direct call to a resolved function, specializing its signature first
     /// when the call site wrote explicit type arguments.
     ///
@@ -1405,84 +1508,55 @@ export namespace Analyzer {
       signature: &Analyzer::Typecheck::FunctionSignature,
     ): Option<Analyzer::TypeId> {
       if (call.typeArguments.length() == 0) {
-        // A generic function called without written type arguments infers
-        // them from the argument types, the way the host's unification does:
-        // the first argument whose declared/actual pair binds every type
-        // parameter decides.
         let inferSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, functionDefId);
 
         if (inferSymbols.length() > 0 && call.arguments.length() > 0) {
           let declaredParams: Vector<Analyzer::TypeId> = Analyzer::Typecheck::staticOverloadParamTypes(defStore, functionDefId)!;
 
-          let mut inferArgTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
-          let mut inferArgIndex: u64 = 0;
-          while (inferArgIndex < call.arguments.length()) {
-            let Option::SOME(argExprId) = call.arguments.get(inferArgIndex) else {
-              inferArgIndex += 1;
-              continue;
-            };
-            let Option::SOME(argType) = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, *argExprId) else {
-              return Option::NONE;
-            };
-            inferArgTypes.push(argType);
-            inferArgIndex += 1;
-          }
+          let inferredOpt: Option<Vector<Analyzer::TypeId>> = Analyzer::Typecheck::inferCallTypeArguments(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            call,
+            &inferSymbols,
+            &declaredParams,
+          );
 
-          let mut pairIndex: u64 = 0;
-          while (pairIndex < inferArgTypes.length() && pairIndex < declaredParams.length()) {
-            let Option::SOME(declaredParam) = declaredParams.get(pairIndex) else {
-              pairIndex += 1;
-              continue;
-            };
-            let Option::SOME(argType) = inferArgTypes.get(pairIndex) else {
-              pairIndex += 1;
-              continue;
-            };
+          if (let Option::SOME(resolvedArgs) = inferredOpt) {
+            let mut specializedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+            let mut substituteIndex: u64 = 0;
 
-            // The argument may spell its shape through an alias; unification
-            // sees the resolved form.
-            let inferArgResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, *argType);
-            let mut inferArgType: Analyzer::TypeId = *argType;
-            if (inferArgResolved.cycleAlias.isNone()) {
-              inferArgType = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, inferArgResolved.typeId, 0);
-            }
-
-            let typeStoreInferRef: &mut Analyzer::TypeStore = typeStore;
-            if (let Option::SOME(resolvedArgs) = typeStoreInferRef.inferTypeArguments(*declaredParam, inferArgType, &inferSymbols)) {
-              let mut specializedParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
-              let mut substituteIndex: u64 = 0;
-
-              while (substituteIndex < declaredParams.length()) {
-                let Option::SOME(paramType) = declaredParams.get(substituteIndex) else {
-                  substituteIndex += 1;
-                  continue;
-                };
-
-                let mut typeStoreSubRef: &mut Analyzer::TypeStore = typeStore;
-                specializedParams.push(typeStoreSubRef.substitute(*paramType, &inferSymbols, &resolvedArgs));
+            while (substituteIndex < declaredParams.length()) {
+              let Option::SOME(paramType) = declaredParams.get(substituteIndex) else {
                 substituteIndex += 1;
-              }
+                continue;
+              };
 
-              let mut typeStoreRetRef: &mut Analyzer::TypeStore = typeStore;
-              let specializedReturn: Analyzer::TypeId = typeStoreRetRef.substitute(signature.returnType, &inferSymbols, &resolvedArgs);
-
-              Analyzer::Typecheck::recordCallTypeArgs(state, callExprId, &resolvedArgs);
-
-              return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
-                state,
-                defStore,
-                typeStore,
-                symbols,
-                module,
-                resolvedBodies,
-                callExprId,
-                call,
-                &specializedParams,
-                specializedReturn,
-              );
+              let mut typeStoreSubRef: &mut Analyzer::TypeStore = typeStore;
+              specializedParams.push(typeStoreSubRef.substitute(*paramType, &inferSymbols, &resolvedArgs));
+              substituteIndex += 1;
             }
 
-            pairIndex += 1;
+            let mut typeStoreRetRef: &mut Analyzer::TypeStore = typeStore;
+            let specializedReturn: Analyzer::TypeId = typeStoreRetRef.substitute(signature.returnType, &inferSymbols, &resolvedArgs);
+
+            Analyzer::Typecheck::recordCallTypeArgs(state, callExprId, &resolvedArgs);
+
+            return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+              state,
+              defStore,
+              typeStore,
+              symbols,
+              module,
+              resolvedBodies,
+              callExprId,
+              call,
+              &specializedParams,
+              specializedReturn,
+            );
           }
         }
 
@@ -1749,6 +1823,7 @@ export namespace Analyzer {
         state,
         defStore,
         typeStore,
+        symbols,
         ma.span,
         receiverType,
         "method call target must be a non-generic record or enum",
@@ -1790,6 +1865,13 @@ export namespace Analyzer {
         Analyzer::Typecheck::recordCallTarget(state, callExprId, selected);
       } else if (let Option::SOME(single) = candidateSet.get(0)) {
         instanceOpt = Option::SOME(*single);
+
+        // A method reached through a trait bound is not in the receiver type's
+        // own method table, so lowering cannot find it by name. Recording the
+        // target is the only way it reaches the HIR.
+        if (let Option::SOME(Analyzer::Definition::Trait(_)) = defStore.get(owner.defId)) {
+          Analyzer::Typecheck::recordCallTarget(state, callExprId, *single);
+        }
       }
 
       let Option::SOME(methodDefId) = instanceOpt else {
@@ -1912,6 +1994,55 @@ export namespace Analyzer {
           effective.returnType,
         );
         specialized = true;
+      }
+
+      // A method's own type parameters are inferred from the argument types
+      // when the call site writes none, so `box.transform(closure)` learns `U`
+      // from the closure's return type instead of comparing against `U`.
+      if (call.typeArguments.length() == 0) {
+        // Only the method's own parameters are inferred here. The owner's are
+        // already bound by the receiver, and `methodCallTypeParamSymbols`
+        // falls back to them, which would rebind what the receiver decided.
+        let methodSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, methodDefId);
+
+        let inferredOpt: Option<Vector<Analyzer::TypeId>> = Analyzer::Typecheck::inferCallTypeArguments(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          call,
+          &methodSymbols,
+          &effective.paramTypes,
+        );
+
+        if (let Option::SOME(methodTypeArgs) = inferredOpt) {
+          let mut inferredParams: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+          let mut inferredIndex: u64 = 0;
+
+          while (inferredIndex < effective.paramTypes.length()) {
+            let Option::SOME(paramType) = effective.paramTypes.get(inferredIndex) else {
+              inferredIndex += 1;
+              continue;
+            };
+
+            let mut typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+            inferredParams.push(typeStoreParamRef.substitute(*paramType, &methodSymbols, &methodTypeArgs));
+            inferredIndex += 1;
+          }
+
+          let mut typeStoreReturnRef: &mut Analyzer::TypeStore = typeStore;
+          let inferredReturn: Analyzer::TypeId = typeStoreReturnRef.substitute(effective.returnType, &methodSymbols, &methodTypeArgs);
+
+          Analyzer::Typecheck::recordCallTypeArgs(state, callExprId, &methodTypeArgs);
+
+          effective = Analyzer::Typecheck::CalleeSignature {
+            paramTypes: inferredParams,
+            returnType: inferredReturn,
+          };
+          specialized = true;
+        }
       }
 
       if (call.typeArguments.length() > 0) {
@@ -4491,6 +4622,22 @@ export namespace Analyzer {
       };
     }
 
+    /// The pointee of an alias-resolved pointer type, or `NONE` when the type
+    /// is not a pointer.
+    function pointeeTypeOf(
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(typeNode) = typeStore.get(typeId) else {
+        return Option::NONE;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::Pointer(pointer) -> Option::SOME(pointer.pointee),
+        _ -> Option::NONE,
+      };
+    }
+
     function typeIdIsReference(
       typeStore: &mut Analyzer::TypeStore,
       typeId: Analyzer::TypeId
@@ -5013,6 +5160,24 @@ export namespace Analyzer {
       @panic("unreachable: checkUnaryExpr match did not return");
     }
 
+    /// Whether a `let ... else` is written in the annotated shorthand form: a
+    /// plain binding with a type annotation, which unwraps a try enum instead
+    /// of matching a refutable pattern against it.
+    function isShorthandLetElse(module: &Ast::Module, value: &Ast::Statement::LetElse): boolean {
+      if (value.annotation.isNone()) {
+        return false;
+      }
+
+      let Option::SOME(pattern) = module.patterns.get(value.pattern) else {
+        return false;
+      };
+
+      return match (pattern) {
+        Ast::Pattern::Node::Binding(_) -> true,
+        _ -> false,
+      };
+    }
+
     function checkLetElse(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -5031,6 +5196,47 @@ export namespace Analyzer {
         resolvedBodies,
         value.value,
       );
+
+      // `let x: T = tryValue else { ... }` binds the ok payload rather than the
+      // try enum itself, so the annotation is checked against that payload and
+      // the else branch takes the error case.
+      if (Analyzer::Typecheck::isShorthandLetElse(module, value)) {
+        let Option::SOME(actualType) = actualTypeOpt else {
+          Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.elseBranch);
+          return;
+        };
+
+        let viewOpt: Option<Analyzer::Typecheck::TryEnumView> = Analyzer::Typecheck::requireTryEnumView(
+          state,
+          defStore,
+          typeStore,
+          value.span,
+          actualType,
+          DiagnosticCode::LET_ELSE_BINDING_REQUIRES_TRY_TYPE,
+          "`let name = value else` requires a @lang(try) value",
+        );
+
+        let Option::SOME(view) = viewOpt else {
+          Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.elseBranch);
+          return;
+        };
+
+        let mut bindingType: Analyzer::TypeId = view.okType;
+
+        if (let Option::SOME(annotationId) = value.annotation) {
+          if (let Option::SOME(declaredType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, annotationId)) {
+            if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, declaredType, view.okType)) {
+              Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, declaredType, view.okType);
+            }
+
+            bindingType = declaredType;
+          }
+        }
+
+        Analyzer::Typecheck::bindPatternType(state, defStore, typeStore, symbols, resolvedBodies, module, value.pattern, bindingType, value.mutable, value.span);
+        Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.elseBranch);
+        return;
+      }
 
       let mut expectedTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
       if (let Option::SOME(annotationId) = value.annotation) {
@@ -6109,6 +6315,7 @@ export namespace Analyzer {
         state,
         defStore,
         typeStore,
+        symbols,
         ma.span,
         receiverType,
         "method call target must be a non-generic record or enum",
@@ -6577,6 +6784,7 @@ export namespace Analyzer {
         state,
         defStore,
         typeStore,
+        symbols,
         ma.span,
         receiverType,
         "method call target must be a non-generic record or enum",

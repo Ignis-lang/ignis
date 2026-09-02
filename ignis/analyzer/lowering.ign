@@ -1972,7 +1972,7 @@ export namespace Lowering {
     memberAccess: &Ast::Expression::MemberAccess,
     pipedFirstArg: Option<Hir::HirId>,
   ): Hir::HirId {
-    let Option::SOME(callTypeArgs) = Lowering::resolveCallTypeArguments(
+    let Option::SOME(writtenTypeArgs) = Lowering::resolveCallTypeArguments(
       defStore,
       typeStore,
       symbols,
@@ -1981,6 +1981,17 @@ export namespace Lowering {
     ) else {
       return Lowering::errorNode(hir, typeStore, call.span);
     };
+
+    // A method's own type parameters may have been inferred from the argument
+    // types rather than written, and monomorphization keys its instantiation
+    // on them.
+    let mut callTypeArgs: Vector<Analyzer::TypeId> = writtenTypeArgs;
+
+    if (callTypeArgs.length() == 0) {
+      if (let Option::SOME(inferred) = Lowering::lookupCallTypeArgs(&output.typecheck, exprId)) {
+        callTypeArgs = inferred;
+      }
+    }
 
     if (memberAccess.operator != Ast::Expression::AccessOperator::Dot) {
       return Lowering::errorNode(hir, typeStore, call.span);
@@ -3967,16 +3978,70 @@ export namespace Lowering {
     });
   }
 
+  /// The unwrapping pattern behind the annotated `let ... else` shorthand:
+  /// the scrutinee's ok variant, destructured into the written binding. The
+  /// remaining payload slots, if the ok variant carries several, are ignored
+  /// the way the reference lowering ignores them.
+  function shorthandLetElsePattern(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    letElse: &Ast::Statement::LetElse,
+    valueType: Analyzer::TypeId,
+  ): Option<Hir::HirPattern> {
+    let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(letElse.pattern) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(info) = Lowering::tryEnumInfo(defStore, typeStore, valueType) else {
+      return Option::NONE;
+    };
+
+    let mut args: Vector<Hir::HirPattern> = Vector::new<Hir::HirPattern>();
+
+    if (info.okPayload.length() > 0) {
+      let Option::SOME(payloadType) = info.okPayload.get(0) else {
+        return Option::NONE;
+      };
+
+      let bindingDefId: Analyzer::DefinitionId = Lowering::declarePatternBinding(
+        defStore,
+        symbols,
+        output,
+        locals,
+        letElse.pattern,
+        binding.name.toStr(),
+        *payloadType,
+      );
+
+      args.push(Hir::HirPattern::Binding(bindingDefId));
+
+      let mut remaining: u64 = 1;
+
+      while (remaining < info.okPayload.length()) {
+        args.push(Hir::HirPattern::Wildcard);
+        remaining += 1;
+      }
+    }
+
+    return Option::SOME(Hir::HirPattern::Variant(Hir::VariantPattern {
+      enumDef: info.enumDef,
+      variantTag: info.okTag,
+      args: args,
+    }));
+  }
+
   /// Lowers a `let ... else` to `HirKind::LetElse`. The value and the else
   /// block are lowered before the pattern, so the bindings are registered
   /// after the block that cannot see them and before the statements that
   /// can, mirroring the Rust oracle's order.
   ///
-  /// The annotated shorthand (`let x: T = optional else { ... }`, which the
-  /// oracle desugars through the scrutinee's try-capable ok variant) stays
-  /// on the `Error` fallback: the selfhost analyzer binds the annotation
-  /// type to the pattern directly and exposes no ok-variant resolution, so
-  /// there is nothing to derive the unwrapping pattern from.
+  /// The annotated shorthand (`let x: T = tryValue else { ... }`) unwraps the
+  /// scrutinee's ok variant instead of matching the written pattern against
+  /// the enum, which is what the typechecker bound `x` against.
   function lowerLetElse(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3987,34 +4052,37 @@ export namespace Lowering {
     hir: &mut Hir::HirStore,
     letElse: &Ast::Statement::LetElse,
   ): Hir::HirId {
-    let mut isShorthand: boolean = false;
-
-    if (letElse.annotation.isSome()) {
-      if (let Option::SOME(pattern) = module.patterns.get(letElse.pattern)) {
-        if (let Ast::Pattern::Node::Binding(_) = pattern) {
-          isShorthand = true;
-        }
-      }
-    }
-
-    if (isShorthand) {
-      return Lowering::errorNode(hir, typeStore, letElse.span);
-    }
-
     let value: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, letElse.value);
     let elseBlock: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, letElse.elseBranch);
     let valueType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, letElse.value);
 
-    let Option::SOME(pattern) = Lowering::lowerPattern(
-      defStore,
-      typeStore,
-      symbols,
-      module,
-      output,
-      locals,
-      letElse.pattern,
-      valueType,
-    ) else {
+    let mut patternOpt: Option<Hir::HirPattern> = Option::NONE;
+
+    if (Analyzer::Typecheck::isShorthandLetElse(module, letElse)) {
+      patternOpt = Lowering::shorthandLetElsePattern(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output,
+        locals,
+        letElse,
+        valueType,
+      );
+    } else {
+      patternOpt = Lowering::lowerPattern(
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        output,
+        locals,
+        letElse.pattern,
+        valueType,
+      );
+    }
+
+    let Option::SOME(pattern) = patternOpt else {
       return Lowering::errorNode(hir, typeStore, letElse.span);
     };
 

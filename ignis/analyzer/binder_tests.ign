@@ -1366,6 +1366,82 @@ function binderCompleteEnumMixedVariants(): void {
 }
 
 /// Phase 4.1 RED: Record with 1 type parameter, zero fields.
+/// A `T: Weigh` bound is recorded on the TypeParamDef as its written name, so
+/// the typechecker can resolve it to the trait it names.
+@test
+function binderRecordsTypeParameterBounds(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let mut boundSegments: Vector<String> = Vector::new<String>();
+  boundSegments.push(String::create("Weigh"));
+
+  let mut bounds: Vector<Ast::GenericBound> = Vector::new<Ast::GenericBound>();
+  bounds.push(Ast::GenericBound {
+    span: dummySpan(),
+    segments: boundSegments,
+  });
+
+  let mut genericParams: Vector<Ast::GenericParam> = Vector::new<Ast::GenericParam>();
+  genericParams.push(Ast::GenericParam {
+    span: dummySpan(),
+    name: String::create("T"),
+    bounds: bounds,
+  });
+
+  let recordId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("Scale"),
+    genericParameters: genericParams,
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let pass1: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  let _pass2: Analyzer::Binder::BinderOutput = Analyzer::Binder::completeRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+    &pass1,
+  );
+
+  let Option::SOME(defIdFound) = Analyzer::Binder::findDef(&pass1, recordId.raw()) else {
+    @panic("record not found in pass-1 output");
+  };
+
+  let Option::SOME(Analyzer::Definition::Record(rec)) = defStore.get(defIdFound) else {
+    @panic("expected Record");
+  };
+
+  let Option::SOME(typeParamId) = rec.typeParams.get(0) else {
+    @panic("missing type param");
+  };
+
+  let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(*typeParamId) else {
+    @panic("expected TypeParam");
+  };
+
+  Test::assertEq<u64>(typeParam.bounds.length(), 1);
+
+  let Option::SOME(boundName) = typeParam.bounds.get(0) else {
+    @panic("missing bound name");
+  };
+
+  Test::assertEq<str>(boundName.toStr(), "Weigh");
+}
+
 /// After completeRoots: defStore grew by 1 (TypeParamDef), RecordDef.typeParams.length == 1,
 /// TypeParamDef.index == 0.
 @test
