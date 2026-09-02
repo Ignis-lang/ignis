@@ -1103,6 +1103,306 @@ export namespace Mono {
     return Option::NONE;
   }
 
+  function copyDefinitionIds(
+    source: &Vector<Analyzer::DefinitionId>
+  ): Vector<Analyzer::DefinitionId> {
+    let mut result: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(id) = source.get(index)) {
+        result.push(*id);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// True when `equals`'s second parameter accepts `&Self`: either the exact
+  /// immutable reference to the receiver type, or an immutable reference to
+  /// the owner definition written in its pre-monomorphization spelling.
+  function eqOtherParamMatches(
+    typeStore: &mut Analyzer::TypeStore,
+    otherType: Analyzer::TypeId,
+    expectedOther: Analyzer::TypeId,
+    typeDef: Analyzer::DefinitionId,
+  ): boolean {
+    if (otherType.raw() == expectedOther.raw()) {
+      return true;
+    }
+
+    let mut referentOpt: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(typeNode) = typeStore.get(otherType)) {
+      if (let Analyzer::Type::Reference(reference) = typeNode) {
+        if (!reference.mutable) {
+          referentOpt = Option::SOME(reference.referent);
+        }
+      }
+    }
+
+    let Option::SOME(referent) = referentOpt else {
+      return false;
+    };
+
+    if (let Option::SOME(referentNode) = typeStore.get(referent)) {
+      match (referentNode) {
+        Analyzer::Type::Record(recordDef) -> {
+          return recordDef.raw() == typeDef.raw();
+        },
+        Analyzer::Type::Enum(enumDef) -> {
+          return enumDef.raw() == typeDef.raw();
+        },
+        Analyzer::Type::Instance(instance) -> {
+          return instance.definition.raw() == typeDef.raw();
+        },
+        _ -> {},
+      };
+    }
+
+    return false;
+  }
+
+  /// Checks one instance method against the `equals(&self, other: &Self): boolean`
+  /// shape the equality builtin dispatches to.
+  function isEqualsMethod(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    equalsSym: Analyzer::SymbolId,
+    expectedOther: Analyzer::TypeId,
+    typeDef: Analyzer::DefinitionId,
+    methodDefId: Analyzer::DefinitionId,
+  ): boolean {
+    let mut otherParamOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut returnTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(definition) = defStore.get(methodDefId)) {
+      if (let Analyzer::Definition::Method(methodDef) = definition) {
+        if (methodDef.name.raw() != equalsSym.raw()) {
+          return false;
+        }
+
+        if (methodDef.isStatic || methodDef.selfMutable) {
+          return false;
+        }
+
+        if (methodDef.params.length() != 2) {
+          return false;
+        }
+
+        if (let Option::SOME(paramDefId) = methodDef.params.get(1)) {
+          otherParamOpt = Option::SOME(*paramDefId);
+        }
+
+        returnTypeOpt = Option::SOME(methodDef.returnType);
+      }
+    }
+
+    let Option::SOME(returnType) = returnTypeOpt else {
+      return false;
+    };
+
+    let Option::SOME(otherParam) = otherParamOpt else {
+      return false;
+    };
+
+    let mut returnsBoolean: boolean = false;
+
+    if (let Option::SOME(returnNode) = typeStore.get(returnType)) {
+      match (returnNode) {
+        Analyzer::Type::BOOLEAN -> {
+          returnsBoolean = true;
+        },
+        _ -> {},
+      };
+    }
+
+    if (!returnsBoolean) {
+      return false;
+    }
+
+    let mut otherTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
+
+    if (let Option::SOME(paramDefinition) = defStore.get(otherParam)) {
+      if (let Analyzer::Definition::Variable(variableDef) = paramDefinition) {
+        otherTypeOpt = Option::SOME(variableDef.declaredType);
+      }
+    }
+
+    let Option::SOME(otherType) = otherTypeOpt else {
+      return false;
+    };
+
+    return Mono::eqOtherParamMatches(typeStore, otherType, expectedOther, typeDef);
+  }
+
+  /// Finds the `equals` instance method a record or enum offers for structural
+  /// equality. The selfhost binder records no implemented-trait list, so the
+  /// method shape stands in for the oracle's `Eq` trait check.
+  function findEqualsMethod(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    typeDef: Analyzer::DefinitionId,
+    selfType: Analyzer::TypeId,
+  ): Option<Analyzer::DefinitionId> {
+    let mut methods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(typeDef)) {
+      match (definition) {
+        Analyzer::Definition::Record(recordDef) -> {
+          methods = Mono::copyDefinitionIds(&recordDef.instanceMethods);
+        },
+        Analyzer::Definition::Enum(enumDef) -> {
+          methods = Mono::copyDefinitionIds(&enumDef.instanceMethods);
+        },
+        _ -> {},
+      };
+    }
+
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let equalsSym: Analyzer::SymbolId = symbolsRef.intern("equals");
+
+    let mut typesRef: &mut Analyzer::TypeStore = typeStore;
+    let expectedOther: Analyzer::TypeId = typesRef.reference(selfType);
+
+    let mut index: u64 = 0;
+
+    while (index < methods.length()) {
+      let Option::SOME(methodDefId) = methods.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (Mono::isEqualsMethod(defStore, typeStore, equalsSym, expectedOther, typeDef, *methodDefId)) {
+        return Option::SOME(*methodDefId);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Picks the concrete strategy for `@eq<T>` once `T` is substituted, mirroring
+  /// the oracle's `resolve_builtin_eq_kind_after_substitution`. A type without a
+  /// usable `equals` stays `Pending`, which LIR lowering still reads as the
+  /// primitive comparison.
+  function resolveBuiltinEqKind(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut MonoState,
+    ty: Analyzer::TypeId,
+    kind: &Hir::BuiltinEqKind,
+  ): Hir::BuiltinEqKind {
+    match (kind) {
+      Hir::BuiltinEqKind::Primitive -> {
+        return Hir::BuiltinEqKind::Primitive;
+      },
+      Hir::BuiltinEqKind::Str -> {
+        return Hir::BuiltinEqKind::Str;
+      },
+      Hir::BuiltinEqKind::Method(methodDef) -> {
+        return Hir::BuiltinEqKind::Method(methodDef);
+      },
+      Hir::BuiltinEqKind::Pending -> {},
+    };
+
+    let mut nominalDefOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+    let mut instanceArgs: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    if (let Option::SOME(typeNode) = typeStore.get(ty)) {
+      match (typeNode) {
+        Analyzer::Type::BOOLEAN -> {
+          return Hir::BuiltinEqKind::Primitive;
+        },
+        Analyzer::Type::CHAR -> {
+          return Hir::BuiltinEqKind::Primitive;
+        },
+        Analyzer::Type::I8 -> {
+          return Hir::BuiltinEqKind::Primitive;
+        },
+        Analyzer::Type::I16 -> {
+          return Hir::BuiltinEqKind::Primitive;
+        },
+        Analyzer::Type::I32 -> {
+          return Hir::BuiltinEqKind::Primitive;
+        },
+        Analyzer::Type::I64 -> {
+          return Hir::BuiltinEqKind::Primitive;
+        },
+        Analyzer::Type::U8 -> {
+          return Hir::BuiltinEqKind::Primitive;
+        },
+        Analyzer::Type::U16 -> {
+          return Hir::BuiltinEqKind::Primitive;
+        },
+        Analyzer::Type::U32 -> {
+          return Hir::BuiltinEqKind::Primitive;
+        },
+        Analyzer::Type::U64 -> {
+          return Hir::BuiltinEqKind::Primitive;
+        },
+        Analyzer::Type::STR -> {
+          return Hir::BuiltinEqKind::Str;
+        },
+        Analyzer::Type::Record(recordDef) -> {
+          nominalDefOpt = Option::SOME(recordDef);
+        },
+        Analyzer::Type::Enum(enumDef) -> {
+          nominalDefOpt = Option::SOME(enumDef);
+        },
+        Analyzer::Type::Instance(instance) -> {
+          nominalDefOpt = Option::SOME(instance.definition);
+          instanceArgs = Mono::copyTypeIds(&instance.typeArguments);
+        },
+        _ -> {},
+      };
+    }
+
+    let Option::SOME(nominalDef) = nominalDefOpt else {
+      return Hir::BuiltinEqKind::Pending;
+    };
+
+    let mut ownerDef: Analyzer::DefinitionId = nominalDef;
+    let mut ownerArgs: Vector<Analyzer::TypeId> = Mono::copyTypeIds(&instanceArgs);
+
+    // A substituted generic reaches here as its concrete clone, whose method
+    // tables are empty; the origin key carries the generic owner the `equals`
+    // method still belongs to.
+    if (ownerArgs.length() == 0) {
+      let originOpt: Option<Analyzer::InstanceType> = Mono::cloneOrigin(defStore, state, nominalDef);
+
+      match (&originOpt) {
+        Option::SOME(origin) -> {
+          ownerDef = origin.definition;
+          ownerArgs = Mono::copyTypeIds(&origin.typeArguments);
+        },
+        Option::NONE -> {},
+      };
+    }
+
+    let Option::SOME(equalsDef) = Mono::findEqualsMethod(defStore, typeStore, symbols, ownerDef, ty) else {
+      return Hir::BuiltinEqKind::Pending;
+    };
+
+    if (ownerArgs.length() == 0) {
+      return Hir::BuiltinEqKind::Method(equalsDef);
+    }
+
+    let concreteEquals: Analyzer::DefinitionId = Mono::ensureInstantiated(defStore, typeStore, symbols, state, Mono::InstanceKey {
+      primaryDef: equalsDef,
+      ownerDef: Option::SOME(ownerDef),
+      ownerArgs: ownerArgs,
+      methodArgs: Vector::new<Analyzer::TypeId>(),
+    });
+
+    return Hir::BuiltinEqKind::Method(concreteEquals);
+  }
+
   function cloneHirList(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1423,11 +1723,14 @@ export namespace Mono {
           let left: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, eqNode.left);
           let right: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, eqNode.right);
 
+          let eqType: Analyzer::TypeId = Mono::substituteType(defStore, typeStore, symbols, state, subst, eqNode.ty);
+          let eqKind: Hir::BuiltinEqKind = Mono::resolveBuiltinEqKind(defStore, typeStore, symbols, state, eqType, &eqNode.kind);
+
           clonedKind = Hir::HirKind::BuiltinEq(Hir::HirBuiltinEq {
-            ty: Mono::substituteType(defStore, typeStore, symbols, state, subst, eqNode.ty),
+            ty: eqType,
             left: left,
             right: right,
-            kind: eqNode.kind,
+            kind: eqKind,
           });
         },
         Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
