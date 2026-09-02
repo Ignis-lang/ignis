@@ -88,6 +88,7 @@ export namespace Analyzer {
     enum PathTailLookup {
       Variant(Analyzer::DefinitionId),
       StaticMethod(Analyzer::DefinitionId),
+      StaticField(Analyzer::DefinitionId),
       InstanceMethod(Analyzer::DefinitionId),
       TypeFallback(Analyzer::DefinitionId),
       OwnerIsTrait,
@@ -1771,6 +1772,17 @@ export namespace Analyzer {
             return Analyzer::ResolverBodies::PathTailLookup::Variant(variantDefId);
           }
 
+          let enumStaticFieldOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupStaticFieldInEnum(
+            defStore,
+            &en,
+            memberName,
+            symbols,
+          );
+
+          if (let Option::SOME(staticFieldDefId) = enumStaticFieldOpt) {
+            return Analyzer::ResolverBodies::PathTailLookup::StaticField(staticFieldDefId);
+          }
+
           let staticOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
             defStore,
             &en.staticMethods,
@@ -1796,6 +1808,17 @@ export namespace Analyzer {
           return Analyzer::ResolverBodies::PathTailLookup::MemberNotFoundOnEnum;
         },
         Analyzer::Definition::Record(rec) -> {
+          let staticFieldOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupStaticFieldInRecord(
+            defStore,
+            &rec,
+            memberName,
+            symbols,
+          );
+
+          if (let Option::SOME(staticFieldDefId) = staticFieldOpt) {
+            return Analyzer::ResolverBodies::PathTailLookup::StaticField(staticFieldDefId);
+          }
+
           let staticOpt: Option<Analyzer::DefinitionId> = Analyzer::ResolverBodies::lookupMethodInTable(
             defStore,
             &rec.staticMethods,
@@ -2006,6 +2029,64 @@ export namespace Analyzer {
       );
     }
 
+    /// The enum's static field named `memberName`, if it declares one.
+    function lookupStaticFieldInEnum(
+      defStore: &mut Analyzer::DefinitionStore,
+      en: &Analyzer::EnumDef,
+      memberName: str,
+      symbols: &mut Analyzer::SymbolTable,
+    ): Option<Analyzer::DefinitionId> {
+      let mut index: u64 = 0;
+
+      while (index < en.staticFields.length()) {
+        let Option::SOME(staticId) = en.staticFields.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Option::SOME(definition) = defStore.get(*staticId)) {
+          if (let Option::SOME(name) = symbols.resolve(definition.name())) {
+            if (name.equals(memberName)) {
+              return Option::SOME(*staticId);
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// The record's static field named `memberName`, if it declares one.
+    function lookupStaticFieldInRecord(
+      defStore: &mut Analyzer::DefinitionStore,
+      rec: &Analyzer::RecordDef,
+      memberName: str,
+      symbols: &mut Analyzer::SymbolTable,
+    ): Option<Analyzer::DefinitionId> {
+      let mut index: u64 = 0;
+
+      while (index < rec.staticFields.length()) {
+        let Option::SOME(staticId) = rec.staticFields.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Option::SOME(definition) = defStore.get(*staticId)) {
+          if (let Option::SOME(name) = symbols.resolve(definition.name())) {
+            if (name.equals(memberName)) {
+              return Option::SOME(*staticId);
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
     /// Map a `PathTailLookup` outcome to a `ResolvedRef` for expression position,
     /// emitting a diagnostic for every non-resolving outcome. Shared message
     /// table with the pattern-position mapper (`resolvePatternPathTailMapped`).
@@ -2025,6 +2106,9 @@ export namespace Analyzer {
           return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
         },
         Analyzer::ResolverBodies::PathTailLookup::StaticMethod(defId) -> {
+          return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
+        },
+        Analyzer::ResolverBodies::PathTailLookup::StaticField(defId) -> {
           return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
         },
         Analyzer::ResolverBodies::PathTailLookup::TypeFallback(defId) -> {
@@ -2665,6 +2749,9 @@ export namespace Analyzer {
         },
         Analyzer::ResolverBodies::PathTailLookup::TypeFallback(defId) -> {
           return Analyzer::ResolverBodies::resolvePatternPathTypeFallback(state, defStore, p, defId);
+        },
+        Analyzer::ResolverBodies::PathTailLookup::StaticField(_) -> {
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::StaticMethod(_) -> {
           Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, "methods are not valid in pattern position");

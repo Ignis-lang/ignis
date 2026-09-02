@@ -393,8 +393,37 @@ export namespace ParserDeclarations {
       span: ParserShared::mergeSpans(nameToken.span, endSpan),
       name: nameToken.lexemeString(),
       annotation: annotation,
+      initializer: Option::NONE,
       metadata: Ast::copyMetadata(metadata),
     })));
+  }
+
+  /// Parses the value of a record field written `name: Type = <expr>` and
+  /// stores it on the field's binding. A field that carries a value is a
+  /// static field: it belongs to the type, not to an instance of it.
+  function attachFieldInitializer(
+    parser: &mut ParserShared::State,
+    fieldId: Ast::PatternId,
+  ): Option<Ast::PatternId> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let valueExpression = ParserExpressions::parseExpression(parserRef)!;
+
+    if (let Option::SOME(pattern) = parserRef.module.patterns.getMut(fieldId)) {
+      if (let Ast::Pattern::Node::Binding(binding) = pattern) {
+        *pattern = Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+          span: binding.span,
+          name: binding.name.clone(),
+          annotation: binding.annotation,
+          initializer: Option::SOME(valueExpression.id),
+          metadata: Ast::copyMetadata(&binding.metadata),
+        });
+
+        return Option::SOME(fieldId);
+      }
+    }
+
+    return Option::NONE;
   }
 
   function parseBindingPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
@@ -543,6 +572,7 @@ export namespace ParserDeclarations {
       span: receiverSpan,
       name: String::create("self"),
       annotation: Option::SOME(receiverTypeId),
+      initializer: Option::NONE,
       metadata: Ast::copyMetadata(metadata),
     }));
   }
@@ -1071,6 +1101,7 @@ export namespace ParserDeclarations {
             span: typeSpan,
             name: String::create("_"),
             annotation: Option::SOME(typeId),
+            initializer: Option::NONE,
             metadata: Ast::emptyMetadata(),
           }));
           arguments.push(placeholderId);
@@ -1141,15 +1172,11 @@ export namespace ParserDeclarations {
       };
       fields.push(field);
 
-      if (parserRef.atPunctuation(Punctuation::EQUAL)) {
-        parserRef.emitDiagnostic(
-          parserRef.current().span,
-          DiagnosticCode::UNSUPPORTED_CONSTRUCT,
-          "parser does not support field initializers",
-          "a record field with a value declares a static field, which the selfhost does not bind yet",
-        );
-        ParserRecovery::synchronizeTopLevel(parserRef);
-        break;
+      if (parserRef.consumePunctuation(Punctuation::EQUAL).isSome()) {
+        let Option::SOME(_) = ParserDeclarations::attachFieldInitializer(parserRef, field) else {
+          ParserRecovery::synchronizeTopLevel(parserRef);
+          break;
+        };
       }
 
       if (parserRef.consumePunctuation(Punctuation::SEMICOLON).isSome() || parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
@@ -1229,15 +1256,37 @@ export namespace ParserDeclarations {
       let memberMetadata = ParserDeclarations::parseLeadingMetadata(parserRef)!;
       parserRef.skipTrivia();
 
+      // An enum member written `name: Type = value;` is a static field. It
+      // joins the variant list as a binding carrying its value, which is what
+      // tells it from the unit variants around it.
       if (ParserDeclarations::recordMemberLooksLikeField(parserRef)) {
-        parserRef.emitDiagnostic(
-          parserRef.current().span,
-          DiagnosticCode::UNSUPPORTED_CONSTRUCT,
-          "parser does not support enum static fields",
-          "an enum member written `name: Type = value;` is a static field, which the selfhost does not bind yet",
-        );
-        ParserRecovery::synchronizeTopLevel(parserRef);
-        break;
+        let Option::SOME(staticField) = ParserDeclarations::parseBindingPatternWithMetadata(parserRef, &memberMetadata) else {
+          ParserRecovery::synchronizeTopLevel(parserRef);
+          break;
+        };
+
+        let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' after enum static field type") else {
+          ParserRecovery::synchronizeTopLevel(parserRef);
+          break;
+        };
+
+        let Option::SOME(_) = ParserDeclarations::attachFieldInitializer(parserRef, staticField) else {
+          ParserRecovery::synchronizeTopLevel(parserRef);
+          break;
+        };
+
+        variants.push(staticField);
+
+        endSpan = match (parserRef.module.patterns.get(staticField)) {
+          Option::SOME(node) -> ParserDeclarations::patternSpan(node),
+          Option::NONE -> endSpan,
+        };
+
+        if (parserRef.consumePunctuation(Punctuation::SEMICOLON).isNone()) {
+          let _comma: Option<Token> = parserRef.consumePunctuation(Punctuation::COMMA);
+        }
+
+        continue;
       }
 
       if (ParserDeclarations::enumMemberLooksLikeMethod(parserRef)) {

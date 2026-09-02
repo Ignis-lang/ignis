@@ -760,6 +760,64 @@ export namespace Analyzer {
     // =========================================================================
 
     /// Extract a copy of RecordDef.fields, releasing the immutable borrow.
+    /// The enum's static field definitions, in declaration order.
+    function extractEnumStaticFields(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      let Analyzer::Definition::Enum(en) = def else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+
+      while (index < en.staticFields.length()) {
+        let Option::SOME(staticId) = en.staticFields.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        out.push(*staticId);
+        index += 1;
+      }
+
+      return out;
+    }
+
+    /// The record's static field definitions, in declaration order.
+    function extractRecordStaticFields(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      let Analyzer::Definition::Record(rec) = def else {
+        return Vector::new<Analyzer::DefinitionId>();
+      };
+
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+
+      while (index < rec.staticFields.length()) {
+        let Option::SOME(staticId) = rec.staticFields.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        out.push(*staticId);
+        index += 1;
+      }
+
+      return out;
+    }
+
     function extractRecordFields(
       defStore: &mut Analyzer::DefinitionStore,
       defId: Analyzer::DefinitionId,
@@ -1638,17 +1696,36 @@ export namespace Analyzer {
 
       let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &e.genericParameters);
       let variantDefIds: Vector<Analyzer::DefinitionId> = extractEnumVariants(defStore, defId);
+      let staticDefIds: Vector<Analyzer::DefinitionId> = extractEnumStaticFields(defStore, defId);
 
+      // The written members carry variants and static fields, so each
+      // definition table advances on its own counter.
+      let mut patternIndex: u64 = 0;
       let mut variantIndex: u64 = 0;
+      let mut staticIndex: u64 = 0;
 
-      while (variantIndex < variantDefIds.length()) {
-        let Option::SOME(variantDefId) = variantDefIds.get(variantIndex) else {
-          variantIndex += 1;
+      while (patternIndex < e.variants.length()) {
+        let Option::SOME(variantPatternId) = e.variants.get(patternIndex) else {
+          patternIndex += 1;
           continue;
         };
 
-        let Option::SOME(variantPatternId) = e.variants.get(variantIndex) else {
+        if (Analyzer::Binder::variantPatternIsStaticField(module, *variantPatternId)) {
+          if (let Option::SOME(staticDefId) = staticDefIds.get(staticIndex)) {
+            if (let Option::SOME(annotationTypeId) = patternAnnotation(module, *variantPatternId)) {
+              let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId);
+              patchVariableType(defStore, *staticDefId, resolved);
+            }
+          }
+
+          staticIndex += 1;
+          patternIndex += 1;
+          continue;
+        }
+
+        let Option::SOME(variantDefId) = variantDefIds.get(variantIndex) else {
           variantIndex += 1;
+          patternIndex += 1;
           continue;
         };
 
@@ -1683,6 +1760,7 @@ export namespace Analyzer {
         }
 
         variantIndex += 1;
+        patternIndex += 1;
       }
 
       let selfTypeId: Analyzer::TypeId = selfTypeFor(typeStore, defId, &scope, true);
@@ -1711,28 +1789,45 @@ export namespace Analyzer {
 
       let scope: Analyzer::Resolver::TypeParamScope = buildTypeParamScope(typeStore, symbols, &r.genericParameters);
       let fieldDefIds: Vector<Analyzer::DefinitionId> = extractRecordFields(defStore, defId);
+      let staticDefIds: Vector<Analyzer::DefinitionId> = extractRecordStaticFields(defStore, defId);
 
+      // The written fields carry both kinds, so each definition table advances
+      // on its own counter as the patterns are walked in declaration order.
+      let mut patternIndex: u64 = 0;
       let mut fieldIndex: u64 = 0;
+      let mut staticIndex: u64 = 0;
 
-      while (fieldIndex < fieldDefIds.length()) {
-        let Option::SOME(fieldDefId) = fieldDefIds.get(fieldIndex) else {
-          fieldIndex += 1;
+      while (patternIndex < r.fields.length()) {
+        let Option::SOME(fieldPatId) = r.fields.get(patternIndex) else {
+          patternIndex += 1;
           continue;
         };
 
-        let Option::SOME(fieldPatId) = r.fields.get(fieldIndex) else {
-          fieldIndex += 1;
-          continue;
-        };
-
+        let isStatic: boolean = Analyzer::Binder::fieldPatternIsStatic(module, *fieldPatId);
         let annotationOpt: Option<Ast::TypeId> = patternAnnotation(module, *fieldPatId);
 
-        if (let Option::SOME(annotationTypeId) = annotationOpt) {
-          let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId);
-          patchFieldType(defStore, *fieldDefId, resolved);
+        if (isStatic) {
+          if (let Option::SOME(staticDefId) = staticDefIds.get(staticIndex)) {
+            if (let Option::SOME(annotationTypeId) = annotationOpt) {
+              let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId);
+              patchVariableType(defStore, *staticDefId, resolved);
+            }
+          }
+
+          staticIndex += 1;
+          patternIndex += 1;
+          continue;
+        }
+
+        if (let Option::SOME(fieldDefId) = fieldDefIds.get(fieldIndex)) {
+          if (let Option::SOME(annotationTypeId) = annotationOpt) {
+            let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, annotationTypeId);
+            patchFieldType(defStore, *fieldDefId, resolved);
+          }
         }
 
         fieldIndex += 1;
+        patternIndex += 1;
       }
 
       let selfTypeId: Analyzer::TypeId = selfTypeFor(typeStore, defId, &scope, false);

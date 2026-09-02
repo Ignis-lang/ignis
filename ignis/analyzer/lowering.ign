@@ -5493,9 +5493,11 @@ export namespace Lowering {
         Lowering::lowerFunctionItem(defStore, typeStore, symbols, module, output, locals, hir, itemId, &function_);
       },
       Ast::Item::Node::Record(recordItem) -> {
+        Lowering::lowerRecordStaticFields(defStore, typeStore, symbols, module, output, locals, hir, itemId, &recordItem);
         Lowering::lowerOwnerMethods(defStore, typeStore, symbols, module, output, locals, hir, &recordItem.methods);
       },
       Ast::Item::Node::Enum(enumItem) -> {
+        Lowering::lowerEnumStaticFields(defStore, typeStore, symbols, module, output, locals, hir, itemId, &enumItem);
         Lowering::lowerOwnerMethods(defStore, typeStore, symbols, module, output, locals, hir, &enumItem.methods);
       },
       Ast::Item::Node::Namespace(namespaceItem) -> {
@@ -5511,6 +5513,154 @@ export namespace Lowering {
       },
       _ -> {},
     };
+  }
+
+  /// Records the initializer of every static field a record declares, so a use
+  /// written `Record::NAME` lowers the value the same way a module constant's
+  /// use does.
+  function lowerRecordStaticFields(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    itemId: Ast::ItemId,
+    recordItem: &Ast::Item::Record,
+  ): void {
+    let Option::SOME(recordDefId) = Lowering::findItemDef(output, itemId) else {
+      return;
+    };
+
+    let staticDefIds: Vector<Analyzer::DefinitionId> = Lowering::recordStaticFieldDefs(defStore, recordDefId);
+
+    if (staticDefIds.length() == 0) {
+      return;
+    }
+
+    let mut staticIndex: u64 = 0;
+    let mut patternIndex: u64 = 0;
+
+    while (patternIndex < recordItem.fields.length()) {
+      let Option::SOME(fieldPatId) = recordItem.fields.get(patternIndex) else {
+        patternIndex += 1;
+        continue;
+      };
+
+      if (!Analyzer::Binder::fieldPatternIsStatic(module, *fieldPatId)) {
+        patternIndex += 1;
+        continue;
+      }
+
+      let mut valueOpt: Option<Ast::ExpressionId> = Option::NONE;
+
+      if (let Option::SOME(pattern) = module.patterns.get(*fieldPatId)) {
+        if (let Ast::Pattern::Node::Binding(binding) = pattern) {
+          valueOpt = binding.initializer;
+        }
+      }
+
+      if (let Option::SOME(staticDefId) = staticDefIds.get(staticIndex)) {
+        if (let Option::SOME(valueExprId) = valueOpt) {
+          let init: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, valueExprId);
+          let mut hirRef: &mut Hir::HirStore = hir;
+          hirRef.setConstantInit(*staticDefId, init);
+        }
+      }
+
+      staticIndex += 1;
+      patternIndex += 1;
+    }
+  }
+
+  /// Records the initializer of every static field an enum declares.
+  function lowerEnumStaticFields(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    module: &Ast::Module,
+    output: &Analyzer::AnalyzerOutput,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    itemId: Ast::ItemId,
+    enumItem: &Ast::Item::Enum,
+  ): void {
+    let Option::SOME(enumDefId) = Lowering::findItemDef(output, itemId) else {
+      return;
+    };
+
+    let staticDefIds: Vector<Analyzer::DefinitionId> = Lowering::enumStaticFieldDefs(defStore, enumDefId);
+
+    if (staticDefIds.length() == 0) {
+      return;
+    }
+
+    let mut staticIndex: u64 = 0;
+    let mut patternIndex: u64 = 0;
+
+    while (patternIndex < enumItem.variants.length()) {
+      let Option::SOME(memberPatId) = enumItem.variants.get(patternIndex) else {
+        patternIndex += 1;
+        continue;
+      };
+
+      if (!Analyzer::Binder::variantPatternIsStaticField(module, *memberPatId)) {
+        patternIndex += 1;
+        continue;
+      }
+
+      let mut valueOpt: Option<Ast::ExpressionId> = Option::NONE;
+
+      if (let Option::SOME(pattern) = module.patterns.get(*memberPatId)) {
+        if (let Ast::Pattern::Node::Binding(binding) = pattern) {
+          valueOpt = binding.initializer;
+        }
+      }
+
+      if (let Option::SOME(staticDefId) = staticDefIds.get(staticIndex)) {
+        if (let Option::SOME(valueExprId) = valueOpt) {
+          let init: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, valueExprId);
+          let mut hirRef: &mut Hir::HirStore = hir;
+          hirRef.setConstantInit(*staticDefId, init);
+        }
+      }
+
+      staticIndex += 1;
+      patternIndex += 1;
+    }
+  }
+
+  /// The enum's static field definitions, in declaration order.
+  function enumStaticFieldDefs(
+    defStore: &mut Analyzer::DefinitionStore,
+    enumDefId: Analyzer::DefinitionId,
+  ): Vector<Analyzer::DefinitionId> {
+    let Option::SOME(definition) = defStore.get(enumDefId) else {
+      return Vector::new<Analyzer::DefinitionId>();
+    };
+
+    let Analyzer::Definition::Enum(enum_) = definition else {
+      return Vector::new<Analyzer::DefinitionId>();
+    };
+
+    return Analyzer::Typecheck::copyDefinitionIdVector(&enum_.staticFields);
+  }
+
+  /// The record's static field definitions, in declaration order.
+  function recordStaticFieldDefs(
+    defStore: &mut Analyzer::DefinitionStore,
+    recordDefId: Analyzer::DefinitionId,
+  ): Vector<Analyzer::DefinitionId> {
+    let Option::SOME(definition) = defStore.get(recordDefId) else {
+      return Vector::new<Analyzer::DefinitionId>();
+    };
+
+    let Analyzer::Definition::Record(record_) = definition else {
+      return Vector::new<Analyzer::DefinitionId>();
+    };
+
+    return Analyzer::Typecheck::copyDefinitionIdVector(&record_.staticFields);
   }
 
   /// Records a module constant's initializer in `constantInits`. A constant

@@ -45,6 +45,7 @@ function typecheckAddBinding(module: &mut Ast::Module, name: str): Ast::PatternI
     span: typecheckDummySpan(),
     name: String::create(name),
     annotation: Option::NONE,
+    initializer: Option::NONE,
     metadata: Ast::emptyMetadata(),
   }));
 }
@@ -131,6 +132,7 @@ function typecheckAddAnnotatedBinding(
     span: typecheckDummySpan(),
     name: String::create(name),
     annotation: Option::SOME(annotation),
+    initializer: Option::NONE,
     metadata: Ast::emptyMetadata(),
   }));
 }
@@ -204,6 +206,7 @@ function typecheckAddAnnotatedField(
     span: typecheckDummySpan(),
     name: String::create(name),
     annotation: Option::SOME(annotation),
+    initializer: Option::NONE,
     metadata: Ast::emptyMetadata(),
   }));
 }
@@ -725,6 +728,7 @@ function typecheckAddSelfReceiverPattern(
     span: typecheckDummySpan(),
     name: String::create("self"),
     annotation: Option::SOME(selfRefType),
+    initializer: Option::NONE,
     metadata: Ast::emptyMetadata(),
   }));
 }
@@ -15020,4 +15024,96 @@ function typecheckTraitDefaultOverrideWins(): void {
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
   Test::assertEq<u64>(typecheckRecordOwnedMethodCount(&defStore, &symbols, "describe"), 1);
+}
+
+/// Counts the static field definitions a record or an enum owns.
+function typecheckStaticFieldCount(
+  defStore: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+  ownerName: str,
+): u64 {
+  let mut index: u64 = 0;
+
+  while (index < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      if (let Option::SOME(name) = symbols.resolve(definition.name())) {
+        if (name.equals(ownerName)) {
+          match (definition) {
+            Analyzer::Definition::Record(record_) -> {
+              return record_.staticFields.length();
+            },
+            Analyzer::Definition::Enum(enum_) -> {
+              return enum_.staticFields.length();
+            },
+            _ -> {},
+          };
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return 0;
+}
+
+/// Scenario: a record declares a static field and a use written
+/// `Config::MAX_SIZE` reads it. The field leaves the instance layout and
+/// becomes a constant the record owns.
+/// Spec: parity fixture e2e_ok::record_static_field.
+@test
+function typecheckResolvesRecordStaticField(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Config {\n  public limit: i32;\n\n  static MAX_SIZE: i32 = 1024;\n}\n\nfunction main(): i32 {\n  return Config::MAX_SIZE;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+  Test::assertEq<u64>(typecheckStaticFieldCount(&defStore, &symbols, "Config"), 1);
+}
+
+/// Scenario: an enum member written `NAME: Type = value;` is a static field
+/// read as `Priority::DEFAULT_LEVEL`, and the variants around it stay
+/// variants.
+/// Spec: parity fixture e2e_ok::enum_static_field.
+@test
+function typecheckResolvesEnumStaticField(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "enum Priority {\n  Low,\n  High,\n\n  DEFAULT_LEVEL: i32 = 1;\n}\n\nfunction main(): i32 {\n  return Priority::DEFAULT_LEVEL;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+  Test::assertEq<u64>(typecheckStaticFieldCount(&defStore, &symbols, "Priority"), 1);
+}
+
+/// Scenario: a static field value that does not satisfy the declared type is
+/// reported, in the same shape a module constant's value is.
+/// Spec: parity fixture e2e_ok::record_static_field.
+@test
+function typecheckRejectsStaticFieldValueOfTheWrongType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Config {\n  static NAME: i32 = true;\n}\n\nfunction main(): i32 {\n  return Config::NAME;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assert(typecheckCountErrors(&output.diagnostics) > 0);
+  Test::assertEq<str>(typecheckFirstDiagnosticCode(&output.diagnostics), DiagnosticCode::TYPE_MISMATCH);
 }

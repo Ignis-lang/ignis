@@ -210,6 +210,7 @@ export namespace Analyzer {
         fields: fields,
         instanceMethods: Vector::new<Analyzer::DefinitionId>(),
         staticMethods: Vector::new<Analyzer::DefinitionId>(),
+        staticFields: Vector::new<Analyzer::DefinitionId>(),
         typeId: sentinelId,
         implementsCopy: false,
         implementsDrop: false,
@@ -243,6 +244,7 @@ export namespace Analyzer {
         tryCapable: Option::NONE,
         instanceMethods: Vector::new<Analyzer::DefinitionId>(),
         staticMethods: Vector::new<Analyzer::DefinitionId>(),
+        staticFields: Vector::new<Analyzer::DefinitionId>(),
         typeId: sentinelId,
         implementsCopy: false,
         implementsDrop: false,
@@ -1069,6 +1071,90 @@ export namespace Analyzer {
     /// diagnostic and skip allocation for the duplicate. Wildcard and non-Binding
     /// patterns are silently skipped. The `index` on each `FieldDef` is the zero-based
     /// position within the successfully-allocated fields (not the raw pattern index).
+    /// A record's fields, split into the ones an instance carries and the ones
+    /// the type owns.
+    record OwnerFieldTables {
+      public fields: Vector<Analyzer::DefinitionId>;
+      public staticFields: Vector<Analyzer::DefinitionId>;
+    }
+
+    /// An enum's members, split into its variants and the static fields it
+    /// declares among them.
+    record OwnerVariantTables {
+      public variants: Vector<Analyzer::DefinitionId>;
+      public staticFields: Vector<Analyzer::DefinitionId>;
+    }
+
+    /// Whether a field binding declares a static field: the `static` modifier
+    /// and a value. A `static` field written without one keeps its instance
+    /// field binding, which is what the selfhost did before static fields were
+    /// bound at all.
+    function fieldBindingIsStatic(binding: &Ast::Pattern::Binding): boolean {
+      if (binding.initializer.isNone()) {
+        return false;
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < binding.metadata.modifiers.length()) {
+        let Option::SOME(modifier) = binding.metadata.modifiers.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Ast::Modifier::Static = modifier) {
+          return true;
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Whether the enum member pattern `patternId` declares a static field.
+    ///
+    /// An enum static field is written `NAME: Type = value;`, so the value is
+    /// what tells it from the unit variants it sits among.
+    function variantPatternIsStaticField(ast: &Ast::Module, patternId: Ast::PatternId): boolean {
+      let Option::SOME(pattern) = ast.patterns.get(patternId) else {
+        return false;
+      };
+
+      match (pattern) {
+        Ast::Pattern::Node::Binding(binding) -> {
+          return binding.initializer.isSome();
+        },
+        Ast::Pattern::Node::Wildcard(_) -> {},
+        Ast::Pattern::Node::Literal(_) -> {},
+        Ast::Pattern::Node::Path(_) -> {},
+        Ast::Pattern::Node::Tuple(_) -> {},
+        Ast::Pattern::Node::Or(_) -> {},
+      };
+
+      return false;
+    }
+
+    /// Whether the field pattern `patternId` declares a static field.
+    function fieldPatternIsStatic(ast: &Ast::Module, patternId: Ast::PatternId): boolean {
+      let Option::SOME(pattern) = ast.patterns.get(patternId) else {
+        return false;
+      };
+
+      match (pattern) {
+        Ast::Pattern::Node::Binding(binding) -> {
+          return Analyzer::Binder::fieldBindingIsStatic(&binding);
+        },
+        Ast::Pattern::Node::Wildcard(_) -> {},
+        Ast::Pattern::Node::Literal(_) -> {},
+        Ast::Pattern::Node::Path(_) -> {},
+        Ast::Pattern::Node::Tuple(_) -> {},
+        Ast::Pattern::Node::Or(_) -> {},
+      };
+
+      return false;
+    }
+
     function bindFields(
       state: &mut Analyzer::Binder::BinderState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1077,8 +1163,9 @@ export namespace Analyzer {
       ast: &Ast::Module,
       fieldPatternIds: &Vector<Ast::PatternId>,
       owner: Analyzer::DefinitionId,
-    ): Vector<Analyzer::DefinitionId> {
+    ): Analyzer::Binder::OwnerFieldTables {
       let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut staticFields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
       let mut seenSyms: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
       let mut typesRef: &mut Analyzer::TypeStore = typeStore;
       let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
@@ -1111,6 +1198,21 @@ export namespace Analyzer {
 
               if (isDuplicate) {
                 emitDuplicateNameDiagnostic(state, "field name", b.name.toStr(), b.span);
+              } else if (Analyzer::Binder::fieldBindingIsStatic(&b)) {
+                seenSyms.push(sym);
+
+                let staticDef: Analyzer::VariableDef = Analyzer::VariableDef {
+                  name: sym,
+                  visibility: Analyzer::Visibility::PUBLIC,
+                  declaredType: sentinelId,
+                  mutable: false,
+                  takes: false,
+                  noEscape: false,
+                  isExtern: false,
+                };
+                let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+                let staticId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(staticDef));
+                staticFields.push(staticId);
               } else {
                 seenSyms.push(sym);
                 let fieldDef: Analyzer::FieldDef = Analyzer::FieldDef {
@@ -1136,7 +1238,10 @@ export namespace Analyzer {
         index += 1;
       }
 
-      return out;
+      return Analyzer::Binder::OwnerFieldTables {
+        fields: out,
+        staticFields: staticFields,
+      };
     }
 
     /// Allocate `Definition::Variant` sub-defs for each variant pattern in source order.
@@ -1154,8 +1259,9 @@ export namespace Analyzer {
       ast: &Ast::Module,
       variantPatternIds: &Vector<Ast::PatternId>,
       owner: Analyzer::DefinitionId,
-    ): Vector<Analyzer::DefinitionId> {
+    ): Analyzer::Binder::OwnerVariantTables {
       let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut staticFields: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
       let mut seenSyms: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
       let mut typesRef: &mut Analyzer::TypeStore = typeStore;
       let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
@@ -1191,6 +1297,20 @@ export namespace Analyzer {
 
               if (isDuplicate) {
                 emitDuplicateNameDiagnostic(state, "variant name", b.name.toStr(), b.span);
+              } else if (b.initializer.isSome()) {
+                seenSyms.push(sym);
+                let staticDef: Analyzer::VariableDef = Analyzer::VariableDef {
+                  name: sym,
+                  visibility: Analyzer::Visibility::PUBLIC,
+                  declaredType: sentinelId,
+                  mutable: false,
+                  takes: false,
+                  noEscape: false,
+                  isExtern: false,
+                };
+                let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+                let staticId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Variable(staticDef));
+                staticFields.push(staticId);
               } else {
                 seenSyms.push(sym);
                 let payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
@@ -1266,7 +1386,10 @@ export namespace Analyzer {
         index += 1;
       }
 
-      return out;
+      return Analyzer::Binder::OwnerVariantTables {
+        variants: out,
+        staticFields: staticFields,
+      };
     }
 
     /// Allocate `Definition::Variable` sub-defs for each function parameter in source order.
@@ -1717,7 +1840,7 @@ export namespace Analyzer {
 
       // Immutable borrow of defStore is released here. Now allocate sub-defs.
       let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &rec.genericParameters, defId);
-      let fields: Vector<Analyzer::DefinitionId> = bindFields(state, defStore, typeStore, symbols, ast, &rec.fields, defId);
+      let fieldTables: Analyzer::Binder::OwnerFieldTables = bindFields(state, defStore, typeStore, symbols, ast, &rec.fields, defId);
       let methods: Analyzer::Binder::OwnerMethodTables = bindOwnerMethods(
         state,
         defStore,
@@ -1737,9 +1860,10 @@ export namespace Analyzer {
         name: placeholderName,
         visibility: Analyzer::Visibility::PUBLIC,
         typeParams: typeParams,
-        fields: fields,
+        fields: fieldTables.fields,
         instanceMethods: methods.instanceMethods,
         staticMethods: methods.staticMethods,
+        staticFields: fieldTables.staticFields,
         typeId: realTypeId,
         implementsCopy: Analyzer::Binder::implementsLangTrait(&rec.metadata, "Copy"),
         implementsDrop: Analyzer::Binder::implementsLangTrait(&rec.metadata, "Drop"),
@@ -1796,7 +1920,7 @@ export namespace Analyzer {
       }
 
       let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &en.genericParameters, defId);
-      let variants: Vector<Analyzer::DefinitionId> = bindVariants(state, defStore, typeStore, symbols, ast, &en.variants, defId);
+      let variantTables: Analyzer::Binder::OwnerVariantTables = bindVariants(state, defStore, typeStore, symbols, ast, &en.variants, defId);
       let methods: Analyzer::Binder::OwnerMethodTables = bindOwnerMethods(
         state,
         defStore,
@@ -1815,7 +1939,7 @@ export namespace Analyzer {
       let tryCapable: Option<Analyzer::TryCapability> = Analyzer::Binder::enumTryCapability(
         state,
         &en.metadata,
-        variants.length(),
+        variantTables.variants.length(),
         en.span,
       );
 
@@ -1823,10 +1947,11 @@ export namespace Analyzer {
         name: placeholderName,
         visibility: Analyzer::Visibility::PUBLIC,
         typeParams: typeParams,
-        variants: variants,
+        variants: variantTables.variants,
         tryCapable: tryCapable,
         instanceMethods: methods.instanceMethods,
         staticMethods: methods.staticMethods,
+        staticFields: variantTables.staticFields,
         typeId: realTypeId,
         implementsCopy: Analyzer::Binder::implementsLangTrait(&en.metadata, "Copy"),
         implementsDrop: Analyzer::Binder::implementsLangTrait(&en.metadata, "Drop"),

@@ -906,3 +906,27 @@ function loweringInheritedTraitDefaultBody(): void {
 
   Test::assertSnapshot("lowering-trait-default-inherited", rendered.toStr());
 }
+
+/// A static field's value lowers once, so a use written `Record::NAME` reads
+/// the value rather than a name the emitter has no definition for.
+/// Spec: parity fixture e2e_ok::record_static_field.
+@test
+function loweringRecordStaticFieldValue(): void {
+  let rendered: String = loweringRender(
+    "record Config {\n  static MAX_SIZE: i32 = 1024;\n}\n\nfunction main(): i32 {\n  return Config::MAX_SIZE;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-record-static-field", rendered.toStr());
+}
+
+/// An enum static field lowers the same way, alongside the variants it is
+/// written among.
+/// Spec: parity fixture e2e_ok::enum_static_field.
+@test
+function loweringEnumStaticFieldValue(): void {
+  let rendered: String = loweringRender(
+    "enum Priority {\n  Low,\n  High,\n\n  DEFAULT_LEVEL: i32 = 1;\n}\n\nfunction main(): i32 {\n  return Priority::DEFAULT_LEVEL;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-enum-static-field", rendered.toStr());
+}
