@@ -2214,9 +2214,10 @@ export namespace Lowering {
   /// The record definition is re-derived from the checked type of the whole
   /// initializer instead of from the path expression: the selfhost
   /// typechecker records the record type on this node, and the oracle's
-  /// `resolve_record_path_for_lowering` has no selfhost counterpart.
-  /// Explicit type arguments are rejected outright by the typechecker
-  /// ("generic record initializers"), so they stay on `Error`.
+  /// `resolve_record_path_for_lowering` has no selfhost counterpart. That
+  /// also covers `Rec<T> { ... }`: the written type arguments are already
+  /// folded into the checked type, so the explicit and inferred forms lower
+  /// through the same path.
   function lowerRecordInit(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -2228,10 +2229,6 @@ export namespace Lowering {
     exprId: Ast::ExpressionId,
     recordInit: &Ast::Expression::RecordInit,
   ): Hir::HirId {
-    if (recordInit.typeArguments.length() > 0) {
-      return Lowering::errorNode(hir, typeStore, recordInit.span);
-    }
-
     let resultType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
 
     let Option::SOME(recordDef) = Lowering::nominalDefinition(defStore, typeStore, resultType) else {
