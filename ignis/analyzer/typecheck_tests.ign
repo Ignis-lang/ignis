@@ -11525,12 +11525,12 @@ function typecheckShiftOnFloatProducesDiagnostic(): void {
   assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_BINARY_OPERAND_TYPE);
 }
 
-/// Scenario: `1 << (1 as u64)` with an `i32` lhs and a `u64` rhs is rejected with
-/// `TYPE_MISMATCH`: the selfhost has no integer widening, so shift/bitwise
-/// operands must name the same type like every other binary arm.
+/// Scenario: `1 << (1 as u64)` mixes an `i32` lhs with a `u64` rhs and is
+/// accepted: shift and bitwise operands go through the same common-type rule
+/// as arithmetic, which takes the right operand when neither side widens.
 /// Spec: IGN-30 — shift/bitwise binary operators.
 @test
-function typecheckShiftOnMixedIntegerTypesProducesDiagnostic(): void {
+function typecheckShiftOnMixedIntegerTypesTakesRightOperandType(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -11552,7 +11552,8 @@ function typecheckShiftOnMixedIntegerTypesProducesDiagnostic(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+  assertExprType(&output, shiftExpr, typeStore.intern(Analyzer::Type::U64));
 }
 
 /// Scenario: `let one: u64 = 1;` adopts the annotated integer type for the
@@ -14484,6 +14485,92 @@ function typecheckCharEqualityIsBoolean(): void {
 function typecheckGenericEnumInstanceDestructuringBindsSubstitutedPayload(): void {
   let parsed: ParseOutput = typecheckParseSource(
     "enum Wrap<T> {\n  FULL(T),\n  EMPTY,\n}\n\nfunction unwrap(w: Wrap<u32>): u32 {\n  match (w) {\n    Wrap::FULL(value) -> {\n      return value;\n    },\n    Wrap::EMPTY -> {\n      return 0;\n    },\n  };\n\n  return 0;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: subtracting two pointers over the same pointee yields the `i64`
+/// element distance instead of a mismatch against the pointer type.
+@test
+function typecheckPointerDifferenceYieldsI64(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function distance(a: *mut i32, b: *mut i32): i64 {\n  return a - b;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: subtracting pointers with unrelated pointees stays an error, so
+/// the difference rule does not swallow a genuine mismatch.
+@test
+function typecheckPointerDifferenceOverDifferentPointeesProducesDiagnostic(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function distance(a: *mut i32, b: *mut u8): i64 {\n  return a - b;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<boolean>(typecheckCountErrors(&output.diagnostics) > 0, true);
+}
+
+/// Scenario: an integer on the left of a pointer addition keeps the pointer
+/// type, mirroring the host's symmetric pointer arithmetic.
+@test
+function typecheckIntegerPlusPointerYieldsPointerType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function offset(p: *mut i32): *mut i32 {\n  return 1 + p;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: bitwise operands of mixed signedness take the right operand's
+/// type through the host's common-type rule instead of demanding an exact
+/// match.
+@test
+function typecheckBitwiseMixedSignednessTakesRightOperandType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "const SIGN_BIT: u32 = 2147483648;\n\nfunction masked(): u32 {\n  return 7 | SIGN_BIT;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: bitwise operands of different widths widen to the wider integer
+/// type.
+@test
+function typecheckBitwiseMixedWidthsWidens(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function combined(wide: u64, narrow: u32): u64 {\n  return wide | narrow;\n}\n",
   );
 
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();

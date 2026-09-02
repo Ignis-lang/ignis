@@ -161,6 +161,35 @@ export namespace Analyzer {
           return Option::SOME(leftType);
         }
 
+        let rightAliasResolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, rightType);
+        let rightIsPointer: boolean = rightAliasResolved.cycleAlias.isNone() && Analyzer::Typecheck::typeIdIsPointer(typeStore, rightAliasResolved.typeId);
+
+        if (rightIsPointer && Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, b.span, leftType)) {
+          Analyzer::Typecheck::recordExprType(state, exprId, rightType);
+          return Option::SOME(rightType);
+        }
+
+        // Pointer difference: `p - q` over a shared pointee measures the
+        // distance in elements, which the host types as `i64`.
+        let bothPointers: boolean = leftAliasResolved.cycleAlias.isNone() && Analyzer::Typecheck::typeIdIsPointer(typeStore, leftAliasResolved.typeId) && rightIsPointer;
+
+        if (bothPointers && Analyzer::Typecheck::isSubtractBinaryOperator(b.operator)) {
+          let leftPointee: Option<Analyzer::TypeId> = Analyzer::Typecheck::pointeeTypeOf(typeStore, leftAliasResolved.typeId);
+          let rightPointee: Option<Analyzer::TypeId> = Analyzer::Typecheck::pointeeTypeOf(typeStore, rightAliasResolved.typeId);
+
+          if (let Option::SOME(leftBase) = leftPointee) {
+            if (let Option::SOME(rightBase) = rightPointee) {
+              if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftBase, rightBase)) {
+                let mut differenceStore: &mut Analyzer::TypeStore = typeStore;
+                let differenceType: Analyzer::TypeId = differenceStore.intern(Analyzer::Type::I64);
+
+                Analyzer::Typecheck::recordExprType(state, exprId, differenceType);
+                return Option::SOME(differenceType);
+              }
+            }
+          }
+        }
+
         // Operands of different widths unify on the wider one, as the
         // reference analyzer's `typecheck_common_type` does.
         if (let Option::SOME(commonType) = Analyzer::Typecheck::commonIntegerType(defStore, typeStore, leftType, rightType)) {
@@ -273,16 +302,21 @@ export namespace Analyzer {
           return Option::NONE;
         }
 
-        // The reference analyzer widens mixed integer operands through its
-        // common-type machinery; the selfhost has none, so both sides must
-        // name the same type, matching every other binary arm here.
-        if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType)) {
-          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
-          return Option::NONE;
+        if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, b.span, leftType, rightType)) {
+          Analyzer::Typecheck::recordExprType(state, exprId, leftType);
+          return Option::SOME(leftType);
         }
 
-        Analyzer::Typecheck::recordExprType(state, exprId, leftType);
-        return Option::SOME(leftType);
+        // Mixed integer widths unify on the wider operand, and a mixed
+        // signedness that cannot widen takes the right operand's type. Both
+        // come from the host's common-type rule.
+        if (let Option::SOME(commonType) = Analyzer::Typecheck::commonIntegerType(defStore, typeStore, leftType, rightType)) {
+          Analyzer::Typecheck::recordExprType(state, exprId, commonType);
+          return Option::SOME(commonType);
+        }
+
+        Analyzer::Typecheck::recordExprType(state, exprId, rightType);
+        return Option::SOME(rightType);
       }
 
       Analyzer::Typecheck::emitUnsupported(state, b.span, "binary expressions");
@@ -4488,6 +4522,22 @@ export namespace Analyzer {
       return match (typeNode) {
         Analyzer::Type::Pointer(_) -> true,
         _ -> false,
+      };
+    }
+
+    /// The pointee of an alias-resolved pointer type, or `NONE` when the type
+    /// is not a pointer.
+    function pointeeTypeOf(
+      typeStore: &mut Analyzer::TypeStore,
+      typeId: Analyzer::TypeId
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(typeNode) = typeStore.get(typeId) else {
+        return Option::NONE;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::Pointer(pointer) -> Option::SOME(pointer.pointee),
+        _ -> Option::NONE,
       };
     }
 
