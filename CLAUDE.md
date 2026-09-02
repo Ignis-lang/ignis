@@ -70,6 +70,8 @@ ignis build-std                                # Build standard library archive
 # stage3 = built by stage2 and byte-compared with stage2's emitted C)
 scripts/bootstrap.sh all                       # stage1 -> stage2 -> stage3 fixed-point gate
 scripts/bootstrap.sh status                    # which build/bootstrap/<stage>/ignis exist
+scripts/bootstrap.sh parity                    # host e2e corpus through stage2 -> build/bootstrap/parity.md
+scripts/selfhost_e2e_parity.py --compiler <bin> --report parity.md  # same harness, any selfhost binary
 
 # Language-level tests
 ignis test                                     # Run project tests
