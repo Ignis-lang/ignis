@@ -2008,6 +2008,7 @@ export namespace CodegenC {
     let mut isRecord: boolean = false;
     let mut isEnum: boolean = false;
     let mut implementsDrop: boolean = false;
+    let mut layoutAttributes: String = String::new();
     let mut members: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
 
     if (let Option::SOME(definition) = defStore.get(defId)) {
@@ -2015,6 +2016,7 @@ export namespace CodegenC {
         Analyzer::Definition::Record(recordDef) -> {
           isRecord = true;
           implementsDrop = recordDef.implementsDrop;
+          layoutAttributes = CodegenC::recordLayoutAttributes(recordDef.packed, recordDef.alignment);
           members = CodegenC::copyDefIds(&recordDef.fields);
         },
         Analyzer::Definition::Enum(enumDef) -> {
@@ -2045,7 +2047,8 @@ export namespace CodegenC {
         if (let Option::SOME(fieldDefinition) = defStore.get(*fieldDefId)) {
           if (let Analyzer::Definition::Field(fieldDef) = fieldDefinition) {
             let fieldType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, fieldDef.fieldType);
-            let line: String = `    ${fieldType.toStr()} field_${fieldDef.index};\n`;
+            let fieldAttributes: String = CodegenC::fieldLayoutAttributes(fieldDef.alignment);
+            let line: String = `    ${fieldType.toStr()} field_${fieldDef.index}${fieldAttributes.toStr()};\n`;
 
             let mut fieldRef: &mut String = output;
             fieldRef.pushStr(line.toStr());
@@ -2068,7 +2071,9 @@ export namespace CodegenC {
         tailRef.pushStr("    char _empty;\n");
       }
 
-      tailRef.pushStr("};\n");
+      tailRef.pushStr("}");
+      tailRef.pushStr(layoutAttributes.toStr());
+      tailRef.pushStr(";\n");
       return;
     }
 
@@ -2172,6 +2177,38 @@ export namespace CodegenC {
     }
 
     enumTailRef.pushStr("};\n");
+  }
+
+  /// The `__attribute__` suffix a record's `@packed` / `@aligned(N)` ask the C
+  /// struct to carry, in the order the host writes them.
+  function recordLayoutAttributes(packed: boolean, alignment: Option<u64>): String {
+    let mut text: String = String::new();
+    let mut textRef: &mut String = &mut text;
+
+    if (packed) {
+      textRef.pushStr(" __attribute__((packed))");
+    }
+
+    if (let Option::SOME(value) = alignment) {
+      let suffix: String = ` __attribute__((aligned(${value})))`;
+      textRef.pushStr(suffix.toStr());
+    }
+
+    return text;
+  }
+
+  /// The `__attribute__` suffix a field's `@aligned(N)` asks its C member to
+  /// carry.
+  function fieldLayoutAttributes(alignment: Option<u64>): String {
+    let mut text: String = String::new();
+
+    if (let Option::SOME(value) = alignment) {
+      let mut textRef: &mut String = &mut text;
+      let suffix: String = ` __attribute__((aligned(${value})))`;
+      textRef.pushStr(suffix.toStr());
+    }
+
+    return text;
   }
 
   /// Local slots this function drops through an `Instr::Drop`.
