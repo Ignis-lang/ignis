@@ -13,7 +13,7 @@ import Hir from "@compiler::hir";
 // import graph reaches HIR lowering or the borrow checker yet, and a module
 // outside the graph is never typechecked.
 import _ from "./analyzer/lowering";
-import _ from "./analyzer/borrowck";
+import Borrowck from "./analyzer/borrowck";
 import _ from "./analyzer/escape";
 import Capture from "./analyzer/capture";
 import CodegenC from "./codegen/mod";
@@ -421,6 +421,8 @@ function compileFile(path: &String, outputPath: &String): i32 {
   // reference resolved and every expression typed. Failures surface as
   // `HirKind::Error` nodes, counted per module.
   let mut linkErrors: u64 = 0;
+  let mut ownershipErrors: u64 = 0;
+  let mut ownershipWarnings: u64 = 0;
 
   if (analyzeErrors == 0) {
     let mut loweredModules: u64 = 0;
@@ -489,6 +491,22 @@ function compileFile(path: &String, outputPath: &String): i32 {
 
     Io::println(`  mono: ${monoResult.instantiations} instantiations, ${monoResult.hir.nodes.length()} nodes, ${monoGenericNodes} generic nodes left`);
 
+    // Ownership and borrow checking runs over the monomorphized HIR, the same
+    // program LIR lowering is about to walk: its drop schedules are keyed by
+    // the nodes that walk visits.
+    let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+      &mut defStore,
+      &mut typeStore,
+      &mut symbols,
+      &monoResult.hir,
+    );
+
+    ownershipErrors = countBySeverity(&checked.diagnostics, Severity::ERROR);
+    ownershipWarnings = countBySeverity(&checked.diagnostics, Severity::WARNING);
+
+    Io::println(formatPhaseLine("ownership", ownershipErrors, ownershipWarnings));
+    renderBagToStderr(&checked.diagnostics, &file);
+
     let programConstValues: Analyzer::ConstEval::ConstValueMap = collectProgramConstValues(&records);
 
     let lirResult: LirLowering::LowerModuleResult = LirLowering::lowerModule(
@@ -544,8 +562,8 @@ function compileFile(path: &String, outputPath: &String): i32 {
     Io::println(String::create("  lower: skipped (analyze errors)"));
   }
 
-  let totalErrors: u64 = frontendErrors + analyzeErrors + linkErrors;
-  let totalWarnings: u64 = frontendWarnings + analyzeWarnings;
+  let totalErrors: u64 = frontendErrors + analyzeErrors + ownershipErrors + linkErrors;
+  let totalWarnings: u64 = frontendWarnings + analyzeWarnings + ownershipWarnings;
 
   Io::println(
     `  summary: ${totalErrors} errors, ${totalWarnings} warnings`
