@@ -1,6 +1,7 @@
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 
+import Env from "std::env";
 import Io from "std::io";
 import Path from "std::path";
 import Process from "std::process";
@@ -93,6 +94,36 @@ function testRunnerTrimEnd(value: &String): String {
 }
 
 export namespace TestRunner {
+  /// A section header, `U+2022 BULLET` then the title.
+  ///
+  /// The bullet is spelled byte by byte because the C backend emits a
+  /// non-ASCII literal as a single `\xNNNN` escape, which C truncates to one
+  /// byte.
+  function sectionHeader(title: str): String {
+    let mut header: String = String::new();
+    header.pushByte(226);
+    header.pushByte(128);
+    header.pushByte(162);
+    header.pushStr(" ");
+    header.pushStr(title);
+
+    return header;
+  }
+
+  /// `path` made absolute against the current directory, so a bare relative
+  /// program name is executed rather than looked up on `PATH`.
+  function resolveAgainstCurrentDir(path: &Path::PathBuf): Path::PathBuf {
+    if (path.isAbsolute()) {
+      return path.clone();
+    }
+
+    let Result::OK(currentDir) = Env::currentDir() else {
+      return path.clone();
+    };
+
+    return currentDir.join(path.asStr()).normalize();
+  }
+
   /// The `::`-joined module part of a test name, mirroring the host's
   /// `module_segments`: the module path relative to the source root, without
   /// the `.ign` extension and without a trailing `mod` segment.
@@ -368,6 +399,7 @@ export namespace TestRunner {
     updateSnapshots: boolean,
   ): Vector<TestOutcome> {
     let mut outcomes: Vector<TestOutcome> = Vector::new<TestOutcome>();
+    let program: Path::PathBuf = TestRunner::resolveAgainstCurrentDir(binaryPath);
     let updateFlag: str = updateSnapshots ? "1" : "0";
     let mut index: u64 = 0;
 
@@ -376,7 +408,7 @@ export namespace TestRunner {
         break;
       };
 
-      let mut command: Process::Command = Process::Command::new(binaryPath.asStr());
+      let mut command: Process::Command = Process::Command::new(program.asStr());
       command.arg("--ignis-test");
       command.arg(testCase.fqName.toStr());
       command.env("IGNIS_TEST_NAME", testCase.fqName.toStr());
@@ -415,7 +447,7 @@ export namespace TestRunner {
   /// One failure stream, indented under its label and cut at
   /// `FAILED_TEST_OUTPUT_LIMIT` characters. An all-whitespace stream is
   /// omitted entirely.
-  function appendFailedStream(lines: &mut String, label: str, output: &String): void {
+  function appendFailedStream(lines: &mut Vector<String>, label: str, output: &String): void {
     let trimmed: String = testRunnerTrimEnd(output).trimAsciiWhitespace();
 
     if (trimmed.length() == 0) {
@@ -432,8 +464,8 @@ export namespace TestRunner {
       truncated = true;
     }
 
-    let mut linesRef: &mut String = lines;
-    linesRef.pushStr(`  ${label}:\n`.toStr());
+    let mut linesRef: &mut Vector<String> = lines;
+    linesRef.push(`  ${label}:`);
 
     let streamLines: Vector<String> = shown.lines();
     let mut index: u64 = 0;
@@ -443,18 +475,19 @@ export namespace TestRunner {
         break;
       };
 
-      linesRef.pushStr(`    ${line.toStr()}\n`.toStr());
+      linesRef.push(`    ${line.toStr()}`);
       index += 1;
     }
 
     if (truncated) {
-      linesRef.pushStr("    [truncated]\n");
+      linesRef.push(String::create("    [truncated]"));
     }
   }
 
-  /// The host's failure block for one test, newline-terminated per line.
-  function formatFailedTestDetails(outcome: &TestOutcome): String {
-    let mut lines: String = `- ${outcome.fqName.toStr()} (exit code ${outcome.exitCode})\n`;
+  /// The host's failure block for one test, one entry per output line.
+  function formatFailedTestDetails(outcome: &TestOutcome): Vector<String> {
+    let mut lines: Vector<String> = Vector::new<String>();
+    lines.push(`- ${outcome.fqName.toStr()} (exit code ${outcome.exitCode})`);
 
     TestRunner::appendFailedStream(&mut lines, "stderr", &outcome.stderr);
     TestRunner::appendFailedStream(&mut lines, "stdout", &outcome.stdout);
@@ -496,7 +529,7 @@ export namespace TestRunner {
     }
 
     if (failed > 0) {
-      Io::eprintln(String::create("• Failures"));
+      Io::eprintln(TestRunner::sectionHeader("Failures"));
 
       let mut failureIndex: u64 = 0;
 
@@ -510,8 +543,7 @@ export namespace TestRunner {
           continue;
         }
 
-        let details: String = TestRunner::formatFailedTestDetails(outcome);
-        let detailLines: Vector<String> = details.lines();
+        let detailLines: Vector<String> = TestRunner::formatFailedTestDetails(outcome);
         let mut lineIndex: u64 = 0;
 
         while (lineIndex < detailLines.length()) {
@@ -528,7 +560,7 @@ export namespace TestRunner {
       }
     }
 
-    Io::eprintln(String::create("• Summary"));
+    Io::eprintln(TestRunner::sectionHeader("Summary"));
     Io::eprintln(`  - ${total} total`);
     Io::eprintln(`  - ${passed} passed`);
     Io::eprintln(`  - ${failed} failed`);
@@ -643,6 +675,27 @@ function testRunnerHarnessDispatchesEveryTestByName(): void {
 }
 
 @test
+function testRunnerSectionHeaderCarriesTheBulletAsUtf8Bytes(): void {
+  let header: String = TestRunner::sectionHeader("Summary");
+  let mut prefix: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < 3) {
+    if (let Option::SOME(byte) = header.byteAt(index)) {
+      let value: String = `${byte}.`;
+      prefix.push(&value);
+    }
+
+    index += 1;
+  }
+
+  let title: String = header.substringBytes(3, header.length());
+
+  Test::assertEq<str>(prefix.toStr(), "226.128.162.");
+  Test::assertEq<str>(title.toStr(), " Summary");
+}
+
+@test
 function testRunnerFailureDetailsIndentEachStreamUnderItsLabel(): void {
   let outcome: TestOutcome = TestOutcome {
     fqName: String::create("a::failing"),
@@ -652,11 +705,27 @@ function testRunnerFailureDetailsIndentEachStreamUnderItsLabel(): void {
     stderr: String::create("panic: boom\nat line 3\n"),
   };
 
-  let details: String = TestRunner::formatFailedTestDetails(&outcome);
+  let detailLines: Vector<String> = TestRunner::formatFailedTestDetails(&outcome);
+  let mut joined: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < detailLines.length()) {
+    let Option::SOME(line) = detailLines.get(index) else {
+      break;
+    };
+
+    if (index > 0) {
+      joined.pushStr("\n");
+    }
+
+    joined.push(line);
+    index += 1;
+  }
+
   let expected: String = String::create("- a::failing (exit code 101)\n")
     .concat("  stderr:\n")
     .concat("    panic: boom\n")
-    .concat("    at line 3\n");
+    .concat("    at line 3");
 
-  Test::assertEq<str>(details.toStr(), expected.toStr());
+  Test::assertEq<str>(joined.toStr(), expected.toStr());
 }
