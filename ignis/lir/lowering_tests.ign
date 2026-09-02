@@ -64,6 +64,14 @@ function lirLocalName(
   return lirDefinitionName(defStore, symbols, defId);
 }
 
+function lirLocalIsBorrowedAlias(function_: &Lir::FunctionLir, local: Lir::LocalId): boolean {
+  let Option::SOME(data) = function_.locals.get(local.raw() as u64) else {
+    return false;
+  };
+
+  return data.borrowedAlias;
+}
+
 function lirTerminatorLabel(terminator: &Lir::Terminator): str {
   return match (terminator) {
     Lir::Terminator::Goto(_) -> "goto",
@@ -124,6 +132,13 @@ function lirRenderDrops(
 
               rendered.pushStr("    drop ");
               rendered.pushStr(name.toStr());
+
+              // A slot that aliases borrowed storage keeps its drop in the
+              // stream; codegen turns it into a comment, so it is marked here.
+              if (lirLocalIsBorrowedAlias(function_, dropInstr.local)) {
+                rendered.pushStr(" (borrowed alias)");
+              }
+
               rendered.pushStr("\n");
             },
             Lir::Instr::DropClosure(_) -> {
@@ -232,4 +247,18 @@ function lirLoweringDropsOwnedTemporaries(): void {
   );
 
   Test::assertSnapshot("lir-lowering-owned-temporaries", rendered.toStr());
+}
+
+/// Scenario: a let-else that destructures a variant payload reached through a
+/// reference (`Lookup::FOUND(&Definition)`). The binding names storage the
+/// store owns, so its slot is a borrowed alias and its scheduled drop must not
+/// free anything.
+/// Spec: IGN-39 — bindings through a reference alias, they do not own.
+@test
+function lirLoweringMarksBindingsThroughReferenceAsAliases(): void {
+  let rendered: String = lirRenderLoweredDrops(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Definition {\n  ITEM(Owned),\n  OTHER,\n}\n\nenum Lookup {\n  FOUND(&Definition),\n  MISSING,\n}\n\nfunction idOf(lookup: Lookup): u32 {\n  let Lookup::FOUND(Definition::ITEM(owned)) = lookup else {\n    return 0;\n  };\n\n  return owned.id;\n}\n",
+  );
+
+  Test::assertSnapshot("lir-lowering-binding-through-reference", rendered.toStr());
 }
