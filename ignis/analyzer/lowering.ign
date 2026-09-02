@@ -90,6 +90,13 @@ export namespace Lowering {
     /// oracle's `lowering_counter`. Nested desugars of the same shape would
     /// otherwise share a name.
     public syntheticCounter: u32;
+    /// The `@move` / `@ref` / `@refMut` overrides written inside the lambda
+    /// being lowered, the oracle's `capture_override_stack`. The two vectors
+    /// are parallel; `overrideFrames` records their length when each
+    /// enclosing lambda opened, so a nested lambda keeps its own overrides.
+    public overrideDefs: Vector<Analyzer::DefinitionId>;
+    public overrideModes: Vector<Hir::CaptureMode>;
+    public overrideFrames: Vector<u64>;
 
     public static init(): LocalMap {
       return LocalMap {
@@ -99,6 +106,9 @@ export namespace Lowering {
         currentReturnType: Option::NONE,
         pipedValues: Vector::new<Hir::HirId>(),
         syntheticCounter: 0,
+        overrideDefs: Vector::new<Analyzer::DefinitionId>(),
+        overrideModes: Vector::new<Hir::CaptureMode>(),
+        overrideFrames: Vector::new<u64>(),
       };
     }
   }
@@ -113,6 +123,71 @@ export namespace Lowering {
     localsRef.fnRaws.push(localId.enclosingFn.raw());
     localsRef.indexes.push(localId.index);
     localsRef.defs.push(defId);
+  }
+
+  /// Opens the override frame of a lambda about to be lowered.
+  function pushCaptureOverrideFrame(locals: &mut Lowering::LocalMap): void {
+    let mark: u64 = locals.overrideDefs.length();
+    let mut localsRef: &mut Lowering::LocalMap = locals;
+
+    localsRef.overrideFrames.push(mark);
+  }
+
+  /// Records one written override against the lambda currently being lowered.
+  /// An override written outside any lambda has nothing to apply to and is
+  /// dropped: capture analysis only reads a closure's own list.
+  function recordCaptureOverride(
+    locals: &mut Lowering::LocalMap,
+    defId: Analyzer::DefinitionId,
+    mode: Hir::CaptureMode,
+  ): void {
+    if (locals.overrideFrames.length() == 0) {
+      return;
+    }
+
+    let mut localsRef: &mut Lowering::LocalMap = locals;
+
+    localsRef.overrideDefs.push(defId);
+    localsRef.overrideModes.push(mode);
+  }
+
+  /// Closes the innermost override frame and hands back what it collected.
+  function popCaptureOverrideFrame(
+    locals: &mut Lowering::LocalMap
+  ): Vector<Hir::HirCaptureOverride> {
+    let mut collected: Vector<Hir::HirCaptureOverride> = Vector::new<Hir::HirCaptureOverride>();
+    let mut localsRef: &mut Lowering::LocalMap = locals;
+
+    let Option::SOME(mark) = localsRef.overrideFrames.pop() else {
+      return collected;
+    };
+
+    let mut index: u64 = mark;
+
+    while (index < localsRef.overrideDefs.length()) {
+      let Option::SOME(defId) = localsRef.overrideDefs.get(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(mode) = localsRef.overrideModes.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      collected.push(Hir::HirCaptureOverride {
+        sourceDef: *defId,
+        mode: *mode,
+      });
+
+      index += 1;
+    }
+
+    while (localsRef.overrideDefs.length() > mark) {
+      let _droppedDef: Option<Analyzer::DefinitionId> = localsRef.overrideDefs.pop();
+      let _droppedMode: Option<Hir::CaptureMode> = localsRef.overrideModes.pop();
+    }
+
+    return collected;
   }
 
   function lookupLocal(
@@ -262,6 +337,11 @@ export namespace Lowering {
   function unsignedInt64Type(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
     let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
     return typeStoreRef.intern(Analyzer::Type::U64);
+  }
+
+  function strType(typeStore: &mut Analyzer::TypeStore): Analyzer::TypeId {
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    return typeStoreRef.intern(Analyzer::Type::STR);
   }
 
   function exprTypeOrVoid(
@@ -1490,7 +1570,29 @@ export namespace Lowering {
         return Lowering::lowerLambda(defStore, typeStore, symbols, module, output, locals, hir, exprId, &lambda);
       },
       Ast::Expression::Node::CaptureOverride(captureOverride) -> {
-        return Lowering::errorNode(hir, typeStore, captureOverride.span);
+        let mode: Hir::CaptureMode = match (captureOverride.kind) {
+          Ast::Expression::CaptureOverrideKind::Move -> Hir::CaptureMode::ByValue,
+          Ast::Expression::CaptureOverrideKind::Ref -> Hir::CaptureMode::ByRef,
+          Ast::Expression::CaptureOverrideKind::RefMut -> Hir::CaptureMode::ByMutRef,
+        };
+
+        if (let Option::SOME(resolved) = Analyzer::ResolverBodies::findExprRef(
+          &output.resolvedBodies.bodyResolution,
+          captureOverride.expression.raw(),
+        )) {
+          let overriddenDef: Option<Analyzer::DefinitionId> = match (resolved) {
+            Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> Lowering::lookupLocal(locals, localId),
+            Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> Option::SOME(defId),
+            Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> Option::NONE,
+            Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> Option::NONE,
+          };
+
+          if (let Option::SOME(defId) = overriddenDef) {
+            Lowering::recordCaptureOverride(locals, defId, mode);
+          }
+        }
+
+        return Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, captureOverride.expression);
       },
       Ast::Expression::Node::Pipe(pipe) -> {
         return Lowering::lowerPipe(defStore, typeStore, symbols, module, output, locals, hir, exprId, &pipe);
@@ -2421,11 +2523,8 @@ export namespace Lowering {
   /// typechecker still rejects as unsupported has no checked operand or result
   /// type to lower against, so the call stays on `Error`.
   ///
-  /// `@typeName` stays on `Error` for a language reason rather than a model
-  /// one: the oracle folds it to the printed type name, and the selfhost type
-  /// printer (`TypeStore::nameOfResolved`) takes shared borrows of the three
-  /// stores, which lowering holds mutably end to end. The compiler has no
-  /// `&mut` to `&` reborrow, so the call cannot be made from here.
+  /// `@typeName` folds to the printed name of its type argument, which the
+  /// oracle decides at the same point.
   /// Resolves a builtin call's single written type argument, `NONE` when it
   /// is absent or names something the annotation probe cannot resolve.
   function builtinTypeArgument(
@@ -2531,7 +2630,11 @@ export namespace Lowering {
     let enclosingReturnType: Option<Analyzer::TypeId> = locals.currentReturnType;
     locals.currentReturnType = Option::SOME(returnType);
 
+    Lowering::pushCaptureOverrideFrame(locals);
+
     let body: Hir::HirId = Lowering::lowerStmt(defStore, typeStore, symbols, module, output, locals, hir, lambda.body);
+
+    let captureOverrides: Vector<Hir::HirCaptureOverride> = Lowering::popCaptureOverrideFrame(locals);
 
     locals.currentReturnType = enclosingReturnType;
 
@@ -2545,7 +2648,7 @@ export namespace Lowering {
         escapes: false,
         thunkDef: Option::NONE,
         dropDef: Option::NONE,
-        captureOverrides: Vector::new<Hir::HirCaptureOverride>(),
+        captureOverrides: captureOverrides,
       }),
       span: lambda.span,
       typeId: fnType,
@@ -2843,7 +2946,7 @@ export namespace Lowering {
 
     let mut takesTypeArgument: boolean = false;
 
-    if (name.equals("sizeOf") || name.equals("alignOf")) {
+    if (name.equals("sizeOf") || name.equals("alignOf") || name.equals("typeName")) {
       takesTypeArgument = true;
     }
 
@@ -2864,6 +2967,20 @@ export namespace Lowering {
     ) else {
       return Lowering::errorNode(hir, typeStore, builtinCall.span);
     };
+
+    if (name.equals("typeName")) {
+      // The name is decided here rather than at run time: the printer only
+      // needs the stores, and nothing about the type changes after lowering.
+      let printed: String = typeStore.nameOfResolved(operandType, &*defStore, &*symbols);
+      let nameType: Analyzer::TypeId = Lowering::strType(typeStore);
+
+      let mut typeNameHirRef: &mut Hir::HirStore = hir;
+      return typeNameHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Literal(Hir::LiteralValue::String(printed)),
+        span: builtinCall.span,
+        typeId: nameType,
+      });
+    }
 
     if (name.equals("sizeOf")) {
       let mut sizeHirRef: &mut Hir::HirStore = hir;

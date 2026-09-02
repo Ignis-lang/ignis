@@ -4306,9 +4306,14 @@ export namespace Analyzer {
           return Option::SOME(lambdaType);
         },
         Ast::Expression::Node::CaptureOverride(value) -> {
-          let _innerType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "capture overrides");
-          return Option::NONE;
+          // The override names how the closure holds the binding, not what
+          // the expression is: `@move x` types exactly as `x` does.
+          let Option::SOME(innerType) = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression) else {
+            return Option::NONE;
+          };
+
+          Analyzer::Typecheck::recordExprType(state, exprId, innerType);
+          return Option::SOME(innerType);
         },
         Ast::Expression::Node::Pipe(value) -> {
           let Option::SOME(pipeType) = Analyzer::Typecheck::checkPipeExpr(
