@@ -22,6 +22,8 @@ import LirLowering from "./lir/lowering";
 import LirVerify from "./lir/verify";
 
 import BuildGraph, BuildModuleKind from "./build/module_graph";
+import CCompiler from "./build/c_compiler";
+import Linker from "./build/linker";
 import DiscoveryResult, Resolver from "./build/resolver";
 
 /// Count diagnostics in `bag` whose severity equals `target`.
@@ -212,10 +214,69 @@ function mapImportSourcesToDiscoveryTargets(
   return true;
 }
 
+/// Compile the emitted translation unit and link it into an executable.
+///
+/// Returns 0 when both toolchain steps succeed and 1 when either one fails.
+function compileAndLinkEmitted(
+  emitPath: &Path::PathBuf,
+  objectPath: &Path::PathBuf,
+  outputPath: &Path::PathBuf,
+  stdRoot: &Path::PathBuf,
+  file: &SourceFile,
+): u64 {
+  let runtimeDir: Path::PathBuf = stdRoot.join("runtime");
+
+  let mut includeDirs: Vector<String> = Vector::new<String>();
+  includeDirs.push(runtimeDir.toString());
+
+  let mut extraFlags: Vector<String> = Vector::new<String>();
+  extraFlags.push(String::create("-O0"));
+  extraFlags.push(String::create("-g"));
+
+  if (let Result::ERROR(compileBag) = CCompiler::compileObject(
+    "gcc",
+    emitPath,
+    objectPath,
+    &includeDirs,
+    &extraFlags,
+  )) {
+    renderBagToStderr(&compileBag, file);
+    Io::println(String::create("  link: failed"));
+    return 1;
+  }
+
+  let mut objects: Vector<String> = Vector::new<String>();
+  objects.push(objectPath.toString());
+
+  let mut archives: Vector<String> = Vector::new<String>();
+  archives.push(runtimeDir.join("libignis_rt.a").toString());
+
+  let mut libs: Vector<String> = Vector::new<String>();
+  libs.push(String::create("m"));
+
+  let linkFlags: Vector<String> = Vector::new<String>();
+
+  if (let Result::ERROR(linkBag) = Linker::link(
+    "gcc",
+    outputPath,
+    &objects,
+    &archives,
+    &libs,
+    &linkFlags,
+  )) {
+    renderBagToStderr(&linkBag, file);
+    Io::println(String::create("  link: failed"));
+    return 1;
+  }
+
+  Io::println(`  link: ${outputPath.asStr()}`);
+  return 0;
+}
+
 /// Drive the selfhost compiler pipeline against the project containing a source file.
 ///
-/// Returns 0 on success, 1 on any error (I/O, lex, parse, or analyze).
-function compileFile(path: &String): i32 {
+/// Returns 0 on success, 1 on any error (I/O, lex, parse, analyze, or linking).
+function compileFile(path: &String, outputPath: &String): i32 {
   Io::println(String::create("ignis selfhost (partial pipeline)"));
   Io::println(`  source: ${path.toStr()}`);
 
@@ -359,6 +420,8 @@ function compileFile(path: &String): i32 {
   // Lowering runs only over a clean analysis: its inputs assume every
   // reference resolved and every expression typed. Failures surface as
   // `HirKind::Error` nodes, counted per module.
+  let mut linkErrors: u64 = 0;
+
   if (analyzeErrors == 0) {
     let mut loweredModules: u64 = 0;
     let mut hirErrorNodes: u64 = 0;
@@ -464,12 +527,24 @@ function compileFile(path: &String): i32 {
       Io::println(String::create("  emit: could not write selfhost_emit.c"));
     } else {
       Io::println(`  emit: ${emitPath}`);
+
+      let emitPathBuf: Path::PathBuf = Path::PathBuf::create(emitPath);
+      let objectPathBuf: Path::PathBuf = Path::PathBuf::create("selfhost_emit.o");
+      let outputPathBuf: Path::PathBuf = Path::PathBuf::fromString(outputPath);
+
+      linkErrors += compileAndLinkEmitted(
+        &emitPathBuf,
+        &objectPathBuf,
+        &outputPathBuf,
+        &discovery.stdRoot,
+        &file,
+      );
     }
   } else {
     Io::println(String::create("  lower: skipped (analyze errors)"));
   }
 
-  let totalErrors: u64 = frontendErrors + analyzeErrors;
+  let totalErrors: u64 = frontendErrors + analyzeErrors + linkErrors;
   let totalWarnings: u64 = frontendWarnings + analyzeWarnings;
 
   Io::println(
@@ -483,21 +558,46 @@ function compileFile(path: &String): i32 {
   return 0;
 }
 
-/// CLI entry point.
+/// CLI entry point: `ignis <source.ign> [-o <output-binary>]`.
 ///
-/// Without arguments the binary exits cleanly. With one positional argument
-/// the binary treats it as a path to an Ignis source file and runs the
-/// selfhost pipeline against it.
+/// Without arguments the binary exits cleanly. The positional argument is a
+/// path to an Ignis source file and the pipeline runs against the project that
+/// contains it. `-o` overrides the output binary, which defaults to
+/// `selfhost_out` in the current directory. An unknown flag exits with 2.
 function main(): i32 {
   let args: Vector<String> = Process::args();
+  let mut sourcePath: Option<String> = Option::NONE;
+  let mut outputPath: String = String::create("selfhost_out");
+  let mut index: u64 = 1;
 
-  if (args.length() <= 1) {
-    return 0;
+  while (index < args.length()) {
+    let Option::SOME(arg) = args.get(index) else {
+      break;
+    };
+
+    if (arg.equals("-o")) {
+      let Option::SOME(value) = args.get(index + 1) else {
+        Io::eprintln(String::create("error: -o requires an output path"));
+        return 2;
+      };
+
+      outputPath = value.clone();
+      index += 2;
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      Io::eprintln(`error: unknown argument: ${arg.toStr()}`);
+      return 2;
+    }
+
+    sourcePath = Option::SOME(arg.clone());
+    index += 1;
   }
 
-  let Option::SOME(pathArg) = args.get(1) else {
+  let Option::SOME(source) = sourcePath else {
     return 0;
   };
 
-  return compileFile(pathArg);
+  return compileFile(&source, &outputPath);
 }
