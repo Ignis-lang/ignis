@@ -31,6 +31,7 @@ Commands:
   stage3   Build stage3 with stage2 and check that its C matches stage2's (fixed point).
   all      stage1, stage2, stage3 in order.
   parity   Run the host e2e corpus through stage2 (builds stage2 first when missing).
+  gate-g5  Run the host error corpus through stage2 and write gates/G5.json.
   status   Show which stage artifacts exist.
   clean    Remove build/bootstrap.
 
@@ -140,6 +141,66 @@ run_parity() {
   info "parity: report -> ${report}"
 }
 
+# G5: the selfhost's diagnostics must be equal or better than the host's over
+# the error corpus, so every diagnostic the host records has to appear.
+run_gate_g5() {
+  ensure_stage stage2
+
+  local gates_dir="${BOOTSTRAP_ROOT}/gates"
+  local report="${BOOTSTRAP_ROOT}/parity-err.md"
+  local counts="${BOOTSTRAP_ROOT}/parity-err.json"
+  local gate_file="${gates_dir}/G5.json"
+
+  mkdir -p "$gates_dir"
+  rm -f "$counts"
+
+  info "gate-g5: replaying the host error corpus through $(stage_bin stage2)"
+
+  local status="pass"
+
+  if ! python3 "${SCRIPT_DIR}/selfhost_e2e_parity.py" \
+    --compiler "$(stage_bin stage2)" \
+    --corpus err \
+    --std "${PROJECT_ROOT}/std" \
+    --work-dir "${BOOTSTRAP_ROOT}/parity-err" \
+    --counts-json "$counts" \
+    --report "$report"; then
+    status="fail"
+  fi
+
+  [[ -f "$counts" ]] || fail "gate-g5: the harness wrote no counts, see ${report}"
+
+  python3 - "$counts" "$gate_file" "$status" <<'PYTHON'
+import json
+import sys
+
+counts_path, gate_path, status = sys.argv[1:4]
+
+with open(counts_path, encoding="utf-8") as handle:
+  data = json.load(handle)
+
+counts = data["counts"]
+gate = {
+  "gate": "G5",
+  "status": status,
+  "summary": "{}/{} error-corpus cases keep every diagnostic the host records".format(
+    counts.get("pass", 0), data["total"]
+  ),
+  "details": {
+    "corpus": "err",
+    "total": data["total"],
+    "counts": counts,
+    "failing": data["failing"],
+  },
+}
+
+with open(gate_path, "w", encoding="utf-8") as handle:
+  handle.write(json.dumps(gate, indent=2) + "\n")
+PYTHON
+
+  info "gate-g5: ${status} -> ${gate_file} (report ${report})"
+}
+
 show_status() {
   local stage
   for stage in stage1 stage2 stage3; do
@@ -164,6 +225,7 @@ main() {
       build_stage3
       ;;
     parity) run_parity ;;
+    gate-g5) run_gate_g5 ;;
     status) show_status ;;
     clean) rm -rf "$BOOTSTRAP_ROOT"; info "removed ${BOOTSTRAP_ROOT}" ;;
     -h|--help|help|"") usage ;;
