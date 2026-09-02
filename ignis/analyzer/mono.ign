@@ -864,6 +864,7 @@ export namespace Mono {
           typeId: Id::fromRaw<Analyzer::TypeTag>(0),
           implementsCopy: false,
           implementsDrop: false,
+          implementedTraits: Vector::new<String>(),
         }));
       } else {
         shellId = defStoreRef.push(Analyzer::Definition::Enum(Analyzer::EnumDef {
@@ -877,6 +878,7 @@ export namespace Mono {
           tryCapable: Option::NONE,
           implementsCopy: false,
           implementsDrop: false,
+          implementedTraits: Vector::new<String>(),
         }));
       }
 
@@ -1120,6 +1122,37 @@ export namespace Mono {
     return result;
   }
 
+  function copyTraitNames(source: &Vector<String>): Vector<String> {
+    let mut result: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      if (let Option::SOME(name) = source.get(index)) {
+        result.push(name.clone());
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function declaresTrait(traits: &Vector<String>, traitName: str): boolean {
+    let mut index: u64 = 0;
+
+    while (index < traits.length()) {
+      if (let Option::SOME(name) = traits.get(index)) {
+        if (name.equals(traitName)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
   /// True when `equals`'s second parameter accepts `&Self`: either the exact
   /// immutable reference to the receiver type, or an immutable reference to
   /// the owner definition written in its pre-monomorphization spelling.
@@ -1239,8 +1272,8 @@ export namespace Mono {
   }
 
   /// Finds the `equals` instance method a record or enum offers for structural
-  /// equality. The selfhost binder records no implemented-trait list, so the
-  /// method shape stands in for the oracle's `Eq` trait check.
+  /// equality. Only a type that declares `@implements(Eq)` is eligible; without
+  /// it the caller keeps the `Pending` kind even when a matching `equals` exists.
   function findEqualsMethod(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1249,17 +1282,24 @@ export namespace Mono {
     selfType: Analyzer::TypeId,
   ): Option<Analyzer::DefinitionId> {
     let mut methods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut declaresEq: boolean = false;
 
     if (let Option::SOME(definition) = defStore.get(typeDef)) {
       match (definition) {
         Analyzer::Definition::Record(recordDef) -> {
+          declaresEq = Mono::declaresTrait(&recordDef.implementedTraits, "Eq");
           methods = Mono::copyDefinitionIds(&recordDef.instanceMethods);
         },
         Analyzer::Definition::Enum(enumDef) -> {
+          declaresEq = Mono::declaresTrait(&enumDef.implementedTraits, "Eq");
           methods = Mono::copyDefinitionIds(&enumDef.instanceMethods);
         },
         _ -> {},
       };
+    }
+
+    if (!declaresEq) {
+      return Option::NONE;
     }
 
     let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
@@ -2444,12 +2484,14 @@ export namespace Mono {
     let mut visibility: Analyzer::Visibility = Analyzer::Visibility::PRIVATE;
     let mut implementsCopy: boolean = false;
     let mut implementsDrop: boolean = false;
+    let mut implementedTraits: Vector<String> = Vector::new<String>();
 
     if (let Option::SOME(definition) = defStore.get(genericDefId)) {
       if (let Analyzer::Definition::Record(recordDef) = definition) {
         visibility = recordDef.visibility;
         implementsCopy = recordDef.implementsCopy;
         implementsDrop = recordDef.implementsDrop;
+        implementedTraits = Mono::copyTraitNames(&recordDef.implementedTraits);
         fieldDefs = Mono::copyDefIdList(&recordDef.fields);
       }
     }
@@ -2504,6 +2546,7 @@ export namespace Mono {
       typeId: concreteType,
       implementsCopy: implementsCopy,
       implementsDrop: implementsDrop,
+      implementedTraits: implementedTraits,
     }));
 
     let _ = state;
@@ -2527,6 +2570,7 @@ export namespace Mono {
     let mut visibility: Analyzer::Visibility = Analyzer::Visibility::PRIVATE;
     let mut implementsCopy: boolean = false;
     let mut implementsDrop: boolean = false;
+    let mut implementedTraits: Vector<String> = Vector::new<String>();
     let mut tryCapable: Option<Analyzer::TryCapability> = Option::NONE;
 
     if (let Option::SOME(definition) = defStore.get(genericDefId)) {
@@ -2534,6 +2578,7 @@ export namespace Mono {
         visibility = enumDef.visibility;
         implementsCopy = enumDef.implementsCopy;
         implementsDrop = enumDef.implementsDrop;
+        implementedTraits = Mono::copyTraitNames(&enumDef.implementedTraits);
         tryCapable = enumDef.tryCapable;
         variantDefs = Mono::copyDefIdList(&enumDef.variants);
       }
@@ -2603,6 +2648,7 @@ export namespace Mono {
       tryCapable: tryCapable,
       implementsCopy: implementsCopy,
       implementsDrop: implementsDrop,
+      implementedTraits: implementedTraits,
     }));
 
     let _ = state;
