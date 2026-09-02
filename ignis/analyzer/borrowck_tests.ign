@@ -118,6 +118,20 @@ function borrowckReportsUseAfterMove(): void {
   Test::assertEq<u64>(diagnostics.length(), 1);
 }
 
+/// Scenario: `Drop` declared inside an `@implements` list marks the record as
+/// owning exactly like the single-argument form, which is how `String`, `Rc`
+/// and `PathBuf` declare it in std.
+/// Spec: IGN-39 — the binder reads every argument of `@implements`.
+@test
+function borrowckReadsDropFromImplementsList(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop, Clone, Eq)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(): u32 {\n  let first: Owned = Owned { id: 1 };\n  let second: Owned = first;\n  let third: Owned = first;\n\n  return second.id + third.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::USE_AFTER_MOVE), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
 /// Scenario: the same shape over a primitive reports nothing, because a Copy
 /// type is never consumed by binding it elsewhere.
 /// Spec: IGN-38 — move tracking keys on drop-needing types.
