@@ -25,6 +25,7 @@ import BuildGraph, BuildModuleKind from "./build/module_graph";
 import CCompiler from "./build/c_compiler";
 import Linker from "./build/linker";
 import DiscoveryResult, Resolver from "./build/resolver";
+import TestCase, TestOutcome, TestRunner from "./build/test_runner";
 
 /// Count diagnostics in `bag` whose severity equals `target`.
 function countBySeverity(bag: &DiagnosticBag, target: Severity): u64 {
@@ -214,12 +215,12 @@ function mapImportSourcesToDiscoveryTargets(
   return true;
 }
 
-/// Compile the emitted translation unit and link it into an executable.
+/// Compile every emitted translation unit and link them into an executable.
 ///
-/// Returns 0 when both toolchain steps succeed and 1 when either one fails.
-function compileAndLinkEmitted(
-  emitPath: &Path::PathBuf,
-  objectPath: &Path::PathBuf,
+/// Returns 0 when every toolchain step succeeds and 1 when any one fails.
+function compileAndLinkUnits(
+  sourcePaths: &Vector<Path::PathBuf>,
+  objectPaths: &Vector<Path::PathBuf>,
   outputPath: &Path::PathBuf,
   stdRoot: &Path::PathBuf,
   file: &SourceFile,
@@ -233,20 +234,32 @@ function compileAndLinkEmitted(
   extraFlags.push(String::create("-O0"));
   extraFlags.push(String::create("-g"));
 
-  if (let Result::ERROR(compileBag) = CCompiler::compileObject(
-    "gcc",
-    emitPath,
-    objectPath,
-    &includeDirs,
-    &extraFlags,
-  )) {
-    renderBagToStderr(&compileBag, file);
-    Io::println(String::create("  link: failed"));
-    return 1;
-  }
-
   let mut objects: Vector<String> = Vector::new<String>();
-  objects.push(objectPath.toString());
+  let mut unitIndex: u64 = 0;
+
+  while (unitIndex < sourcePaths.length()) {
+    let Option::SOME(sourcePath) = sourcePaths.get(unitIndex) else {
+      break;
+    };
+    let Option::SOME(objectPath) = objectPaths.get(unitIndex) else {
+      break;
+    };
+
+    if (let Result::ERROR(compileBag) = CCompiler::compileObject(
+      "gcc",
+      sourcePath,
+      objectPath,
+      &includeDirs,
+      &extraFlags,
+    )) {
+      renderBagToStderr(&compileBag, file);
+      Io::println(String::create("  link: failed"));
+      return 1;
+    }
+
+    objects.push(objectPath.toString());
+    unitIndex += 1;
+  }
 
   let mut archives: Vector<String> = Vector::new<String>();
   archives.push(runtimeDir.join("libignis_rt.a").toString());
@@ -273,40 +286,51 @@ function compileAndLinkEmitted(
   return 0;
 }
 
-/// Drive the selfhost compiler pipeline against the project containing a source file.
+/// The emitted translation unit plus what the frontend measured.
+record CompiledProgram {
+  /// The emitted C, empty when a phase before codegen failed.
+  public source: String;
+  /// The project's `@test` functions, empty unless the caller asked for them.
+  public tests: Vector<TestCase>;
+  public errors: u64;
+  public warnings: u64;
+}
+
+function failedCompilation(errors: u64, warnings: u64): CompiledProgram {
+  return CompiledProgram {
+    source: String::new(),
+    tests: Vector::new<TestCase>(),
+    errors: errors,
+    warnings: warnings,
+  };
+}
+
+/// Render a module-discovery failure the way the phase lines do.
+function reportDiscoveryFailure(diagnostics: &DiagnosticBag, file: &SourceFile): void {
+  let discoveryErrors: u64 = countBySeverity(diagnostics, Severity::ERROR);
+  let discoveryWarnings: u64 = countBySeverity(diagnostics, Severity::WARNING);
+
+  Io::println(formatPhaseLine("discover", discoveryErrors, discoveryWarnings));
+  renderBagToStderr(diagnostics, file);
+  Io::println(
+    `  summary: ${discoveryErrors} errors, ${discoveryWarnings} warnings`
+  );
+}
+
+/// Parse, analyze, lower and emit every module `discovery` reached.
 ///
-/// Returns 0 on success, 1 on any error (I/O, lex, parse, analyze, or linking).
-function compileFile(path: &String, outputPath: &String): i32 {
-  Io::println(String::create("ignis selfhost (partial pipeline)"));
-  Io::println(`  source: ${path.toStr()}`);
-
-  let text: String = match (Fs::readToString(path)) {
-    Result::OK(content) -> content,
-    Result::ERROR(_) -> {
-      Io::eprintln(`error: cannot read source file: ${path.toStr()}`);
-      return 1;
-    },
-  };
-
-  let file: SourceFile = SourceFile::create(path.toStr(), text.toStr());
-
-  let entryPath: Path::PathBuf = Path::PathBuf::fromString(path);
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&entryPath)) {
-    Result::OK(value) -> value,
-    Result::ERROR(diagnostics) -> {
-      let discoveryErrors: u64 = countBySeverity(&diagnostics, Severity::ERROR);
-      let discoveryWarnings: u64 = countBySeverity(&diagnostics, Severity::WARNING);
-      Io::println(formatPhaseLine("discover", discoveryErrors, discoveryWarnings));
-      renderBagToStderr(&diagnostics, &file);
-      Io::println(
-        `  summary: ${discoveryErrors} errors, ${discoveryWarnings} warnings`
-      );
-      return 1;
-    },
-  };
-
+/// `collectTests` gathers the project's `@test` functions and leaves the entry
+/// wrapper out of the emitted unit, because the test harness owns `main` in
+/// that build.
+function compileDiscovered(
+  discovery: &DiscoveryResult,
+  file: &SourceFile,
+  collectTests: boolean,
+): CompiledProgram {
   let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
   let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
+  let mut modulePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut moduleIsProject: Vector<boolean> = Vector::new<boolean>();
   let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
   let mut lexErrors: u64 = 0;
   let mut lexWarnings: u64 = 0;
@@ -318,15 +342,15 @@ function compileFile(path: &String, outputPath: &String): i32 {
   while (orderIndex < discovery.order.length()) {
     let Option::SOME(nodeIndex) = discovery.order.get(orderIndex) else {
       Io::eprintln("error: discovery order is incomplete");
-      return 1;
+      return failedCompilation(1, 0);
     };
     let Option::SOME(node) = discovery.graph.nodes.get(*nodeIndex) else {
       Io::eprintln("error: discovery order references a missing module");
-      return 1;
+      return failedCompilation(1, 0);
     };
     let Result::OK(moduleText) = Fs::readToString(&node.path) else {
       Io::eprintln(`error: cannot read source file: ${node.path.toString().toStr()}`);
-      return 1;
+      return failedCompilation(1, 0);
     };
 
     let modulePath: String = node.path.toString();
@@ -344,15 +368,24 @@ function compileFile(path: &String, outputPath: &String): i32 {
 
     if (!mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, *nodeIndex)) {
       Io::eprintln(`error: discovery graph import mapping is incomplete for ${modulePath.toStr()}`);
-      return 1;
+      return failedCompilation(1, 0);
+    }
+
+    let kind: Analyzer::Imports::ModuleKind = analyzerModuleKind(node.kind);
+    let mut isProject: boolean = false;
+
+    if (let Analyzer::Imports::ModuleKind::PROJECT = kind) {
+      isProject = true;
     }
 
     modules.push(output.module);
     files.push(moduleFile);
+    modulePaths.push(node.path.clone());
+    moduleIsProject.push(isProject);
     infos.push(Analyzer::Imports::ModuleInfo {
       index: *nodeIndex,
       pathText: modulePath,
-      kind: analyzerModuleKind(node.kind),
+      kind: kind,
     });
     orderIndex += 1;
   }
@@ -366,10 +399,7 @@ function compileFile(path: &String, outputPath: &String): i32 {
 
   if (frontendErrors > 0) {
     Io::println(String::create("  analyze: skipped (frontend errors)"));
-    Io::println(
-      `  summary: ${frontendErrors} errors, ${frontendWarnings} warnings`
-    );
-    return 1;
+    return failedCompilation(frontendErrors, frontendWarnings);
   }
 
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
@@ -402,11 +432,11 @@ function compileFile(path: &String, outputPath: &String): i32 {
   while (recordIndex < records.length()) {
     let Option::SOME(analysisRecord) = records.get(recordIndex) else {
       Io::eprintln("error: analysis records are incomplete");
-      return 1;
+      return failedCompilation(frontendErrors + 1, frontendWarnings);
     };
     let Option::SOME(moduleFile) = files.get(recordIndex) else {
       Io::eprintln("error: analysis records do not align with parsed modules");
-      return 1;
+      return failedCompilation(frontendErrors + 1, frontendWarnings);
     };
 
     analyzeErrors += countBySeverity(&analysisRecord.output.diagnostics, Severity::ERROR);
@@ -420,154 +450,227 @@ function compileFile(path: &String, outputPath: &String): i32 {
   // Lowering runs only over a clean analysis: its inputs assume every
   // reference resolved and every expression typed. Failures surface as
   // `HirKind::Error` nodes, counted per module.
-  let mut linkErrors: u64 = 0;
-  let mut ownershipErrors: u64 = 0;
-  let mut ownershipWarnings: u64 = 0;
+  if (analyzeErrors > 0) {
+    Io::println(String::create("  lower: skipped (analyze errors)"));
+    return failedCompilation(frontendErrors + analyzeErrors, frontendWarnings + analyzeWarnings);
+  }
 
-  if (analyzeErrors == 0) {
-    let mut loweredModules: u64 = 0;
-    let mut hirErrorNodes: u64 = 0;
-    let mut hirNodes: u64 = 0;
-    let mut lirUnsupported: u64 = 0;
-    let mut lirFunctions: u64 = 0;
-    let mut lirVerifyErrors: u64 = 0;
-    let mut lowerIndex: u64 = 0;
-    let mut programHir: Hir::HirStore = Hir::HirStore::init();
+  let mut tests: Vector<TestCase> = Vector::new<TestCase>();
 
-    while (lowerIndex < records.length()) {
-      let Option::SOME(analysisRecord) = records.get(lowerIndex) else {
-        lowerIndex += 1;
-        continue;
-      };
-      let Option::SOME(module) = modules.get(lowerIndex) else {
-        lowerIndex += 1;
-        continue;
+  if (collectTests) {
+    let sourceRoot: Path::PathBuf = TestRunner::sourceRootOf(&discovery.graph);
+    let mut testModuleIndex: u64 = 0;
+
+    while (testModuleIndex < records.length()) {
+      let Option::SOME(isProject) = moduleIsProject.get(testModuleIndex) else {
+        break;
       };
 
-      let moduleNodeStart: u64 = programHir.nodes.length();
+      if (*isProject) {
+        let Option::SOME(analysisRecord) = records.get(testModuleIndex) else {
+          break;
+        };
+        let Option::SOME(module) = modules.get(testModuleIndex) else {
+          break;
+        };
+        let Option::SOME(modulePath) = modulePaths.get(testModuleIndex) else {
+          break;
+        };
 
-      Lowering::lowerModuleInto(
-        &mut defStore,
-        &mut typeStore,
-        &mut symbols,
-        module,
-        &analysisRecord.output,
-        &mut programHir,
-      );
-
-      let mut nodeIndex: u64 = moduleNodeStart;
-      while (nodeIndex < programHir.nodes.length()) {
-        if (let Option::SOME(node) = programHir.nodes.get(nodeIndex)) {
-          if (let Hir::HirKind::Error = node.kind) {
-            hirErrorNodes += 1;
-          }
-        }
-        nodeIndex += 1;
+        TestRunner::collectModuleTests(
+          &mut defStore,
+          &mut symbols,
+          module,
+          &analysisRecord.output.pass2,
+          modulePath,
+          &sourceRoot,
+          &mut tests,
+        );
       }
 
-      hirNodes += programHir.nodes.length() - moduleNodeStart;
-
-      loweredModules += 1;
-      lowerIndex += 1;
+      testModuleIndex += 1;
     }
 
-    // Closures reach LIR with an environment layout and a thunk, so capture
-    // analysis has to run over the whole program before monomorphization
-    // clones any body.
-    let captureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(
+    Io::println(`  tests: ${tests.length()} discovered`);
+  }
+
+  let mut loweredModules: u64 = 0;
+  let mut hirErrorNodes: u64 = 0;
+  let mut hirNodes: u64 = 0;
+  let mut lowerIndex: u64 = 0;
+  let mut programHir: Hir::HirStore = Hir::HirStore::init();
+
+  while (lowerIndex < records.length()) {
+    let Option::SOME(analysisRecord) = records.get(lowerIndex) else {
+      lowerIndex += 1;
+      continue;
+    };
+    let Option::SOME(module) = modules.get(lowerIndex) else {
+      lowerIndex += 1;
+      continue;
+    };
+
+    let moduleNodeStart: u64 = programHir.nodes.length();
+
+    Lowering::lowerModuleInto(
       &mut defStore,
       &mut typeStore,
       &mut symbols,
+      module,
+      &analysisRecord.output,
       &mut programHir,
     );
 
-    let captureErrors: u64 = countBySeverity(&captureDiagnostics, Severity::ERROR);
-    let captureWarnings: u64 = countBySeverity(&captureDiagnostics, Severity::WARNING);
+    let mut nodeIndex: u64 = moduleNodeStart;
+    while (nodeIndex < programHir.nodes.length()) {
+      if (let Option::SOME(node) = programHir.nodes.get(nodeIndex)) {
+        if (let Hir::HirKind::Error = node.kind) {
+          hirErrorNodes += 1;
+        }
+      }
+      nodeIndex += 1;
+    }
 
-    Io::println(formatPhaseLine("capture", captureErrors, captureWarnings));
+    hirNodes += programHir.nodes.length() - moduleNodeStart;
 
-    let monoResult: Mono::MonoOutput = Mono::run(&mut defStore, &mut typeStore, &mut symbols, &programHir);
-    let monoGenericNodes: u64 = Mono::countRemainingGenerics(&mut typeStore, &monoResult.hir);
+    loweredModules += 1;
+    lowerIndex += 1;
+  }
 
-    Io::println(`  mono: ${monoResult.instantiations} instantiations, ${monoResult.hir.nodes.length()} nodes, ${monoGenericNodes} generic nodes left`);
+  // Closures reach LIR with an environment layout and a thunk, so capture
+  // analysis has to run over the whole program before monomorphization
+  // clones any body.
+  let captureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &mut programHir,
+  );
 
-    // Ownership and borrow checking runs over the monomorphized HIR, the same
-    // program LIR lowering is about to walk: its drop schedules are keyed by
-    // the nodes that walk visits.
-    let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
-      &mut defStore,
-      &mut typeStore,
-      &mut symbols,
-      &monoResult.hir,
-    );
+  let captureErrors: u64 = countBySeverity(&captureDiagnostics, Severity::ERROR);
+  let captureWarnings: u64 = countBySeverity(&captureDiagnostics, Severity::WARNING);
 
-    ownershipErrors = countBySeverity(&checked.diagnostics, Severity::ERROR);
-    ownershipWarnings = countBySeverity(&checked.diagnostics, Severity::WARNING);
+  Io::println(formatPhaseLine("capture", captureErrors, captureWarnings));
 
-    Io::println(formatPhaseLine("ownership", ownershipErrors, ownershipWarnings));
-    renderBagToStderr(&checked.diagnostics, &file);
+  let monoResult: Mono::MonoOutput = Mono::run(&mut defStore, &mut typeStore, &mut symbols, &programHir);
+  let monoGenericNodes: u64 = Mono::countRemainingGenerics(&mut typeStore, &monoResult.hir);
 
-    let programConstValues: Analyzer::ConstEval::ConstValueMap = collectProgramConstValues(&records);
+  Io::println(`  mono: ${monoResult.instantiations} instantiations, ${monoResult.hir.nodes.length()} nodes, ${monoGenericNodes} generic nodes left`);
 
-    let lirResult: LirLowering::LowerModuleResult = LirLowering::lowerModule(
-      &mut defStore,
-      &mut typeStore,
-      &monoResult.hir,
-      &checked.dropSchedules,
-      &programConstValues,
-    );
+  // Ownership and borrow checking runs over the monomorphized HIR, the same
+  // program LIR lowering is about to walk: its drop schedules are keyed by
+  // the nodes that walk visits.
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &monoResult.hir,
+  );
 
-    lirUnsupported += lirResult.unsupported;
-    lirFunctions += lirResult.loweredFunctions;
+  let ownershipErrors: u64 = countBySeverity(&checked.diagnostics, Severity::ERROR);
+  let ownershipWarnings: u64 = countBySeverity(&checked.diagnostics, Severity::WARNING);
 
-    let verifyFindings: Vector<String> = LirVerify::verifyProgram(&mut defStore, &mut typeStore, &lirResult.program);
-    lirVerifyErrors += verifyFindings.length();
+  Io::println(formatPhaseLine("ownership", ownershipErrors, ownershipWarnings));
+  renderBagToStderr(&checked.diagnostics, file);
 
-    Io::println(`  lower: ${hirErrorNodes} error nodes, ${hirNodes} hir nodes, ${loweredModules} modules`);
-    Io::println(`  lir: ${lirUnsupported} unsupported, ${lirFunctions} functions, ${lirVerifyErrors} verify errors`);
+  let programConstValues: Analyzer::ConstEval::ConstValueMap = collectProgramConstValues(&records);
 
-    let emitResult: CodegenC::EmitOutput = CodegenC::emitProgram(
-      &mut defStore,
-      &mut typeStore,
-      &mut symbols,
-      &lirResult.program,
-    );
+  let mut lirResult: LirLowering::LowerModuleResult = LirLowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &monoResult.hir,
+    &checked.dropSchedules,
+    &programConstValues,
+  );
 
-    Io::println(
-      `  codegen: ${emitResult.unsupported} unsupported, ${emitResult.functions} functions, ${emitResult.source.length()} bytes`
-    );
+  let verifyFindings: Vector<String> = LirVerify::verifyProgram(&mut defStore, &mut typeStore, &lirResult.program);
 
-    // The emitted translation unit is the next thing to feed to a C compiler,
-    // and the `// unsupported instruction: <Variant>` comments in it are how the
-    // remaining work is counted per variant.
+  Io::println(`  lower: ${hirErrorNodes} error nodes, ${hirNodes} hir nodes, ${loweredModules} modules`);
+  Io::println(`  lir: ${lirResult.unsupported} unsupported, ${lirResult.loweredFunctions} functions, ${verifyFindings.length()} verify errors`);
+
+  // The harness translation unit defines `main` and calls the selected tests
+  // directly, so the program unit must not carry an entry wrapper too.
+  if (collectTests) {
+    lirResult.program.entryPoint = Option::NONE;
+  }
+
+  let emitResult: CodegenC::EmitOutput = CodegenC::emitProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &lirResult.program,
+  );
+
+  Io::println(
+    `  codegen: ${emitResult.unsupported} unsupported, ${emitResult.functions} functions, ${emitResult.source.length()} bytes`
+  );
+
+  return CompiledProgram {
+    source: emitResult.source,
+    tests: tests,
+    errors: frontendErrors + analyzeErrors + ownershipErrors,
+    warnings: frontendWarnings + analyzeWarnings + ownershipWarnings,
+  };
+}
+
+/// Drive the selfhost compiler pipeline against the project containing a source file.
+///
+/// Returns 0 on success, 1 on any error (I/O, lex, parse, analyze, or linking).
+function compileFile(path: &String, outputPath: &String): i32 {
+  Io::println(String::create("ignis selfhost (partial pipeline)"));
+  Io::println(`  source: ${path.toStr()}`);
+
+  let Result::OK(text) = Fs::readToString(path) else {
+    Io::eprintln(`error: cannot read source file: ${path.toStr()}`);
+    return 1;
+  };
+
+  let file: SourceFile = SourceFile::create(path.toStr(), text.toStr());
+  let entryPath: Path::PathBuf = Path::PathBuf::fromString(path);
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&entryPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(diagnostics) -> {
+      reportDiscoveryFailure(&diagnostics, &file);
+      return 1;
+    },
+  };
+
+  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, false);
+  let mut linkErrors: u64 = 0;
+
+  // The emitted translation unit is the next thing to feed to a C compiler,
+  // and the `// unsupported instruction: <Variant>` comments in it are how the
+  // remaining work is counted per variant.
+  if (compiled.source.length() > 0) {
     let emitPath: str = "selfhost_emit.c";
 
-    if (let Result::ERROR(_) = Fs::writeString(emitPath, &emitResult.source)) {
+    if (let Result::ERROR(_) = Fs::writeString(emitPath, &compiled.source)) {
       Io::println(String::create("  emit: could not write selfhost_emit.c"));
     } else {
       Io::println(`  emit: ${emitPath}`);
 
-      let emitPathBuf: Path::PathBuf = Path::PathBuf::create(emitPath);
-      let objectPathBuf: Path::PathBuf = Path::PathBuf::create("selfhost_emit.o");
+      let mut sourcePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+      sourcePaths.push(Path::PathBuf::create(emitPath));
+
+      let mut objectPaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+      objectPaths.push(Path::PathBuf::create("selfhost_emit.o"));
+
       let outputPathBuf: Path::PathBuf = Path::PathBuf::fromString(outputPath);
 
-      linkErrors += compileAndLinkEmitted(
-        &emitPathBuf,
-        &objectPathBuf,
+      linkErrors += compileAndLinkUnits(
+        &sourcePaths,
+        &objectPaths,
         &outputPathBuf,
         &discovery.stdRoot,
         &file,
       );
     }
-  } else {
-    Io::println(String::create("  lower: skipped (analyze errors)"));
   }
 
-  let totalErrors: u64 = frontendErrors + analyzeErrors + ownershipErrors + linkErrors;
-  let totalWarnings: u64 = frontendWarnings + analyzeWarnings + ownershipWarnings;
+  let totalErrors: u64 = compiled.errors + linkErrors;
 
   Io::println(
-    `  summary: ${totalErrors} errors, ${totalWarnings} warnings`
+    `  summary: ${totalErrors} errors, ${compiled.warnings} warnings`
   );
 
   if (totalErrors > 0) {
@@ -577,17 +680,126 @@ function compileFile(path: &String, outputPath: &String): i32 {
   return 0;
 }
 
-/// CLI entry point: `ignis <source.ign> [-o <output-binary>]`.
+/// Build the project's test harness and run every selected test in its own
+/// process, reporting the way the host `ignis test` runner does.
+///
+/// Returns 0 when every selected test exits 0, and 1 on any failure.
+function runProjectTests(
+  path: &String,
+  outputPath: &String,
+  filter: &String,
+  updateSnapshots: boolean,
+): i32 {
+  Io::eprintln(`Testing ${path.toStr()}\n`);
+
+  let Result::OK(text) = Fs::readToString(path) else {
+    Io::eprintln(`error: cannot read source file: ${path.toStr()}`);
+    return 1;
+  };
+
+  let file: SourceFile = SourceFile::create(path.toStr(), text.toStr());
+  let entryPath: Path::PathBuf = Path::PathBuf::fromString(path);
+  let discovery: DiscoveryResult = match (Resolver::discoverProjectTests(&entryPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(diagnostics) -> {
+      reportDiscoveryFailure(&diagnostics, &file);
+      return 1;
+    },
+  };
+
+  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, true);
+
+  if (compiled.source.length() == 0) {
+    Io::eprintln(String::create("error: test setup failed"));
+    return 1;
+  }
+
+  let selected: Vector<TestCase> = TestRunner::plan(&compiled.tests, filter);
+
+  Io::eprintln(TestRunner::sectionHeader("Planning"));
+
+  if (selected.length() == 0) {
+    Io::eprintln(String::create("  - No tests selected"));
+    return 0;
+  }
+
+  let mut plannedIndex: u64 = 0;
+
+  while (plannedIndex < selected.length()) {
+    if (let Option::SOME(testCase) = selected.get(plannedIndex)) {
+      Io::eprintln(`  - ${testCase.fqName.toStr()}`);
+    }
+
+    plannedIndex += 1;
+  }
+
+  let programSourceText: String = outputPath.concat("-program.c");
+  let harnessSourceText: String = outputPath.concat("-harness.c");
+  let programObjectText: String = outputPath.concat("-program.o");
+  let harnessObjectText: String = outputPath.concat("-harness.o");
+  let programPath: Path::PathBuf = Path::PathBuf::fromString(&programSourceText);
+  let harnessPath: Path::PathBuf = Path::PathBuf::fromString(&harnessSourceText);
+
+  if (let Result::ERROR(_) = Fs::writeString(programPath.asStr(), &compiled.source)) {
+    Io::eprintln(`error: could not write ${programPath.asStr()}`);
+    return 1;
+  }
+
+  let harness: String = TestRunner::harnessSource(&selected);
+
+  if (let Result::ERROR(_) = Fs::writeString(harnessPath.asStr(), &harness)) {
+    Io::eprintln(`error: could not write ${harnessPath.asStr()}`);
+    return 1;
+  }
+
+  let mut sourcePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  sourcePaths.push(programPath.clone());
+  sourcePaths.push(harnessPath.clone());
+
+  let mut objectPaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  objectPaths.push(Path::PathBuf::fromString(&programObjectText));
+  objectPaths.push(Path::PathBuf::fromString(&harnessObjectText));
+
+  let binaryPath: Path::PathBuf = Path::PathBuf::fromString(outputPath);
+
+  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &binaryPath, &discovery.stdRoot, &file) > 0) {
+    Io::eprintln(String::create("error: test setup failed"));
+    return 1;
+  }
+
+  Io::eprintln(TestRunner::sectionHeader("Running"));
+
+  let outcomes: Vector<TestOutcome> = TestRunner::execute(&binaryPath, &selected, updateSnapshots);
+
+  if (TestRunner::report(&outcomes, &binaryPath) > 0) {
+    return 1;
+  }
+
+  return 0;
+}
+
+/// CLI entry point: `ignis <source.ign> [-o <output-binary>]` or
+/// `ignis test <entry.ign> [--filter <substring>] [--update-snapshots] [-o <binary>]`.
 ///
 /// Without arguments the binary exits cleanly. The positional argument is a
 /// path to an Ignis source file and the pipeline runs against the project that
 /// contains it. `-o` overrides the output binary, which defaults to
-/// `selfhost_out` in the current directory. An unknown flag exits with 2.
+/// `selfhost_out` for a build and `selfhost_tests` for a test run. An unknown
+/// flag exits with 2.
 function main(): i32 {
   let args: Vector<String> = Process::args();
   let mut sourcePath: Option<String> = Option::NONE;
   let mut outputPath: String = String::create("selfhost_out");
+  let mut filter: String = String::new();
+  let mut updateSnapshots: boolean = false;
+  let mut testMode: boolean = false;
   let mut index: u64 = 1;
+
+  if (let Option::SOME(first) = args.get(1) && first.equals("test")) {
+    testMode = true;
+    outputPath = String::create("selfhost_tests");
+    index = 2;
+  }
 
   while (index < args.length()) {
     let Option::SOME(arg) = args.get(index) else {
@@ -605,6 +817,23 @@ function main(): i32 {
       continue;
     }
 
+    if (testMode && arg.equals("--filter")) {
+      let Option::SOME(value) = args.get(index + 1) else {
+        Io::eprintln(String::create("error: --filter requires a substring"));
+        return 2;
+      };
+
+      filter = value.clone();
+      index += 2;
+      continue;
+    }
+
+    if (testMode && arg.equals("--update-snapshots")) {
+      updateSnapshots = true;
+      index += 1;
+      continue;
+    }
+
     if (arg.startsWith("-")) {
       Io::eprintln(`error: unknown argument: ${arg.toStr()}`);
       return 2;
@@ -617,6 +846,10 @@ function main(): i32 {
   let Option::SOME(source) = sourcePath else {
     return 0;
   };
+
+  if (testMode) {
+    return runProjectTests(&source, &outputPath, &filter, updateSnapshots);
+  }
 
   return compileFile(&source, &outputPath);
 }
