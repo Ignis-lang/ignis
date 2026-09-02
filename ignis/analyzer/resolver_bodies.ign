@@ -82,7 +82,9 @@ export namespace Analyzer {
     /// `Variant`/`StaticMethod`/`InstanceMethod` — member resolved against the
     /// owner's variant/method tables. `TypeFallback` — the owner segment did
     /// not resolve to a usable qualifier, but the member segment alone names
-    /// a top-level Record/Enum (namespace-prefix parity, ADR D3). `OwnerIsTrait`,
+    /// a top-level Record/Enum (namespace-prefix parity, ADR D3).
+    /// `NamespaceMember` — the owner is a namespace and the whole written path
+    /// names a function or constant it declares. `OwnerIsTrait`,
     /// `OwnerInvalid`, `OwnerNotFound` — the owner segment is unusable.
     /// `MemberNotFoundOnEnum`/`MemberNotFoundOnRecord` — owner resolved, member did not.
     enum PathTailLookup {
@@ -91,6 +93,7 @@ export namespace Analyzer {
       StaticField(Analyzer::DefinitionId),
       InstanceMethod(Analyzer::DefinitionId),
       TypeFallback(Analyzer::DefinitionId),
+      NamespaceMember(Analyzer::DefinitionId),
       OwnerIsTrait,
       OwnerInvalid,
       OwnerNotFound,
@@ -1853,8 +1856,9 @@ export namespace Analyzer {
           )) {
             // Only a type declaration may stand in as a TypeFallback —
             // pattern position treats anything else as an invariant break.
-            // A function or constant found here still resolves, through the
-            // mapper's own fallback on the MemberNotFound path below.
+            // A function or constant the namespace declares is reported apart,
+            // because the flat member fallback below would otherwise answer
+            // `Holder::Point` with a top-level record of that name.
             if (let Option::SOME(qualifiedDef) = defStore.get(qualifiedDefId)) {
               match (qualifiedDef) {
                 Analyzer::Definition::Record(_) -> {
@@ -1862,6 +1866,12 @@ export namespace Analyzer {
                 },
                 Analyzer::Definition::Enum(_) -> {
                   return Analyzer::ResolverBodies::PathTailLookup::TypeFallback(qualifiedDefId);
+                },
+                Analyzer::Definition::Function(_) -> {
+                  return Analyzer::ResolverBodies::PathTailLookup::NamespaceMember(qualifiedDefId);
+                },
+                Analyzer::Definition::Variable(_) -> {
+                  return Analyzer::ResolverBodies::PathTailLookup::NamespaceMember(qualifiedDefId);
                 },
                 _ -> {},
               };
@@ -2112,6 +2122,9 @@ export namespace Analyzer {
           return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
         },
         Analyzer::ResolverBodies::PathTailLookup::TypeFallback(defId) -> {
+          return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
+        },
+        Analyzer::ResolverBodies::PathTailLookup::NamespaceMember(defId) -> {
           return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
         },
         Analyzer::ResolverBodies::PathTailLookup::InstanceMethod(_) -> {
@@ -2751,6 +2764,16 @@ export namespace Analyzer {
           return Analyzer::ResolverBodies::resolvePatternPathTypeFallback(state, defStore, p, defId);
         },
         Analyzer::ResolverBodies::PathTailLookup::StaticField(_) -> {
+          return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
+        },
+        Analyzer::ResolverBodies::PathTailLookup::NamespaceMember(defId) -> {
+          // A constant is a legal pattern (`__fs_errno::ENOENT ->`); a
+          // namespace function is not.
+          if (let Option::SOME(Analyzer::Definition::Variable(_)) = defStore.get(defId)) {
+            return Analyzer::ResolverBodies::ResolvedRef::Definition(defId);
+          }
+
+          Analyzer::ResolverBodies::emitUndeclaredVariable(state, p.span, DiagnosticCode::INVALID_ENTITY_POSITION, "functions are not valid in pattern position");
           return Analyzer::ResolverBodies::ResolvedRef::Unresolved(String::create("unresolved"));
         },
         Analyzer::ResolverBodies::PathTailLookup::StaticMethod(_) -> {
