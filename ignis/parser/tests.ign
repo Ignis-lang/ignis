@@ -3923,3 +3923,79 @@ function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
     _ -> @panic("expected function root for the configFlag test"),
   };
 }
+
+/// Scenario: `i++` and `i--` in the update slot of a C-style `for` parse into
+/// postfix expressions over the loop binding.
+/// Spec: GRAMMAR.md `<postfix>`; parity fixture e2e_ok::for_loop.
+@test
+function parserParsesPostfixStepOperators(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_postfix_step.ign",
+    "function main(): void { for (let i = 0; i < 10; i++) { break; } for (let j = 10; j > 0; j--) { break; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing postfix step function root"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let incrementLoopId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing increment for statement"),
+          };
+          let decrementLoopId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing decrement for statement"),
+          };
+
+          match (expectStatement(&module, incrementLoopId)) {
+            Ast::Statement::Node::For(forStatement) -> {
+              let updateId: Ast::ExpressionId = match (forStatement.update) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing increment update"),
+              };
+
+              match (expectExpression(&module, updateId)) {
+                Ast::Expression::Node::PostfixIncrement(postfix) -> {
+                  match (expectExpression(&module, postfix.operand)) {
+                    Ast::Expression::Node::Path(_) -> {},
+                    _ -> @panic("increment operand is not a path"),
+                  };
+                },
+                _ -> @panic("update is not a postfix increment"),
+              };
+            },
+            _ -> @panic("statement is not a C-style for"),
+          };
+
+          match (expectStatement(&module, decrementLoopId)) {
+            Ast::Statement::Node::For(forStatement) -> {
+              let updateId: Ast::ExpressionId = match (forStatement.update) {
+                Option::SOME(value) -> value,
+                Option::NONE -> @panic("missing decrement update"),
+              };
+
+              match (expectExpression(&module, updateId)) {
+                Ast::Expression::Node::PostfixDecrement(_) -> {},
+                _ -> @panic("update is not a postfix decrement"),
+              };
+            },
+            _ -> @panic("statement is not a C-style for"),
+          };
+        },
+        _ -> @panic("function body is not a block"),
+      };
+    },
+    _ -> @panic("root is not a function"),
+  };
+}

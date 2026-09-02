@@ -658,3 +658,15 @@ function loweringEnumVariantConstruction(): void {
 
   Test::assertSnapshot("lowering-enum-variant-construction", rendered.toStr());
 }
+
+/// `i++` and `i--` lower to a compound assignment of one, so a C-style `for`
+/// header reaches HIR as an ordinary counted loop.
+/// Spec: IGN-172 — postfix step operators.
+@test
+function loweringPostfixStepIsCompoundAssignment(): void {
+  let rendered: String = loweringRender(
+    "function count(): i32 {\n  let mut total: i32 = 0;\n  for (let i = 0; i < 3; i++) {\n    total = total + i;\n  }\n  for (let j = 3; j > 0; j--) {\n    total = total + j;\n  }\n  return total;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-postfix-step", rendered.toStr());
+}
