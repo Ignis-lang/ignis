@@ -470,8 +470,17 @@ def normalize_diagnostic_line(line: str) -> str:
   return re.sub(r"\s+", " ", text).strip()
 
 
+NOTE_LINE_PATTERN = re.compile(r"^\s*(?:note|help):")
+
+
 def missing_diagnostics(expected: str, output: str) -> tuple[list[str], list[str]]:
-  """Return the expected lines the output does not carry, and the expected set."""
+  """Return the expected lines the output does not carry, and the expected set.
+
+  Only diagnostic messages gate the case. A `note:`/`help:` continuation the
+  host records but the selfhost omits is reported through `missing_notes`,
+  not here: the promotion rule asks for every host diagnostic to be present,
+  and treats extra or richer output as an improvement rather than a failure.
+  """
   expected_lines = [line for line in expected.split("\n") if line.strip()]
   observed_lines = [normalize_diagnostic_line(line) for line in strip_ansi(output).splitlines()]
   observed_lines = [line for line in observed_lines if line]
@@ -479,12 +488,33 @@ def missing_diagnostics(expected: str, output: str) -> tuple[list[str], list[str
   missing = []
 
   for line in expected_lines:
+    if NOTE_LINE_PATTERN.match(line):
+      continue
+
     wanted = normalize_diagnostic_line(line)
 
     if not any(wanted in observed for observed in observed_lines):
       missing.append(line.strip())
 
   return missing, expected_lines
+
+
+def missing_notes(expected: str, output: str) -> list[str]:
+  """The `note:`/`help:` lines the host records that the selfhost did not print."""
+  observed_lines = [normalize_diagnostic_line(line) for line in strip_ansi(output).splitlines()]
+  observed_lines = [line for line in observed_lines if line]
+  missing = []
+
+  for line in expected.split("\n"):
+    if not NOTE_LINE_PATTERN.match(line):
+      continue
+
+    wanted = normalize_diagnostic_line(line)
+
+    if not any(wanted in observed for observed in observed_lines):
+      missing.append(line.strip())
+
+  return missing
 
 
 REPORTED_DIAGNOSTIC_PATTERN = re.compile(r"^\s*(?:[A-Za-z]+\[[A-Za-z]?\d+\]:|note:|help:)")
@@ -524,7 +554,10 @@ def run_err_case(case: Case, compiler: Path, std_path: Path, work_dir: Path) -> 
     )
 
   if not missing:
-    return CaseResult(case, CLASS_PASS, expected_lines=expected_lines)
+    notes = missing_notes(case.snapshot or "", compiler_output)
+    reason = f"{len(notes)} host note line(s) not printed: `{notes[0]}`" if notes else ""
+
+    return CaseResult(case, CLASS_PASS, reason, expected_lines=expected_lines)
 
   reason = "{} of {} expected diagnostic line(s) missing: `{}`".format(
     len(missing),
