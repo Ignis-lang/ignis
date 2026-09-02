@@ -292,6 +292,16 @@ export namespace LirLowering {
     return false;
   }
 
+  function isReferenceType(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
+    if (let Option::SOME(typeNode) = typeStore.get(ty)) {
+      if (let Analyzer::Type::Reference(_) = typeNode) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   function isPointerLikeType(typeStore: &mut Analyzer::TypeStore, ty: Analyzer::TypeId): boolean {
     if (let Option::SOME(typeNode) = typeStore.get(ty)) {
       return match (typeNode) {
@@ -2601,8 +2611,13 @@ export namespace LirLowering {
     valueType: Analyzer::TypeId,
     pattern: &Hir::HirPattern,
     span: SourceSpan,
+    borrowedAlias: boolean,
   ): Lir::Operand {
     let boolType: Analyzer::TypeId = LirLowering::booleanTypeId(typeStore);
+
+    // Destructuring through a reference keeps every payload in the referenced
+    // storage: a binding taken below this level aliases it and owns nothing.
+    let aliased: boolean = borrowedAlias || LirLowering::isReferenceType(typeStore, valueType);
 
     match (pattern) {
       Hir::HirPattern::Wildcard -> {
@@ -2683,13 +2698,15 @@ export namespace LirLowering {
             }
           }
 
+          let bindingAliases: boolean = aliased && Borrowck::needsDropType(defStore, typeStore, valueType);
+
           let mut bindingFunctionRef: &mut Lir::FunctionLir = function_;
           bindingSlot = bindingFunctionRef.allocLocal(Lir::LocalData {
             defId: Option::SOME(defId),
             ty: valueType,
             mutable: bindingMutable,
             name: Option::NONE,
-            borrowedAlias: false,
+            borrowedAlias: bindingAliases,
           });
 
           LirLowering::registerLocal(state, defId, bindingSlot);
@@ -2780,6 +2797,7 @@ export namespace LirLowering {
               *fieldType,
               argPattern,
               span,
+              aliased,
             );
           }
 
@@ -2819,6 +2837,7 @@ export namespace LirLowering {
             valueType,
             alternative,
             span,
+            aliased,
           );
 
           let orTemp: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
@@ -2872,6 +2891,7 @@ export namespace LirLowering {
     elementTypes: &Vector<Analyzer::TypeId>,
     pattern: &Hir::HirPattern,
     span: SourceSpan,
+    borrowedAlias: boolean,
   ): Lir::Operand {
     let boolType: Analyzer::TypeId = LirLowering::booleanTypeId(typeStore);
 
@@ -2920,6 +2940,7 @@ export namespace LirLowering {
             *elementType,
             elementPattern,
             span,
+            borrowedAlias,
           );
 
           let andTemp: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
@@ -2958,6 +2979,7 @@ export namespace LirLowering {
             elementTypes,
             alternative,
             span,
+            borrowedAlias,
           );
 
           let orTemp: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
@@ -3133,6 +3155,7 @@ export namespace LirLowering {
           &elementTypes,
           &arm.pattern,
           nodeSpan,
+          false,
         );
       } else {
         let scrutineeTemp: Lir::TempId = LirLowering::freshTemp(function_, scrutineeType, nodeSpan);
@@ -3154,6 +3177,7 @@ export namespace LirLowering {
           scrutineeType,
           &arm.pattern,
           nodeSpan,
+          false,
         );
       }
 
@@ -3264,6 +3288,7 @@ export namespace LirLowering {
       valueType,
       &letElseNode.pattern,
       nodeSpan,
+      false,
     );
 
     let continueBlock: Lir::BlockId = LirLowering::createBlock(function_, "let_else_ok");

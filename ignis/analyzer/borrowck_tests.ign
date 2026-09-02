@@ -746,6 +746,19 @@ function borrowckSchedulesLetElseThroughReference(): void {
   Test::assertEq<str>(rendered.toStr(), "");
 }
 
+/// Scenario: a match on a reference binds a payload that is itself an enum;
+/// a second match on that binding destructures storage the reference owns.
+/// Neither binding is dropped at its arm's end, and nothing is consumed.
+/// Spec: IGN-39 — a borrowed binding carries the borrow into nested matches.
+@test
+function borrowckSchedulesNestedMatchThroughReference(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nenum Terminator {\n  RETURN(Maybe),\n  JUMP,\n}\n\nfunction idOf(terminator: &Terminator): u32 {\n  match (terminator) {\n    Terminator::RETURN(valueOpt) -> {\n      match (valueOpt) {\n        Maybe::SOME(value) -> {\n          return value.id;\n        },\n        Maybe::NONE -> {\n          return 0;\n        },\n      };\n    },\n    Terminator::JUMP -> {},\n  };\n\n  return 1;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "");
+}
+
 /// Scenario: overwriting a local that still holds a value schedules a drop of
 /// the old value before the store.
 /// Spec: IGN-39 — `on_overwrite`.

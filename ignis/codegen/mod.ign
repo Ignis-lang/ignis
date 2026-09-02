@@ -766,6 +766,46 @@ export namespace CodegenC {
 
   /// Mark a moved-from value as already dropped, so the drop scheduled at the
   /// end of its scope becomes a no-op.
+  /// A freshly built record or enum value that carries a drop flag starts
+  /// live: its slot may hold the flag of a value dropped earlier. Mirrors
+  /// the oracle's reset after `InitRecord` and `InitEnumVariant`.
+  function emitInitializedDropState(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    output: &mut String,
+    destination: &String,
+    typeId: Analyzer::TypeId,
+  ): void {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return;
+    };
+
+    let mut nominalOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    match (typeNode) {
+      Analyzer::Type::Record(defId) -> {
+        nominalOpt = Option::SOME(defId);
+      },
+      Analyzer::Type::Enum(defId) -> {
+        nominalOpt = Option::SOME(defId);
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(nominal) = nominalOpt else {
+      return;
+    };
+
+    if (!CodegenC::hasDropTrait(defStore, nominal)) {
+      return;
+    }
+
+    let line: String = `    (${destination.toStr()})->__ignis_drop_state = 0;\n`;
+
+    let mut outputRef: &mut String = output;
+    outputRef.pushStr(line.toStr());
+  }
+
   function emitUninitializedDropState(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1267,8 +1307,12 @@ export namespace CodegenC {
       },
       Lir::Instr::InitEnumVariant(node) -> {
         let destination: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.destPtr);
+        // A variant fills only its own payload; the rest of the union stays
+        // whatever the slot held before, so the whole value is cleared first.
+        let clear: String = `    __builtin_memset((void*)${destination.toStr()}, 0, sizeof(*${destination.toStr()}));\n`;
         let header: String = `    (${destination.toStr()})->tag = ${node.variantTag}U;\n`;
         let mut outputRef: &mut String = output;
+        outputRef.pushStr(clear.toStr());
         outputRef.pushStr(header.toStr());
 
         let mut payloadIndex: u64 = 0;
@@ -1287,6 +1331,8 @@ export namespace CodegenC {
 
           payloadIndex += 1;
         }
+
+        CodegenC::emitInitializedDropState(defStore, typeStore, output, &destination, node.enumType);
       },
       Lir::Instr::InitRecord(node) -> {
         let destination: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.destPtr);
@@ -1302,6 +1348,8 @@ export namespace CodegenC {
 
           fieldIndex += 1;
         }
+
+        CodegenC::emitInitializedDropState(defStore, typeStore, output, &destination, node.recordType);
       },
       Lir::Instr::Call(node) -> {
         let callee: String = CodegenC::mangledName(defStore, symbols, node.callee);
