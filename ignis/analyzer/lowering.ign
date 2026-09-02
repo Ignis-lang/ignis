@@ -320,6 +320,73 @@ export namespace Lowering {
     return Option::SOME(reference.referent);
   }
 
+  /// Whether an assignment target names a variable directly: a bare name, a
+  /// path, or either of those inside parentheses.
+  function isNamedAssignmentTarget(module: &Ast::Module, exprId: Ast::ExpressionId): boolean {
+    let Option::SOME(expression) = module.expressions.get(exprId) else {
+      return false;
+    };
+
+    return match (expression) {
+      Ast::Expression::Node::Variable(_) -> true,
+      Ast::Expression::Node::Path(_) -> true,
+      Ast::Expression::Node::Grouped(grouped) -> Lowering::isNamedAssignmentTarget(module, grouped.expression),
+      _ -> false,
+    };
+  }
+
+  /// Assigning to a variable of type `&mut T` writes through the reference,
+  /// so the target is wrapped in a `Dereference` node. Mirrors the oracle's
+  /// `lower_implicit_mut_ref_assignment_target`.
+  function implicitMutRefAssignmentTarget(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    module: &Ast::Module,
+    hir: &mut Hir::HirStore,
+    targetExprId: Ast::ExpressionId,
+    target: Hir::HirId,
+  ): Hir::HirId {
+    if (!Lowering::isNamedAssignmentTarget(module, targetExprId)) {
+      return target;
+    }
+
+    let mut targetType: Analyzer::TypeId = Lowering::voidType(typeStore);
+    let mut targetSpan: SourceSpan = SourceSpan::new("", 0, 0);
+
+    let hirReader: &mut Hir::HirStore = hir;
+    if (let Option::SOME(targetNode) = hirReader.get(target)) {
+      targetType = targetNode.typeId;
+      targetSpan = targetNode.span;
+    }
+
+    let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, targetType);
+
+    if (resolved.cycleAlias.isSome()) {
+      return target;
+    }
+
+    let Option::SOME(typeNode) = typeStore.get(resolved.typeId) else {
+      return target;
+    };
+
+    let Analyzer::Type::Reference(reference) = typeNode else {
+      return target;
+    };
+
+    if (!reference.mutable) {
+      return target;
+    }
+
+    let referent: Analyzer::TypeId = reference.referent;
+
+    let mut hirRef: &mut Hir::HirStore = hir;
+    return hirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Dereference(target),
+      span: targetSpan,
+      typeId: referent,
+    });
+  }
+
   /// Pointee of a pointer or reference type, `NONE` otherwise. Mirrors the
   /// shapes the oracle's `Dereference` arm unwraps.
   function pointeeType(
@@ -1077,7 +1144,15 @@ export namespace Lowering {
         });
       },
       Ast::Expression::Node::Assignment(assignment) -> {
-        let target: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.target);
+        let loweredTarget: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.target);
+        let target: Hir::HirId = Lowering::implicitMutRefAssignmentTarget(
+          defStore,
+          typeStore,
+          module,
+          hir,
+          assignment.target,
+          loweredTarget,
+        );
         let value: Hir::HirId = Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, assignment.value);
         let assignType: Analyzer::TypeId = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, exprId);
 
