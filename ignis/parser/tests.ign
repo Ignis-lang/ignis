@@ -4078,3 +4078,65 @@ function parserParsesEnumMethodAfterUndelimitedVariant(): void {
     _ -> @panic("root is not an enum"),
   };
 }
+
+/// Scenario: every conjunct of an `if` condition may be its own `let` binding,
+/// so `if (let A = x && let B = y && cond)` nests two `LetCondition` nodes on
+/// the left of the outer `&&`.
+/// Spec: GRAMMAR.md `<let-condition>`; parity fixture e2e_ok::if_let_multi_chain.
+@test
+function parserParsesChainedLetConditions(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_let_condition_chain.ign",
+    "function main(): void { if (let Maybe::Some(x) = first() && let Maybe::Some(y) = second(x) && y > 3) { return; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing let chain function root"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          let statementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing if statement"),
+          };
+
+          match (expectStatement(&module, statementId)) {
+            Ast::Statement::Node::If(ifStatement) -> {
+              match (expectExpression(&module, ifStatement.condition)) {
+                Ast::Expression::Node::Binary(outer) -> {
+                  match (expectExpression(&module, outer.left)) {
+                    Ast::Expression::Node::Binary(inner) -> {
+                      match (expectExpression(&module, inner.left)) {
+                        Ast::Expression::Node::LetCondition(_) -> {},
+                        _ -> @panic("first conjunct is not a let condition"),
+                      };
+
+                      match (expectExpression(&module, inner.right)) {
+                        Ast::Expression::Node::LetCondition(_) -> {},
+                        _ -> @panic("second conjunct is not a let condition"),
+                      };
+                    },
+                    _ -> @panic("left of the outer && is not a conjunction"),
+                  };
+                },
+                _ -> @panic("condition is not a conjunction"),
+              };
+            },
+            _ -> @panic("statement is not an if"),
+          };
+        },
+        _ -> @panic("function body is not a block"),
+      };
+    },
+    _ -> @panic("root is not a function"),
+  };
+}

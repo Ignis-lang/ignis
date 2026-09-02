@@ -47,6 +47,56 @@ export namespace ParserStatements {
     })));
   }
 
+  /// Parses `let <pattern> = <value>` in condition position into a
+  /// `LetCondition` expression.
+  ///
+  /// The value stops before `&&` (binding power 31), so the conjuncts that
+  /// follow stay outside the scrutinee — their bindings only exist past the
+  /// pattern.
+  function parseLetConditionOperand(parser: &mut ParserShared::State): Option<ParsedCondition> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let letKeyword = parserRef.expectKeyword(Keyword::LET, "expected 'let' in condition")!;
+    let patternResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);
+    let pattern = patternResult!;
+    parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' in let condition")!;
+
+    let valueResult: Option<ParserExpressions::ParsedExpression> = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 31);
+    let value = valueResult!;
+
+    let valueId: Ast::ExpressionId = value.id;
+    let valueSpan: SourceSpan = value.span;
+    let span: SourceSpan = ParserShared::mergeSpans(letKeyword.span, valueSpan);
+
+    return Option::SOME(ParsedCondition {
+      id: parserRef.module.addExpression(Ast::Expression::Node::LetCondition(Ast::Expression::LetCondition {
+        span: span,
+        pattern: pattern,
+        value: valueId,
+      })),
+      span: span,
+    });
+  }
+
+  /// Parses one conjunct of a `let` condition chain. Every conjunct may itself
+  /// be a `let` binding, so `let A = x && let B = f(a) && cond` parses the way
+  /// the host does, where `let` is an ordinary prefix.
+  function parseConditionConjunct(parser: &mut ParserShared::State): Option<ParsedCondition> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (parserRef.atKeyword(Keyword::LET)) {
+      return ParserStatements::parseLetConditionOperand(parserRef);
+    }
+
+    let rightResult: Option<ParserExpressions::ParsedExpression> = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 31);
+    let right = rightResult!;
+
+    return Option::SOME(ParsedCondition {
+      id: right.id,
+      span: right.span,
+    });
+  }
+
   function parseConditionExpression(parser: &mut ParserShared::State): Option<ParsedCondition> {
     let mut parserRef: &mut ParserShared::State = parser;
 
@@ -60,38 +110,20 @@ export namespace ParserStatements {
       });
     }
 
-    let letKeyword = parserRef.expectKeyword(Keyword::LET, "expected 'let' in condition")!;
-    let patternResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);
-    let pattern = patternResult!;
-    parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' in let condition")!;
-
-    // Stops before `&&` (binding power 31), so the chained conjuncts stay
-    // outside the scrutinee — their bindings only exist past the pattern.
-    let valueResult: Option<ParserExpressions::ParsedExpression> = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 31);
-    let value = valueResult!;
-
-    let valueId: Ast::ExpressionId = value.id;
-    let valueSpan: SourceSpan = value.span;
-    let span: SourceSpan = ParserShared::mergeSpans(letKeyword.span, valueSpan);
-    let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::LetCondition(Ast::Expression::LetCondition {
-      span: span,
-      pattern: pattern,
-      value: valueId,
-    }));
+    let first = ParserStatements::parseLetConditionOperand(parserRef)!;
 
     // `let P = e && cond && ...` chains: the value stopped before `&&`, so
     // each following conjunct combines here, with the pattern's bindings in
     // scope for every one of them.
-    let mut conditionId: Ast::ExpressionId = expressionId;
-    let mut conditionSpan: SourceSpan = span;
+    let mut conditionId: Ast::ExpressionId = first.id;
+    let mut conditionSpan: SourceSpan = first.span;
 
     while (parserRef.atPunctuation(Punctuation::AND)) {
       let Option::SOME(_) = parserRef.consumePunctuation(Punctuation::AND) else {
         break;
       };
 
-      let rightResult: Option<ParserExpressions::ParsedExpression> = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 31);
-      let right = rightResult!;
+      let right = ParserStatements::parseConditionConjunct(parserRef)!;
 
       let combinedSpan: SourceSpan = ParserShared::mergeSpans(conditionSpan, right.span);
       conditionId = parserRef.module.addExpression(Ast::Expression::Node::Binary(Ast::Expression::Binary {
