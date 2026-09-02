@@ -1440,6 +1440,18 @@ export namespace LirLowering {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::FieldAccess(fieldNode) -> {
+        // Reading a droppable field by value out of an owned base moves it:
+        // the base's drop must skip the field afterwards. Through a pointer or
+        // reference the base is borrowed and nothing moves. Mirrors the
+        // oracle's `should_mark_field_moved`.
+        let mut baseIsPointer: boolean = false;
+
+        if (let Option::SOME(baseNode) = hirStore.get(fieldNode.base)) {
+          baseIsPointer = LirLowering::isPointerLikeType(typeStore, baseNode.typeId);
+        }
+
+        let marksFieldMoved: boolean = !baseIsPointer && Borrowck::needsDropType(defStore, typeStore, nodeType);
+
         let basePtr: Lir::Operand = LirLowering::lowerBasePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, fieldNode.base);
 
         let mut fieldPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
@@ -1459,6 +1471,13 @@ export namespace LirLowering {
           dest: dest,
           ptr: Lir::Operand::Temp(fieldPtr),
         }));
+
+        if (marksFieldMoved) {
+          LirLowering::pushInstr(function_, state, Lir::Instr::MarkMoved(Lir::InstrMarkMoved {
+            ptr: Lir::Operand::Temp(fieldPtr),
+            ty: nodeType,
+          }));
+        }
 
         return Lir::Operand::Temp(dest);
       },
