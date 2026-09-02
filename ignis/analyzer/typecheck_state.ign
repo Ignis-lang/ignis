@@ -2423,6 +2423,7 @@ export namespace Analyzer {
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       typeId: Analyzer::TypeId,
       nonOwnerMessage: str,
@@ -2537,6 +2538,29 @@ export namespace Analyzer {
             },
           };
         },
+        // A bounded type parameter answers the methods its bounds declare. The
+        // trait stands in as the owner here; monomorphization re-dispatches the
+        // call to the concrete implementation once the parameter is substituted.
+        Analyzer::Type::Param(symbol) -> {
+          let Option::SOME(traitDefId) = Analyzer::Typecheck::traitBoundOwnerFor(defStore, symbols, symbol) else {
+            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
+            return Option::NONE;
+          };
+
+          let Option::SOME(Analyzer::Definition::Trait(trait_)) = defStore.get(traitDefId) else {
+            Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
+            return Option::NONE;
+          };
+
+          return Option::SOME(Analyzer::Typecheck::RequiredMethodOwner {
+            defId: traitDefId,
+            typeId: resolvedType.typeId,
+            instanceMethods: Analyzer::Typecheck::copyDefinitionIdVector(&trait_.methods),
+            staticMethods: Vector::new<Analyzer::DefinitionId>(),
+            typeParamSymbols: Vector::new<Analyzer::SymbolId>(),
+            typeArguments: Vector::new<Analyzer::TypeId>(),
+          });
+        },
         _ -> {
           Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, nonOwnerMessage);
           return Option::NONE;
@@ -2544,6 +2568,78 @@ export namespace Analyzer {
       };
 
       @panic("unreachable: requireMethodOwner match did not return");
+    }
+
+    /// The first trait a type parameter named `symbol` is bounded by.
+    ///
+    /// Bounds are held as written names, so this resolves both the parameter and
+    /// the bound by name. A parameter with no bound, or a bound naming something
+    /// that is not a trait, has no owner to answer methods.
+    function traitBoundOwnerFor(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      symbol: Analyzer::SymbolId,
+    ): Option<Analyzer::DefinitionId> {
+      let mut boundNames: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < defStore.length()) {
+        let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+        if (let Option::SOME(Analyzer::Definition::TypeParam(typeParam)) = defStore.get(defId)) {
+          if (typeParam.name.raw() == symbol.raw() && typeParam.bounds.length() > 0) {
+            boundNames = Analyzer::Typecheck::copyStringVector(&typeParam.bounds);
+            index = defStore.length();
+            continue;
+          }
+        }
+
+        index += 1;
+      }
+
+      let mut boundIndex: u64 = 0;
+
+      while (boundIndex < boundNames.length()) {
+        let Option::SOME(boundName) = boundNames.get(boundIndex) else {
+          boundIndex += 1;
+          continue;
+        };
+
+        let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+        let boundSymbol: Analyzer::SymbolId = symbolsRef.intern(boundName.toStr());
+        let mut traitIndex: u64 = 0;
+
+        while (traitIndex < defStore.length()) {
+          let candidateId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(traitIndex as u32);
+
+          if (let Option::SOME(Analyzer::Definition::Trait(trait_)) = defStore.get(candidateId)) {
+            if (trait_.name.raw() == boundSymbol.raw()) {
+              return Option::SOME(candidateId);
+            }
+          }
+
+          traitIndex += 1;
+        }
+
+        boundIndex += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    function copyStringVector(source: &Vector<String>): Vector<String> {
+      let mut copy: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < source.length()) {
+        if (let Option::SOME(entry) = source.get(index)) {
+          copy.push(entry.clone());
+        }
+
+        index += 1;
+      }
+
+      return copy;
     }
 
     function recordFieldCount(

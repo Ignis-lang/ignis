@@ -1108,6 +1108,107 @@ export namespace Mono {
     };
   }
 
+  /// The record or enum a receiver type names, peeling references and pointers.
+  /// Unlike `receiverInstance` this answers for a plain nominal type too, which
+  /// is what a substituted type parameter usually becomes.
+  function receiverNominalDef(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    receiverType: Analyzer::TypeId,
+  ): Option<Analyzer::DefinitionId> {
+    let mut currentType: Analyzer::TypeId = receiverType;
+    let mut guard: u64 = 0;
+
+    while (guard < 16) {
+      let mut next: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(typeNode) = typeStore.get(currentType)) {
+        match (typeNode) {
+          Analyzer::Type::Reference(referenceType) -> {
+            next = Option::SOME(referenceType.referent);
+          },
+          Analyzer::Type::Pointer(pointerType) -> {
+            next = Option::SOME(pointerType.pointee);
+          },
+          Analyzer::Type::Instance(instance) -> {
+            return Option::SOME(instance.definition);
+          },
+          Analyzer::Type::Record(recordDef) -> {
+            return Option::SOME(recordDef);
+          },
+          Analyzer::Type::Enum(enumDef) -> {
+            return Option::SOME(enumDef);
+          },
+          _ -> {},
+        };
+      }
+
+      let Option::SOME(inner) = next else {
+        return Option::NONE;
+      };
+
+      currentType = inner;
+      guard += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// The instance method on `ownerDef` implementing `traitMethodDef`, or NONE
+  /// when the call does not go through a trait at all.
+  ///
+  /// The implementation is matched by name and by how many parameters it takes,
+  /// which is what separates two overloads of the same trait method name.
+  function traitImplementationMethod(
+    defStore: &mut Analyzer::DefinitionStore,
+    ownerDef: Analyzer::DefinitionId,
+    traitMethodDef: Analyzer::DefinitionId,
+  ): Option<Analyzer::DefinitionId> {
+    let Option::SOME(Analyzer::Definition::Method(traitMethod)) = defStore.get(traitMethodDef) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(Analyzer::Definition::Trait(_)) = defStore.get(traitMethod.owner) else {
+      return Option::NONE;
+    };
+
+    let traitMethodName: Analyzer::SymbolId = traitMethod.name;
+    let traitMethodArity: u64 = traitMethod.params.length();
+
+    let mut candidates: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(ownerDef)) {
+      match (definition) {
+        Analyzer::Definition::Record(recordDef) -> {
+          candidates = Mono::copyDefinitionIds(&recordDef.instanceMethods);
+        },
+        Analyzer::Definition::Enum(enumDef) -> {
+          candidates = Mono::copyDefinitionIds(&enumDef.instanceMethods);
+        },
+        _ -> {},
+      };
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < candidates.length()) {
+      let Option::SOME(candidateId) = candidates.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Option::SOME(Analyzer::Definition::Method(candidate)) = defStore.get(*candidateId)) {
+        if (candidate.name.raw() == traitMethodName.raw() && candidate.params.length() == traitMethodArity) {
+          return Option::SOME(*candidateId);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
   function receiverInstance(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1623,6 +1724,15 @@ export namespace Mono {
             let outputHirRef: &mut Hir::HirStore = outputHir;
             if (let Option::SOME(receiverNode) = outputHirRef.get(receiverId)) {
               receiverType = receiverNode.typeId;
+            }
+
+            // A call through a trait bound names the trait's declaration. The
+            // substituted receiver is concrete, so the call goes to that type's
+            // own implementation of the same method.
+            if (let Option::SOME(nominalDef) = Mono::receiverNominalDef(defStore, typeStore, receiverType)) {
+              if (let Option::SOME(implementation) = Mono::traitImplementationMethod(defStore, nominalDef, method)) {
+                method = implementation;
+              }
             }
 
             ownerInstance = Mono::receiverInstance(defStore, typeStore, state, receiverType);

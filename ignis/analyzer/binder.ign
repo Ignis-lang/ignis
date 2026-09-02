@@ -977,11 +977,36 @@ export namespace Analyzer {
       stateRef.diagnostics.push(diag);
     }
 
+    /// The written path of each bound on a generic parameter, last segment only:
+    /// a bound resolves by name the way `@implements(...)` does.
+    function typeParamBoundNames(generic: &Ast::GenericParam): Vector<String> {
+      let mut names: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < generic.bounds.length()) {
+        let Option::SOME(bound) = generic.bounds.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (bound.segments.length() == 0) {
+          index += 1;
+          continue;
+        }
+
+        if (let Option::SOME(lastSegment) = bound.segments.get(bound.segments.length() - 1)) {
+          names.push(lastSegment.clone());
+        }
+
+        index += 1;
+      }
+
+      return names;
+    }
+
     /// Allocate `Definition::TypeParam` sub-defs for each generic parameter in source order.
     ///
-    /// Bounds are intentionally ignored in this slice — only name and positional index are
-    /// recorded. A future slice attaches bound descriptors to `TypeParamDef`. Duplicate
-    /// type-parameter names emit a diagnostic and skip the duplicate.
+    /// Duplicate type-parameter names emit a diagnostic and skip the duplicate.
     function bindTypeParams(
       state: &mut Analyzer::Binder::BinderState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -1026,6 +1051,7 @@ export namespace Analyzer {
           name: sym,
           owner: owner,
           index: index as u32,
+          bounds: Analyzer::Binder::typeParamBoundNames(gp),
         };
         let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
         let tpId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::TypeParam(tpDef));

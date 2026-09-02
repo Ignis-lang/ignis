@@ -1823,6 +1823,7 @@ export namespace Analyzer {
         state,
         defStore,
         typeStore,
+        symbols,
         ma.span,
         receiverType,
         "method call target must be a non-generic record or enum",
@@ -1864,6 +1865,13 @@ export namespace Analyzer {
         Analyzer::Typecheck::recordCallTarget(state, callExprId, selected);
       } else if (let Option::SOME(single) = candidateSet.get(0)) {
         instanceOpt = Option::SOME(*single);
+
+        // A method reached through a trait bound is not in the receiver type's
+        // own method table, so lowering cannot find it by name. Recording the
+        // target is the only way it reaches the HIR.
+        if (let Option::SOME(Analyzer::Definition::Trait(_)) = defStore.get(owner.defId)) {
+          Analyzer::Typecheck::recordCallTarget(state, callExprId, *single);
+        }
       }
 
       let Option::SOME(methodDefId) = instanceOpt else {
@@ -6245,6 +6253,7 @@ export namespace Analyzer {
         state,
         defStore,
         typeStore,
+        symbols,
         ma.span,
         receiverType,
         "method call target must be a non-generic record or enum",
@@ -6713,6 +6722,7 @@ export namespace Analyzer {
         state,
         defStore,
         typeStore,
+        symbols,
         ma.span,
         receiverType,
         "method call target must be a non-generic record or enum",

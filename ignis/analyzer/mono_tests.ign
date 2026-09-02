@@ -3,6 +3,7 @@ import Test from "std::test";
 import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
+import Id from "@compiler::ids";
 import ParseOutput, Parser from "@compiler::parser";
 import Capture from "./capture";
 import Lowering from "./lowering";
@@ -137,6 +138,140 @@ function monoLeavesAModuleConstantOutOfTheEnvironment(): void {
   );
 
   Test::assert(monoContains(&rendered, "captures: 0"));
+}
+
+/// Analyze `source` and return the store it filled, for tests that inspect
+/// definitions directly rather than the rendered HIR.
+function monoAnalyzeDefinitions(source: str): Analyzer::DefinitionStore {
+  let file: SourceFile = SourceFile::create("mono_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(monoCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(monoCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(monoCountErrors(&output.diagnostics), 0);
+
+  return defStore;
+}
+
+/// The method the single trait in `defStore` declares at `methodIndex`.
+function monoTraitMethodAt(
+  defStore: &mut Analyzer::DefinitionStore,
+  methodIndex: u64,
+): Analyzer::DefinitionId {
+  let mut index: u64 = 0;
+
+  while (index < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+    if (let Option::SOME(Analyzer::Definition::Trait(trait_)) = defStore.get(defId)) {
+      let Option::SOME(methodId) = trait_.methods.get(methodIndex) else {
+        @panic("trait declares no method at that index");
+      };
+
+      return *methodId;
+    }
+
+    index += 1;
+  }
+
+  @panic("no trait definition found");
+}
+
+/// The first record in `defStore`, which every trait-bound test declares once.
+function monoOnlyRecordDef(defStore: &mut Analyzer::DefinitionStore): Analyzer::DefinitionId {
+  let mut index: u64 = 0;
+
+  while (index < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+    if (let Option::SOME(Analyzer::Definition::Record(_)) = defStore.get(defId)) {
+      return defId;
+    }
+
+    index += 1;
+  }
+
+  @panic("no record definition found");
+}
+
+/// Scenario: a call through a trait bound names the trait's declaration, and
+/// the re-dispatch resolves it to the implementing record's own method instead
+/// of leaving the trait stub as the callee.
+@test
+function monoRedispatchesATraitBoundCallToTheImplementation(): void {
+  let mut defStore: Analyzer::DefinitionStore = monoAnalyzeDefinitions(
+    "trait Weigh {\n  weigh(&self): i32;\n}\n\n@implements(Weigh)\nrecord Stone {\n  public grams: i32;\n\n  weigh(&self): i32 {\n    return self.grams * 2;\n  }\n}\n\nfunction total<T: Weigh>(value: &T): i32 {\n  return value.weigh();\n}\n",
+  );
+
+  let traitMethod: Analyzer::DefinitionId = monoTraitMethodAt(&mut defStore, 0);
+  let recordDef: Analyzer::DefinitionId = monoOnlyRecordDef(&mut defStore);
+
+  let Option::SOME(implementation) = Mono::traitImplementationMethod(&mut defStore, recordDef, traitMethod) else {
+    @panic("expected the record's own implementation");
+  };
+
+  Test::assertEq<boolean>(implementation.raw() == traitMethod.raw(), false);
+
+  let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(implementation) else {
+    @panic("expected a method definition");
+  };
+
+  Test::assertEq<u32>(method.owner.raw(), recordDef.raw());
+}
+
+/// Scenario: with two same-named overloads on the implementing record, the
+/// re-dispatch picks the one whose parameter count matches the trait's.
+@test
+function monoRedispatchPicksTheOverloadMatchingTheTraitArity(): void {
+  let mut defStore: Analyzer::DefinitionStore = monoAnalyzeDefinitions(
+    "trait Weigh {\n  weigh(&self): i32;\n}\n\n@implements(Weigh)\nrecord Stone {\n  public grams: i32;\n\n  weigh(&self): i32 {\n    return self.grams * 2;\n  }\n\n  weigh(&self, factor: i32): i32 {\n    return self.grams * factor;\n  }\n}\n\nfunction total<T: Weigh>(value: &T): i32 {\n  return value.weigh();\n}\n",
+  );
+
+  let traitMethod: Analyzer::DefinitionId = monoTraitMethodAt(&mut defStore, 0);
+  let recordDef: Analyzer::DefinitionId = monoOnlyRecordDef(&mut defStore);
+
+  let Option::SOME(implementation) = Mono::traitImplementationMethod(&mut defStore, recordDef, traitMethod) else {
+    @panic("expected the record's own implementation");
+  };
+
+  let Option::SOME(Analyzer::Definition::Method(method)) = defStore.get(implementation) else {
+    @panic("expected a method definition");
+  };
+
+  Test::assertEq<u64>(method.params.length(), 1);
+}
+
+/// Scenario: an ordinary method call already names a record's own method, so
+/// the re-dispatch leaves it alone instead of rewriting every method call.
+@test
+function monoRedispatchIgnoresANonTraitMethod(): void {
+  let mut defStore: Analyzer::DefinitionStore = monoAnalyzeDefinitions(
+    "record Stone {\n  public grams: i32;\n\n  weigh(&self): i32 {\n    return self.grams * 2;\n  }\n}\n",
+  );
+
+  let recordDef: Analyzer::DefinitionId = monoOnlyRecordDef(&mut defStore);
+
+  let Option::SOME(Analyzer::Definition::Record(record_)) = defStore.get(recordDef) else {
+    @panic("expected a record definition");
+  };
+
+  let Option::SOME(ownMethod) = record_.instanceMethods.get(0) else {
+    @panic("expected the record to declare a method");
+  };
+
+  Test::assertEq<boolean>(Mono::traitImplementationMethod(&mut defStore, recordDef, *ownMethod).isSome(), false);
 }
 
 /// Scenario: a method type parameter inferred from the argument reaches

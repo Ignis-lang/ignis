@@ -14551,6 +14551,57 @@ function typecheckGenericEnumInstanceDestructuringBindsSubstitutedPayload(): voi
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }
 
+/// Scenario: a bounded type parameter answers the methods its bound declares,
+/// so `value.weigh()` on a `T: Weigh` types against the trait's signature.
+@test
+function typecheckTraitBoundReceiverResolvesTheBoundMethod(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "trait Weigh {\n  weigh(&self): i32;\n}\n\n@implements(Weigh)\nrecord Stone {\n  public grams: i32;\n\n  weigh(&self): i32 {\n    return self.grams * 2;\n  }\n}\n\nfunction total<T: Weigh>(value: &T): i32 {\n  return value.weigh();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: a method the bound does not declare is still unknown on a type
+/// parameter, so the bound opens exactly what the trait names.
+@test
+function typecheckTraitBoundReceiverRejectsAMethodTheBoundDoesNotDeclare(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "trait Weigh {\n  weigh(&self): i32;\n}\n\nfunction total<T: Weigh>(value: &T): i32 {\n  return value.measure();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<boolean>(typecheckCountErrors(&output.diagnostics) > 0, true);
+}
+
+/// Scenario: an unbounded type parameter owns no methods at all, so the call
+/// stays the mismatch it was before bounds were read.
+@test
+function typecheckUnboundedTypeParameterReceiverStaysAnError(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function total<T>(value: &T): i32 {\n  return value.weigh();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<boolean>(typecheckCountErrors(&output.diagnostics) > 0, true);
+}
+
 /// Scenario: a method declaring its own type parameter infers it from the
 /// closure argument's return type, so the call types as that return type
 /// instead of comparing the argument against the bare parameter.
