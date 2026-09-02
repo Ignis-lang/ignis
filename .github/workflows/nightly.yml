@@ -206,13 +206,31 @@ jobs:
   # host-built compiler) and stage3 (built by stage2) must emit the same C.
   # Each self-compilation takes around fifteen minutes locally, so it runs here
   # once per green commit instead of on every pull request.
+  #
+  # Promotion flow
+  # --------------
+  # `scripts/bootstrap.sh gates` runs every stage and gate and writes
+  # build/bootstrap/promotion.json. A run is a *candidate* when every gate
+  # passes; the job's own red or green is that verdict, decided after the
+  # artifacts are uploaded so a failing run is still readable.
+  #
+  # The streak of consecutive candidate runs lives in the `promotion-streak.json`
+  # asset of the rolling nightly release: it is read at the start of the job and
+  # written back at the end. At three consecutive candidates the stage2 binary is
+  # published as `ignis-selfhost-linux-amd64`, and the streak keeps counting.
+  # A run that is not a candidate resets the streak to zero and uploads no
+  # selfhost binary, which leaves the last published one in place.
   bootstrap:
     name: Bootstrap ladder
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
+
+    # The job publishes the streak and the promoted binary to the nightly release.
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -254,13 +272,109 @@ jobs:
       - name: Add Ignis to PATH
         run: echo "${GITHUB_WORKSPACE}/target/debug" >> "$GITHUB_PATH"
 
-      - name: Run the bootstrap ladder
-        run: scripts/bootstrap.sh all
+      # Read before the gates run, which is also before the `release` job has
+      # replaced this release's assets. A missing asset is the first run.
+      - name: Read the promotion streak
+        id: streak
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
 
-      - name: Upload stage logs
+          PREVIOUS_STREAK=0
+
+          if gh release download nightly --pattern promotion-streak.json --dir streak 2>/dev/null; then
+            PREVIOUS_STREAK=$(jq -r '.streak // 0' streak/promotion-streak.json)
+          else
+            echo "No promotion-streak.json on the nightly release; starting from zero."
+          fi
+
+          echo "previous_streak=${PREVIOUS_STREAK}" >> "$GITHUB_OUTPUT"
+
+      # Every gate writes its own result and the report is produced even when
+      # gates fail, so this step is expected to succeed whatever the verdict is.
+      - name: Run the bootstrap gates
+        run: scripts/bootstrap.sh gates
+
+      - name: Upload the bootstrap report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bootstrap-logs
-          path: build/bootstrap/*/log.txt
+          name: bootstrap-report
+          path: |
+            build/bootstrap/report.md
+            build/bootstrap/promotion.json
+            build/bootstrap/parity.md
+            build/bootstrap/gates/
+            build/bootstrap/*/log.txt
+            build/bootstrap/*/log-host.txt
+            build/bootstrap/stage2/ignis
           if-no-files-found: ignore
+
+      - name: Publish the promotion state
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_STREAK: ${{ steps.streak.outputs.previous_streak }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f build/bootstrap/promotion.json ]; then
+            echo "No promotion.json; the gate run did not get far enough to decide anything."
+            exit 0
+          fi
+
+          CANDIDATE=$(jq -r '.candidate' build/bootstrap/promotion.json)
+          COMMIT=$(jq -r '.commit' build/bootstrap/promotion.json)
+
+          if [ "$CANDIDATE" = "true" ]; then
+            STREAK=$(( ${PREVIOUS_STREAK:-0} + 1 ))
+          else
+            STREAK=0
+          fi
+
+          echo "candidate=${CANDIDATE} streak=${STREAK}"
+
+          jq -n --arg commit "$COMMIT" --argjson streak "$STREAK" \
+            '{commit: $commit, streak: $streak}' > promotion-streak.json
+
+          if ! gh release view nightly >/dev/null 2>&1; then
+            echo "No nightly release to publish to; the state stays in this run's artifacts."
+            exit 0
+          fi
+
+          # Uploaded even on a reset: the streak file is state, not a promotion.
+          gh release upload nightly promotion-streak.json --clobber
+
+          if [ "$STREAK" -lt 3 ]; then
+            echo "Not official yet; the published selfhost binary is left as it is."
+            exit 0
+          fi
+
+          cp build/bootstrap/stage2/ignis ignis-selfhost-linux-amd64
+          sha256sum ignis-selfhost-linux-amd64 > ignis-selfhost-linux-amd64.sha256
+
+          gh release upload nightly \
+            ignis-selfhost-linux-amd64 \
+            ignis-selfhost-linux-amd64.sha256 \
+            --clobber
+
+      # Last, so that a failed run still leaves the report and the streak behind.
+      - name: Fail when the run is not a promotion candidate
+        run: |
+          set -euo pipefail
+
+          if [ ! -f build/bootstrap/promotion.json ]; then
+            echo "The gate run produced no promotion.json."
+            exit 1
+          fi
+
+          jq -r '.gates | to_entries[] | "\(.key): \(.value.status) — \(.value.summary)"' \
+            build/bootstrap/promotion.json
+
+          if [ "$(jq -r '.candidate' build/bootstrap/promotion.json)" != "true" ]; then
+            echo "Not a promotion candidate: at least one gate did not pass."
+            exit 1
+          fi
+
+          echo "Promotion candidate."
