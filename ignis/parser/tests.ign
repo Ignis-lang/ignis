@@ -3999,3 +3999,40 @@ function parserParsesPostfixStepOperators(): void {
     _ -> @panic("root is not a function"),
   };
 }
+
+/// Renders the single modifier of the function at `rootIndex`.
+function inlineModifierName(module: &Ast::Module, rootIndex: u64): String {
+  let functionId: Ast::ItemId = match (module.roots.get(rootIndex)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing inline function root"),
+  };
+
+  return match (expectItem(module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> match (functionItem.metadata.modifiers.get(0)) {
+      Option::SOME(modifier) -> Ast::Serializer::renderModifier(*modifier),
+      Option::NONE -> @panic("missing inline modifier"),
+    },
+    _ -> @panic("root is not a function"),
+  };
+}
+
+/// Scenario: `inline(always)` and `inline(never)` before `function` reach the
+/// declaration as their own modifiers, and a bare `inline` keeps the plain one.
+/// Spec: GRAMMAR.md `<inline-mode>`; parity fixture e2e_ok::inline_always.
+@test
+function parserParsesInlineModes(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_inline_modes.ign",
+    "inline(always) function a(): void {} inline(never) function b(): void {} inline function c(): void {}"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 3);
+
+  Test::assertEq<str>(inlineModifierName(&module, 0).toStr(), "inline(always)");
+  Test::assertEq<str>(inlineModifierName(&module, 1).toStr(), "inline(never)");
+  Test::assertEq<str>(inlineModifierName(&module, 2).toStr(), "inline");
+}

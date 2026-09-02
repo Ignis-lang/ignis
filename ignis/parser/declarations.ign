@@ -262,6 +262,47 @@ export namespace ParserDeclarations {
     return Option::SOME(Ast::copyGenericParams(&parameters));
   }
 
+  /// Reads the optional mode of an `inline` modifier whose keyword was just
+  /// consumed: `inline`, `inline(always)` or `inline(never)`.
+  ///
+  /// An unknown mode name is reported and the plain `inline` modifier is kept,
+  /// so the declaration around it still parses.
+  function parseInlineModifier(parser: &mut ParserShared::State): Ast::Modifier {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (parserRef.consumePunctuation(Punctuation::LEFT_PAREN).isNone()) {
+      return Ast::Modifier::Inline;
+    }
+
+    let Option::SOME(modeToken) = parserRef.expectIdentifier("expected inline mode") else {
+      return Ast::Modifier::Inline;
+    };
+
+    let mode: String = modeToken.lexemeString();
+    let known: boolean = mode.equals("always") || mode.equals("never");
+
+    if (!known) {
+      parserRef.emitDiagnostic(
+        modeToken.span,
+        DiagnosticCode::UNEXPECTED_TOKEN,
+        "unexpected inline mode",
+        "expected 'always' or 'never'",
+      );
+    }
+
+    let _closing: Option<Token> = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after inline mode");
+
+    if (mode.equals("always")) {
+      return Ast::Modifier::InlineAlways;
+    }
+
+    if (mode.equals("never")) {
+      return Ast::Modifier::InlineNever;
+    }
+
+    return Ast::Modifier::Inline;
+  }
+
   function consumeLeadingModifiers(
     parser: &mut ParserShared::State,
     metadata: &mut Ast::Metadata
@@ -288,7 +329,7 @@ export namespace ParserDeclarations {
     }
 
     if (parserRef.consumeKeyword(Keyword::INLINE).isSome()) {
-      metadataRef.modifiers.push(Ast::Modifier::Inline);
+      metadataRef.modifiers.push(ParserDeclarations::parseInlineModifier(parserRef));
       ParserDeclarations::consumeLeadingModifiers(parserRef, metadataRef);
       return;
     }
