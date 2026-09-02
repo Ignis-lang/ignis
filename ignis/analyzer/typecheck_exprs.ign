@@ -217,6 +217,13 @@ export namespace Analyzer {
           return Option::SOME(booleanType);
         }
 
+        // Two atoms compare by their interned identity.
+        if (Analyzer::Typecheck::typeIdIsAtom(typeStore, equalityLeftResolved.typeId) && Analyzer::Typecheck::typeIdIsAtom(typeStore, equalityRightResolved.typeId)) {
+          let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
+          Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
+          return Option::SOME(booleanType);
+        }
+
         Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
         return Option::NONE;
       }
@@ -558,6 +565,60 @@ export namespace Analyzer {
       };
 
       return referentOpt;
+    }
+
+    /// Typechecks `operand++` and `operand--`.
+    ///
+    /// The operand must be a mutable place of numeric type; the expression
+    /// takes the operand's type, mirroring the reference analyzer.
+    function checkPostfixStep(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+      operandId: Ast::ExpressionId,
+      span: SourceSpan,
+    ): Option<Analyzer::TypeId> {
+      let operandTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        operandId,
+      );
+      let Option::SOME(operandType) = operandTypeOpt else {
+        return Option::NONE;
+      };
+
+      if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, operandId)) {
+        Analyzer::Typecheck::emitDiagnostic(
+          state,
+          span,
+          DiagnosticCode::MUTABILITY_VIOLATION,
+          "cannot assign to an immutable place",
+        );
+        return Option::NONE;
+      }
+
+      Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, operandId);
+
+      if (!Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, operandType)) {
+        Analyzer::Typecheck::emitDiagnostic(
+          state,
+          span,
+          DiagnosticCode::TYPE_MISMATCH,
+          "postfix step requires a numeric operand",
+        );
+        return Option::NONE;
+      }
+
+      Analyzer::Typecheck::recordExprType(state, exprId, operandType);
+      return Option::SOME(operandType);
     }
 
     /// Typechecks an assignment whose target names a place: `*x = v`,
@@ -4018,14 +4079,10 @@ export namespace Analyzer {
           return Option::SOME(elementType);
         },
         Ast::Expression::Node::PostfixIncrement(value) -> {
-          let _operandType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "postfix increment");
-          return Option::NONE;
+          return Analyzer::Typecheck::checkPostfixStep(state, defStore, typeStore, symbols, module, resolvedBodies, exprId, value.operand, value.span);
         },
         Ast::Expression::Node::PostfixDecrement(value) -> {
-          let _operandType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
-          Analyzer::Typecheck::emitUnsupported(state, value.span, "postfix decrement");
-          return Option::NONE;
+          return Analyzer::Typecheck::checkPostfixStep(state, defStore, typeStore, symbols, module, resolvedBodies, exprId, value.operand, value.span);
         },
         Ast::Expression::Node::MemberAccess(value) -> {
           return Analyzer::Typecheck::checkMemberAccessExpr(
@@ -4466,6 +4523,17 @@ export namespace Analyzer {
 
       return match (typeNode) {
         Analyzer::Type::CHAR -> true,
+        _ -> false,
+      };
+    }
+
+    function typeIdIsAtom(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+      let Option::SOME(typeNode) = typeStore.get(typeId) else {
+        return false;
+      };
+
+      return match (typeNode) {
+        Analyzer::Type::ATOM -> true,
         _ -> false,
       };
     }
@@ -6888,6 +6956,7 @@ export namespace Analyzer {
         Ast::Expression::LiteralValue::Float(_) -> false,
         Ast::Expression::LiteralValue::Boolean(_) -> false,
         Ast::Expression::LiteralValue::Character(_) -> false,
+        Ast::Expression::LiteralValue::Atom(_) -> false,
         Ast::Expression::LiteralValue::Null -> false,
       };
     }

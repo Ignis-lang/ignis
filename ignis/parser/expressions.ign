@@ -638,6 +638,26 @@ export namespace ParserExpressions {
       });
     }
 
+    // `:name` is an atom literal. The lexer emits `::` as its own token, so a
+    // path separator never reaches here.
+    if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::COLON) {
+      let nameToken: Token = parserRef.tokens.peekNth(1);
+
+      if (nameToken.kindValue() == TokenKind::IDENTIFIER) {
+        parserRef.bump();
+        let name: Token = parserRef.bump();
+        let span: SourceSpan = ParserShared::mergeSpans(token.span, name.span);
+        let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
+          span: span,
+          value: Ast::Expression::LiteralValue::Atom(name.lexemeString()),
+        }));
+        return Option::SOME(ParsedExpression {
+          id: expressionId,
+          span: span,
+        });
+      }
+    }
+
     if (token.kindValue() == TokenKind::KEYWORD && token.keywordValue() == Keyword::NULL) {
       parserRef.bump();
       let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::Literal(Ast::Expression::Literal {
@@ -2477,6 +2497,38 @@ export namespace ParserExpressions {
       if (parserRef.atPunctuation(Punctuation::LEFT_BRACKET)) {
         let access = ParserExpressions::parseIndexSuffix(parserRef, expression)!;
         expression = access;
+        continue;
+      }
+
+      if (parserRef.atPunctuation(Punctuation::INCREMENT)) {
+        let operatorToken: Token = parserRef.bump();
+        let currentExpressionId: Ast::ExpressionId = expression.id;
+        let currentExpressionSpan: SourceSpan = expression.span;
+        let span: SourceSpan = ParserShared::mergeSpans(currentExpressionSpan, operatorToken.span);
+        let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::PostfixIncrement(Ast::Expression::PostfixIncrement {
+          span: span,
+          operand: currentExpressionId,
+        }));
+        expression = ParsedExpression {
+          id: expressionId,
+          span: span,
+        };
+        continue;
+      }
+
+      if (parserRef.atPunctuation(Punctuation::DECREMENT)) {
+        let operatorToken: Token = parserRef.bump();
+        let currentExpressionId: Ast::ExpressionId = expression.id;
+        let currentExpressionSpan: SourceSpan = expression.span;
+        let span: SourceSpan = ParserShared::mergeSpans(currentExpressionSpan, operatorToken.span);
+        let expressionId: Ast::ExpressionId = parserRef.module.addExpression(Ast::Expression::Node::PostfixDecrement(Ast::Expression::PostfixDecrement {
+          span: span,
+          operand: currentExpressionId,
+        }));
+        expression = ParsedExpression {
+          id: expressionId,
+          span: span,
+        };
         continue;
       }
 

@@ -658,3 +658,27 @@ function loweringEnumVariantConstruction(): void {
 
   Test::assertSnapshot("lowering-enum-variant-construction", rendered.toStr());
 }
+
+/// `i++` and `i--` lower to a compound assignment of one, so a C-style `for`
+/// header reaches HIR as an ordinary counted loop.
+/// Spec: IGN-172 — postfix step operators.
+@test
+function loweringPostfixStepIsCompoundAssignment(): void {
+  let rendered: String = loweringRender(
+    "function count(): i32 {\n  let mut total: i32 = 0;\n  for (let i = 0; i < 3; i++) {\n    total = total + i;\n  }\n  for (let j = 3; j > 0; j--) {\n    total = total + j;\n  }\n  return total;\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-postfix-step", rendered.toStr());
+}
+
+/// An atom literal lowers to `Literal(Atom(...))` with the same interned
+/// symbol at every occurrence, in expression and in pattern position.
+/// Spec: IGN-172 — atom literals.
+@test
+function loweringAtomLiteralsInternOnce(): void {
+  let rendered: String = loweringRender(
+    "function main(): i32 {\n  let a: atom = :ok;\n  return match (a) {\n    :ok -> 1,\n    _ -> 0,\n  };\n}\n",
+  );
+
+  Test::assertSnapshot("lowering-atom-literal", rendered.toStr());
+}
