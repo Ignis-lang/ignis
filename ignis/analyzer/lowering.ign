@@ -276,6 +276,32 @@ export namespace Lowering {
     return Lowering::voidType(typeStore);
   }
 
+  /// The type the checker settled on for the binding site `patternId`.
+  function lookupLocalBindingType(
+    typecheck: &Analyzer::Typecheck::TypecheckOutput,
+    patternId: Ast::PatternId,
+  ): Option<Analyzer::TypeId> {
+    let mut index: u64 = 0;
+
+    while (index < typecheck.localTypes.patterns.length()) {
+      let Option::SOME(candidate) = typecheck.localTypes.patterns.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (*candidate == patternId.raw()) {
+        return match (typecheck.localTypes.typeIds.get(index)) {
+          Option::SOME(typeId) -> Option::SOME(*typeId),
+          Option::NONE -> Option::NONE,
+        };
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
   /// Single fallback for every construct outside this slice. The selfhost
   /// type model has no error type, so the node types as `void`.
   function errorNode(
@@ -3633,6 +3659,14 @@ export namespace Lowering {
     if (let Option::SOME(valueId) = value) {
       init = Option::SOME(Lowering::lowerExpr(defStore, typeStore, symbols, module, output, locals, hir, valueId));
       bindingType = Lowering::exprTypeOrVoid(typeStore, &output.typecheck, valueId);
+    }
+
+    // The slot holds what the binding was declared to hold, which is not the
+    // initializer's own type when the initializer diverges (`let x: u64 =
+    // @panic(...)`) and is not known here at all for a `let mut x;` waiting
+    // on its first assignment.
+    if (let Option::SOME(settled) = Lowering::lookupLocalBindingType(&output.typecheck, patternId)) {
+      bindingType = settled;
     }
 
     let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
