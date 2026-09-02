@@ -1,0 +1,220 @@
+import Test from "std::test";
+import Vector from "std::vector";
+
+import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import ParseOutput, Parser from "@compiler::parser";
+import Borrowck from "@compiler::analyzer::borrowck";
+import Lowering from "@compiler::analyzer::lowering";
+import Lir from "./mod";
+import LirLowering from "./lowering";
+
+function lirCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function lirDefinitionName(
+  defStore: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+  defId: Analyzer::DefinitionId,
+): String {
+  let Option::SOME(definition) = defStore.get(defId) else {
+    return String::create("<unknown>");
+  };
+
+  return match (symbols.resolve(definition.name())) {
+    Option::SOME(text) -> String::create(text),
+    Option::NONE -> String::create("<unknown>"),
+  };
+}
+
+/// Name of the definition a local slot belongs to, or its slot number when
+/// the slot is synthetic and owns no definition.
+function lirLocalName(
+  defStore: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+  function_: &Lir::FunctionLir,
+  local: Lir::LocalId,
+): String {
+  let Option::SOME(data) = function_.locals.get(local.raw() as u64) else {
+    return String::create("<missing>");
+  };
+
+  let Option::SOME(defId) = data.defId else {
+    return `local${local.raw()}`;
+  };
+
+  return lirDefinitionName(defStore, symbols, defId);
+}
+
+function lirTerminatorLabel(terminator: &Lir::Terminator): str {
+  return match (terminator) {
+    Lir::Terminator::Goto(_) -> "goto",
+    Lir::Terminator::Branch(_) -> "branch",
+    Lir::Terminator::Return(_) -> "return",
+    Lir::Terminator::Unreachable -> "unreachable",
+  };
+}
+
+/// Renders the drop placement of one program: every block that lowering
+/// produced, the drops it carries in order, and how control leaves it.
+///
+/// Only drop instructions are printed. The rest of the instruction stream is
+/// covered by the codegen tests and would make every expectation here churn
+/// with unrelated lowering changes, while the block labels and terminators
+/// already pin down where each drop landed.
+function lirRenderDrops(
+  defStore: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+  program: &Lir::LirProgram,
+): String {
+  let mut rendered: String = String::create("");
+  let mut functionIndex: u64 = 0;
+
+  while (functionIndex < program.functions.length()) {
+    let Option::SOME(defId) = program.functions.defAt(functionIndex) else {
+      functionIndex += 1;
+      continue;
+    };
+    let Option::SOME(function_) = program.functions.functionAt(functionIndex) else {
+      functionIndex += 1;
+      continue;
+    };
+
+    rendered.pushStr("fn ");
+    rendered.pushStr(lirDefinitionName(defStore, symbols, *defId).toStr());
+    rendered.pushStr("\n");
+
+    let mut blockIndex: u64 = 0;
+
+    while (blockIndex < function_.blocks.length()) {
+      let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+        blockIndex += 1;
+        continue;
+      };
+
+      rendered.pushStr("  ");
+      rendered.pushStr(block.label.toStr());
+      rendered.pushStr(":\n");
+
+      let mut instrIndex: u64 = 0;
+
+      while (instrIndex < block.instructions.length()) {
+        if (let Option::SOME(instr) = block.instructions.get(instrIndex)) {
+          match (instr) {
+            Lir::Instr::Drop(dropInstr) -> {
+              let name: String = lirLocalName(defStore, symbols, function_, dropInstr.local);
+
+              rendered.pushStr("    drop ");
+              rendered.pushStr(name.toStr());
+              rendered.pushStr("\n");
+            },
+            Lir::Instr::DropClosure(_) -> {
+              rendered.pushStr("    drop-closure\n");
+            },
+            _ -> {},
+          };
+        }
+
+        instrIndex += 1;
+      }
+
+      rendered.pushStr("    -> ");
+      rendered.pushStr(lirTerminatorLabel(&block.terminator));
+      rendered.pushStr("\n");
+
+      blockIndex += 1;
+    }
+
+    functionIndex += 1;
+  }
+
+  return rendered;
+}
+
+/// Runs the whole front end over `source` and renders where LIR lowering
+/// placed the drops the ownership walk scheduled.
+///
+/// Parse and analyzer errors are rejected: a fixture the rest of the pipeline
+/// refuses lowers to something whose drop placement means nothing.
+function lirRenderLoweredDrops(source: str): String {
+  let file: SourceFile = SourceFile::create("lowering_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(lirCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(lirCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(lirCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &hir,
+  );
+
+  Test::assertEq<u64>(lirCountErrors(&checked.diagnostics), 0);
+
+  let constValues: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap {
+    defIdRaws: Vector::new<u32>(),
+    values: Vector::new<Analyzer::ConstEval::ConstValue>(),
+  };
+
+  let lowered: LirLowering::LowerModuleResult = LirLowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &hir,
+    &checked.dropSchedules,
+    &constValues,
+  );
+
+  return lirRenderDrops(&defStore, &symbols, &lowered.program);
+}
+
+/// Scenario: an owning local that falls out of scope, one whose value moved
+/// into a call, and an early return out of an `if`.
+/// Spec: IGN-39 — scope-end, exit and function-end drops reach the LIR.
+@test
+function lirLoweringEmitsScheduledDrops(): void {
+  let rendered: String = lirRenderLoweredDrops(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction consume(value: Owned): u32 {\n  return value.id;\n}\n\nfunction run(flag: boolean): u32 {\n  let kept: Owned = Owned { id: 1 };\n  let moved: Owned = Owned { id: 2 };\n  let taken: u32 = consume(moved);\n\n  if (flag) {\n    return taken;\n  }\n\n  return kept.id + taken;\n}\n",
+  );
+
+  Test::assertSnapshot("lir-lowering-scheduled-drops", rendered.toStr());
+}

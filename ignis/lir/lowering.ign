@@ -28,6 +28,12 @@ export namespace LirLowering {
     /// Definitions whose local slot holds a pointer to the original place
     /// rather than a copy: the by-mutable-reference captures of a thunk.
     public byrefCaptureRaws: Vector<u32>;
+    /// Locals initialized from a closure literal, so a scheduled drop of one
+    /// tears the environment down instead of dropping the value struct.
+    /// Parallel to `closureLocalTypeRaws` and `closureLocalHeap`.
+    public closureLocalDefRaws: Vector<u32>;
+    public closureLocalTypeRaws: Vector<u32>;
+    public closureLocalHeap: Vector<boolean>;
     /// Evaluated module constants, so a reference to one folds into a LIR
     /// constant instead of naming a global the emitter has no definition for.
     public constValues: Analyzer::ConstEval::ConstValueMap;
@@ -42,6 +48,9 @@ export namespace LirLowering {
         breakBlockRaws: Vector::new<u32>(),
         continueBlockRaws: Vector::new<u32>(),
         byrefCaptureRaws: Vector::new<u32>(),
+        closureLocalDefRaws: Vector::new<u32>(),
+        closureLocalTypeRaws: Vector::new<u32>(),
+        closureLocalHeap: Vector::new<boolean>(),
         constValues: LirLowering::copyConstValueMap(constValues),
       };
     }
@@ -326,6 +335,194 @@ export namespace LirLowering {
     stateRef.byrefCaptureRaws.push(defId.raw());
   }
 
+  /// Records that a local holds a closure value, with the environment layout
+  /// a later drop of it needs.
+  function markClosureLocal(
+    state: &mut LirLowering::LowerState,
+    defId: Analyzer::DefinitionId,
+    closureType: Analyzer::TypeId,
+    heapAllocated: boolean,
+  ): void {
+    let mut stateRef: &mut LirLowering::LowerState = state;
+
+    stateRef.closureLocalDefRaws.push(defId.raw());
+    stateRef.closureLocalTypeRaws.push(closureType.raw());
+    stateRef.closureLocalHeap.push(heapAllocated);
+  }
+
+  function closureLocalIndex(
+    state: &mut LirLowering::LowerState,
+    defId: Analyzer::DefinitionId,
+  ): Option<u64> {
+    let mut index: u64 = 0;
+
+    while (index < state.closureLocalDefRaws.length()) {
+      if (let Option::SOME(raw) = state.closureLocalDefRaws.get(index)) {
+        if (*raw == defId.raw()) {
+          return Option::SOME(index);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Emits the drop of one scheduled local. Mirrors the oracle's
+  /// `emit_drop_for_def`: a definition with no slot in this function has
+  /// nothing to drop, a closure local tears its environment down, and every
+  /// other local drops in place.
+  function emitDropForDef(
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    defId: Analyzer::DefinitionId,
+  ): void {
+    let Option::SOME(slot) = LirLowering::lookupLocal(state, defId) else {
+      return;
+    };
+
+    if (let Option::SOME(index) = LirLowering::closureLocalIndex(state, defId)) {
+      let Option::SOME(closureTypeRaw) = state.closureLocalTypeRaws.get(index) else {
+        return;
+      };
+      let Option::SOME(heapAllocated) = state.closureLocalHeap.get(index) else {
+        return;
+      };
+
+      let closureType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*closureTypeRaw);
+      let mut slotType: Analyzer::TypeId = closureType;
+
+      if (let Option::SOME(localType) = function_.localType(slot)) {
+        slotType = localType;
+      }
+
+      let closureTemp: Lir::TempId = LirLowering::freshTemp(function_, slotType, SourceSpan::new("", 0, 0));
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+        dest: closureTemp,
+        source: slot,
+      }));
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::DropClosure(Lir::InstrDropClosure {
+        closure: Lir::Operand::Temp(closureTemp),
+        closureType: closureType,
+        heapAllocated: *heapAllocated,
+      }));
+
+      return;
+    }
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Drop(Lir::InstrDrop {
+      local: slot,
+    }));
+  }
+
+  function emitDropList(
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    drops: &Vector<Analyzer::DefinitionId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < drops.length()) {
+      if (let Option::SOME(defId) = drops.get(index)) {
+        LirLowering::emitDropForDef(function_, state, *defId);
+      }
+
+      index += 1;
+    }
+  }
+
+  function emitScopeEndDrops(
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    block: Hir::HirId,
+  ): void {
+    let drops: Vector<Analyzer::DefinitionId> = dropSchedules.scopeEndDrops(block);
+    LirLowering::emitDropList(function_, state, &drops);
+  }
+
+  /// Drops the pattern bindings an arm owns, at the end of that arm. Kept
+  /// apart from `emitScopeEndDrops` because a block-bodied arm already drains
+  /// the block-scope list for its own node.
+  function emitMatchArmDrops(
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    body: Hir::HirId,
+  ): void {
+    let drops: Vector<Analyzer::DefinitionId> = dropSchedules.matchArmDrops(body);
+    LirLowering::emitDropList(function_, state, &drops);
+  }
+
+  function emitOverwriteDrops(
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    assign: Hir::HirId,
+  ): void {
+    let drops: Vector<Analyzer::DefinitionId> = dropSchedules.overwriteDrops(assign);
+    LirLowering::emitDropList(function_, state, &drops);
+  }
+
+  function emitExitDrops(
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    key: &Hir::ExitKey,
+  ): void {
+    let drops: Vector<Analyzer::DefinitionId> = dropSchedules.exitDrops(key);
+    LirLowering::emitDropList(function_, state, &drops);
+  }
+
+  function emitDeferBodies(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    bodies: &Vector<Hir::HirId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < bodies.length()) {
+      if (let Option::SOME(bodyId) = bodies.get(index)) {
+        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *bodyId);
+      }
+
+      index += 1;
+    }
+  }
+
+  function emitScopeEndDefers(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    block: Hir::HirId,
+  ): void {
+    let bodies: Vector<Hir::HirId> = dropSchedules.scopeEndDefers(block);
+    LirLowering::emitDeferBodies(defStore, typeStore, hirStore, dropSchedules, function_, state, &bodies);
+  }
+
+  function emitExitDefers(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    key: &Hir::ExitKey,
+  ): void {
+    let bodies: Vector<Hir::HirId> = dropSchedules.exitDefers(key);
+    LirLowering::emitDeferBodies(defStore, typeStore, hirStore, dropSchedules, function_, state, &bodies);
+  }
+
   /// The pointee of a pointer type, or the type itself when it is not one.
   function pointeeOrSelf(
     typeStore: &mut Analyzer::TypeStore,
@@ -478,6 +675,7 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     hirId: Hir::HirId,
@@ -547,14 +745,14 @@ export namespace LirLowering {
         // A constant without a folded value still has its initializer; the
         // oracle lowers that expression at the use site.
         if (let Option::SOME(initId) = hirStore.constantInit(defId)) {
-          return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, initId);
+          return LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, initId);
         }
 
         return Lir::Operand::GlobalRef(defId);
       },
       Hir::HirKind::Binary(binaryNode) -> {
-        let left: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, binaryNode.left);
-        let right: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, binaryNode.right);
+        let left: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, binaryNode.left);
+        let right: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, binaryNode.right);
         let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
@@ -572,7 +770,7 @@ export namespace LirLowering {
 
         while (argIndex < call.args.length()) {
           if (let Option::SOME(argId) = call.args.get(argIndex)) {
-            args.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *argId));
+            args.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId));
           }
 
           argIndex += 1;
@@ -612,7 +810,13 @@ export namespace LirLowering {
         LirLowering::registerLocal(state, letNode.name, slot);
 
         if (let Option::SOME(valueId) = letNode.value) {
-          let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, valueId);
+          if (let Option::SOME(valueNode) = hirStore.get(valueId)) {
+            if (let Hir::HirKind::Closure(closureNode) = &valueNode.kind) {
+              LirLowering::markClosureLocal(state, letNode.name, declaredType, closureNode.escapes);
+            }
+          }
+
+          let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId);
 
           LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
             dest: slot,
@@ -627,20 +831,29 @@ export namespace LirLowering {
 
         while (statementIndex < block.statements.length()) {
           if (let Option::SOME(statementId) = block.statements.get(statementIndex)) {
-            let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *statementId);
+            let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *statementId);
           }
 
           statementIndex += 1;
         }
 
+        let mut blockValue: Lir::Operand = Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+
         if (let Option::SOME(valueId) = block.expression) {
-          return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, valueId);
+          blockValue = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId);
         }
 
-        return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
+        // An early exit already unwound this scope on its own path, so the
+        // scope end only owes drops when control still reaches it.
+        if (!state.terminated) {
+          LirLowering::emitScopeEndDefers(defStore, typeStore, hirStore, dropSchedules, function_, state, hirId);
+          LirLowering::emitScopeEndDrops(dropSchedules, function_, state, hirId);
+        }
+
+        return blockValue;
       },
       Hir::HirKind::ExpressionStatement(innerId) -> {
-        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, innerId);
+        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, innerId);
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
@@ -648,15 +861,23 @@ export namespace LirLowering {
         let mut returned: Option<Lir::Operand> = Option::NONE;
 
         if (let Option::SOME(valueId) = valueOpt) {
-          returned = Option::SOME(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, valueId));
+          returned = Option::SOME(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, valueId));
         }
+
+        // The returned value is already evaluated, so unwinding here cannot
+        // drop something the return still reads. Ownership of the value moves
+        // to the caller, which is why it is never on this list.
+        let returnKey: Hir::ExitKey = Hir::ExitKey::Return(hirId);
+
+        LirLowering::emitExitDefers(defStore, typeStore, hirStore, dropSchedules, function_, state, &returnKey);
+        LirLowering::emitExitDrops(dropSchedules, function_, state, &returnKey);
 
         LirLowering::terminate(function_, state, Lir::Terminator::Return(returned));
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::Unary(unaryNode) -> {
-        let operand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, unaryNode.operand);
+        let operand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, unaryNode.operand);
         let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::UnaryOp(Lir::InstrUnaryOp {
@@ -668,7 +889,7 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::Cast(castNode) -> {
-        let source: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, castNode.expression);
+        let source: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, castNode.expression);
         let dest: Lir::TempId = LirLowering::freshTemp(function_, castNode.target, nodeSpan);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::Cast(Lir::InstrCast {
@@ -680,7 +901,7 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::BitCast(castNode) -> {
-        let source: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, castNode.expression);
+        let source: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, castNode.expression);
         let dest: Lir::TempId = LirLowering::freshTemp(function_, castNode.target, nodeSpan);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::BitCast(Lir::InstrCast {
@@ -692,7 +913,7 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::Dereference(innerId) -> {
-        let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, innerId);
+        let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, innerId);
         let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
@@ -703,8 +924,8 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::Index(indexNode) -> {
-        let base: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, indexNode.base);
-        let indexOperand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, indexNode.index);
+        let base: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, indexNode.base);
+        let indexOperand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, indexNode.index);
 
         let mut pointerTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
         let elementPtrType: Analyzer::TypeId = pointerTypeStoreRef.pointer(nodeType);
@@ -748,7 +969,7 @@ export namespace LirLowering {
 
         while (elementIndex < elements.length()) {
           if (let Option::SOME(elementId) = elements.get(elementIndex)) {
-            elementOperands.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *elementId));
+            elementOperands.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *elementId));
           }
 
           elementIndex += 1;
@@ -780,8 +1001,8 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::MakeSlice(sliceNode) -> {
-        let data: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, sliceNode.data);
-        let len: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, sliceNode.len);
+        let data: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, sliceNode.data);
+        let len: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, sliceNode.len);
         let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::MakeSlice(Lir::InstrMakeSlice {
@@ -834,7 +1055,7 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::BuiltinLoad(loadNode) -> {
-        let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, loadNode.ptr);
+        let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, loadNode.ptr);
         let dest: Lir::TempId = LirLowering::freshTemp(function_, loadNode.ty, nodeSpan);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::BuiltinLoad(Lir::InstrBuiltinLoad {
@@ -846,8 +1067,8 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::BuiltinStore(storeNode) -> {
-        let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, storeNode.ptr);
-        let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, storeNode.value);
+        let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, storeNode.ptr);
+        let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, storeNode.value);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::BuiltinStore(Lir::InstrBuiltinStore {
           ptr: pointer,
@@ -858,8 +1079,8 @@ export namespace LirLowering {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::BuiltinHash(hashNode) -> {
-        let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hashNode.value);
-        let hasher: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hashNode.hasher);
+        let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, hashNode.value);
+        let hasher: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, hashNode.hasher);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::BuiltinHash(Lir::InstrBuiltinHash {
           value: value,
@@ -870,8 +1091,8 @@ export namespace LirLowering {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::BuiltinEq(eqNode) -> {
-        let left: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, eqNode.left);
-        let right: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, eqNode.right);
+        let left: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, eqNode.left);
+        let right: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, eqNode.right);
         let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
 
         let kind: Lir::BuiltinEqKind = match (&eqNode.kind) {
@@ -892,7 +1113,7 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
-        let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, dropNode.ptr);
+        let pointer: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, dropNode.ptr);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::DropInPlace(Lir::InstrDropInPlace {
           ptr: pointer,
@@ -912,7 +1133,7 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::TypeOf(innerId) -> {
-        let source: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, innerId);
+        let source: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, innerId);
         let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::TypeIdOf(Lir::InstrTypeIdOf {
@@ -955,7 +1176,7 @@ export namespace LirLowering {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::FieldAccess(fieldNode) -> {
-        let basePtr: Lir::Operand = LirLowering::lowerBasePtr(defStore, typeStore, hirStore, function_, state, fieldNode.base);
+        let basePtr: Lir::Operand = LirLowering::lowerBasePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, fieldNode.base);
 
         let mut fieldPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
         let fieldPtrType: Analyzer::TypeId = fieldPtrTypeStoreRef.pointer(nodeType);
@@ -978,7 +1199,7 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::Reference(referenceNode) -> {
-        return LirLowering::lowerBasePtr(defStore, typeStore, hirStore, function_, state, referenceNode.expression);
+        return LirLowering::lowerBasePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, referenceNode.expression);
       },
       Hir::HirKind::RecordInit(recordNode) -> {
         let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
@@ -990,7 +1211,7 @@ export namespace LirLowering {
           if (let Option::SOME(field) = recordNode.fields.get(fieldIndex)) {
             fieldOperands.push(Lir::InitRecordField {
               fieldIndex: field.fieldIndex,
-              value: LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, field.value),
+              value: LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, field.value),
             });
           }
 
@@ -1030,7 +1251,7 @@ export namespace LirLowering {
 
         while (payloadIndex < variantNode.payload.length()) {
           if (let Option::SOME(payloadId) = variantNode.payload.get(payloadIndex)) {
-            payloadOperands.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *payloadId));
+            payloadOperands.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *payloadId));
           }
 
           payloadIndex += 1;
@@ -1066,14 +1287,14 @@ export namespace LirLowering {
         let mut callArgs: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
 
         if (let Option::SOME(receiverId) = methodNode.receiver) {
-          callArgs.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, receiverId));
+          callArgs.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, receiverId));
         }
 
         let mut argIndex: u64 = 0;
 
         while (argIndex < methodNode.args.length()) {
           if (let Option::SOME(argId) = methodNode.args.get(argIndex)) {
-            callArgs.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *argId));
+            callArgs.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId));
           }
 
           argIndex += 1;
@@ -1100,14 +1321,14 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirKind::CallClosure(closureCallNode) -> {
-        let closure: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, closureCallNode.callee);
+        let closure: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, closureCallNode.callee);
 
         let mut closureArgs: Vector<Lir::Operand> = Vector::new<Lir::Operand>();
         let mut argIndex: u64 = 0;
 
         while (argIndex < closureCallNode.args.length()) {
           if (let Option::SOME(argId) = closureCallNode.args.get(argIndex)) {
-            closureArgs.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *argId));
+            closureArgs.push(LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *argId));
           }
 
           argIndex += 1;
@@ -1141,21 +1362,21 @@ export namespace LirLowering {
         }
 
         if (let Option::SOME(initId) = hirStore.constantInit(defId)) {
-          return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, initId);
+          return LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, initId);
         }
 
         return Lir::Operand::GlobalRef(defId);
       },
       Hir::HirKind::Assign(assignNode) -> {
-        LirLowering::lowerAssign(defStore, typeStore, hirStore, function_, state, &assignNode);
+        LirLowering::lowerAssign(defStore, typeStore, hirStore, dropSchedules, function_, state, hirId, &assignNode);
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::If(ifNode) -> {
-        return LirLowering::lowerIf(defStore, typeStore, hirStore, function_, state, &ifNode, nodeType, nodeSpan);
+        return LirLowering::lowerIf(defStore, typeStore, hirStore, dropSchedules, function_, state, &ifNode, nodeType, nodeSpan);
       },
       Hir::HirKind::Loop(loopNode) -> {
-        LirLowering::lowerLoop(defStore, typeStore, hirStore, function_, state, &loopNode);
+        LirLowering::lowerLoop(defStore, typeStore, hirStore, dropSchedules, function_, state, &loopNode);
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
@@ -1164,6 +1385,11 @@ export namespace LirLowering {
 
         if (breakLength > 0) {
           if (let Option::SOME(targetRaw) = state.breakBlockRaws.get(breakLength - 1)) {
+            let breakKey: Hir::ExitKey = Hir::ExitKey::Break(hirId);
+
+            LirLowering::emitExitDefers(defStore, typeStore, hirStore, dropSchedules, function_, state, &breakKey);
+            LirLowering::emitExitDrops(dropSchedules, function_, state, &breakKey);
+
             LirLowering::terminate(function_, state, Lir::Terminator::Goto(Id::fromRaw<Lir::BlockTag>(*targetRaw)));
           }
         }
@@ -1175,6 +1401,11 @@ export namespace LirLowering {
 
         if (continueLength > 0) {
           if (let Option::SOME(targetRaw) = state.continueBlockRaws.get(continueLength - 1)) {
+            let continueKey: Hir::ExitKey = Hir::ExitKey::Continue(hirId);
+
+            LirLowering::emitExitDefers(defStore, typeStore, hirStore, dropSchedules, function_, state, &continueKey);
+            LirLowering::emitExitDrops(dropSchedules, function_, state, &continueKey);
+
             LirLowering::terminate(function_, state, Lir::Terminator::Goto(Id::fromRaw<Lir::BlockTag>(*targetRaw)));
           }
         }
@@ -1182,10 +1413,10 @@ export namespace LirLowering {
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
       Hir::HirKind::Match(matchNode) -> {
-        return LirLowering::lowerMatch(defStore, typeStore, hirStore, function_, state, &matchNode, nodeType, nodeSpan);
+        return LirLowering::lowerMatch(defStore, typeStore, hirStore, dropSchedules, function_, state, &matchNode, nodeType, nodeSpan);
       },
       Hir::HirKind::LetElse(letElseNode) -> {
-        LirLowering::lowerLetElse(defStore, typeStore, hirStore, function_, state, &letElseNode, nodeSpan);
+        LirLowering::lowerLetElse(defStore, typeStore, hirStore, dropSchedules, function_, state, &letElseNode, nodeSpan);
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
@@ -1216,6 +1447,7 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     hirId: Hir::HirId,
@@ -1226,16 +1458,17 @@ export namespace LirLowering {
     };
 
     if (LirLowering::isPointerLikeType(typeStore, node.typeId)) {
-      return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hirId);
+      return LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, hirId);
     }
 
-    return LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, hirId);
+    return LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, hirId);
   }
 
   function lowerPlacePtr(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     hirId: Hir::HirId,
@@ -1284,11 +1517,11 @@ export namespace LirLowering {
     }
 
     if (let Hir::HirKind::Dereference(innerId) = &node.kind) {
-      return LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, innerId);
+      return LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, innerId);
     }
 
     if (let Hir::HirKind::FieldAccess(fieldNode) = &node.kind) {
-      let basePtr: Lir::Operand = LirLowering::lowerBasePtr(defStore, typeStore, hirStore, function_, state, fieldNode.base);
+      let basePtr: Lir::Operand = LirLowering::lowerBasePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, fieldNode.base);
 
       let mut fieldPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
       let fieldPtrType: Analyzer::TypeId = fieldPtrTypeStoreRef.pointer(nodeType);
@@ -1307,8 +1540,8 @@ export namespace LirLowering {
     // `&base[index]` is the element's own address, never a copy of it: a
     // spilled copy would hand the caller a pointer into this frame.
     if (let Hir::HirKind::Index(indexNode) = &node.kind) {
-      let base: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, indexNode.base);
-      let indexOperand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, indexNode.index);
+      let base: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, indexNode.base);
+      let indexOperand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, indexNode.index);
 
       let mut elementPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
       let elementPtrType: Analyzer::TypeId = elementPtrTypeStoreRef.pointer(nodeType);
@@ -1324,7 +1557,7 @@ export namespace LirLowering {
       return Lir::Operand::Temp(elementPtr);
     }
 
-    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, hirId);
+    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, hirId);
     let spill: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
 
     LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
@@ -1727,8 +1960,10 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
+    assignId: Hir::HirId,
     assignNode: &Hir::HirAssign,
     targetSlot: Lir::LocalId,
     targetType: Analyzer::TypeId,
@@ -1748,9 +1983,11 @@ export namespace LirLowering {
       source: targetSlot,
     }));
 
-    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, assignNode.value);
+    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value);
 
     let Option::SOME(operation) = assignNode.operation else {
+      LirLowering::emitOverwriteDrops(dropSchedules, function_, state, assignId);
+
       LirLowering::pushInstr(function_, state, Lir::Instr::StorePtr(Lir::InstrStorePtr {
         ptr: Lir::Operand::Temp(pointerTemp),
         value: value,
@@ -1775,6 +2012,8 @@ export namespace LirLowering {
       right: value,
     }));
 
+    LirLowering::emitOverwriteDrops(dropSchedules, function_, state, assignId);
+
     LirLowering::pushInstr(function_, state, Lir::Instr::StorePtr(Lir::InstrStorePtr {
       ptr: Lir::Operand::Temp(pointerTemp),
       value: Lir::Operand::Temp(combined),
@@ -1785,8 +2024,10 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
+    assignId: Hir::HirId,
     assignNode: &Hir::HirAssign,
   ): void {
     let mut targetType: Analyzer::TypeId = function_.returnType;
@@ -1812,7 +2053,7 @@ export namespace LirLowering {
     }
 
     if (targetIsByref) {
-      LirLowering::lowerByrefAssign(defStore, typeStore, hirStore, function_, state, assignNode, targetSlot, targetType);
+      LirLowering::lowerByrefAssign(defStore, typeStore, hirStore, dropSchedules, function_, state, assignId, assignNode, targetSlot, targetType);
       return;
     }
 
@@ -1825,7 +2066,7 @@ export namespace LirLowering {
           source: targetSlot,
         }));
 
-        let rhs: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, assignNode.value);
+        let rhs: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value);
         let result: Lir::TempId = LirLowering::freshTemp(function_, targetType, SourceSpan::new("", 0, 0));
 
         LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
@@ -1835,6 +2076,10 @@ export namespace LirLowering {
           right: rhs,
         }));
 
+        // The old value drops after the right-hand side is evaluated, so
+        // `x = x.method()` can still read `x` before the overwrite.
+        LirLowering::emitOverwriteDrops(dropSchedules, function_, state, assignId);
+
         LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
           dest: targetSlot,
           value: Lir::Operand::Temp(result),
@@ -1843,7 +2088,9 @@ export namespace LirLowering {
         return;
       }
 
-      let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, assignNode.value);
+      let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value);
+
+      LirLowering::emitOverwriteDrops(dropSchedules, function_, state, assignId);
 
       LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
         dest: targetSlot,
@@ -1853,7 +2100,7 @@ export namespace LirLowering {
       return;
     }
 
-    let targetPtr: Lir::Operand = LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, function_, state, assignNode.target);
+    let targetPtr: Lir::Operand = LirLowering::lowerPlacePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.target);
 
     if (let Option::SOME(operation) = assignNode.operation) {
       // A place pointer is always a temp; the temp id copies, so the same
@@ -1870,7 +2117,7 @@ export namespace LirLowering {
         ptr: Lir::Operand::Temp(ptrTemp),
       }));
 
-      let rhs: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, assignNode.value);
+      let rhs: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value);
       let result: Lir::TempId = LirLowering::freshTemp(function_, targetType, SourceSpan::new("", 0, 0));
 
       LirLowering::pushInstr(function_, state, Lir::Instr::BinOp(Lir::InstrBinOp {
@@ -1888,7 +2135,7 @@ export namespace LirLowering {
       return;
     }
 
-    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, assignNode.value);
+    let value: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value);
 
     LirLowering::pushInstr(function_, state, Lir::Instr::StorePtr(Lir::InstrStorePtr {
       ptr: targetPtr,
@@ -2081,6 +2328,7 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     value: &Lir::Operand,
@@ -2137,7 +2385,7 @@ export namespace LirLowering {
         if (let Option::SOME(folded) = LirLowering::foldedConstOperand(typeStore, state, defId, valueType)) {
           constantOperand = folded;
         } else if (let Option::SOME(initId) = hirStore.constantInit(defId)) {
-          constantOperand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, initId);
+          constantOperand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, initId);
         }
 
         let dest: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
@@ -2259,6 +2507,7 @@ export namespace LirLowering {
               defStore,
               typeStore,
               hirStore,
+              dropSchedules,
               function_,
               state,
               &fieldOperand,
@@ -2297,6 +2546,7 @@ export namespace LirLowering {
             defStore,
             typeStore,
             hirStore,
+            dropSchedules,
             function_,
             state,
             value,
@@ -2349,6 +2599,7 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     elementLocals: &Vector<Lir::LocalId>,
@@ -2396,6 +2647,7 @@ export namespace LirLowering {
             defStore,
             typeStore,
             hirStore,
+            dropSchedules,
             function_,
             state,
             &elementOperand,
@@ -2433,6 +2685,7 @@ export namespace LirLowering {
             defStore,
             typeStore,
             hirStore,
+            dropSchedules,
             function_,
             state,
             elementLocals,
@@ -2468,6 +2721,7 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     matchNode: &Hir::HirMatch,
@@ -2505,7 +2759,7 @@ export namespace LirLowering {
           elementType = elementNode.typeId;
         }
 
-        let elementValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, *elementId);
+        let elementValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, *elementId);
         let elementLocal: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, elementType);
 
         LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
@@ -2518,7 +2772,7 @@ export namespace LirLowering {
         elementIndex += 1;
       }
     } else {
-      let scrutineeValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, matchNode.scrutinee);
+      let scrutineeValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, matchNode.scrutinee);
 
       if (let Option::SOME(scrutineeNode) = hirStore.get(matchNode.scrutinee)) {
         scrutineeType = scrutineeNode.typeId;
@@ -2606,6 +2860,7 @@ export namespace LirLowering {
           defStore,
           typeStore,
           hirStore,
+          dropSchedules,
           function_,
           state,
           &elementLocals,
@@ -2626,6 +2881,7 @@ export namespace LirLowering {
           defStore,
           typeStore,
           hirStore,
+          dropSchedules,
           function_,
           state,
           &scrutineeOperand,
@@ -2646,7 +2902,7 @@ export namespace LirLowering {
 
         LirLowering::switchToBlock(state, guardBlock);
 
-        let guardValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, guardId);
+        let guardValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, guardId);
 
         // `terminate` already drops a second terminator, so the branch is
         // built unconditionally and the operand moves on every path.
@@ -2665,12 +2921,17 @@ export namespace LirLowering {
 
       LirLowering::switchToBlock(state, armBlock);
 
-      let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, arm.body);
+      let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, arm.body);
 
       let bodyLive: boolean = !state.terminated;
       LirLowering::storeResult(function_, state, hasResult && bodyLive, resultSlot, bodyValue);
 
       if (bodyLive) {
+        // After the store: an arm whose value is its own binding has already
+        // handed it over, and ownership analysis leaves such a binding out of
+        // this list.
+        LirLowering::emitMatchArmDrops(dropSchedules, function_, state, arm.body);
+
         LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
       }
 
@@ -2706,6 +2967,7 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     letElseNode: &Hir::HirLetElse,
@@ -2716,7 +2978,7 @@ export namespace LirLowering {
       valueType = valueNode.typeId;
     }
 
-    let valueOperand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, letElseNode.value);
+    let valueOperand: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, letElseNode.value);
     let scrutineeSlot: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, valueType);
 
     LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
@@ -2729,6 +2991,7 @@ export namespace LirLowering {
       defStore,
       typeStore,
       hirStore,
+      dropSchedules,
       function_,
       state,
       &scrutineeOperand,
@@ -2747,7 +3010,7 @@ export namespace LirLowering {
     }));
 
     LirLowering::switchToBlock(state, failBlock);
-    let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, letElseNode.elseBlock);
+    let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, letElseNode.elseBlock);
 
     if (!state.terminated) {
       LirLowering::terminate(function_, state, Lir::Terminator::Unreachable);
@@ -2782,13 +3045,14 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     ifNode: &Hir::HirIf,
     nodeType: Analyzer::TypeId,
     nodeSpan: SourceSpan,
   ): Lir::Operand {
-    let condition: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, ifNode.condition);
+    let condition: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, ifNode.condition);
 
     let thenBlock: Lir::BlockId = LirLowering::createBlock(function_, "then");
     let elseBlock: Lir::BlockId = LirLowering::createBlock(function_, "else");
@@ -2811,7 +3075,7 @@ export namespace LirLowering {
     }));
 
     LirLowering::switchToBlock(state, thenBlock);
-    let thenValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, ifNode.thenBranch);
+    let thenValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, ifNode.thenBranch);
 
     let thenLive: boolean = !state.terminated;
     LirLowering::storeResult(function_, state, hasResult && thenLive, resultSlot, thenValue);
@@ -2823,7 +3087,7 @@ export namespace LirLowering {
     LirLowering::switchToBlock(state, elseBlock);
 
     if (let Option::SOME(elseId) = ifNode.elseBranch) {
-      let elseValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, elseId);
+      let elseValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, elseId);
 
       let elseLive: boolean = !state.terminated;
       LirLowering::storeResult(function_, state, hasResult && elseLive, resultSlot, elseValue);
@@ -2856,6 +3120,7 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     loopNode: &Hir::HirLoop,
@@ -2872,7 +3137,7 @@ export namespace LirLowering {
         LirLowering::terminate(function_, state, Lir::Terminator::Goto(bodyBlock));
 
         LirLowering::switchToBlock(state, bodyBlock);
-        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, loopNode.body);
+        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, loopNode.body);
 
         if (!state.terminated) {
           LirLowering::terminate(function_, state, Lir::Terminator::Goto(bodyBlock));
@@ -2889,7 +3154,7 @@ export namespace LirLowering {
         LirLowering::terminate(function_, state, Lir::Terminator::Goto(headerBlock));
 
         LirLowering::switchToBlock(state, headerBlock);
-        let condition: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, conditionId);
+        let condition: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, conditionId);
 
         LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
           condition: condition,
@@ -2898,7 +3163,7 @@ export namespace LirLowering {
         }));
 
         LirLowering::switchToBlock(state, bodyBlock);
-        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, loopNode.body);
+        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, loopNode.body);
 
         if (!state.terminated) {
           LirLowering::terminate(function_, state, Lir::Terminator::Goto(continueBlock));
@@ -2916,7 +3181,7 @@ export namespace LirLowering {
         state.continueBlockRaws.push(continueBlock.raw());
 
         if (let Option::SOME(initId) = forNode.init) {
-          let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, initId);
+          let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, initId);
         }
 
         if (!state.terminated) {
@@ -2926,7 +3191,7 @@ export namespace LirLowering {
         LirLowering::switchToBlock(state, headerBlock);
 
         if (let Option::SOME(conditionId) = forNode.condition) {
-          let condition: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, conditionId);
+          let condition: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, conditionId);
 
           LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
             condition: condition,
@@ -2938,7 +3203,7 @@ export namespace LirLowering {
         }
 
         LirLowering::switchToBlock(state, bodyBlock);
-        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, loopNode.body);
+        let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, loopNode.body);
 
         if (!state.terminated) {
           LirLowering::terminate(function_, state, Lir::Terminator::Goto(continueBlock));
@@ -2947,7 +3212,7 @@ export namespace LirLowering {
         LirLowering::switchToBlock(state, continueBlock);
 
         if (let Option::SOME(updateId) = forNode.update) {
-          let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, function_, state, updateId);
+          let _ = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, updateId);
         }
 
         LirLowering::terminate(function_, state, Lir::Terminator::Goto(headerBlock));
@@ -3046,6 +3311,7 @@ export namespace LirLowering {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
     constValues: &Analyzer::ConstEval::ConstValueMap,
   ): LirLowering::LowerModuleResult {
     let mut program: Lir::LirProgram = Lir::LirProgram::init();
@@ -3105,13 +3371,30 @@ export namespace LirLowering {
         LirLowering::emitDropFunctionBody(defStore, typeStore, &mut function_, &mut state, &paramDefs, &dropCaptures);
       }
 
-      let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, &mut function_, &mut state, bodyId);
+      let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, &mut function_, &mut state, bodyId);
 
       // A body that falls off its end returns implicitly: nothing for a void
       // function, its value otherwise. The value is the block's tail, which
       // is how an expression-bodied lambda's thunk returns its result.
       // A block whose every path already returned leaves an `Undef` behind;
       // its merge block is unreachable rather than a return of nothing.
+      // The synthetic return at the end of a body unwinds whatever is still
+      // open; a body that already terminated unwound on its own paths.
+      if (!state.terminated) {
+        let fnEndKey: Hir::ExitKey = Hir::ExitKey::FnEnd(*itemDef);
+
+        LirLowering::emitExitDefers(
+          defStore,
+          typeStore,
+          hirStore,
+          dropSchedules,
+          &mut function_,
+          &mut state,
+          &fnEndKey,
+        );
+        LirLowering::emitExitDrops(dropSchedules, &mut function_, &mut state, &fnEndKey);
+      }
+
       let returnsVoid: boolean = LirLowering::isVoidType(typeStore, returnType);
       let bodyIsUndef: boolean = LirLowering::isUndefOperand(&bodyValue);
       let implicitTerminator: Lir::Terminator = LirLowering::implicitTerminator(returnsVoid, bodyIsUndef, bodyValue);
