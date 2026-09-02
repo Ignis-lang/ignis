@@ -979,6 +979,37 @@ export namespace Analyzer {
         },
       };
 
+      // A constant of function type is callable the same way a local holding
+      // one is: the whole signature lives in its type, and the call goes
+      // through the value rather than through a declared parameter list.
+      if (let Option::SOME(constantType) = Analyzer::Typecheck::functionTypedConstantType(defStore, typeStore, functionDefId)) {
+        if (call.typeArguments.length() > 0) {
+          Analyzer::Typecheck::emitUnsupported(state, call.span, "type arguments on calls through constant values");
+          return Option::NONE;
+        }
+
+        let Option::SOME(calleeType) = typeStore.get(constantType) else {
+          return Option::NONE;
+        };
+
+        let Analyzer::Type::Function(signature) = calleeType else {
+          return Option::NONE;
+        };
+
+        return Analyzer::Typecheck::checkCallArgumentsAgainstTypes(
+          state,
+          defStore,
+          typeStore,
+          symbols,
+          module,
+          resolvedBodies,
+          callExprId,
+          call,
+          &signature.params,
+          signature.returnType,
+        );
+      }
+
       // The resolver stops at the first same-name function; sibling overloads
       // share the same published path, and the arguments pick among them.
       let mut selectedFunctionDefId: Analyzer::DefinitionId = functionDefId;
@@ -1124,6 +1155,34 @@ export namespace Analyzer {
     ///
     /// The signature comes from the local's own type instead of from a definition, so the
     /// parameter types are `TypeId`s directly rather than parameter definitions.
+    /// The declared type of a constant that holds a function value.
+    ///
+    /// Module constants and locals share the `Variable` definition kind, so
+    /// this is the definition-side twin of the local binding's type lookup.
+    /// Only the id is handed back: the signature behind it belongs to the type
+    /// store and is read at the use site.
+    function functionTypedConstantType(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      defId: Analyzer::DefinitionId,
+    ): Option<Analyzer::TypeId> {
+      let mut declaredType: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(defId)) {
+        declaredType = Option::SOME(variableDef.declaredType);
+      }
+
+      let Option::SOME(declared) = declaredType else {
+        return Option::NONE;
+      };
+
+      if (let Option::SOME(Analyzer::Type::Function(_)) = typeStore.get(declared)) {
+        return Option::SOME(declared);
+      }
+
+      return Option::NONE;
+    }
+
     function checkCallThroughLocal(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,

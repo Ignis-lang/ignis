@@ -1908,6 +1908,14 @@ export namespace Lowering {
       calleeDefOpt = Option::SOME(selectedDef);
     }
 
+    // A constant of function type carries its whole signature in its type, the
+    // same as a local holding one, so the call goes through the value.
+    if (let Option::SOME(constantDef) = calleeDefOpt) {
+      if (Analyzer::Typecheck::functionTypedConstantType(defStore, typeStore, constantDef).isSome()) {
+        localCallee = true;
+      }
+    }
+
     // A callee resolving to a local is a function-typed value (a closure or
     // function parameter): the call goes through the value, not a definition.
     if (localCallee) {
