@@ -55,6 +55,10 @@ export namespace Analyzer {
       public programSyms: Vector<Analyzer::SymbolId>;
       public programDefs: Vector<Analyzer::DefinitionId>;
       public programQualifiedNames: Vector<String>;
+      /// Namespaces entered by the item walk, outermost first. A bare type
+      /// name is read against this chain before the flat index answers, so
+      /// two namespaces may each declare a `Point` and keep them apart.
+      public namespaceChain: Vector<String>;
     }
 
     /// Type-parameter scope for one item walk (Record, Enum, or Function).
@@ -1144,14 +1148,82 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
+    /// The program-index declaration a bare type name refers to when read from
+    /// inside the namespaces currently entered.
+    ///
+    /// The enclosing chain is tried innermost first, so `Point` written inside
+    /// `namespace Second` finds `Second::Point` before an outer or top-level
+    /// declaration of that name. Only type declarations answer: a namespace
+    /// constant or function sharing the name is not what a type position wants.
+    function namespaceScopedTypeLookup(
+      state: &mut Analyzer::Resolver::ResolverState,
+      defStore: &mut Analyzer::DefinitionStore,
+      sym: Analyzer::SymbolId,
+      name: str,
+    ): Option<Analyzer::DefinitionId> {
+      let mut depth: u64 = state.namespaceChain.length();
+
+      while (depth > 0) {
+        let mut writtenPath: String = String::create("");
+        let mut segIndex: u64 = 0;
+
+        while (segIndex < depth) {
+          if (let Option::SOME(seg) = state.namespaceChain.get(segIndex)) {
+            writtenPath.pushStr(seg.toStr());
+            writtenPath.pushStr("::");
+          }
+          segIndex += 1;
+        }
+        writtenPath.pushStr(name);
+
+        let suffix: String = `::${writtenPath.toStr()}`;
+        let mut i: u64 = 0;
+
+        while (i < state.programSyms.length()) {
+          let Option::SOME(candidateSym) = state.programSyms.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          if (candidateSym.raw() != sym.raw()) {
+            i += 1;
+            continue;
+          }
+
+          let Option::SOME(candidate) = state.programQualifiedNames.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          if (candidate.equals(writtenPath.toStr()) || Analyzer::Imports::programPathEndsWith(candidate, &suffix)) {
+            let Option::SOME(defId) = state.programDefs.get(i) else {
+              i += 1;
+              continue;
+            };
+
+            if (isTypeNameDef(defStore, *defId) && !isTraitDef(defStore, *defId)) {
+              return Option::SOME(*defId);
+            }
+          }
+
+          i += 1;
+        }
+
+        depth -= 1;
+      }
+
+      return Option::NONE;
+    }
+
     /// Resolve a single-segment `Ast::Type::Path` to an `Analyzer::TypeId`.
     ///
     /// Resolution order:
     ///   1. Primitive names (15 `String::create().equals()` compares).
     ///   2. Type-param scope (innermost-first linear scan).
-    ///   3. Global type-name index (linear scan).
-    ///   4. Import overlay (linear scan).
-    ///   5. Unknown: emit UNDEFINED_TYPE + return VOID.
+    ///   3. Enclosing namespace chain, innermost first.
+    ///   4. Global type-name index (linear scan).
+    ///   5. Import overlay (linear scan).
+    ///   6. Unknown: emit UNDEFINED_TYPE + return VOID.
     ///
     /// A multi-segment path resolves on its last segment; the leading segments
     /// are an unvalidated namespace qualifier (TODO(namespace-path-validation)).
@@ -1227,7 +1299,18 @@ export namespace Analyzer {
         }
       }
 
-      // 4. Global type-name index.
+      // 4. The namespaces this annotation is written inside, innermost first.
+      // The flat index below keys on the bare name alone and would hand every
+      // namespace the same `Point`.
+      if (!qualified) {
+        let scopedOpt: Option<Analyzer::DefinitionId> = namespaceScopedTypeLookup(state, defStore, sym, nameStr.toStr());
+
+        if (let Option::SOME(scopedDefId) = scopedOpt) {
+          return nominalTypeFor(defStore, typeStore, scopedDefId);
+        }
+      }
+
+      // 5. Global type-name index.
       let globalOpt: Option<Analyzer::DefinitionId> = globalLookup(state, sym);
 
       if (let Option::SOME(defId) = globalOpt) {
@@ -2086,6 +2169,9 @@ export namespace Analyzer {
           resolveConstant(state, defStore, typeStore, symbols, module, pass1, pass2, itemId, &c);
         },
         Ast::Item::Node::Namespace(ns) -> {
+          let mut enterRef: &mut Analyzer::Resolver::ResolverState = state;
+          enterRef.namespaceChain.push(ns.name.clone());
+
           let mut childIndex: u64 = 0;
 
           while (childIndex < ns.items.length()) {
@@ -2097,6 +2183,9 @@ export namespace Analyzer {
             resolveItem(state, defStore, typeStore, symbols, module, pass1, pass2, *childId);
             childIndex += 1;
           }
+
+          let mut leaveRef: &mut Analyzer::Resolver::ResolverState = state;
+          let _left: Option<String> = leaveRef.namespaceChain.pop();
         },
         Ast::Item::Node::Export(ex) -> {
           if (let Option::SOME(innerItemId) = ex.declaration) {
@@ -2367,6 +2456,7 @@ export namespace Analyzer {
         programSyms: Vector::new<Analyzer::SymbolId>(),
         programDefs: Vector::new<Analyzer::DefinitionId>(),
         programQualifiedNames: Vector::new<String>(),
+        namespaceChain: Vector::new<String>(),
       };
 
       buildGlobalNameIndex(&mut state, defStore, pass1);

@@ -191,6 +191,11 @@ export namespace Analyzer {
       public programDefs: Vector<Analyzer::DefinitionId>;
       public programQualifiedNames: Vector<String>;
 
+      /// Namespaces the item walk has entered, outermost first. A record
+      /// literal's bare path is read against this chain so `Point { }` written
+      /// inside `namespace Second` builds `Second::Point`.
+      public namespaceChain: Vector<String>;
+
       /// Per-function transient state (reset at each function/constant entry).
       public currentFunction: Analyzer::DefinitionId;
       public localStack: Analyzer::ResolverBodies::LocalStack;
@@ -1944,6 +1949,157 @@ export namespace Analyzer {
       return candidate.equals("minOf") || candidate.equals("maxOf");
     }
 
+    /// Whether `defId` names a type: what a record literal's path has to be.
+    function isTypeDeclarationDef(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): boolean {
+      let Option::SOME(def) = defStore.get(defId) else {
+        return false;
+      };
+
+      match (def) {
+        Analyzer::Definition::Record(_) -> {
+          return true;
+        },
+        Analyzer::Definition::Enum(_) -> {
+          return true;
+        },
+        Analyzer::Definition::TypeAlias(_) -> {
+          return true;
+        },
+        _ -> {
+          return false;
+        },
+      };
+
+      @panic("unreachable: isTypeDeclarationDef match did not return");
+    }
+
+    /// The type a bare name refers to when read from inside the namespaces the
+    /// walk has entered, innermost first.
+    ///
+    /// The flat global index keys on the bare name alone, so two namespaces
+    /// each declaring a `Point` would both be handed the first one. Only type
+    /// declarations answer here: a constant or function of that name is not
+    /// what a record literal's path wants.
+    function namespaceScopedTypeLookup(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      sym: Analyzer::SymbolId,
+      name: str,
+    ): Option<Analyzer::DefinitionId> {
+      let mut depth: u64 = state.namespaceChain.length();
+
+      while (depth > 0) {
+        let mut writtenPath: String = String::create("");
+        let mut segIndex: u64 = 0;
+
+        while (segIndex < depth) {
+          if (let Option::SOME(seg) = state.namespaceChain.get(segIndex)) {
+            writtenPath.pushStr(seg.toStr());
+            writtenPath.pushStr("::");
+          }
+          segIndex += 1;
+        }
+        writtenPath.pushStr(name);
+
+        let suffix: String = `::${writtenPath.toStr()}`;
+        let mut i: u64 = 0;
+
+        while (i < state.programSyms.length()) {
+          let Option::SOME(candidateSym) = state.programSyms.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          if (candidateSym.raw() != sym.raw()) {
+            i += 1;
+            continue;
+          }
+
+          let Option::SOME(candidate) = state.programQualifiedNames.get(i) else {
+            i += 1;
+            continue;
+          };
+
+          if (candidate.equals(writtenPath.toStr()) || Analyzer::Imports::programPathEndsWith(candidate, &suffix)) {
+            let Option::SOME(defId) = state.programDefs.get(i) else {
+              i += 1;
+              continue;
+            };
+
+            if (Analyzer::ResolverBodies::isTypeDeclarationDef(defStore, *defId)) {
+              return Option::SOME(*defId);
+            }
+          }
+
+          i += 1;
+        }
+
+        depth -= 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Record a record-initializer's bare path as the type the enclosing
+    /// namespace declares, when it declares one.
+    ///
+    /// Returns false when nothing chain-scoped answers, and the ordinary
+    /// expression walk resolves the path instead.
+    function resolveRecordInitPathAsType(
+      state: &mut Analyzer::ResolverBodies::ResolverBodiesState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      pathExprId: Ast::ExpressionId,
+    ): boolean {
+      if (state.namespaceChain.length() == 0) {
+        return false;
+      }
+
+      let Option::SOME(pathExpr) = module.expressions.get(pathExprId) else {
+        return false;
+      };
+
+      let mut writtenName: String = String::create("");
+
+      match (pathExpr) {
+        Ast::Expression::Node::Variable(variable) -> {
+          writtenName = variable.name.clone();
+        },
+        Ast::Expression::Node::Path(path) -> {
+          // A qualified path already picks its declaration by written chain.
+          if (path.segments.length() == 1) {
+            if (let Option::SOME(segment) = path.segments.get(0)) {
+              writtenName = segment.clone();
+            }
+          }
+        },
+        _ -> {},
+      };
+
+      if (writtenName.length() == 0) {
+        return false;
+      }
+
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(writtenName.toStr());
+
+      let Option::SOME(defId) = Analyzer::ResolverBodies::namespaceScopedTypeLookup(
+        state,
+        defStore,
+        sym,
+        writtenName.toStr(),
+      ) else {
+        return false;
+      };
+
+      Analyzer::ResolverBodies::recordExprRef(state, pathExprId, Analyzer::ResolverBodies::ResolvedRef::Definition(defId));
+      return true;
+    }
+
     /// Resolve a single-segment identifier in expression position.
     ///
     /// Priority (ADR-B1, REQ-B1):
@@ -3030,7 +3186,9 @@ export namespace Analyzer {
           Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, ma.object);
         },
         Ast::Expression::Node::RecordInit(ri) -> {
-          Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, ri.path);
+          if (!Analyzer::ResolverBodies::resolveRecordInitPathAsType(state, defStore, symbols, module, ri.path)) {
+            Analyzer::ResolverBodies::walkExpr(state, defStore, symbols, module, ri.path);
+          }
           let mut fieldIdx: u64 = 0;
 
           while (fieldIdx < ri.fields.length()) {
@@ -3520,6 +3678,9 @@ export namespace Analyzer {
           Analyzer::ResolverBodies::walkConstantInit(state, defStore, symbols, module, pass1, pass2, itemId, &c);
         },
         Ast::Item::Node::Namespace(ns) -> {
+          let mut enterRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+          enterRef.namespaceChain.push(ns.name.clone());
+
           let mut childIdx: u64 = 0;
 
           while (childIdx < ns.items.length()) {
@@ -3531,6 +3692,9 @@ export namespace Analyzer {
             Analyzer::ResolverBodies::walkItemForBody(state, defStore, typeStore, symbols, module, pass1, pass2, *childId);
             childIdx += 1;
           }
+
+          let mut leaveRef: &mut Analyzer::ResolverBodies::ResolverBodiesState = state;
+          let _left: Option<String> = leaveRef.namespaceChain.pop();
         },
         Ast::Item::Node::Export(ex) -> {
           if (let Option::SOME(innerItemId) = ex.declaration) {
@@ -3646,6 +3810,7 @@ export namespace Analyzer {
         programSyms: Vector::new<Analyzer::SymbolId>(),
         programDefs: Vector::new<Analyzer::DefinitionId>(),
         programQualifiedNames: Vector::new<String>(),
+        namespaceChain: Vector::new<String>(),
         currentFunction: sentinel,
         localStack: Analyzer::ResolverBodies::LocalStack {
           scopeStarts: Vector::new<u64>(),
