@@ -336,15 +336,23 @@ export namespace CodegenC {
   }
 
   /// A C string literal body with the bytes C cannot carry raw escaped.
+  ///
+  /// Bytes outside printable ASCII become one hex escape each, so a non-ASCII
+  /// character is written as its UTF-8 bytes. A C hex escape consumes every hex
+  /// digit that follows it, so a printable byte in that position is written as a
+  /// fixed-width octal escape instead.
   function escapeStringLiteral(value: &String): String {
     let mut result: String = String::create("");
     let mut index: u64 = 0;
+    let mut afterHexEscape: boolean = false;
 
     while (index < value.length()) {
       let Option::SOME(byte) = value.byteAt(index) else {
         index += 1;
         continue;
       };
+
+      let mut nextAfterHexEscape: boolean = false;
 
       if (byte == 34) {
         result.pushStr("\\\"");
@@ -356,14 +364,64 @@ export namespace CodegenC {
         result.pushStr("\\r");
       } else if (byte == 9) {
         result.pushStr("\\t");
+      } else if (byte == 0) {
+        result.pushStr("\\000");
+      } else if (byte >= 32 && byte <= 126) {
+        if (afterHexEscape && CodegenC::isHexDigitByte(byte)) {
+          result.pushStr(CodegenC::octalEscape(byte).toStr());
+        } else {
+          result.pushByte(byte);
+        }
       } else {
-        result.pushByte(byte);
+        result.pushStr(CodegenC::hexEscape(byte).toStr());
+
+        nextAfterHexEscape = true;
       }
 
+      afterHexEscape = nextAfterHexEscape;
       index += 1;
     }
 
     return result;
+  }
+
+  /// The `\xNN` C escape for one byte, with lowercase hex digits.
+  function hexEscape(byte: u8): String {
+    let mut escape: String = String::create("\\x");
+
+    escape.pushByte(CodegenC::hexDigitByte(byte / 16));
+    escape.pushByte(CodegenC::hexDigitByte(byte % 16));
+
+    return escape;
+  }
+
+  /// The three-digit `\NNN` C octal escape for one byte.
+  function octalEscape(byte: u8): String {
+    let mut escape: String = String::create("\\");
+
+    escape.pushByte(48 + (byte / 64));
+    escape.pushByte(48 + ((byte / 8) % 8));
+    escape.pushByte(48 + (byte % 8));
+
+    return escape;
+  }
+
+  /// The lowercase ASCII hex digit for a value in the inclusive range `0..15`.
+  function hexDigitByte(value: u8): u8 {
+    if (value < 10) {
+      return 48 + value;
+    }
+
+    return 87 + value;
+  }
+
+  /// Returns whether an ASCII byte is a hex digit that a C hex escape would absorb.
+  function isHexDigitByte(byte: u8): boolean {
+    let isDigit: boolean = byte >= 48 && byte <= 57;
+    let isUpper: boolean = byte >= 65 && byte <= 70;
+    let isLower: boolean = byte >= 97 && byte <= 102;
+
+    return isDigit || isUpper || isLower;
   }
 
   function formatConst(

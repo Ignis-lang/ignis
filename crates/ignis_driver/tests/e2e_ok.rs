@@ -7806,3 +7806,21 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_string_literal_non_ascii_escapes() {
+  e2e_workspace_std_test(
+    "string_literal_non_ascii_escapes",
+    r#"
+import Io from "std::io";
+
+function main(): i32 {
+  Io::println("• Summary");
+  Io::println("é1");
+  Io::println("añejo 42");
+
+  return 0;
+}
+"#,
+  );
+}
