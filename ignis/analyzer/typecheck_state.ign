@@ -180,7 +180,7 @@ export namespace Analyzer {
       expected: Analyzer::TypeId,
       actual: Analyzer::TypeId,
     ): void {
-      let message: String = `type mismatch: expected \`${typeStore.nameOf(expected).toStr()}\`, found \`${typeStore.nameOf(actual).toStr()}\``;
+      let message: String = `Type mismatch: expected '${typeStore.nameOf(expected).toStr()}', found '${typeStore.nameOf(actual).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
     }
 
@@ -258,7 +258,7 @@ export namespace Analyzer {
         state,
         span,
         DiagnosticCode::PIPE_PLACEHOLDER_OUTSIDE_PIPE,
-        "`_` placeholder is only valid inside the right side of a pipe",
+        "`_` placeholder is only valid inside pipe (|>) call arguments",
       );
     }
 
@@ -282,32 +282,28 @@ export namespace Analyzer {
         state,
         span,
         DiagnosticCode::PIPE_PLACEHOLDER_NOT_IN_CALL,
-        "`_` placeholder must appear inside an expression on the right side of a pipe",
+        "`_` placeholder must appear inside a function call on the RHS of |>",
       );
     }
 
+    /// `rhsDescription` names the shape the right side was written as, so the
+    /// message says which expression is the one that cannot be called.
     function emitPipeRightNotCallable(
       state: &mut Analyzer::Typecheck::TypecheckState,
       span: SourceSpan,
+      rhsDescription: str,
     ): void {
-      Analyzer::Typecheck::emitDiagnostic(
-        state,
-        span,
-        DiagnosticCode::PIPE_RIGHT_NOT_CALLABLE,
-        "the right side of a pipe must be callable",
-      );
+      let message: String = `invalid pipe RHS: ${rhsDescription} is not callable`;
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::PIPE_RIGHT_NOT_CALLABLE, message.toStr());
     }
 
     function emitPipeRightNeedsPlaceholder(
       state: &mut Analyzer::Typecheck::TypecheckState,
       span: SourceSpan,
+      rhsDescription: str,
     ): void {
-      Analyzer::Typecheck::emitDiagnostic(
-        state,
-        span,
-        DiagnosticCode::PIPE_RIGHT_NEEDS_PLACEHOLDER,
-        "this pipe right side cannot take the value implicitly; write `_` where it goes",
-      );
+      let message: String = `${rhsDescription} as pipe RHS requires a \`_\` placeholder`;
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::PIPE_RIGHT_NEEDS_PLACEHOLDER, message.toStr());
     }
 
     function emitUnknownBuiltin(
@@ -315,7 +311,7 @@ export namespace Analyzer {
       span: SourceSpan,
       name: str,
     ): void {
-      let message: String = `unknown builtin \`@${name}\``;
+      let message: String = `Unknown builtin '@${name}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::UNKNOWN_BUILTIN, message.toStr());
     }
 
@@ -349,14 +345,43 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS, message.toStr());
     }
 
+    /// The arity mismatch of a call whose callee has a written name. Callers that
+    /// cannot name their callee pass `<function>`, as the reference analyzer does.
+    function emitArgumentCountMismatch(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+      calleeName: str,
+      expected: u64,
+      actual: u64,
+    ): void {
+      let message: String = `Function '${calleeName}' expects ${expected} arguments, got ${actual}`;
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS, message.toStr());
+    }
+
+    /// The arity mismatch of a builtin, which is named after the `@` form the
+    /// source writes rather than after a declaration.
+    function emitBuiltinArgumentCountMismatch(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+      name: str,
+      expected: u64,
+      actual: u64,
+    ): void {
+      let message: String = `@${name} expects ${expected} argument(s), got ${actual}`;
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS, message.toStr());
+    }
+
+    /// `argumentIndex` is one-based, counting the piped value of a pipe as the
+    /// first argument, so the number matches what the source wrote.
     function emitInvalidArgumentType(
       state: &mut Analyzer::Typecheck::TypecheckState,
       typeStore: &mut Analyzer::TypeStore,
       span: SourceSpan,
+      argumentIndex: u64,
       expected: Analyzer::TypeId,
       actual: Analyzer::TypeId,
     ): void {
-      let message: String = `invalid argument type: expected \`${typeStore.nameOf(expected).toStr()}\`, found \`${typeStore.nameOf(actual).toStr()}\``;
+      let message: String = `Argument ${argumentIndex} type mismatch: expected '${typeStore.nameOf(expected).toStr()}', got '${typeStore.nameOf(actual).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_ARGUMENT_TYPE, message.toStr());
     }
 
@@ -466,6 +491,17 @@ export namespace Analyzer {
       );
     }
 
+    /// The declaration form of `emitCannotInferLocal`, which names the binding
+    /// because the declaration is where the annotation or initializer belongs.
+    function emitCannotInferVariableType(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      span: SourceSpan,
+      name: str,
+    ): void {
+      let message: String = `Cannot infer type for variable '${name}' - add a type annotation or initializer`;
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::CANNOT_INFER_TYPE, message.toStr());
+    }
+
     function emitCannotInferNullLiteral(
       state: &mut Analyzer::Typecheck::TypecheckState,
       span: SourceSpan,
@@ -474,7 +510,7 @@ export namespace Analyzer {
         state,
         span,
         DiagnosticCode::CANNOT_INFER_TYPE,
-        "cannot infer a pointer type for `null`; add a type annotation",
+        "Cannot infer pointer type for null literal",
       );
     }
 
@@ -484,7 +520,7 @@ export namespace Analyzer {
       span: SourceSpan,
       expected: Analyzer::TypeId,
     ): void {
-      let message: String = `\`null\` can only be used with pointer types, expected \`${typeStore.nameOf(expected).toStr()}\``;
+      let message: String = `Null literal can only be used with pointer types, expected '${typeStore.nameOf(expected).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_NULL_LITERAL, message.toStr());
     }
 
