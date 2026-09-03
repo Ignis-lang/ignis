@@ -759,6 +759,46 @@ function borrowckSchedulesNestedMatchThroughReference(): void {
   Test::assertEq<str>(rendered.toStr(), "");
 }
 
+/// Scenario: a match takes an owning payload out of a field of a local it
+/// owns. The bytes leave with the payload, so the local owes no drop anywhere
+/// and the remaining fields leak rather than being freed twice.
+/// Spec: IGN-39 — `drop_suppressed_vars`, filled from the field owner.
+@test
+function borrowckSchedulesSuppressesFieldOwnerDrop(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nrecord Holder {\n  public first: Maybe;\n  public second: Maybe;\n}\n\nfunction run(holder: Holder): u32 {\n  let taken: Owned = match (holder.first) {\n    Maybe::SOME(payload) -> payload,\n    Maybe::NONE -> Owned { id: 0 },\n  };\n\n  return taken.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: taken\nexit return: taken\n");
+}
+
+/// Scenario: the same match, but the field is reached through a reference.
+/// Suppressing the owner's drop there would silently accept a move out of
+/// storage the function does not own, so the move is rejected instead: once
+/// for the scrutinee and once for the payload the arm hands to the result.
+/// Spec: IGN-178 — a borrowed base wins over field-owner drop suppression.
+@test
+function borrowckReportsFieldOwnerMoveThroughReference(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nrecord Holder {\n  public first: Maybe;\n}\n\nfunction run(holder: &Holder): u32 {\n  let taken: Owned = match (holder.first) {\n    Maybe::SOME(payload) -> payload,\n    Maybe::NONE -> Owned { id: 0 },\n  };\n\n  return taken.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW), 2);
+  Test::assertEq<u64>(diagnostics.length(), 2);
+}
+
+/// Scenario: the arms bind a `Copy` payload, so nothing leaves the field and
+/// the owner keeps every drop it owed.
+/// Spec: IGN-39 — suppression is driven by the payload, not by the field.
+@test
+function borrowckSchedulesKeepsFieldOwnerDropForCopyPayload(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Tag {\n  VALUE(u32),\n  OTHER,\n}\n\nrecord Holder {\n  public tag: Tag;\n  public owned: Owned;\n}\n\nfunction run(holder: Holder): u32 {\n  let value: u32 = match (holder.tag) {\n    Tag::VALUE(inner) -> inner,\n    Tag::OTHER -> 0,\n  };\n\n  return value;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "exit return: holder\nexit fn-end run: holder\n");
+}
+
 /// Scenario: overwriting a local that still holds a value schedules a drop of
 /// the old value before the store.
 /// Spec: IGN-39 — `on_overwrite`.
