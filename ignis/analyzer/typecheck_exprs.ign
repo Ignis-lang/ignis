@@ -2409,6 +2409,95 @@ export namespace Analyzer {
       return found;
     }
 
+    /// Score one overload candidate's parameter types against the call's
+    /// argument types, mirroring the host's `try_match_signature`.
+    ///
+    /// An exact parameter match is free, a value-satisfies match costs two, and a
+    /// candidate that declares type parameters may instead bind them structurally
+    /// against the argument — a candidate that binds anything pays one flat unit,
+    /// so a concrete signature always outranks a generic one that would accept the
+    /// same call. `NONE` disqualifies the candidate. Written type arguments are not
+    /// consulted here: unification reaches the same specialization from the
+    /// arguments, and the selected callee resolves them again when it instantiates.
+    function overloadCandidateMatchCost(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      span: SourceSpan,
+      candidateDefId: Analyzer::DefinitionId,
+      paramTypes: &Vector<Analyzer::TypeId>,
+      argTypes: &Vector<Analyzer::TypeId>,
+    ): Option<u64> {
+      let typeParamSymbols: Vector<Analyzer::SymbolId> = Analyzer::Typecheck::calleeTypeParamSymbols(defStore, candidateDefId);
+
+      let mut bindings: Vector<Option<Analyzer::TypeId>> = Vector::new<Option<Analyzer::TypeId>>();
+      let mut bindingIndex: u64 = 0;
+
+      while (bindingIndex < typeParamSymbols.length()) {
+        bindings.push(Option::NONE);
+        bindingIndex += 1;
+      }
+
+      let mut cost: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < argTypes.length()) {
+        let Option::SOME(argType) = argTypes.get(index) else {
+          index += 1;
+          continue;
+        };
+        let Option::SOME(paramType) = paramTypes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, *paramType, *argType)) {
+          index += 1;
+          continue;
+        }
+
+        if (Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, *paramType, *argType)) {
+          cost += 2;
+          index += 1;
+          continue;
+        }
+
+        if (typeParamSymbols.length() == 0) {
+          return Option::NONE;
+        }
+
+        // `unifyForInference` treats a parameter with nothing to learn from as
+        // compatible and leaves the type check to its caller. Here that caller
+        // is this loop, and equality and value-satisfaction have both already
+        // said no, so a concrete parameter is out.
+        let typeStoreParamRef: &mut Analyzer::TypeStore = typeStore;
+        if (!typeStoreParamRef.containsTypeParam(*paramType)) {
+          return Option::NONE;
+        }
+
+        let typeStoreUnifyRef: &mut Analyzer::TypeStore = typeStore;
+        if (!typeStoreUnifyRef.unifyForInference(*paramType, *argType, &typeParamSymbols, &mut bindings)) {
+          return Option::NONE;
+        }
+
+        index += 1;
+      }
+
+      let mut boundIndex: u64 = 0;
+
+      while (boundIndex < bindings.length()) {
+        if (let Option::SOME(binding) = bindings.get(boundIndex)) {
+          if (binding.isSome()) {
+            return Option::SOME(cost + 1);
+          }
+        }
+
+        boundIndex += 1;
+      }
+
+      return Option::SOME(cost);
+    }
+
     /// Pick one static method among same-name candidates by arity and
     /// argument types — the static twin of `selectMethodOverload`, with no
     /// self slot and no owner substitution (a generic owner's statics go
@@ -2464,36 +2553,17 @@ export namespace Analyzer {
           continue;
         }
 
-        let mut cost: u64 = 0;
-        let mut matches: boolean = true;
-        let mut i: u64 = 0;
+        let costOpt: Option<u64> = Analyzer::Typecheck::overloadCandidateMatchCost(
+          state,
+          defStore,
+          typeStore,
+          span,
+          *candidateDefId,
+          &paramTypes,
+          &argTypes,
+        );
 
-        while (i < argTypes.length()) {
-          let Option::SOME(argType) = argTypes.get(i) else {
-            i += 1;
-            continue;
-          };
-          let Option::SOME(paramType) = paramTypes.get(i) else {
-            i += 1;
-            continue;
-          };
-
-          if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, *paramType, *argType)) {
-            i += 1;
-            continue;
-          }
-
-          if (Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, *paramType, *argType)) {
-            cost += 1;
-            i += 1;
-            continue;
-          }
-
-          matches = false;
-          break;
-        }
-
-        if (matches) {
+        if (let Option::SOME(cost) = costOpt) {
           if (bestDefIds.length() == 0 || cost < bestCost) {
             bestDefIds = Vector::new<Analyzer::DefinitionId>();
             bestDefIds.push(*candidateDefId);
@@ -2583,36 +2653,17 @@ export namespace Analyzer {
           continue;
         }
 
-        let mut cost: u64 = 0;
-        let mut matches: boolean = true;
-        let mut i: u64 = 0;
+        let costOpt: Option<u64> = Analyzer::Typecheck::overloadCandidateMatchCost(
+          state,
+          defStore,
+          typeStore,
+          span,
+          *candidateDefId,
+          &paramTypes,
+          &argTypes,
+        );
 
-        while (i < argTypes.length()) {
-          let Option::SOME(argType) = argTypes.get(i) else {
-            i += 1;
-            continue;
-          };
-          let Option::SOME(paramType) = paramTypes.get(i) else {
-            i += 1;
-            continue;
-          };
-
-          if (Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, *paramType, *argType)) {
-            i += 1;
-            continue;
-          }
-
-          if (Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, *paramType, *argType)) {
-            cost += 1;
-            i += 1;
-            continue;
-          }
-
-          matches = false;
-          break;
-        }
-
-        if (matches) {
+        if (let Option::SOME(cost) = costOpt) {
           if (bestDefIds.length() == 0 || cost < bestCost) {
             bestDefIds = Vector::new<Analyzer::DefinitionId>();
             bestDefIds.push(*candidateDefId);
