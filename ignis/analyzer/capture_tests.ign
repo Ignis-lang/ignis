@@ -1,0 +1,125 @@
+import Test from "std::test";
+
+import DiagnosticBag, DiagnosticCode, Severity, SourceFile from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import ParseOutput, Parser from "@compiler::parser";
+import Lowering from "./lowering";
+import Capture from "./capture";
+
+function captureCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// Run `source` through parse, analysis, HIR lowering and capture analysis,
+/// and return what capture analysis reported.
+function captureDiagnosticsFor(source: str): DiagnosticBag {
+  let file: SourceFile = SourceFile::create("capture_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(captureCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(captureCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(captureCountErrors(&output.diagnostics), 0);
+
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  return Capture::populateClosureCaptures(&mut defStore, &mut typeStore, &mut symbols, &mut hir);
+}
+
+/// Assert that `bag` carries `code` with exactly `message`.
+function captureAssertDiagnostic(bag: &DiagnosticBag, code: str, message: str): void {
+  let expectedCode: String = String::create(code);
+  let expectedMessage: String = String::create(message);
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (expectedCode.equals(diagnostic.code) && expectedMessage.equals(diagnostic.messageText())) {
+      return;
+    }
+
+    index += 1;
+  }
+
+  @panic("captureAssertDiagnostic: no diagnostic with the expected code and message");
+}
+
+/// Scenario: a closure returned out of the function that defines it, holding
+/// a reference to that function's local. The reference outlives the frame it
+/// points into.
+@test
+function captureRejectsReturnedClosureHoldingARefCapture(): void {
+  let bag: DiagnosticBag = captureDiagnosticsFor(
+    "function makeCounter(): () -> i32 {\n  let mut count: i32 = 0;\n  let inc = (): i32 -> {\n    count = count + 1;\n    return count;\n  };\n  return inc;\n}\n",
+  );
+
+  captureAssertDiagnostic(
+    &bag,
+    DiagnosticCode::CLOSURE_ESCAPES_WITH_REF_CAPTURE,
+    "closure escapes its scope while capturing `count` by reference",
+  );
+}
+
+/// Scenario: the same closure handed to a parameter that is not `@noescape`,
+/// so the callee may keep it.
+@test
+function captureRejectsEscapingClosureArgumentHoldingARefCapture(): void {
+  let bag: DiagnosticBag = captureDiagnosticsFor(
+    "function apply(f: (i32) -> i32, x: i32): i32 {\n  return f(x);\n}\n\nfunction main(): i32 {\n  let mut val: i32 = 10;\n  let inc = (n: i32): i32 -> {\n    val = val + 1;\n    return n + val;\n  };\n  return apply(inc, 5);\n}\n",
+  );
+
+  captureAssertDiagnostic(
+    &bag,
+    DiagnosticCode::CLOSURE_ESCAPES_WITH_REF_CAPTURE,
+    "closure escapes its scope while capturing `val` by reference",
+  );
+}
+
+/// Scenario: the same closure handed to a `@noescape` parameter, which cannot
+/// outlive the call, so the reference capture stays sound.
+@test
+function captureAcceptsRefCaptureThroughANoescapeParameter(): void {
+  let bag: DiagnosticBag = captureDiagnosticsFor(
+    "function apply(@noescape f: (i32) -> i32, x: i32): i32 {\n  return f(x);\n}\n\nfunction main(): i32 {\n  let mut val: i32 = 10;\n  let inc = (n: i32): i32 -> {\n    val = val + 1;\n    return n + val;\n  };\n  return apply(inc, 5);\n}\n",
+  );
+
+  Test::assertEq<u64>(captureCountErrors(&bag), 0);
+}
