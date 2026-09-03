@@ -378,10 +378,12 @@ function loweringSiblingMatchArmBindings(): void {
   Test::assertSnapshot("lowering-sibling-match-arm-bindings", rendered.toStr());
 }
 
+/// A bare binding in a `let ... else` takes the ok payload of a `@lang(try)`
+/// value, so the fixture unwraps one rather than binding a plain `u32`.
 @test
 function loweringLetElseBindingUsedAfterwards(): void {
   let rendered: String = loweringRender(
-    "function read(value: u32): u32 {\n  let doubled = value * 2 else {\n    return 0;\n  };\n\n  return doubled;\n}\n",
+    "@lang(try)\nenum Res {\n  OK(u32),\n  ERROR(u32),\n}\n\nfunction read(value: Res): u32 {\n  let doubled = value else {\n    return 0;\n  };\n\n  return doubled;\n}\n",
   );
 
   Test::assertSnapshot("lowering-let-else-binding", rendered.toStr());

@@ -5662,14 +5662,14 @@ export namespace Analyzer {
       @panic("unreachable: checkUnaryExpr match did not return");
     }
 
-    /// Whether a `let ... else` is written in the annotated shorthand form: a
-    /// plain binding with a type annotation, which unwraps a try enum instead
-    /// of matching a refutable pattern against it.
+    /// Whether a `let ... else` is written in the shorthand form: a plain
+    /// binding, which unwraps a try enum instead of matching a refutable
+    /// pattern against it.
+    ///
+    /// The type annotation is optional. The host reaches the same shorthand
+    /// for `let x = value else` and `let x: T = value else`, so an
+    /// unannotated binding takes the ok payload rather than the whole value.
     function isShorthandLetElse(module: &Ast::Module, value: &Ast::Statement::LetElse): boolean {
-      if (value.annotation.isNone()) {
-        return false;
-      }
-
       let Option::SOME(pattern) = module.patterns.get(value.pattern) else {
         return false;
       };
@@ -5708,6 +5708,8 @@ export namespace Analyzer {
           return;
         };
 
+        let message: String = `\`let name = value else\` requires a @lang(try) value, got ${typeStore.nameOf(actualType).toStr()}`;
+
         let viewOpt: Option<Analyzer::Typecheck::TryEnumView> = Analyzer::Typecheck::requireTryEnumView(
           state,
           defStore,
@@ -5715,7 +5717,7 @@ export namespace Analyzer {
           value.span,
           actualType,
           DiagnosticCode::LET_ELSE_BINDING_REQUIRES_TRY_TYPE,
-          "`let name = value else` requires a @lang(try) value",
+          message.toStr(),
         );
 
         let Option::SOME(view) = viewOpt else {

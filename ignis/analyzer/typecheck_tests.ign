@@ -5708,8 +5708,11 @@ function typecheckLetElseChecksElseBranchDiagnostics(): void {
   assertContainsDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
 }
 
+/// An unannotated `let name = value else` is the same shorthand as the
+/// annotated one: the binding takes the ok payload, so a non-try value leaves
+/// it nothing to bind.
 @test
-function typecheckLetElseUnannotatedBindingUsesValueType(): void {
+function typecheckLetElseUnannotatedBindingRequiresATryValue(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -5738,8 +5741,7 @@ function typecheckLetElseUnannotatedBindingUsesValueType(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  Test::assertEq<u64>(output.diagnostics.length(), 0);
-  assertExprType(&output, xUse, typeStore.intern(Analyzer::Type::I32));
+  assertContainsDiagnosticCode(&output, DiagnosticCode::LET_ELSE_BINDING_REQUIRES_TRY_TYPE);
 }
 
 /// An annotated `let ... else` over a non-try value reports the missing try
@@ -15290,6 +15292,45 @@ function typecheckRejectsBuiltinWriteToNull(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
   assertContainsDiagnostic(&output, DiagnosticCode::NULL_DEREFERENCE, "Cannot dereference null pointer");
+}
+
+/// Scenario: `let name = value else` without a type annotation. The binding
+/// takes the ok payload of a `@lang(try)` value, so a plain `i32` leaves it
+/// nothing to bind.
+@test
+function typecheckRejectsUnannotatedLetElseBindingOnNonTryValue(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let value: i32 = 5;\n\n  let bound = value else {\n    return 1;\n  };\n\n  return bound;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::LET_ELSE_BINDING_REQUIRES_TRY_TYPE,
+    "`let name = value else` requires a @lang(try) value, got i32",
+  );
+}
+
+/// Scenario: the same shorthand over a `@lang(try)` value, which binds the ok
+/// payload and stays silent.
+@test
+function typecheckAcceptsUnannotatedLetElseBindingOnTryValue(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@lang(try)\nenum Res {\n  OK(i32),\n  ERROR(i32),\n}\n\nfunction main(value: Res): i32 {\n  let bound = value else {\n    return 1;\n  };\n\n  return bound;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }
 
 /// Scenario: an extension method called on a literal. The receiver is passed
