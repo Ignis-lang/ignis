@@ -58,6 +58,22 @@ function cloneDiagnostic(diag: &Diagnostic): Diagnostic {
   return cloned;
 }
 
+/// Moves the parsed roots into the module. The parse loop collects them into a
+/// local list first because the parser state owns the module reference, so the
+/// list it appends to cannot live inside it.
+function pushRoots(module: &mut Ast::Module, roots: &Vector<Ast::ItemId>): void {
+  let mut moduleRef: &mut Ast::Module = module;
+  let mut index: u64 = 0;
+
+  while (index < roots.length()) {
+    if (let Option::SOME(itemId) = roots.get(index)) {
+      moduleRef.roots.push(*itemId);
+    }
+
+    index += 1;
+  }
+}
+
 export namespace Parser {
   function parseInto(
     file: &SourceFile,
@@ -80,14 +96,15 @@ export namespace Parser {
 
     let mut parser: ParserShared::State = ParserShared::createState(&mut lexResult.tokens, diagnosticsRef, module);
 
-    while (!parser.atEof()) {
-      let Option::SOME(itemId) = ParserDeclarations::parseTopLevelItem(&mut parser) else {
-        ParserRecovery::synchronizeTopLevel(&mut parser);
-        continue;
-      };
+    let mut roots: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
 
-      parser.module.roots.push(itemId);
+    while (!parser.atEof()) {
+      if (!ParserDeclarations::parseItemListEntry(&mut parser, &mut roots)) {
+        ParserRecovery::synchronizeTopLevel(&mut parser);
+      }
     }
+
+    pushRoots(parser.module, &roots);
 
     ParserTraitDefaults::materialize(parser.module);
   }
@@ -107,14 +124,15 @@ export namespace Parser {
       &mut module,
     );
 
-    while (!parser.atEof()) {
-      let Option::SOME(itemId) = ParserDeclarations::parseTopLevelItem(&mut parser) else {
-        ParserRecovery::synchronizeTopLevel(&mut parser);
-        continue;
-      };
+    let mut roots: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
 
-      parser.module.roots.push(itemId);
+    while (!parser.atEof()) {
+      if (!ParserDeclarations::parseItemListEntry(&mut parser, &mut roots)) {
+        ParserRecovery::synchronizeTopLevel(&mut parser);
+      }
     }
+
+    pushRoots(parser.module, &roots);
 
     ParserTraitDefaults::materialize(parser.module);
 

@@ -3996,6 +3996,115 @@ function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
   };
 }
 
+/// `@if(<condition>)` is answered while parsing: the selected branch's items
+/// take the directive's place and the discarded branch never reaches the AST.
+@test
+function parserSelectsCompileIfBranchAtItemPosition(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_compile_if.ign",
+    "@if(@debug()) { function enabled(): void {} } @else { function disabled(): void {} }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let itemId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing selected compile-time branch root"),
+  };
+
+  match (expectItem(&module, itemId)) {
+    Ast::Item::Node::Function(functionItem) -> Test::assertEq<str>(functionItem.name.toStr(), "enabled"),
+    _ -> @panic("expected function item from the selected compile-time branch"),
+  };
+}
+
+/// `@ifelse` behaves like `@if` except that its else branch is mandatory. Here
+/// the condition is false, so only the else branch reaches the AST.
+@test
+function parserSelectsCompileIfElseBranchAtItemPosition(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_compile_ifelse.ign",
+    "@ifelse(@release()) { function releaseOnly(): void {} } @else { function debugOnly(): void {} }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let itemId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing selected compile-time else branch root"),
+  };
+
+  match (expectItem(&module, itemId)) {
+    Ast::Item::Node::Function(functionItem) -> Test::assertEq<str>(functionItem.name.toStr(), "debugOnly"),
+    _ -> @panic("expected function item from the selected compile-time else branch"),
+  };
+}
+
+/// An extern member declares a signature only: the `;` is required and a
+/// written body is a parse error at the `{` that opens it.
+@test
+function parserRejectsExternFunctionWithBody(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_extern_with_body.ign",
+    "extern C { function foo(): void { return; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(module.roots.length(), 0);
+  Test::assertEq<u64>(diagnostics.length(), 3);
+
+  let first: &Diagnostic = match (diagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing extern function body diagnostic"),
+  };
+
+  Test::assertEq<str>(first.code, "I0001");
+  Test::assertEq<u64>(first.primarySpan.start, 32);
+  Test::assertEq<u64>(first.primarySpan.end, 33);
+
+  let second: &Diagnostic = match (diagnostics.get(1)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing extern function recovery diagnostic"),
+  };
+
+  Test::assertEq<str>(second.code, "I0002");
+}
+
+/// A free function always annotates its return type, so the `:` is required
+/// where a method may leave it out.
+@test
+function parserRejectsFunctionWithoutReturnType(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_missing_return_type.ign",
+    "function foo() { }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(module.roots.length(), 0);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+
+  let diagnostic: &Diagnostic = match (diagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing return type diagnostic"),
+  };
+
+  Test::assertEq<str>(diagnostic.code, "I0001");
+  Test::assertEq<u64>(diagnostic.primarySpan.start, 15);
+  Test::assertEq<u64>(diagnostic.primarySpan.end, 16);
+}
+
 /// Scenario: `i++` and `i--` in the update slot of a C-style `for` parse into
 /// postfix expressions over the loop binding.
 /// Spec: GRAMMAR.md `<postfix>`; parity fixture e2e_ok::for_loop.

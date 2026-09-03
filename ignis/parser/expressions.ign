@@ -1151,6 +1151,140 @@ export namespace ParserExpressions {
     return Option::NONE;
   }
 
+  /// `@if(<condition>)` and `@ifelse(<condition>)` open a parse-time branch.
+  /// The lookahead keeps them apart from an attribute, which also starts
+  /// with `@`.
+  function isCompileIfDirectiveStart(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (!parserRef.atPunctuation(Punctuation::AT)) {
+      return false;
+    }
+
+    let next: Token = ParserShared::nextSignificantToken(parserRef, 1);
+
+    if (next.kindValue() == TokenKind::KEYWORD && next.keywordValue() == Keyword::IF) {
+      return true;
+    }
+
+    return next.kindValue() == TokenKind::IDENTIFIER && next.lexemeString().equals("ifelse");
+  }
+
+  /// `@ifelse` differs from `@if` in that its else branch is mandatory.
+  function isCompileIfElseDirectiveStart(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (!parserRef.atPunctuation(Punctuation::AT)) {
+      return false;
+    }
+
+    let next: Token = ParserShared::nextSignificantToken(parserRef, 1);
+    return next.kindValue() == TokenKind::IDENTIFIER && next.lexemeString().equals("ifelse");
+  }
+
+  function isCompileElseDirectiveStart(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (!parserRef.atPunctuation(Punctuation::AT)) {
+      return false;
+    }
+
+    let next: Token = ParserShared::nextSignificantToken(parserRef, 1);
+    return next.kindValue() == TokenKind::KEYWORD && next.keywordValue() == Keyword::ELSE;
+  }
+
+  /// Consumes the `@if(<condition>)` or `@ifelse(<condition>)` head and folds
+  /// the condition, which decides which branch reaches the AST. The caller has
+  /// already recognised the directive, so only the condition can fail here.
+  function parseCompileDirectiveHeader(parser: &mut ParserShared::State): Option<boolean> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(_) = parserRef.consumePunctuation(Punctuation::AT) else {
+      return Option::NONE;
+    };
+
+    parserRef.skipTrivia();
+    parserRef.bump();
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after the compile-time directive") else {
+      return Option::NONE;
+    };
+
+    let condition: boolean = ParserExpressions::parseCompileConditionOr(parserRef)!;
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after compile-time condition") else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(condition);
+  }
+
+  /// Reports an `@else` that continues nothing and consumes it, so the
+  /// enclosing recovery loop keeps making progress.
+  function rejectUnmatchedCompileElse(parser: &mut ParserShared::State): void {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    parserRef.emitDiagnostic(
+      parserRef.current().span,
+      DiagnosticCode::UNEXPECTED_TOKEN,
+      "unexpected token",
+      "'@else' without a matching '@if'",
+    );
+
+    parserRef.bump();
+    parserRef.skipTrivia();
+    parserRef.bump();
+  }
+
+  /// Consumes the `@else` that continues a compile-time directive.
+  function consumeCompileElseDirective(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(_) = parserRef.consumePunctuation(Punctuation::AT) else {
+      return false;
+    };
+
+    return parserRef.consumeKeyword(Keyword::ELSE).isSome();
+  }
+
+  /// Skips the body of a discarded branch token by token, so nothing inside it
+  /// is parsed or reaches the AST.
+  function skipCompileBranchBody(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(openBrace) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' to open the compile-time directive branch") else {
+      return false;
+    };
+
+    let mut depth: u64 = 1;
+
+    while (depth > 0) {
+      if (parserRef.atEof()) {
+        parserRef.emitDiagnostic(
+          openBrace.span,
+          DiagnosticCode::EXPECTED_DELIMITER,
+          "unterminated compile-time directive branch",
+          "branch must close before end of file",
+        );
+        return false;
+      }
+
+      let token: Token = parserRef.bump();
+
+      if (token.kindValue() != TokenKind::PUNCTUATION) {
+        continue;
+      }
+
+      if (token.punctuationValue() == Punctuation::LEFT_BRACE) {
+        depth += 1;
+      } else if (token.punctuationValue() == Punctuation::RIGHT_BRACE) {
+        depth -= 1;
+      }
+    }
+
+    return true;
+  }
+
   function parseBuiltinCallExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {
     let mut parserRef: &mut ParserShared::State = parser;
     let atToken = parserRef.consumePunctuation(Punctuation::AT)!;
