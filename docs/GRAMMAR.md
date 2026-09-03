@@ -413,7 +413,12 @@
 <factor> ::= <cast> ( ( "*" | "/" | "%" ) <cast> )*
 <cast> ::= <unary> ( "as" <type> )?
 
-<unary> ::= ( "++" | "--" | "-" | "!" | "~" )* <postfix>
+<unary> ::= <prefix-operator>* <postfix>
+
+<prefix-operator> ::= "++" | "--" | "-" | "!" | "~" | "&" "mut"? | "*"
+// Every prefix operator binds tighter than `as`: the cast applies to the whole
+// prefix expression, so `-a as i32`, `&mut a as *mut i32` and `*p as i32` are
+// casts of a negation, of a mutable reference and of a dereference.
 
 <postfix> ::= <primary> ( <postfix-suffix> )*
 

@@ -555,8 +555,7 @@ impl IgnisParser {
         Ok(self.allocate_expression(ASTExpression::Dereference(ASTDereference::new(inner, span))))
       },
       TokenType::Increment | TokenType::Decrement | TokenType::Minus | TokenType::Bang | TokenType::Tilde => {
-        let (_, binding_power_right) = self.binding_powers(&token.type_).unwrap();
-        let right = self.parse_expression(binding_power_right)?;
+        let right = self.parse_expression(super::PREFIX_BINDING_POWER)?;
         let span = Span::merge(&token.span, self.get_span(&right));
 
         Ok(self.allocate_expression(ASTExpression::Unary(ASTUnary::new(
@@ -2026,6 +2025,40 @@ mod tests {
       result.nodes.get(&cast.expression),
       ASTNode::Expression(ASTExpression::Dereference(_))
     ));
+  }
+
+  #[test]
+  fn parses_negation_cast_as_cast_of_negation() {
+    let result = parse_expr("-a as i32");
+    let expr = get_expr(&result);
+
+    let ASTExpression::Cast(cast) = expr else {
+      panic!("expected cast, got {:?}", expr);
+    };
+
+    let ASTNode::Expression(ASTExpression::Unary(unary)) = result.nodes.get(&cast.expression) else {
+      panic!("expected the cast operand to be a unary expression");
+    };
+
+    assert_eq!(unary.operator, UnaryOperator::Negate);
+  }
+
+  #[test]
+  fn parses_negation_product_as_product_of_negation() {
+    let result = parse_expr("-a * b");
+    let expr = get_expr(&result);
+
+    let ASTExpression::Binary(binary) = expr else {
+      panic!("expected binary expression, got {:?}", expr);
+    };
+
+    assert_eq!(binary.operator, ASTBinaryOperator::Multiply);
+
+    let ASTNode::Expression(ASTExpression::Unary(unary)) = result.nodes.get(&binary.left) else {
+      panic!("expected the left operand to be a unary expression");
+    };
+
+    assert_eq!(unary.operator, UnaryOperator::Negate);
   }
 
   #[test]
