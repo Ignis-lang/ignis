@@ -776,6 +776,34 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
+    /// Whether the extension attribute is written `@extension(Type, mut)`.
+    function extensionAttributeIsMutable(metadata: &Ast::Metadata): boolean {
+      let mut index: u64 = 0;
+
+      while (index < metadata.attributes.length()) {
+        let Option::SOME(attribute) = metadata.attributes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let name: &String = &attribute.name;
+        if (!name.equals("extension")) {
+          index += 1;
+          continue;
+        }
+
+        if (let Option::SOME(argument) = attribute.arguments.get(1)) {
+          if (argument.equals("mut")) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     /// Whether the item's attributes carry `@deprecated`, with or without a
     /// message argument. Follows `implementsLangTrait` in matching the
     /// attribute by raw name text.
@@ -2266,6 +2294,7 @@ export namespace Analyzer {
         isDeprecated: false,
         deprecatedMessage: Option::NONE,
         extensionTarget: Option::NONE,
+        extensionMutable: false,
         isExtern: false,
         externName: Option::NONE,
       };
@@ -2285,6 +2314,7 @@ export namespace Analyzer {
         isDeprecated: Analyzer::Binder::hasDeprecatedAttribute(&fn_.metadata),
         deprecatedMessage: Analyzer::Binder::deprecatedAttributeMessage(&fn_.metadata),
         extensionTarget: Analyzer::Binder::extensionAttributeTarget(&fn_.metadata),
+        extensionMutable: Analyzer::Binder::extensionAttributeIsMutable(&fn_.metadata),
         isExtern: state.insideExtern,
         externName: Analyzer::Binder::externNameAttribute(&fn_.metadata),
       };

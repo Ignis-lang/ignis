@@ -2701,6 +2701,138 @@ export namespace Analyzer {
     /// Typecheck `value.name(args)` against an `@extension` function, which
     /// takes the receiver as its first parameter and the written arguments
     /// after it.
+    /// Whether the receiver of an extension call names a place the callee can
+    /// take a reference to.
+    ///
+    /// An extension function receives its receiver by reference, so a literal
+    /// or any other temporary has no storage to lend it. Variables, member
+    /// accesses and element accesses do; everything else is reported and the
+    /// call stops here. Returns `false` when it reported.
+    function checkExtensionReceiverPlace(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      ma: &Ast::Expression::MemberAccess,
+      receiverType: Analyzer::TypeId,
+    ): boolean {
+      let Option::SOME(receiver) = module.expressions.get(ma.object) else {
+        return true;
+      };
+
+      let mut isPlace: boolean = false;
+      let mut isLiteral: boolean = false;
+
+      match (receiver) {
+        // A written name parses as a path with one segment, so both node
+        // kinds name a binding here.
+        Ast::Expression::Node::Variable(_) -> {
+          isPlace = true;
+        },
+        Ast::Expression::Node::Path(_) -> {
+          isPlace = true;
+        },
+        Ast::Expression::Node::MemberAccess(_) -> {
+          isPlace = true;
+        },
+        Ast::Expression::Node::VectorAccess(_) -> {
+          isPlace = true;
+        },
+        Ast::Expression::Node::Literal(_) -> {
+          isLiteral = true;
+        },
+        _ -> {},
+      };
+
+      if (isPlace) {
+        return true;
+      }
+
+      let typeName: str = typeStore.nameOf(receiverType).toStr();
+
+      if (isLiteral) {
+        let message: String = `cannot call extension method '${ma.member.toStr()}' on a ${typeName} literal; assign to a variable first`;
+        Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::EXTENSION_METHOD_ON_LITERAL, message.toStr());
+        return false;
+      }
+
+      let message: String = `cannot call extension method '${ma.member.toStr()}' on a temporary ${typeName}; assign to a variable first`;
+      Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::EXTENSION_METHOD_ON_TEMPORARY, message.toStr());
+      return false;
+    }
+
+    /// Reject `@extension(T, mut)` reached through an immutable binding.
+    ///
+    /// Only a local binding is checked, the way the direct method path does:
+    /// other receiver places carry the same accepted debt.
+    function checkExtensionReceiverMutability(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      ma: &Ast::Expression::MemberAccess,
+      extensionDefId: Analyzer::DefinitionId,
+    ): void {
+      let Option::SOME(Analyzer::Definition::Function(extensionFn)) = defStore.get(extensionDefId) else {
+        return;
+      };
+
+      if (!extensionFn.extensionMutable) {
+        return;
+      }
+
+      Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, ma.object);
+
+      let Option::SOME(receiverRef) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, ma.object) else {
+        return;
+      };
+
+      let Analyzer::ResolverBodies::ResolvedRef::Local(localId) = receiverRef else {
+        return;
+      };
+
+      let Option::SOME(binding) = Analyzer::Typecheck::lookupLocalBinding(state, localId) else {
+        return;
+      };
+
+      if (binding.mutable) {
+        return;
+      }
+
+      let receiverName: String = Analyzer::Typecheck::receiverBindingName(module, ma.object);
+      let message: String = `Cannot call mutating method '${ma.member.toStr()}' on immutable variable '${receiverName.toStr()}'`;
+      Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTATING_METHOD_ON_IMMUTABLE, message.toStr());
+    }
+
+    /// The written name of a receiver expression, for a diagnostic that names
+    /// the binding. Empty for a receiver that names nothing.
+    function receiverBindingName(module: &Ast::Module, exprId: Ast::ExpressionId): String {
+      let Option::SOME(receiver) = module.expressions.get(exprId) else {
+        return String::create("");
+      };
+
+      match (receiver) {
+        Ast::Expression::Node::Variable(variable) -> {
+          return variable.name.clone();
+        },
+        Ast::Expression::Node::Path(path) -> {
+          if (path.segments.isEmpty()) {
+            return String::create("");
+          }
+
+          let Option::SOME(last) = path.segments.get(path.segments.length() - 1) else {
+            return String::create("");
+          };
+
+          return last.clone();
+        },
+        _ -> {
+          return String::create("");
+        },
+      };
+
+      return String::create("");
+    }
+
     function checkExtensionMethodCall(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -2726,6 +2858,19 @@ export namespace Analyzer {
         Analyzer::Typecheck::emitUnsupported(state, ma.span, "extension functions without a receiver parameter");
         return Option::NONE;
       }
+
+      if (!Analyzer::Typecheck::checkExtensionReceiverPlace(state, typeStore, module, ma, receiverType)) {
+        return Option::NONE;
+      }
+
+      Analyzer::Typecheck::checkExtensionReceiverMutability(
+        state,
+        defStore,
+        module,
+        resolvedBodies,
+        ma,
+        extensionDefId,
+      );
 
       if (let Option::SOME(receiverParam) = paramTypes.get(0)) {
         if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, ma.span, *receiverParam, receiverType)) {

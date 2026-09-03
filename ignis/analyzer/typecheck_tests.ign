@@ -15291,3 +15291,83 @@ function typecheckRejectsBuiltinWriteToNull(): void {
 
   assertContainsDiagnostic(&output, DiagnosticCode::NULL_DEREFERENCE, "Cannot dereference null pointer");
 }
+
+/// Scenario: an extension method called on a literal. The receiver is passed
+/// by reference, and a literal has no storage to lend.
+@test
+function typecheckRejectsExtensionMethodOnALiteral(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@extension(i32)\nfunction doubled(value: i32): i32 {\n  return value * 2;\n}\n\nfunction main(): i32 {\n  return 21.doubled();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::EXTENSION_METHOD_ON_LITERAL,
+    "cannot call extension method 'doubled' on a i32 literal; assign to a variable first",
+  );
+}
+
+/// Scenario: the same call on the result of an expression, which lives only
+/// for the duration of the call.
+@test
+function typecheckRejectsExtensionMethodOnATemporary(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@extension(i32)\nfunction doubled(value: i32): i32 {\n  return value * 2;\n}\n\nfunction main(): i32 {\n  let x: i32 = 5;\n  return (x + 1).doubled();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::EXTENSION_METHOD_ON_TEMPORARY,
+    "cannot call extension method 'doubled' on a temporary i32; assign to a variable first",
+  );
+}
+
+/// Scenario: `@extension(T, mut)` reached through a binding declared without
+/// `mut`.
+@test
+function typecheckRejectsMutatingExtensionOnImmutableBinding(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@extension(i32, mut)\nfunction increment(value: i32): i32 {\n  return value + 1;\n}\n\nfunction main(): i32 {\n  let x: i32 = 5;\n  return x.increment();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::MUTATING_METHOD_ON_IMMUTABLE,
+    "Cannot call mutating method 'increment' on immutable variable 'x'",
+  );
+}
+
+/// Scenario: the same call on a `mut` binding, which stays silent — the check
+/// is about the binding, not about the attribute.
+@test
+function typecheckAcceptsMutatingExtensionOnMutableBinding(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@extension(i32, mut)\nfunction increment(value: i32): i32 {\n  return value + 1;\n}\n\nfunction main(): i32 {\n  let mut x: i32 = 5;\n  return x.increment();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
