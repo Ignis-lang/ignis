@@ -766,7 +766,7 @@ export namespace Analyzer {
         }
 
         if (call.arguments.length() != 0) {
-          Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 0);
+          Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, bareBuiltinName.toStr(), 0, call.arguments.length());
           return Option::NONE;
         }
 
@@ -1139,7 +1139,7 @@ export namespace Analyzer {
         if (let Option::SOME(expectedPayload) = expectedType) {
           if (let Option::SOME(actual) = actualOpt) {
             if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, expectedPayload, actual)) {
-              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, expectedPayload, actual);
+              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, index + 1, expectedPayload, actual);
             }
           }
         }
@@ -1282,7 +1282,7 @@ export namespace Analyzer {
         if (let Option::SOME(expectedType) = expectedParam) {
           if (let Option::SOME(actualType) = actualOpt) {
             if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, expectedType, actualType)) {
-              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, expectedType, actualType);
+              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, argIndex + 1, expectedType, actualType);
             }
           }
         }
@@ -1710,7 +1710,8 @@ export namespace Analyzer {
       let actualArity: u64 = call.arguments.length();
 
       if (actualArity != expectedArity) {
-        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, actualArity, expectedArity);
+        let calleeName: String = Analyzer::Typecheck::calleeDisplayName(module, call.callee);
+        Analyzer::Typecheck::emitArgumentCountMismatch(state, call.span, calleeName.toStr(), expectedArity, actualArity);
         Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
         return Option::SOME(signature.returnType);
       }
@@ -1766,7 +1767,7 @@ export namespace Analyzer {
         match (paramDef) {
           Analyzer::Definition::Variable(parameter) -> {
             if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, parameter.declaredType, argumentType)) {
-              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, parameter.declaredType, argumentType);
+              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, index + 1, parameter.declaredType, argumentType);
               Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
               return Option::SOME(signature.returnType);
             }
@@ -2715,7 +2716,7 @@ export namespace Analyzer {
 
       if (let Option::SOME(receiverParam) = paramTypes.get(0)) {
         if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, ma.span, *receiverParam, receiverType)) {
-          Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, ma.span, *receiverParam, receiverType);
+          Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, ma.span, 1, *receiverParam, receiverType);
         }
       }
 
@@ -5511,7 +5512,8 @@ export namespace Analyzer {
             return;
           }
 
-          Analyzer::Typecheck::emitCannotInferLocal(state, span);
+          let bindingName: String = Analyzer::Typecheck::bindingPatternName(module, patternId);
+          Analyzer::Typecheck::emitCannotInferVariableType(state, span, bindingName.toStr());
           return;
         };
 
@@ -5618,7 +5620,7 @@ export namespace Analyzer {
         }
 
         if (call.arguments.length() != 2) {
-          Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 2);
+          Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), 2, call.arguments.length());
           return Option::NONE;
         }
 
@@ -5650,7 +5652,7 @@ export namespace Analyzer {
         }
 
         if (call.arguments.length() != 1) {
-          Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 1);
+          Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), 1, call.arguments.length());
           return Option::NONE;
         }
 
@@ -5677,7 +5679,7 @@ export namespace Analyzer {
         }
 
         if (call.arguments.length() != 1) {
-          Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 1);
+          Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), 1, call.arguments.length());
           return Option::NONE;
         }
 
@@ -5696,7 +5698,7 @@ export namespace Analyzer {
         }
 
         if (call.arguments.length() != 2) {
-          Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 2);
+          Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), 2, call.arguments.length());
           return Option::NONE;
         }
 
@@ -5802,7 +5804,7 @@ export namespace Analyzer {
       }
 
       if (call.arguments.length() != 0) {
-        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 0);
+        Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), 0, call.arguments.length());
         return Option::NONE;
       }
 
@@ -5878,7 +5880,7 @@ export namespace Analyzer {
       }
 
       if (call.arguments.length() != 1) {
-        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 1);
+        Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), 1, call.arguments.length());
         return Option::NONE;
       }
 
@@ -5946,7 +5948,7 @@ export namespace Analyzer {
       }
 
       if (call.arguments.length() != 0) {
-        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 0);
+        Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), 0, call.arguments.length());
         return Option::NONE;
       }
 
@@ -6014,7 +6016,7 @@ export namespace Analyzer {
       }
 
       if (call.arguments.length() != expectedCount) {
-        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), expectedCount);
+        Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), expectedCount, call.arguments.length());
         return Option::NONE;
       }
 
@@ -6072,7 +6074,7 @@ export namespace Analyzer {
       }
 
       if (call.arguments.length() != 0) {
-        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 0);
+        Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), 0, call.arguments.length());
         return Option::NONE;
       }
 
@@ -6108,7 +6110,7 @@ export namespace Analyzer {
       }
 
       if (call.arguments.length() != 1) {
-        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 1);
+        Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), 1, call.arguments.length());
         return Option::NONE;
       }
 
@@ -6137,7 +6139,7 @@ export namespace Analyzer {
       }
 
       if (call.arguments.length() != 0) {
-        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, call.span, call.arguments.length(), 0);
+        Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), 0, call.arguments.length());
         return Option::NONE;
       }
 
@@ -6265,6 +6267,10 @@ export namespace Analyzer {
       // A bare callee has no place to write type arguments either.
       let noTypeArgs: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
 
+      // Only the arm that reports an uncallable right side reads this, but the
+      // arm bodies cannot declare their own bindings.
+      let rightDescription: String = Analyzer::Typecheck::describeExpressionKind(module, rightExprId);
+
       return match (rightExpr) {
         Ast::Expression::Node::Call(call) -> {
           return Analyzer::Typecheck::checkPipePrepend(
@@ -6308,16 +6314,24 @@ export namespace Analyzer {
           leftType,
         ),
         Ast::Expression::Node::RecordInit(_) -> {
-          Analyzer::Typecheck::emitPipeRightNeedsPlaceholder(state, pipe.span);
+          Analyzer::Typecheck::emitPipeRightNeedsPlaceholder(state, pipe.span, "record initialization");
           return Option::NONE;
         },
         Ast::Expression::Node::Vector(_) -> {
-          Analyzer::Typecheck::emitPipeRightNeedsPlaceholder(state, pipe.span);
+          Analyzer::Typecheck::emitPipeRightNeedsPlaceholder(state, pipe.span, "vector literal");
           return Option::NONE;
         },
         Ast::Expression::Node::BuiltinCall(_) -> {
-          Analyzer::Typecheck::emitPipeRightNeedsPlaceholder(state, pipe.span);
-          return Option::NONE;
+          return Analyzer::Typecheck::reportBuiltinPipeRightNeedsPlaceholder(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            pipe.span,
+            rightExprId,
+          );
         },
         Ast::Expression::Node::Lambda(_) -> {
           return Analyzer::Typecheck::checkPipeLambda(
@@ -6346,10 +6360,114 @@ export namespace Analyzer {
           );
         },
         _ -> {
-          Analyzer::Typecheck::emitPipeRightNotCallable(state, pipe.span);
+          Analyzer::Typecheck::emitPipeRightNotCallable(state, pipe.span, rightDescription.toStr());
           return Option::NONE;
         },
       };
+    }
+
+    /// Reports a builtin call written as a pipe right side without a placeholder,
+    /// and then still types the call.
+    ///
+    /// A builtin's own type and arity rules do not depend on where it was written,
+    /// so stopping at the placeholder mistake would hide them behind one recompile.
+    function reportBuiltinPipeRightNeedsPlaceholder(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      module: &Ast::Module,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      span: SourceSpan,
+      builtinExprId: Ast::ExpressionId,
+    ): Option<Analyzer::TypeId> {
+      Analyzer::Typecheck::emitPipeRightNeedsPlaceholder(state, span, "builtin call");
+
+      let _builtinType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(
+        state,
+        defStore,
+        typeStore,
+        symbols,
+        module,
+        resolvedBodies,
+        builtinExprId,
+      );
+
+      return Option::NONE;
+    }
+
+    /// How a diagnostic names the shape of `exprId`, for messages that report
+    /// what was written rather than what it resolved to. Shapes the reference
+    /// analyzer does not name individually fall back to "expression".
+    function describeExpressionKind(module: &Ast::Module, exprId: Ast::ExpressionId): String {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return String::create("expression");
+      };
+
+      return match (expr) {
+        Ast::Expression::Node::Literal(_) -> String::create("literal"),
+        Ast::Expression::Node::Binary(_) -> String::create("binary expression"),
+        Ast::Expression::Node::Unary(_) -> String::create("unary expression"),
+        Ast::Expression::Node::Ternary(_) -> String::create("ternary expression"),
+        Ast::Expression::Node::Assignment(_) -> String::create("assignment"),
+        Ast::Expression::Node::RecordInit(_) -> String::create("record initialization"),
+        Ast::Expression::Node::Vector(_) -> String::create("vector literal"),
+        Ast::Expression::Node::BuiltinCall(_) -> String::create("builtin call"),
+        _ -> String::create("expression"),
+      };
+    }
+
+    /// How a diagnostic names the callee of `exprId`: the identifier, path or
+    /// member the source wrote. A callee with no written name, such as a lambda
+    /// or the result of another expression, is named `<function>`, as the
+    /// reference analyzer names it.
+    function calleeDisplayName(module: &Ast::Module, exprId: Ast::ExpressionId): String {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return String::create("<function>");
+      };
+
+      return match (expr) {
+        Ast::Expression::Node::Variable(variable) -> variable.name.clone(),
+        Ast::Expression::Node::MemberAccess(memberAccess) -> memberAccess.member.clone(),
+        Ast::Expression::Node::Call(call) -> Analyzer::Typecheck::calleeDisplayName(module, call.callee),
+        Ast::Expression::Node::Grouped(grouped) -> Analyzer::Typecheck::calleeDisplayName(module, grouped.expression),
+        Ast::Expression::Node::Path(path) -> Analyzer::Typecheck::pathDisplayName(&path.segments),
+        _ -> String::create("<function>"),
+      };
+    }
+
+    /// The name a binding pattern introduces, for diagnostics that report the
+    /// declaration rather than a use. A pattern that binds no single name, such
+    /// as a tuple, has none to report and is named `<variable>`.
+    function bindingPatternName(module: &Ast::Module, patternId: Ast::PatternId): String {
+      if (let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(patternId)) {
+        return binding.name.clone();
+      }
+
+      return String::create("<variable>");
+    }
+
+    /// Joins path segments the way the source wrote them, so a path callee is
+    /// named `Type::method` rather than by its last segment alone.
+    function pathDisplayName(segments: &Vector<String>): String {
+      let mut result: String = String::create("");
+
+      let mut index: u64 = 0;
+      while (index < segments.length()) {
+        let Option::SOME(segment) = segments.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          result = result.concat("::");
+        }
+
+        result = result.concat(segment.toStr());
+        index += 1;
+      }
+
+      return result;
     }
 
     /// Look past any number of parentheses around `exprId`.
@@ -6628,7 +6746,8 @@ export namespace Analyzer {
           // method has no receiver to skip, so its parameters are taken whole, like any
           // other callee's.
           let Option::SOME(signature) = Analyzer::Typecheck::extractFunctionSignature(defStore, defId) else {
-            Analyzer::Typecheck::emitPipeRightNotCallable(state, span);
+            let description: String = Analyzer::Typecheck::describeExpressionKind(module, calleeExprId);
+            Analyzer::Typecheck::emitPipeRightNotCallable(state, span, description.toStr());
             return Option::NONE;
           };
 
@@ -6846,14 +6965,15 @@ export namespace Analyzer {
       // Bailing out instead would hide every other mistake in the same expression behind
       // one recompile, and would strip the type off a pipe whose callee is known.
       if (suppliedCount != signature.paramTypes.length()) {
-        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, pipe.span, suppliedCount, signature.paramTypes.length());
+        let calleeName: String = Analyzer::Typecheck::calleeDisplayName(module, calleeExprId);
+        Analyzer::Typecheck::emitArgumentCountMismatch(state, pipe.span, calleeName.toStr(), signature.paramTypes.length(), suppliedCount);
       }
 
       // The piped value fills the first parameter; everything written at the call site
       // shifts one place right.
       if (let Option::SOME(firstParamType) = signature.paramTypes.get(0)) {
         if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, pipe.span, *firstParamType, leftType)) {
-          Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, pipe.span, *firstParamType, leftType);
+          Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, pipe.span, 1, *firstParamType, leftType);
         }
       }
 
@@ -6884,7 +7004,7 @@ export namespace Analyzer {
         if (let Option::SOME(expected) = expectedType) {
           if (let Option::SOME(actual) = actualOpt) {
             if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, pipe.span, expected, actual)) {
-              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, pipe.span, expected, actual);
+              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, pipe.span, index + 2, expected, actual);
             }
           }
         }
@@ -6912,11 +7032,12 @@ export namespace Analyzer {
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
       span: SourceSpan,
+      calleeName: str,
       paramTypes: &Vector<Analyzer::TypeId>,
       leftType: Analyzer::TypeId,
     ): void {
       if (paramTypes.length() != 1) {
-        Analyzer::Typecheck::emitInvalidNumberOfArguments(state, span, 1, paramTypes.length());
+        Analyzer::Typecheck::emitArgumentCountMismatch(state, span, calleeName, paramTypes.length(), 1);
       }
 
       let Option::SOME(firstParamType) = paramTypes.get(0) else {
@@ -6926,7 +7047,7 @@ export namespace Analyzer {
       let expectedType: Analyzer::TypeId = *firstParamType;
 
       if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, expectedType, leftType)) {
-        Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, span, expectedType, leftType);
+        Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, span, 1, expectedType, leftType);
       }
     }
 
@@ -6954,14 +7075,16 @@ export namespace Analyzer {
       };
 
       let Analyzer::Type::Function(functionType) = lambdaTypeNode else {
-        Analyzer::Typecheck::emitPipeRightNotCallable(state, pipe.span);
+        let description: String = Analyzer::Typecheck::describeExpressionKind(module, lambdaExprId);
+        Analyzer::Typecheck::emitPipeRightNotCallable(state, pipe.span, description.toStr());
         return Option::NONE;
       };
 
       let paramTypes: Vector<Analyzer::TypeId> = Analyzer::Typecheck::copyTypeIdVector(&functionType.params);
       let returnType: Analyzer::TypeId = functionType.returnType;
 
-      Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, &paramTypes, leftType);
+      let lambdaName: String = Analyzer::Typecheck::calleeDisplayName(module, lambdaExprId);
+      Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, lambdaName.toStr(), &paramTypes, leftType);
 
       // A lambda taking no parameter is not a callee this pipe can complete, so the pipe
       // has no type to offer — unlike a named callee, whose return type stands on its own.
@@ -7063,7 +7186,7 @@ export namespace Analyzer {
       // A wrong count is reported and the pipe still takes the method's return type, the
       // same way `checkPipePrepend` treats a miscounted call: the method is known, so
       // stripping the type would hide every later mistake behind one recompile.
-      Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, &specialized.paramTypes, leftType);
+      Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, ma.member.toStr(), &specialized.paramTypes, leftType);
 
       Analyzer::Typecheck::recordExprType(state, pipe.right, specialized.returnType);
 
