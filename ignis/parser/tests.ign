@@ -943,6 +943,78 @@ function parserParsesUnaryCallAndMemberExpressions(): void {
 }
 
 @test
+function parserParsesPrefixNegationAtPrefixPrecedence(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_prefix_negation.ign",
+    "function main(): void { -a as i32; -a * b; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing prefix negation function root"),
+  };
+
+  match (module.items.get(functionId)) {
+    Option::SOME(Ast::Item::Node::Function(functionItem)) -> {
+      match (expectStatement(&module, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> {
+          Test::assertEq<u64>(block.statements.length(), 2);
+
+          let castStatementId: Ast::StatementId = match (block.statements.get(0)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing negation cast statement"),
+          };
+          let productStatementId: Ast::StatementId = match (block.statements.get(1)) {
+            Option::SOME(value) -> *value,
+            Option::NONE -> @panic("missing negation product statement"),
+          };
+
+          match (expectStatement(&module, castStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Cast(cast) -> {
+                  match (expectExpression(&module, cast.expression)) {
+                    Ast::Expression::Node::Unary(unary) -> Test::assert(unary.operator == Ast::Expression::UnaryOperator::Negate),
+                    _ -> @panic("expected the cast operand to be a negation"),
+                  };
+                },
+                _ -> @panic("expected a cast of the negation"),
+              };
+            },
+            _ -> @panic("expected negation cast statement"),
+          };
+
+          match (expectStatement(&module, productStatementId)) {
+            Ast::Statement::Node::Expression(expressionStatement) -> {
+              match (expectExpression(&module, expressionStatement.expression)) {
+                Ast::Expression::Node::Binary(binaryExpression) -> {
+                  Test::assert(binaryExpression.operator == Ast::Expression::BinaryOperator::Multiply);
+
+                  match (expectExpression(&module, binaryExpression.left)) {
+                    Ast::Expression::Node::Unary(unary) -> Test::assert(unary.operator == Ast::Expression::UnaryOperator::Negate),
+                    _ -> @panic("expected the left operand to be a negation"),
+                  };
+                },
+                _ -> @panic("expected a product of the negation"),
+              };
+            },
+            _ -> @panic("expected negation product statement"),
+          };
+        },
+        _ -> @panic("expected block function body for prefix negation test"),
+      };
+    },
+    _ -> @panic("expected prefix negation function root"),
+  };
+}
+
+@test
 function parserParsesLetIfWhileBreakAndContinueStatements(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_control_flow.ign",
