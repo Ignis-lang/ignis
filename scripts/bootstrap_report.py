@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-GATE_IDS = ("G1", "G2", "G3", "G4", "G5")
+GATE_IDS = ("G1", "G2", "G3", "G4", "G5", "G6")
 
 GATE_TITLES = {
   "G1": "Fixed point (stage3 C identical to stage2)",
@@ -29,6 +29,7 @@ GATE_TITLES = {
   "G3": "Selfhost test suite under stage2",
   "G4": "Resource budget within 1.25x of the host",
   "G5": "Diagnostics equal or better than the host",
+  "G6": "Syntax parity with the host parser",
 }
 
 STATUS_PASS = "pass"
