@@ -1138,7 +1138,12 @@ export namespace Analyzer {
     );
     Analyzer::recordQualifiedNamesInDefStore(defStore, &stampDirect, 0);
 
-    let emptyProgramIndex: Analyzer::Imports::ProgramQualifiedIndex = Analyzer::Imports::emptyProgramQualifiedIndex();
+    // The program path publishes every module's declarations into a shared
+    // qualified index the resolvers consult for namespace-local names. A
+    // single module still needs its own entries there, or a name declared
+    // inside a namespace would only be reachable through the flat overlay.
+    let mut programIndex: Analyzer::Imports::ProgramQualifiedIndex = Analyzer::Imports::emptyProgramQualifiedIndex();
+    Analyzer::appendDirectToProgramIndex(&mut programIndex, &stampDirect);
 
     let resolvedTypes: Analyzer::Resolver::ResolverOutput = Analyzer::Resolver::resolveTypesWithImports(
       defStore,
@@ -1148,7 +1153,7 @@ export namespace Analyzer {
       &pass1,
       &pass2,
       overlay,
-      &emptyProgramIndex,
+      &programIndex,
     );
 
     let resolvedBodies: Analyzer::ResolverBodies::ResolverBodiesOutput = Analyzer::ResolverBodies::resolveBodiesWithImports(
@@ -1159,7 +1164,7 @@ export namespace Analyzer {
       &pass1,
       &pass2,
       overlay,
-      &emptyProgramIndex,
+      &programIndex,
     );
 
     let typecheck: Analyzer::Typecheck::TypecheckOutput = Analyzer::Typecheck::checkModule(
