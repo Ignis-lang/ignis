@@ -2672,7 +2672,7 @@ export namespace Analyzer {
         if (let Analyzer::Definition::Function(function_) = def) {
           if (function_.name.raw() == wanted.raw()) {
             if (let Option::SOME(target) = &function_.extensionTarget) {
-              if (target.equals(receiverName.toStr())) {
+              if (Analyzer::Typecheck::extensionTargetNamesType(target.toStr(), receiverName.toStr())) {
                 return Option::SOME(defId);
               }
             }
@@ -2683,6 +2683,19 @@ export namespace Analyzer {
       }
 
       return Option::NONE;
+    }
+
+    /// Whether the raw text of an `@extension(Type)` attribute names the type
+    /// `typeName` renders.
+    ///
+    /// The two are the same word for every primitive but the boolean one, which
+    /// source spells `boolean` and every rendering spells `bool`.
+    function extensionTargetNamesType(target: str, typeName: str): boolean {
+      if (target.equals(typeName)) {
+        return true;
+      }
+
+      return target.equals("boolean") && typeName.equals("bool");
     }
 
     /// Typecheck `value.name(args)` against an `@extension` function, which
