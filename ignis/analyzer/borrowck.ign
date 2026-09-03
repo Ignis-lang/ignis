@@ -1942,6 +1942,81 @@ export namespace Borrowck {
     };
   }
 
+  /// Whether the node is itself a binding whose bytes live in borrowed storage.
+  /// `fieldBaseIsBorrowed` covers places reached through a reference; this
+  /// covers the binding a destructure of one produced, which can be handed on
+  /// whole. Mirrors `is_borrowed_binding`.
+  function isBorrowedBindingNode(
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    nodeId: Hir::HirId,
+  ): boolean {
+    let Option::SOME(defId) = Borrowck::variableOf(hir, nodeId) else {
+      return false;
+    };
+
+    return state.isBorrowedBinding(defId.raw());
+  }
+
+  /// Reports a move whose source is borrowed storage: a field read through a
+  /// reference, or a pattern binding that carries a borrow forward. Only owning
+  /// values matter, because reading a `Copy` value leaves the borrow intact.
+  /// Mirrors `reject_move_out_of_borrow`.
+  function rejectMoveOutOfBorrow(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    nodeId: Hir::HirId,
+  ): void {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return;
+    };
+
+    let span: SourceSpan = node.span;
+    let typeId: Analyzer::TypeId = node.typeId;
+
+    let throughReference: boolean = Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, nodeId);
+    let borrowedBinding: boolean = Borrowck::isBorrowedBindingNode(hir, state, nodeId);
+
+    if (!throughReference && !borrowedBinding) {
+      return;
+    }
+
+    if (!Borrowck::needsDropType(defStore, typeStore, typeId)) {
+      return;
+    }
+
+    Borrowck::emitCannotMoveOutOfBorrow(diagnostics, span);
+  }
+
+  /// Whether any arm of a match takes an owning payload out of the scrutinee.
+  /// Mirrors the `pattern_moves_owned_value` fold of `check_match`, reusing the
+  /// droppable-binding walk the arms already need.
+  function armsMoveScrutineePayload(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    arms: &Vector<Hir::HirMatchArm>,
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < arms.length()) {
+      if (let Option::SOME(arm) = arms.get(index)) {
+        let mut bindings: Vector<u32> = Vector::new<u32>();
+        Borrowck::collectDroppableBindings(defStore, typeStore, &arm.pattern, &mut bindings);
+
+        if (!bindings.isEmpty()) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
   /// Schedules the drops a match arm owes for its own pattern bindings, keyed
   /// by the arm body so that the body's block schedule and this one stay
   /// distinct. Mirrors the `on_match_arm_end` block of `check_match`, including
@@ -2283,6 +2358,7 @@ export namespace Borrowck {
         while (index < init.fields.length()) {
           if (let Option::SOME(field) = init.fields.get(index)) {
             Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, field.value);
+            Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, field.value);
 
             if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, field.value)) {
               Borrowck::tryConsume(state, source);
@@ -2357,6 +2433,8 @@ export namespace Borrowck {
             let mut returnRef: &mut Borrowck::State = state;
             returnRef.setMoveValue(source.raw(), Borrowck::MOVE_RETURNED);
           }
+
+          Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, returned);
         }
 
         // A return unwinds every open scope back to the function root, so it
@@ -2549,6 +2627,7 @@ export namespace Borrowck {
     while (index < operands.length()) {
       if (let Option::SOME(operand) = operands.get(index)) {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, *operand);
+        Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, *operand);
 
         if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *operand)) {
           Borrowck::tryConsume(state, source);
@@ -2578,6 +2657,7 @@ export namespace Borrowck {
     while (index < args.length()) {
       if (let Option::SOME(argument) = args.get(index)) {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, *argument);
+        Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, *argument);
         Borrowck::checkTemporaryBorrow(defStore, symbols, hir, state, diagnostics, *argument, span);
 
         if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *argument)) {
@@ -2661,13 +2741,10 @@ export namespace Borrowck {
       Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, value);
 
       if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, value)) {
-        if (state.isBorrowedBinding(source.raw())) {
-          Borrowck::emitCannotMoveOutOfBorrow(diagnostics, span);
-        }
-
         Borrowck::tryConsume(state, source);
       }
 
+      Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, value);
       Borrowck::recordLetBorrow(defStore, symbols, hir, state, diagnostics, value, span);
     }
 
@@ -2773,6 +2850,8 @@ export namespace Borrowck {
         }
       }
     }
+
+    Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, assign.value);
 
     if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, assign.value)) {
       Borrowck::tryConsume(state, source);
@@ -2984,7 +3063,16 @@ export namespace Borrowck {
   ): void {
     Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, matchNode.scrutinee);
 
-    if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
+    let movesScrutineePayload: boolean = Borrowck::armsMoveScrutineePayload(defStore, typeStore, &matchNode.arms);
+    let scrutineeIsBorrowed: boolean = Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, matchNode.scrutinee);
+
+    // A borrowed base wins over consuming the scrutinee's owner: taking the
+    // payload out of storage reached through a reference moves out of a borrow,
+    // and suppressing the owner's drop would accept it silently. Mirrors the
+    // `moves_scrutinee_payload` branch of `check_match`.
+    if (movesScrutineePayload && scrutineeIsBorrowed) {
+      Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, matchNode.scrutinee);
+    } else if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
       Borrowck::tryConsume(state, source);
     }
 
@@ -3036,7 +3124,21 @@ export namespace Borrowck {
       if (state.reachable) {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, arm.body);
 
+        // The arm's value flows out of the match, so producing it from borrowed
+        // storage moves out of a borrow just as a `let` or a `return` would.
+        Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, arm.body);
+
         if (let Option::SOME(result) = Borrowck::armResultBinding(hir, arm.body)) {
+          // A block-bodied arm hides the binding behind its block node, so the
+          // rejection above never sees it; this walk does.
+          let handedOnDirectly: boolean = Borrowck::isBorrowedBindingNode(hir, state, arm.body);
+          let resultIsBorrowed: boolean = state.isBorrowedBinding(result.raw());
+          let resultOwnsValue: boolean = Borrowck::definitionNeedsDrop(defStore, typeStore, result);
+
+          if (!handedOnDirectly && resultIsBorrowed && resultOwnsValue) {
+            Borrowck::emitCannotMoveOutOfBorrow(diagnostics, span);
+          }
+
           if (Borrowck::containsRaw(&mut bindings, result.raw())) {
             Borrowck::tryConsume(state, result);
           }

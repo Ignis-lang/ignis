@@ -879,3 +879,150 @@ function borrowckReportsClosureCaptureOfBorrowedBinding(): void {
   Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW), 1);
   Test::assertEq<u64>(diagnostics.length(), 1);
 }
+
+/// Scenario: a pattern binding destructured out of a reference is returned by
+/// value, handing the caller storage the function only borrowed.
+/// Spec: IGN-178 — O0002 on a return value.
+@test
+function borrowckReportsReturnOfBorrowedBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nenum Node {\n  ITEM(Owned),\n  OTHER,\n}\n\nfunction run(node: &Node): Owned {\n  let Node::ITEM(item) = node else {\n    return Owned { id: 0 };\n  };\n\n  return item;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
+/// Scenario: the same return of a `Copy` payload reads the value instead of
+/// moving it, so the borrow survives and nothing is reported.
+/// Spec: IGN-178 — the `Copy` counterpart of the return site.
+@test
+function borrowckAcceptsReturnOfBorrowedCopyBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "enum Tag {\n  VALUE(u32),\n  OTHER,\n}\n\nfunction run(tag: &Tag): u32 {\n  let Tag::VALUE(value) = tag else {\n    return 0;\n  };\n\n  return value;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a pattern binding destructured out of a reference initializes a
+/// new local, which would take ownership of storage the function only borrowed.
+/// Spec: IGN-178 — O0002 on a `let` initializer.
+@test
+function borrowckReportsLetOfBorrowedBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nenum Node {\n  ITEM(Owned),\n  OTHER,\n}\n\nfunction run(node: &Node): u32 {\n  let Node::ITEM(item) = node else {\n    return 0;\n  };\n\n  let taken: Owned = item;\n\n  return taken.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
+/// Scenario: initializing a local from a borrowed `Copy` binding copies it.
+/// Spec: IGN-178 — the `Copy` counterpart of the `let` site.
+@test
+function borrowckAcceptsLetOfBorrowedCopyBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "enum Tag {\n  VALUE(u32),\n  OTHER,\n}\n\nfunction run(tag: &Tag): u32 {\n  let Tag::VALUE(value) = tag else {\n    return 0;\n  };\n\n  let taken: u32 = value;\n\n  return taken;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a pattern binding destructured out of a reference is passed by
+/// value, so the callee would take over storage the caller only borrowed.
+/// Spec: IGN-178 — O0002 on a call argument.
+@test
+function borrowckReportsCallArgumentOfBorrowedBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nenum Node {\n  ITEM(Owned),\n  OTHER,\n}\n\nfunction consume(value: Owned): u32 {\n  return value.id;\n}\n\nfunction run(node: &Node): u32 {\n  let Node::ITEM(item) = node else {\n    return 0;\n  };\n\n  return consume(item);\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
+/// Scenario: passing a borrowed `Copy` binding by value copies it.
+/// Spec: IGN-178 — the `Copy` counterpart of the call argument site.
+@test
+function borrowckAcceptsCallArgumentOfBorrowedCopyBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "enum Tag {\n  VALUE(u32),\n  OTHER,\n}\n\nfunction consume(value: u32): u32 {\n  return value;\n}\n\nfunction run(tag: &Tag): u32 {\n  let Tag::VALUE(value) = tag else {\n    return 0;\n  };\n\n  return consume(value);\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a pattern binding destructured out of a reference initializes a
+/// record field, moving borrowed storage into a value that would drop it.
+/// Spec: IGN-178 — O0002 on a record initializer field.
+@test
+function borrowckReportsRecordFieldOfBorrowedBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nenum Node {\n  ITEM(Owned),\n  OTHER,\n}\n\nrecord Wrapper {\n  public inner: Owned;\n}\n\nfunction run(node: &Node): u32 {\n  let Node::ITEM(item) = node else {\n    return 0;\n  };\n\n  let wrapper: Wrapper = Wrapper { inner: item };\n\n  return wrapper.inner.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
+/// Scenario: a record field initialized from a borrowed `Copy` binding copies
+/// it.
+/// Spec: IGN-178 — the `Copy` counterpart of the record initializer site.
+@test
+function borrowckAcceptsRecordFieldOfBorrowedCopyBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "enum Tag {\n  VALUE(u32),\n  OTHER,\n}\n\nrecord Plain {\n  public inner: u32;\n}\n\nfunction run(tag: &Tag): u32 {\n  let Tag::VALUE(value) = tag else {\n    return 0;\n  };\n\n  let plain: Plain = Plain { inner: value };\n\n  return plain.inner;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a match arm hands a binding destructured out of a reference to
+/// the match result, which flows out of the arm as an owned value.
+/// Spec: IGN-178 — O0002 on a match arm result.
+@test
+function borrowckReportsMatchArmResultOfBorrowedBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nenum Node {\n  ITEM(Owned),\n  OTHER,\n}\n\nenum Choice {\n  FIRST,\n  SECOND,\n}\n\nfunction run(node: &Node, choice: Choice): u32 {\n  let Node::ITEM(item) = node else {\n    return 0;\n  };\n\n  let chosen: Owned = match (choice) {\n    Choice::FIRST -> item,\n    Choice::SECOND -> Owned { id: 0 },\n  };\n\n  return chosen.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
+/// Scenario: a match arm result read out of a borrowed `Copy` binding copies
+/// it.
+/// Spec: IGN-178 — the `Copy` counterpart of the match arm result site.
+@test
+function borrowckAcceptsMatchArmResultOfBorrowedCopyBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "enum Tag {\n  VALUE(u32),\n  OTHER,\n}\n\nenum Choice {\n  FIRST,\n  SECOND,\n}\n\nfunction run(tag: &Tag, choice: Choice): u32 {\n  let Tag::VALUE(value) = tag else {\n    return 0;\n  };\n\n  let chosen: u32 = match (choice) {\n    Choice::FIRST -> value,\n    Choice::SECOND -> 0,\n  };\n\n  return chosen;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a pattern binding destructured out of a reference is assigned
+/// into an owning local, which would then drop storage it does not own.
+/// Spec: IGN-178 — O0002 on an assignment right-hand side.
+@test
+function borrowckReportsAssignmentOfBorrowedBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nenum Node {\n  ITEM(Owned),\n  OTHER,\n}\n\nfunction run(node: &Node): u32 {\n  let Node::ITEM(item) = node else {\n    return 0;\n  };\n\n  let mut slot: Owned = Owned { id: 0 };\n  slot = item;\n\n  return slot.id;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
+/// Scenario: assigning a borrowed `Copy` binding into a local copies it.
+/// Spec: IGN-178 — the `Copy` counterpart of the assignment site.
+@test
+function borrowckAcceptsAssignmentOfBorrowedCopyBinding(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "enum Tag {\n  VALUE(u32),\n  OTHER,\n}\n\nfunction run(tag: &Tag): u32 {\n  let Tag::VALUE(value) = tag else {\n    return 0;\n  };\n\n  let mut slot: u32 = 0;\n  slot = value;\n\n  return slot;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
