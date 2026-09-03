@@ -5708,8 +5708,11 @@ function typecheckLetElseChecksElseBranchDiagnostics(): void {
   assertContainsDiagnosticCode(&output, DiagnosticCode::TYPE_MISMATCH);
 }
 
+/// An unannotated `let name = value else` is the same shorthand as the
+/// annotated one: the binding takes the ok payload, so a non-try value leaves
+/// it nothing to bind.
 @test
-function typecheckLetElseUnannotatedBindingUsesValueType(): void {
+function typecheckLetElseUnannotatedBindingRequiresATryValue(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -5738,8 +5741,7 @@ function typecheckLetElseUnannotatedBindingUsesValueType(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  Test::assertEq<u64>(output.diagnostics.length(), 0);
-  assertExprType(&output, xUse, typeStore.intern(Analyzer::Type::I32));
+  assertContainsDiagnosticCode(&output, DiagnosticCode::LET_ELSE_BINDING_REQUIRES_TRY_TYPE);
 }
 
 /// An annotated `let ... else` over a non-try value reports the missing try
@@ -15173,4 +15175,262 @@ function typecheckRejectsWrongArityThroughAFunctionTypedConstant(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
   assertSingleDiagnosticCode(&output, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+}
+
+/// Assert that `code` was reported with exactly `message`, anywhere in the
+/// run's diagnostics.
+function assertContainsDiagnostic(
+  output: &Analyzer::AnalyzerOutput,
+  code: str,
+  message: str
+): void {
+  let expectedCode: String = String::create(code);
+  let expectedMessage: String = String::create(message);
+  let mut index: u64 = 0;
+
+  while (index < output.diagnostics.length()) {
+    let Option::SOME(diagnostic) = output.diagnostics.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (expectedCode.equals(diagnostic.code) && expectedMessage.equals(diagnostic.messageText())) {
+      return;
+    }
+
+    index += 1;
+  }
+
+  @panic("assertContainsDiagnostic: no diagnostic with the expected code and message");
+}
+
+/// Scenario: a constant index past the end of a fixed array. The host rejects
+/// this at typecheck time rather than leaving it to the runtime bounds check.
+@test
+function typecheckRejectsConstantIndexPastFixedArrayEnd(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let arr: i32[3] = [1, 2, 3];\n  return arr[5];\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::INDEX_OUT_OF_BOUNDS,
+    "Index 5 is out of bounds for array of size 3",
+  );
+}
+
+/// Scenario: a negative constant index. Negation is folded, so the reported
+/// index reads the way it was written.
+@test
+function typecheckRejectsNegativeConstantIndex(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let arr: i32[3] = [1, 2, 3];\n  return arr[-1];\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::INDEX_OUT_OF_BOUNDS,
+    "Index -1 is out of bounds for array of size 3",
+  );
+}
+
+/// Scenario: an index equal to the array's size, the off-by-one the exclusive
+/// bound is about.
+@test
+function typecheckRejectsConstantIndexEqualToFixedArraySize(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let arr: i32[3] = [1, 2, 3];\n  return arr[3];\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::INDEX_OUT_OF_BOUNDS,
+    "Index 3 is out of bounds for array of size 3",
+  );
+}
+
+/// Scenario: the last in-bounds index, which stays silent.
+@test
+function typecheckAcceptsLastInBoundsConstantIndex(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let arr: i32[3] = [1, 2, 3];\n  return arr[2];\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+}
+
+/// Scenario: `@read` handed a literal null. The builtin dereferences its
+/// argument, so the host rejects this at typecheck time.
+@test
+function typecheckRejectsBuiltinReadOfNull(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let value: i32 = @read<i32>(null);\n  return value;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(&output, DiagnosticCode::NULL_DEREFERENCE, "Cannot dereference null pointer");
+}
+
+/// Scenario: `@write` handed a literal null as its destination.
+@test
+function typecheckRejectsBuiltinWriteToNull(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  @write<i32>(null, 10);\n  return 0;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(&output, DiagnosticCode::NULL_DEREFERENCE, "Cannot dereference null pointer");
+}
+
+/// Scenario: `let name = value else` without a type annotation. The binding
+/// takes the ok payload of a `@lang(try)` value, so a plain `i32` leaves it
+/// nothing to bind.
+@test
+function typecheckRejectsUnannotatedLetElseBindingOnNonTryValue(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let value: i32 = 5;\n\n  let bound = value else {\n    return 1;\n  };\n\n  return bound;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::LET_ELSE_BINDING_REQUIRES_TRY_TYPE,
+    "`let name = value else` requires a @lang(try) value, got i32",
+  );
+}
+
+/// Scenario: the same shorthand over a `@lang(try)` value, which binds the ok
+/// payload and stays silent.
+@test
+function typecheckAcceptsUnannotatedLetElseBindingOnTryValue(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@lang(try)\nenum Res {\n  OK(i32),\n  ERROR(i32),\n}\n\nfunction main(value: Res): i32 {\n  let bound = value else {\n    return 1;\n  };\n\n  return bound;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: an extension method called on a literal. The receiver is passed
+/// by reference, and a literal has no storage to lend.
+@test
+function typecheckRejectsExtensionMethodOnALiteral(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@extension(i32)\nfunction doubled(value: i32): i32 {\n  return value * 2;\n}\n\nfunction main(): i32 {\n  return 21.doubled();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::EXTENSION_METHOD_ON_LITERAL,
+    "cannot call extension method 'doubled' on a i32 literal; assign to a variable first",
+  );
+}
+
+/// Scenario: the same call on the result of an expression, which lives only
+/// for the duration of the call.
+@test
+function typecheckRejectsExtensionMethodOnATemporary(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@extension(i32)\nfunction doubled(value: i32): i32 {\n  return value * 2;\n}\n\nfunction main(): i32 {\n  let x: i32 = 5;\n  return (x + 1).doubled();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::EXTENSION_METHOD_ON_TEMPORARY,
+    "cannot call extension method 'doubled' on a temporary i32; assign to a variable first",
+  );
+}
+
+/// Scenario: `@extension(T, mut)` reached through a binding declared without
+/// `mut`.
+@test
+function typecheckRejectsMutatingExtensionOnImmutableBinding(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@extension(i32, mut)\nfunction increment(value: i32): i32 {\n  return value + 1;\n}\n\nfunction main(): i32 {\n  let x: i32 = 5;\n  return x.increment();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::MUTATING_METHOD_ON_IMMUTABLE,
+    "Cannot call mutating method 'increment' on immutable variable 'x'",
+  );
+}
+
+/// Scenario: the same call on a `mut` binding, which stays silent — the check
+/// is about the binding, not about the attribute.
+@test
+function typecheckAcceptsMutatingExtensionOnMutableBinding(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@extension(i32, mut)\nfunction increment(value: i32): i32 {\n  return value + 1;\n}\n\nfunction main(): i32 {\n  let mut x: i32 = 5;\n  return x.increment();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }
