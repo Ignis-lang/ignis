@@ -786,3 +786,43 @@ function lintDirectiveWithTwoArgumentsIsReported(): void {
   Test::assertEq<str>(first.code, DiagnosticCode::ATTRIBUTE_ARG_COUNT);
   Test::assertEq<str>(first.messageText(), "@allow expects 1 argument(s), got 2");
 }
+
+// ===========================================================================
+// IGN-173 — `for..of` bindings and the unused lints
+// ===========================================================================
+
+/// Scenario: a `&mut` for-of binding writes through the iterable, so the
+/// iterable is mutated and its `mut` is not needless. The binding itself is
+/// read by the body, so A0122 stays silent too.
+@test
+function lintMutableForOfBindingClearsUnusedMutOnIterable(): void {
+  lintAssertSourceIsClean(
+    "function main(): i32 {\n  let mut items: i32[2] = [1, 2];\n  for (let item: &mut i32 of items) {\n    *item = 1;\n  }\n\n  return items[0];\n}\n",
+  );
+}
+
+/// Scenario: the same loop with a by-value binding reads the iterable without
+/// mutating it, so the `mut` is still reported — the mutation is specific to
+/// the `&mut` annotation, matching the oracle's
+/// `validate_mutable_iter_for_mut_ref`.
+@test
+function lintByValueForOfLeavesUnusedMutOnIterable(): void {
+  lintAssertSingleLintFromSource(
+    "function main(): i32 {\n  let mut items: i32[2] = [1, 2];\n  let mut total: i32 = 0;\n  for (let item of items) {\n    total = total + item;\n  }\n\n  return total;\n}\n",
+    DiagnosticCode::UNUSED_MUT,
+    Severity::WARNING,
+    "variable 'items' does not need to be mutable",
+  );
+}
+
+/// Scenario: a for-of binding the body never reads is reported like any other
+/// local, at the binding name.
+@test
+function lintUnusedForOfBindingWarns(): void {
+  lintAssertSingleLintFromSource(
+    "function main(): i32 {\n  let items: i32[2] = [1, 2];\n  for (let item of items) {\n    return 1;\n  }\n\n  return items[0];\n}\n",
+    DiagnosticCode::UNUSED_VARIABLE,
+    Severity::WARNING,
+    "unused variable 'item'",
+  );
+}

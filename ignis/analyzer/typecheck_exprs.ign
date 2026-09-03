@@ -8241,6 +8241,12 @@ export namespace Analyzer {
           Analyzer::Typecheck::emitTypeMismatch(state, typeStore, bindingSpan, elementType, referentType);
         }
 
+        // A `&mut` binding writes through the iterable, so iterating it is a
+        // mutation of the iterable itself, not only of the element behind it.
+        if (reference.mutable) {
+          Analyzer::Typecheck::markMutationTarget(state, resolvedBodies, module, iterableExprId);
+        }
+
         if (reference.mutable && !Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, iterableExprId)) {
           Analyzer::Typecheck::emitForOfMutRequiresMutableIter(state, bindingSpan);
         }
