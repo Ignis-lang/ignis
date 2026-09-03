@@ -10568,6 +10568,7 @@ function typecheckAnnotationPrefersATypeParameterOverASameNamedRecord(): void {
     &mut symbols,
     &module,
     paramTypeId,
+    Option::NONE,
   ) else {
     Test::assertEq<str>("no annotation resolved", "a type parameter");
     return;
@@ -15620,4 +15621,42 @@ function typecheckRejectsAnExtensionCallOnASameNamedTypeElsewhere(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
   assertContainsDiagnosticCode(&output, DiagnosticCode::UNKNOWN_MEMBER);
+}
+
+/// Scenario: two namespaces declare a record named `Point`, and a local
+/// annotation inside one of them is written bare.
+/// Spec: the annotation reads from the namespace it is written inside, so it
+/// and the record literal on the same line agree on the type.
+@test
+function typecheckReadsABareLocalAnnotationFromItsOwnNamespace(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "namespace Geometry {\n  record Point {\n    public x: i32;\n  }\n}\n\nnamespace Screen {\n  record Point {\n    public y: i32;\n  }\n\n  function useIt(): i32 {\n    let p: Point = Point { y: 1 };\n    return p.y;\n  }\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: a namespace declares a record whose name a top-level record
+/// already takes, and each body reaches its own. Single-module analysis
+/// publishes its declarations into the same qualified index the program path
+/// builds, so `Point` inside `Inner` is the namespace-local one.
+@test
+function typecheckNamespaceLocalRecordShadowsTopLevelInSingleModule(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Point {\n  public x: i32;\n}\n\nnamespace Inner {\n  record Point {\n    public y: i32;\n  }\n\n  function make(): Point {\n    return Point { y: 2 };\n  }\n}\n\nfunction main(): i32 {\n  let outer: Point = Point { x: 1 };\n  let inner: Inner::Point = Inner::make();\n\n  return outer.x + inner.y;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }

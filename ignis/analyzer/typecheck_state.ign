@@ -2902,7 +2902,7 @@ export namespace Analyzer {
               let Option::SOME(annotationId) = binding.annotation else {
                 return Option::NONE;
               };
-              return Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, annotationId);
+              return Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, annotationId, Option::NONE);
             }
             return Option::NONE;
           }
@@ -4040,12 +4040,113 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
+    /// The namespace path a qualified name sits in: `Screen::useIt` yields
+    /// `Screen`, and a name written without any `::` yields the empty path.
+    function enclosingNamespacePath(qualified: &String): String {
+      let mut separator: u64 = qualified.length();
+      let mut index: u64 = 0;
+
+      while (index < qualified.length()) {
+        if (let Option::SOME(byte) = qualified.byteAt(index)) {
+          if (byte == 58) {
+            separator = index;
+          }
+        }
+
+        index += 1;
+      }
+
+      if (separator == 0 || separator >= qualified.length()) {
+        return String::create("");
+      }
+
+      return qualified.substringBytes(0, separator - 1);
+    }
+
+    /// The record, enum or type alias a bare annotation name reaches from
+    /// inside `enclosing`'s namespaces, innermost first.
+    ///
+    /// Where a name is written decides which declaration it names: `Point`
+    /// inside `namespace Screen` is `Screen::Point` even when another
+    /// namespace declares `Point` too. The resolver already reads signatures
+    /// and record-init paths this way in `namespaceScopedTypeLookup`; without
+    /// the same reading here a local annotation falls to a first-hit scan by
+    /// bare name and picks whichever `Point` was bound first, so the two
+    /// spellings of the same source line disagree on the type.
+    function namespaceScopedAnnotationType(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbol: Analyzer::SymbolId,
+      name: str,
+      enclosing: Option<Analyzer::DefinitionId>,
+    ): Option<Analyzer::TypeId> {
+      let Option::SOME(enclosingId) = enclosing else {
+        return Option::NONE;
+      };
+
+      let mut qualified: String = String::create("");
+      if (let Option::SOME(stored) = defStore.qualifiedNameOf(enclosingId)) {
+        qualified = stored.clone();
+      }
+
+      let mut chain: String = Analyzer::Typecheck::enclosingNamespacePath(&qualified);
+
+      while (chain.length() > 0) {
+        let candidatePath: String = `${chain.toStr()}::${name}`;
+        let candidateSuffix: String = `::${candidatePath.toStr()}`;
+
+        let mut index: u64 = 0;
+        while (index < defStore.length()) {
+          let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+          let mut pathMatches: boolean = false;
+          if (let Option::SOME(storedQualified) = defStore.qualifiedNameOf(defId)) {
+            pathMatches = storedQualified.equals(candidatePath.toStr()) || Analyzer::Imports::programPathEndsWith(storedQualified, &candidateSuffix);
+          }
+
+          if (!pathMatches) {
+            index += 1;
+            continue;
+          }
+
+          let Option::SOME(def) = defStore.get(defId) else {
+            index += 1;
+            continue;
+          };
+
+          if (def.name().raw() != symbol.raw()) {
+            index += 1;
+            continue;
+          }
+
+          match (def) {
+            Analyzer::Definition::Record(record_) -> {
+              return Option::SOME(record_.typeId);
+            },
+            Analyzer::Definition::Enum(enum_) -> {
+              return Option::SOME(enum_.typeId);
+            },
+            Analyzer::Definition::TypeAlias(alias_) -> {
+              return Option::SOME(alias_.typeId);
+            },
+            _ -> {},
+          };
+
+          index += 1;
+        }
+
+        chain = Analyzer::Typecheck::enclosingNamespacePath(&chain);
+      }
+
+      return Option::NONE;
+    }
+
     function resolveLocalAnnotation(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
       symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
       typeId: Ast::TypeId,
+      enclosing: Option<Analyzer::DefinitionId>,
     ): Option<Analyzer::TypeId> {
       let Option::SOME(typeNode) = module.types.get(typeId) else {
         return Option::NONE;
@@ -4196,6 +4297,18 @@ export namespace Analyzer {
             return Option::SOME(typeStoreParamRef.param(typeParamSymbol));
           }
 
+          // The namespaces the annotation is written inside decide before any
+          // bare-name scan does.
+          let scopedOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::namespaceScopedAnnotationType(
+            defStore,
+            symbol,
+            name.toStr(),
+            enclosing,
+          );
+          if (let Option::SOME(scoped) = scopedOpt) {
+            return Option::SOME(scoped);
+          }
+
           // The current module's own declaration wins over a same-named one
           // from elsewhere — the two ParsedCondition records must not
           // cross-wire — so the scan runs module-local first, then global.
@@ -4234,6 +4347,7 @@ export namespace Analyzer {
             symbols,
             module,
             pointer.pointee,
+            enclosing,
           ) else {
             return Option::NONE;
           };
@@ -4252,6 +4366,7 @@ export namespace Analyzer {
             symbols,
             module,
             reference.target,
+            enclosing,
           ) else {
             return Option::NONE;
           };
@@ -4280,6 +4395,7 @@ export namespace Analyzer {
               symbols,
               module,
               *elementTypeId,
+              enclosing,
             ) else {
               return Option::NONE;
             };
@@ -4298,6 +4414,7 @@ export namespace Analyzer {
             symbols,
             module,
             slice.element,
+            enclosing,
           ) else {
             return Option::NONE;
           };
@@ -4312,6 +4429,7 @@ export namespace Analyzer {
             symbols,
             module,
             fixedArray.element,
+            enclosing,
           ) else {
             return Option::NONE;
           };
@@ -4336,6 +4454,7 @@ export namespace Analyzer {
               symbols,
               module,
               *paramTypeId,
+              enclosing,
             ) else {
               return Option::NONE;
             };
@@ -4350,6 +4469,7 @@ export namespace Analyzer {
             symbols,
             module,
             functionType.returnType,
+            enclosing,
           ) else {
             return Option::NONE;
           };
@@ -4388,6 +4508,7 @@ export namespace Analyzer {
               symbols,
               module,
               *argumentTypeId,
+              enclosing,
             ) else {
               return Option::NONE;
             };
