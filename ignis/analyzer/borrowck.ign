@@ -188,6 +188,11 @@ export namespace Borrowck {
     /// these is what the oracle reports as a move out of a borrowed value.
     borrowedBindings: Vector<u32>;
 
+    /// Locals whose storage had an owning field moved out of it. The bytes the
+    /// field held now belong to whatever the move handed them to, so dropping
+    /// the local would free them a second time. Mirrors `drop_suppressed_vars`.
+    dropSuppressed: Vector<u32>;
+
     /// False after a terminator, until a join restores it.
     public reachable: boolean;
 
@@ -219,6 +224,7 @@ export namespace Borrowck {
         deferBodies: Vector::new<u32>(),
         loopContinue: Vector::new<u32>(),
         borrowedBindings: Vector::new<u32>(),
+        dropSuppressed: Vector::new<u32>(),
         reachable: true,
         inDefer: false,
         inDropMethod: false,
@@ -261,6 +267,33 @@ export namespace Borrowck {
       while (self.borrowedBindings.length() > mark) {
         self.borrowedBindings.pop();
       }
+    }
+
+    /// Take `defRaw` out of every drop list for the rest of the function. The
+    /// remaining fields of its storage leak, which is what the oracle accepts
+    /// rather than freeing the moved field twice.
+    public suppressDrop(&mut self, defRaw: u32): void {
+      if (self.isDropSuppressed(defRaw)) {
+        return;
+      }
+
+      self.dropSuppressed.push(defRaw);
+    }
+
+    public isDropSuppressed(&self, defRaw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.dropSuppressed.length()) {
+        if (let Option::SOME(entry) = self.dropSuppressed.get(index)) {
+          if (*entry == defRaw) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
     }
 
     public setInDefer(&mut self, value: boolean): void {
@@ -555,7 +588,7 @@ export namespace Borrowck {
           position -= 1;
 
           if (let Option::SOME(defRaw) = self.ownedVars.get(position)) {
-            if (self.isMoveValid(*defRaw)) {
+            if (self.isMoveValid(*defRaw) && !self.isDropSuppressed(*defRaw)) {
               drops.push(*defRaw);
             }
           }
@@ -1190,6 +1223,36 @@ export namespace Borrowck {
     }
 
     return Option::SOME(defId);
+  }
+
+  /// The owning local a field access reads out of, walking nested fields down
+  /// to their base. Unlike `extractRootVariable` it stops at anything that is
+  /// not a field, so a place reached through a reference or an index never
+  /// names an owner. Mirrors `get_moved_field_owner`.
+  function movedFieldOwner(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    nodeId: Hir::HirId,
+  ): Option<Analyzer::DefinitionId> {
+    let mut baseId: Option<Hir::HirId> = Option::NONE;
+
+    if (let Option::SOME(node) = hir.get(nodeId)) {
+      baseId = match (&node.kind) {
+        Hir::HirKind::FieldAccess(access) -> Option::SOME(access.base),
+        _ -> Option::NONE,
+      };
+    }
+
+    let Option::SOME(base) = baseId else {
+      return Option::NONE;
+    };
+
+    if (let Option::SOME(owner) = Borrowck::movedVariable(defStore, typeStore, hir, base)) {
+      return Option::SOME(owner);
+    }
+
+    return Borrowck::movedFieldOwner(defStore, typeStore, hir, base);
   }
 
   /// The reference expression an initializer is, if it is one directly.
@@ -2047,7 +2110,7 @@ export namespace Borrowck {
       position -= 1;
 
       if (let Option::SOME(defRaw) = bindings.get(position)) {
-        if (state.isMoveValid(*defRaw)) {
+        if (state.isMoveValid(*defRaw) && !state.isDropSuppressed(*defRaw)) {
           drops.push(*defRaw);
         }
       }
@@ -3066,12 +3129,25 @@ export namespace Borrowck {
     let movesScrutineePayload: boolean = Borrowck::armsMoveScrutineePayload(defStore, typeStore, &matchNode.arms);
     let scrutineeIsBorrowed: boolean = Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, matchNode.scrutinee);
 
-    // A borrowed base wins over consuming the scrutinee's owner: taking the
+    // Mirrors the `moves_scrutinee_payload` branch of `check_match`. A borrowed
+    // base wins over consuming or suppressing the scrutinee's owner: taking the
     // payload out of storage reached through a reference moves out of a borrow,
-    // and suppressing the owner's drop would accept it silently. Mirrors the
-    // `moves_scrutinee_payload` branch of `check_match`.
-    if (movesScrutineePayload && scrutineeIsBorrowed) {
-      Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, matchNode.scrutinee);
+    // and suppressing the owner's drop would accept it silently. Once the field
+    // owner's drop is suppressed the rest of its fields leak, which the oracle
+    // takes over freeing the moved payload twice.
+    if (movesScrutineePayload) {
+      if (scrutineeIsBorrowed) {
+        Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, matchNode.scrutinee);
+      } else if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
+        Borrowck::tryConsume(state, source);
+      } else if (let Option::SOME(owner) = Borrowck::movedFieldOwner(defStore, typeStore, hir, matchNode.scrutinee)) {
+        let mut suppressRef: &mut Borrowck::State = state;
+        suppressRef.suppressDrop(owner.raw());
+      } else {
+        // Neither a local nor a field of one we own, so the payload sits behind
+        // a reference and cannot be moved out at all.
+        Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, matchNode.scrutinee);
+      }
     } else if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
       Borrowck::tryConsume(state, source);
     }
