@@ -5407,6 +5407,13 @@ export namespace Analyzer {
       exprId: Ast::ExpressionId,
       value: &Ast::Expression::Dereference,
     ): Option<Analyzer::TypeId> {
+      // A literal null has no pointer type to infer, so the reference analyzer
+      // reports the dereference itself rather than the failed inference.
+      if (Analyzer::Typecheck::isNullLiteral(module, value.operand)) {
+        Analyzer::Typecheck::emitNullDereference(state, value.span);
+        return Option::NONE;
+      }
+
       let operandTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.operand);
       let Option::SOME(operandType) = operandTypeOpt else {
         return Option::NONE;

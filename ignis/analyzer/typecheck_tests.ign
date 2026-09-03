@@ -15300,6 +15300,23 @@ function typecheckRejectsBuiltinReadOfNull(): void {
   assertContainsDiagnostic(&output, DiagnosticCode::NULL_DEREFERENCE, "Cannot dereference null pointer");
 }
 
+/// Scenario: a literal null dereferenced directly. The reference analyzer
+/// reports the dereference instead of the null literal's failed inference.
+@test
+function typecheckRejectsDereferenceOfNullLiteral(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let x: i32 = *null;\n  return x;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(&output, DiagnosticCode::NULL_DEREFERENCE, "Cannot dereference null pointer");
+}
+
 /// Scenario: `@write` handed a literal null as its destination.
 @test
 function typecheckRejectsBuiltinWriteToNull(): void {
