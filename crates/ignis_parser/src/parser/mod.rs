@@ -53,6 +53,11 @@ pub struct IgnisParser {
 
 pub(crate) const MAX_RECURSION_DEPTH: usize = 500;
 
+/// Right binding power shared by every prefix operator. It sits above `as` (75, 74)
+/// so a prefix operator binds tighter than a cast, as `<cast> ::= <unary> ("as" <type>)?`
+/// requires in `docs/GRAMMAR.md`.
+pub(crate) const PREFIX_BINDING_POWER: u16 = 80;
+
 impl IgnisParser {
   pub fn new(
     tokens: Vec<Token>,
@@ -615,7 +620,7 @@ impl IgnisParser {
   ) -> Option<BindingPower> {
     let p = match op {
       // unary prefix operators (right-assoc)
-      TokenType::Increment | TokenType::Decrement | TokenType::Bang | TokenType::Tilde => (0, 80),
+      TokenType::Increment | TokenType::Decrement | TokenType::Bang | TokenType::Tilde => (0, PREFIX_BINDING_POWER),
 
       // cast (right-assoc)
       TokenType::As => (75, 74),
