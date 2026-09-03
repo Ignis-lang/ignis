@@ -127,6 +127,20 @@ export namespace Analyzer {
         rightExpected,
       );
 
+      // The reference analyzer gives an uninferable `null` literal its own
+      // `null` type rather than an error, so the operator check still runs and
+      // names `null` as both operand types. Equality and the logical operators
+      // are excluded because the host accepts or reports them differently:
+      // equality coerces two nulls to a pointer pair, and `&&`/`||` check the
+      // operands against `boolean` instead.
+      let bothOperandsAreNull: boolean = leftTypeOpt.isNone() && rightTypeOpt.isNone() && Analyzer::Typecheck::isNullLiteral(module, b.left) && Analyzer::Typecheck::isNullLiteral(module, b.right);
+      let reportsOperandTypes: boolean = Analyzer::Typecheck::isArithmeticBinaryOperator(b.operator) || Analyzer::Typecheck::isComparisonBinaryOperator(b.operator) || Analyzer::Typecheck::isShiftOrBitwiseBinaryOperator(b.operator);
+
+      if (bothOperandsAreNull && reportsOperandTypes) {
+        Analyzer::Typecheck::emitInvalidNullBinaryOperands(state, b.span, b.operator);
+        return Option::NONE;
+      }
+
       let Option::SOME(initialLeftType) = leftTypeOpt else {
         return Option::NONE;
       };

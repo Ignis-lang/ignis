@@ -15300,6 +15300,28 @@ function typecheckRejectsBuiltinReadOfNull(): void {
   assertContainsDiagnostic(&output, DiagnosticCode::NULL_DEREFERENCE, "Cannot dereference null pointer");
 }
 
+/// Scenario: `null - null`. Neither operand can infer a pointer type, and the
+/// reference analyzer still reports the operator over the two `null` operands.
+@test
+function typecheckRejectsSubtractionOfTwoNullLiterals(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "function main(): i32 {\n  let d: i64 = null - null;\n  return d as i32;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnostic(&output, DiagnosticCode::CANNOT_INFER_TYPE, "Cannot infer pointer type for null literal");
+  assertContainsDiagnostic(
+    &output,
+    DiagnosticCode::INVALID_BINARY_OPERAND_TYPE,
+    "Binary operator 'Subtract' cannot be applied to types 'null' and 'null'",
+  );
+}
+
 /// Scenario: a literal null dereferenced directly. The reference analyzer
 /// reports the dereference instead of the null literal's failed inference.
 @test
