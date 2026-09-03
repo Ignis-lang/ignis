@@ -15477,3 +15477,147 @@ function typecheckAcceptsMutatingExtensionOnMutableBinding(): void {
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
 }
+
+/// The resolved `@extension` target of the function named `name`.
+function typecheckExtensionTargetOf(
+  defStore: &mut Analyzer::DefinitionStore,
+  symbols: &mut Analyzer::SymbolTable,
+  name: str,
+): Option<Analyzer::TypeId> {
+  let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+  let wanted: Analyzer::SymbolId = symbolsRef.intern(name);
+  let mut index: u64 = 0;
+
+  while (index < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+    if (let Option::SOME(def) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Function(function_) = def) {
+        if (function_.name.raw() == wanted.raw()) {
+          if (let Option::SOME(target) = &function_.extensionTarget) {
+            return Option::SOME(target);
+          }
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// The nominal type of the record named `name`.
+function typecheckRecordTypeOf(
+  defStore: &mut Analyzer::DefinitionStore,
+  symbols: &mut Analyzer::SymbolTable,
+  name: str,
+): Option<Analyzer::TypeId> {
+  let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+  let wanted: Analyzer::SymbolId = symbolsRef.intern(name);
+  let mut index: u64 = 0;
+
+  while (index < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+    if (let Option::SOME(def) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Record(record_) = def) {
+        if (record_.name.raw() == wanted.raw()) {
+          return Option::SOME(record_.typeId);
+        }
+      }
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// Scenario: `@extension(boolean)`, a spelling the rendering of that type does
+/// not share.
+/// Spec: the target is recorded as the type it names, so a rename of the
+/// rendering cannot detach the function from its receiver.
+@test
+function typecheckResolvesABooleanExtensionTargetToItsType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "@extension(boolean)\nfunction negated(value: boolean): boolean {\n  return !value;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let _output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  let Option::SOME(target) = typecheckExtensionTargetOf(&mut defStore, &mut symbols, "negated") else {
+    @panic("expected the extension target to resolve");
+  };
+
+  let mut typeStoreRef: &mut Analyzer::TypeStore = &mut typeStore;
+  let expected: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::BOOLEAN);
+
+  Test::assertEq<u32>(target.raw(), expected.raw());
+}
+
+/// Scenario: `@extension(Point)` over a record.
+/// Spec: the target resolves to the record's nominal type, the type its values
+/// carry.
+@test
+function typecheckResolvesARecordExtensionTargetToItsType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Point {\n  public x: i32;\n}\n\n@extension(Point)\nfunction shifted(point: Point): i32 {\n  return point.x + 1;\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let _output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  let Option::SOME(target) = typecheckExtensionTargetOf(&mut defStore, &mut symbols, "shifted") else {
+    @panic("expected the extension target to resolve");
+  };
+
+  let Option::SOME(recordType) = typecheckRecordTypeOf(&mut defStore, &mut symbols, "Point") else {
+    @panic("expected the record to carry a nominal type");
+  };
+
+  Test::assertEq<u32>(target.raw(), recordType.raw());
+}
+
+/// Scenario: the extension call on a receiver of the type the attribute names.
+/// Spec: the call resolves and the module stays silent.
+@test
+function typecheckAcceptsARecordExtensionCallOnItsOwnType(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "record Point {\n  public x: i32;\n}\n\n@extension(Point)\nfunction shifted(point: Point): i32 {\n  return point.x + 1;\n}\n\nfunction main(): i32 {\n  let p: Point = Point { x: 1 };\n  return p.shifted();\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 0);
+}
+
+/// Scenario: two records named `Point` in different namespaces, with an
+/// extension declared over one of them.
+/// Spec: the receiver is matched by type, so the other namespace's `Point`
+/// does not answer the call even though both render the same name.
+@test
+function typecheckRejectsAnExtensionCallOnASameNamedTypeElsewhere(): void {
+  let parsed: ParseOutput = typecheckParseSource(
+    "namespace Geometry {\n  record Point {\n    public x: i32;\n  }\n\n  @extension(Point)\n  function shifted(point: Point): i32 {\n    return point.x + 1;\n  }\n}\n\nnamespace Screen {\n  record Point {\n    public y: i32;\n  }\n\n  function useIt(): i32 {\n    let p: Point = Point { y: 1 };\n    return p.shifted();\n  }\n}\n",
+  );
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
+
+  assertContainsDiagnosticCode(&output, DiagnosticCode::UNKNOWN_MEMBER);
+}

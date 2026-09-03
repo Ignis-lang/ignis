@@ -681,6 +681,15 @@ export namespace Analyzer {
       };
     }
 
+    /// Copies an optional resolved type out of a borrowed definition, for the
+    /// same reason `copyOptionalMessage` exists.
+    function copyOptionalTypeId(source: &Option<Analyzer::TypeId>): Option<Analyzer::TypeId> {
+      return match (source) {
+        Option::SOME(typeId) -> Option::SOME(typeId),
+        Option::NONE -> Option::NONE,
+      };
+    }
+
     /// Patch `FunctionDef.returnType` at `fnDefId` via `DefinitionStore::replace`.
     function patchReturnType(
       defStore: &mut Analyzer::DefinitionStore,
@@ -701,7 +710,47 @@ export namespace Analyzer {
             returnType: typeId,
             isDeprecated: fn_.isDeprecated,
             deprecatedMessage: Analyzer::Resolver::copyOptionalMessage(&fn_.deprecatedMessage),
-            extensionTarget: Analyzer::Resolver::copyOptionalMessage(&fn_.extensionTarget),
+            extensionTarget: Analyzer::Resolver::copyOptionalTypeId(&fn_.extensionTarget),
+            extensionMutable: fn_.extensionMutable,
+            isExtern: fn_.isExtern,
+            externName: Analyzer::Resolver::copyOptionalMessage(&fn_.externName),
+          };
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.replace(fnDefId, Analyzer::Definition::Function(updated));
+        },
+        Analyzer::Definition::Record(_) -> {},
+        Analyzer::Definition::Enum(_) -> {},
+        Analyzer::Definition::Variable(_) -> {},
+        Analyzer::Definition::Field(_) -> {},
+        Analyzer::Definition::Variant(_) -> {},
+        Analyzer::Definition::TypeParam(_) -> {},
+        Analyzer::Definition::TypeAlias(_) -> {},
+        Analyzer::Definition::Trait(_) -> {},
+        Analyzer::Definition::Method(_) -> {},
+      };
+    }
+
+    /// Patch `FunctionDef.extensionTarget` at `fnDefId` via `DefinitionStore::replace`.
+    function patchExtensionTarget(
+      defStore: &mut Analyzer::DefinitionStore,
+      fnDefId: Analyzer::DefinitionId,
+      targetType: Analyzer::TypeId,
+    ): void {
+      let Option::SOME(existing) = defStore.get(fnDefId) else {
+        return;
+      };
+
+      match (existing) {
+        Analyzer::Definition::Function(fn_) -> {
+          let updated: Analyzer::FunctionDef = Analyzer::FunctionDef {
+            name: fn_.name,
+            visibility: fn_.visibility,
+            typeParams: Analyzer::Resolver::copyDefinitionIdVector(&fn_.typeParams),
+            params: Analyzer::Resolver::copyDefinitionIdVector(&fn_.params),
+            returnType: fn_.returnType,
+            isDeprecated: fn_.isDeprecated,
+            deprecatedMessage: Analyzer::Resolver::copyOptionalMessage(&fn_.deprecatedMessage),
+            extensionTarget: Option::SOME(targetType),
             extensionMutable: fn_.extensionMutable,
             isExtern: fn_.isExtern,
             externName: Analyzer::Resolver::copyOptionalMessage(&fn_.externName),
@@ -1967,6 +2016,19 @@ export namespace Analyzer {
       if (let Option::SOME(retTypeId) = f.returnType) {
         let resolved: Analyzer::TypeId = resolveTypeNode(state, defStore, typeStore, symbols, module, &scope, retTypeId);
         patchReturnType(defStore, defId, resolved);
+      }
+
+      // `@extension(Type)` names the receiver's type in attribute text. It is
+      // resolved here, once, so the call site matches receivers by type rather
+      // than by the name a rendering happens to give them.
+      if (let Option::SOME(targetPath) = Analyzer::Binder::extensionAttributeTarget(&f.metadata)) {
+        let resolvedTarget: Analyzer::TypeId = resolvePath(state, defStore, typeStore, symbols, module, &scope, &targetPath);
+        let mut voidRef: &mut Analyzer::TypeStore = typeStore;
+        let voidId: Analyzer::TypeId = voidRef.intern(Analyzer::Type::VOID);
+
+        if (resolvedTarget.raw() != voidId.raw()) {
+          patchExtensionTarget(defStore, defId, resolvedTarget);
+        }
       }
     }
 

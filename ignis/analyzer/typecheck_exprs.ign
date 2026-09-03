@@ -2719,9 +2719,9 @@ export namespace Analyzer {
     /// The `@extension` function that answers `name` for a receiver of
     /// `receiverType`, if one is declared.
     ///
-    /// The attribute carries its target as raw text, so the match is made on
-    /// the receiver type's own name: that is the only form both sides share
-    /// without resolving types in the binder.
+    /// The resolver has already turned the attribute's target into a `TypeId`,
+    /// so receiver and target are matched as types: a rendering that spells a
+    /// type differently from its source no longer decides the lookup.
     function lookupExtensionFunction(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
@@ -2729,25 +2729,30 @@ export namespace Analyzer {
       receiverType: Analyzer::TypeId,
       name: str,
     ): Option<Analyzer::DefinitionId> {
-      let receiverName: String = typeStore.nameOf(receiverType);
+      let receiverNormalized: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, receiverType, 0);
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let wanted: Analyzer::SymbolId = symbolsRef.intern(name);
       let mut index: u64 = 0;
 
       while (index < defStore.length()) {
         let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
-        let Option::SOME(def) = defStore.get(defId) else {
-          index += 1;
-          continue;
-        };
+        let mut targetOpt: Option<Analyzer::TypeId> = Option::NONE;
 
-        if (let Analyzer::Definition::Function(function_) = def) {
-          if (function_.name.raw() == wanted.raw()) {
-            if (let Option::SOME(target) = &function_.extensionTarget) {
-              if (Analyzer::Typecheck::extensionTargetNamesType(target.toStr(), receiverName.toStr())) {
-                return Option::SOME(defId);
+        if (let Option::SOME(def) = defStore.get(defId)) {
+          if (let Analyzer::Definition::Function(function_) = def) {
+            if (function_.name.raw() == wanted.raw()) {
+              if (let Option::SOME(target) = &function_.extensionTarget) {
+                targetOpt = Option::SOME(target);
               }
             }
+          }
+        }
+
+        if (let Option::SOME(target) = targetOpt) {
+          let targetNormalized: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, target, 0);
+
+          if (targetNormalized.raw() == receiverNormalized.raw()) {
+            return Option::SOME(defId);
           }
         }
 
@@ -2755,19 +2760,6 @@ export namespace Analyzer {
       }
 
       return Option::NONE;
-    }
-
-    /// Whether the raw text of an `@extension(Type)` attribute names the type
-    /// `typeName` renders.
-    ///
-    /// The two are the same word for every primitive but the boolean one, which
-    /// source spells `boolean` and every rendering spells `bool`.
-    function extensionTargetNamesType(target: str, typeName: str): boolean {
-      if (target.equals(typeName)) {
-        return true;
-      }
-
-      return target.equals("boolean") && typeName.equals("bool");
     }
 
     /// Typecheck `value.name(args)` against an `@extension` function, which

@@ -3365,3 +3365,73 @@ function binderAcceptsLayoutAttributesOnARecord(): void {
 
   Test::assertEq<u64>(bag.length(), 0);
 }
+
+/// Assert that `segments` holds `expected` at `index`.
+function assertPathSegmentAt(segments: &Vector<String>, index: u64, expected: str): void {
+  let Option::SOME(segment) = segments.get(index) else {
+    @panic("expected a path segment at this index");
+  };
+
+  Test::assertEq<boolean>(segment.equals(expected), true);
+}
+
+/// Build the metadata a single attribute with one argument produces.
+function metadataWithAttribute(name: str, argument: str): Ast::Metadata {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create(argument));
+
+  let mut attributes: Vector<Ast::Attribute> = Vector::new<Ast::Attribute>();
+  attributes.push(Ast::Attribute {
+    span: dummySpan(),
+    name: String::create(name),
+    arguments: arguments,
+  });
+
+  return Ast::Metadata {
+    attributes: attributes,
+    modifiers: Vector::new<Ast::Modifier>(),
+  };
+}
+
+/// Scenario: `@extension(boolean)`.
+/// Spec: the target reads as a one-segment type path, so the resolver sees the
+/// name source wrote rather than the name a rendering gives the type.
+@test
+function binderReadsAnExtensionTargetAsATypePath(): void {
+  let metadata: Ast::Metadata = metadataWithAttribute("extension", "boolean");
+
+  let Option::SOME(path) = Analyzer::Binder::extensionAttributeTarget(&metadata) else {
+    @panic("expected the extension attribute to name a type path");
+  };
+
+  Test::assertEq<u64>(path.segments.length(), 1);
+  assertPathSegmentAt(&path.segments, 0, "boolean");
+}
+
+/// Scenario: `@extension(Geometry::Point)`.
+/// Spec: the argument is one run of lexemes, so the `::` separators are split
+/// back into the segments the resolver walks.
+@test
+function binderSplitsAQualifiedExtensionTargetIntoSegments(): void {
+  let metadata: Ast::Metadata = metadataWithAttribute("extension", "Geometry::Point");
+
+  let Option::SOME(path) = Analyzer::Binder::extensionAttributeTarget(&metadata) else {
+    @panic("expected the extension attribute to name a type path");
+  };
+
+  Test::assertEq<u64>(path.segments.length(), 2);
+  assertPathSegmentAt(&path.segments, 0, "Geometry");
+  assertPathSegmentAt(&path.segments, 1, "Point");
+}
+
+/// Scenario: an attribute that is not `@extension`.
+/// Spec: nothing is read as a target.
+@test
+function binderReadsNoExtensionTargetFromAnotherAttribute(): void {
+  let metadata: Ast::Metadata = metadataWithAttribute("externName", "ignis_rt_alloc");
+
+  match (Analyzer::Binder::extensionAttributeTarget(&metadata)) {
+    Option::SOME(_) -> @panic("expected no extension target"),
+    Option::NONE -> {},
+  };
+}
