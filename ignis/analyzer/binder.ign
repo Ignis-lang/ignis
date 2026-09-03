@@ -717,10 +717,7 @@ export namespace Analyzer {
       return Option::SOME(value);
     }
 
-    /// The type named by `@extension(Type)`, as raw attribute text.
-    ///
-    /// `@extension(Type, mut)` carries a second argument the selfhost does not
-    /// model yet; the target is read the same way from both forms.
+    /// The C symbol named by `@externName("name")`, without its quotes.
     function externNameAttribute(metadata: &Ast::Metadata): Option<String> {
       let mut index: u64 = 0;
 
@@ -746,7 +743,46 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
-    function extensionAttributeTarget(metadata: &Ast::Metadata): Option<String> {
+    /// The `::`-separated segments of a written type path.
+    ///
+    /// Attribute arguments arrive as one run of lexemes, so `Ns::Type` is a
+    /// single string here and the separators are the only structure it carries.
+    function typePathSegments(text: &String): Vector<String> {
+      let colon: u8 = 58;
+      let mut segments: Vector<String> = Vector::new<String>();
+      let mut start: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < text.length()) {
+        let Option::SOME(byte) = text.byteAt(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (byte == colon) {
+          if (index > start) {
+            segments.push(text.substring(start as i64, (index - start) as i64));
+          }
+          start = index + 1;
+        }
+
+        index += 1;
+      }
+
+      if (text.length() > start) {
+        segments.push(text.substring(start as i64, (text.length() - start) as i64));
+      }
+
+      return segments;
+    }
+
+    /// The type path named by `@extension(Type)`.
+    ///
+    /// `@extension(Type, mut)` carries a second argument `extensionAttributeIsMutable`
+    /// answers; the target is read the same way from both forms. The path is
+    /// returned unresolved because the binder interns no types — the resolver
+    /// turns it into the `TypeId` the definition stores.
+    function extensionAttributeTarget(metadata: &Ast::Metadata): Option<Ast::Type::Path> {
       let mut index: u64 = 0;
 
       while (index < metadata.attributes.length()) {
@@ -761,16 +797,20 @@ export namespace Analyzer {
           continue;
         }
 
-        if (attribute.arguments.isEmpty()) {
+        let Option::SOME(argument) = attribute.arguments.get(0) else {
           index += 1;
           continue;
+        };
+
+        let segments: Vector<String> = Analyzer::Binder::typePathSegments(argument);
+        if (segments.isEmpty()) {
+          return Option::NONE;
         }
 
-        if (let Option::SOME(argument) = attribute.arguments.get(0)) {
-          return Option::SOME(argument.clone());
-        }
-
-        index += 1;
+        return Option::SOME(Ast::Type::Path {
+          span: attribute.span,
+          segments: segments,
+        });
       }
 
       return Option::NONE;
@@ -2313,7 +2353,7 @@ export namespace Analyzer {
         returnType: sentinelId,
         isDeprecated: Analyzer::Binder::hasDeprecatedAttribute(&fn_.metadata),
         deprecatedMessage: Analyzer::Binder::deprecatedAttributeMessage(&fn_.metadata),
-        extensionTarget: Analyzer::Binder::extensionAttributeTarget(&fn_.metadata),
+        extensionTarget: Option::NONE,
         extensionMutable: Analyzer::Binder::extensionAttributeIsMutable(&fn_.metadata),
         isExtern: state.insideExtern,
         externName: Analyzer::Binder::externNameAttribute(&fn_.metadata),

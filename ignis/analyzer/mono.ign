@@ -2418,7 +2418,7 @@ export namespace Mono {
       let mut returnType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
       let mut isDeprecated: boolean = false;
       let mut deprecatedMessage: Option<String> = Option::NONE;
-      let mut extensionTarget: Option<String> = Option::NONE;
+      let mut extensionTarget: Option<Analyzer::TypeId> = Option::NONE;
       let mut extensionMutable: boolean = false;
       let mut owner: Analyzer::DefinitionId = defId;
       let mut isStatic: boolean = false;
@@ -2445,7 +2445,9 @@ export namespace Mono {
             returnType = functionDef.returnType;
             isDeprecated = functionDef.isDeprecated;
             deprecatedMessage = Mono::copyOptionalString(&functionDef.deprecatedMessage);
-            extensionTarget = Mono::copyOptionalString(&functionDef.extensionTarget);
+            if (let Option::SOME(targetType) = &functionDef.extensionTarget) {
+              extensionTarget = Option::SOME(targetType);
+            }
             extensionMutable = functionDef.extensionMutable;
             isExtern = functionDef.isExtern;
             externName = Mono::copyOptionalString(&functionDef.externName);
@@ -2499,6 +2501,12 @@ export namespace Mono {
 
       if (kind == 1) {
         let concreteReturn: Analyzer::TypeId = Mono::concretizeType(defStore, typeStore, symbols, state, returnType);
+
+        let mut concreteExtensionTarget: Option<Analyzer::TypeId> = Option::NONE;
+        if (let Option::SOME(targetType) = &extensionTarget) {
+          concreteExtensionTarget = Option::SOME(Mono::concretizeType(defStore, typeStore, symbols, state, targetType));
+        }
+
         let mut functionStoreRef: &mut Analyzer::DefinitionStore = defStore;
 
         let _ = functionStoreRef.replace(defId, Analyzer::Definition::Function(Analyzer::FunctionDef {
@@ -2509,7 +2517,7 @@ export namespace Mono {
           returnType: concreteReturn,
           isDeprecated: isDeprecated,
           deprecatedMessage: deprecatedMessage,
-          extensionTarget: extensionTarget,
+          extensionTarget: concreteExtensionTarget,
           extensionMutable: extensionMutable,
           isExtern: isExtern,
           externName: externName,
