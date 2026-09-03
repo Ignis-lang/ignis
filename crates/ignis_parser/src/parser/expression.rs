@@ -543,15 +543,13 @@ impl IgnisParser {
         let ampersand_span = token.span.clone();
         let is_mutable = self.eat(TokenType::Mut);
 
-        let (_, binding_power_right) = self.binding_powers(&TokenType::Ampersand).unwrap();
-        let inner = self.parse_expression(binding_power_right)?;
+        let inner = self.parse_expression(super::PREFIX_BINDING_POWER)?;
         let span = Span::merge(&ampersand_span, self.get_span(&inner));
 
         Ok(self.allocate_expression(ASTExpression::Reference(ASTReference::new(inner, is_mutable, span))))
       },
       TokenType::Asterisk => {
-        let (_, binding_power_right) = self.binding_powers(&TokenType::Asterisk).unwrap();
-        let inner = self.parse_expression(binding_power_right)?;
+        let inner = self.parse_expression(super::PREFIX_BINDING_POWER)?;
         let span = Span::merge(&token.span, self.get_span(&inner));
 
         Ok(self.allocate_expression(ASTExpression::Dereference(ASTDereference::new(inner, span))))
@@ -1997,6 +1995,37 @@ mod tests {
       },
       other => panic!("expected mutable reference, got {:?}", other),
     }
+  }
+
+  #[test]
+  fn parses_mutable_reference_cast_as_cast_of_reference() {
+    let result = parse_expr("&mut a as *mut i32");
+    let expr = get_expr(&result);
+
+    let ASTExpression::Cast(cast) = expr else {
+      panic!("expected cast, got {:?}", expr);
+    };
+
+    let ASTNode::Expression(ASTExpression::Reference(reference)) = result.nodes.get(&cast.expression) else {
+      panic!("expected the cast operand to be a reference");
+    };
+
+    assert!(reference.mutable);
+  }
+
+  #[test]
+  fn parses_dereference_cast_as_cast_of_dereference() {
+    let result = parse_expr("*ptr as i32");
+    let expr = get_expr(&result);
+
+    let ASTExpression::Cast(cast) = expr else {
+      panic!("expected cast, got {:?}", expr);
+    };
+
+    assert!(matches!(
+      result.nodes.get(&cast.expression),
+      ASTNode::Expression(ASTExpression::Dereference(_))
+    ));
   }
 
   #[test]
