@@ -794,7 +794,7 @@ export namespace Analyzer {
         let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
           return Option::NONE;
         };
-        let Option::SOME(operandType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+        let Option::SOME(operandType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId, Option::SOME(state.currentFunction)) else {
           let detail: String = `the type argument of \`${bareBuiltinName.toStr()}\``;
           Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
           return Option::NONE;
@@ -1345,6 +1345,7 @@ export namespace Analyzer {
           symbols,
           module,
           *annotationId,
+          Option::SOME(state.currentFunction),
         );
         let Option::SOME(resolved) = resolvedOpt else {
           Analyzer::Typecheck::emitUnsupported(state, span, "unsupported type argument");
@@ -5392,6 +5393,7 @@ export namespace Analyzer {
         symbols,
         module,
         value.targetType,
+        Option::SOME(state.currentFunction),
       );
       let Option::SOME(targetType) = targetTypeOpt else {
         Analyzer::Typecheck::emitUnsupported(state, value.span, "unsupported cast target type");
@@ -5799,7 +5801,7 @@ export namespace Analyzer {
         let mut bindingType: Analyzer::TypeId = view.okType;
 
         if (let Option::SOME(annotationId) = value.annotation) {
-          if (let Option::SOME(declaredType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, annotationId)) {
+          if (let Option::SOME(declaredType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, annotationId, Option::SOME(state.currentFunction))) {
             if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, declaredType, view.okType)) {
               Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, declaredType, view.okType);
             }
@@ -5815,7 +5817,7 @@ export namespace Analyzer {
 
       let mut expectedTypeOpt: Option<Analyzer::TypeId> = Option::NONE;
       if (let Option::SOME(annotationId) = value.annotation) {
-        expectedTypeOpt = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, annotationId);
+        expectedTypeOpt = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, annotationId, Option::SOME(state.currentFunction));
       } else {
         expectedTypeOpt = actualTypeOpt;
       }
@@ -5902,6 +5904,7 @@ export namespace Analyzer {
         symbols,
         module,
         annotationId,
+        Option::SOME(state.currentFunction),
       );
       let Option::SOME(expectedType) = expectedTypeOpt else {
         Analyzer::Typecheck::emitUnsupported(state, span, "unsupported local annotation type");
@@ -5986,7 +5989,7 @@ export namespace Analyzer {
         let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
           return Option::NONE;
         };
-        let Option::SOME(elementType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+        let Option::SOME(elementType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId, Option::SOME(state.currentFunction)) else {
           let detail: String = `the type argument of \`@${call.name.toStr()}\``;
           Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
           return Option::NONE;
@@ -6018,7 +6021,7 @@ export namespace Analyzer {
         let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
           return Option::NONE;
         };
-        let Option::SOME(pointerResultType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+        let Option::SOME(pointerResultType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId, Option::SOME(state.currentFunction)) else {
           let detail: String = `the type argument of \`@${call.name.toStr()}\``;
           Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
           return Option::NONE;
@@ -6068,7 +6071,7 @@ export namespace Analyzer {
         // @hash<T>(value, hasher): the value is checked expecting &T, the
         // hasher checks on its own, and the call itself yields void.
         let mut hashExpected: Option<Analyzer::TypeId> = Option::NONE;
-        if (let Option::SOME(hashValueType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId)) {
+        if (let Option::SOME(hashValueType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId, Option::SOME(state.currentFunction))) {
           let mut typeStoreHashRef: &mut Analyzer::TypeStore = typeStore;
           hashExpected = Option::SOME(typeStoreHashRef.reference(hashValueType));
         }
@@ -6171,7 +6174,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      return Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId);
+      return Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId, Option::SOME(state.currentFunction));
     }
 
     /// The single-segment name a call's callee spells, but only when the
@@ -6247,7 +6250,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      let Option::SOME(targetType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+      let Option::SOME(targetType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId, Option::SOME(state.currentFunction)) else {
         let detail: String = `the type argument of \`@${call.name.toStr()}\``;
         Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
         return Option::NONE;
@@ -6315,7 +6318,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      let Option::SOME(_valueType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+      let Option::SOME(_valueType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId, Option::SOME(state.currentFunction)) else {
         let detail: String = `the type argument of \`@${call.name.toStr()}\``;
         Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
         return Option::NONE;
@@ -6356,7 +6359,7 @@ export namespace Analyzer {
       let Option::SOME(typeArgId) = call.typeArguments.get(0) else {
         return Option::NONE;
       };
-      let Option::SOME(valueType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId) else {
+      let Option::SOME(valueType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, *typeArgId, Option::SOME(state.currentFunction)) else {
         let detail: String = `the type argument of \`@${call.name.toStr()}\``;
         Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
         return Option::NONE;
@@ -6460,6 +6463,7 @@ export namespace Analyzer {
         symbols,
         module,
         *typeArgId,
+        Option::SOME(state.currentFunction),
       ) else {
         let detail: String = `the type argument of \`@${call.name.toStr()}\``;
         Analyzer::Typecheck::emitUnsupported(state, call.span, detail.toStr());
@@ -7905,6 +7909,7 @@ export namespace Analyzer {
         symbols,
         module,
         declaredReturn,
+        Option::SOME(state.currentFunction),
       ) else {
         Analyzer::Typecheck::emitUnsupported(state, lambda.span, "unsupported lambda return type");
         return Option::NONE;
@@ -8013,6 +8018,7 @@ export namespace Analyzer {
         symbols,
         module,
         annotation,
+        Option::SOME(state.currentFunction),
       ) else {
         Analyzer::Typecheck::emitUnsupported(state, span, "unsupported lambda parameter type");
         return Option::NONE;
@@ -8231,6 +8237,7 @@ export namespace Analyzer {
           symbols,
           module,
           reference.target,
+          Option::SOME(state.currentFunction),
         );
         let Option::SOME(referentType) = referentTypeOpt else {
           Analyzer::Typecheck::emitUnsupported(state, bindingSpan, "unsupported local annotation type");
@@ -8265,6 +8272,7 @@ export namespace Analyzer {
         symbols,
         module,
         annotationId,
+        Option::SOME(state.currentFunction),
       );
       let Option::SOME(annotatedType) = annotatedTypeOpt else {
         Analyzer::Typecheck::emitUnsupported(state, bindingSpan, "unsupported local annotation type");
