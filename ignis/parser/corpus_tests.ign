@@ -14,6 +14,7 @@ from "@compiler::diagnostics";
 import Parser from "@compiler::parser";
 
 record ParseResult {
+  public source: SourceFile;
   public module: Ast::Module;
   public diagnostics: DiagnosticBag;
 }
@@ -57,6 +58,7 @@ function parseText(path: str, sourceText: str): ParseResult {
   let mut diagnostics = DiagnosticBag::init();
   Parser::parseInto(&source, &mut module, &mut diagnostics);
   return ParseResult {
+    source: source,
     module: module,
     diagnostics: diagnostics,
   };
@@ -541,6 +543,20 @@ function parserCorpusParsesExampleCorpusWithoutDiagnostics(): void {
 function parserCorpusParsesFormatterMirrorCorpusWithoutDiagnostics(): void {
   let paths: Vector<String> = formatterMirrorCorpusPaths();
   assertCorpusParsesWithoutDiagnostics(&paths);
+}
+
+@test
+function parserSpanFilePathsSurviveTheParseHelper(): void {
+  let result: ParseResult = parseText(
+    "fixtures/parser_span_retention.ign",
+    "record Packet { public value: i32; }\nfunction main(): void {}\n"
+  );
+
+  Test::assertEq<u64>(result.diagnostics.length(), 0);
+
+  let rendered: String = Ast::Serializer::render(&result.module);
+  assertTextContains(&rendered, "Record span=fixtures/parser_span_retention.ign:");
+  assertTextContains(&rendered, "Function span=fixtures/parser_span_retention.ign:");
 }
 
 @test
