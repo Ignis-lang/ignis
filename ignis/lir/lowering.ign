@@ -1158,6 +1158,22 @@ export namespace LirLowering {
         return Lir::Operand::GlobalRef(defId);
       },
       Hir::HirKind::Binary(binaryNode) -> {
+        if (LirLowering::isShortCircuitOperation(binaryNode.operation)) {
+          return LirLowering::lowerShortCircuit(
+            defStore,
+            typeStore,
+            hirStore,
+            dropSchedules,
+            function_,
+            state,
+            binaryNode.operation,
+            binaryNode.left,
+            binaryNode.right,
+            nodeType,
+            nodeSpan,
+          );
+        }
+
         let left: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, binaryNode.left);
         let right: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, binaryNode.right);
         let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
@@ -3230,6 +3246,95 @@ export namespace LirLowering {
     };
 
     @panic("unreachable: lowerTupleMatchPatternCheck match did not return");
+  }
+
+  /// Whether the operation only evaluates its right operand for some values of
+  /// its left one.
+  function isShortCircuitOperation(operation: Hir::BinaryOperation): boolean {
+    return match (operation) {
+      Hir::BinaryOperation::And -> true,
+      Hir::BinaryOperation::Or -> true,
+      _ -> false,
+    };
+  }
+
+  /// The oracle's `lower_short_circuit`: spill the left operand, branch on it,
+  /// and only overwrite the slot from a block the right operand reaches.
+  ///
+  /// `&&` skips the right operand when the left is false and `||` skips it when
+  /// the left is true, so the right side must sit behind a branch rather than in
+  /// the same block. Evaluating it eagerly would run whatever it does — a
+  /// division the left operand was guarding, a call, a trap — on inputs the
+  /// program says it never sees.
+  function lowerShortCircuit(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    operation: Hir::BinaryOperation,
+    leftId: Hir::HirId,
+    rightId: Hir::HirId,
+    nodeType: Analyzer::TypeId,
+    nodeSpan: SourceSpan,
+  ): Lir::Operand {
+    let left: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, leftId);
+
+    let rightBlock: Lir::BlockId = LirLowering::createBlock(function_, "sc_right");
+    let mergeBlock: Lir::BlockId = LirLowering::createBlock(function_, "sc_merge");
+
+    let resultSlot: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, nodeType);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+      dest: resultSlot,
+      value: left,
+    }));
+
+    // The branch reads the slot rather than the operand it was just handed, so
+    // the left value is spelled once and reaching it twice needs no copy.
+    let condition: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+      dest: condition,
+      source: resultSlot,
+    }));
+
+    let mut thenBlock: Lir::BlockId = rightBlock;
+    let mut elseBlock: Lir::BlockId = mergeBlock;
+
+    if (let Hir::BinaryOperation::Or = operation) {
+      thenBlock = mergeBlock;
+      elseBlock = rightBlock;
+    }
+
+    LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+      condition: Lir::Operand::Temp(condition),
+      thenBlock: thenBlock,
+      elseBlock: elseBlock,
+    }));
+
+    LirLowering::switchToBlock(state, rightBlock);
+
+    let right: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, rightId);
+    let rightLive: boolean = !state.terminated;
+
+    LirLowering::storeResult(function_, state, rightLive, resultSlot, right);
+
+    if (rightLive) {
+      LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
+    }
+
+    LirLowering::switchToBlock(state, mergeBlock);
+
+    let dest: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+      dest: dest,
+      source: resultSlot,
+    }));
+
+    return Lir::Operand::Temp(dest);
   }
 
   function lowerMatch(

@@ -693,6 +693,19 @@ function lirLoweringMarksMovedFieldsOutOfOwnedBases(): void {
   Test::assertSnapshot("lir-lowering-mark-moved-field", rendered.toStr());
 }
 
+/// Scenario: `&&` guarding a division against a zero divisor, and `||` whose
+/// right operand divides as well. Each right operand belongs to the block the
+/// branch reaches only when the left operand did not already decide the answer.
+/// Spec: `&&` skips its right operand on a false left, `||` on a true left.
+@test
+function lirLoweringPutsShortCircuitOperandsBehindABranch(): void {
+  let rendered: String = lirRenderLoweredLocals(
+    "function guarded(count: u64, stride: u64): boolean {\n  let total: u64 = count * stride;\n  return count != 0 && total / count != stride;\n}\n\nfunction fallback(flag: boolean, count: u64): boolean {\n  return flag || count / count == 1;\n}\n",
+  );
+
+  Test::assertSnapshot("lir-lowering-short-circuit", rendered.toStr());
+}
+
 /// Scenario: a `match` arm whose body is a second `match`, every arm of which
 /// diverges, so the inner one carries the `never` type. A slot for it would be
 /// declared with a C type that holds nothing.
