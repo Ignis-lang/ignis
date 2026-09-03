@@ -2590,6 +2590,14 @@ export namespace Borrowck {
     };
   }
 
+  function captureIsByMutRef(mode: &Hir::CaptureMode): boolean {
+    return match (mode) {
+      Hir::CaptureMode::ByValue -> false,
+      Hir::CaptureMode::ByRef -> false,
+      Hir::CaptureMode::ByMutRef -> true,
+    };
+  }
+
   /// Walks a method call. A `.drop()` on a `Drop` type is the manual teardown
   /// of its receiver rather than an ordinary call: the ownership oracle routes
   /// the receiver through `handle_manual_drop` and consumes no argument.
@@ -2809,6 +2817,7 @@ export namespace Borrowck {
 
       Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, value);
       Borrowck::recordLetBorrow(defStore, symbols, hir, state, diagnostics, value, span);
+      Borrowck::recordClosureCaptureBorrows(defStore, symbols, hir, state, diagnostics, value, span);
     }
 
     // A closure local owns its environment even when its type needs no drop of
@@ -2859,6 +2868,57 @@ export namespace Borrowck {
 
     let mut stateRef: &mut Borrowck::State = state;
     stateRef.recordHeldBorrow(target.raw(), reference.mutable);
+  }
+
+  /// A binding holding a closure keeps a mutable borrow of every variable the
+  /// closure captured by mutable reference, for as long as the binding lives.
+  /// Mirrors `try_record_closure_capture_borrows`.
+  ///
+  /// `ByRef` captures are excluded: the closure only reads through a pointer at
+  /// call time, which is allowed to observe later writes to the original.
+  function recordClosureCaptureBorrows(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    value: Hir::HirId,
+    span: SourceSpan,
+  ): void {
+    let Option::SOME(node) = hir.get(value) else {
+      return;
+    };
+
+    match (&node.kind) {
+      Hir::HirKind::Closure(closure) -> {
+        Borrowck::recordCaptureBorrows(defStore, symbols, state, diagnostics, &closure.captures, span);
+      },
+      _ -> {},
+    };
+  }
+
+  function recordCaptureBorrows(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    captures: &Vector<Hir::HirCapture>,
+    span: SourceSpan,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < captures.length()) {
+      if (let Option::SOME(capture) = captures.get(index)) {
+        if (Borrowck::captureIsByMutRef(&capture.mode)) {
+          Borrowck::tryBorrow(defStore, symbols, state, diagnostics, capture.sourceDef, true, span);
+
+          let mut stateRef: &mut Borrowck::State = state;
+          stateRef.recordHeldBorrow(capture.sourceDef.raw(), true);
+        }
+      }
+
+      index += 1;
+    }
   }
 
   /// Assignment: the value is walked first, the target is reported when it is

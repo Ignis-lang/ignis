@@ -907,6 +907,57 @@ function borrowckSchedulesClosureByValueCapture(): void {
   );
 }
 
+/// Scenario: a closure that writes to an outer local captures it by mutable
+/// reference, which borrows the local for as long as the closure binding
+/// lives, so assigning to the local in between is rejected.
+/// Spec: IGN-179 — the closure-capture arm of the borrow oracle.
+@test
+function borrowckReportsAssignWhileClosureHoldsMutableCapture(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "function run(): i32 {\n  let mut x: i32 = 0;\n  let f = (): void -> {\n    x = 1;\n  };\n  x = 2;\n  f();\n\n  return x;\n}\n",
+  );
+
+  Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::MUTATED_WHILE_BORROWED), 1);
+  Test::assertEq<u64>(diagnostics.length(), 1);
+}
+
+/// Scenario: a closure that only reads an outer local captures it by shared
+/// reference, which the borrow oracle does not record, so the local stays
+/// assignable.
+/// Spec: IGN-179 — `ByRef` captures are excluded from the capture borrow.
+@test
+function borrowckAcceptsAssignWhileClosureReadsCapture(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "function run(): i32 {\n  let mut x: i32 = 0;\n  let f = (): i32 -> {\n    return x;\n  };\n  x = 2;\n\n  return f();\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: a closure that moves an owning local into its environment holds
+/// no borrow of it, so reassigning the local afterwards is accepted.
+/// Spec: IGN-179 — a by-value capture records no capture borrow.
+@test
+function borrowckAcceptsAssignAfterClosureByValueCapture(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n\n  public drop(&mut self): void {\n    self.id = 0;\n  }\n}\n\nfunction run(): u32 {\n  let mut value: Owned = Owned { id: 1 };\n  let read = (): u32 -> {\n    let taken: Owned = value;\n\n    return taken.id;\n  };\n  value = Owned { id: 2 };\n\n  return read();\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
+/// Scenario: the capture borrow ends with the scope that holds the closure, so
+/// a later assignment outside that scope is accepted.
+/// Spec: IGN-179 — the capture borrow is released by the enclosing scope.
+@test
+function borrowckAcceptsAssignAfterClosureScopeEnds(): void {
+  let diagnostics: DiagnosticBag = borrowckDiagnostics(
+    "function run(): i32 {\n  let mut x: i32 = 0;\n\n  {\n    let f = (): void -> {\n      x = 1;\n    };\n    f();\n  }\n\n  x = 2;\n\n  return x;\n}\n",
+  );
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+}
+
 /// Scenario: a pattern binding destructured out of a reference lives in
 /// borrowed storage, so a closure cannot move it into its environment.
 /// Spec: IGN-39 — O0002 on a by-value capture.
