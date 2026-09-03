@@ -3212,20 +3212,44 @@ impl<'a> CEmitter<'a> {
     }
   }
 
+  /// Escapes a string for a C literal. Non-ASCII characters are written as one hex
+  /// escape per UTF-8 byte. A C hex escape consumes every hex digit that follows it,
+  /// so a character in that position is written as a fixed-width octal escape instead.
   fn escape_string(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
+    let mut after_hex_escape = false;
+
     for c in s.chars() {
       match c {
         '\n' => result.push_str("\\n"),
         '\r' => result.push_str("\\r"),
         '\t' => result.push_str("\\t"),
-        '\0' => result.push_str("\\0"),
+        '\0' => result.push_str("\\000"),
         '\\' => result.push_str("\\\\"),
         '"' => result.push_str("\\\""),
-        c if c.is_ascii_graphic() || c == ' ' => result.push(c),
-        c => result.push_str(&format!("\\x{:02x}", c as u32)),
+        c if c.is_ascii_graphic() || c == ' ' => {
+          if after_hex_escape && c.is_ascii_hexdigit() {
+            result.push_str(&format!("\\{:03o}", c as u32));
+          } else {
+            result.push(c);
+          }
+        },
+        c => {
+          let mut buffer = [0u8; 4];
+
+          for byte in c.encode_utf8(&mut buffer).as_bytes() {
+            result.push_str(&format!("\\x{:02x}", byte));
+          }
+
+          after_hex_escape = true;
+
+          continue;
+        },
       }
+
+      after_hex_escape = false;
     }
+
     result
   }
 
