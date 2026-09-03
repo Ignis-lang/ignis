@@ -501,6 +501,118 @@ export namespace ParserStatements {
     return ParserStatements::parseExpressionStatement(parserRef);
   }
 
+  /// One branch of a compile-time directive in statement position. A discarded
+  /// branch is skipped whole; the selected one splices its statements into the
+  /// enclosing block.
+  function parseCompileBranchStatements(
+    parser: &mut ParserShared::State,
+    selected: boolean,
+    statements: &mut Vector<Ast::StatementId>
+  ): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (!selected) {
+      return ParserExpressions::skipCompileBranchBody(parserRef);
+    }
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' to open the compile-time directive branch") else {
+      return false;
+    };
+
+    let mut statementsRef: &mut Vector<Ast::StatementId> = statements;
+
+    while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
+      if (ParserExpressions::isCompileIfDirectiveStart(parserRef)) {
+        if (!ParserStatements::parseCompileDirectiveStatements(parserRef, statementsRef)) {
+          return false;
+        }
+
+        continue;
+      }
+
+      if (ParserExpressions::isCompileElseDirectiveStart(parserRef)) {
+        ParserExpressions::rejectUnmatchedCompileElse(parserRef);
+        return false;
+      }
+
+      let Option::SOME(statementId) = ParserStatements::parseStatement(parserRef) else {
+        return false;
+      };
+
+      statementsRef.push(statementId);
+    }
+
+    return parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' to close the compile-time directive branch").isSome();
+  }
+
+  /// `@if(<cond>) { ... } @else { ... }` and `@ifelse(<cond>) { ... } { ... }`
+  /// in statement position: the condition folds while parsing, the discarded
+  /// branch never reaches the AST, and the selected branch's statements take
+  /// the directive's place. `@ifelse` requires the second branch, `@if` does
+  /// not.
+  function parseCompileDirectiveStatements(
+    parser: &mut ParserShared::State,
+    statements: &mut Vector<Ast::StatementId>
+  ): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let elseRequired: boolean = ParserExpressions::isCompileIfElseDirectiveStart(parserRef);
+    let directiveSpan: SourceSpan = parserRef.current().span;
+
+    let Option::SOME(condition) = ParserExpressions::parseCompileDirectiveHeader(parserRef) else {
+      return false;
+    };
+
+    if (!ParserStatements::parseCompileBranchStatements(parserRef, condition, statements)) {
+      return false;
+    }
+
+    if (ParserExpressions::isCompileElseDirectiveStart(parserRef)) {
+      if (!ParserExpressions::consumeCompileElseDirective(parserRef)) {
+        return false;
+      }
+
+      return ParserStatements::parseCompileBranchStatements(parserRef, !condition, statements);
+    }
+
+    if (!elseRequired) {
+      return true;
+    }
+
+    if (parserRef.atPunctuation(Punctuation::LEFT_BRACE)) {
+      return ParserStatements::parseCompileBranchStatements(parserRef, !condition, statements);
+    }
+
+    parserRef.emitDiagnostic(directiveSpan, DiagnosticCode::EXPECTED_TOKEN, "expected token", "'@ifelse' requires an else branch");
+    return false;
+  }
+
+  /// Collects one block entry: a compile-time directive expands to zero or more
+  /// statements, anything else parses as a single statement.
+  function parseBlockEntry(
+    parser: &mut ParserShared::State,
+    statements: &mut Vector<Ast::StatementId>
+  ): boolean {
+    let parserRef: &mut ParserShared::State = parser;
+
+    if (ParserExpressions::isCompileIfDirectiveStart(parserRef)) {
+      return ParserStatements::parseCompileDirectiveStatements(parserRef, statements);
+    }
+
+    if (ParserExpressions::isCompileElseDirectiveStart(parserRef)) {
+      ParserExpressions::rejectUnmatchedCompileElse(parserRef);
+      return false;
+    }
+
+    let mut statementsRef: &mut Vector<Ast::StatementId> = statements;
+
+    let Option::SOME(statementId) = ParserStatements::parseStatement(parserRef) else {
+      return false;
+    };
+
+    statementsRef.push(statementId);
+    return true;
+  }
   function parseBlockStatement(parser: &mut ParserShared::State): Option<Ast::StatementId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
@@ -508,12 +620,9 @@ export namespace ParserStatements {
     let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
-      let Option::SOME(statementId) = ParserStatements::parseStatement(parserRef) else {
+      if (!ParserStatements::parseBlockEntry(parserRef, &mut statements)) {
         ParserRecovery::synchronizeBlockStatement(parserRef);
-        continue;
-      };
-
-      statements.push(statementId);
+      }
     }
 
     if (parserRef.atEof()) {

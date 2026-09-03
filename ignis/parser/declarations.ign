@@ -849,12 +849,14 @@ export namespace ParserDeclarations {
     let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after function parameters") else {
       return Option::NONE;
     };
-    let mut returnType: Option<Ast::TypeId> = Option::NONE;
 
-    if (parserRef.consumePunctuation(Punctuation::COLON).isSome()) {
-      let typeId = ParserTypes::parseType(parserRef)!;
-      returnType = Option::SOME(typeId);
-    }
+    // A free function always annotates its return type; only methods and trait
+    // members may leave it out.
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::COLON, "expected ':' before function return type") else {
+      return Option::NONE;
+    };
+
+    let returnType: Option<Ast::TypeId> = Option::SOME(ParserTypes::parseType(parserRef)!);
 
     let body = ParserStatements::parseBlockStatement(parserRef)!;
     let bodySpan: SourceSpan = match (parserRef.module.statements.get(body)) {
@@ -946,31 +948,16 @@ export namespace ParserDeclarations {
     };
     let typeId = ParserTypes::parseType(parserRef)!;
 
-    // A `;` ends the signature; a written body still parses — rejecting it is
-    // analysis's job (host A0026), not a parse error.
-    let mut endSpan: SourceSpan = nameToken.span;
-    let mut bodyOpt: Option<Ast::StatementId> = Option::NONE;
+    // The signature ends at `;`. A written body is rejected here, so an extern
+    // function with one never reaches analysis.
+    let semicolon = parserRef.expectPunctuation(Punctuation::SEMICOLON, "expected ';' after extern function signature")!;
+    let endSpan: SourceSpan = semicolon.span;
 
-    if (let Option::SOME(semicolon) = parserRef.consumePunctuation(Punctuation::SEMICOLON)) {
-      endSpan = semicolon.span;
-    } else if (parserRef.atPunctuation(Punctuation::LEFT_BRACE)) {
-      let parsedBody = ParserStatements::parseBlockStatement(parserRef)!;
-      bodyOpt = Option::SOME(parsedBody);
-
-      if (let Option::SOME(bodyNode) = parserRef.module.statements.get(parsedBody)) {
-        endSpan = Ast::Serializer::statementSpan(bodyNode);
-      }
-    }
-
-    let mut body: Ast::StatementId = parserRef.module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
+    let body: Ast::StatementId = parserRef.module.addStatement(Ast::Statement::Node::Block(Ast::Statement::Block {
       span: endSpan,
       statements: Vector::new<Ast::StatementId>(),
       tail: Option::NONE,
     }));
-
-    if (let Option::SOME(parsedBodyId) = bodyOpt) {
-      body = parsedBodyId;
-    }
 
     return Option::SOME(parserRef.module.addItem(Ast::Item::Node::Function(Ast::Item::Function {
       span: ParserShared::mergeSpans(keyword.span, endSpan),
@@ -1217,12 +1204,9 @@ export namespace ParserDeclarations {
     let mut items: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
-      let itemResult: Option<Ast::ItemId> = ParserDeclarations::parseTopLevelItem(parser);
-      let Option::SOME(itemId) = itemResult else {
+      if (!ParserDeclarations::parseItemListEntry(parserRef, &mut items)) {
         ParserRecovery::synchronizeTopLevel(parserRef);
-        continue;
-      };
-      items.push(itemId);
+      }
     }
 
     let closeBrace = parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' after namespace body")!;
@@ -1611,6 +1595,118 @@ export namespace ParserDeclarations {
     let token: Token = parserRef.current();
     parserRef.emitDiagnostic(token.span, DiagnosticCode::UNEXPECTED_TOKEN, "unexpected token at top level", "expected import, type, record, namespace, function, const, extern, enum, trait, or export declaration");
     return Option::NONE;
+  }
+
+  /// One branch of a compile-time directive in item position. A discarded
+  /// branch is skipped whole; the selected one splices its items into the
+  /// enclosing list.
+  function parseCompileBranchItems(
+    parser: &mut ParserShared::State,
+    selected: boolean,
+    items: &mut Vector<Ast::ItemId>
+  ): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (!selected) {
+      return ParserExpressions::skipCompileBranchBody(parserRef);
+    }
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_BRACE, "expected '{' to open the compile-time directive branch") else {
+      return false;
+    };
+
+    let mut itemsRef: &mut Vector<Ast::ItemId> = items;
+
+    while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
+      if (ParserExpressions::isCompileIfDirectiveStart(parserRef)) {
+        if (!ParserDeclarations::parseCompileDirectiveItems(parserRef, itemsRef)) {
+          return false;
+        }
+
+        continue;
+      }
+
+      if (ParserExpressions::isCompileElseDirectiveStart(parserRef)) {
+        ParserExpressions::rejectUnmatchedCompileElse(parserRef);
+        return false;
+      }
+
+      let Option::SOME(itemId) = ParserDeclarations::parseTopLevelItem(parserRef) else {
+        return false;
+      };
+
+      itemsRef.push(itemId);
+    }
+
+    return parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' to close the compile-time directive branch").isSome();
+  }
+
+  /// `@if(<cond>) { ... } @else { ... }` and `@ifelse(<cond>) { ... } { ... }`
+  /// in item position: the condition folds while parsing, the discarded branch
+  /// never reaches the AST, and the selected branch's items take the
+  /// directive's place. `@ifelse` requires the second branch, `@if` does not.
+  function parseCompileDirectiveItems(
+    parser: &mut ParserShared::State,
+    items: &mut Vector<Ast::ItemId>
+  ): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let elseRequired: boolean = ParserExpressions::isCompileIfElseDirectiveStart(parserRef);
+    let directiveSpan: SourceSpan = parserRef.current().span;
+
+    let Option::SOME(condition) = ParserExpressions::parseCompileDirectiveHeader(parserRef) else {
+      return false;
+    };
+
+    if (!ParserDeclarations::parseCompileBranchItems(parserRef, condition, items)) {
+      return false;
+    }
+
+    if (ParserExpressions::isCompileElseDirectiveStart(parserRef)) {
+      if (!ParserExpressions::consumeCompileElseDirective(parserRef)) {
+        return false;
+      }
+
+      return ParserDeclarations::parseCompileBranchItems(parserRef, !condition, items);
+    }
+
+    if (!elseRequired) {
+      return true;
+    }
+
+    if (parserRef.atPunctuation(Punctuation::LEFT_BRACE)) {
+      return ParserDeclarations::parseCompileBranchItems(parserRef, !condition, items);
+    }
+
+    parserRef.emitDiagnostic(directiveSpan, DiagnosticCode::EXPECTED_TOKEN, "expected token", "'@ifelse' requires an else branch");
+    return false;
+  }
+
+  /// Collects one item list entry: a compile-time directive expands to zero or
+  /// more items, anything else parses as a single item.
+  function parseItemListEntry(
+    parser: &mut ParserShared::State,
+    items: &mut Vector<Ast::ItemId>
+  ): boolean {
+    let parserRef: &mut ParserShared::State = parser;
+
+    if (ParserExpressions::isCompileIfDirectiveStart(parserRef)) {
+      return ParserDeclarations::parseCompileDirectiveItems(parserRef, items);
+    }
+
+    if (ParserExpressions::isCompileElseDirectiveStart(parserRef)) {
+      ParserExpressions::rejectUnmatchedCompileElse(parserRef);
+      return false;
+    }
+
+    let mut itemsRef: &mut Vector<Ast::ItemId> = items;
+
+    let Option::SOME(itemId) = ParserDeclarations::parseTopLevelItem(parserRef) else {
+      return false;
+    };
+
+    itemsRef.push(itemId);
+    return true;
   }
 
   function parseTopLevelItem(parser: &mut ParserShared::State): Option<Ast::ItemId> {
