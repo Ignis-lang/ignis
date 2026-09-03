@@ -310,9 +310,10 @@ run_gate_g3() {
 
   info "gate-g3: running the selfhost test suite under stage2"
 
-  # The selfhost driver writes its emitted C next to the working directory
-  # and links the harness to `-o`, which has to name a file inside `dir`.
-  (cd "$dir" && timeout "$GATE_G3_TIMEOUT_SECONDS" \
+  # The suite reads its fixtures relative to the working directory, so both
+  # runs start from the project root. In test mode every artifact the selfhost
+  # driver writes derives from `-o`, which has to name a file inside `dir`.
+  (cd "$PROJECT_ROOT" && timeout "$GATE_G3_TIMEOUT_SECONDS" \
     env IGNIS_STD_PATH="${PROJECT_ROOT}/std" \
     "$(stage_bin stage2)" test "$ENTRY" -o "${dir}/ignis-tests") >"$stage2_log" 2>&1 || stage2_status=$?
 
