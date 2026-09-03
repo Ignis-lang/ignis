@@ -21,6 +21,7 @@
 #   G3  the selfhost test suite under stage2 matches the host's result
 #   G4  resource budget: stage2 within 1.25x of the host
 #   G5  diagnostics: stage2's messages equal or better than the host's
+#   G6  syntax: stage2 accepts and rejects exactly what the host parser does
 #
 # `gates` runs all of them and then `report`, which turns the gate files into
 # build/bootstrap/report.md and build/bootstrap/promotion.json.
@@ -37,9 +38,9 @@ STAGE1_MEASURE="stage1-measure"
 G4_THRESHOLD="1.25"
 SELF="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 
-# Gate identifiers in report order. G4 and G5 have their own subcommands; when
-# those are absent `gates` still records a result for them.
-GATE_IDS=(G1 G2 G3 G4 G5)
+# Gate identifiers in report order. G4, G5 and G6 have their own subcommands;
+# when those are absent `gates` still records a result for them.
+GATE_IDS=(G1 G2 G3 G4 G5 G6)
 
 # The selfhost test suite runs a full analysis of `ignis/` before it links, and
 # a hung run still has to leave a gate result behind.
@@ -57,6 +58,7 @@ Commands:
   parity   Run the host e2e corpus through stage2 (builds stage2 first when missing, G2).
   gate-g3  Run the selfhost test suite under stage2 and under the host and compare them (G3).
   gate-g5  Run the host error corpus through stage2 and write gates/G5.json.
+  gate-g6  Compare stage2's parse verdicts with the host's and write gates/G6.json.
   gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
   gates    Run every stage and gate in order, then write the promotion report.
   report   Turn build/bootstrap/gates/*.json into report.md and promotion.json.
@@ -351,7 +353,7 @@ run_gates() {
   mkdir -p "$GATES_DIR"
 
   local step
-  for step in stage1 stage2 parity stage3 gate-g4 gate-g5 gate-g3; do
+  for step in stage1 stage2 parity stage3 gate-g4 gate-g5 gate-g6 gate-g3; do
     info "gates: ${step}"
     "$SELF" "$step" || info "gates: ${step} exited non-zero, continuing"
   done
@@ -423,6 +425,39 @@ with open(gate_path, "w", encoding="utf-8") as handle:
 PYTHON
 
   info "gate-g5: ${status} -> ${gate_file} (report ${report})"
+}
+
+# G6: every source the host parser accepts must parse under stage2, and every
+# source it rejects must be rejected there too.
+run_gate_g6() {
+  ensure_stage stage2
+
+  local report="${BOOTSTRAP_ROOT}/parity-syntax.md"
+  local counts="${BOOTSTRAP_ROOT}/parity-syntax.json"
+  local gate_file="${GATES_DIR}/G6.json"
+
+  mkdir -p "$GATES_DIR"
+  rm -f "$gate_file"
+
+  info "gate-g6: comparing the parse verdicts of $(stage_bin stage2) with ${STAGE0}'s"
+
+  # A non-zero exit only means some cases diverge; the gate file is the product.
+  python3 "${SCRIPT_DIR}/selfhost_syntax_parity.py" \
+    --compiler "$(stage_bin stage2)" \
+    --host "$STAGE0" \
+    --std "${PROJECT_ROOT}/std" \
+    --work-dir "${BOOTSTRAP_ROOT}/parity-syntax" \
+    --counts-json "$counts" \
+    --report "$report" \
+    --gate-json "$gate_file" || true
+
+  if [[ ! -f "$gate_file" ]]; then
+    write_gate G6 fail "the syntax parity run produced no gate result" \
+      "$(json_object report "$report")"
+    return 0
+  fi
+
+  info "gate-g6: result -> ${gate_file} (report ${report})"
 }
 
 # G4: the selfhost-built compiler (stage2) compiling the selfhost corpus must
@@ -516,6 +551,7 @@ main() {
       ;;
     parity) run_parity ;;
     gate-g5) run_gate_g5 ;;
+    gate-g6) run_gate_g6 ;;
     gate-g4) run_gate_g4 ;;
     gate-g3) run_gate_g3 ;;
     gates) run_gates ;;

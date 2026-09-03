@@ -72,11 +72,13 @@ scripts/bootstrap.sh all                       # stage1 -> stage2 -> stage3 fixe
 scripts/bootstrap.sh status                    # which build/bootstrap/<stage>/ignis exist
 scripts/bootstrap.sh parity                    # host e2e corpus through stage2 -> build/bootstrap/parity.md
 scripts/bootstrap.sh gate-g5                   # host error corpus through stage2 -> build/bootstrap/gates/G5.json
+scripts/bootstrap.sh gate-g6                   # host vs stage2 parse verdicts -> build/bootstrap/gates/G6.json
 scripts/bootstrap.sh gate-g4                   # stage2 vs stage1 RSS/wall budget -> build/bootstrap/gates/G4.json
-scripts/bootstrap.sh gates                     # every stage and gate (G1..G5) -> build/bootstrap/gates/, then report
+scripts/bootstrap.sh gates                     # every stage and gate (G1..G6) -> build/bootstrap/gates/, then report
 scripts/bootstrap.sh report                    # gates/*.json -> build/bootstrap/report.md + promotion.json (candidate verdict)
 scripts/selfhost_e2e_parity.py --compiler <bin> --report parity.md  # same harness, any selfhost binary
 scripts/selfhost_e2e_parity.py --compiler <bin> --corpus err --report parity-err.md  # diagnostics parity
+scripts/selfhost_syntax_parity.py --compiler <bin> --report parity-syntax.md  # parse-verdict parity, any selfhost binary
 
 # Language-level tests
 ignis test                                     # Run project tests
