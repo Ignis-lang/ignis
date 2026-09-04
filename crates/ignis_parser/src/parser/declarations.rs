@@ -1900,6 +1900,23 @@ mod tests {
     ParseResult { nodes, roots, symbols }
   }
 
+  fn parse_with_ctx(
+    source: &str,
+    ctx: ignis_type::compilation_context::CompilationContext,
+  ) -> ParseResult {
+    let mut sm = SourceMap::new();
+    let file_id = sm.add_file("test.ign", source.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new_with_compilation_ctx(lexer.tokens, symbols.clone(), ctx);
+    let (nodes, roots) = parser.parse().expect("parse failed");
+
+    ParseResult { nodes, roots, symbols }
+  }
+
   fn first_root(result: &ParseResult) -> &ASTStatement {
     match result.nodes.get(&result.roots[0]) {
       ASTNode::Statement(s) => s,
@@ -2319,8 +2336,31 @@ mod tests {
   }
 
   #[test]
-  fn parse_time_if_directive_still_selects_enabled_branch() {
+  fn parse_time_if_directive_defaults_to_disabled_branch() {
+    // `CompilationContext::default()` never depends on the host compiler's own
+    // build profile: `@debug()` is false unless the caller opts in explicitly.
     let result = parse("@if(@debug()) { function enabled(): void {} } @else { function disabled(): void {} }");
+
+    assert_eq!(result.roots.len(), 1);
+
+    match first_root(&result) {
+      ASTStatement::Function(func) => {
+        assert_eq!(symbol_name(&result, &func.signature.name), "disabled");
+      },
+      other => panic!("expected function, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parse_time_if_directive_selects_enabled_branch_when_debug_is_true() {
+    let ctx = ignis_type::compilation_context::CompilationContext {
+      debug: true,
+      ..ignis_type::compilation_context::CompilationContext::default()
+    };
+    let result = parse_with_ctx(
+      "@if(@debug()) { function enabled(): void {} } @else { function disabled(): void {} }",
+      ctx,
+    );
 
     assert_eq!(result.roots.len(), 1);
 

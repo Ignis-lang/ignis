@@ -269,6 +269,7 @@ impl ProjectManager {
 
     config.std = project.std_path.is_some();
     config.auto_load_std = project.std_path.is_some();
+    config.build_debug = project.debug;
     config.manifest = load_manifest(&config.std_path);
 
     if let Some(ref triple) = project.target_triple {

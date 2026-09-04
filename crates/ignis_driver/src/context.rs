@@ -1209,7 +1209,7 @@ fn build_type_compilation_context(config: &IgnisConfig) -> TypeCompilationContex
     TypeCompilationContext::from_target_triple(&config.target_triple)
   };
 
-  ctx.debug = config.debug;
+  ctx.debug = config.build_debug;
   ctx.features = config.enabled_features.clone();
   ctx.known_features = config.known_features.clone();
   ctx

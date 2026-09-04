@@ -684,6 +684,7 @@ fn build_config_from_project(
   }
   config.std = project.std_path.is_some();
   config.auto_load_std = project.std_path.is_some();
+  config.build_debug = project.debug;
 
   // Load manifest
   config.manifest = load_manifest(&config.std_path);
@@ -766,6 +767,7 @@ fn build_config_for_single_file(
   config.std_path = resolve_std_path(cmd.std_path.as_deref());
   config.std = !cli.std;
   config.auto_load_std = !cli.auto_load_std;
+  config.build_debug = !cmd.no_debug && cmd.debug;
   config.manifest = load_manifest(&config.std_path);
   config.c_compiler = cmd.cc.clone().unwrap_or_else(|| "gcc".to_string());
   config.cflags = Vec::new();
@@ -863,6 +865,7 @@ fn check_config_from_project(
   }
   config.std = project.std_path.is_some();
   config.auto_load_std = project.std_path.is_some();
+  config.build_debug = project.debug;
   config.manifest = load_manifest(&config.std_path);
   config.c_compiler = project.cc.clone();
   config.cflags = project.cflags.clone();

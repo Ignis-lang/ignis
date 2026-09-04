@@ -387,6 +387,10 @@ pub struct IgnisConfig {
   pub build_config: Option<IgnisBuildConfig>,
   pub init_config: Option<IgnisInitConfig>,
   pub debug: bool,
+  /// Build profile debug flag used by `@debug()` compile-time directives.
+  /// Resolved from `ignis.toml [build] debug` / `--debug` / `--no-debug`,
+  /// independent of the internal `debug` flag above.
+  pub build_debug: bool,
   pub debug_trace: Vec<DebugTrace>,
   pub quiet: bool,
   pub verbose: u8,
@@ -447,6 +451,7 @@ impl IgnisConfig {
       build_config,
       init_config,
       debug,
+      build_debug: false,
       debug_trace,
       quiet,
       verbose,
