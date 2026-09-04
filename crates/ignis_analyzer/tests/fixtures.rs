@@ -157,6 +157,21 @@ fn fixture_nested_if_all_paths_return() {
   test_fixture("test_cases/analyzer/missing_return/nested_if_all_paths_return.ign");
 }
 
+#[test]
+fn fixture_match_all_arms_return() {
+  test_fixture("test_cases/analyzer/missing_return/match_all_arms_return.ign");
+}
+
+#[test]
+fn fixture_match_one_arm_falls_through() {
+  test_fixture("test_cases/analyzer/missing_return/match_one_arm_falls_through.ign");
+}
+
+#[test]
+fn fixture_match_guarded_arm() {
+  test_fixture("test_cases/analyzer/missing_return/match_guarded_arm.ign");
+}
+
 // --- Extern Tests ---
 
 #[test]
