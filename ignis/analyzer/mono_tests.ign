@@ -287,3 +287,98 @@ function monoSpecializesAMethodTypeParameterInferredFromTheArgument(): void {
   Test::assert(monoContains(&rendered, "i64"));
   Test::assert(!monoContains(&rendered, "param:"));
 }
+
+/// The stores one monomorphization run filled, for tests that inspect the
+/// definitions it produced rather than the rendered HIR.
+record MonoRun {
+  public defStore: Analyzer::DefinitionStore;
+  public symbols: Analyzer::SymbolTable;
+}
+
+/// Analyzes, lowers and monomorphizes `source`, returning the stores the run
+/// filled.
+function monoRunDefinitions(source: str): MonoRun {
+  let file: SourceFile = SourceFile::create("mono_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(monoCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(monoCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(monoCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let _ = Mono::run(&mut defStore, &mut typeStore, &mut symbols, &hir);
+
+  return MonoRun {
+    defStore: defStore,
+    symbols: symbols,
+  };
+}
+
+/// The definition written with exactly this name, if the run produced one.
+function monoDefNamed(run: &mut MonoRun, name: str): Option<Analyzer::DefinitionId> {
+  let mut rawId: u64 = 0;
+
+  while (rawId < run.defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+    let mut nameSym: Option<Analyzer::SymbolId> = Option::NONE;
+
+    if (let Option::SOME(definition) = run.defStore.get(defId)) {
+      nameSym = Option::SOME(definition.name());
+    }
+
+    if (let Option::SOME(defName) = nameSym) {
+      if (let Option::SOME(text) = run.symbols.resolve(defName)) {
+        if (String::create(text).equals(name)) {
+          return Option::SOME(defId);
+        }
+      }
+    }
+
+    rawId += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// Scenario: no call site names the destructor of a value a scope drops, so
+/// instantiating a `@implements(Drop)` generic has to specialize its `drop`
+/// method itself and point the specialization back at the instantiation.
+@test
+function monoSpecializesTheDropMethodOfAnInstantiatedNominal(): void {
+  let mut run: MonoRun = monoRunDefinitions(
+    "@implements(Drop)\nrecord Box<T> {\n  public value: T;\n\n  public drop(&mut self): void {\n    return;\n  }\n}\n\nfunction main(): i32 {\n  let b: Box<i32> = Box { value: 7 };\n\n  return b.value;\n}\n",
+  );
+
+  let Option::SOME(shellId) = monoDefNamed(&mut run, "Box__i32") else {
+    @panic("monomorphization produced no Box<i32> instantiation");
+  };
+
+  let Option::SOME(dropId) = monoDefNamed(&mut run, "drop__i32") else {
+    @panic("monomorphization specialized no drop method");
+  };
+
+  let Option::SOME(Analyzer::Definition::Method(methodDef)) = run.defStore.get(dropId) else {
+    @panic("expected a method definition");
+  };
+
+  Test::assertEq<u64>(methodDef.owner.raw() as u64, shellId.raw() as u64);
+}
