@@ -1,6 +1,6 @@
 use crate::{Analyzer, ScopeKind};
 use ignis_ast::{
-  expressions::ASTExpression,
+  expressions::{match_expression::ASTMatch, ASTExpression},
   pattern::ASTPattern,
   statements::{
     enum_::{ASTEnum, ASTEnumItem},
@@ -618,7 +618,32 @@ impl<'a> Analyzer<'a> {
 
       ASTStatement::While(_) | ASTStatement::For(_) => Termination::Sometimes,
 
+      ASTStatement::Expression(ASTExpression::Match(match_expr)) => self.match_termination(match_expr),
+
       _ => Termination::Sometimes,
+    }
+  }
+
+  /// A statement-position `match` cannot fall through when every arm is
+  /// unguarded and always terminates. Statement matches carry no expression
+  /// type, so the never-typed check cannot see them.
+  fn match_termination(
+    &self,
+    match_expr: &ASTMatch,
+  ) -> Termination {
+    if match_expr.arms.is_empty() {
+      return Termination::Sometimes;
+    }
+
+    let every_arm_terminates = match_expr
+      .arms
+      .iter()
+      .all(|arm| arm.guard.is_none() && self.check_termination(arm.body) == Termination::Always);
+
+    if every_arm_terminates {
+      Termination::Always
+    } else {
+      Termination::Sometimes
     }
   }
 
