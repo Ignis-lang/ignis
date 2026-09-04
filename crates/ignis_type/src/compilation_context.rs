@@ -90,23 +90,12 @@ fn normalize_platform(raw: &str) -> String {
   normalized
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CompilationContext {
   pub target: TargetInfo,
   pub debug: bool,
   pub features: HashSet<String>,
   pub known_features: Option<HashSet<String>>,
-}
-
-impl Default for CompilationContext {
-  fn default() -> Self {
-    Self {
-      target: TargetInfo::default(),
-      debug: cfg!(debug_assertions),
-      features: HashSet::new(),
-      known_features: None,
-    }
-  }
 }
 
 impl CompilationContext {

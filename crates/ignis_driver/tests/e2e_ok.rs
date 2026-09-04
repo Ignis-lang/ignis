@@ -1949,11 +1949,7 @@ function main(): i32 {
   );
 }
 
-#[test]
-fn e2e_config_flag_build_debug() {
-  e2e_test(
-    "config_flag_build_debug",
-    r#"
+const CONFIG_FLAG_BUILD_DEBUG_SOURCE: &str = r#"
 function main(): i32 {
     let debug: boolean = @configFlag(@debug());
     if (debug) {
@@ -1961,8 +1957,37 @@ function main(): i32 {
     }
     return 0;
 }
-"#,
+"#;
+
+/// Default `CompilationContext::debug` is false (matches an `ignis.toml` with
+/// `[build] debug = false` and no `--debug`/`--no-debug` override).
+#[test]
+fn e2e_config_flag_build_debug_default() {
+  e2e_test("config_flag_build_debug_default", CONFIG_FLAG_BUILD_DEBUG_SOURCE);
+}
+
+/// `@debug()` reflects the project's build profile, not the host compiler's
+/// own build profile. This case pins `CompilationContext::debug = true`
+/// directly, as if resolved from `ignis.toml [build] debug = true` or
+/// `--debug`.
+#[test]
+fn e2e_config_flag_build_debug_enabled() {
+  let name = "config_flag_build_debug_enabled";
+  let ctx = ignis_type::compilation_context::CompilationContext {
+    debug: true,
+    ..ignis_type::compilation_context::CompilationContext::default()
+  };
+
+  let result = common::compile_and_run_with_ctx(CONFIG_FLAG_BUILD_DEBUG_SOURCE, ctx)
+    .unwrap_or_else(|error| panic!("Compilation of '{}' failed: {}", name, error));
+
+  assert!(
+    !result.leaked,
+    "LeakSanitizer detected a memory leak in '{}':\n{}",
+    name, result.leak_report,
   );
+
+  assert_snapshot!(name, common::format_e2e_result(&result));
 }
 
 #[test]
