@@ -236,6 +236,9 @@ jobs:
     permissions:
       contents: write
 
+    outputs:
+      superseded: ${{ steps.gates.outputs.superseded }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -297,8 +300,79 @@ jobs:
 
       # Every gate writes its own result and the report is produced even when
       # gates fail, so this step is expected to succeed whatever the verdict is.
+      #
+      # The ladder holds the `nightly` concurrency group for as long as it runs,
+      # so a run whose commit `main` has already moved past keeps the run for the
+      # current head queued behind a verdict nobody will use. The gates run in
+      # their own process group while the remote head is polled, and a moved head
+      # ends the run early as superseded rather than as a failure.
       - name: Run the bootstrap gates
-        run: scripts/bootstrap.sh gates
+        id: gates
+        env:
+          BUILT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          POLL_INTERVAL_SECONDS: 300
+        run: |
+          set -uo pipefail
+
+          PGID_FILE="${RUNNER_TEMP}/bootstrap-gates.pgid"
+          rm -f "$PGID_FILE"
+
+          # shellcheck disable=SC2016 # $$ is the wrapper's own pid, expanded by it.
+          setsid --wait bash -c 'echo $$ > "$1"; exec scripts/bootstrap.sh gates' _ "$PGID_FILE" &
+          GATES_WAITER=$!
+
+          GATES_PGID=""
+          for _ in $(seq 1 10); do
+            if [ -s "$PGID_FILE" ]; then
+              GATES_PGID=$(cat "$PGID_FILE")
+              break
+            fi
+            sleep 1
+          done
+
+          remote_head() {
+            git ls-remote --exit-code --heads origin refs/heads/main | awk '{print $1}'
+          }
+
+          SUPERSEDED_BY=""
+          ELAPSED=0
+
+          while kill -0 "$GATES_WAITER" 2>/dev/null; do
+            sleep 10
+            ELAPSED=$((ELAPSED + 10))
+
+            [ "$ELAPSED" -ge "$POLL_INTERVAL_SECONDS" ] || continue
+            ELAPSED=0
+
+            # An unreachable remote is not evidence that the head moved.
+            REMOTE_HEAD=$(remote_head) || continue
+            [ -n "$REMOTE_HEAD" ] || continue
+
+            if [ "$REMOTE_HEAD" != "$BUILT_SHA" ]; then
+              SUPERSEDED_BY="$REMOTE_HEAD"
+              break
+            fi
+          done
+
+          if [ -n "$SUPERSEDED_BY" ]; then
+            if [ -n "$GATES_PGID" ]; then
+              kill -TERM "-${GATES_PGID}" 2>/dev/null || true
+              sleep 10
+              kill -KILL "-${GATES_PGID}" 2>/dev/null || true
+            fi
+
+            wait "$GATES_WAITER" 2>/dev/null || true
+
+            echo "superseded by ${SUPERSEDED_BY}"
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          wait "$GATES_WAITER"
+          STATUS=$?
+
+          echo "superseded=false" >> "$GITHUB_OUTPUT"
+          exit "$STATUS"
 
       - name: Upload the bootstrap report
         if: always()
@@ -316,7 +390,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Publish the promotion state
-        if: always()
+        if: always() && steps.gates.outputs.superseded != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PREVIOUS_STREAK: ${{ steps.streak.outputs.previous_streak }}
@@ -365,6 +439,7 @@ jobs:
 
       # Last, so that a failed run still leaves the report and the streak behind.
       - name: Fail when the run is not a promotion candidate
+        if: success() && steps.gates.outputs.superseded != 'true'
         run: |
           set -euo pipefail
 
