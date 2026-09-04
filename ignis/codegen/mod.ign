@@ -585,12 +585,86 @@ export namespace CodegenC {
   }
 
   /// The user-written `drop` method of a nominal, if it declares one.
+  ///
+  /// A monomorphized record or enum keeps an empty method list: mono
+  /// specializes methods as standalone definitions that point back at the
+  /// instantiation. For those the list lookup finds nothing and the store is
+  /// scanned for the method the instantiation owns.
   function findDropMethod(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
     defId: Analyzer::DefinitionId,
   ): Option<Analyzer::DefinitionId> {
-    return CodegenC::findNamedInstanceMethod(defStore, symbols, defId, "drop");
+    if (let Option::SOME(methodId) = CodegenC::findNamedInstanceMethod(defStore, symbols, defId, "drop")) {
+      return Option::SOME(methodId);
+    }
+
+    if (!CodegenC::hasDropTrait(defStore, defId)) {
+      return Option::NONE;
+    }
+
+    if (!CodegenC::hasNoInstanceMethods(defStore, defId)) {
+      return Option::NONE;
+    }
+
+    return CodegenC::findOwnedDropMethod(defStore, symbols, defId);
+  }
+
+  /// Whether the nominal behind `defId` lists no instance method, which is
+  /// what a monomorphized shell looks like.
+  function hasNoInstanceMethods(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Record(recordDef) -> recordDef.instanceMethods.length() == 0,
+      Analyzer::Definition::Enum(enumDef) -> enumDef.instanceMethods.length() == 0,
+      _ -> false,
+    };
+  }
+
+  /// Scans every definition for the `drop` method `defId` owns.
+  ///
+  /// Monomorphization names a specialized method after the method it came
+  /// from followed by the owner's type arguments, so `drop__i32` is the
+  /// destructor of one `Vector` instantiation.
+  function findOwnedDropMethod(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): Option<Analyzer::DefinitionId> {
+    let mut rawId: u64 = 0;
+
+    while (rawId < defStore.length()) {
+      let candidateId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+      let mut nameSym: Option<Analyzer::SymbolId> = Option::NONE;
+
+      if (let Option::SOME(definition) = defStore.get(candidateId)) {
+        if (let Analyzer::Definition::Method(methodDef) = definition) {
+          if (methodDef.owner.raw() == defId.raw()) {
+            nameSym = Option::SOME(methodDef.name);
+          }
+        }
+      }
+
+      if (let Option::SOME(methodName) = nameSym) {
+        if (let Option::SOME(text) = symbols.resolve(methodName)) {
+          let name: String = String::create(text);
+
+          if (name.equals("drop") || name.startsWith("drop__")) {
+            return Option::SOME(candidateId);
+          }
+        }
+      }
+
+      rawId += 1;
+    }
+
+    return Option::NONE;
   }
 
   /// The instance method of a nominal written with the given name.

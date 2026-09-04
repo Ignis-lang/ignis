@@ -659,6 +659,24 @@ export namespace Mono {
     state.currentScope = savedScope;
     state.lastShellScope = scope;
 
+    // A method reached through a generic owner belongs to the owner's
+    // instantiation, not to the generic it was written on: later phases find
+    // the methods of a concrete nominal by this id.
+    if (isMethod && key.ownerArgs.length() > 0) {
+      if (let Option::SOME(ownerId) = key.ownerDef) {
+        let ownerKey: Mono::InstanceKey = Mono::InstanceKey {
+          primaryDef: ownerId,
+          ownerDef: Option::NONE,
+          ownerArgs: Vector::new<Analyzer::TypeId>(),
+          methodArgs: Mono::copyTypeIds(&key.ownerArgs),
+        };
+
+        if (let Option::SOME(concreteOwner) = Mono::cacheLookup(state, &ownerKey)) {
+          methodOwner = concreteOwner;
+        }
+      }
+    }
+
     let mut defStoreRef: &mut Analyzer::DefinitionStore = defStore;
 
     if (isMethod) {
@@ -862,6 +880,59 @@ export namespace Mono {
     return Hir::HirPattern::Wildcard;
   }
 
+  /// The `drop` instance method a generic record or enum declares, when it
+  /// carries `@implements(Drop)`.
+  function findDropMethod(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    typeDef: Analyzer::DefinitionId,
+  ): Option<Analyzer::DefinitionId> {
+    let mut methods: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut declaresDrop: boolean = false;
+
+    if (let Option::SOME(definition) = defStore.get(typeDef)) {
+      match (definition) {
+        Analyzer::Definition::Record(recordDef) -> {
+          declaresDrop = recordDef.implementsDrop;
+          methods = Mono::copyDefinitionIds(&recordDef.instanceMethods);
+        },
+        Analyzer::Definition::Enum(enumDef) -> {
+          declaresDrop = enumDef.implementsDrop;
+          methods = Mono::copyDefinitionIds(&enumDef.instanceMethods);
+        },
+        _ -> {},
+      };
+    }
+
+    if (!declaresDrop) {
+      return Option::NONE;
+    }
+
+    let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+    let dropSym: Analyzer::SymbolId = symbolsRef.intern("drop");
+
+    let mut index: u64 = 0;
+
+    while (index < methods.length()) {
+      let Option::SOME(methodDefId) = methods.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Option::SOME(definition) = defStore.get(*methodDefId)) {
+        if (let Analyzer::Definition::Method(methodDef) = definition) {
+          if (methodDef.name.raw() == dropSym.raw()) {
+            return Option::SOME(*methodDefId);
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
   /// Ensures one instantiation exists (shell created and cached), returning
   /// its concrete definition id.
   function ensureInstantiated(
@@ -937,6 +1008,7 @@ export namespace Mono {
 
       let subst: Mono::SubstTable = Mono::buildSubstitution(defStore, &key);
       let genericDefId: Analyzer::DefinitionId = key.primaryDef;
+      let instanceArgs: Vector<Analyzer::TypeId> = Mono::copyTypeIds(&key.methodArgs);
 
       state.cacheKeys.push(key);
       state.cacheConcreteDefs.push(shellId);
@@ -949,6 +1021,17 @@ export namespace Mono {
         let _ = Mono::instantiateRecord(defStore, typeStore, symbols, state, &subst, nameSym, genericDefId, shellId);
       } else {
         let _ = Mono::instantiateEnum(defStore, typeStore, symbols, state, &subst, nameSym, genericDefId, shellId);
+      }
+
+      // No call site names the destructor of a value a scope drops, so the
+      // instantiation would ship without one unless it is requested here.
+      if (let Option::SOME(dropMethodId) = Mono::findDropMethod(defStore, symbols, genericDefId)) {
+        let _ = Mono::ensureInstantiated(defStore, typeStore, symbols, state, Mono::InstanceKey {
+          primaryDef: dropMethodId,
+          ownerDef: Option::SOME(genericDefId),
+          ownerArgs: Mono::copyTypeIds(&instanceArgs),
+          methodArgs: Vector::new<Analyzer::TypeId>(),
+        });
       }
 
       return shellId;

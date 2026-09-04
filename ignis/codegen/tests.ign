@@ -1,0 +1,167 @@
+import Test from "std::test";
+import Vector from "std::vector";
+
+import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import Id from "@compiler::ids";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import ParseOutput, Parser from "@compiler::parser";
+import Borrowck from "@compiler::analyzer::borrowck";
+import Lowering from "@compiler::analyzer::lowering";
+import Mono from "@compiler::analyzer::mono";
+import LirLowering from "@compiler::lir::lowering";
+import CodegenC from "./mod";
+
+function codegenCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+function codegenContains(haystack: &String, needle: str): boolean {
+  let target: String = String::create(needle);
+
+  return haystack.contains(&target);
+}
+
+/// One emitted translation unit plus the stores that produced it, so a test
+/// can name a definition the emitter mangled rather than guess its id.
+record CodegenEmission {
+  public source: String;
+  public defStore: Analyzer::DefinitionStore;
+  public symbols: Analyzer::SymbolTable;
+}
+
+/// Runs `source` through the whole pipeline the driver uses and returns the
+/// C it emitted. Parse, analyzer and ownership errors are rejected: emitted C
+/// from a program the rest of the pipeline refuses says nothing.
+function codegenEmit(source: str): CodegenEmission {
+  let file: SourceFile = SourceFile::create("codegen_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(codegenCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(codegenCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(codegenCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let monoResult: Mono::MonoOutput = Mono::run(&mut defStore, &mut typeStore, &mut symbols, &hir);
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &monoResult.hir,
+  );
+
+  Test::assertEq<u64>(codegenCountErrors(&checked.diagnostics), 0);
+
+  let constValues: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap {
+    defIdRaws: Vector::new<u32>(),
+    values: Vector::new<Analyzer::ConstEval::ConstValue>(),
+  };
+
+  let lowered: LirLowering::LowerModuleResult = LirLowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &monoResult.hir,
+    &checked.dropSchedules,
+    &constValues,
+  );
+
+  let emitted: CodegenC::EmitOutput = CodegenC::emitProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &lowered.program,
+  );
+
+  return CodegenEmission {
+    source: emitted.source,
+    defStore: defStore,
+    symbols: symbols,
+  };
+}
+
+/// The C name of the first method whose written name starts with `prefix`.
+function codegenMangledMethodStartingWith(
+  emission: &mut CodegenEmission,
+  prefix: str,
+): Option<String> {
+  let mut rawId: u64 = 0;
+
+  while (rawId < emission.defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+    let mut nameSym: Option<Analyzer::SymbolId> = Option::NONE;
+
+    if (let Option::SOME(Analyzer::Definition::Method(methodDef)) = emission.defStore.get(defId)) {
+      nameSym = Option::SOME(methodDef.name);
+    }
+
+    if (let Option::SOME(methodName) = nameSym) {
+      if (let Option::SOME(text) = emission.symbols.resolve(methodName)) {
+        if (String::create(text).startsWith(prefix)) {
+          return Option::SOME(
+            CodegenC::mangledName(&mut emission.defStore, &mut emission.symbols, defId),
+          );
+        }
+      }
+    }
+
+    rawId += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// A generic nominal that declares `@implements(Drop)` reaches the emitter as
+/// a monomorphized shell whose method list is empty, so the destructor of one
+/// instantiation is only found by the definition that owns it.
+@test
+function codegenDropsAMonomorphizedNominal(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "@implements(Drop)\nrecord Box<T> {\n  public value: T;\n\n  public static create(value: T): Box<T> {\n    return Box { value: value };\n  }\n\n  public drop(&mut self): void {\n    return;\n  }\n}\n\nfunction useBox(): i32 {\n  let b: Box<i32> = Box::create<i32>(7);\n\n  return b.value;\n}\n",
+  );
+
+  Test::assert(codegenContains(&emission.source, "void drop__i32_"));
+
+  let Option::SOME(dropName) = codegenMangledMethodStartingWith(&mut emission, "drop__") else {
+    @panic("monomorphization produced no specialized drop method");
+  };
+
+  let expectedCall: String = `${dropName.toStr()}(&`;
+
+  Test::assert(emission.source.contains(&expectedCall));
+}
