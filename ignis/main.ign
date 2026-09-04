@@ -620,7 +620,7 @@ function compileDiscovered(
 function compileFile(
   path: &String,
   outputPath: &String,
-  debug: boolean,
+  debug: Option<boolean>,
   features: &Vector<String>,
 ): i32 {
   Io::println(String::create("ignis selfhost (partial pipeline)"));
@@ -695,7 +695,7 @@ function runProjectTests(
   outputPath: &String,
   filter: &String,
   updateSnapshots: boolean,
-  debug: boolean,
+  debug: Option<boolean>,
   features: &Vector<String>,
 ): i32 {
   Io::eprintln(`Testing ${path.toStr()}\n`);
@@ -826,9 +826,12 @@ function splitCommaSeparated(value: &String): Vector<String> {
 /// `selfhost_out` for a build and `selfhost_tests` for a test run. An unknown
 /// flag exits with 2.
 ///
-/// The compile-time predicates read `--debug`, `--feature <name>` and
-/// `--features <list>`: `--debug` decides `@debug()` and `@release()`, and the
-/// feature flags add to the project's declared default features.
+/// The compile-time predicates read `--debug`/`--no-debug`, `--feature <name>`
+/// and `--features <list>`: `--debug`/`--no-debug` overrides `[build] debug`
+/// from `ignis.toml` and decides `@debug()` and `@release()`; with neither
+/// flag the project file's value applies, and with no project file the build
+/// is not debug. The feature flags add to the project's declared default
+/// features.
 function main(): i32 {
   let args: Vector<String> = Process::args();
   let mut sourcePath: Option<String> = Option::NONE;
@@ -836,7 +839,7 @@ function main(): i32 {
   let mut filter: String = String::new();
   let mut updateSnapshots: boolean = false;
   let mut testMode: boolean = false;
-  let mut debug: boolean = false;
+  let mut debug: Option<boolean> = Option::NONE;
   let mut features: Vector<String> = Vector::new<String>();
   let mut index: u64 = 1;
 
@@ -880,7 +883,13 @@ function main(): i32 {
     }
 
     if (arg.equals("--debug")) {
-      debug = true;
+      debug = Option::SOME(true);
+      index += 1;
+      continue;
+    }
+
+    if (arg.equals("--no-debug")) {
+      debug = Option::SOME(false);
       index += 1;
       continue;
     }

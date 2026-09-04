@@ -3943,7 +3943,7 @@ function configFlagLiteralValue(module: &Ast::Module, statementId: Ast::Statemen
 /// `@configFlag(<condition>)` is answered while parsing, so the directive
 /// never reaches the AST: only the boolean it evaluated to does. The values
 /// below follow the compile-time flags the parser stands in with, which
-/// describe a debug build on a glibc x86_64 Linux host.
+/// describe a release build on a glibc x86_64 Linux host.
 @test
 function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
   let source: SourceFile = SourceFile::create(
@@ -3963,8 +3963,8 @@ function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
 
   let mut expected: Vector<boolean> = Vector::new<boolean>();
   expected.push(true);
-  expected.push(true);
-  expected.push(true);
+  expected.push(false);
+  expected.push(false);
   expected.push(true);
   expected.push(true);
 
@@ -4002,7 +4002,7 @@ function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
 function parserSelectsCompileIfBranchAtItemPosition(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_compile_if.ign",
-    "@if(@debug()) { function enabled(): void {} } @else { function disabled(): void {} }"
+    "@if(@release()) { function enabled(): void {} } @else { function disabled(): void {} }"
   );
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
@@ -4028,7 +4028,7 @@ function parserSelectsCompileIfBranchAtItemPosition(): void {
 function parserSelectsCompileIfElseBranchAtItemPosition(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_compile_ifelse.ign",
-    "@ifelse(@release()) { function releaseOnly(): void {} } @else { function debugOnly(): void {} }"
+    "@ifelse(@debug()) { function debugOnly(): void {} } @else { function releaseOnly(): void {} }"
   );
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
@@ -4043,7 +4043,7 @@ function parserSelectsCompileIfElseBranchAtItemPosition(): void {
   };
 
   match (expectItem(&module, itemId)) {
-    Ast::Item::Node::Function(functionItem) -> Test::assertEq<str>(functionItem.name.toStr(), "debugOnly"),
+    Ast::Item::Node::Function(functionItem) -> Test::assertEq<str>(functionItem.name.toStr(), "releaseOnly"),
     _ -> @panic("expected function item from the selected compile-time else branch"),
   };
 }

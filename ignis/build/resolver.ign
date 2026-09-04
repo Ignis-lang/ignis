@@ -341,11 +341,13 @@ function resolverCanonicalPath(
 
 /// Loads the project the compile-time predicates are answered from.
 ///
-/// `debug` and `cliFeatures` come from the command line; the project file
-/// supplies the target triple and the default and declared feature sets.
+/// `cliDebug` and `cliFeatures` come from the command line. A CLI override
+/// wins over the project file's `[build] debug`; with neither set, the
+/// build is not debug. The project file also supplies the target triple and
+/// the default and declared feature sets.
 function resolverLoadProject(
   startPath: &Path::PathBuf,
-  debug: boolean,
+  cliDebug: Option<boolean>,
   cliFeatures: &Vector<String>,
 ): Result<ResolverProject, DiagnosticBag> {
   let Option::SOME(configPath) = resolverFindProjectFile(startPath) else {
@@ -364,6 +366,7 @@ function resolverLoadProject(
   let mut entryName: String = String::create("main.ign");
   let mut stdPath: String = String::create("std");
   let mut targetTriple: String = CompileFlags::defaultTargetTriple();
+  let mut tomlDebug: boolean = false;
   let mut defaultFeatures: Vector<String> = Vector::new<String>();
   let mut knownFeatures: Vector<String> = Vector::new<String>();
   let mut aliases: Vector<ResolverAlias> = Vector::new<ResolverAlias>();
@@ -412,6 +415,10 @@ function resolverLoadProject(
         targetTriple = value.clone();
       }
 
+      if (key.equals("debug")) {
+        tomlDebug = value.equals("true");
+      }
+
       if (key.equals("default_features")) {
         defaultFeatures = resolverStringArray(&valueText);
       }
@@ -449,6 +456,8 @@ function resolverLoadProject(
   let mut features: Vector<String> = Vector::new<String>();
   resolverPushMissingStrings(&mut features, cliFeatures);
   resolverPushMissingStrings(&mut features, &defaultFeatures);
+
+  let debug: boolean = cliDebug.unwrapOr(tomlDebug);
 
   return Result::OK(ResolverProject {
     root: root,
@@ -1074,17 +1083,17 @@ export namespace Resolver {
   /// configuration the project file and the command line decide.
   function discoverProject(startPath: &Path::PathBuf): Result<DiscoveryResult, DiagnosticBag> {
     let features: Vector<String> = Vector::new<String>();
-    return Resolver::discoverProjectWithOptions(startPath, false, &features);
+    return Resolver::discoverProjectWithOptions(startPath, Option::NONE, &features);
   }
 
   function discoverProjectTests(startPath: &Path::PathBuf): Result<DiscoveryResult, DiagnosticBag> {
     let features: Vector<String> = Vector::new<String>();
-    return Resolver::discoverProjectTestsWithOptions(startPath, false, &features);
+    return Resolver::discoverProjectTestsWithOptions(startPath, Option::NONE, &features);
   }
 
   function discoverProjectWithOptions(
     startPath: &Path::PathBuf,
-    debug: boolean,
+    debug: Option<boolean>,
     features: &Vector<String>,
   ): Result<DiscoveryResult, DiagnosticBag> {
     let project: ResolverProject = resolverLoadProject(startPath, debug, features)!;
@@ -1096,7 +1105,7 @@ export namespace Resolver {
 
   function discoverProjectTestsWithOptions(
     startPath: &Path::PathBuf,
-    debug: boolean,
+    debug: Option<boolean>,
     features: &Vector<String>,
   ): Result<DiscoveryResult, DiagnosticBag> {
     let project: ResolverProject = resolverLoadProject(startPath, debug, features)!;
@@ -1139,6 +1148,37 @@ export namespace Resolver {
 
     return resolverDiagnosticSummary(&bag);
   }
+}
+
+/// `[build] debug = true` in the project's `ignis.toml` is the base value of
+/// `CompileFlags.debug` when the command line supplies no override.
+@test
+function resolverReadsDebugTrueFromProjectFile(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/debug_flag_enabled");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<boolean>(discovery.flags.debug, true);
+}
+
+/// A project file without `[build] debug` resolves to `debug = false`.
+@test
+function resolverDefaultsDebugToFalseWithoutProjectSetting(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/debug_flag_default");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<boolean>(discovery.flags.debug, false);
 }
 
 @test
