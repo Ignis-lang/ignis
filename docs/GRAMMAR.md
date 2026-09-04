@@ -241,15 +241,12 @@
   | <type-alias>
   | <extern>
   | <namespace>
-  | <directive-statement>
-  | <directive>
-  | <use>
 
 <function> ::= <directive-attrs>? "function" <identifier> (<generic-type>)?
                "(" <parameters>? ")" ":" <type> <block>
 
 <parameters> ::= <parameter> ("," <parameter>)* ","?
-<parameter> ::= <param-attr>* "..."? <identifier> "?"? ":" <variable-modifiers>? <type>
+<parameter> ::= <param-attr>* <identifier> ":" <variable-modifiers>? <type>
 
 <param-attr> ::= "@" "takes" | "@" "noescape" | <directive-attr>
 
@@ -260,9 +257,9 @@
 
 <import> ::= "import" <import-list> "from" <string> ";"
 <import-list> ::= <import-item> ("," <import-item>)*
-<import-item> ::= "_" | <identifier> | <identifier> "as" <identifier>
+<import-item> ::= "_" | <identifier>
 
-<export> ::= "export" (<function> | <const> | <record> | <enum> | <type-alias> | <directive-statement> | <directive>)
+<export> ::= "export" (<function> | <const> | <record> | <enum> | <type-alias>)
   | "export" <identifier> ";"
   | "export" <import-list> "from" <string> ";"
 <inline> ::= <inline-modifier> (<function> | <const>)
@@ -276,8 +273,7 @@
 
 <directive-attrs> ::= (<directive-attr>)+
 
-<directive-attr> ::= "@[" <directive-attr-list>? "]"
-                   | "@" <qualified-identifier> <attribute-args>?
+<directive-attr> ::= "@" <qualified-identifier> <attribute-args>?
 
 <attribute-args> ::= "(" (<attribute-arg-item> ("," <attribute-arg-item>)* ","?)? ")"
 <attribute-arg-item> ::= <attribute-arg> | <identifier> ":" <attribute-arg>
@@ -310,15 +306,6 @@
 // `Drop`, `Clone` and `Copy`. `@lang(try)` marks the `Result`/`Option` enums.
 // `@langHook("name")` applies to a namespace. `@takes` and `@noescape` are
 // parameter attributes (see <parameter>).
-
-<directive-attr-list> ::= <directive-attr-item> ("," <directive-attr-item>)* ","?
-<directive-attr-item> ::= <qualified-identifier> ("(" <expression-list>? ")")?
-
-<directive-statement> ::= "directive" <qualified-identifier>
-                          ("(" <expression-list>? ")")?
-                          (";" | <block>)
-
-<directive> ::= "directive" <identifier> ("(" <parameters>? ")")? ";"
 
 // Compile-time selection. These are resolved by the parser: the discarded
 // branch or item is skipped and never reaches the AST.
@@ -362,8 +349,8 @@
 <method-parameters> ::= <self-parameter> ("," <parameters>)? | <parameters>
 <self-parameter> ::= "&" "mut"? "self"
 
-<property-modifier> ::= "public" | "private" | "static" | "mut" | "abstract"
-<method-modifier> ::= "public" | "private" | "static" | "final" | "abstract" | <inline-modifier>
+<property-modifier> ::= "public" | "private" | "static"
+<method-modifier> ::= "public" | "private" | "static" | <inline-modifier>
 
 <enum> ::= <directive-attrs>? "enum" <identifier> <generic-type>?
            "{" (<enum-item>)* "}"
@@ -391,7 +378,7 @@
                       "(" <parameters>? ")" ":" <type> ";"
 
 <namespace> ::= <directive-attrs>? "namespace" <qualified-identifier> "{" <namespace-item>* "}"
-<namespace-item> ::= <function> | <const> | <record> | <enum> | <trait> | <type-alias> | <extern> | <directive-statement> | <directive> | <use> | <namespace>
+<namespace-item> ::= <function> | <const> | <record> | <enum> | <trait> | <type-alias> | <extern> | <namespace>
 
 <trait> ::= <directive-attrs>? "trait" <identifier> <generic-type>?
             "{" <trait-method>* "}"
@@ -407,11 +394,6 @@
 //     greet(&self): i32 { return self.name() + 1; }
 //   }
 // An omitted return type means `void`.
-
-<use> ::= "use" <use-path> <use-alias>? ";"
-
-<use-path> ::= <qualified-identifier>
-<use-alias> ::= "as" <identifier>
 
 <statement> ::= <declaration>
   | <if>
@@ -535,9 +517,7 @@
 <bitwise-and-expression> ::= <equality> ( "&" <equality> )*
 
 <equality> ::= <comparison> ( ( "==" | "!=" ) <comparison> )*
-<comparison> ::= <range> ( ( "<" | ">" | "<=" | ">=" ) <range> )*
-
-<range> ::= <shift> ( ( ".." | "..=" ) <shift> )?
+<comparison> ::= <shift> ( ( "<" | ">" | "<=" | ">=" ) <shift> )*
 
 <shift> ::= <term> ( ( "<<" | ">>" ) <term> )*
 <term> ::= <factor> ( ( "+" | "-" ) <factor> )*
@@ -571,7 +551,6 @@
   | <identifier>
   | <literal>
   | <group>
-  | <this>
   | <self>
   | <directive-expression>
   | <capture-override>
@@ -587,11 +566,9 @@
 <generic-args> ::= "<" <type-list> ">"
 
 <group> ::= "(" <expression> ")"
-<this> ::= "this"
 <self> ::= "self"
 
 <directive-expression> ::= "@" <qualified-identifier> ("(" <expression-list>? ")")?
-                         | "@[" <expression-list>? "]"
 
 <capture-override> ::= ("@move" | "@ref" | "@refMut") <expression>
 
@@ -660,11 +637,9 @@
 
 <qualified-identifier> ::= <identifier> ("::" <identifier>)*
 
-<type> ::= <union-type> | <intersection-type> | <function-type> | <vector-type> | <tuple-type> | <type-identifier>
+<type> ::= <function-type> | <vector-type> | <type-identifier>
 
 <type-identifier> ::= <type-modifier>? (<primitive> | <qualified-identifier>) <generic-type>? "[]"?
-
-<tuple-type> ::= "(" <type> "," <type> ("," <type>)* ","? ")"
 
 <function-type> ::= "(" <type-list>? ")" "->" <type>
 <type-list> ::= <type> ("," <type>)* ","?
@@ -682,11 +657,6 @@
   | "i8" | "i16" | "i32" | "i64"
   | "u8" | "u16" | "u32" | "u64"
   | "f32" | "f64"
-  | "hex"
-  | "binary"
-
-<union-type> ::= <type-identifier> ("|" <type-identifier>)+
-<intersection-type> ::= <type-identifier> ("&" <type-identifier>)+
 
 <identifier> ::= [a-zA-Z_][a-zA-Z0-9_]*
 <number> ::= [0-9]+
@@ -697,3 +667,16 @@
 <assignment-operators> ::= "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
 <variable-modifiers> ::= ("mut" | "&" | "*")+
 ```
+
+### Reserved syntax not yet parsed
+
+- `@[attr, attr]` — bracketed attribute lists (`@[...]`), both as a declaration attribute and in expression position.
+- `this` — the `this` keyword; only `self` is accepted.
+- `use <path> (as <name>)?;` — the `use` declaration.
+- `directive <name> (...)?;` and `directive <path> (...)? (; | { ... })` — directive declarations.
+- `..` and `..=` as a range operator between expressions.
+- Tuple types `(T, T, ...)`, union types `T | T`, and intersection types `T & T`.
+- `hex` and `binary` as primitive type keywords.
+- `<identifier> as <identifier>` in an import item.
+- `...` (variadic) and `?` (optional) on a function parameter.
+- `mut` and `abstract` as property modifiers; `final` and `abstract` as method modifiers.
