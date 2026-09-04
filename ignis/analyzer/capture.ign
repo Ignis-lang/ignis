@@ -9,6 +9,7 @@ from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import Id from "@compiler::ids";
+import HashSet from "std::collections";
 import Vector from "std::vector";
 
 import Escape from "./escape";
@@ -43,39 +44,6 @@ export namespace Capture {
         moved: false,
       };
     }
-  }
-
-  function containsRaw(values: &mut Vector<u32>, target: u32): boolean {
-    let mut index: u64 = 0;
-
-    while (index < values.length()) {
-      if (let Option::SOME(existing) = values.get(index)) {
-        if (*existing == target) {
-          return true;
-        }
-      }
-
-      index += 1;
-    }
-
-    return false;
-  }
-
-  function pushRaw(values: &mut Vector<u32>, value: u32): void {
-    let mut index: u64 = 0;
-
-    while (index < values.length()) {
-      if (let Option::SOME(existing) = values.get(index)) {
-        if (*existing == value) {
-          return;
-        }
-      }
-
-      index += 1;
-    }
-
-    let mut valuesRef: &mut Vector<u32> = values;
-    valuesRef.push(value);
   }
 
   /// A definition is capturable when it names a runtime value. Functions,
@@ -611,7 +579,7 @@ export namespace Capture {
   /// transitive captures propagate outward.
   function collectClosuresBottomUp(hir: &mut Hir::HirStore): Vector<Hir::HirId> {
     let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
-    let mut visited: Vector<u32> = Vector::new<u32>();
+    let mut visited: HashSet<u32> = HashSet::new<u32>();
 
     let mut bodyIndex: u64 = 0;
 
@@ -651,7 +619,7 @@ export namespace Capture {
   function collectClosuresPostorderList(
     hir: &mut Hir::HirStore,
     result: &mut Vector<Hir::HirId>,
-    visited: &mut Vector<u32>,
+    visited: &mut HashSet<u32>,
     ids: &Vector<Hir::HirId>,
   ): void {
     let mut index: u64 = 0;
@@ -669,13 +637,13 @@ export namespace Capture {
     hir: &mut Hir::HirStore,
     hirId: Hir::HirId,
     result: &mut Vector<Hir::HirId>,
-    visited: &mut Vector<u32>,
+    visited: &mut HashSet<u32>,
   ): void {
-    if (Capture::containsRaw(visited, hirId.raw())) {
+    let mut visitedRef: &mut HashSet<u32> = visited;
+
+    if (!visitedRef.insert(hirId.raw())) {
       return;
     }
-
-    Capture::pushRaw(visited, hirId.raw());
 
     let Option::SOME(node) = hir.get(hirId) else {
       return;
@@ -865,7 +833,7 @@ export namespace Capture {
   function collectLocals(
     hir: &mut Hir::HirStore,
     hirId: Hir::HirId,
-    locals: &mut Vector<u32>,
+    locals: &mut HashSet<u32>,
   ): void {
     let Option::SOME(node) = hir.get(hirId) else {
       return;
@@ -873,7 +841,8 @@ export namespace Capture {
 
     match (&node.kind) {
       Hir::HirKind::Let(letNode) -> {
-        Capture::pushRaw(locals, letNode.name.raw());
+        let mut localsRef: &mut HashSet<u32> = locals;
+        localsRef.insert(letNode.name.raw());
 
         if (let Option::SOME(valueId) = letNode.value) {
           Capture::collectLocals(hir, valueId, locals);
@@ -962,10 +931,11 @@ export namespace Capture {
     };
   }
 
-  function collectPatternBindings(pattern: &Hir::HirPattern, locals: &mut Vector<u32>): void {
+  function collectPatternBindings(pattern: &Hir::HirPattern, locals: &mut HashSet<u32>): void {
     match (pattern) {
       Hir::HirPattern::Binding(defId) -> {
-        Capture::pushRaw(locals, defId.raw());
+        let mut localsRef: &mut HashSet<u32> = locals;
+        localsRef.insert(defId.raw());
       },
       Hir::HirPattern::Variant(variantPattern) -> {
         let mut index: u64 = 0;
@@ -1009,16 +979,18 @@ export namespace Capture {
   function recordFreeVar(
     hir: &mut Hir::HirStore,
     defStore: &mut Analyzer::DefinitionStore,
-    locals: &mut Vector<u32>,
+    locals: &mut HashSet<u32>,
     freeVars: &mut Vector<Analyzer::DefinitionId>,
-    seen: &mut Vector<u32>,
+    seen: &mut HashSet<u32>,
     defId: Analyzer::DefinitionId,
   ): void {
-    if (Capture::containsRaw(locals, defId.raw())) {
+    let raw: u32 = defId.raw();
+
+    if (locals.contains(&raw)) {
       return;
     }
 
-    if (Capture::containsRaw(seen, defId.raw())) {
+    if (seen.contains(&raw)) {
       return;
     }
 
@@ -1026,7 +998,8 @@ export namespace Capture {
       return;
     }
 
-    Capture::pushRaw(seen, defId.raw());
+    let mut seenRef: &mut HashSet<u32> = seen;
+    seenRef.insert(raw);
 
     let mut freeVarsRef: &mut Vector<Analyzer::DefinitionId> = freeVars;
     freeVarsRef.push(defId);
@@ -1035,9 +1008,9 @@ export namespace Capture {
   function collectFreeVarsList(
     hir: &mut Hir::HirStore,
     defStore: &mut Analyzer::DefinitionStore,
-    locals: &mut Vector<u32>,
+    locals: &mut HashSet<u32>,
     freeVars: &mut Vector<Analyzer::DefinitionId>,
-    seen: &mut Vector<u32>,
+    seen: &mut HashSet<u32>,
     ids: &Vector<Hir::HirId>,
   ): void {
     let mut index: u64 = 0;
@@ -1054,9 +1027,9 @@ export namespace Capture {
   function collectFreeVars(
     hir: &mut Hir::HirStore,
     defStore: &mut Analyzer::DefinitionStore,
-    locals: &mut Vector<u32>,
+    locals: &mut HashSet<u32>,
     freeVars: &mut Vector<Analyzer::DefinitionId>,
-    seen: &mut Vector<u32>,
+    seen: &mut HashSet<u32>,
     hirId: Hir::HirId,
   ): void {
     let Option::SOME(node) = hir.get(hirId) else {
@@ -1536,12 +1509,12 @@ export namespace Capture {
         continue;
       }
 
-      let mut locals: Vector<u32> = Vector::new<u32>();
+      let mut locals: HashSet<u32> = HashSet::new<u32>();
       let mut paramIndex: u64 = 0;
 
       while (paramIndex < params.length()) {
         if (let Option::SOME(paramDefId) = params.get(paramIndex)) {
-          Capture::pushRaw(&mut locals, paramDefId.raw());
+          locals.insert(paramDefId.raw());
         }
 
         paramIndex += 1;
@@ -1550,7 +1523,7 @@ export namespace Capture {
       Capture::collectLocals(hir, bodyId, &mut locals);
 
       let mut freeVars: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
-      let mut seen: Vector<u32> = Vector::new<u32>();
+      let mut seen: HashSet<u32> = HashSet::new<u32>();
       Capture::collectFreeVars(hir, defStore, &mut locals, &mut freeVars, &mut seen, bodyId);
 
       let mut captures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
