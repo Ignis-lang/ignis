@@ -1966,6 +1966,30 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_radix_literals_keep_their_value() {
+  e2e_test(
+    "radix_literals_keep_their_value",
+    r#"
+function main(): i32 {
+    let byte: u32 = 0xff;
+    let bits: u8 = 0b1010;
+    let masked: u32 = 0x12345678 & 0x0000ff00;
+    if (byte != 255) {
+        return 1;
+    }
+    if (bits != 10) {
+        return 2;
+    }
+    if (masked != 0x5600) {
+        return 3;
+    }
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_config_flag_os() {
   e2e_test(
     "config_flag_os",

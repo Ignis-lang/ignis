@@ -650,12 +650,15 @@ impl<'a> LoweringContext<'a> {
       IgnisLiteralValue::Char(v) => ConstValue::Char(*v, ty),
       IgnisLiteralValue::String(v) => ConstValue::String(v.clone(), ty),
       IgnisLiteralValue::Atom(sym) => ConstValue::Atom(sym.index(), ty),
+      // The lexeme keeps its radix prefix; the typechecker strips it the same way.
       IgnisLiteralValue::Hex(v) => {
-        let val = u64::from_str_radix(v, 16).unwrap_or(0);
+        let digits = v.trim_start_matches("0x").trim_start_matches("0X");
+        let val = u64::from_str_radix(digits, 16).unwrap_or(0);
         ConstValue::UInt(val, ty)
       },
       IgnisLiteralValue::Binary(v) => {
-        let val = u64::from_str_radix(v, 2).unwrap_or(0);
+        let digits = v.trim_start_matches("0b").trim_start_matches("0B");
+        let val = u64::from_str_radix(digits, 2).unwrap_or(0);
         ConstValue::UInt(val, ty)
       },
       IgnisLiteralValue::Null => ConstValue::Null(ty),
