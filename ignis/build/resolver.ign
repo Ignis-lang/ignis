@@ -7,7 +7,7 @@ import
   SourceFile,
   SourceSpan,
 from "@compiler::diagnostics";
-import Parser from "@compiler::parser";
+import CompileFlags, Parser from "@compiler::parser";
 
 import Env from "std::env";
 import Fs from "std::fs";
@@ -46,6 +46,7 @@ record ResolverProject {
   public stdRoot: Path::PathBuf;
   public stdManifestPath: Path::PathBuf;
   public aliases: Vector<ResolverAlias>;
+  public flags: CompileFlags;
 }
 
 record AliasResolution {
@@ -63,6 +64,10 @@ export record DiscoveryResult {
   /// Absolute std root the project resolved to, so later build stages can
   /// locate the runtime headers and archive without re-reading the config.
   public stdRoot: Path::PathBuf;
+  /// Compile-time configuration discovery parsed the project with. The build
+  /// has to parse every module again with the same one, or the two passes
+  /// would disagree on which branches exist.
+  public flags: CompileFlags;
 
   public orderCount(&self): u64 {
     return self.order.length();
@@ -219,6 +224,79 @@ function resolverUnquote(text: &String): String {
   return text.substringBytes(1, text.length() - 1);
 }
 
+/// Reads a single-line TOML string array such as `["a", "b"]`. The reader
+/// above is line-based, so an array spread over several lines is not seen.
+function resolverStringArray(value: &String): Vector<String> {
+  let mut items: Vector<String> = Vector::new<String>();
+  let trimmed: String = value.trimAsciiWhitespace();
+
+  if (trimmed.length() < 2 || !trimmed.startsWith("[")) {
+    return items;
+  }
+
+  let inner: String = trimmed.substringBytes(1, trimmed.length() - 1);
+  let mut start: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index <= inner.length()) {
+    let mut atSeparator: boolean = index == inner.length();
+
+    if (!atSeparator) {
+      if (let Option::SOME(byte) = inner.byteAt(index)) {
+        atSeparator = byte == ',' as u8;
+      }
+    }
+
+    if (atSeparator) {
+      let raw: String = inner.substringBytes(start, index).trimAsciiWhitespace();
+      let item: String = resolverUnquote(&raw);
+
+      if (item.length() > 0) {
+        items.push(item.clone());
+      }
+
+      start = index + 1;
+    }
+
+    index += 1;
+  }
+
+  return items;
+}
+
+function resolverPushMissingStrings(target: &mut Vector<String>, source: &Vector<String>): void {
+  let mut targetRef: &mut Vector<String> = target;
+  let mut index: u64 = 0;
+
+  while (index < source.length()) {
+    let Option::SOME(value) = source.get(index) else {
+      break;
+    };
+
+    let mut existingIndex: u64 = 0;
+    let mut alreadyPresent: boolean = false;
+
+    while (existingIndex < targetRef.length()) {
+      let Option::SOME(existing) = targetRef.get(existingIndex) else {
+        break;
+      };
+
+      if (existing.equals(value)) {
+        alreadyPresent = true;
+        break;
+      }
+
+      existingIndex += 1;
+    }
+
+    if (!alreadyPresent) {
+      targetRef.push(value.clone());
+    }
+
+    index += 1;
+  }
+}
+
 function resolverFindProjectFile(startPath: &Path::PathBuf): Option<Path::PathBuf> {
   let mut current: Path::PathBuf = startPath.clone();
 
@@ -261,7 +339,15 @@ function resolverCanonicalPath(
   return Result::OK(canonical);
 }
 
-function resolverLoadProject(startPath: &Path::PathBuf): Result<ResolverProject, DiagnosticBag> {
+/// Loads the project the compile-time predicates are answered from.
+///
+/// `debug` and `cliFeatures` come from the command line; the project file
+/// supplies the target triple and the default and declared feature sets.
+function resolverLoadProject(
+  startPath: &Path::PathBuf,
+  debug: boolean,
+  cliFeatures: &Vector<String>,
+): Result<ResolverProject, DiagnosticBag> {
   let Option::SOME(configPath) = resolverFindProjectFile(startPath) else {
     return Result::ERROR(resolverSimpleDiagnostic(startPath, MISSING_MODULE, "ignis.toml could not be found"));
   };
@@ -277,6 +363,9 @@ function resolverLoadProject(startPath: &Path::PathBuf): Result<ResolverProject,
   let mut sourceDir: String = String::create("src");
   let mut entryName: String = String::create("main.ign");
   let mut stdPath: String = String::create("std");
+  let mut targetTriple: String = CompileFlags::defaultTargetTriple();
+  let mut defaultFeatures: Vector<String> = Vector::new<String>();
+  let mut knownFeatures: Vector<String> = Vector::new<String>();
   let mut aliases: Vector<ResolverAlias> = Vector::new<ResolverAlias>();
   let lines: Vector<String> = source.lines();
   let mut lineIndex: u64 = 0;
@@ -318,6 +407,18 @@ function resolverLoadProject(startPath: &Path::PathBuf): Result<ResolverProject,
       if (key.equals("entry")) {
         entryName = value.clone();
       }
+
+      if (key.equals("target_triple")) {
+        targetTriple = value.clone();
+      }
+
+      if (key.equals("default_features")) {
+        defaultFeatures = resolverStringArray(&valueText);
+      }
+
+      if (key.equals("known_features")) {
+        knownFeatures = resolverStringArray(&valueText);
+      }
     }
 
     if (section.equals("ignis") && key.equals("std_path")) {
@@ -345,6 +446,10 @@ function resolverLoadProject(startPath: &Path::PathBuf): Result<ResolverProject,
   let manifestCandidate: Path::PathBuf = stdRoot.join("manifest.toml");
   let stdManifestPath: Path::PathBuf = resolverCanonicalPath(&manifestCandidate, "std manifest could not be resolved")!;
 
+  let mut features: Vector<String> = Vector::new<String>();
+  resolverPushMissingStrings(&mut features, cliFeatures);
+  resolverPushMissingStrings(&mut features, &defaultFeatures);
+
   return Result::OK(ResolverProject {
     root: root,
     sourceRoot: sourceRoot,
@@ -352,6 +457,7 @@ function resolverLoadProject(startPath: &Path::PathBuf): Result<ResolverProject,
     stdRoot: stdRoot,
     stdManifestPath: stdManifestPath,
     aliases: aliases,
+    flags: CompileFlags::create(&targetTriple, debug, &features, &knownFeatures),
   });
 }
 
@@ -686,7 +792,10 @@ function resolverResolveImport(
   });
 }
 
-function resolverExtractImports(path: &Path::PathBuf): Result<Vector<ParsedImport>, DiagnosticBag> {
+function resolverExtractImports(
+  path: &Path::PathBuf,
+  flags: &CompileFlags,
+): Result<Vector<ParsedImport>, DiagnosticBag> {
   let Result::OK(sourceText) = Fs::readToString(path) else {
     return Result::ERROR(resolverSingleDiagnostic(Diagnostic::new(
       Severity::ERROR,
@@ -703,7 +812,7 @@ function resolverExtractImports(path: &Path::PathBuf): Result<Vector<ParsedImpor
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
 
-  Parser::parseInto(&sourceFile, &mut module, &mut diagnostics);
+  Parser::parseIntoWithFlags(&sourceFile, &mut module, &mut diagnostics, flags);
   if (!diagnostics.isEmpty()) {
     return Result::ERROR(diagnostics);
   }
@@ -777,7 +886,7 @@ function resolverDiscoverModule(
   let mut stackRef: &mut Vector<Path::PathBuf> = stack;
   stackRef.push(currentPath.clone());
 
-  let imports: Vector<ParsedImport> = resolverExtractImports(currentPath)!;
+  let imports: Vector<ParsedImport> = resolverExtractImports(currentPath, &project.flags)!;
   let mut importIndex: u64 = 0;
 
   while (importIndex < imports.length()) {
@@ -946,6 +1055,7 @@ function resolverDiscoverProjectRoots(
     order: order,
     preludePaths: preludePaths,
     stdRoot: project.stdRoot.clone(),
+    flags: project.flags.clone(),
   });
 }
 
@@ -959,16 +1069,37 @@ function resolverDiagnosticSummary(bag: &DiagnosticBag): String {
 }
 
 export namespace Resolver {
+  /// Discovers with the compile-time configuration of the machine this
+  /// compiler runs on. A build uses the `WithOptions` entry points, whose
+  /// configuration the project file and the command line decide.
   function discoverProject(startPath: &Path::PathBuf): Result<DiscoveryResult, DiagnosticBag> {
-    let project: ResolverProject = resolverLoadProject(startPath)!;
+    let features: Vector<String> = Vector::new<String>();
+    return Resolver::discoverProjectWithOptions(startPath, false, &features);
+  }
+
+  function discoverProjectTests(startPath: &Path::PathBuf): Result<DiscoveryResult, DiagnosticBag> {
+    let features: Vector<String> = Vector::new<String>();
+    return Resolver::discoverProjectTestsWithOptions(startPath, false, &features);
+  }
+
+  function discoverProjectWithOptions(
+    startPath: &Path::PathBuf,
+    debug: boolean,
+    features: &Vector<String>,
+  ): Result<DiscoveryResult, DiagnosticBag> {
+    let project: ResolverProject = resolverLoadProject(startPath, debug, features)!;
     let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
     let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
 
     return resolverDiscoverProjectRoots(&project, &manifest, false);
   }
 
-  function discoverProjectTests(startPath: &Path::PathBuf): Result<DiscoveryResult, DiagnosticBag> {
-    let project: ResolverProject = resolverLoadProject(startPath)!;
+  function discoverProjectTestsWithOptions(
+    startPath: &Path::PathBuf,
+    debug: boolean,
+    features: &Vector<String>,
+  ): Result<DiscoveryResult, DiagnosticBag> {
+    let project: ResolverProject = resolverLoadProject(startPath, debug, features)!;
     let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
     let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
 
