@@ -4,7 +4,7 @@ import Test from "std::test";
 
 import Diagnostic, DiagnosticBag, SourceFile from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
-import Parser from "@compiler::parser";
+import CompileFlags, Parser from "@compiler::parser";
 
 function readFixture(path: str): String {
   return match (Fs::readToString(path)) {
@@ -3943,7 +3943,7 @@ function configFlagLiteralValue(module: &Ast::Module, statementId: Ast::Statemen
 /// `@configFlag(<condition>)` is answered while parsing, so the directive
 /// never reaches the AST: only the boolean it evaluated to does. The values
 /// below follow the compile-time flags the parser stands in with, which
-/// describe a debug build on a glibc x86_64 Linux host.
+/// describe a release build on a glibc x86_64 Linux host.
 @test
 function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
   let source: SourceFile = SourceFile::create(
@@ -3963,8 +3963,8 @@ function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
 
   let mut expected: Vector<boolean> = Vector::new<boolean>();
   expected.push(true);
-  expected.push(true);
-  expected.push(true);
+  expected.push(false);
+  expected.push(false);
   expected.push(true);
   expected.push(true);
 
@@ -4002,7 +4002,7 @@ function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
 function parserSelectsCompileIfBranchAtItemPosition(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_compile_if.ign",
-    "@if(@debug()) { function enabled(): void {} } @else { function disabled(): void {} }"
+    "@if(@release()) { function enabled(): void {} } @else { function disabled(): void {} }"
   );
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
@@ -4028,7 +4028,7 @@ function parserSelectsCompileIfBranchAtItemPosition(): void {
 function parserSelectsCompileIfElseBranchAtItemPosition(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_compile_ifelse.ign",
-    "@ifelse(@release()) { function releaseOnly(): void {} } @else { function debugOnly(): void {} }"
+    "@ifelse(@debug()) { function debugOnly(): void {} } @else { function releaseOnly(): void {} }"
   );
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
@@ -4043,9 +4043,130 @@ function parserSelectsCompileIfElseBranchAtItemPosition(): void {
   };
 
   match (expectItem(&module, itemId)) {
-    Ast::Item::Node::Function(functionItem) -> Test::assertEq<str>(functionItem.name.toStr(), "debugOnly"),
+    Ast::Item::Node::Function(functionItem) -> Test::assertEq<str>(functionItem.name.toStr(), "releaseOnly"),
     _ -> @panic("expected function item from the selected compile-time else branch"),
   };
+}
+
+/// Name of the single function the parsed module kept, so a test can state
+/// which compile-time branch the flags selected.
+function selectedBranchFunctionName(module: &Ast::Module): String {
+  let itemId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing selected compile-time branch root"),
+  };
+
+  return match (expectItem(module, itemId)) {
+    Ast::Item::Node::Function(functionItem) -> functionItem.name.clone(),
+    _ -> @panic("expected function item from the selected compile-time branch"),
+  };
+}
+
+/// Parses `text` with `flags` and returns the name of the function the
+/// selected branch left behind.
+function parseSelectedBranchName(path: str, text: str, flags: &CompileFlags): String {
+  let source: SourceFile = SourceFile::create(path, text);
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseIntoWithFlags(&source, &mut module, &mut diagnostics, flags);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  return selectedBranchFunctionName(&module);
+}
+
+/// `@debug()` and `@release()` answer from the flags the driver resolved, so
+/// the same source selects the opposite branch under the opposite build.
+@test
+function parserSelectsCompileBranchFromDebugFlag(): void {
+  let source: str = "@ifelse(@release()) { function releaseOnly(): void {} } @else { function debugOnly(): void {} }";
+  let noFeatures: Vector<String> = Vector::new<String>();
+  let triple: String = CompileFlags::defaultTargetTriple();
+
+  let debugFlags: CompileFlags = CompileFlags::create(&triple, true, &noFeatures, &noFeatures);
+  let underDebug: String = parseSelectedBranchName("fixtures/parser_flags_debug.ign", source, &debugFlags);
+  Test::assertEq<str>(underDebug.toStr(), "debugOnly");
+
+  let releaseFlags: CompileFlags = CompileFlags::create(&triple, false, &noFeatures, &noFeatures);
+  let underRelease: String = parseSelectedBranchName("fixtures/parser_flags_release.ign", source, &releaseFlags);
+  Test::assertEq<str>(underRelease.toStr(), "releaseOnly");
+}
+
+/// `@platform(...)` compares against the operating system the target triple
+/// names, and folds the argument's case before it does.
+@test
+function parserSelectsCompileBranchFromPlatformFlag(): void {
+  let source: str = "@ifelse(@platform(\"Linux\")) { function onLinux(): void {} } @else { function elsewhere(): void {} }";
+  let noFeatures: Vector<String> = Vector::new<String>();
+
+  let linuxTriple: String = String::create("x86_64-unknown-linux-gnu");
+  let linuxFlags: CompileFlags = CompileFlags::create(&linuxTriple, true, &noFeatures, &noFeatures);
+  let onLinux: String = parseSelectedBranchName("fixtures/parser_flags_linux.ign", source, &linuxFlags);
+  Test::assertEq<str>(onLinux.toStr(), "onLinux");
+
+  let macosTriple: String = String::create("aarch64-apple-darwin");
+  let macosFlags: CompileFlags = CompileFlags::create(&macosTriple, true, &noFeatures, &noFeatures);
+  let onMacos: String = parseSelectedBranchName("fixtures/parser_flags_macos.ign", source, &macosFlags);
+  Test::assertEq<str>(onMacos.toStr(), "elsewhere");
+}
+
+/// A triple's components decide `@arch`, `@abi` and `@target` too, and a
+/// triple that names no ABI answers `@abi(...)` with false.
+@test
+function parserReadsTargetComponentsFromTriple(): void {
+  let noFeatures: Vector<String> = Vector::new<String>();
+  let triple: String = String::create("aarch64-apple-darwin");
+  let flags: CompileFlags = CompileFlags::create(&triple, false, &noFeatures, &noFeatures);
+
+  Test::assertEq<str>(flags.arch.toStr(), "aarch64");
+  Test::assertEq<str>(flags.os.toStr(), "macos");
+  Test::assertEq<str>(flags.abi.toStr(), "");
+  Test::assertEq<str>(flags.targetTriple.toStr(), "aarch64-apple-darwin");
+
+  let gnuTriple: String = String::create("x86_64-unknown-linux-gnu");
+  let gnuFlags: CompileFlags = CompileFlags::create(&gnuTriple, false, &noFeatures, &noFeatures);
+
+  Test::assertEq<str>(gnuFlags.abi.toStr(), "gnu");
+}
+
+/// `@feature(...)` answers from the enabled set. A project that declares no
+/// feature catalog makes every name known, so an unknown one is false.
+@test
+function parserSelectsCompileBranchFromFeatureFlag(): void {
+  let source: str = "@ifelse(@feature(\"simd\")) { function withSimd(): void {} } @else { function withoutSimd(): void {} }";
+  let triple: String = CompileFlags::defaultTargetTriple();
+
+  let noFeatures: Vector<String> = Vector::new<String>();
+  let disabledFlags: CompileFlags = CompileFlags::create(&triple, true, &noFeatures, &noFeatures);
+  let withoutSimd: String = parseSelectedBranchName("fixtures/parser_flags_no_simd.ign", source, &disabledFlags);
+  Test::assertEq<str>(withoutSimd.toStr(), "withoutSimd");
+
+  let mut enabled: Vector<String> = Vector::new<String>();
+  enabled.push(String::create("simd"));
+  let enabledFlags: CompileFlags = CompileFlags::create(&triple, true, &enabled, &noFeatures);
+  let withSimd: String = parseSelectedBranchName("fixtures/parser_flags_simd.ign", source, &enabledFlags);
+  Test::assertEq<str>(withSimd.toStr(), "withSimd");
+}
+
+/// A project that declares a feature catalog rejects a name outside it.
+@test
+function parserRejectsFeatureOutsideDeclaredCatalog(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_flags_unknown_feature.ign",
+    "function main(): void { @configFlag(@feature(\"missing\")); }"
+  );
+  let triple: String = CompileFlags::defaultTargetTriple();
+  let noFeatures: Vector<String> = Vector::new<String>();
+  let mut known: Vector<String> = Vector::new<String>();
+  known.push(String::create("simd"));
+
+  let flags: CompileFlags = CompileFlags::create(&triple, true, &noFeatures, &known);
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseIntoWithFlags(&source, &mut module, &mut diagnostics, &flags);
+
+  Test::assertEq<boolean>(diagnostics.length() > 0, true);
 }
 
 /// An extern member declares a signature only: the `;` is required and a

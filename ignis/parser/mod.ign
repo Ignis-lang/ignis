@@ -1,4 +1,5 @@
 import _ from "./shared";
+import _ from "./compile_flags";
 import _ from "./declarations";
 import _ from "./types";
 import _ from "./expressions";
@@ -10,6 +11,8 @@ import _ from "./trait_defaults";
 import Ast from "@compiler::ast";
 import Diagnostic, DiagnosticBag, DiagnosticNote, SourceFile from "@compiler::diagnostics";
 import LexResult, Lexer from "@compiler::lexer";
+
+export CompileFlags from "./compile_flags";
 
 /// Result of parsing a full source file: the populated module plus the
 /// diagnostics produced by lexing and parsing as separate bags so callers
@@ -75,10 +78,23 @@ function pushRoots(module: &mut Ast::Module, roots: &Vector<Ast::ItemId>): void 
 }
 
 export namespace Parser {
+  /// Parses with the configuration of the machine this compiler runs on. Use
+  /// `parseIntoWithFlags` from a build, whose configuration the project and
+  /// the command line decide.
   function parseInto(
     file: &SourceFile,
     module: &mut Ast::Module,
     diagnostics: &mut DiagnosticBag
+  ): void {
+    let flags: CompileFlags = CompileFlags::hostDefault();
+    Parser::parseIntoWithFlags(file, module, diagnostics, &flags);
+  }
+
+  function parseIntoWithFlags(
+    file: &SourceFile,
+    module: &mut Ast::Module,
+    diagnostics: &mut DiagnosticBag,
+    flags: &CompileFlags,
   ): void {
     let mut lexResult: LexResult = Lexer::lex(file);
     let mut diagnosticsRef: &mut DiagnosticBag = diagnostics;
@@ -94,7 +110,7 @@ export namespace Parser {
       lexDiagIndex += 1;
     }
 
-    let mut parser: ParserShared::State = ParserShared::createState(&mut lexResult.tokens, diagnosticsRef, module);
+    let mut parser: ParserShared::State = ParserShared::createState(&mut lexResult.tokens, diagnosticsRef, module, flags);
 
     let mut roots: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
 
@@ -114,6 +130,11 @@ export namespace Parser {
   /// driver and CLI: it owns the AST module so the caller does not need to
   /// pre-allocate one.
   function parseFile(file: &SourceFile): ParseOutput {
+    let flags: CompileFlags = CompileFlags::hostDefault();
+    return Parser::parseFileWithFlags(file, &flags);
+  }
+
+  function parseFileWithFlags(file: &SourceFile, flags: &CompileFlags): ParseOutput {
     let mut module: Ast::Module = Ast::Module::init();
     let mut parseDiagnostics: DiagnosticBag = DiagnosticBag::init();
     let mut lexResult: LexResult = Lexer::lex(file);
@@ -122,6 +143,7 @@ export namespace Parser {
       &mut lexResult.tokens,
       &mut parseDiagnostics,
       &mut module,
+      flags,
     );
 
     let mut roots: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();

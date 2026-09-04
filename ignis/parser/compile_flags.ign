@@ -1,0 +1,227 @@
+import String from "std::string";
+import Vector from "std::vector";
+
+// Values of the machine this compiler is built for. The reference front end
+// reads them from `std::env::consts` and `cfg!(target_env)`, which are fixed
+// when that compiler is built; nothing in the self-hosted runtime answers the
+// same question, so they are fixed here when this compiler is built instead.
+const HOST_OS: str = "linux";
+const HOST_ARCH: str = "x86_64";
+const HOST_ABI: str = "gnu";
+const HOST_TARGET_TRIPLE: str = "x86_64-unknown-linux-gnu";
+
+// Triple the driver assumes when the project declares none. The reference
+// driver composes it from the host architecture and operating system without
+// an ABI component, so `@abi(...)` answers false unless a project spells a
+// four-part triple out.
+const DEFAULT_TARGET_TRIPLE: str = "x86_64-unknown-linux";
+
+function compileFlagsCloneStrings(source: &Vector<String>): Vector<String> {
+  let mut result: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < source.length()) {
+    let Option::SOME(value) = source.get(index) else {
+      break;
+    };
+
+    result.push(value.clone());
+    index += 1;
+  }
+
+  return result;
+}
+
+function compileFlagsContainsText(value: &String, needle: str): boolean {
+  let needleString: String = String::create(needle);
+  return value.contains(&needleString);
+}
+
+function compileFlagsSplitOnDash(value: &String): Vector<String> {
+  let mut parts: Vector<String> = Vector::new<String>();
+  let total: u64 = value.length();
+  let mut start: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < total) {
+    let Option::SOME(byte) = value.byteAt(index) else {
+      break;
+    };
+
+    if (byte == '-' as u8) {
+      parts.push(value.substringBytes(start, index));
+      start = index + 1;
+    }
+
+    index += 1;
+  }
+
+  parts.push(value.substringBytes(start, total));
+  return parts;
+}
+
+/// Folds the operating-system component of a triple onto the name the
+/// `@platform(...)` predicate compares against, so `darwin`, `mingw` and the
+/// rest answer as the platform they name.
+function compileFlagsNormalizePlatform(raw: &String): String {
+  let lowered: String = raw.toLowerCase();
+
+  if (compileFlagsContainsText(&lowered, "darwin") || compileFlagsContainsText(&lowered, "macos")) {
+    return String::create("macos");
+  }
+
+  if (compileFlagsContainsText(&lowered, "windows") || compileFlagsContainsText(&lowered, "mingw") || compileFlagsContainsText(&lowered, "msvc")) {
+    return String::create("windows");
+  }
+
+  if (compileFlagsContainsText(&lowered, "linux")) {
+    return String::create("linux");
+  }
+
+  return lowered;
+}
+
+/// Compile-time configuration the `@configFlag`, `@if` and `@ifelse`
+/// predicates are answered from. The parser folds those directives while it
+/// reads a file, so the driver has to resolve the configuration before it
+/// parses anything.
+export record CompileFlags {
+  public os: String;
+  public arch: String;
+  public abi: String;
+  public targetTriple: String;
+  public debug: boolean;
+  public features: Vector<String>;
+  /// Feature names the project declares. An empty list means the project
+  /// declared none, and then every name counts as known.
+  public knownFeatures: Vector<String>;
+
+  /// Configuration of the machine this compiler runs on, with an ABI and a
+  /// four-part triple. This is what a caller that has no project gets.
+  public static hostDefault(): CompileFlags {
+    return CompileFlags {
+      os: String::create(HOST_OS),
+      arch: String::create(HOST_ARCH),
+      abi: String::create(HOST_ABI),
+      targetTriple: String::create(HOST_TARGET_TRIPLE),
+      debug: false,
+      features: Vector::new<String>(),
+      knownFeatures: Vector::new<String>(),
+    };
+  }
+
+  public static defaultTargetTriple(): String {
+    return String::create(DEFAULT_TARGET_TRIPLE);
+  }
+
+  /// Reads architecture, operating system and ABI out of `triple`. A missing
+  /// component keeps the host value, except for the ABI, which a triple that
+  /// does not spell one out clears.
+  public static fromTargetTriple(triple: &String): CompileFlags {
+    let trimmed: String = triple.trimAsciiWhitespace();
+
+    if (trimmed.length() == 0) {
+      return CompileFlags::hostDefault();
+    }
+
+    let mut flags: CompileFlags = CompileFlags::hostDefault();
+    flags.targetTriple = trimmed.clone();
+
+    let parts: Vector<String> = compileFlagsSplitOnDash(&trimmed);
+
+    if (let Option::SOME(arch) = parts.get(0)) {
+      if (arch.length() > 0) {
+        flags.arch = arch.clone();
+      }
+    }
+
+    if (parts.length() >= 3) {
+      if (let Option::SOME(os) = parts.get(2)) {
+        flags.os = compileFlagsNormalizePlatform(os);
+      }
+    } else if (parts.length() == 2) {
+      if (let Option::SOME(os) = parts.get(1)) {
+        flags.os = compileFlagsNormalizePlatform(os);
+      }
+    }
+
+    if (parts.length() >= 4) {
+      if (let Option::SOME(abi) = parts.get(3)) {
+        flags.abi = abi.toLowerCase();
+      }
+    } else {
+      flags.abi = String::new();
+    }
+
+    return flags;
+  }
+
+  /// Resolved configuration of a build: the project's triple plus the enabled
+  /// and declared feature sets.
+  public static create(
+    triple: &String,
+    debug: boolean,
+    features: &Vector<String>,
+    knownFeatures: &Vector<String>,
+  ): CompileFlags {
+    let mut flags: CompileFlags = CompileFlags::fromTargetTriple(triple);
+
+    flags.debug = debug;
+    flags.features = compileFlagsCloneStrings(features);
+    flags.knownFeatures = compileFlagsCloneStrings(knownFeatures);
+
+    return flags;
+  }
+
+  public clone(&self): CompileFlags {
+    return CompileFlags {
+      os: self.os.clone(),
+      arch: self.arch.clone(),
+      abi: self.abi.clone(),
+      targetTriple: self.targetTriple.clone(),
+      debug: self.debug,
+      features: compileFlagsCloneStrings(&self.features),
+      knownFeatures: compileFlagsCloneStrings(&self.knownFeatures),
+    };
+  }
+
+  public hasFeature(&self, name: &String): boolean {
+    let mut index: u64 = 0;
+
+    while (index < self.features.length()) {
+      let Option::SOME(feature) = self.features.get(index) else {
+        break;
+      };
+
+      if (feature.equals(name)) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  public isKnownFeature(&self, name: &String): boolean {
+    if (self.knownFeatures.length() == 0) {
+      return true;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < self.knownFeatures.length()) {
+      let Option::SOME(feature) = self.knownFeatures.get(index) else {
+        break;
+      };
+
+      if (feature.equals(name)) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+}

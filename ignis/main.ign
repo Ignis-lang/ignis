@@ -355,7 +355,7 @@ function compileDiscovered(
 
     let modulePath: String = node.path.toString();
     let moduleFile: SourceFile = SourceFile::create(modulePath.toStr(), moduleText.toStr());
-    let mut output: ParseOutput = Parser::parseFile(&moduleFile);
+    let mut output: ParseOutput = Parser::parseFileWithFlags(&moduleFile, &discovery.flags);
 
     lexErrors += countBySeverity(&output.lexDiagnostics, Severity::ERROR);
     lexWarnings += countBySeverity(&output.lexDiagnostics, Severity::WARNING);
@@ -617,7 +617,12 @@ function compileDiscovered(
 /// Drive the selfhost compiler pipeline against the project containing a source file.
 ///
 /// Returns 0 on success, 1 on any error (I/O, lex, parse, analyze, or linking).
-function compileFile(path: &String, outputPath: &String): i32 {
+function compileFile(
+  path: &String,
+  outputPath: &String,
+  debug: Option<boolean>,
+  features: &Vector<String>,
+): i32 {
   Io::println(String::create("ignis selfhost (partial pipeline)"));
   Io::println(`  source: ${path.toStr()}`);
 
@@ -628,7 +633,7 @@ function compileFile(path: &String, outputPath: &String): i32 {
 
   let file: SourceFile = SourceFile::create(path.toStr(), text.toStr());
   let entryPath: Path::PathBuf = Path::PathBuf::fromString(path);
-  let discovery: DiscoveryResult = match (Resolver::discoverProject(&entryPath)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProjectWithOptions(&entryPath, debug, features)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
       reportDiscoveryFailure(&diagnostics, &file);
@@ -690,6 +695,8 @@ function runProjectTests(
   outputPath: &String,
   filter: &String,
   updateSnapshots: boolean,
+  debug: Option<boolean>,
+  features: &Vector<String>,
 ): i32 {
   Io::eprintln(`Testing ${path.toStr()}\n`);
 
@@ -700,7 +707,7 @@ function runProjectTests(
 
   let file: SourceFile = SourceFile::create(path.toStr(), text.toStr());
   let entryPath: Path::PathBuf = Path::PathBuf::fromString(path);
-  let discovery: DiscoveryResult = match (Resolver::discoverProjectTests(&entryPath)) {
+  let discovery: DiscoveryResult = match (Resolver::discoverProjectTestsWithOptions(&entryPath, debug, features)) {
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
       reportDiscoveryFailure(&diagnostics, &file);
@@ -779,6 +786,37 @@ function runProjectTests(
   return 0;
 }
 
+/// Splits a comma-separated feature list into its names, dropping empty ones.
+function splitCommaSeparated(value: &String): Vector<String> {
+  let mut items: Vector<String> = Vector::new<String>();
+  let mut start: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index <= value.length()) {
+    let mut atSeparator: boolean = index == value.length();
+
+    if (!atSeparator) {
+      if (let Option::SOME(byte) = value.byteAt(index)) {
+        atSeparator = byte == ',' as u8;
+      }
+    }
+
+    if (atSeparator) {
+      let item: String = value.substringBytes(start, index).trimAsciiWhitespace();
+
+      if (item.length() > 0) {
+        items.push(item.clone());
+      }
+
+      start = index + 1;
+    }
+
+    index += 1;
+  }
+
+  return items;
+}
+
 /// CLI entry point: `ignis <source.ign> [-o <output-binary>]` or
 /// `ignis test <entry.ign> [--filter <substring>] [--update-snapshots] [-o <binary>]`.
 ///
@@ -787,6 +825,13 @@ function runProjectTests(
 /// contains it. `-o` overrides the output binary, which defaults to
 /// `selfhost_out` for a build and `selfhost_tests` for a test run. An unknown
 /// flag exits with 2.
+///
+/// The compile-time predicates read `--debug`/`--no-debug`, `--feature <name>`
+/// and `--features <list>`: `--debug`/`--no-debug` overrides `[build] debug`
+/// from `ignis.toml` and decides `@debug()` and `@release()`; with neither
+/// flag the project file's value applies, and with no project file the build
+/// is not debug. The feature flags add to the project's declared default
+/// features.
 function main(): i32 {
   let args: Vector<String> = Process::args();
   let mut sourcePath: Option<String> = Option::NONE;
@@ -794,6 +839,8 @@ function main(): i32 {
   let mut filter: String = String::new();
   let mut updateSnapshots: boolean = false;
   let mut testMode: boolean = false;
+  let mut debug: Option<boolean> = Option::NONE;
+  let mut features: Vector<String> = Vector::new<String>();
   let mut index: u64 = 1;
 
   if (let Option::SOME(first) = args.get(1) && first.equals("test")) {
@@ -835,6 +882,50 @@ function main(): i32 {
       continue;
     }
 
+    if (arg.equals("--debug")) {
+      debug = Option::SOME(true);
+      index += 1;
+      continue;
+    }
+
+    if (arg.equals("--no-debug")) {
+      debug = Option::SOME(false);
+      index += 1;
+      continue;
+    }
+
+    if (arg.equals("--feature")) {
+      let Option::SOME(value) = args.get(index + 1) else {
+        Io::eprintln(String::create("error: --feature requires a name"));
+        return 2;
+      };
+
+      features.push(value.clone());
+      index += 2;
+      continue;
+    }
+
+    if (arg.equals("--features")) {
+      let Option::SOME(value) = args.get(index + 1) else {
+        Io::eprintln(String::create("error: --features requires a comma-separated list"));
+        return 2;
+      };
+
+      let parsed: Vector<String> = splitCommaSeparated(value);
+      let mut parsedIndex: u64 = 0;
+
+      while (parsedIndex < parsed.length()) {
+        if (let Option::SOME(feature) = parsed.get(parsedIndex)) {
+          features.push(feature.clone());
+        }
+
+        parsedIndex += 1;
+      }
+
+      index += 2;
+      continue;
+    }
+
     if (arg.startsWith("-")) {
       Io::eprintln(`error: unknown argument: ${arg.toStr()}`);
       return 2;
@@ -849,8 +940,8 @@ function main(): i32 {
   };
 
   if (testMode) {
-    return runProjectTests(&source, &outputPath, &filter, updateSnapshots);
+    return runProjectTests(&source, &outputPath, &filter, updateSnapshots, debug, &features);
   }
 
-  return compileFile(&source, &outputPath);
+  return compileFile(&source, &outputPath, debug, &features);
 }

@@ -13,6 +13,8 @@ import
 from "@compiler::diagnostics";
 import Keyword, Punctuation, Token, TokenKind, TokenStream from "@compiler::syntax";
 
+import CompileFlags from "./compile_flags";
+
 export namespace ParserShared {
   function isTrivia(token: Token): boolean {
     return token.kindValue() == TokenKind::WHITESPACE || token.kindValue() == TokenKind::LINE_COMMENT || token.kindValue() == TokenKind::BLOCK_COMMENT || token.kindValue() == TokenKind::OUTER_DOC_COMMENT || token.kindValue() == TokenKind::INNER_DOC_COMMENT;
@@ -400,6 +402,9 @@ export namespace ParserShared {
     public tokens: &mut TokenStream;
     public diagnostics: &mut DiagnosticBag;
     public module: &mut Ast::Module;
+    /// Compile-time configuration `@configFlag`, `@if` and `@ifelse` fold
+    /// against while this file is parsed.
+    public flags: CompileFlags;
 
     public current(&self): Token {
       return self.tokens.peek();
@@ -528,12 +533,14 @@ export namespace ParserShared {
   function createState(
     tokens: &mut TokenStream,
     diagnostics: &mut DiagnosticBag,
-    module: &mut Ast::Module
+    module: &mut Ast::Module,
+    flags: &CompileFlags,
   ): State {
     return State {
       tokens: tokens,
       diagnostics: diagnostics,
       module: module,
+      flags: flags.clone(),
     };
   }
 }

@@ -966,23 +966,6 @@ export namespace ParserExpressions {
     return Option::SOME(ParserShared::copyTypeIds(&arguments));
   }
 
-  // Compile-time flags the `@configFlag(...)` predicates answer from.
-  //
-  // The self-hosted driver has no compilation-context plumbing: the build
-  // config (`ignis/build/config.ign`) carries a target triple, but nothing
-  // reaches the parser, which is where `@configFlag` folds to a boolean. Until
-  // that plumbing exists these constants stand in for it and describe a
-  // glibc x86_64 Linux host. `debug` mirrors the host's `cfg!(debug_assertions)`,
-  // which is the compiler's own build profile: the bootstrap ladder builds
-  // this compiler at -O0 -g, so it answers as a debug build. Replacing the
-  // constants with threaded configuration is the only change the predicates
-  // below need.
-  const CONFIG_FLAG_OS: str = "linux";
-  const CONFIG_FLAG_ARCH: str = "x86_64";
-  const CONFIG_FLAG_ABI: str = "gnu";
-  const CONFIG_FLAG_TARGET_TRIPLE: str = "x86_64-unknown-linux-gnu";
-  const CONFIG_FLAG_DEBUG: boolean = true;
-
   /// `@configFlag(<condition>)` in expression position: the condition is
   /// evaluated while parsing and the call becomes a boolean literal, so
   /// nothing downstream ever sees the directive.
@@ -1094,10 +1077,10 @@ export namespace ParserExpressions {
       };
 
       if (name.equals("debug")) {
-        return Option::SOME(ParserExpressions::CONFIG_FLAG_DEBUG);
+        return Option::SOME(parserRef.flags.debug);
       }
 
-      return Option::SOME(!ParserExpressions::CONFIG_FLAG_DEBUG);
+      return Option::SOME(!parserRef.flags.debug);
     }
 
     parserRef.skipTrivia();
@@ -1123,26 +1106,32 @@ export namespace ParserExpressions {
     // `@platform` and `@abi` fold their argument's case; `@arch` and `@target`
     // compare it verbatim.
     if (name.equals("platform")) {
-      return Option::SOME(argument.toLowerCase().equals(ParserExpressions::CONFIG_FLAG_OS));
+      return Option::SOME(argument.toLowerCase().equals(&parserRef.flags.os));
     }
 
     if (name.equals("abi")) {
-      return Option::SOME(argument.toLowerCase().equals(ParserExpressions::CONFIG_FLAG_ABI));
+      return Option::SOME(argument.toLowerCase().equals(&parserRef.flags.abi));
     }
 
     if (name.equals("arch")) {
-      return Option::SOME(argument.equals(ParserExpressions::CONFIG_FLAG_ARCH));
+      return Option::SOME(argument.equals(&parserRef.flags.arch));
     }
 
     if (name.equals("target")) {
-      return Option::SOME(argument.equals(ParserExpressions::CONFIG_FLAG_TARGET_TRIPLE));
+      return Option::SOME(argument.equals(&parserRef.flags.targetTriple));
     }
 
-    // No build enables features yet, and with no declared feature set every
-    // name counts as known, so an unrecognised one is false rather than an
-    // error — the same answer the reference front end gives by default.
+    // A project that declares no feature catalog makes every name known, so an
+    // unrecognised one is false there; a project that declares one rejects a
+    // name outside it.
     if (name.equals("feature")) {
-      return Option::SOME(false);
+      if (!parserRef.flags.isKnownFeature(&argument)) {
+        let unknownDetail: String = `unknown feature \`${argument.toStr()}\` in compile-time condition`;
+        parserRef.emitDiagnostic(argumentToken.span, DiagnosticCode::EXPECTED_EXPRESSION, "expected expression", unknownDetail.toStr());
+        return Option::NONE;
+      }
+
+      return Option::SOME(parserRef.flags.hasFeature(&argument));
     }
 
     let span: SourceSpan = ParserShared::mergeSpans(atToken.span, nameToken.span);
