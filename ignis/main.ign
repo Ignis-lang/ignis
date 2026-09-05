@@ -1,3 +1,4 @@
+import Env from "std::env";
 import Fs from "std::fs";
 import Io from "std::io";
 import Path from "std::path";
@@ -21,10 +22,19 @@ import Mono from "./analyzer/mono";
 import LirLowering from "./lir/lowering";
 import LirVerify from "./lir/verify";
 
+import CliCommand, CliOptions, helpText, parseArguments, versionText from "./cli";
 import BuildGraph, BuildModuleKind from "./build/module_graph";
+import BuildLayout from "./build/layout";
+import
+  BuildArtifacts,
+  projectArtifacts,
+  singleFileArtifacts,
+  stdArtifactBase,
+from "./build/artifacts";
+import ArchiveTool from "./build/archive";
 import CCompiler from "./build/c_compiler";
 import Linker from "./build/linker";
-import DiscoveryResult, Resolver from "./build/resolver";
+import BuildOverrides, DiscoveryResult, Resolver from "./build/resolver";
 import TestCase, TestOutcome, TestRunner from "./build/test_runner";
 
 /// Count diagnostics in `bag` whose severity equals `target`.
@@ -221,6 +231,8 @@ record BuildProfile {
   public debug: boolean;
   /// The project's `[build] cflags`, forwarded verbatim to the C toolchain.
   public cflags: Vector<String>;
+  /// The project's `[build] cc`, the driver every toolchain step is invoked with.
+  public cc: String;
 }
 
 function buildProfileCloneStrings(source: &Vector<String>): Vector<String> {
@@ -249,6 +261,7 @@ function resolveBuildProfile(discovery: &DiscoveryResult, optLevel: Option<u64>)
     optLevel: discovery.optLevel,
     debug: discovery.flags.debug,
     cflags: buildProfileCloneStrings(&discovery.cflags),
+    cc: discovery.cc.clone(),
   };
 
   if (let Option::SOME(level) = optLevel) {
@@ -269,6 +282,7 @@ function compileAndLinkUnits(
   profile: &BuildProfile,
   file: &SourceFile,
 ): u64 {
+  let cc: str = profile.cc.toStr();
   let runtimeDir: Path::PathBuf = stdRoot.join("runtime");
 
   let mut includeDirs: Vector<String> = Vector::new<String>();
@@ -289,7 +303,7 @@ function compileAndLinkUnits(
   }
 
   if (let Result::ERROR(compileBag) = CCompiler::compileObjects(
-    "gcc",
+    cc,
     sourcePaths,
     objectPaths,
     &includeDirs,
@@ -310,7 +324,7 @@ function compileAndLinkUnits(
   let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
 
   if (let Result::ERROR(linkBag) = Linker::link(
-    "gcc",
+    cc,
     outputPath,
     &objects,
     &archives,
@@ -366,6 +380,8 @@ function compileDiscovered(
   discovery: &DiscoveryResult,
   file: &SourceFile,
   collectTests: boolean,
+  emitCode: boolean,
+  exportAll: boolean,
 ): CompiledProgram {
   let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
   let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
@@ -614,6 +630,17 @@ function compileDiscovered(
   Io::println(formatPhaseLine("ownership", ownershipErrors, ownershipWarnings));
   renderBagToStderr(&checked.diagnostics, file);
 
+  // A check answers whether the program is well formed, so it stops with the
+  // last phase that can say no. Nothing past this point reports a diagnostic.
+  if (!emitCode) {
+    return CompiledProgram {
+      source: String::new(),
+      tests: tests,
+      errors: frontendErrors + analyzeErrors + captureErrors + ownershipErrors,
+      warnings: frontendWarnings + analyzeWarnings + captureWarnings + ownershipWarnings,
+    };
+  }
+
   let programConstValues: Analyzer::ConstEval::ConstValueMap = collectProgramConstValues(&records);
 
   let mut lirResult: LirLowering::LowerModuleResult = LirLowering::lowerModule(
@@ -636,8 +663,24 @@ function compileDiscovered(
   }
 
   // Every definition the program unit holds is private to it, except the test
-  // functions the harness unit dispatches to by symbol.
+  // functions the harness unit dispatches to by symbol. A standard-library
+  // build exports every function instead, because the archive it produces is
+  // linked by translation units this build never sees.
   let mut externalSymbols: Vector<u32> = Vector::new<u32>();
+
+  if (exportAll) {
+    let mut functionIndex: u64 = 0;
+
+    while (functionIndex < lirResult.program.functions.length()) {
+      let Option::SOME(defId) = lirResult.program.functions.defAt(functionIndex) else {
+        break;
+      };
+
+      externalSymbols.push(defId.raw());
+      functionIndex += 1;
+    }
+  }
+
   let mut externalIndex: u64 = 0;
 
   while (externalIndex < tests.length()) {
@@ -669,65 +712,138 @@ function compileDiscovered(
   };
 }
 
-/// Drive the selfhost compiler pipeline against the project containing a source file.
-///
-/// Returns 0 on success, 1 on any error (I/O, lex, parse, analyze, or linking).
-function compileFile(
-  path: &String,
-  outputPath: &String,
-  debug: Option<boolean>,
-  optLevel: Option<u64>,
-  features: &Vector<String>,
-): i32 {
-  Io::println(String::create("ignis selfhost (partial pipeline)"));
-  Io::println(`  source: ${path.toStr()}`);
+/// Command-line values a build applies on top of the project file.
+function buildOverridesFrom(options: &CliOptions): BuildOverrides {
+  let mut overrides: BuildOverrides = BuildOverrides::none();
+  overrides.debug = options.debug;
+  overrides.features = buildProfileCloneStrings(&options.features);
+  overrides.stdPath = cloneOptionalText(&options.stdPath);
+  overrides.targetTriple = cloneOptionalText(&options.targetTriple);
+  overrides.cc = cloneOptionalText(&options.cc);
+  overrides.outDir = cloneOptionalText(&options.outDir);
+  return overrides;
+}
 
-  let Result::OK(text) = Fs::readToString(path) else {
-    Io::eprintln(`error: cannot read source file: ${path.toStr()}`);
-    return 1;
+function cloneOptionalText(value: &Option<String>): Option<String> {
+  return match (value) {
+    Option::SOME(text) -> Option::SOME(text.clone()),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+/// The source file diagnostics are rendered against.
+///
+/// Every module's diagnostics carry their own path, so this is the entry the
+/// renderer falls back to when it needs source text.
+function entrySourceFile(path: &Path::PathBuf): SourceFile {
+  let text: String = match (Fs::readToString(path)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> String::new(),
+  };
+  let pathText: String = path.toString();
+
+  return SourceFile::create(pathText.toStr(), text.toStr());
+}
+
+/// Create the directory a path lives in, so a toolchain step can write into it.
+function ensureParentDirectory(path: &Path::PathBuf): boolean {
+  let Option::SOME(parent) = path.parent() else {
+    return true;
   };
 
-  let file: SourceFile = SourceFile::create(path.toStr(), text.toStr());
-  let entryPath: Path::PathBuf = Path::PathBuf::fromString(path);
-  let discovery: DiscoveryResult = match (Resolver::discoverProjectWithOptions(&entryPath, debug, features)) {
-    Result::OK(value) -> value,
+  if (parent.isEmpty() || Fs::exists(parent.asStr())) {
+    return true;
+  }
+
+  if (let Result::ERROR(_) = Fs::createDirAll(&parent)) {
+    Io::eprintln(`error: could not create directory: ${parent.asStr()}`);
+    return false;
+  }
+
+  return true;
+}
+
+/// Discover the module graph a command runs against, reporting what failed.
+function discoverFor(
+  startPath: &Path::PathBuf,
+  options: &CliOptions,
+  includeTests: boolean,
+): Option<DiscoveryResult> {
+  let overrides: BuildOverrides = buildOverridesFrom(options);
+
+  match (Resolver::discover(startPath, &overrides, includeTests)) {
+    Result::OK(value) -> {
+      return Option::SOME(value);
+    },
     Result::ERROR(diagnostics) -> {
+      let file: SourceFile = entrySourceFile(startPath);
       reportDiscoveryFailure(&diagnostics, &file);
-      return 1;
+      return Option::NONE;
     },
   };
 
-  let profile: BuildProfile = resolveBuildProfile(&discovery, optLevel);
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, false);
+  return Option::NONE;
+}
+
+/// Compile the project `startPath` belongs to.
+///
+/// `checkOnly` stops after the last phase that can reject the program, which is
+/// what `ignis check` reports on: nothing is emitted and nothing is linked.
+/// `projectMode` writes the artifacts under `[build] out_dir` instead of the
+/// working directory.
+///
+/// Returns 0 on success and 1 on any error (I/O, lex, parse, analyze, ownership
+/// or linking).
+function runCompile(
+  startPath: &Path::PathBuf,
+  options: &CliOptions,
+  checkOnly: boolean,
+  projectMode: boolean,
+): i32 {
+  let banner: str = checkOnly ? "ignis selfhost check" : "ignis selfhost (partial pipeline)";
+  Io::println(String::create(banner));
+  Io::println(`  source: ${startPath.asStr()}`);
+
+  let Option::SOME(discovery) = discoverFor(startPath, options, false) else {
+    return 1;
+  };
+
+  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, false, !checkOnly, false);
   let mut linkErrors: u64 = 0;
 
   // The emitted translation unit is the next thing to feed to a C compiler,
   // and the `// unsupported instruction: <Variant>` comments in it are how the
   // remaining work is counted per variant.
-  if (compiled.source.length() > 0) {
-    let emitPath: str = "selfhost_emit.c";
+  if (!checkOnly && compiled.source.length() > 0) {
+    let artifacts: BuildArtifacts = projectMode ? projectArtifacts(&discovery.name, &discovery.outDir, &options.outputPath) : singleFileArtifacts(&options.outputPath);
 
-    if (let Result::ERROR(_) = Fs::writeString(emitPath, &compiled.source)) {
-      Io::println(String::create("  emit: could not write selfhost_emit.c"));
+    if (!ensureParentDirectory(&artifacts.source) || !ensureParentDirectory(&artifacts.object) || !ensureParentDirectory(&artifacts.executable)) {
+      return 1;
+    }
+
+    if (let Result::ERROR(_) = Fs::writeString(&artifacts.source, &compiled.source)) {
+      Io::println(`  emit: could not write ${artifacts.source.asStr()}`);
     } else {
-      Io::println(`  emit: ${emitPath}`);
+      Io::println(`  emit: ${artifacts.source.asStr()}`);
 
       let mut sourcePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-      sourcePaths.push(Path::PathBuf::create(emitPath));
+      sourcePaths.push(artifacts.source.clone());
 
       let mut objectPaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-      objectPaths.push(Path::PathBuf::create("selfhost_emit.o"));
+      objectPaths.push(artifacts.object.clone());
 
-      let outputPathBuf: Path::PathBuf = Path::PathBuf::fromString(outputPath);
-
-      linkErrors += compileAndLinkUnits(
-        &sourcePaths,
-        &objectPaths,
-        &outputPathBuf,
-        &discovery.stdRoot,
-        &profile,
-        &file,
-      );
+      if (discovery.bin) {
+        linkErrors += compileAndLinkUnits(
+          &sourcePaths,
+          &objectPaths,
+          &artifacts.executable,
+          &discovery.stdRoot,
+          &profile,
+          &file,
+        );
+      }
     }
   }
 
@@ -748,41 +864,23 @@ function compileFile(
 /// process, reporting the way the host `ignis test` runner does.
 ///
 /// Returns 0 when every selected test exits 0, and 1 on any failure.
-function runProjectTests(
-  path: &String,
-  outputPath: &String,
-  filter: &String,
-  updateSnapshots: boolean,
-  debug: Option<boolean>,
-  optLevel: Option<u64>,
-  features: &Vector<String>,
-): i32 {
-  Io::eprintln(`Testing ${path.toStr()}\n`);
+function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
+  Io::eprintln(`Testing ${startPath.asStr()}\n`);
 
-  let Result::OK(text) = Fs::readToString(path) else {
-    Io::eprintln(`error: cannot read source file: ${path.toStr()}`);
+  let Option::SOME(discovery) = discoverFor(startPath, options, true) else {
     return 1;
   };
 
-  let file: SourceFile = SourceFile::create(path.toStr(), text.toStr());
-  let entryPath: Path::PathBuf = Path::PathBuf::fromString(path);
-  let discovery: DiscoveryResult = match (Resolver::discoverProjectTestsWithOptions(&entryPath, debug, features)) {
-    Result::OK(value) -> value,
-    Result::ERROR(diagnostics) -> {
-      reportDiscoveryFailure(&diagnostics, &file);
-      return 1;
-    },
-  };
-
-  let profile: BuildProfile = resolveBuildProfile(&discovery, optLevel);
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, true);
+  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, true, true, false);
 
   if (compiled.source.length() == 0) {
     Io::eprintln(String::create("error: test setup failed"));
     return 1;
   }
 
-  let selected: Vector<TestCase> = TestRunner::plan(&compiled.tests, filter);
+  let selected: Vector<TestCase> = TestRunner::plan(&compiled.tests, &options.filter);
 
   Io::eprintln(TestRunner::sectionHeader("Planning"));
 
@@ -801,6 +899,7 @@ function runProjectTests(
     plannedIndex += 1;
   }
 
+  let outputPath: String = options.outputPathOr("selfhost_tests");
   let programSourceText: String = outputPath.concat("-program.c");
   let harnessSourceText: String = outputPath.concat("-harness.c");
   let programObjectText: String = outputPath.concat("-program.o");
@@ -828,7 +927,7 @@ function runProjectTests(
   objectPaths.push(Path::PathBuf::fromString(&programObjectText));
   objectPaths.push(Path::PathBuf::fromString(&harnessObjectText));
 
-  let binaryPath: Path::PathBuf = Path::PathBuf::fromString(outputPath);
+  let binaryPath: Path::PathBuf = Path::PathBuf::fromString(&outputPath);
 
   if (compileAndLinkUnits(&sourcePaths, &objectPaths, &binaryPath, &discovery.stdRoot, &profile, &file) > 0) {
     Io::eprintln(String::create("error: test setup failed"));
@@ -837,7 +936,12 @@ function runProjectTests(
 
   Io::eprintln(TestRunner::sectionHeader("Running"));
 
-  let outcomes: Vector<TestOutcome> = TestRunner::execute(&binaryPath, &selected, updateSnapshots, TestRunner::jobLimit());
+  let outcomes: Vector<TestOutcome> = TestRunner::execute(
+    &binaryPath,
+    &selected,
+    options.updateSnapshots,
+    TestRunner::jobLimit(),
+  );
 
   if (TestRunner::report(&outcomes, &binaryPath) > 0) {
     return 1;
@@ -846,201 +950,190 @@ function runProjectTests(
   return 0;
 }
 
-/// Splits a comma-separated feature list into its names, dropping empty ones.
-function splitCommaSeparated(value: &String): Vector<String> {
-  let mut items: Vector<String> = Vector::new<String>();
-  let mut start: u64 = 0;
-  let mut index: u64 = 0;
-
-  while (index <= value.length()) {
-    let mut atSeparator: boolean = index == value.length();
-
-    if (!atSeparator) {
-      if (let Option::SOME(byte) = value.byteAt(index)) {
-        atSeparator = byte == ',' as u8;
-      }
-    }
-
-    if (atSeparator) {
-      let item: String = value.substringBytes(start, index).trimAsciiWhitespace();
-
-      if (item.length() > 0) {
-        items.push(item.clone());
-      }
-
-      start = index + 1;
-    }
-
-    index += 1;
-  }
-
-  return items;
+/// Where a command runs: a project directory, a source file, or the current
+/// directory when the command line named neither.
+record CommandTarget {
+  public path: Path::PathBuf;
+  /// True when the target is a directory, which is what selects the project
+  /// artifact layout over the single-file one.
+  public projectMode: boolean;
 }
 
-/// CLI entry point: `ignis <source.ign> [-o <output-binary>]` or
-/// `ignis test <entry.ign> [--filter <substring>] [--update-snapshots] [-o <binary>]`.
+/// Resolve what a command runs against.
 ///
-/// Without arguments the binary exits cleanly. The positional argument is a
-/// path to an Ignis source file and the pipeline runs against the project that
-/// contains it. `-o` overrides the output binary, which defaults to
-/// `selfhost_out` for a build and `selfhost_tests` for a test run. An unknown
-/// flag exits with 2.
-///
-/// `-O <level>` / `--opt-level <level>` overrides `[build] opt_level` from
-/// `ignis.toml`, which is the level the C toolchain is invoked with. The C
-/// toolchain is asked for debug information under the same `--debug` value the
-/// compile-time predicates use.
-///
-/// The compile-time predicates read `--debug`/`--no-debug`, `--feature <name>`
-/// and `--features <list>`: `--debug`/`--no-debug` overrides `[build] debug`
-/// from `ignis.toml` and decides `@debug()` and `@release()`; with neither
-/// flag the project file's value applies, and with no project file the build
-/// is not debug. The feature flags add to the project's declared default
-/// features.
-/// Read an `--opt-level` / `-O` value, which the C toolchain takes as `-O<level>`.
-function parseOptLevelArgument(text: &String): Option<u64> {
-  if (text.length() != 1) {
-    return Option::NONE;
-  }
-
-  let Option::SOME(digit) = text.charAt(0) else {
-    return Option::NONE;
-  };
-
-  if (digit < '0' || digit > '3') {
-    return Option::NONE;
-  }
-
-  return Option::SOME((digit as u64) - ('0' as u64));
-}
-
-function main(): i32 {
-  let args: Vector<String> = Process::args();
-  let mut sourcePath: Option<String> = Option::NONE;
-  let mut outputPath: String = String::create("selfhost_out");
-  let mut filter: String = String::new();
-  let mut updateSnapshots: boolean = false;
-  let mut testMode: boolean = false;
-  let mut debug: Option<boolean> = Option::NONE;
-  let mut optLevel: Option<u64> = Option::NONE;
-  let mut features: Vector<String> = Vector::new<String>();
-  let mut index: u64 = 1;
-
-  if (let Option::SOME(first) = args.get(1) && first.equals("test")) {
-    testMode = true;
-    outputPath = String::create("selfhost_tests");
-    index = 2;
-  }
-
-  while (index < args.length()) {
-    let Option::SOME(arg) = args.get(index) else {
-      break;
+/// A named source file keeps the single-file behaviour the bootstrap ladder
+/// depends on: the project that contains it still governs the build, and the
+/// artifacts stay in the working directory. A directory, or no path at all,
+/// selects project mode.
+function resolveTarget(options: &CliOptions): Option<CommandTarget> {
+  let Option::SOME(pathText) = &options.path else {
+    let Result::OK(currentDir) = Env::currentDir() else {
+      Io::eprintln(String::create("error: the current directory could not be read"));
+      return Option::NONE;
     };
 
-    if (arg.equals("-o")) {
-      let Option::SOME(value) = args.get(index + 1) else {
-        Io::eprintln(String::create("error: -o requires an output path"));
-        return 2;
-      };
-
-      outputPath = value.clone();
-      index += 2;
-      continue;
-    }
-
-    if (testMode && arg.equals("--filter")) {
-      let Option::SOME(value) = args.get(index + 1) else {
-        Io::eprintln(String::create("error: --filter requires a substring"));
-        return 2;
-      };
-
-      filter = value.clone();
-      index += 2;
-      continue;
-    }
-
-    if (testMode && arg.equals("--update-snapshots")) {
-      updateSnapshots = true;
-      index += 1;
-      continue;
-    }
-
-    if (arg.equals("-O") || arg.equals("--opt-level")) {
-      let Option::SOME(value) = args.get(index + 1) else {
-        Io::eprintln(String::create("error: --opt-level requires a level between 0 and 3"));
-        return 2;
-      };
-
-      let Option::SOME(level) = parseOptLevelArgument(value) else {
-        Io::eprintln(`error: invalid optimization level: ${value.toStr()}`);
-        return 2;
-      };
-
-      optLevel = Option::SOME(level);
-      index += 2;
-      continue;
-    }
-
-    if (arg.equals("--debug")) {
-      debug = Option::SOME(true);
-      index += 1;
-      continue;
-    }
-
-    if (arg.equals("--no-debug")) {
-      debug = Option::SOME(false);
-      index += 1;
-      continue;
-    }
-
-    if (arg.equals("--feature")) {
-      let Option::SOME(value) = args.get(index + 1) else {
-        Io::eprintln(String::create("error: --feature requires a name"));
-        return 2;
-      };
-
-      features.push(value.clone());
-      index += 2;
-      continue;
-    }
-
-    if (arg.equals("--features")) {
-      let Option::SOME(value) = args.get(index + 1) else {
-        Io::eprintln(String::create("error: --features requires a comma-separated list"));
-        return 2;
-      };
-
-      let parsed: Vector<String> = splitCommaSeparated(value);
-      let mut parsedIndex: u64 = 0;
-
-      while (parsedIndex < parsed.length()) {
-        if (let Option::SOME(feature) = parsed.get(parsedIndex)) {
-          features.push(feature.clone());
-        }
-
-        parsedIndex += 1;
-      }
-
-      index += 2;
-      continue;
-    }
-
-    if (arg.startsWith("-")) {
-      Io::eprintln(`error: unknown argument: ${arg.toStr()}`);
-      return 2;
-    }
-
-    sourcePath = Option::SOME(arg.clone());
-    index += 1;
-  }
-
-  let Option::SOME(source) = sourcePath else {
-    return 0;
+    return Option::SOME(CommandTarget {
+      path: currentDir,
+      projectMode: true,
+    });
   };
 
-  if (testMode) {
-    return runProjectTests(&source, &outputPath, &filter, updateSnapshots, debug, optLevel, &features);
+  let path: Path::PathBuf = Path::PathBuf::fromString(&pathText);
+
+  let Result::OK(metadata) = Fs::metadata(&path) else {
+    Io::eprintln(`error: path not found: ${path.asStr()}`);
+    return Option::NONE;
+  };
+
+  return Option::SOME(CommandTarget {
+    path: path.clone(),
+    projectMode: !metadata.isFile(),
+  });
+}
+
+/// Compile the standard library into the archive a project links against.
+///
+/// The compiler emits one translation unit for a whole program rather than one
+/// per module, so the archive holds a single object with every std function
+/// given external linkage. The host driver archives one object per std module
+/// and writes an umbrella `ignis_std.h` beside the archive; this build writes
+/// no header, because nothing in this pipeline emits one yet.
+function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): i32 {
+  Io::println(String::create("ignis selfhost build-std"));
+
+  let overrides: BuildOverrides = buildOverridesFrom(options);
+  let discovery: DiscoveryResult = match (Resolver::discoverStd(startPath, &overrides)) {
+    Result::OK(value) -> value,
+    Result::ERROR(diagnostics) -> {
+      let startFile: SourceFile = entrySourceFile(startPath);
+      reportDiscoveryFailure(&diagnostics, &startFile);
+      return 1;
+    },
+  };
+
+  Io::println(`  std: ${discovery.stdRoot.asStr()}`);
+
+  let file: SourceFile = entrySourceFile(&discovery.entry);
+  let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, false, true, true);
+
+  if (compiled.errors > 0 || compiled.source.length() == 0) {
+    Io::println(`  summary: ${compiled.errors} errors, ${compiled.warnings} warnings`);
+    return 1;
   }
 
-  return compileFile(&source, &outputPath, debug, optLevel, &features);
+  let base: Path::PathBuf = stdArtifactBase(&discovery.outDir, &options.outDir, &options.outputPath);
+  let layout: BuildLayout = BuildLayout::new("std", &base);
+  let sourcePath: Path::PathBuf = layout.stdSrcDir().join("ignis_std.c");
+  let objectPath: Path::PathBuf = layout.stdObjDir().join("ignis_std.o");
+  let libraryPath: Path::PathBuf = layout.stdLibPath();
+
+  if (!ensureParentDirectory(&sourcePath) || !ensureParentDirectory(&objectPath) || !ensureParentDirectory(&libraryPath)) {
+    return 1;
+  }
+
+  if (let Result::ERROR(_) = Fs::writeString(&sourcePath, &compiled.source)) {
+    Io::eprintln(`error: could not write ${sourcePath.asStr()}`);
+    return 1;
+  }
+
+  Io::println(`  emit: ${sourcePath.asStr()}`);
+
+  let runtimeDir: Path::PathBuf = discovery.stdRoot.join("runtime");
+  let mut includeDirs: Vector<String> = Vector::new<String>();
+  includeDirs.push(runtimeDir.toString());
+
+  let extraFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+
+  if (let Result::ERROR(compileBag) = CCompiler::compileObject(
+    profile.cc.toStr(),
+    &sourcePath,
+    &objectPath,
+    &includeDirs,
+    &extraFlags,
+  )) {
+    renderBagToStderr(&compileBag, &file);
+    Io::println(String::create("  archive: failed"));
+    return 1;
+  }
+
+  let mut objects: Vector<String> = Vector::new<String>();
+  objects.push(objectPath.toString());
+
+  if (let Result::ERROR(archiveBag) = ArchiveTool::archive("ar", &libraryPath, &objects)) {
+    renderBagToStderr(&archiveBag, &file);
+    Io::println(String::create("  archive: failed"));
+    return 1;
+  }
+
+  Io::println(`  archive: ${libraryPath.asStr()}`);
+  Io::println(`  summary: 0 errors, ${compiled.warnings} warnings`);
+  return 0;
+}
+
+/// Build the standard library into the archive a project links against.
+function runBuildStd(options: &CliOptions): i32 {
+  let Option::SOME(target) = resolveTarget(options) else {
+    return 1;
+  };
+
+  return buildStandardLibrary(&target.path, options);
+}
+
+/// CLI entry point.
+///
+/// `ignis build [PATH]`, `ignis check [PATH]`, `ignis build-std` and
+/// `ignis test [PATH]` run against the project that contains `PATH`, which
+/// defaults to the current directory. The bare form `ignis <entry.ign>` is the
+/// build the bootstrap ladder and the parity harness call, and stays a build of
+/// the project that contains that file.
+///
+/// `-o` names the binary a build or a test run links; `--out-dir` overrides
+/// `[build] out_dir`. `-O` / `--opt-level`, `--debug` / `--no-debug`, `--cc`,
+/// `--std-path`, `--target-triple`, `--feature` and `--features` override what
+/// the project file declares. `--debug` / `--no-debug` also decides `@debug()`
+/// and `@release()`, so the `-g` the C toolchain receives and the predicate the
+/// source sees can never disagree.
+///
+/// Exits 2 on a command line this compiler does not answer, 1 on a failed
+/// command and 0 otherwise.
+function main(): i32 {
+  let args: Vector<String> = Process::args();
+
+  let options: CliOptions = match (parseArguments(&args)) {
+    Result::OK(value) -> value,
+    Result::ERROR(message) -> {
+      Io::eprintln(message);
+      return 2;
+    },
+  };
+
+  if (let CliCommand::HELP = options.command) {
+    Io::println(helpText());
+    return 0;
+  }
+
+  if (let CliCommand::VERSION = options.command) {
+    Io::println(versionText());
+    return 0;
+  }
+
+  if (let CliCommand::BUILD_STD = options.command) {
+    return runBuildStd(&options);
+  }
+
+  let Option::SOME(target) = resolveTarget(&options) else {
+    return 1;
+  };
+
+  if (let CliCommand::TEST = options.command) {
+    return runProjectTests(&target.path, &options);
+  }
+
+  let checkOnly: boolean = match (options.command) {
+    CliCommand::CHECK -> true,
+    _ -> false,
+  };
+
+  return runCompile(&target.path, &options, checkOnly, target.projectMode);
 }

@@ -8,6 +8,7 @@ import
   SourceSpan,
 from "@compiler::diagnostics";
 import CompileFlags, Parser from "@compiler::parser";
+import AliasBinding, Config, ResolvedProject from "@compiler::config";
 
 import Env from "std::env";
 import Fs from "std::fs";
@@ -54,6 +55,42 @@ record ResolverProject {
   public flags: CompileFlags;
   public optLevel: u64;
   public cflags: Vector<String>;
+  public outDir: Path::PathBuf;
+  public name: String;
+  public cc: String;
+  public bin: boolean;
+  public emitC: boolean;
+  /// False when discovery ran without an `ignis.toml`, which is what a
+  /// single-file build does.
+  public hasProjectFile: boolean;
+}
+
+/// Command-line values a build applies on top of what the project file declares.
+export record BuildOverrides {
+  public debug: Option<boolean>;
+  public features: Vector<String>;
+  public stdPath: Option<String>;
+  public targetTriple: Option<String>;
+  public cc: Option<String>;
+  public outDir: Option<String>;
+
+  public static none(): BuildOverrides {
+    return BuildOverrides {
+      debug: Option::NONE,
+      features: Vector::new<String>(),
+      stdPath: Option::NONE,
+      targetTriple: Option::NONE,
+      cc: Option::NONE,
+      outDir: Option::NONE,
+    };
+  }
+
+  public static withOptions(debug: Option<boolean>, features: &Vector<String>): BuildOverrides {
+    let mut overrides: BuildOverrides = BuildOverrides::none();
+    overrides.debug = debug;
+    overrides.features = resolverCloneStrings(features);
+    return overrides;
+  }
 }
 
 record AliasResolution {
@@ -81,6 +118,21 @@ export record DiscoveryResult {
   /// `[build] cflags` from the project file, forwarded verbatim to the C
   /// toolchain after the profile flags so a project can override them.
   public cflags: Vector<String>;
+  /// Absolute `[build] out_dir`, the root every build artifact is written under
+  /// in project mode.
+  public outDir: Path::PathBuf;
+  /// `[package] name`, which names the binary a project build links.
+  public name: String;
+  /// `[build] cc`, the C toolchain driver every toolchain step is invoked with.
+  public cc: String;
+  /// `[build] bin`: whether a project build links an executable.
+  public bin: boolean;
+  /// True when `[build] emit` asks for the generated C to be kept.
+  public emitC: boolean;
+  /// The entry module the build starts from.
+  public entry: Path::PathBuf;
+  /// False when discovery ran without an `ignis.toml`.
+  public hasProjectFile: boolean;
 
   public orderCount(&self): u64 {
     return self.order.length();
@@ -176,107 +228,6 @@ function resolverSimpleDiagnostic(path: &Path::PathBuf, code: str, message: str)
   return resolverSingleDiagnostic(diagnostic);
 }
 
-function resolverSectionName(line: &String): Option<String> {
-  if (line.length() < 2) {
-    return Option::NONE;
-  }
-
-  let Option::SOME(first) = line.charAt(0) else {
-    return Option::NONE;
-  };
-  let Option::SOME(last) = line.charAt(line.length() - 1) else {
-    return Option::NONE;
-  };
-
-  if (first != '[' || last != ']') {
-    return Option::NONE;
-  }
-
-  return Option::SOME(line.substringBytes(1, line.length() - 1).trimAsciiWhitespace());
-}
-
-function resolverAssignmentKey(line: &String): Option<String> {
-  let Option::SOME(index) = line.indexOfCharFrom('=', 0) else {
-    return Option::NONE;
-  };
-
-  let key: String = line.substringBytes(0, index).trimAsciiWhitespace();
-  if (key.length() == 0) {
-    return Option::NONE;
-  }
-
-  return Option::SOME(key);
-}
-
-function resolverAssignmentValue(line: &String): Option<String> {
-  let Option::SOME(index) = line.indexOfCharFrom('=', 0) else {
-    return Option::NONE;
-  };
-
-  let value: String = line.substringBytes(index + 1, line.length()).trimAsciiWhitespace();
-  if (value.length() == 0) {
-    return Option::NONE;
-  }
-
-  return Option::SOME(value);
-}
-
-function resolverUnquote(text: &String): String {
-  if (text.length() < 2 || !text.startsWith("\"")) {
-    return text.clone();
-  }
-
-  let Option::SOME(last) = text.charAt(text.length() - 1) else {
-    return text.clone();
-  };
-
-  if (last != '"') {
-    return text.clone();
-  }
-
-  return text.substringBytes(1, text.length() - 1);
-}
-
-/// Reads a single-line TOML string array such as `["a", "b"]`. The reader
-/// above is line-based, so an array spread over several lines is not seen.
-function resolverStringArray(value: &String): Vector<String> {
-  let mut items: Vector<String> = Vector::new<String>();
-  let trimmed: String = value.trimAsciiWhitespace();
-
-  if (trimmed.length() < 2 || !trimmed.startsWith("[")) {
-    return items;
-  }
-
-  let inner: String = trimmed.substringBytes(1, trimmed.length() - 1);
-  let mut start: u64 = 0;
-  let mut index: u64 = 0;
-
-  while (index <= inner.length()) {
-    let mut atSeparator: boolean = index == inner.length();
-
-    if (!atSeparator) {
-      if (let Option::SOME(byte) = inner.byteAt(index)) {
-        atSeparator = byte == ',' as u8;
-      }
-    }
-
-    if (atSeparator) {
-      let raw: String = inner.substringBytes(start, index).trimAsciiWhitespace();
-      let item: String = resolverUnquote(&raw);
-
-      if (item.length() > 0) {
-        items.push(item.clone());
-      }
-
-      start = index + 1;
-    }
-
-    index += 1;
-  }
-
-  return items;
-}
-
 function resolverCloneStrings(source: &Vector<String>): Vector<String> {
   let mut result: Vector<String> = Vector::new<String>();
   let mut index: u64 = 0;
@@ -368,185 +319,333 @@ function resolverCanonicalPath(
   return Result::OK(canonical);
 }
 
-/// Loads the project the compile-time predicates are answered from.
-///
-/// `cliDebug` and `cliFeatures` come from the command line. A CLI override
-/// wins over the project file's `[build] debug`; with neither set, the
-/// build is not debug. The project file also supplies the target triple and
-/// the default and declared feature sets.
-function resolverLoadProject(
-  startPath: &Path::PathBuf,
-  cliDebug: Option<boolean>,
-  cliFeatures: &Vector<String>,
-): Result<ResolverProject, DiagnosticBag> {
-  let Option::SOME(configPath) = resolverFindProjectFile(startPath) else {
-    return Result::ERROR(resolverSimpleDiagnostic(startPath, MISSING_MODULE, "ignis.toml could not be found"));
-  };
-  let Result::OK(source) = Fs::readToString(&configPath) else {
-    return Result::ERROR(resolverSimpleDiagnostic(&configPath, MISSING_MODULE, "ignis.toml could not be read"));
-  };
-  let Option::SOME(rootPath) = configPath.parent() else {
-    return Result::ERROR(resolverSimpleDiagnostic(&configPath, MISSING_MODULE, "project root could not be resolved"));
-  };
-  let root: Path::PathBuf = resolverCanonicalPath(&rootPath, "project root could not be resolved")!;
-
-  let mut section: String = String::new();
-  let mut sourceDir: String = String::create("src");
-  let mut entryName: String = String::create("main.ign");
-  let mut stdPath: String = String::create("std");
-  let mut targetTriple: String = CompileFlags::defaultTargetTriple();
-  let mut tomlDebug: boolean = false;
-  let mut optLevel: u64 = 0;
-  let mut cflags: Vector<String> = Vector::new<String>();
-  let mut defaultFeatures: Vector<String> = Vector::new<String>();
-  let mut knownFeatures: Vector<String> = Vector::new<String>();
+/// Maps the aliases the project file declared onto the resolver's own form.
+function resolverAliasesFrom(bindings: &Vector<AliasBinding>): Vector<ResolverAlias> {
   let mut aliases: Vector<ResolverAlias> = Vector::new<ResolverAlias>();
-  let lines: Vector<String> = source.lines();
-  let mut lineIndex: u64 = 0;
-
-  while (lineIndex < lines.length()) {
-    let Option::SOME(line) = lines.get(lineIndex) else {
-      break;
-    };
-    let trimmed: String = line.trimAsciiWhitespace();
-
-    if (trimmed.length() == 0 || trimmed.startsWith("#")) {
-      lineIndex += 1;
-      continue;
-    }
-
-    if (let Option::SOME(sectionName) = resolverSectionName(&trimmed)) {
-      section = sectionName.clone();
-      lineIndex += 1;
-      continue;
-    }
-
-    let Option::SOME(keyText) = resolverAssignmentKey(&trimmed) else {
-      lineIndex += 1;
-      continue;
-    };
-    let Option::SOME(valueText) = resolverAssignmentValue(&trimmed) else {
-      lineIndex += 1;
-      continue;
-    };
-
-    let key: String = resolverUnquote(&keyText);
-    let value: String = resolverUnquote(&valueText);
-
-    if (section.equals("build")) {
-      if (key.equals("source_dir")) {
-        sourceDir = value.clone();
-      }
-
-      if (key.equals("entry")) {
-        entryName = value.clone();
-      }
-
-      if (key.equals("target_triple")) {
-        targetTriple = value.clone();
-      }
-
-      if (key.equals("debug")) {
-        tomlDebug = value.equals("true");
-      }
-
-      if (key.equals("opt_level")) {
-        let Option::SOME(level) = resolverParseOptLevel(&value) else {
-          return Result::ERROR(resolverSimpleDiagnostic(
-            &configPath,
-            INVALID_BUILD_PROFILE,
-            "build.opt_level must be an integer between 0 and 3",
-          ));
-        };
-        optLevel = level;
-      }
-
-      if (key.equals("cflags")) {
-        cflags = resolverStringArray(&valueText);
-      }
-
-      if (key.equals("default_features")) {
-        defaultFeatures = resolverStringArray(&valueText);
-      }
-
-      if (key.equals("known_features")) {
-        knownFeatures = resolverStringArray(&valueText);
-      }
-    }
-
-    if (section.equals("ignis") && key.equals("std_path")) {
-      stdPath = value.clone();
-    }
-
-    if (section.equals("aliases")) {
-      let aliasCandidate: Path::PathBuf = root.join(value.toStr()).normalize();
-      let aliasBase: Path::PathBuf = resolverCanonicalPath(&aliasCandidate, "alias path could not be resolved")!;
-      aliases.push(ResolverAlias {
-        name: key.clone(),
-        path: aliasBase,
-      });
-    }
-
-    lineIndex += 1;
-  }
-
-  let sourceRootCandidate: Path::PathBuf = root.join(sourceDir.toStr()).normalize();
-  let sourceRoot: Path::PathBuf = resolverCanonicalPath(&sourceRootCandidate, "source directory could not be resolved")!;
-  let entryCandidate: Path::PathBuf = sourceRoot.join(entryName.toStr()).normalize();
-  let entryPath: Path::PathBuf = resolverCanonicalPath(&entryCandidate, "entry file could not be resolved")!;
-  let stdRootCandidate: Path::PathBuf = root.join(stdPath.toStr()).normalize();
-  let stdRoot: Path::PathBuf = resolverCanonicalPath(&stdRootCandidate, "std root could not be resolved")!;
-  let manifestCandidate: Path::PathBuf = stdRoot.join("manifest.toml");
-  let stdManifestPath: Path::PathBuf = resolverCanonicalPath(&manifestCandidate, "std manifest could not be resolved")!;
-
-  let mut features: Vector<String> = Vector::new<String>();
-  resolverPushMissingStrings(&mut features, cliFeatures);
-  resolverPushMissingStrings(&mut features, &defaultFeatures);
-
-  let debug: boolean = cliDebug.unwrapOr(tomlDebug);
-
-  return Result::OK(ResolverProject {
-    root: root,
-    sourceRoot: sourceRoot,
-    entry: entryPath,
-    stdRoot: stdRoot,
-    stdManifestPath: stdManifestPath,
-    aliases: aliases,
-    flags: CompileFlags::create(&targetTriple, debug, &features, &knownFeatures),
-    optLevel: optLevel,
-    cflags: cflags,
-  });
-}
-
-/// Read a `[build] opt_level` value, rejecting anything that is not a decimal
-/// integer the C toolchain accepts as `-O<level>`.
-function resolverParseOptLevel(text: &String): Option<u64> {
-  if (text.length() == 0) {
-    return Option::NONE;
-  }
-
-  let mut value: u64 = 0;
   let mut index: u64 = 0;
 
-  while (index < text.length()) {
-    let Option::SOME(digit) = text.charAt(index) else {
-      return Option::NONE;
+  while (index < bindings.length()) {
+    let Option::SOME(binding) = bindings.get(index) else {
+      break;
     };
 
-    if (digit < '0' || digit > '9') {
-      return Option::NONE;
-    }
+    aliases.push(ResolverAlias {
+      name: binding.name.clone(),
+      path: binding.path.clone(),
+    });
+    index += 1;
+  }
 
-    value = value * 10 + ((digit as u64) - ('0' as u64));
+  return aliases;
+}
 
-    if (value > MAX_OPT_LEVEL) {
-      return Option::NONE;
+/// True when `[build] emit` asks for the generated C to be kept on disk.
+function resolverEmitsC(emit: &Vector<String>): boolean {
+  let mut index: u64 = 0;
+
+  while (index < emit.length()) {
+    let Option::SOME(value) = emit.get(index) else {
+      break;
+    };
+
+    if (value.equals("c")) {
+      return true;
     }
 
     index += 1;
   }
 
-  return Option::SOME(value);
+  return false;
+}
+
+/// Resolve the std root a build reads its modules from.
+///
+/// `--std-path` wins over what the project file resolved, which is what the
+/// host driver does with the same flag.
+function resolverStdRoot(
+  configPath: &Path::PathBuf,
+  declared: &Option<Path::PathBuf>,
+  overrides: &BuildOverrides,
+): Result<Path::PathBuf, DiagnosticBag> {
+  if (let Option::SOME(stdPath) = &overrides.stdPath) {
+    let candidate: Path::PathBuf = Path::PathBuf::fromString(&stdPath).normalize();
+    return resolverCanonicalPath(&candidate, "std root could not be resolved");
+  }
+
+  return match (declared) {
+    Option::SOME(path) -> Result::OK(path.clone()),
+    Option::NONE -> Result::ERROR(
+      resolverSimpleDiagnostic(configPath, MISSING_MODULE, "std root could not be resolved"),
+    ),
+  };
+}
+
+/// The target triple the compile-time predicates are answered with.
+function resolverTargetTriple(declared: &Option<String>, overrides: &BuildOverrides): String {
+  if (let Option::SOME(triple) = &overrides.targetTriple) {
+    return triple.clone();
+  }
+
+  return match (declared) {
+    Option::SOME(triple) -> triple.clone(),
+    Option::NONE -> CompileFlags::defaultTargetTriple(),
+  };
+}
+
+/// The name a project build gives the binary it links.
+function resolverProjectName(declared: &Option<String>, root: &Path::PathBuf): String {
+  if (let Option::SOME(name) = declared) {
+    return name.clone();
+  }
+
+  return match (root.fileName()) {
+    Option::SOME(name) -> name,
+    Option::NONE -> String::create("out"),
+  };
+}
+
+/// Drops a file name's extension, so `main.ign` names the binary `main`.
+function resolverStemOf(fileName: &String): String {
+  let Option::SOME(dotIndex) = fileName.findLastByte((byte: u8): boolean -> {
+    return byte == '.' as u8;
+  }) else {
+    return fileName.clone();
+  };
+
+  if (dotIndex == 0) {
+    return fileName.clone();
+  }
+
+  return fileName.substringBytes(0, dotIndex);
+}
+
+/// Loads the project the compile-time predicates are answered from.
+///
+/// The project file is read by the shared TOML loader in `@compiler::config`,
+/// so a build and `ignis check` see exactly the same fields, including the ones
+/// a line-based reader cannot see, such as an array spread over several lines.
+///
+/// `overrides` comes from the command line. A CLI override wins over the
+/// project file's own value; with neither set, the project file's defaults
+/// apply.
+function resolverLoadProject(
+  startPath: &Path::PathBuf,
+  overrides: &BuildOverrides,
+): Result<ResolverProject, DiagnosticBag> {
+  let Option::SOME(configPath) = Config::findProjectFile(startPath) else {
+    return Result::ERROR(resolverSimpleDiagnostic(startPath, MISSING_MODULE, "ignis.toml could not be found"));
+  };
+
+  let resolved: ResolvedProject = Config::loadProjectFile(&configPath)!;
+
+  let Option::SOME(root) = &resolved.root else {
+    return Result::ERROR(resolverSimpleDiagnostic(&configPath, MISSING_MODULE, "project root could not be resolved"));
+  };
+  let Option::SOME(sourceRoot) = &resolved.sourceDir else {
+    return Result::ERROR(
+      resolverSimpleDiagnostic(&configPath, MISSING_MODULE, "source directory could not be resolved"),
+    );
+  };
+
+  if (resolved.optLevel > MAX_OPT_LEVEL) {
+    return Result::ERROR(resolverSimpleDiagnostic(
+      &configPath,
+      INVALID_BUILD_PROFILE,
+      "build.opt_level must be an integer between 0 and 3",
+    ));
+  }
+
+  let stdRoot: Path::PathBuf = resolverStdRoot(&configPath, &resolved.stdRoot, overrides)!;
+  let manifestCandidate: Path::PathBuf = stdRoot.join("manifest.toml");
+  let stdManifestPath: Path::PathBuf = resolverCanonicalPath(&manifestCandidate, "std manifest could not be resolved")!;
+
+  let mut features: Vector<String> = Vector::new<String>();
+  resolverPushMissingStrings(&mut features, &overrides.features);
+  resolverPushMissingStrings(&mut features, &resolved.defaultFeatures);
+
+  let targetTriple: String = resolverTargetTriple(&resolved.targetTriple, overrides);
+  let debug: boolean = overrides.debug.unwrapOr(resolved.debug);
+
+  let mut outDir: Path::PathBuf = match (&resolved.outDir) {
+    Option::SOME(path) -> path.clone(),
+    Option::NONE -> root.join("build"),
+  };
+
+  if (let Option::SOME(value) = &overrides.outDir) {
+    outDir = Path::PathBuf::fromString(&value).normalize();
+  }
+
+  let mut cc: String = resolved.cc.clone();
+
+  if (let Option::SOME(value) = &overrides.cc) {
+    cc = value.clone();
+  }
+
+  return Result::OK(ResolverProject {
+    root: root.clone(),
+    sourceRoot: sourceRoot.clone(),
+    entry: resolved.entry.clone(),
+    stdRoot: stdRoot,
+    stdManifestPath: stdManifestPath,
+    aliases: resolverAliasesFrom(&resolved.aliases),
+    flags: CompileFlags::create(&targetTriple, debug, &features, &resolved.knownFeatures),
+    optLevel: resolved.optLevel,
+    cflags: resolverCloneStrings(&resolved.cflags),
+    outDir: outDir,
+    name: resolverProjectName(&resolved.packageName, &root),
+    cc: cc,
+    bin: resolved.bin,
+    emitC: resolverEmitsC(&resolved.emit),
+    hasProjectFile: true,
+  });
+}
+
+/// Resolves the std root when no project file declares one.
+///
+/// `--std-path` wins over `IGNIS_STD_PATH`, which is the order the host driver
+/// resolves the same two inputs in.
+function resolverEnvironmentStdRoot(
+  reportPath: &Path::PathBuf,
+  overrides: &BuildOverrides,
+): Result<Path::PathBuf, DiagnosticBag> {
+  let mut stdPathText: Option<String> = Option::NONE;
+
+  match (&overrides.stdPath) {
+    Option::SOME(value) -> {
+      stdPathText = Option::SOME(value.clone());
+    },
+    Option::NONE -> {
+      if (let Result::OK(value) = Env::var("IGNIS_STD_PATH")) {
+        stdPathText = Option::SOME(value.clone());
+      }
+    },
+  };
+
+  let Option::SOME(stdPath) = stdPathText else {
+    return Result::ERROR(resolverSimpleDiagnostic(
+      reportPath,
+      MISSING_MODULE,
+      "std_path not set. Use --std-path or set IGNIS_STD_PATH env var",
+    ));
+  };
+
+  let stdCandidate: Path::PathBuf = Path::PathBuf::fromString(&stdPath).normalize();
+  return resolverCanonicalPath(&stdCandidate, "std root could not be resolved");
+}
+
+/// Builds the project a single source file is compiled under when no
+/// `ignis.toml` governs it.
+///
+/// The std root comes from `--std-path` or `IGNIS_STD_PATH`, the way the host
+/// driver resolves it in single-file mode, and the entry's own directory is the
+/// source root. No aliases exist, because only a project file declares them.
+function resolverSingleFileProject(
+  entryPath: &Path::PathBuf,
+  overrides: &BuildOverrides,
+): Result<ResolverProject, DiagnosticBag> {
+  let entry: Path::PathBuf = resolverCanonicalPath(entryPath, "entry file could not be resolved")!;
+  let Option::SOME(sourceRoot) = entry.parent() else {
+    return Result::ERROR(resolverSimpleDiagnostic(&entry, MISSING_MODULE, "source directory could not be resolved"));
+  };
+
+  let stdRoot: Path::PathBuf = resolverEnvironmentStdRoot(&entry, overrides)!;
+  let manifestCandidate: Path::PathBuf = stdRoot.join("manifest.toml");
+  let stdManifestPath: Path::PathBuf = resolverCanonicalPath(&manifestCandidate, "std manifest could not be resolved")!;
+
+  let mut features: Vector<String> = Vector::new<String>();
+  resolverPushMissingStrings(&mut features, &overrides.features);
+
+  let knownFeatures: Vector<String> = Vector::new<String>();
+  let declaredTriple: Option<String> = Option::NONE;
+  let targetTriple: String = resolverTargetTriple(&declaredTriple, overrides);
+  let debug: boolean = overrides.debug.unwrapOr(false);
+
+  let mut outDir: Path::PathBuf = sourceRoot.join("build");
+
+  if (let Option::SOME(value) = &overrides.outDir) {
+    outDir = Path::PathBuf::fromString(&value).normalize();
+  }
+
+  let mut cc: String = String::create("cc");
+
+  if (let Option::SOME(value) = &overrides.cc) {
+    cc = value.clone();
+  }
+
+  let name: String = match (entry.fileName()) {
+    Option::SOME(fileName) -> resolverStemOf(&fileName),
+    Option::NONE -> String::create("out"),
+  };
+
+  return Result::OK(ResolverProject {
+    root: sourceRoot.clone(),
+    sourceRoot: sourceRoot.clone(),
+    entry: entry.clone(),
+    stdRoot: stdRoot,
+    stdManifestPath: stdManifestPath,
+    aliases: Vector::new<ResolverAlias>(),
+    flags: CompileFlags::create(&targetTriple, debug, &features, &knownFeatures),
+    optLevel: 0,
+    cflags: Vector::new<String>(),
+    outDir: outDir,
+    name: name,
+    cc: cc,
+    bin: true,
+    emitC: false,
+    hasProjectFile: false,
+  });
+}
+
+/// Builds the project a standard-library build runs under when no `ignis.toml`
+/// governs the directory it started from.
+///
+/// Only the std root matters here: nothing else is compiled, so the entry and
+/// the source root are the directory the command ran against.
+function resolverStdOnlyProject(
+  startPath: &Path::PathBuf,
+  overrides: &BuildOverrides,
+): Result<ResolverProject, DiagnosticBag> {
+  let stdRoot: Path::PathBuf = resolverEnvironmentStdRoot(startPath, overrides)!;
+  let manifestCandidate: Path::PathBuf = stdRoot.join("manifest.toml");
+  let stdManifestPath: Path::PathBuf = resolverCanonicalPath(&manifestCandidate, "std manifest could not be resolved")!;
+
+  let mut features: Vector<String> = Vector::new<String>();
+  resolverPushMissingStrings(&mut features, &overrides.features);
+
+  let knownFeatures: Vector<String> = Vector::new<String>();
+  let declaredTriple: Option<String> = Option::NONE;
+  let targetTriple: String = resolverTargetTriple(&declaredTriple, overrides);
+  let debug: boolean = overrides.debug.unwrapOr(false);
+
+  let mut outDir: Path::PathBuf = startPath.join("build");
+
+  if (let Option::SOME(value) = &overrides.outDir) {
+    outDir = Path::PathBuf::fromString(&value).normalize();
+  }
+
+  let mut cc: String = String::create("cc");
+
+  if (let Option::SOME(value) = &overrides.cc) {
+    cc = value.clone();
+  }
+
+  return Result::OK(ResolverProject {
+    root: startPath.clone(),
+    sourceRoot: startPath.clone(),
+    entry: startPath.clone(),
+    stdRoot: stdRoot,
+    stdManifestPath: stdManifestPath,
+    aliases: Vector::new<ResolverAlias>(),
+    flags: CompileFlags::create(&targetTriple, debug, &features, &knownFeatures),
+    optLevel: 0,
+    cflags: Vector::new<String>(),
+    outDir: outDir,
+    name: String::create("std"),
+    cc: cc,
+    bin: false,
+    emitC: false,
+    hasProjectFile: false,
+  });
 }
 
 function resolverMissingModuleDiagnostic(
@@ -1146,6 +1245,101 @@ function resolverDiscoverProjectRoots(
     flags: project.flags.clone(),
     optLevel: project.optLevel,
     cflags: resolverCloneStrings(&project.cflags),
+    outDir: project.outDir.clone(),
+    name: project.name.clone(),
+    cc: project.cc.clone(),
+    bin: project.bin,
+    emitC: project.emitC,
+    entry: project.entry.clone(),
+    hasProjectFile: project.hasProjectFile,
+  });
+}
+
+/// True when the manifest declares `name` as compile-only, which means the
+/// module is C the runtime already builds rather than Ignis source.
+function resolverIsCompileOnly(manifest: &StdManifest, name: &String): boolean {
+  let mut index: u64 = 0;
+
+  while (index < manifest.compileOnlyCount()) {
+    let Option::SOME(compileOnly) = manifest.compileOnlyText(index) else {
+      break;
+    };
+
+    if (compileOnly.equals(name)) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+/// Discovers every module the std manifest declares, which is the graph a
+/// standard-library build compiles.
+///
+/// Each manifest module is a root of its own: nothing outside the std imports
+/// them here, and every one of them has to be compiled.
+function resolverDiscoverStdRoots(
+  project: &ResolverProject,
+  manifest: &StdManifest,
+): Result<DiscoveryResult, DiagnosticBag> {
+  let mut graph: BuildGraph = BuildGraph::init();
+  let mut preludePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut preludeIndex: u64 = 0;
+
+  while (preludeIndex < manifest.autoLoadCount()) {
+    let Option::SOME(moduleName) = manifest.autoLoadText(preludeIndex) else {
+      preludeIndex += 1;
+      continue;
+    };
+
+    let mut candidateBase: Path::PathBuf = project.stdRoot.join(moduleName.toStr()).normalize();
+    if (let Option::SOME(relativePath) = manifest.modulePathText(moduleName.toStr())) {
+      candidateBase = project.stdRoot.join(relativePath.toStr()).normalize();
+    }
+
+    let mut preludeStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, BuildModuleKind::STD, &mut preludeStack)!;
+    preludePaths.push(candidateBase.clone());
+    preludeIndex += 1;
+  }
+
+  let mut moduleIndex: u64 = 0;
+
+  while (moduleIndex < manifest.modules.length()) {
+    let Option::SOME(module) = manifest.modules.get(moduleIndex) else {
+      break;
+    };
+
+    if (resolverIsCompileOnly(manifest, &module.name)) {
+      moduleIndex += 1;
+      continue;
+    }
+
+    let candidateBase: Path::PathBuf = project.stdRoot.join(module.path.toStr()).normalize();
+    let mut stack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, BuildModuleKind::STD, &mut stack)!;
+    moduleIndex += 1;
+  }
+
+  let order: Vector<u64> = ModuleGraph::allModulesTopologicalOrder(&graph);
+
+  return Result::OK(DiscoveryResult {
+    graph: graph,
+    order: order,
+    preludePaths: preludePaths,
+    stdRoot: project.stdRoot.clone(),
+    flags: project.flags.clone(),
+    optLevel: project.optLevel,
+    cflags: resolverCloneStrings(&project.cflags),
+    outDir: project.outDir.clone(),
+    name: String::create("std"),
+    cc: project.cc.clone(),
+    bin: false,
+    emitC: project.emitC,
+    entry: project.entry.clone(),
+    hasProjectFile: project.hasProjectFile,
   });
 }
 
@@ -1177,11 +1371,8 @@ export namespace Resolver {
     debug: Option<boolean>,
     features: &Vector<String>,
   ): Result<DiscoveryResult, DiagnosticBag> {
-    let project: ResolverProject = resolverLoadProject(startPath, debug, features)!;
-    let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
-    let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
-
-    return resolverDiscoverProjectRoots(&project, &manifest, false);
+    let overrides: BuildOverrides = BuildOverrides::withOptions(debug, features);
+    return Resolver::discover(startPath, &overrides, false);
   }
 
   function discoverProjectTestsWithOptions(
@@ -1189,11 +1380,47 @@ export namespace Resolver {
     debug: Option<boolean>,
     features: &Vector<String>,
   ): Result<DiscoveryResult, DiagnosticBag> {
-    let project: ResolverProject = resolverLoadProject(startPath, debug, features)!;
+    let overrides: BuildOverrides = BuildOverrides::withOptions(debug, features);
+    return Resolver::discover(startPath, &overrides, true);
+  }
+
+  /// Discovers the module graph a build compiles, starting from a project
+  /// directory, a source file inside a project, or a source file no project
+  /// file governs.
+  ///
+  /// `includeTests` adds the project's test modules to the graph, which is what
+  /// a test run needs and a build must not have.
+  function discover(
+    startPath: &Path::PathBuf,
+    overrides: &BuildOverrides,
+    includeTests: boolean,
+  ): Result<DiscoveryResult, DiagnosticBag> {
+    let project: ResolverProject = match (Config::findProjectFile(startPath)) {
+      Option::SOME(_) -> resolverLoadProject(startPath, overrides)!,
+      Option::NONE -> resolverSingleFileProject(startPath, overrides)!,
+    };
     let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
     let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
 
-    return resolverDiscoverProjectRoots(&project, &manifest, true);
+    return resolverDiscoverProjectRoots(&project, &manifest, includeTests);
+  }
+
+  /// Discovers the standard library's own module graph, which is what
+  /// `ignis build-std` compiles. The std root comes from the project file when
+  /// one governs `startPath`, and from `--std-path` or `IGNIS_STD_PATH`
+  /// otherwise.
+  function discoverStd(
+    startPath: &Path::PathBuf,
+    overrides: &BuildOverrides,
+  ): Result<DiscoveryResult, DiagnosticBag> {
+    let project: ResolverProject = match (Config::findProjectFile(startPath)) {
+      Option::SOME(_) -> resolverLoadProject(startPath, overrides)!,
+      Option::NONE -> resolverStdOnlyProject(startPath, overrides)!,
+    };
+    let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
+    let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
+
+    return resolverDiscoverStdRoots(&project, &manifest);
   }
 
   function orderSummaryRelativeTo(discovery: &DiscoveryResult, root: &Path::PathBuf): String {
@@ -1289,6 +1516,81 @@ function resolverReadsCflagsFromProjectFile(): void {
 
   Test::assertEq<str>(first.toStr(), "-Wall");
   Test::assertEq<str>(second.toStr(), "-fno-omit-frame-pointer");
+}
+
+/// `[build] cflags` spread over several lines reads the same as a single-line
+/// array: the project file is parsed as TOML, not scanned line by line.
+@test
+function resolverReadsMultilineCflagsFromProjectFile(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/multiline_cflags");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<u64>(discovery.cflags.length(), 3);
+
+  let Option::SOME(first) = discovery.cflags.get(0) else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(second) = discovery.cflags.get(1) else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(third) = discovery.cflags.get(2) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(first.toStr(), "-Wall");
+  Test::assertEq<str>(second.toStr(), "-Wextra");
+  Test::assertEq<str>(third.toStr(), "-fno-omit-frame-pointer");
+}
+
+/// Discovery starting inside a project finds the same project the root does:
+/// the project file is looked up by walking the directories above it.
+@test
+function resolverDiscoversTheProjectFromASubdirectory(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/acyclic");
+  let sourceDir: Path::PathBuf = fixtureRoot.join("src");
+  let expectedPath: Path::PathBuf = fixtureRoot.join("expected_order.txt");
+  let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&sourceDir)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+  let actual: String = Resolver::orderSummaryRelativeTo(&discovery, &fixtureRoot).trimAsciiWhitespace();
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+/// `[package] name`, `[build] out_dir`, `[build] cc` and `[build] bin` reach the
+/// build, which lays its artifacts out from them.
+@test
+function resolverReadsBuildOutputFieldsFromProjectFile(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/build_profile");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let outDirText: String = discovery.outDir.toString();
+  let expectedOutDir: String = fixtureRoot.join("build/out").toString();
+
+  Test::assertEq<str>(discovery.name.toStr(), "resolver-build-profile");
+  Test::assertEq<str>(outDirText.toStr(), expectedOutDir.toStr());
+  Test::assertEq<str>(discovery.cc.toStr(), "cc");
+  Test::assertEq<boolean>(discovery.bin, true);
+  Test::assertEq<boolean>(discovery.hasProjectFile, true);
 }
 
 /// A project file without `[build] cflags` hands the toolchain nothing beyond

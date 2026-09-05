@@ -49,6 +49,8 @@ export record ResolvedProject {
   public cc: String;
   public cflags: Vector<String>;
   public emit: Vector<String>;
+  public defaultFeatures: Vector<String>;
+  public knownFeatures: Vector<String>;
   public stdEnabled: boolean;
   public stdRoot: Option<Path::PathBuf>;
   public runtimeRoot: Option<Path::PathBuf>;
@@ -145,6 +147,28 @@ export record ResolvedProject {
 
   public emitText(&self, index: u64): Option<String> {
     return match (self.emit.get(index)) {
+      Option::SOME(value) -> Option::SOME(value.clone()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public defaultFeatureCount(&self): u64 {
+    return self.defaultFeatures.length();
+  }
+
+  public defaultFeatureText(&self, index: u64): Option<String> {
+    return match (self.defaultFeatures.get(index)) {
+      Option::SOME(value) -> Option::SOME(value.clone()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  public knownFeatureCount(&self): u64 {
+    return self.knownFeatures.length();
+  }
+
+  public knownFeatureText(&self, index: u64): Option<String> {
+    return match (self.knownFeatures.get(index)) {
       Option::SOME(value) -> Option::SOME(value.clone()),
       Option::NONE -> Option::NONE,
     };
@@ -348,8 +372,15 @@ function stringArrayOrDefault(
 
 function resolveProjectPath(root: &Path::PathBuf, value: &String): Path::PathBuf {
   let rawPath: Path::PathBuf = Path::PathBuf::fromString(value);
-  let resolved: Path::PathBuf = rawPath.isAbsolute() ? rawPath : root.join(value.toStr());
-  return resolved.normalize();
+
+  // The absolute branch hands `rawPath` on by value. Written as a conditional
+  // expression the compiler this file is part of frees it twice, so the two
+  // paths are kept apart.
+  if (rawPath.isAbsolute()) {
+    return rawPath.normalize();
+  }
+
+  return root.join(value.toStr()).normalize();
 }
 
 function resolveEnvPath(value: &String): Path::PathBuf {
@@ -723,6 +754,10 @@ export namespace Config {
     let cflags: Vector<String> = stringArrayOrDefault(&document, configPath, "build.cflags", &emptyCflags)!;
     let emptyEmit: Vector<String> = Vector::new<String>();
     let emit: Vector<String> = stringArrayOrDefault(&document, configPath, "build.emit", &emptyEmit)!;
+    let emptyDefaultFeatures: Vector<String> = Vector::new<String>();
+    let defaultFeatures: Vector<String> = stringArrayOrDefault(&document, configPath, "build.default_features", &emptyDefaultFeatures)!;
+    let emptyKnownFeatures: Vector<String> = Vector::new<String>();
+    let knownFeatures: Vector<String> = stringArrayOrDefault(&document, configPath, "build.known_features", &emptyKnownFeatures)!;
 
     let stdEnabled: boolean = booleanOrDefault(&document, configPath, "ignis.std", true)!;
 
@@ -821,6 +856,8 @@ export namespace Config {
       cc: cc.clone(),
       cflags: cloneStringVector(&cflags),
       emit: cloneStringVector(&emit),
+      defaultFeatures: cloneStringVector(&defaultFeatures),
+      knownFeatures: cloneStringVector(&knownFeatures),
       stdEnabled: stdEnabled,
       stdRoot: cloneOptionPath(&stdRoot),
       runtimeRoot: cloneOptionPath(&runtimeRoot),
@@ -902,6 +939,8 @@ function emptyProject(): ResolvedProject {
     cc: String::create("cc"),
     cflags: Vector::new<String>(),
     emit: Vector::new<String>(),
+    defaultFeatures: Vector::new<String>(),
+    knownFeatures: Vector::new<String>(),
     stdEnabled: false,
     stdRoot: Option::NONE,
     runtimeRoot: Option::NONE,
