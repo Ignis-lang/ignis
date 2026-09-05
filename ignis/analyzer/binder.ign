@@ -67,6 +67,11 @@ export namespace Analyzer {
       /// True while the children of an `extern` block are being completed.
       /// The functions inside one have no body and keep their written name.
       public insideExtern: boolean;
+      /// C symbols claimed by `@externName` on a definition, co-indexed with
+      /// `exportedSymbolSpans`. Two definitions claiming one symbol would emit
+      /// two C definitions of it.
+      public exportedSymbols: Vector<String>;
+      public exportedSymbolSpans: Vector<SourceSpan>;
     }
 
     /// Output produced by `predeclareRoots`.
@@ -1125,6 +1130,69 @@ export namespace Analyzer {
       diag.addLabel(LabelKind::PRIMARY, span, message.toStr());
       let mut stateRef: &mut Analyzer::Binder::BinderState = state;
       stateRef.diagnostics.push(diag);
+    }
+
+    /// Validate `@externName` used as an export on a function definition.
+    ///
+    /// On an `extern` declaration the attribute names a symbol the C side owns
+    /// and nothing here applies. On a definition it claims the symbol for this
+    /// program, so the claim has to be unique and has to name exactly one body:
+    /// a generic function has one body per instantiation.
+    function checkExportedCSymbol(
+      state: &mut Analyzer::Binder::BinderState,
+      symbol: &String,
+      isGeneric: boolean,
+      span: SourceSpan,
+    ): void {
+      if (isGeneric) {
+        let message: String = `generic function cannot be exported as C symbol '${symbol.toStr()}': every instantiation would claim the same name`;
+        let mut diag: Diagnostic = Diagnostic::new(
+          Severity::ERROR,
+          DiagnosticCode::EXPORTED_SYMBOL_IS_GENERIC,
+          message.toStr(),
+          span,
+        );
+        diag.addLabel(LabelKind::PRIMARY, span, message.toStr());
+
+        let mut genericStateRef: &mut Analyzer::Binder::BinderState = state;
+        genericStateRef.diagnostics.push(diag);
+        return;
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < state.exportedSymbols.length()) {
+        let Option::SOME(claimed) = state.exportedSymbols.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (!claimed.equals(symbol.toStr())) {
+          index += 1;
+          continue;
+        }
+
+        let message: String = `C symbol '${symbol.toStr()}' is already exported by another definition`;
+        let mut diag: Diagnostic = Diagnostic::new(
+          Severity::ERROR,
+          DiagnosticCode::DUPLICATE_EXPORTED_SYMBOL,
+          message.toStr(),
+          span,
+        );
+        diag.addLabel(LabelKind::PRIMARY, span, message.toStr());
+
+        if (let Option::SOME(previous) = state.exportedSymbolSpans.get(index)) {
+          diag.addLabel(LabelKind::SECONDARY, *previous, "first exported here");
+        }
+
+        let mut duplicateStateRef: &mut Analyzer::Binder::BinderState = state;
+        duplicateStateRef.diagnostics.push(diag);
+        return;
+      }
+
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.exportedSymbols.push(symbol.clone());
+      stateRef.exportedSymbolSpans.push(span);
     }
 
     /// Emit a diagnostic for trait methods that do not declare a `self` receiver.
@@ -2358,8 +2426,18 @@ export namespace Analyzer {
         isExtern: state.insideExtern,
         externName: Analyzer::Binder::externNameAttribute(&fn_.metadata),
       };
+      let isExportedDefinition: boolean = !state.insideExtern;
+      let exportedSymbol: Option<String> = Analyzer::Binder::externNameAttribute(&fn_.metadata);
+      let isGenericFunction: boolean = fn_.genericParameters.length() > 0;
+
       let mut defsRef2: &mut Analyzer::DefinitionStore = defStore;
       defsRef2.replace(defId, Analyzer::Definition::Function(newFn));
+
+      if (isExportedDefinition) {
+        if (let Option::SOME(symbol) = &exportedSymbol) {
+          Analyzer::Binder::checkExportedCSymbol(state, &symbol, isGenericFunction, fn_.span);
+        }
+      }
 
       if (duplicateOpt.isNone()) {
         recordScopeEntry(state, scopeKey, sym, fn_.span);
@@ -2527,6 +2605,8 @@ export namespace Analyzer {
         scopeSyms: scopeSyms,
         scopeSpans: scopeSpans,
         insideExtern: false,
+        exportedSymbols: Vector::new<String>(),
+        exportedSymbolSpans: Vector::new<SourceSpan>(),
       };
 
       let typeStoreLengthBefore: u64 = typeStore.length();
@@ -2597,6 +2677,8 @@ export namespace Analyzer {
         scopeSyms: scopeSyms,
         scopeSpans: scopeSpans,
         insideExtern: false,
+        exportedSymbols: Vector::new<String>(),
+        exportedSymbolSpans: Vector::new<SourceSpan>(),
       };
 
       let mut index: u64 = 0;

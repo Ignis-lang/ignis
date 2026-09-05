@@ -1107,6 +1107,64 @@ impl<'a> Analyzer<'a> {
   // Function Binding
   // ========================================================================
 
+  /// Validates `@externName` used as an export on a function definition.
+  ///
+  /// On an `extern` declaration the attribute names a symbol the C side owns
+  /// and nothing here applies. On a definition it claims the symbol for this
+  /// program, so the claim has to be unique and has to name exactly one body:
+  /// a generic function has one body per instantiation.
+  fn check_exported_c_symbol(
+    &mut self,
+    def_id: DefinitionId,
+    span: &ignis_type::span::Span,
+  ) {
+    let DefinitionKind::Function(function_def) = &self.defs.get(&def_id).kind else {
+      return;
+    };
+
+    if function_def.is_extern {
+      return;
+    }
+
+    let Some(symbol) = function_def.attrs.iter().find_map(|attr| match attr {
+      FunctionAttr::ExternName(name) => Some(name.clone()),
+      _ => None,
+    }) else {
+      return;
+    };
+
+    if !function_def.type_params.is_empty() {
+      self.add_diagnostic(
+        DiagnosticMessage::ExportedSymbolIsGeneric {
+          symbol,
+          span: span.clone(),
+        }
+        .report(),
+      );
+      return;
+    }
+
+    match self.exported_c_symbols.get(&symbol) {
+      // The same declaration bound twice (a std module reached from several
+      // entry modules) is not a second claim on the symbol.
+      Some(previous) if previous == span => {},
+      Some(previous) => {
+        let previous_span = previous.clone();
+        self.add_diagnostic(
+          DiagnosticMessage::DuplicateExportedSymbol {
+            symbol,
+            span: span.clone(),
+            previous_span,
+          }
+          .report(),
+        );
+      },
+      None => {
+        self.exported_c_symbols.insert(symbol, span.clone());
+      },
+    }
+  }
+
   fn bind_function(
     &mut self,
     node_id: &NodeId,
@@ -1182,6 +1240,8 @@ impl<'a> Analyzer<'a> {
     if let DefinitionKind::Function(fd) = &mut self.defs.get_mut(&def_id).kind {
       fd.type_params = type_param_defs;
     }
+
+    self.check_exported_c_symbol(def_id, span);
 
     self.register_function_directives(def_id, func);
 

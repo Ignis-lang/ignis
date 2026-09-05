@@ -1734,6 +1734,28 @@ impl<'a> CEmitter<'a> {
     }
   }
 
+  /// Whether `def_id` is an Ignis definition exported under a fixed C symbol.
+  ///
+  /// `@externName` on an `extern` declaration names a symbol the C side owns.
+  /// The same attribute on a definition means the opposite direction: this unit
+  /// owns the symbol and every other unit, Ignis or C, reaches it by that name.
+  /// Such a definition keeps external linkage regardless of its visibility.
+  fn is_exported_symbol(
+    &self,
+    def_id: DefinitionId,
+  ) -> bool {
+    let def = self.defs.get(&def_id);
+
+    if matches!(&def.kind, DefinitionKind::Function(f) if f.is_extern) {
+      return false;
+    }
+
+    self
+      .get_function_attrs(def_id)
+      .iter()
+      .any(|attr| matches!(attr, FunctionAttr::ExternName(_)))
+  }
+
   fn emit_headers(&mut self) {
     for header in self.headers {
       if header.quoted {
@@ -2308,6 +2330,14 @@ impl<'a> CEmitter<'a> {
         if !matches!(func.inline_mode, InlineMode::Inline | InlineMode::Always) {
           needs_internal_linkage = true;
         }
+      }
+
+      // An exported definition owns its C symbol for the whole program, so it
+      // outranks every rule above that would have made it translation-unit
+      // local.
+      if self.is_exported_symbol(def_id) {
+        is_public = true;
+        needs_internal_linkage = false;
       }
 
       if needs_internal_linkage && !matches!(func.inline_mode, InlineMode::Inline | InlineMode::Always) {

@@ -4,6 +4,46 @@ mod common;
 /// These tests are more resilient to message text changes than snapshots.
 
 #[test]
+fn exported_symbol_on_a_generic_function_is_rejected() {
+  // Line 3: the exported generic function signature.
+  common::assert_diagnostic_at_line(
+    r#"
+@externName("ignis_exported_generic")
+function exportedGeneric<T>(value: T): T {
+    return value;
+}
+
+function main(): i32 {
+    return exportedGeneric<i32>(0);
+}"#,
+    "A0204", // ExportedSymbolIsGeneric
+    3,
+  );
+}
+
+#[test]
+fn two_definitions_cannot_claim_one_exported_symbol() {
+  // Line 7: the signature of the second claim on `ignis_exported_twice`.
+  common::assert_diagnostic_at_line(
+    r#"
+@externName("ignis_exported_twice")
+function firstClaim(): i32 {
+    return 1;
+}
+@externName("ignis_exported_twice")
+function secondClaim(): i32 {
+    return 2;
+}
+
+function main(): i32 {
+    return firstClaim() + secondClaim();
+}"#,
+    "A0205", // DuplicateExportedSymbol
+    7,
+  );
+}
+
+#[test]
 fn break_outside_loop_at_correct_line() {
   // Line 3: break
   common::assert_diagnostic_at_line(

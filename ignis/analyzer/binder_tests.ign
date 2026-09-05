@@ -3341,6 +3341,51 @@ function binderRejectsPackedOnFunction(): void {
   );
 }
 
+/// Scenario: `@externName` exporting a generic function.
+/// Spec: the export claims one C symbol, and a generic function has one body
+/// per instantiation, so no single body can own the name.
+@test
+function binderRejectsAnExportedGenericFunction(): void {
+  let bag: DiagnosticBag = binderBindSource(
+    "@externName(\"ignis_exported_generic\")\nfunction exportedGeneric<T>(value: T): T {\n  return value;\n}\n",
+  );
+
+  binderAssertDiagnostic(
+    &bag,
+    DiagnosticCode::EXPORTED_SYMBOL_IS_GENERIC,
+    "generic function cannot be exported as C symbol 'ignis_exported_generic': every instantiation would claim the same name",
+  );
+}
+
+/// Scenario: two definitions writing the same `@externName`.
+/// Spec: both would emit a C definition of that symbol, so the second claim is
+/// rejected where it is written.
+@test
+function binderRejectsTwoDefinitionsClaimingOneExportedSymbol(): void {
+  let bag: DiagnosticBag = binderBindSource(
+    "@externName(\"ignis_exported_twice\")\nfunction firstClaim(): i32 {\n  return 1;\n}\n\n@externName(\"ignis_exported_twice\")\nfunction secondClaim(): i32 {\n  return 2;\n}\n",
+  );
+
+  binderAssertDiagnostic(
+    &bag,
+    DiagnosticCode::DUPLICATE_EXPORTED_SYMBOL,
+    "C symbol 'ignis_exported_twice' is already exported by another definition",
+  );
+}
+
+/// Scenario: `@externName` inside an `extern` block, where it names a symbol
+/// the C side owns rather than claiming one.
+/// Spec: the export rules do not apply, so two declarations of the same C
+/// symbol stay silent.
+@test
+function binderAcceptsExternDeclarationsNamingOneCSymbol(): void {
+  let bag: DiagnosticBag = binderBindSource(
+    "extern __a {\n  @externName(\"puts\")\n  function putsA(message: str): i32;\n}\n\nextern __b {\n  @externName(\"puts\")\n  function putsB(message: str): i32;\n}\n",
+  );
+
+  Test::assertEq<u64>(bag.length(), 0);
+}
+
 /// Scenario: `@aligned(N)` with an `N` no allocation can honour.
 @test
 function binderRejectsAlignmentThatIsNotAPowerOfTwo(): void {
