@@ -329,8 +329,8 @@ Existing attributes: `@packed`, `@aligned(N)`, `@cold`, `@externName("name")`, `
 
 | Type | Crate | What It Tests | Snapshot Dir |
 | --- | --- | --- | --- |
-| E2E (ok) | ignis_driver | Full compile + run, asserts exit code/stdout | `crates/ignis_driver/tests/snapshots/` |
-| E2E (err) | ignis_driver | Runtime errors (panics, bounds checks) | same |
+| E2E (ok/err/warn fixtures) | ignis_driver (`ignis test`) | Full compile + run, or compile-only diagnostics/warnings, from `.ign` fixtures | `test_cases/e2e/{ok,err}/__snapshots__/` |
+| E2E (inline) | ignis_driver | Cases too specific to a hand-built `CompilationContext`/pipeline call for a fixture | `crates/ignis_driver/tests/snapshots/` |
 | Analyzer (golden) | ignis_analyzer | Diagnostics and HIR output | `crates/ignis_analyzer/tests/snapshots/` |
 | Analyzer (fixtures) | ignis_analyzer | `.ign` files from `test_cases/` | same |
 | Analyzer (diagnostics) | ignis_analyzer | Error codes at specific line numbers | N/A (assertions) |
@@ -340,23 +340,33 @@ Existing attributes: `@packed`, `@aligned(N)`, `@cold`, `@externName("name")`, `
 
 ### Adding an E2E Test
 
-```rust
-// In crates/ignis_driver/tests/e2e_ok.rs
-#[test]
-fn e2e_my_feature() {
-  e2e_test(
-    "my_feature",
-    r#"
+The end-to-end corpus lives in Ignis source under `test_cases/e2e/{ok,err}`, one
+`.ign` file per case, run by `ignis test` as fixtures. A fixture's leading
+`// e2e: <option>` comment lines select its mode (see
+`crates/ignis_driver/src/fixture_tests.rs`):
+
+| Header | Mode |
+| --- | --- |
+| (none) | Compile, link and run; the baseline holds exit code and streams. |
+| `// e2e: std` | Same as above, forcing the standard library on. |
+| `// e2e: allow-leak` | Same as above, skipping leak checking. |
+| `// e2e: err` | Compile only; expects failure. The baseline holds the reported error diagnostics. |
+| `// e2e: warn` | Compile only; expects success with warnings. The baseline holds the reported warning diagnostics. |
+
+```
+// In test_cases/e2e/ok/my_feature.ign
 function main(): i32 {
     return 42;
 }
-"#,
-  );
-}
 ```
 
-Run: `cargo test -p ignis_driver e2e_my_feature`
-Accept snapshot: `INSTA_UPDATE=always cargo test -p ignis_driver e2e_my_feature`
+Run: `target-local/debug/ignis test e2e::my_feature`
+Accept snapshot: `target-local/debug/ignis test --update-snapshots e2e::my_feature`
+Run the whole e2e corpus: `target-local/debug/ignis test e2e::`
+
+A case that needs a hand-built `CompilationContext` or drives the pipeline
+directly (not a plain `.ign` program) stays as an inline Rust test in
+`crates/ignis_driver/tests/e2e_ok.rs` / `e2e_err.rs` instead.
 
 ### Adding an Analyzer Test
 

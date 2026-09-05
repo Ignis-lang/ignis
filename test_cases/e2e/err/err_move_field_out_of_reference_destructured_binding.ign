@@ -1,0 +1,38 @@
+// e2e: err
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source {
+    SOME(Payload),
+    NONE,
+}
+
+record ExportItem {
+    public source: Source;
+}
+
+enum Node {
+    Export(ExportItem),
+    Nothing,
+}
+
+function readSource(item: &Node): i32 {
+    return match (item) {
+        Node::Export(exportItem) -> match (exportItem.source) {
+            Source::SOME(path) -> path.value,
+            Source::NONE -> 0,
+        },
+        Node::Nothing -> 0,
+    };
+}
+
+function main(): i32 {
+    let node: Node = Node::Export(ExportItem { source: Source::SOME(Payload { value: 42 }) });
+    return readSource(&node);
+}
