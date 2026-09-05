@@ -116,6 +116,14 @@ export namespace Analyzer {
       public declaredBindingMutable: Vector<boolean>;
       public referencedBindings: Vector<u32>;
       public mutatedBindings: Vector<u32>;
+      /// Spans of the `null` literals that reached no pointer expectation.
+      ///
+      /// The oracle types such a literal as `NullPtr` and only reports what is
+      /// still `NullPtr` once the module is checked (`report_unresolved_nulls`),
+      /// so the enclosing expression's own diagnostic is emitted first. The
+      /// selfhost has no `NullPtr` type, so it records the span here and flushes
+      /// at the same point to keep that order.
+      public pendingNullSpans: Vector<SourceSpan>;
       /// Type of the piped value for each pipe currently being checked, innermost last.
       ///
       /// A `_` placeholder has no declaration to resolve against, so it reads its type from
@@ -646,16 +654,43 @@ export namespace Analyzer {
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::CANNOT_INFER_TYPE, message.toStr());
     }
 
+    /// Defers the uninferred-`null` report to the end of the module check, so
+    /// the enclosing expression reports its own failure first. See
+    /// `TypecheckState::pendingNullSpans`.
     function emitCannotInferNullLiteral(
       state: &mut Analyzer::Typecheck::TypecheckState,
       span: SourceSpan,
     ): void {
-      Analyzer::Typecheck::emitDiagnostic(
-        state,
-        span,
-        DiagnosticCode::CANNOT_INFER_NULL_TYPE,
-        "Cannot infer pointer type for null literal",
-      );
+      let mut stateRef: &mut Analyzer::Typecheck::TypecheckState = state;
+      stateRef.pendingNullSpans.push(span);
+    }
+
+    function flushPendingNullDiagnostics(state: &mut Analyzer::Typecheck::TypecheckState): void {
+      let mut spans: Vector<SourceSpan> = Vector::new<SourceSpan>();
+      let mut copyIndex: u64 = 0;
+
+      while (copyIndex < state.pendingNullSpans.length()) {
+        if (let Option::SOME(span) = state.pendingNullSpans.get(copyIndex)) {
+          spans.push(*span);
+        }
+
+        copyIndex += 1;
+      }
+
+      let mut index: u64 = 0;
+
+      while (index < spans.length()) {
+        if (let Option::SOME(span) = spans.get(index)) {
+          Analyzer::Typecheck::emitDiagnostic(
+            state,
+            *span,
+            DiagnosticCode::CANNOT_INFER_NULL_TYPE,
+            "Cannot infer pointer type for null literal",
+          );
+        }
+
+        index += 1;
+      }
     }
 
     function emitInvalidNullLiteral(

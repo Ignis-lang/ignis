@@ -112,6 +112,25 @@ export namespace Analyzer {
       bag.push(diagnostic);
     }
 
+    function emitWarning(
+      diagnostics: &mut DiagnosticBag,
+      span: SourceSpan,
+      code: str,
+      message: str,
+      labelMessage: str,
+    ): void {
+      let mut diagnostic: Diagnostic = Diagnostic::new(
+        Severity::WARNING,
+        code,
+        message,
+        span,
+      );
+      diagnostic.addLabel(LabelKind::PRIMARY, span, labelMessage);
+
+      let mut bag: &mut DiagnosticBag = diagnostics;
+      bag.push(diagnostic);
+    }
+
     /// Whether an expression's checked type is `NEVER`, using the
     /// last-write-wins lookup convention shared with `ConstEval` and the
     /// typechecker's own `lookupRecordedExprType`.
@@ -342,7 +361,7 @@ export namespace Analyzer {
         };
 
         if (foundTerminator) {
-          Analyzer::Checks::emitError(
+          Analyzer::Checks::emitWarning(
             diagnostics,
             Analyzer::Checks::stmtSpan(module, *stmtId),
             DiagnosticCode::UNREACHABLE_CODE,

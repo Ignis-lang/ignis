@@ -1521,6 +1521,189 @@ export namespace Borrowck {
     bag.push(diagnostic);
   }
 
+  /// Emits `Use of moved value 'name'` carrying the same trailing notes the
+  /// Rust oracle attaches in `build_use_after_move_diagnostic`: why the value's
+  /// type is non-Copy, and which trait would give the program a way out.
+  function emitUseAfterMove(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    diagnostics: &mut DiagnosticBag,
+    defId: Analyzer::DefinitionId,
+    span: SourceSpan,
+  ): void {
+    let name: String = Borrowck::definitionName(defStore, symbols, defId);
+    let message: String = `Use of moved value '${name}'`;
+
+    let mut diagnostic: Diagnostic = Diagnostic::new(
+      Severity::ERROR,
+      DiagnosticCode::USE_AFTER_MOVE,
+      message.toStr(),
+      span,
+    );
+    diagnostic.addLabel(LabelKind::PRIMARY, span, "value used here after it was moved");
+
+    if (let Option::SOME(typeId) = Borrowck::variableTypeOf(defStore, defId)) {
+      Borrowck::appendNonCopyNotes(defStore, typeStore, symbols, &mut diagnostic, typeId);
+    }
+
+    let mut bag: &mut DiagnosticBag = diagnostics;
+    bag.push(diagnostic);
+  }
+
+  /// Nominal name of a type as the move diagnostics spell it: `record Name`
+  /// and `enum Name` carry their keyword, every other type reads as the
+  /// type store already renders it. Mirrors `format_type_name`.
+  function nominalTypeName(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    typeId: Analyzer::TypeId,
+  ): String {
+    let plain: String = typeStore.nameOfResolved(typeId, &*defStore, &*symbols);
+
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return plain;
+    };
+
+    return match (type_) {
+      Analyzer::Type::Record(_) -> `record ${plain.toStr()}`,
+      Analyzer::Type::Enum(_) -> `enum ${plain.toStr()}`,
+      _ -> plain,
+    };
+  }
+
+  /// Appends the two notes the oracle's `append_non_copy_notes` produces for a
+  /// record type: what makes it non-Copy, then the remedy that fits the traits
+  /// it already carries. Non-record types get no notes, like the oracle.
+  function appendNonCopyNotes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    diagnostic: &mut Diagnostic,
+    typeId: Analyzer::TypeId,
+  ): void {
+    let Option::SOME(type_) = typeStore.get(typeId) else {
+      return;
+    };
+
+    let Analyzer::Type::Record(recordDefId) = type_ else {
+      return;
+    };
+
+    let Option::SOME(definition) = defStore.get(recordDefId) else {
+      return;
+    };
+
+    let Analyzer::Definition::Record(recordDef) = definition else {
+      return;
+    };
+
+    let implementsDrop: boolean = recordDef.implementsDrop;
+    let implementsClone: boolean = Borrowck::declaresTrait(&recordDef.implementedTraits, "Clone");
+    let mut fieldIds: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut fieldIndex: u64 = 0;
+
+    while (fieldIndex < recordDef.fields.length()) {
+      if (let Option::SOME(fieldId) = recordDef.fields.get(fieldIndex)) {
+        fieldIds.push(*fieldId);
+      }
+
+      fieldIndex += 1;
+    }
+
+    let typeName: String = Borrowck::nominalTypeName(defStore, typeStore, symbols, typeId);
+    let nonCopyField: Option<Analyzer::DefinitionId> = Borrowck::firstNonCopyField(defStore, typeStore, &fieldIds);
+
+    let mut target: &mut Diagnostic = diagnostic;
+
+    if (implementsDrop) {
+      let note: String = `'${typeName.toStr()}' implements Drop, which makes it non-Copy`;
+      target.addNote(note.toStr());
+    } else if (let Option::SOME(fieldId) = nonCopyField) {
+      let fieldName: String = Borrowck::definitionName(defStore, symbols, fieldId);
+      let fieldTypeName: String = match (Borrowck::fieldTypeOf(defStore, fieldId)) {
+        Option::SOME(fieldType) -> Borrowck::nominalTypeName(defStore, typeStore, symbols, fieldType),
+        Option::NONE -> String::create("<unknown>"),
+      };
+
+      let note: String = `'${typeName.toStr()}' is non-Copy because field '${fieldName.toStr()}' has type '${fieldTypeName.toStr()}' which is non-Copy`;
+      target.addNote(note.toStr());
+    } else {
+      let note: String = `'${typeName.toStr()}' is non-Copy; consider adding '@implements(Copy)'`;
+      target.addNote(note.toStr());
+    }
+
+    if (implementsClone) {
+      target.addNote("help: consider using '.clone()' to create an explicit copy");
+      return;
+    }
+
+    if (!implementsDrop && nonCopyField.isNone()) {
+      let note: String = `help: consider adding '@implements(Copy)' to '${typeName.toStr()}' since all its fields are Copy`;
+      target.addNote(note.toStr());
+      return;
+    }
+
+    let note: String = `help: consider adding '@implements(Clone)' to '${typeName.toStr()}' and implementing a 'clone' method`;
+    target.addNote(note.toStr());
+  }
+
+  function declaresTrait(traits: &Vector<String>, name: str): boolean {
+    let mut index: u64 = 0;
+
+    while (index < traits.length()) {
+      if (let Option::SOME(declared) = traits.get(index)) {
+        if (declared.equals(name)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function firstNonCopyField(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    fieldIds: &Vector<Analyzer::DefinitionId>,
+  ): Option<Analyzer::DefinitionId> {
+    let mut index: u64 = 0;
+
+    while (index < fieldIds.length()) {
+      let Option::SOME(fieldId) = fieldIds.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Option::SOME(fieldType) = Borrowck::fieldTypeOf(defStore, *fieldId)) {
+        if (!Analyzer::Typecheck::isCopyType(defStore, typeStore, fieldType)) {
+          return Option::SOME(*fieldId);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function fieldTypeOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    fieldId: Analyzer::DefinitionId,
+  ): Option<Analyzer::TypeId> {
+    let Option::SOME(definition) = defStore.get(fieldId) else {
+      return Option::NONE;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Field(field) -> Option::SOME(field.fieldType),
+      _ -> Option::NONE,
+    };
+  }
+
   function copyDiagnostic(source: &Diagnostic): Diagnostic {
     let mut copy: Diagnostic = Diagnostic::new(
       source.severity,
@@ -1651,6 +1834,7 @@ export namespace Borrowck {
   /// `check_use`, restricted to the states this slice models.
   function checkUse(
     defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
@@ -1680,16 +1864,7 @@ export namespace Borrowck {
       return;
     }
 
-    let name: String = Borrowck::definitionName(defStore, symbols, defId);
-    let message: String = `Use of moved value '${name}'`;
-
-    Borrowck::emitError(
-      diagnostics,
-      span,
-      DiagnosticCode::USE_AFTER_MOVE,
-      message.toStr(),
-      "value used here after it was moved",
-    );
+    Borrowck::emitUseAfterMove(defStore, typeStore, symbols, diagnostics, defId, span);
   }
 
   /// Reports handing on a value that lives in borrowed storage. Mirrors the
@@ -1725,6 +1900,7 @@ export namespace Borrowck {
   /// would produce.
   function handleManualDrop(
     defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
@@ -1754,16 +1930,7 @@ export namespace Borrowck {
     // A returned local left this scope, so dropping it here tears down storage
     // the caller owns: the oracle models that as a use after move.
     if (current == Borrowck::MOVE_MOVED || current == Borrowck::MOVE_RETURNED) {
-      let movedName: String = Borrowck::definitionName(defStore, symbols, defId);
-      let movedMessage: String = `Use of moved value '${movedName}'`;
-
-      Borrowck::emitError(
-        diagnostics,
-        span,
-        DiagnosticCode::USE_AFTER_MOVE,
-        movedMessage.toStr(),
-        "value used here after it was moved",
-      );
+      Borrowck::emitUseAfterMove(defStore, typeStore, symbols, diagnostics, defId, span);
 
       return;
     }
@@ -2369,10 +2536,10 @@ export namespace Borrowck {
       Hir::HirKind::BuiltinDropGlue(_) -> {},
 
       Hir::HirKind::Variable(defId) -> {
-        Borrowck::checkUse(defStore, symbols, state, diagnostics, defId, span);
+        Borrowck::checkUse(defStore, typeStore, symbols, state, diagnostics, defId, span);
       },
       Hir::HirKind::StaticAccess(defId) -> {
-        Borrowck::checkUse(defStore, symbols, state, diagnostics, defId, span);
+        Borrowck::checkUse(defStore, typeStore, symbols, state, diagnostics, defId, span);
       },
 
       Hir::HirKind::Binary(binaryNode) -> {
@@ -2650,7 +2817,7 @@ export namespace Borrowck {
       }
 
       if (let Option::SOME(target) = droppedTarget) {
-        Borrowck::handleManualDrop(defStore, symbols, state, diagnostics, target, span);
+        Borrowck::handleManualDrop(defStore, typeStore, symbols, state, diagnostics, target, span);
       } else {
         if (isDrop && !(state.inDropMethod && Borrowck::isFieldDropOnVariable(hir, receiver))) {
           Borrowck::emitWarning(
