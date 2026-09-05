@@ -1,7 +1,6 @@
 import SourceSpan, DiagnosticCode from "@compiler::diagnostics";
 
 import Ast from "@compiler::ast";
-import Id from "@compiler::ids";
 import Vector from "std::vector";
 
 export namespace Analyzer {
@@ -2322,13 +2321,19 @@ export namespace Analyzer {
         return out;
       }
 
+      let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(nameSym);
       let mut index: u64 = 0;
-      while (index < defStore.length()) {
-        let candidateDefId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+      while (index < candidates.length()) {
+        let Option::SOME(candidate) = candidates.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let candidateDefId: Analyzer::DefinitionId = *candidate;
 
         let mut sameName: boolean = false;
-        if (let Option::SOME(Analyzer::Definition::Function(candidateDef)) = defStore.get(candidateDefId)) {
-          sameName = candidateDef.name.raw() == nameSym.raw();
+        if (let Option::SOME(Analyzer::Definition::Function(_)) = defStore.get(candidateDefId)) {
+          sameName = true;
         }
 
         if (!sameName) {
@@ -2733,18 +2738,22 @@ export namespace Analyzer {
       let receiverNormalized: Analyzer::TypeId = Analyzer::Typecheck::normalizeAliasesDeep(defStore, typeStore, receiverType, 0);
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let wanted: Analyzer::SymbolId = symbolsRef.intern(name);
+      let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(wanted);
       let mut index: u64 = 0;
 
-      while (index < defStore.length()) {
-        let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+      while (index < candidates.length()) {
+        let Option::SOME(candidate) = candidates.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let defId: Analyzer::DefinitionId = *candidate;
         let mut targetOpt: Option<Analyzer::TypeId> = Option::NONE;
 
         if (let Option::SOME(def) = defStore.get(defId)) {
           if (let Analyzer::Definition::Function(function_) = def) {
-            if (function_.name.raw() == wanted.raw()) {
-              if (let Option::SOME(target) = &function_.extensionTarget) {
-                targetOpt = Option::SOME(target);
-              }
+            if (let Option::SOME(target) = &function_.extensionTarget) {
+              targetOpt = Option::SOME(target);
             }
           }
         }
@@ -3748,28 +3757,27 @@ export namespace Analyzer {
 
       // Module-local first, for the same reason the annotation reader scans
       // that way: a record of this name declared here outranks one elsewhere.
+      let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(symbol);
       let mut localPass: u64 = 0;
 
       while (localPass < 2) {
         let mut index: u64 = 0;
 
-        while (index < defStore.length()) {
-          let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+        while (index < candidates.length()) {
+          let Option::SOME(candidate) = candidates.get(index) else {
+            index += 1;
+            continue;
+          };
+
+          let defId: Analyzer::DefinitionId = *candidate;
 
           if (localPass == 0 && !defStore.defBelongsToActiveModule(defId)) {
             index += 1;
             continue;
           }
 
-          let Option::SOME(def) = defStore.get(defId) else {
-            index += 1;
-            continue;
-          };
-
-          if (def.name().raw() == symbol.raw()) {
-            if (let Analyzer::Definition::Record(record_) = def) {
-              return Option::SOME(record_.typeId);
-            }
+          if (let Option::SOME(Analyzer::Definition::Record(record_)) = defStore.get(defId)) {
+            return Option::SOME(record_.typeId);
           }
 
           index += 1;

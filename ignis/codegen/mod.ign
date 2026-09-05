@@ -665,18 +665,20 @@ export namespace CodegenC {
     symbols: &mut Analyzer::SymbolTable,
     defId: Analyzer::DefinitionId,
   ): Option<Analyzer::DefinitionId> {
+    let owned: Vector<Analyzer::DefinitionId> = defStore.methodsOwnedBy(defId);
     let mut rawId: u64 = 0;
 
-    while (rawId < defStore.length()) {
-      let candidateId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+    while (rawId < owned.length()) {
+      let Option::SOME(candidate) = owned.get(rawId) else {
+        rawId += 1;
+        continue;
+      };
+
+      let candidateId: Analyzer::DefinitionId = *candidate;
       let mut nameSym: Option<Analyzer::SymbolId> = Option::NONE;
 
-      if (let Option::SOME(definition) = defStore.get(candidateId)) {
-        if (let Analyzer::Definition::Method(methodDef) = definition) {
-          if (methodDef.owner.raw() == defId.raw()) {
-            nameSym = Option::SOME(methodDef.name);
-          }
-        }
+      if (let Option::SOME(Analyzer::Definition::Method(methodDef)) = defStore.get(candidateId)) {
+        nameSym = Option::SOME(methodDef.name);
       }
 
       if (let Option::SOME(methodName) = nameSym) {
