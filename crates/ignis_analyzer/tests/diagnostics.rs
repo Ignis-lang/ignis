@@ -1168,6 +1168,47 @@ function main(): i32 {
 }
 
 #[test]
+fn cannot_match_owned_payload_out_of_a_borrowed_field() {
+  // Line 21: match over `node.slot`, where `node` is only borrowed. The owner's drop
+  // cannot be suppressed here, so the payload may not be moved into the arm binding.
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Slot {
+    SOME(Payload),
+    NONE,
+}
+
+record Node {
+    public slot: Slot;
+}
+
+function readSlot(node: &Node): i32 {
+    return match (node.slot) {
+        Slot::SOME(payload) -> payload.value,
+        Slot::NONE -> 0,
+    };
+}
+
+function main(): i32 {
+    let node: Node = Node { slot: Slot::SOME(Payload { value: 7 }) };
+    return readSlot(&node);
+}
+"#,
+    "A0186", // CannotMoveOutOfBorrowedValue
+    21,
+  );
+}
+
+#[test]
 fn heterogeneous_vector_literal_at_correct_line() {
   // Line 3: [1, true, 3] — element 1 diverges from the first element's type
   common::assert_diagnostic_at_line(
