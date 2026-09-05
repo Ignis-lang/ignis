@@ -8094,3 +8094,75 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_option_combinators_move_owning_payload_once() {
+  e2e_workspace_std_test(
+    "option_combinators_move_owning_payload_once",
+    r#"
+import Io from "std::io";
+import Option from "std::option";
+import String from "std::string";
+
+function main(): i32 {
+  let source: Option<String> = Option::SOME(String::create("alpha"));
+
+  let mapped: Option<String> = source
+    .filter((text: &String): boolean -> { return text.length() > 0; })
+    .inspect((text: &String): void -> { Io::println(text.toStr()); })
+    .map<String>((text: String): String -> {
+      let mut grown: String = text;
+      grown.pushStr("-mapped");
+      return grown;
+    });
+
+  Io::println(mapped.unwrap().toStr());
+
+  let absent: Option<String> = Option::NONE;
+  let recovered: String = absent.unwrapOr(String::create("fallback"));
+  Io::println(recovered.toStr());
+
+  return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_result_combinators_move_owning_payload_once() {
+  e2e_workspace_std_test(
+    "result_combinators_move_owning_payload_once",
+    r#"
+import Io from "std::io";
+import Result from "std::result";
+import String from "std::string";
+
+function main(): i32 {
+  let source: Result<String, String> = Result::OK(String::create("alpha"));
+
+  let mapped: Result<String, String> = source
+    .inspect((text: &String): void -> { Io::println(text.toStr()); })
+    .map<String>((text: String): String -> {
+      let mut grown: String = text;
+      grown.pushStr("-mapped");
+      return grown;
+    });
+
+  Io::println(mapped.unwrap().toStr());
+
+  let failed: Result<String, String> = Result::ERROR(String::create("boom"));
+  let handled: String = failed
+    .inspectErr((error: &String): void -> { Io::println(error.toStr()); })
+    .unwrapOrElse((error: String): String -> {
+      let mut message: String = error;
+      message.pushStr("-handled");
+      return message;
+    });
+
+  Io::println(handled.toStr());
+
+  return 0;
+}
+"#,
+  );
+}

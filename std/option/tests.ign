@@ -1,0 +1,183 @@
+import Option from "std::option";
+import String from "std::string";
+import Test from "std::test";
+
+function ownedText(text: str): Option<String> {
+  return Option::SOME(String::create(text));
+}
+
+@test
+function unwrapMovesTheOwningPayloadOut(): void {
+  let source: Option<String> = ownedText("alpha");
+  let taken: String = source.unwrap();
+
+  Test::assertEq<str>(taken.toStr(), "alpha");
+}
+
+@test
+function unwrapOrKeepsTheOwningPayloadWhenSome(): void {
+  let source: Option<String> = ownedText("alpha");
+  let fallback: String = String::create("fallback");
+  let taken: String = source.unwrapOr(fallback);
+
+  Test::assertEq<str>(taken.toStr(), "alpha");
+}
+
+@test
+function unwrapOrReturnsTheOwningDefaultWhenNone(): void {
+  let source: Option<String> = Option::NONE;
+  let fallback: String = String::create("fallback");
+  let taken: String = source.unwrapOr(fallback);
+
+  Test::assertEq<str>(taken.toStr(), "fallback");
+}
+
+@test
+function unwrapOrElseOnlyBuildsTheOwningDefaultWhenNone(): void {
+  let present: Option<String> = ownedText("alpha");
+  let kept: String = present.unwrapOrElse((): String -> {
+    return String::create("lazy");
+  });
+
+  Test::assertEq<str>(kept.toStr(), "alpha");
+
+  let absent: Option<String> = Option::NONE;
+  let built: String = absent.unwrapOrElse((): String -> {
+    return String::create("lazy");
+  });
+
+  Test::assertEq<str>(built.toStr(), "lazy");
+}
+
+@test
+function mapMovesTheOwningPayloadIntoTheCallback(): void {
+  let source: Option<String> = ownedText("alpha");
+  let mapped: Option<u64> = source.map<u64>((text: String): u64 -> {
+    return text.length();
+  });
+
+  Test::assertEq<u64>(mapped.unwrap(), 5);
+}
+
+@test
+function mapRebuildsAnOwningPayload(): void {
+  let source: Option<String> = ownedText("alpha");
+  let mapped: Option<String> = source.map<String>((text: String): String -> {
+    let mut grown: String = text;
+    grown.pushStr("-mapped");
+    return grown;
+  });
+
+  Test::assertEq<str>(mapped.unwrap().toStr(), "alpha-mapped");
+}
+
+@test
+function andThenMovesTheOwningPayloadIntoTheCallback(): void {
+  let source: Option<String> = ownedText("alpha");
+  let chained: Option<String> = source.andThen<String>((text: String): Option<String> -> {
+    if (text.length() == 0) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(text);
+  });
+
+  Test::assertEq<str>(chained.unwrap().toStr(), "alpha");
+}
+
+@test
+function filterBorrowsTheOwningPayloadAndHandsItBack(): void {
+  let kept: Option<String> = ownedText("alpha").filter((text: &String): boolean -> {
+    return text.length() == 5;
+  });
+
+  Test::assertEq<str>(kept.unwrap().toStr(), "alpha");
+
+  let dropped: Option<String> = ownedText("alpha").filter((text: &String): boolean -> {
+    return text.length() == 0;
+  });
+
+  Test::assert(dropped.isNone());
+}
+
+@test
+function inspectBorrowsTheOwningPayloadAndHandsItBack(): void {
+  let mut seen: u64 = 0;
+
+  let passed: Option<String> = ownedText("alpha").inspect((text: &String): void -> {
+    seen = text.length();
+  });
+
+  Test::assertEq<u64>(seen, 5);
+  Test::assertEq<str>(passed.unwrap().toStr(), "alpha");
+}
+
+@test
+function orElseMovesTheOwningPayloadThrough(): void {
+  let present: Option<String> = ownedText("alpha").orElse((): Option<String> -> {
+    return Option::SOME(String::create("fallback"));
+  });
+
+  Test::assertEq<str>(present.unwrap().toStr(), "alpha");
+
+  let absent: Option<String> = Option::NONE;
+  let recovered: Option<String> = absent.orElse((): Option<String> -> {
+    return Option::SOME(String::create("fallback"));
+  });
+
+  Test::assertEq<str>(recovered.unwrap().toStr(), "fallback");
+}
+
+@test
+function observersLeaveTheOwningOptionUsable(): void {
+  let source: Option<String> = ownedText("alpha");
+
+  Test::assert(source.isSome());
+  Test::assert(!source.isNone());
+  Test::assert(source.isSome());
+
+  Test::assertEq<str>(source.unwrap().toStr(), "alpha");
+}
+
+@test
+function matchingOnABorrowAvoidsConsumingTheOption(): void {
+  let source: Option<String> = ownedText("alpha");
+
+  let observed: u64 = match (&source) {
+    Option::SOME(text) -> text.length(),
+    Option::NONE -> 0,
+  };
+
+  Test::assertEq<u64>(observed, 5);
+  Test::assertEq<str>(source.unwrap().toStr(), "alpha");
+}
+
+@test
+function cloningThePayloadAllowsASecondConsumingCall(): void {
+  let source: Option<String> = ownedText("alpha");
+
+  let copy: Option<String> = match (&source) {
+    Option::SOME(text) -> Option::SOME(text.clone()),
+    Option::NONE -> Option::NONE,
+  };
+
+  Test::assertEq<u64>(copy.unwrap().length(), 5);
+  Test::assertEq<str>(source.unwrap().toStr(), "alpha");
+}
+
+@test
+function chainedCombinatorsMoveTheOwningPayloadOnce(): void {
+  let total: Option<u64> = ownedText("alpha")
+    .filter((text: &String): boolean -> { return text.length() > 0; })
+    .inspect((text: &String): void -> { Test::assert(text.length() == 5); })
+    .map<String>((text: String): String -> {
+      let mut grown: String = text;
+      grown.pushStr("!");
+      return grown;
+    })
+    .andThen<u64>((text: String): Option<u64> -> {
+      return Option::SOME(text.length());
+    });
+
+  Test::assertEq<u64>(total.unwrap(), 6);
+}

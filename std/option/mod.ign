@@ -27,6 +27,20 @@
 //!   └─────────────────────────────────────┘
 //! ```
 //!
+//! ## Ownership
+//!
+//! Every method that can hand the payload out takes `self` by value and
+//! consumes the option: `unwrap`, `unwrapOr`, `unwrapOrElse`, `filter`,
+//! `orElse`, `inspect`, `map`, and `andThen`. The receiver cannot be used
+//! again afterwards, so an owning payload is moved exactly once.
+//!
+//! Only `isSome` and `isNone` observe through `&self` and leave the option
+//! usable.
+//!
+//! A borrowed `Option<S>` therefore cannot be fed to a consuming combinator
+//! directly. Match on the borrow instead, or clone the option when the value
+//! is genuinely needed twice.
+//!
 //! ## Higher-Order Methods
 //!
 //! Option provides callback-based methods for transforming and inspecting
@@ -34,12 +48,16 @@
 //!
 //! | Method         | Signature                          | Description                        |
 //! |----------------|------------------------------------|------------------------------------|
-//! | `filter`       | `(S) -> boolean` → `Option<S>`     | Keep SOME only if predicate holds  |
+//! | `filter`       | `(&S) -> boolean` → `Option<S>`    | Keep SOME only if predicate holds  |
 //! | `unwrapOrElse` | `() -> S` → `S`                    | Lazy default on NONE               |
 //! | `orElse`       | `() -> Option<S>` → `Option<S>`    | Lazy alternative on NONE           |
-//! | `inspect`      | `(S) -> void` → `Option<S>`        | Side-effect without consuming      |
+//! | `inspect`      | `(&S) -> void` → `Option<S>`       | Side-effect on the inner value     |
 //! | `map<U>`       | `(S) -> U` → `Option<U>`           | Transform inner value              |
 //! | `andThen<U>`   | `(S) -> Option<U>` → `Option<U>`   | Chain fallible operations          |
+//!
+//! `filter` and `inspect` observe the payload through `&S` because they hand
+//! the original option back. `map` and `andThen` pass `S` by value because the
+//! payload is given away to the callback.
 //!
 //! All callbacks are `@noescape`: the closure must not outlive the method call.
 //!
@@ -60,7 +78,7 @@
 //!
 //!   // Chain: look up user, check name length, convert to uppercase
 //!   let result: Option<i32> = findUser(1)
-//!     .filter((s: str): boolean -> { return s != ""; })
+//!     .filter((s: &str): boolean -> { return *s != ""; })
 //!     .map<i32>((s: str): i32 -> { return 42; });
 //!
 //!   return 0;
@@ -130,6 +148,8 @@ export enum Option<S> {
 
   /// Extracts the contained value, panicking if `NONE`.
   ///
+  /// Consumes the option: the receiver is moved and cannot be used again.
+  ///
   /// # Panics
   ///
   /// Panics with `"Option is None"` if the option is `NONE`.
@@ -145,7 +165,7 @@ export enum Option<S> {
   /// let y: Option<i32> = Option::NONE;
   /// // y.unwrap();  // PANIC: "Option is None"
   /// ```
-  public unwrap(&self): S {
+  public unwrap(self): S {
     return match (self) {
       Option::SOME(s) -> s,
       Option::NONE -> @panic("Option is None"),
@@ -153,6 +173,8 @@ export enum Option<S> {
   }
 
   /// Returns the contained value, or `defaultValue` if `NONE`.
+  ///
+  /// Consumes the option: the receiver is moved and cannot be used again.
   ///
   /// The default is always evaluated. Use `unwrapOrElse` for a lazy
   /// alternative that only computes the default when needed.
@@ -172,14 +194,23 @@ export enum Option<S> {
   /// let y: Option<i32> = Option::NONE;
   /// let b: i32 = y.unwrapOr(0);  // 0
   /// ```
-  public unwrapOr(&self, defaultValue: S): S {
-    return match (self) {
-      Option::SOME(s) -> s,
-      Option::NONE -> defaultValue,
+  public unwrapOr(self, defaultValue: S): S {
+    // `defaultValue` is returned from a statement match rather than a match
+    // expression: returning a by-value parameter out of a match arm of a
+    // consuming method drops it twice.
+    match (self) {
+      Option::SOME(s) -> {
+        return s;
+      },
+      Option::NONE -> {},
     };
+
+    return defaultValue;
   }
 
   /// Returns the contained value, or calls `f` to produce a default.
+  ///
+  /// Consumes the option: the receiver is moved and cannot be used again.
   ///
   /// Unlike `unwrapOr`, the fallback is only evaluated when the option
   /// is `NONE`. Use this when computing the default is expensive.
@@ -201,7 +232,7 @@ export enum Option<S> {
   /// let val2: i32 = y.unwrapOrElse((): i32 -> { return 99; });
   /// // val2 == 42 (callback was NOT called)
   /// ```
-  public unwrapOrElse(&self, @noescape f: () -> S): S {
+  public unwrapOrElse(self, @noescape f: () -> S): S {
     return match (self) {
       Option::SOME(s) -> s,
       Option::NONE -> f(),
@@ -214,10 +245,13 @@ export enum Option<S> {
   /// Useful for adding a condition to an optional value without unwrapping
   /// it manually.
   ///
+  /// Consumes the option: the receiver is moved and cannot be used again.
+  /// The payload itself is only borrowed by `predicate` and is handed back
+  /// inside the returned option when the predicate passes.
+  ///
   /// # Arguments
   ///
-  /// * `predicate` - Callback that tests the inner value. Receives `S`
-  ///   by copy.
+  /// * `predicate` - Callback that tests the inner value through `&S`.
   ///
   /// # Returns
   ///
@@ -231,27 +265,33 @@ export enum Option<S> {
   /// let x: Option<i32> = Option::SOME(4);
   ///
   /// // Keep only even values
-  /// let even: Option<i32> = x.filter((n: i32): boolean -> { return n % 2 == 0; });
+  /// let even: Option<i32> = x.filter((n: &i32): boolean -> { return *n % 2 == 0; });
   /// // even == Option::SOME(4)
   ///
   /// let odd: Option<i32> = Option::SOME(3);
-  /// let filtered: Option<i32> = odd.filter((n: i32): boolean -> { return n % 2 == 0; });
+  /// let filtered: Option<i32> = odd.filter((n: &i32): boolean -> { return *n % 2 == 0; });
   /// // filtered == Option::NONE
   /// ```
-  public filter(&self, @noescape predicate: (S) -> boolean): Option<S> {
+  public filter(self, @noescape predicate: (&S) -> boolean): Option<S> {
     match (self) {
       Option::SOME(s) -> {
-        if (predicate(s)) {
+        if (predicate(&s)) {
           return Option::SOME(s);
         }
+
+        return Option::NONE;
       },
-      _ -> {},
+      Option::NONE -> {},
     };
+
     return Option::NONE;
   }
 
   /// Returns `self` if `SOME`, otherwise calls `f` to produce an
   /// alternative `Option<S>`.
+  ///
+  /// Consumes the option: the receiver is moved into the returned option
+  /// when it is `SOME`.
   ///
   /// The callback is only invoked when `self` is `NONE`.
   ///
@@ -276,7 +316,7 @@ export enum Option<S> {
   /// });
   /// // result == Option::SOME(1)  (callback not called)
   /// ```
-  public orElse(&self, @noescape f: () -> Option<S>): Option<S> {
+  public orElse(self, @noescape f: () -> Option<S>): Option<S> {
     return match (self) {
       Option::SOME(s) -> Option::SOME(s),
       Option::NONE -> f(),
@@ -289,9 +329,12 @@ export enum Option<S> {
   /// Useful for logging, debugging, or accumulating state while
   /// passing the option through a chain.
   ///
+  /// Consumes the option: the receiver is moved and handed back as the
+  /// return value. The payload is only borrowed by `f`.
+  ///
   /// # Arguments
   ///
-  /// * `f` - Callback invoked with the inner value by copy. Its return
+  /// * `f` - Callback invoked with the inner value through `&S`. Its return
   ///   value is discarded.
   ///
   /// # Returns
@@ -308,20 +351,22 @@ export enum Option<S> {
   ///
   /// // Log the value mid-chain
   /// let result: Option<i32> = x
-  ///   .inspect((val: i32): void -> { Io::printI32(val); })
+  ///   .inspect((val: &i32): void -> { Io::printI32(*val); })
   ///   .map<i32>((val: i32): i32 -> { return val * 2; });
   /// // Prints: 42
   /// // result == Option::SOME(84)
   /// ```
-  public inspect(&self, @noescape f: (S) -> void): Option<S> {
+  public inspect(self, @noescape f: (&S) -> void): Option<S> {
     match (self) {
-      Option::SOME(s) -> f(s),
-      _ -> {},
+      Option::SOME(s) -> {
+        f(&s);
+
+        return Option::SOME(s);
+      },
+      Option::NONE -> {},
     };
-    return match (self) {
-      Option::SOME(s) -> Option::SOME(s),
-      Option::NONE -> Option::NONE,
-    };
+
+    return Option::NONE;
   }
 
   /// Transforms the inner value by applying `f`, producing an
@@ -329,6 +374,8 @@ export enum Option<S> {
   ///
   /// This is the fundamental "functor map" over Option: it lets you
   /// transform the contained value without unwrapping.
+  ///
+  /// Consumes the option and gives the payload away to `f`.
   ///
   /// # Type Parameters
   ///
@@ -362,7 +409,7 @@ export enum Option<S> {
   /// });
   /// // result == Option::NONE
   /// ```
-  public map<U>(&self, @noescape f: (S) -> U): Option<U> {
+  public map<U>(self, @noescape f: (S) -> U): Option<U> {
     return match (self) {
       Option::SOME(s) -> Option::SOME(f(s)),
       Option::NONE -> Option::NONE,
@@ -374,6 +421,8 @@ export enum Option<S> {
   ///
   /// This is the monadic "bind" / "flatMap" over Option. Use it to chain
   /// operations that each might fail (return `NONE`).
+  ///
+  /// Consumes the option and gives the payload away to `f`.
   ///
   /// # Type Parameters
   ///
@@ -411,7 +460,7 @@ export enum Option<S> {
   ///   .andThen<i32>((n: i32): Option<i32> -> { return safeDivide(n, 5); });
   /// // bad == Option::NONE (first andThen returned NONE)
   /// ```
-  public andThen<U>(&self, @noescape f: (S) -> Option<U>): Option<U> {
+  public andThen<U>(self, @noescape f: (S) -> Option<U>): Option<U> {
     return match (self) {
       Option::SOME(s) -> f(s),
       Option::NONE -> Option::NONE,
