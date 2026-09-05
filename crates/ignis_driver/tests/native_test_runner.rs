@@ -296,6 +296,81 @@ function deeperSmoke(): void {
   );
 }
 
+/// A filtered run must emit every project module, not just the import closure of the
+/// selected tests. `b.ign` calls `C::helper` without importing `c.ign`, so the import
+/// graph alone would leave `c.o` out of the link and the harness would fail to resolve
+/// `C_helper`.
+#[test]
+fn run_project_tests_links_modules_reached_outside_the_import_graph_of_the_filter() {
+  let project = write_test_project(
+    r#"
+import C from "./c";
+import A from "./a";
+
+function main(): i32 {
+    return A::callsB() - C::helper();
+}
+"#,
+  );
+
+  write_project_module(
+    project.path(),
+    "c.ign",
+    r#"
+export namespace C {
+  function helper(): i32 {
+    return 7;
+  }
+}
+"#,
+  );
+  write_project_module(
+    project.path(),
+    "b.ign",
+    r#"
+export namespace B {
+  function callsC(): i32 {
+    return C::helper();
+  }
+}
+"#,
+  );
+  write_project_module(
+    project.path(),
+    "a.ign",
+    r#"
+import B from "./b";
+
+export namespace A {
+  function callsB(): i32 {
+    return B::callsC();
+  }
+}
+"#,
+  );
+  write_project_module(
+    project.path(),
+    "a_tests.ign",
+    r#"
+import Test from "std::test";
+import A from "./a";
+
+@test
+function aReachesC(): void {
+    Test::assert(A::callsB() == 7);
+}
+"#,
+  );
+
+  let result = run_project_tests(project.path(), Some("aReachesC"), false);
+
+  assert!(result.is_ok(), "expected the filtered test run to link and pass");
+  assert!(
+    harness_binary_path(project.path()).exists(),
+    "expected test harness binary to be built"
+  );
+}
+
 #[test]
 fn run_single_file_tests_returns_ok_when_generic_equality_assertions_pass() {
   let (_temp_dir, file_path) = write_single_test_file(
