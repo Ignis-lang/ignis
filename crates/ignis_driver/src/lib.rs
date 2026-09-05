@@ -5,6 +5,7 @@ pub mod backend;
 mod build_layout;
 mod context;
 mod doc;
+pub mod jobs;
 pub mod link;
 mod pipeline;
 pub mod project;

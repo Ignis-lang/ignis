@@ -1114,6 +1114,8 @@ fn load_manifest(std_path: &str) -> IgnisSTDManifest {
 fn main() {
   let cli = Cli::parse();
 
+  ignis_driver::jobs::set_job_limit(cli.jobs.map(|jobs| jobs as usize));
+
   let result = match &cli.subcommand {
     SubCommand::Lsp(_) => {
       run_lsp(&cli);

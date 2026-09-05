@@ -146,6 +146,138 @@ export namespace CCompiler {
 
     @panic("unreachable: CCompiler::compileObject match did not return");
   }
+
+  /// Compile every source/object pair, keeping up to `jobs` compilers running.
+  ///
+  /// Each `gcc -c` writes its own object file, so the units are independent and
+  /// only the archive or link step that follows needs all of them present.
+  /// Failures are reported in unit order, which keeps the reported diagnostic
+  /// independent of which compiler happened to fail first.
+  ///
+  /// - `sourcePaths` and `objectPaths` are matched by index; trailing entries of
+  ///   the longer vector are ignored.
+  function compileObjects(
+    cc: str,
+    sourcePaths: &Vector<Path::PathBuf>,
+    objectPaths: &Vector<Path::PathBuf>,
+    includeDirs: &Vector<String>,
+    extraFlags: &Vector<String>,
+    jobs: u64,
+  ): Result<boolean, DiagnosticBag> {
+    let compiler: str = cCompilerResolve(cc);
+    let window: u64 = jobs == 0 ? 1 : jobs;
+
+    let mut unitCount: u64 = sourcePaths.length();
+    if (objectPaths.length() < unitCount) {
+      unitCount = objectPaths.length();
+    }
+
+    // Slot `i` holds the compiler for unit `i`. A slot with `pid == -1` records
+    // a spawn that never happened, so slot indices stay aligned with unit order.
+    let mut children: Vector<Process::Child> = Vector::new<Process::Child>();
+    let mut spawnCursor: u64 = 0;
+    let mut waitCursor: u64 = 0;
+
+    while (waitCursor < unitCount) {
+      while (spawnCursor < unitCount && (spawnCursor - waitCursor) < window) {
+        let Option::SOME(sourcePath) = sourcePaths.get(spawnCursor) else {
+          break;
+        };
+        let Option::SOME(objectPath) = objectPaths.get(spawnCursor) else {
+          break;
+        };
+
+        let mut cmd: Process::Command = Process::Command::new(compiler);
+        cmd.arg("-c");
+        cmd.arg(sourcePath.asStr());
+        cmd.arg("-o");
+        cmd.arg(objectPath.asStr());
+
+        let mut flagIdx: u64 = 0;
+        while (flagIdx < extraFlags.length()) {
+          let Option::SOME(flag) = extraFlags.get(flagIdx) else {
+            break;
+          };
+          cmd.arg(flag.toStr());
+          flagIdx += 1;
+        }
+
+        let mut incIdx: u64 = 0;
+        while (incIdx < includeDirs.length()) {
+          let Option::SOME(dir) = includeDirs.get(incIdx) else {
+            break;
+          };
+          cmd.arg("-I");
+          cmd.arg(dir.toStr());
+          incIdx += 1;
+        }
+
+        match (cmd.spawnCapturing()) {
+          Result::OK(child) -> children.push(child),
+          Result::ERROR(_) -> children.push(Process::Child {
+            pid: -1,
+            errorReadFd: -1,
+            stdoutFd: -1,
+            stderrFd: -1,
+          }),
+        };
+
+        spawnCursor += 1;
+      }
+
+      let mut failure: Option<String> = Option::NONE;
+
+      if (waitCursor < children.length()) {
+        let mut child: &mut Process::Child = match (children.getMut(waitCursor)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("unreachable: CCompiler::compileObjects lost a compiler slot"),
+        };
+
+        if (child.pid == -1) {
+          failure = Option::SOME(String::create("could not start the C compiler"));
+        } else {
+          match (child.wait()) {
+            Result::OK(out) -> {
+              let status: Process::ExitStatus = out.status();
+
+              if (!status.success) {
+                failure = Option::SOME(out.stderr());
+              }
+            },
+            Result::ERROR(ioErr) -> failure = Option::SOME(String::create(ioErr.errorMessage())),
+          };
+        }
+      } else {
+        failure = Option::SOME(String::create("could not start the C compiler"));
+      }
+
+      if (let Option::SOME(detail) = failure) {
+        // Drain the children still in flight so the failing build leaves no
+        // zombie compilers and no leaked descriptors behind.
+        let mut pending: u64 = waitCursor + 1;
+
+        while (pending < spawnCursor) {
+          let mut pendingChild: &mut Process::Child = match (children.getMut(pending)) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("unreachable: CCompiler::compileObjects lost a compiler slot"),
+          };
+
+          if (pendingChild.pid != -1) {
+            let _ = pendingChild.wait();
+          }
+
+          pending += 1;
+        }
+
+        let error: ToolchainError = ToolchainError::new(compiler, "compilation", detail.toStr());
+        return Result::ERROR(toolchainErrorDiag(ToolchainDiagnosticCode::COMPILE_FAILED, &error));
+      }
+
+      waitCursor += 1;
+    }
+
+    return Result::OK(true);
+  }
 }
 
 /// Resolve the compiler name: use `cc` when non-empty; fall back to `"gcc"`.

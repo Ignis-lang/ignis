@@ -392,6 +392,92 @@ export namespace Process {
     }
   }
 
+  /// A spawned child process whose stdout and stderr are being captured.
+  ///
+  /// A `Child` owns the child pid, the exec-status pipe, and the two temporary
+  /// capture files. Exactly one `wait` call per child releases all of them, so
+  /// dropping a `Child` without waiting leaks the descriptors and leaves a
+  /// zombie process behind.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Process from "std::process";
+  ///
+  /// let mut command: Process::Command = Process::Command::new("/bin/echo");
+  /// command.arg("hello");
+  ///
+  /// match (command.spawnCapturing()) {
+  ///   Result::OK(child) -> {
+  ///     let mut running: Process::Child = child;
+  ///     match (running.wait()) {
+  ///       Result::OK(output) -> {},
+  ///       Result::ERROR(_) -> {},
+  ///     };
+  ///   },
+  ///   Result::ERROR(_) -> {},
+  /// };
+  /// ```
+  record Child {
+    /// Process id of the running child.
+    public pid: i32;
+
+    /// Read end of the pipe the child reports pre-`execvp` failures on.
+    public errorReadFd: i32;
+
+    /// Open descriptor of the unlinked temporary file capturing stdout.
+    public stdoutFd: i32;
+
+    /// Open descriptor of the unlinked temporary file capturing stderr.
+    public stderrFd: i32;
+
+    /// Waits for the child to exit and returns its captured output.
+    ///
+    /// Every descriptor this `Child` owns is closed before returning, on both
+    /// the success and the failure path.
+    public wait(&mut self): Result<Output, Io::IoError> {
+      let mut rawStatus: i32 = 0;
+      let rawErrno: i32 = processCommandWaitForExec(self.pid, self.errorReadFd, &mut rawStatus);
+
+      if (rawErrno != 0) {
+        LibC::File::close(self.stdoutFd);
+        LibC::File::close(self.stderrFd);
+        return Result::ERROR(Io::IoError::fromErrno(rawErrno));
+      }
+
+      let mut stdout: String = String::new();
+
+      match (processCommandReadAll(self.stdoutFd)) {
+        Result::OK(value) -> stdout = value,
+        Result::ERROR(error) -> {
+          LibC::File::close(self.stdoutFd);
+          LibC::File::close(self.stderrFd);
+          return Result::ERROR(error);
+        },
+      };
+
+      LibC::File::close(self.stdoutFd);
+
+      let mut stderr: String = String::new();
+
+      match (processCommandReadAll(self.stderrFd)) {
+        Result::OK(value) -> stderr = value,
+        Result::ERROR(error) -> {
+          LibC::File::close(self.stderrFd);
+          return Result::ERROR(error);
+        },
+      };
+
+      LibC::File::close(self.stderrFd);
+
+      return Result::OK(Output {
+        status: processExitStatusFromRaw(rawStatus),
+        stdout: stdout,
+        stderr: stderr,
+      });
+    }
+  }
+
   /// Owned child-process builder implemented in Ignis std.
   ///
   /// The builder keeps owned program, argument, environment, and cwd state in
@@ -587,12 +673,15 @@ export namespace Process {
       }
     }
 
-    /// Forks, optionally redirects output fds, execs the program, and waits.
+    /// Forks, optionally redirects output fds, and execs the program without
+    /// waiting for it to finish.
     ///
-    /// Returns 0 on successful spawn/wait and writes the raw wait status to
-    /// `rawStatusOut`. A nonzero return value is a raw `errno` suitable for
-    /// `Io::IoError::fromErrno`.
-    spawn(&self, stdoutFd: i32, stderrFd: i32, rawStatusOut: &mut i32): i32 {
+    /// On success returns 0 and writes the child pid plus the read end of the
+    /// exec-status pipe. The caller owns both and must hand them to
+    /// `processCommandWaitForExec` exactly once, otherwise the child stays a
+    /// zombie and the pipe fd leaks. A nonzero return value is a raw `errno`
+    /// and leaves no child behind.
+    spawnNoWait(&self, stdoutFd: i32, stderrFd: i32, pidOut: &mut i32, errorReadFdOut: &mut i32): i32 {
       let argv: *mut str = self.buildArgv();
       let mut errorPipe: i32[2] = [0, 0];
 
@@ -646,7 +735,27 @@ export namespace Process {
       LibC::File::close(errorPipe[1]);
       Memory::free(argv as *mut u8);
 
-      return processCommandWaitForExec(pid, errorPipe[0], rawStatusOut);
+      @write<i32>(pidOut as *mut i32, pid);
+      @write<i32>(errorReadFdOut as *mut i32, errorPipe[0]);
+
+      return 0;
+    }
+
+    /// Forks, optionally redirects output fds, execs the program, and waits.
+    ///
+    /// Returns 0 on successful spawn/wait and writes the raw wait status to
+    /// `rawStatusOut`. A nonzero return value is a raw `errno` suitable for
+    /// `Io::IoError::fromErrno`.
+    spawn(&self, stdoutFd: i32, stderrFd: i32, rawStatusOut: &mut i32): i32 {
+      let mut pid: i32 = 0;
+      let mut errorReadFd: i32 = 0;
+      let rawErrno: i32 = self.spawnNoWait(stdoutFd, stderrFd, &mut pid, &mut errorReadFd);
+
+      if (rawErrno != 0) {
+        return rawErrno;
+      }
+
+      return processCommandWaitForExec(pid, errorReadFd, rawStatusOut);
     }
 
     /// Drops all initialized argv strings and frees argv storage.
@@ -848,6 +957,68 @@ export namespace Process {
       });
     }
 
+    /// Spawns the child with captured stdout/stderr and returns immediately.
+    ///
+    /// This is the non-blocking half of `output`: it performs the same capture
+    /// setup and the same `fork`/`execvp`, but hands back a `Child` instead of
+    /// waiting. Callers keeping several children in flight can therefore
+    /// overlap their run time and still collect results in any order they want.
+    ///
+    /// The caller must call `Child::wait` exactly once on the returned handle.
+    ///
+    /// # Example
+    ///
+    /// ```ignis
+    /// import Process from "std::process";
+    ///
+    /// let mut command: Process::Command = Process::Command::new("/bin/sh");
+    /// command.arg("-c");
+    /// command.arg("printf done");
+    ///
+    /// match (command.spawnCapturing()) {
+    ///   Result::OK(child) -> {},
+    ///   Result::ERROR(_) -> {},
+    /// };
+    /// ```
+    public spawnCapturing(&self): Result<Child, Io::IoError> {
+      let stdoutTemplate: String = String::create("/tmp/ignis-process-stdout-XXXXXX");
+      let stderrTemplate: String = String::create("/tmp/ignis-process-stderr-XXXXXX");
+      let stdoutFd: i32 = LibC::Stdio::mkstemp(stdoutTemplate.toStr() as *mut u8);
+
+      if (stdoutFd == -1) {
+        return Result::ERROR(Io::IoError::lastError());
+      }
+
+      let stderrFd: i32 = LibC::Stdio::mkstemp(stderrTemplate.toStr() as *mut u8);
+
+      if (stderrFd == -1) {
+        let error: Io::IoError = Io::IoError::lastError();
+        LibC::File::close(stdoutFd);
+        LibC::File::unlink(stdoutTemplate.toStr() as *u8);
+        return Result::ERROR(error);
+      }
+
+      LibC::File::unlink(stdoutTemplate.toStr() as *u8);
+      LibC::File::unlink(stderrTemplate.toStr() as *u8);
+
+      let mut pid: i32 = 0;
+      let mut errorReadFd: i32 = 0;
+      let rawErrno: i32 = self.spawnNoWait(stdoutFd, stderrFd, &mut pid, &mut errorReadFd);
+
+      if (rawErrno != 0) {
+        LibC::File::close(stdoutFd);
+        LibC::File::close(stderrFd);
+        return Result::ERROR(Io::IoError::fromErrno(rawErrno));
+      }
+
+      return Result::OK(Child {
+        pid: pid,
+        errorReadFd: errorReadFd,
+        stdoutFd: stdoutFd,
+        stderrFd: stderrFd,
+      });
+    }
+
     /// Releases the owned builder storage.
     public drop(&mut self): void {
       self.program.drop();
@@ -855,6 +1026,28 @@ export namespace Process {
       self.dropEnvStorage();
       self.cwd.drop();
     }
+  }
+
+  /// Number of processors available to this process, or 1 when unknown.
+  ///
+  /// This is the default worker count for pools that run one child process per
+  /// unit of work, and it matches what the host compiler uses.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Process from "std::process";
+  ///
+  /// let workers: u64 = Process::availableParallelism();
+  /// ```
+  function availableParallelism(): u64 {
+    let count: i64 = LibC::Process::onlineProcessorCount();
+
+    if (count < 1) {
+      return 1;
+    }
+
+    return count as u64;
   }
 
   /// Convenience helper mirroring common builder-style construction.

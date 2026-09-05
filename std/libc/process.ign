@@ -98,6 +98,11 @@ extern __unistd_proc {
   /// `argv` must be a null-terminated vector of null-terminated strings. On
   /// success this call does not return; on failure it returns -1 and sets errno.
   function execvp(file: CType::CConstStr, argv: *mut str): CType::CInt;
+
+  /// Selector for the number of processors currently online.
+  const _SC_NPROCESSORS_ONLN: CType::CInt;
+  /// POSIX `sysconf`; queries a runtime configurable system value.
+  function sysconf(name: CType::CInt): CType::CLong;
 }
 
 @configFlag(@platform("linux") || @platform("macos"))
@@ -177,6 +182,16 @@ namespace LibC::Process {
   /// Suspends execution for `usec` microseconds.
   @configFlag(@platform("linux") || @platform("macos"))
   function usleep(usec: CType::CUInt): CType::CInt { return __unistd_proc::usleep(usec); }
+
+  /// Number of processors currently online, or -1 when the host cannot say.
+  ///
+  /// This is `sysconf(_SC_NPROCESSORS_ONLN)`. It is the only host CPU count
+  /// reachable from Ignis, so callers sizing a worker pool must handle the -1
+  /// result themselves.
+  @configFlag(@platform("linux") || @platform("macos"))
+  function onlineProcessorCount(): i64 {
+    return __unistd_proc::sysconf(__unistd_proc::_SC_NPROCESSORS_ONLN) as i64;
+  }
 
   /// Creates a new process by duplicating the calling process.
   ///

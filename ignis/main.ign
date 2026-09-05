@@ -260,28 +260,26 @@ function compileAndLinkUnits(
   let mut objects: Vector<String> = Vector::new<String>();
   let mut unitIndex: u64 = 0;
 
-  while (unitIndex < sourcePaths.length()) {
-    let Option::SOME(sourcePath) = sourcePaths.get(unitIndex) else {
-      break;
-    };
+  while (unitIndex < objectPaths.length()) {
     let Option::SOME(objectPath) = objectPaths.get(unitIndex) else {
       break;
     };
 
-    if (let Result::ERROR(compileBag) = CCompiler::compileObject(
-      "gcc",
-      sourcePath,
-      objectPath,
-      &includeDirs,
-      &extraFlags,
-    )) {
-      renderBagToStderr(&compileBag, file);
-      Io::println(String::create("  link: failed"));
-      return 1;
-    }
-
     objects.push(objectPath.toString());
     unitIndex += 1;
+  }
+
+  if (let Result::ERROR(compileBag) = CCompiler::compileObjects(
+    "gcc",
+    sourcePaths,
+    objectPaths,
+    &includeDirs,
+    &extraFlags,
+    TestRunner::jobLimit(),
+  )) {
+    renderBagToStderr(&compileBag, file);
+    Io::println(String::create("  link: failed"));
+    return 1;
   }
 
   let mut archives: Vector<String> = Vector::new<String>();
@@ -820,7 +818,7 @@ function runProjectTests(
 
   Io::eprintln(TestRunner::sectionHeader("Running"));
 
-  let outcomes: Vector<TestOutcome> = TestRunner::execute(&binaryPath, &selected, updateSnapshots);
+  let outcomes: Vector<TestOutcome> = TestRunner::execute(&binaryPath, &selected, updateSnapshots, TestRunner::jobLimit());
 
   if (TestRunner::report(&outcomes, &binaryPath) > 0) {
     return 1;
