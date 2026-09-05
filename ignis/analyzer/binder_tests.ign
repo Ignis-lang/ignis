@@ -1,6 +1,7 @@
 import Test from "std::test";
 
 import DiagnosticBag, DiagnosticCode, SourceFile, SourceSpan from "@compiler::diagnostics";
+import Id from "@compiler::ids";
 import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 import ParseOutput, Parser from "@compiler::parser";
@@ -3479,4 +3480,67 @@ function binderReadsNoExtensionTargetFromAnotherAttribute(): void {
     Option::SOME(_) -> @panic("expected no extension target"),
     Option::NONE -> {},
   };
+}
+
+/// The mutability the binder recorded for the static field named `name`.
+function binderStaticFieldMutability(source: str, name: str): boolean {
+  let file: SourceFile = SourceFile::create("binder_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let pass1 = Analyzer::Binder::predeclareRoots(
+    &parsed.module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+  let _pass2 = Analyzer::Binder::completeRoots(
+    &parsed.module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &pass1,
+  );
+
+  let wanted: String = String::create(name);
+  let mut rawId: u64 = 0;
+
+  while (rawId < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+    rawId += 1;
+
+    let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(defId) else {
+      continue;
+    };
+
+    let mutable: boolean = variableDef.mutable;
+    let nameSym: Analyzer::SymbolId = variableDef.name;
+
+    let Option::SOME(text) = symbols.resolve(nameSym) else {
+      continue;
+    };
+
+    if (wanted.equals(text)) {
+      return mutable;
+    }
+  }
+
+  @panic("binderStaticFieldMutability: no static field with that name");
+}
+
+/// Scenario: `static mut` on a record field binds a writable definition, while
+/// a plain `static` field binds an immutable one.
+/// Spec: IGN-203 — `static mut` fields.
+@test
+function binderMarksStaticMutFieldsMutable(): void {
+  Test::assertEq<boolean>(binderStaticFieldMutability("record Counter {\n  static mut TOTAL: i32 = 0;\n  static SEED: i32 = 7;\n}\n", "TOTAL"), true);
+  Test::assertEq<boolean>(binderStaticFieldMutability("record Counter {\n  static mut TOTAL: i32 = 0;\n  static SEED: i32 = 7;\n}\n", "SEED"), false);
 }

@@ -241,6 +241,19 @@ impl<'a> LirPrinter<'a> {
         let ref_kind = if *mutable { "&mut" } else { "&" };
         writeln!(self.output, "t{} = {} %{} : {}", dest.index(), ref_kind, local.index(), ty).unwrap();
       },
+      Instr::AddrOfGlobal { dest, def, mutable } => {
+        let ty = self.format_type(func.temp_type(*dest));
+        let ref_kind = if *mutable { "&mut" } else { "&" };
+        writeln!(
+          self.output,
+          "t{} = {} ${} : {}",
+          dest.index(),
+          ref_kind,
+          self.def_name(*def),
+          ty
+        )
+        .unwrap();
+      },
       Instr::GetElementPtr {
         dest,
         base,

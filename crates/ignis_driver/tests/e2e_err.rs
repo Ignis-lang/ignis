@@ -1621,3 +1621,41 @@ function main(): i32 {
 "#,
   );
 }
+
+// =========================================================================
+// Static Field Mutability Tests
+// =========================================================================
+
+#[test]
+fn e2e_err_assign_to_immutable_static_field() {
+  e2e_error_test(
+    "err_assign_to_immutable_static_field",
+    r#"
+record Config {
+    static MAX_SIZE: i32 = 1024;
+}
+
+function main(): i32 {
+    Config::MAX_SIZE = 1;
+    return 0;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_mutable_borrow_of_immutable_static_field() {
+  e2e_error_test(
+    "err_mutable_borrow_of_immutable_static_field",
+    r#"
+record Config {
+    static MAX_SIZE: i32 = 1024;
+}
+
+function main(): i32 {
+    let handle: &mut i32 = &mut Config::MAX_SIZE;
+    return *handle;
+}
+"#,
+  );
+}

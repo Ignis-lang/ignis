@@ -240,6 +240,10 @@ pub struct ConstantDefinition {
   pub value: Option<ConstValue>,
   /// For static fields, the owning record/enum definition
   pub owner_type: Option<DefinitionId>,
+  /// Set for `static mut` fields. Their initializer is still a compile-time
+  /// constant, but the storage it seeds is writable, so reads of it must not be
+  /// folded and writes and `&mut` borrows of it are accepted.
+  pub mutable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

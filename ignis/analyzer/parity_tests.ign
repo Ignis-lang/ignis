@@ -1022,8 +1022,41 @@ function parityTraitBasicRequiredMethod(): void {
   );
 }
 
+/// Origin: golden_ok::static_mut_fields_accept_assignment_and_mutable_borrows.
+/// Host expectation: accepted — a `static mut` field is one writable storage
+/// location, so assigning to it and borrowing it as `&mut` are both legal
+/// (IGN-203).
+@test
+function parityStaticMutFieldIsWritable(): void {
+  parityAcceptsSource(
+    "record Counter {\n    static mut TOTAL: i32 = 0;\n}\n\nfunction bump(): void {\n    Counter::TOTAL += 1;\n}\n\nfunction main(): i32 {\n    bump();\n\n    let handle: &mut i32 = &mut Counter::TOTAL;\n    *handle = *handle + 1;\n\n    return Counter::TOTAL;\n}\n",
+  );
+}
+
+/// Origin: golden_err::assign_to_immutable_static_field.
+/// Host expectation: A0013 — a `static` field without `mut` stays immutable.
+@test
+function parityAssignToImmutableStaticField(): void {
+  parityRejectsSource(
+    "record Config {\n    static MAX: i32 = 1024;\n}\n\nfunction main(): void {\n    Config::MAX = 1;\n    return;\n}\n",
+    DiagnosticCode::MUTABILITY_VIOLATION,
+    1,
+  );
+}
+
+/// Origin: golden_err::mutable_borrow_of_immutable_static_field.
+/// Host expectation: A0014 — `&mut` of a `static` field without `mut`.
+@test
+function parityMutableBorrowOfImmutableStaticField(): void {
+  parityRejectsSource(
+    "record Config {\n    static MAX: i32 = 1024;\n}\n\nfunction main(): void {\n    let handle: &mut i32 = &mut Config::MAX;\n    return;\n}\n",
+    DiagnosticCode::MUTABLE_REFERENCE_TO_IMMUTABLE,
+    1,
+  );
+}
+
 // ===========================================================================
 // Gap inventory
 //
-// Empty. All 74 curated fixtures run as gates.
+// Empty. All 77 curated fixtures run as gates.
 // ===========================================================================

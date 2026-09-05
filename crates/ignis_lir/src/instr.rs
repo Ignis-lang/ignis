@@ -119,6 +119,13 @@ pub enum Instr {
     mutable: bool,
   },
 
+  /// Get address of a global (a `static mut` field): `dest = &global`
+  AddrOfGlobal {
+    dest: TempId,
+    def: DefinitionId,
+    mutable: bool,
+  },
+
   /// Get element pointer (for array indexing).
   /// `dest = &base[index]`
   GetElementPtr {

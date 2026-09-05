@@ -424,6 +424,46 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
+      // `Type::NAME` is written as a path, so a static field arrives here as a
+      // definition rather than a local. It names one storage location the
+      // whole program shares, and only `static mut` makes that location
+      // writable.
+      if (let Analyzer::ResolverBodies::ResolvedRef::Definition(targetDefId) = &resolved) {
+        let mut isVariable: boolean = false;
+        let mut isMutable: boolean = false;
+
+        if (let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(targetDefId)) {
+          isVariable = true;
+          isMutable = variableDef.mutable;
+        }
+
+        if (isVariable && !isMutable) {
+          let targetName: String = Analyzer::Typecheck::referenceTargetName(module, value.target);
+          let message: String = `Cannot assign to immutable variable '${targetName.toStr()}'`;
+
+          Analyzer::Typecheck::emitDiagnostic(
+            state,
+            value.span,
+            DiagnosticCode::MUTABILITY_VIOLATION,
+            message.toStr(),
+          );
+          return Option::NONE;
+        }
+
+        if (isVariable) {
+          return Analyzer::Typecheck::checkPlaceAssignment(
+            state,
+            defStore,
+            typeStore,
+            symbols,
+            module,
+            resolvedBodies,
+            exprId,
+            value,
+          );
+        }
+      }
+
       let localId: Analyzer::ResolverBodies::LocalId = match (resolved) {
         Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> localId,
         Analyzer::ResolverBodies::ResolvedRef::Definition(_) -> {

@@ -518,6 +518,7 @@ impl<'a> Analyzer<'a> {
             type_id: const_type,
             value: None,
             owner_type: None,
+            mutable: false,
           });
         }
 
@@ -10088,6 +10089,10 @@ impl<'a> Analyzer<'a> {
       },
       ASTExpression::Path(path) => {
         if let Some(last) = path.segments.last() {
+          if self.static_field_is_mutable(&last.span) {
+            return true;
+          }
+
           if let Some(def_id) = self.scopes.lookup_def(&last.name) {
             match &self.defs.get(def_id).kind {
               DefinitionKind::Variable(var_def) => var_def.mutable,
@@ -10102,6 +10107,12 @@ impl<'a> Analyzer<'a> {
         }
       },
       ASTExpression::MemberAccess(ma) => {
+        // `Type::NAME` names one storage location shared by the whole program.
+        // Only `static mut` makes it writable; a plain `static` stays a value.
+        if ma.op == ignis_ast::expressions::member_access::ASTAccessOp::DoubleColon {
+          return self.static_field_is_mutable(&ma.member_span);
+        }
+
         // For field access (dot operator), check if the base object is mutable
         if ma.op == ignis_ast::expressions::member_access::ASTAccessOp::Dot {
           let node = self.ast.get(&ma.object);
@@ -10398,6 +10409,22 @@ impl<'a> Analyzer<'a> {
       },
       _ => "<expression>".to_string(),
     }
+  }
+
+  /// Whether the member named at `member_span` is a `static mut` field.
+  ///
+  /// Static access resolves during typechecking, which records the field's
+  /// definition against the span of the member name. Reading it back here keeps
+  /// the mutability answer on the same definition the access resolved to.
+  fn static_field_is_mutable(
+    &self,
+    member_span: &ignis_type::span::Span,
+  ) -> bool {
+    let Some(def_id) = self.lookup_import_item_def(member_span) else {
+      return false;
+    };
+
+    matches!(&self.defs.get(def_id).kind, DefinitionKind::Constant(const_def) if const_def.mutable)
   }
 
   fn is_lvalue(

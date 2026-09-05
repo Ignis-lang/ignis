@@ -37,6 +37,11 @@ fn fixture_mut_ref_to_immutable() {
   test_fixture("test_cases/analyzer/mutability/mut_ref_to_immutable.ign");
 }
 
+#[test]
+fn fixture_static_mut_field() {
+  test_fixture("test_cases/analyzer/mutability/static_mut_field.ign");
+}
+
 // --- Borrow Tests ---
 
 #[test]

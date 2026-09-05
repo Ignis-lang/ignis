@@ -1441,6 +1441,7 @@ export namespace CodegenC {
       Lir::Instr::Cast(_) -> "Cast",
       Lir::Instr::BitCast(_) -> "BitCast",
       Lir::Instr::AddrOfLocal(_) -> "AddrOfLocal",
+      Lir::Instr::AddrOfGlobal(_) -> "AddrOfGlobal",
       Lir::Instr::GetElementPtr(_) -> "GetElementPtr",
       Lir::Instr::MakeSlice(_) -> "MakeSlice",
       Lir::Instr::InitVector(_) -> "InitVector",
@@ -1568,6 +1569,12 @@ export namespace CodegenC {
           }
         }
 
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
+      },
+      Lir::Instr::AddrOfGlobal(node) -> {
+        let name: String = CodegenC::mangledName(defStore, symbols, node.def);
+        let line: String = `    t${node.dest.raw()} = &${name.toStr()};\n`;
         let mut outputRef: &mut String = output;
         outputRef.pushStr(line.toStr());
       },
@@ -3209,6 +3216,48 @@ export namespace CodegenC {
   /// `externalSymbols` holds the raw definition ids another translation unit
   /// references by name, which today is the `@test` functions the harness unit
   /// dispatches to. Everything else the unit defines stays `static`.
+  /// One C global per `static mut` field, seeded with its constant
+  /// initializer. Every other static field folds into its uses and needs no
+  /// storage, so nothing else reaches this section.
+  function emitStaticMutGlobals(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+    program: &Lir::LirProgram,
+  ): void {
+    if (program.globalInits.length() == 0) {
+      return;
+    }
+
+    let mut outputRef: &mut String = output;
+    outputRef.pushStr("\n// Static mutable fields\n");
+
+    let mut index: u64 = 0;
+
+    while (index < program.globalInits.length()) {
+      let Option::SOME(global) = program.globalInits.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+
+      if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(global.defId)) {
+        declaredType = variable.declaredType;
+      }
+
+      let cType: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, declaredType);
+      let name: String = CodegenC::mangledName(defStore, symbols, global.defId);
+      let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &global.value);
+      let line: String = `static ${cType.toStr()} ${name.toStr()} = ${value.toStr()};\n`;
+
+      outputRef.pushStr(line.toStr());
+      index += 1;
+    }
+  }
+
   function emitProgram(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3265,6 +3314,8 @@ export namespace CodegenC {
     CodegenC::emitClosureTypes(defStore, typeStore, symbols, &mut source, closures);
 
     CodegenC::emitDropGlueHelpers(defStore, typeStore, symbols, &mut source, closures, program);
+
+    CodegenC::emitStaticMutGlobals(defStore, typeStore, symbols, &mut source, closures, program);
 
     source.pushStr("\n// Function prototypes\n");
 

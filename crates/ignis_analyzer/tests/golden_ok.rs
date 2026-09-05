@@ -1984,3 +1984,35 @@ function run(input: Maybe): i32 {
 "#,
   );
 }
+
+#[test]
+fn static_mut_fields_accept_assignment_and_mutable_borrows() {
+  common::assert_ok(
+    r#"
+record Counter {
+    static mut TOTAL: i32 = 0;
+}
+
+enum Slot {
+    A,
+
+    static mut PICKED: i32 = 3;
+}
+
+function bump(): void {
+    Counter::TOTAL += 1;
+}
+
+function run(): i32 {
+    bump();
+
+    let handle: &mut i32 = &mut Counter::TOTAL;
+    *handle = *handle + 1;
+
+    Slot::PICKED = 9;
+
+    return Counter::TOTAL + Slot::PICKED;
+}
+"#,
+  );
+}

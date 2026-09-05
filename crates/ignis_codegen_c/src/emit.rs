@@ -1791,9 +1791,10 @@ impl<'a> CEmitter<'a> {
             let c_type = self.format_type(const_def.type_id);
             let c_value = self.const_value_to_c(value, &const_def.type_id);
             let full_name = format!("{}_{}", type_name, Self::escape_ident(field_name));
+            let storage = if const_def.mutable { "static" } else { "static const" };
             constants.push((
               const_def_id,
-              format!("static const {} {} = {};", c_type, full_name, c_value),
+              format!("{} {} {} = {};", storage, c_type, full_name, c_value),
               full_name,
             ));
           }
@@ -1809,9 +1810,10 @@ impl<'a> CEmitter<'a> {
             let c_type = self.format_type(const_def.type_id);
             let c_value = self.const_value_to_c(value, &const_def.type_id);
             let full_name = format!("{}_{}", type_name, Self::escape_ident(field_name));
+            let storage = if const_def.mutable { "static" } else { "static const" };
             constants.push((
               const_def_id,
-              format!("static const {} {} = {};", c_type, full_name, c_value),
+              format!("{} {} {} = {};", storage, c_type, full_name, c_value),
               full_name,
             ));
           }
@@ -2787,6 +2789,10 @@ impl<'a> CEmitter<'a> {
         } else {
           writeln!(self.output, "t{} = &l{};", dest.index(), local.index()).unwrap();
         }
+      },
+      Instr::AddrOfGlobal { dest, def, .. } => {
+        let name = self.def_name(*def);
+        writeln!(self.output, "t{} = &{};", dest.index(), name).unwrap();
       },
       Instr::GetElementPtr { dest, base, index, .. } => {
         let b = self.format_operand(func, base);

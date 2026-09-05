@@ -2050,6 +2050,7 @@ impl<'a> Monomorphizer<'a> {
           type_id: new_type,
           value: cd.value.clone(),
           owner_type: cd.owner_type,
+          mutable: cd.mutable,
         })
       },
       // Parameters are handled by instantiate_param; other kinds shouldn't appear here
