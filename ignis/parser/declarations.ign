@@ -473,6 +473,32 @@ export namespace ParserDeclarations {
     return Option::NONE;
   }
 
+  /// Extends a field binding's span to end at `terminatorSpan`, matching the
+  /// host parser's `Span::merge(&name_token.span, &end.span)` for record and
+  /// enum static fields: the field's span always reaches its `;`/`,`
+  /// terminator, not just its type or initializer. Without this, the byte
+  /// range the formatter attributes to the field stops short, and the
+  /// terminator (or an initializer trailing it) is misread as an unowned gap.
+  function extendFieldSpanToTerminator(
+    parser: &mut ParserShared::State,
+    fieldId: Ast::PatternId,
+    terminatorSpan: SourceSpan
+  ): void {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (let Option::SOME(pattern) = parserRef.module.patterns.getMut(fieldId)) {
+      if (let Ast::Pattern::Node::Binding(binding) = pattern) {
+        *pattern = Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
+          span: ParserShared::mergeSpans(binding.span, terminatorSpan),
+          name: binding.name.clone(),
+          annotation: binding.annotation,
+          initializer: binding.initializer,
+          metadata: Ast::copyMetadata(&binding.metadata),
+        });
+      }
+    }
+  }
+
   function parseBindingPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
     let metadata: Ast::Metadata = Ast::emptyMetadata();
     return ParserDeclarations::parseBindingPatternWithMetadata(parser, &metadata);
@@ -1230,7 +1256,13 @@ export namespace ParserDeclarations {
         };
       }
 
-      if (parserRef.consumePunctuation(Punctuation::SEMICOLON).isSome() || parserRef.consumePunctuation(Punctuation::COMMA).isSome()) {
+      if (let Option::SOME(terminator) = parserRef.consumePunctuation(Punctuation::SEMICOLON)) {
+        ParserDeclarations::extendFieldSpanToTerminator(parserRef, field, terminator.span);
+        continue;
+      }
+
+      if (let Option::SOME(terminator) = parserRef.consumePunctuation(Punctuation::COMMA)) {
+        ParserDeclarations::extendFieldSpanToTerminator(parserRef, field, terminator.span);
         continue;
       }
 
@@ -1325,14 +1357,16 @@ export namespace ParserDeclarations {
 
         variants.push(staticField);
 
+        if (let Option::SOME(terminator) = parserRef.consumePunctuation(Punctuation::SEMICOLON)) {
+          ParserDeclarations::extendFieldSpanToTerminator(parserRef, staticField, terminator.span);
+        } else if (let Option::SOME(terminator) = parserRef.consumePunctuation(Punctuation::COMMA)) {
+          ParserDeclarations::extendFieldSpanToTerminator(parserRef, staticField, terminator.span);
+        }
+
         endSpan = match (parserRef.module.patterns.get(staticField)) {
           Option::SOME(node) -> ParserDeclarations::patternSpan(node),
           Option::NONE -> endSpan,
         };
-
-        if (parserRef.consumePunctuation(Punctuation::SEMICOLON).isNone()) {
-          let _comma: Option<Token> = parserRef.consumePunctuation(Punctuation::COMMA);
-        }
 
         continue;
       }
