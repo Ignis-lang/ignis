@@ -20,6 +20,17 @@ use tempfile::TempDir;
 /// LSan uses exit code 23 to signal detected memory leaks.
 const LSAN_EXIT_CODE: i32 = 23;
 
+/// C flags that make a staged driver build leak-checkable. They travel through the
+/// project `cflags`, which the link plan forwards to both the object compilation and
+/// the final link, so the sanitizer runtime is present in the produced binary.
+fn lsan_cflags() -> Vec<String> {
+  vec![
+    "-fsanitize=leak".to_string(),
+    "-g".to_string(),
+    "-fno-omit-frame-pointer".to_string(),
+  ]
+}
+
 pub struct E2EResult {
   pub exit_code: i32,
   pub stdout: String,
@@ -44,6 +55,7 @@ fn build_driver_test_config(
   file_path: &std::path::Path,
   output_dir: &std::path::Path,
   target: TargetBackend,
+  cflags: Vec<String>,
 ) -> Arc<IgnisConfig> {
   let mut config = IgnisConfig::new_basic(false, Vec::new(), true, 0);
   let bin_path = output_dir.join(file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("out"));
@@ -61,6 +73,7 @@ fn build_driver_test_config(
     modules: std::collections::HashMap::from([("__test_base".to_string(), "types.h".to_string())]),
     ..Default::default()
   };
+  config.cflags = cflags;
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
     Some(file_path.to_string_lossy().to_string()),
@@ -88,6 +101,7 @@ fn build_workspace_std_driver_test_config(
   file_path: &std::path::Path,
   output_dir: &std::path::Path,
   target: TargetBackend,
+  cflags: Vec<String>,
 ) -> Result<Arc<IgnisConfig>, String> {
   let std_path = workspace_std_path();
   let manifest = load_std_manifest(&std_path)?;
@@ -98,6 +112,7 @@ fn build_workspace_std_driver_test_config(
   config.std = true;
   config.auto_load_std = true;
   config.manifest = manifest;
+  config.cflags = cflags;
   config.build = true;
   config.build_config = Some(IgnisBuildConfig::new(
     Some(file_path.to_string_lossy().to_string()),
@@ -174,13 +189,21 @@ pub fn compile_project_single_file(
   source: &str,
   target: TargetBackend,
 ) -> Result<DriverBuildAttempt, String> {
+  compile_project_single_file_with_cflags(source, target, Vec::new())
+}
+
+fn compile_project_single_file_with_cflags(
+  source: &str,
+  target: TargetBackend,
+  cflags: Vec<String>,
+) -> Result<DriverBuildAttempt, String> {
   let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
   let source_path = temp_dir.path().join("main.ign");
   let output_dir = temp_dir.path().join("build");
   std::fs::create_dir_all(&output_dir).map_err(|e| format!("Failed to create build dir: {}", e))?;
   std::fs::write(&source_path, source).map_err(|e| format!("Failed to write source file: {}", e))?;
 
-  let config = build_driver_test_config(&source_path, &output_dir, target);
+  let config = build_driver_test_config(&source_path, &output_dir, target, cflags);
   let bin_path = output_dir.join("main");
   let result = compile_project(config, source_path.to_string_lossy().as_ref());
 
@@ -210,13 +233,21 @@ pub fn compile_project_single_file_with_workspace_std(
   source: &str,
   target: TargetBackend,
 ) -> Result<DriverBuildAttempt, String> {
+  compile_project_single_file_with_workspace_std_and_cflags(source, target, Vec::new())
+}
+
+fn compile_project_single_file_with_workspace_std_and_cflags(
+  source: &str,
+  target: TargetBackend,
+  cflags: Vec<String>,
+) -> Result<DriverBuildAttempt, String> {
   let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
   let source_path = temp_dir.path().join("main.ign");
   let output_dir = temp_dir.path().join("build");
   std::fs::create_dir_all(&output_dir).map_err(|e| format!("Failed to create build dir: {}", e))?;
   std::fs::write(&source_path, source).map_err(|e| format!("Failed to write source file: {}", e))?;
 
-  let config = build_workspace_std_driver_test_config(&source_path, &output_dir, target)?;
+  let config = build_workspace_std_driver_test_config(&source_path, &output_dir, target, cflags)?;
   let bin_path = output_dir.join("main");
   let result = compile_project(config, source_path.to_string_lossy().as_ref());
 
@@ -234,7 +265,7 @@ pub fn analyze_project_single_file_with_workspace_std(source: &str) -> Result<An
   std::fs::create_dir_all(&output_dir).map_err(|e| format!("Failed to create build dir: {}", e))?;
   std::fs::write(&source_path, source).map_err(|e| format!("Failed to write source file: {}", e))?;
 
-  let config = build_workspace_std_driver_test_config(&source_path, &output_dir, TargetBackend::C)?;
+  let config = build_workspace_std_driver_test_config(&source_path, &output_dir, TargetBackend::C, Vec::new())?;
   let analysis = analyze_project_with_text(&config, source_path.to_string_lossy().as_ref(), Some(source.to_string()));
 
   Ok(analysis)
@@ -256,40 +287,50 @@ pub fn check_std_with_target(target: TargetBackend) -> Result<StdCommandAttempt,
 }
 
 pub fn compile_project_and_run(source: &str) -> Result<E2EResult, String> {
-  let attempt = compile_project_single_file(source, TargetBackend::C)?;
+  let attempt = compile_project_single_file_with_cflags(source, TargetBackend::C, lsan_cflags())?;
   attempt
     .result
     .map_err(|_| "compile_project failed for C backend".to_string())?;
 
-  let run = Command::new(&attempt.bin_path)
-    .output()
-    .map_err(|e| format!("Failed to run compiled binary: {}", e))?;
-
-  Ok(E2EResult {
-    exit_code: run.status.code().unwrap_or(-1),
-    stdout: String::from_utf8_lossy(&run.stdout).to_string(),
-    stderr: String::from_utf8_lossy(&run.stderr).to_string(),
-    leaked: false,
-    leak_report: String::new(),
-  })
+  run_leak_checked_binary(&attempt.bin_path)
 }
 
 pub fn compile_project_and_run_with_workspace_std(source: &str) -> Result<E2EResult, String> {
-  let attempt = compile_project_single_file_with_workspace_std(source, TargetBackend::C)?;
+  let attempt = compile_project_single_file_with_workspace_std_and_cflags(source, TargetBackend::C, lsan_cflags())?;
   attempt
     .result
     .map_err(|_| "compile_project failed for C backend".to_string())?;
 
-  let run = Command::new(&attempt.bin_path)
+  run_leak_checked_binary(&attempt.bin_path)
+}
+
+/// Run a staged driver binary linked with the leak sanitizer, splitting the LSan
+/// report out of stderr so snapshots keep only the program's own output.
+///
+/// `use_stacks=0` is required, not a tightening: the leak check runs from `atexit`,
+/// where the popped frame of `main` still holds the last pointers the program used.
+/// With stack scanning on, any allocation a top-level `main` forgot to drop is
+/// reported as reachable and the check silently passes. Nothing owned by Ignis code
+/// is legitimately live at that point, so a stack-only root means a leak.
+fn run_leak_checked_binary(bin_path: &Path) -> Result<E2EResult, String> {
+  let run = Command::new(bin_path)
+    .env("LSAN_OPTIONS", "detect_leaks=1:leak_check_at_exit=1:use_stacks=0")
     .output()
     .map_err(|e| format!("Failed to run compiled binary: {}", e))?;
 
+  let raw_exit = run.status.code().unwrap_or(-1);
+  let raw_stderr = String::from_utf8_lossy(&run.stderr).to_string();
+  let leaked = raw_exit == LSAN_EXIT_CODE;
+  let (user_stderr, leak_report) = split_lsan_output(&raw_stderr);
+
+  let exit_code = if leaked { 0 } else { raw_exit };
+
   Ok(E2EResult {
-    exit_code: run.status.code().unwrap_or(-1),
+    exit_code,
     stdout: String::from_utf8_lossy(&run.stdout).to_string(),
-    stderr: String::from_utf8_lossy(&run.stderr).to_string(),
-    leaked: false,
-    leak_report: String::new(),
+    stderr: user_stderr,
+    leaked,
+    leak_report,
   })
 }
 

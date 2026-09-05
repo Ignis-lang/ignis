@@ -147,6 +147,12 @@ function main(): i32 {
   )
   .expect("staged driver build should succeed");
 
+  assert!(
+    !result.leaked,
+    "LeakSanitizer detected a memory leak in 'staged_driver_single_file':\n{}",
+    result.leak_report,
+  );
+
   assert_snapshot!("staged_driver_single_file", common::format_e2e_result(&result));
 }
 
@@ -6806,6 +6812,92 @@ function main(): i32 {
     Payload::Function(item) -> renderFunctionItem(item),
     Payload::Empty -> 0,
   };
+}
+"#,
+  );
+}
+
+/// Moving a payload out of an owned record's field suppresses the record's own drop,
+/// so nothing else frees that payload: the arm binding owns it and must be dropped at
+/// arm end. An arm that only reads the binding used to drop it nowhere and leak it.
+#[test]
+fn e2e_match_payload_binding_out_of_owned_field_is_dropped_at_arm_end() {
+  e2e_workspace_std_test(
+    "match_payload_binding_out_of_owned_field_is_dropped_at_arm_end",
+    r#"
+import Vector from "std::vector";
+import String from "std::string";
+
+record FunctionItem {
+  public names: Vector<String>;
+}
+
+enum Payload {
+  Function(FunctionItem),
+  Empty,
+}
+
+record Node {
+  public payload: Payload;
+}
+
+function main(): i32 {
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("alpha"));
+  names.push(String::create("beta"));
+
+  let node: Node = Node {
+    payload: Payload::Function(FunctionItem { names: names }),
+  };
+
+  return match (node.payload) {
+    Payload::Function(item) -> item.names.length() as i32,
+    Payload::Empty -> 0,
+  };
+}
+"#,
+  );
+}
+
+/// The same partial move, with the rest of the owner still read afterwards. The payload
+/// is dropped once through the arm binding and the untouched field stays readable.
+#[test]
+fn e2e_match_payload_partial_move_leaves_the_other_field_readable() {
+  e2e_workspace_std_test(
+    "match_payload_partial_move_leaves_the_other_field_readable",
+    r#"
+import Vector from "std::vector";
+import String from "std::string";
+
+record FunctionItem {
+  public names: Vector<String>;
+}
+
+enum Payload {
+  Function(FunctionItem),
+  Empty,
+}
+
+record Node {
+  public payload: Payload;
+  public tag: i32;
+}
+
+function main(): i32 {
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("alpha"));
+
+  let node: Node = Node {
+    payload: Payload::Function(FunctionItem { names: names }),
+    tag: 40,
+  };
+
+  let count: i32 = match (node.payload) {
+    Payload::Function(item) -> item.names.length() as i32,
+    Payload::Empty -> 0,
+  };
+
+  return count + node.tag;
 }
 "#,
   );

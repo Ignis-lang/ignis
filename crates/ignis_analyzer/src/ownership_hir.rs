@@ -1248,6 +1248,11 @@ impl<'a> HirOwnershipChecker<'a> {
       .iter()
       .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
 
+    // Set when the payload was moved out of a field of a value we own and the owner's
+    // drop was suppressed to keep that payload from being freed twice. Ownership of the
+    // payload then rests with the arm's pattern bindings and nowhere else.
+    let mut arm_bindings_own_payload = false;
+
     if moves_scrutinee_payload {
       if self.field_base_is_borrowed(scrutinee) {
         // A borrowed base wins over field-owner drop suppression: suppressing the
@@ -1257,6 +1262,7 @@ impl<'a> HirOwnershipChecker<'a> {
         self.try_consume(source_def, span.clone());
       } else if let Some(owner_def) = self.get_moved_field_owner(scrutinee) {
         self.drop_suppressed_vars.insert(owner_def);
+        arm_bindings_own_payload = true;
       } else {
         // Neither a variable nor a field of one we own: the only remaining source is a
         // field behind a reference, which cannot be moved out of at all.
@@ -1269,6 +1275,8 @@ impl<'a> HirOwnershipChecker<'a> {
     // Matching a place that belongs to something else — a field, an element, a
     // dereference — binds the payload without taking ownership of it. The bytes are still
     // the base's, and its own schedule frees them; dropping them here frees them twice.
+    // This does not hold once `arm_bindings_own_payload` is set: the base's drop was
+    // suppressed precisely because the payload left it, so no other schedule frees it.
     let scrutinee_aliases_external_storage = matches!(
       self.hir.get(scrutinee).kind,
       HIRKind::FieldAccess { .. } | HIRKind::Index { .. } | HIRKind::Dereference(_) | HIRKind::StaticAccess { .. }
@@ -1354,7 +1362,7 @@ impl<'a> HirOwnershipChecker<'a> {
 
       if !pattern_drops.is_empty()
         && !body_is_literal
-        && !scrutinee_aliases_external_storage
+        && (!scrutinee_aliases_external_storage || arm_bindings_own_payload)
         && !bindings_borrow_payloads
       {
         self
