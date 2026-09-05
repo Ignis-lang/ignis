@@ -1,0 +1,159 @@
+import Path from "std::path";
+import String from "std::string";
+import Test from "std::test";
+
+import BuildLayout from "./layout";
+
+/// Where a build writes the translation unit, the object and the executable.
+export record BuildArtifacts {
+  public source: Path::PathBuf;
+  public object: Path::PathBuf;
+  public executable: Path::PathBuf;
+}
+
+/// The paths a single-file build writes.
+///
+/// They stay in the working directory, which is where the bootstrap ladder and
+/// the parity harness expect the emitted C to appear. `outputPath` is what `-o`
+/// named, and the executable falls back to `selfhost_out` without it.
+export function singleFileArtifacts(outputPath: &Option<String>): BuildArtifacts {
+  let executableText: String = match (outputPath) {
+    Option::SOME(value) -> value.clone(),
+    Option::NONE -> String::create("selfhost_out"),
+  };
+
+  return BuildArtifacts {
+    source: Path::PathBuf::create("selfhost_emit.c"),
+    object: Path::PathBuf::create("selfhost_emit.o"),
+    executable: Path::PathBuf::fromString(&executableText),
+  };
+}
+
+/// The paths a project build writes, laid out under `[build] out_dir`.
+///
+/// The compiler emits one translation unit for the whole program, so the
+/// per-module trees the layout describes hold a single unit named after the
+/// package. Without `-o` the executable is the layout's own `bin/<name>`.
+export function projectArtifacts(
+  name: &String,
+  outDir: &Path::PathBuf,
+  outputPath: &Option<String>,
+): BuildArtifacts {
+  let layout: BuildLayout = BuildLayout::new(name.toStr(), outDir);
+  let sourceName: String = name.concat(".c");
+  let objectName: String = name.concat(".o");
+
+  let mut executable: Path::PathBuf = layout.binPath();
+
+  if (let Option::SOME(value) = outputPath) {
+    executable = Path::PathBuf::fromString(&value);
+  }
+
+  return BuildArtifacts {
+    source: layout.userSrcDir().join(sourceName.toStr()),
+    object: layout.userObjDir().join(objectName.toStr()),
+    executable: executable,
+  };
+}
+
+/// The directory a standard-library build lays its artifacts out under.
+///
+/// The host `build-std` takes that directory as `-o`, so both spellings name it
+/// here; without either, the project's own `[build] out_dir` does.
+export function stdArtifactBase(
+  outDir: &Path::PathBuf,
+  outDirOverride: &Option<String>,
+  outputPath: &Option<String>,
+): Path::PathBuf {
+  if (let Option::SOME(value) = outDirOverride) {
+    return Path::PathBuf::fromString(&value).normalize();
+  }
+
+  if (let Option::SOME(value) = outputPath) {
+    return Path::PathBuf::fromString(&value).normalize();
+  }
+
+  return outDir.clone();
+}
+function artifactsProjectOutDir(): Path::PathBuf {
+  return Path::PathBuf::create("/tmp/ignis_artifacts_test/build");
+}
+
+/// Without `-o`, a project build links the binary the layout names after the
+/// package, and emits its translation unit under the same output directory.
+@test
+function artifactsProjectBuildUsesTheLayoutBinaryPath(): void {
+  let name: String = String::create("myapp");
+  let outputPath: Option<String> = Option::NONE;
+  let outDir: Path::PathBuf = artifactsProjectOutDir();
+  let artifacts: BuildArtifacts = projectArtifacts(&name, &outDir, &outputPath);
+
+  let sourceText: String = artifacts.source.toString();
+  let objectText: String = artifacts.object.toString();
+  let executableText: String = artifacts.executable.toString();
+
+  Test::assertEq<str>(sourceText.toStr(), "/tmp/ignis_artifacts_test/build/user/src/myapp.c");
+  Test::assertEq<str>(objectText.toStr(), "/tmp/ignis_artifacts_test/build/user/obj/myapp.o");
+  Test::assertEq<str>(executableText.toStr(), "/tmp/ignis_artifacts_test/build/bin/myapp");
+}
+
+/// `-o` names the binary a project build links, and moves nothing else.
+@test
+function artifactsProjectBuildHonoursTheOutputOverride(): void {
+  let name: String = String::create("myapp");
+  let outputPath: Option<String> = Option::SOME(String::create("/tmp/ignis_artifacts_test/elsewhere/ignis"));
+  let outDir: Path::PathBuf = artifactsProjectOutDir();
+  let artifacts: BuildArtifacts = projectArtifacts(&name, &outDir, &outputPath);
+
+  let sourceText: String = artifacts.source.toString();
+  let executableText: String = artifacts.executable.toString();
+
+  Test::assertEq<str>(sourceText.toStr(), "/tmp/ignis_artifacts_test/build/user/src/myapp.c");
+  Test::assertEq<str>(executableText.toStr(), "/tmp/ignis_artifacts_test/elsewhere/ignis");
+}
+
+/// A single-file build writes its unit in the working directory, and links
+/// `selfhost_out` unless `-o` names something else.
+@test
+function artifactsSingleFileBuildStaysInTheWorkingDirectory(): void {
+  let none: Option<String> = Option::NONE;
+  let defaults: BuildArtifacts = singleFileArtifacts(&none);
+
+  let sourceText: String = defaults.source.toString();
+  let objectText: String = defaults.object.toString();
+  let executableText: String = defaults.executable.toString();
+
+  Test::assertEq<str>(sourceText.toStr(), "selfhost_emit.c");
+  Test::assertEq<str>(objectText.toStr(), "selfhost_emit.o");
+  Test::assertEq<str>(executableText.toStr(), "selfhost_out");
+
+  let outputPath: Option<String> = Option::SOME(String::create("build/bootstrap/stage2/ignis"));
+  let overridden: BuildArtifacts = singleFileArtifacts(&outputPath);
+  let overriddenText: String = overridden.executable.toString();
+
+  Test::assertEq<str>(overriddenText.toStr(), "build/bootstrap/stage2/ignis");
+}
+
+/// A standard-library build fills the project's output directory, or the one
+/// `--out-dir` or `-o` named.
+@test
+function artifactsStandardLibraryBaseFollowsTheOverrides(): void {
+  let outDir: Path::PathBuf = artifactsProjectOutDir();
+  let none: Option<String> = Option::NONE;
+  let declared: Path::PathBuf = stdArtifactBase(&outDir, &none, &none);
+  let declaredText: String = declared.toString();
+
+  Test::assertEq<str>(declaredText.toStr(), "/tmp/ignis_artifacts_test/build");
+
+  let overrideDir: Option<String> = Option::SOME(String::create("/tmp/ignis_artifacts_test/other"));
+  let overridden: Path::PathBuf = stdArtifactBase(&outDir, &overrideDir, &none);
+  let overriddenText: String = overridden.toString();
+
+  Test::assertEq<str>(overriddenText.toStr(), "/tmp/ignis_artifacts_test/other");
+
+  let outputPath: Option<String> = Option::SOME(String::create("/tmp/ignis_artifacts_test/from-o"));
+  let fromOutput: Path::PathBuf = stdArtifactBase(&outDir, &none, &outputPath);
+  let fromOutputText: String = fromOutput.toString();
+
+  Test::assertEq<str>(fromOutputText.toStr(), "/tmp/ignis_artifacts_test/from-o");
+}

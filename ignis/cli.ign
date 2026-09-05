@@ -1,0 +1,630 @@
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+/// The version this compiler reports, kept equal to the host compiler's
+/// workspace version so `ignis --version` prints the same string whichever
+/// binary answers it.
+export const IGNIS_VERSION: str = "0.4.0";
+
+/// The subcommand a command line selected.
+export enum CliCommand {
+  BUILD,
+  CHECK,
+  BUILD_STD,
+  TEST,
+  HELP,
+  VERSION,
+}
+
+/// Everything a parsed command line carries.
+///
+/// `path` is the project directory or source file the command runs against,
+/// absent when the command runs against the current directory. `outputPath`
+/// is the binary `-o` names, and `outDir` the directory `--out-dir` names;
+/// the rest override what the project file declares.
+export record CliOptions {
+  public command: CliCommand;
+  public path: Option<String>;
+  public outputPath: Option<String>;
+  public outDir: Option<String>;
+  public stdPath: Option<String>;
+  public cc: Option<String>;
+  public targetTriple: Option<String>;
+  public optLevel: Option<u64>;
+  public debug: Option<boolean>;
+  public features: Vector<String>;
+  public filter: String;
+  public updateSnapshots: boolean;
+
+  public static create(command: CliCommand): CliOptions {
+    return CliOptions {
+      command: command,
+      path: Option::NONE,
+      outputPath: Option::NONE,
+      outDir: Option::NONE,
+      stdPath: Option::NONE,
+      cc: Option::NONE,
+      targetTriple: Option::NONE,
+      optLevel: Option::NONE,
+      debug: Option::NONE,
+      features: Vector::new<String>(),
+      filter: String::new(),
+      updateSnapshots: false,
+    };
+  }
+
+  /// The binary path a build writes, or `fallback` when `-o` was absent.
+  public outputPathOr(&self, fallback: str): String {
+    return match (&self.outputPath) {
+      Option::SOME(value) -> value.clone(),
+      Option::NONE -> String::create(fallback),
+    };
+  }
+
+  public isTestMode(&self): boolean {
+    if (let CliCommand::TEST = self.command) {
+      return true;
+    }
+
+    return false;
+  }
+}
+
+/// Splits a comma-separated list into its items, dropping empty ones.
+export function splitCommaSeparated(value: &String): Vector<String> {
+  let mut items: Vector<String> = Vector::new<String>();
+  let mut start: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index <= value.length()) {
+    let mut atSeparator: boolean = index == value.length();
+
+    if (!atSeparator) {
+      if (let Option::SOME(byte) = value.byteAt(index)) {
+        atSeparator = byte == ',' as u8;
+      }
+    }
+
+    if (atSeparator) {
+      let item: String = value.substringBytes(start, index).trimAsciiWhitespace();
+
+      if (item.length() > 0) {
+        items.push(item.clone());
+      }
+
+      start = index + 1;
+    }
+
+    index += 1;
+  }
+
+  return items;
+}
+
+/// Read an `--opt-level` / `-O` value, which the C toolchain takes as `-O<level>`.
+function parseOptLevelArgument(text: &String): Option<u64> {
+  if (text.length() != 1) {
+    return Option::NONE;
+  }
+
+  let Option::SOME(digit) = text.charAt(0) else {
+    return Option::NONE;
+  };
+
+  if (digit < '0' || digit > '3') {
+    return Option::NONE;
+  }
+
+  return Option::SOME((digit as u64) - ('0' as u64));
+}
+
+function cliSubcommandOf(argument: &String): Option<CliCommand> {
+  if (argument.equals("build")) {
+    return Option::SOME(CliCommand::BUILD);
+  }
+
+  if (argument.equals("check")) {
+    return Option::SOME(CliCommand::CHECK);
+  }
+
+  if (argument.equals("build-std")) {
+    return Option::SOME(CliCommand::BUILD_STD);
+  }
+
+  if (argument.equals("test")) {
+    return Option::SOME(CliCommand::TEST);
+  }
+
+  return Option::NONE;
+}
+
+/// True for an argument that names a source file rather than a subcommand.
+///
+/// The bare form `ignis <entry.ign>` predates the subcommands and is still what
+/// the bootstrap ladder and the parity harness call, so a path in the first
+/// position stays a build.
+function cliLooksLikePath(argument: &String): boolean {
+  return cliEndsWith(argument, ".ign") || argument.startsWith("./") || argument.startsWith("../") || argument.startsWith("/") || argument.equals(".");
+}
+
+function cliEndsWith(value: &String, suffix: str): boolean {
+  let suffixText: String = String::create(suffix);
+
+  if (value.length() < suffixText.length()) {
+    return false;
+  }
+
+  let actualSuffix: String = value.substringBytes(value.length() - suffixText.length(), value.length());
+  return actualSuffix.equals(&suffixText);
+}
+
+function cliMissingValue(flag: str, expected: str): String {
+  return `error: ${flag} requires ${expected}`;
+}
+
+/// Parses a command line into the options every subcommand reads.
+///
+/// `arguments` is the process argument vector, so the first entry is the
+/// program name. The error is the message to print before exiting with 2.
+export function parseArguments(arguments: &Vector<String>): Result<CliOptions, String> {
+  let mut command: CliCommand = CliCommand::BUILD;
+  let mut index: u64 = 1;
+
+  if (let Option::SOME(first) = arguments.get(1)) {
+    if (let Option::SOME(subcommand) = cliSubcommandOf(first)) {
+      command = subcommand;
+      index = 2;
+    } else if (!first.startsWith("-") && !cliLooksLikePath(first)) {
+      return Result::ERROR(`error: unrecognized subcommand '${first.toStr()}'`);
+    }
+  }
+
+  let mut options: CliOptions = CliOptions::create(command);
+
+  while (index < arguments.length()) {
+    let Option::SOME(argument) = arguments.get(index) else {
+      break;
+    };
+
+    if (argument.equals("-h") || argument.equals("--help")) {
+      options.command = CliCommand::HELP;
+      return Result::OK(options);
+    }
+
+    if (argument.equals("-V") || argument.equals("--version")) {
+      options.command = CliCommand::VERSION;
+      return Result::OK(options);
+    }
+
+    if (argument.equals("-o")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("-o", "an output path"));
+      };
+
+      options.outputPath = Option::SOME(value.clone());
+      index += 2;
+      continue;
+    }
+
+    if (argument.equals("--out-dir")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--out-dir", "a directory"));
+      };
+
+      options.outDir = Option::SOME(value.clone());
+      index += 2;
+      continue;
+    }
+
+    if (argument.equals("--std-path")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--std-path", "a directory"));
+      };
+
+      options.stdPath = Option::SOME(value.clone());
+      index += 2;
+      continue;
+    }
+
+    if (argument.equals("--cc")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--cc", "a C compiler"));
+      };
+
+      options.cc = Option::SOME(value.clone());
+      index += 2;
+      continue;
+    }
+
+    if (argument.equals("--target-triple")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--target-triple", "a target triple"));
+      };
+
+      options.targetTriple = Option::SOME(value.clone());
+      index += 2;
+      continue;
+    }
+
+    if (argument.equals("-O") || argument.equals("--opt-level")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(String::create("error: --opt-level requires a level between 0 and 3"));
+      };
+
+      let Option::SOME(level) = parseOptLevelArgument(value) else {
+        return Result::ERROR(`error: invalid optimization level: ${value.toStr()}`);
+      };
+
+      options.optLevel = Option::SOME(level);
+      index += 2;
+      continue;
+    }
+
+    if (argument.equals("--debug")) {
+      options.debug = Option::SOME(true);
+      index += 1;
+      continue;
+    }
+
+    if (argument.equals("--no-debug")) {
+      options.debug = Option::SOME(false);
+      index += 1;
+      continue;
+    }
+
+    if (argument.equals("--feature")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--feature", "a name"));
+      };
+
+      options.features.push(value.clone());
+      index += 2;
+      continue;
+    }
+
+    if (argument.equals("--features")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--features", "a comma-separated list"));
+      };
+
+      let parsed: Vector<String> = splitCommaSeparated(value);
+      let mut parsedIndex: u64 = 0;
+
+      while (parsedIndex < parsed.length()) {
+        if (let Option::SOME(feature) = parsed.get(parsedIndex)) {
+          options.features.push(feature.clone());
+        }
+
+        parsedIndex += 1;
+      }
+
+      index += 2;
+      continue;
+    }
+
+    if (options.isTestMode() && argument.equals("--filter")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--filter", "a substring"));
+      };
+
+      options.filter = value.clone();
+      index += 2;
+      continue;
+    }
+
+    if (options.isTestMode() && argument.equals("--update-snapshots")) {
+      options.updateSnapshots = true;
+      index += 1;
+      continue;
+    }
+
+    if (argument.startsWith("-")) {
+      return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
+    }
+
+    options.path = Option::SOME(argument.clone());
+    index += 1;
+  }
+
+  return Result::OK(options);
+}
+
+/// The text `--help` prints, listing what this compiler answers today.
+export function helpText(): String {
+  let mut text: String = String::new();
+  text.pushStr("The Ignis compiler\n");
+  text.pushStr("\n");
+  text.pushStr("Usage: ignis [COMMAND] [OPTIONS] [PATH]\n");
+  text.pushStr("\n");
+  text.pushStr("Commands:\n");
+  text.pushStr("  build      Build file or project\n");
+  text.pushStr("  check      Check file or project without codegen or linking\n");
+  text.pushStr("  build-std  Build the standard library\n");
+  text.pushStr("  test       Run language-native tests for a project\n");
+  text.pushStr("\n");
+  text.pushStr("Without a command the path is built, which is what `ignis build <path>` does.\n");
+  text.pushStr("Without a path the project containing the current directory is used.\n");
+  text.pushStr("\n");
+  text.pushStr("Options:\n");
+  text.pushStr("  -o <PATH>                 Write the linked binary here, or the directory build-std fills\n");
+  text.pushStr("      --out-dir <DIR>       Override [build] out_dir\n");
+  text.pushStr("      --std-path <DIR>      Override the standard library root\n");
+  text.pushStr("      --cc <CC>             Override [build] cc\n");
+  text.pushStr("      --target-triple <T>   Override the target triple directives are answered with\n");
+  text.pushStr("  -O, --opt-level <0-3>     Override [build] opt_level\n");
+  text.pushStr("      --debug               Build with debug information\n");
+  text.pushStr("      --no-debug            Build without debug information\n");
+  text.pushStr("      --feature <NAME>      Enable one feature (can be repeated)\n");
+  text.pushStr("      --features <LIST>     Enable features separated by commas\n");
+  text.pushStr("      --filter <SUBSTRING>  Select tests whose name contains it (test only)\n");
+  text.pushStr("      --update-snapshots    Create or replace selected snapshots (test only)\n");
+  text.pushStr("  -h, --help                Print this message\n");
+  text.pushStr("  -V, --version             Print the compiler version\n");
+  return text;
+}
+
+/// The text `--version` prints.
+export function versionText(): String {
+  let mut text: String = String::create("ignis ");
+  text.pushStr(IGNIS_VERSION);
+  return text;
+}
+function cliArguments(values: &Vector<String>): Vector<String> {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  arguments.push(String::create("ignis"));
+
+  let mut index: u64 = 0;
+
+  while (index < values.length()) {
+    let Option::SOME(value) = values.get(index) else {
+      break;
+    };
+
+    arguments.push(value.clone());
+    index += 1;
+  }
+
+  return arguments;
+}
+
+function cliParse(values: &Vector<String>): CliOptions {
+  let arguments: Vector<String> = cliArguments(values);
+
+  let Result::OK(options) = parseArguments(&arguments) else {
+    Test::fail();
+    return CliOptions::create(CliCommand::HELP);
+  };
+
+  return options;
+}
+
+function cliParseError(values: &Vector<String>): String {
+  let arguments: Vector<String> = cliArguments(values);
+
+  let Result::ERROR(message) = parseArguments(&arguments) else {
+    Test::fail();
+    return String::new();
+  };
+
+  return message;
+}
+
+function cliCommandName(command: CliCommand): str {
+  return match (command) {
+    CliCommand::BUILD -> "build",
+    CliCommand::CHECK -> "check",
+    CliCommand::BUILD_STD -> "build-std",
+    CliCommand::TEST -> "test",
+    CliCommand::HELP -> "help",
+    CliCommand::VERSION -> "version",
+  };
+}
+
+function cliOptionText(value: &Option<String>): String {
+  return match (value) {
+    Option::SOME(text) -> text.clone(),
+    Option::NONE -> String::new(),
+  };
+}
+
+function cliPathText(options: &CliOptions): String {
+  return cliOptionText(&options.path);
+}
+
+/// Builds a test's argument vector out of the words a command line carries.
+function cliWords(): Vector<String> {
+  return Vector::new<String>();
+}
+
+function cliPush(arguments: &mut Vector<String>, value: str): void {
+  let mut target: &mut Vector<String> = arguments;
+  target.push(String::create(value));
+}
+
+/// No arguments at all selects a project build of the current directory.
+@test
+function cliDefaultsToBuildingTheCurrentProject(): void {
+  let arguments: Vector<String> = cliWords();
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliCommandName(options.command), "build");
+  Test::assertEq<str>(cliPathText(&options).toStr(), "");
+}
+
+/// The bare form the bootstrap ladder calls stays a build of that file.
+@test
+function cliBareSourcePathBuildsThatFile(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "ignis/main.ign");
+  cliPush(&mut arguments, "-o");
+  cliPush(&mut arguments, "build/out/ignis");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliCommandName(options.command), "build");
+  Test::assertEq<str>(cliPathText(&options).toStr(), "ignis/main.ign");
+  Test::assertEq<str>(options.outputPathOr("selfhost_out").toStr(), "build/out/ignis");
+}
+
+/// Each subcommand is selected by name, with the path that follows it.
+@test
+function cliParsesEverySubcommand(): void {
+  let mut buildArguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut buildArguments, "build");
+  cliPush(&mut buildArguments, "example");
+  Test::assertEq<str>(cliCommandName(cliParse(&buildArguments).command), "build");
+
+  let mut checkArguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut checkArguments, "check");
+  Test::assertEq<str>(cliCommandName(cliParse(&checkArguments).command), "check");
+
+  let mut stdArguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut stdArguments, "build-std");
+  Test::assertEq<str>(cliCommandName(cliParse(&stdArguments).command), "build-std");
+
+  let mut testArguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut testArguments, "test");
+  Test::assertEq<str>(cliCommandName(cliParse(&testArguments).command), "test");
+}
+
+/// A subcommand takes a project path the same way a build takes one.
+@test
+function cliSubcommandTakesAProjectPath(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "check");
+  cliPush(&mut arguments, "example/demo");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliCommandName(options.command), "check");
+  Test::assertEq<str>(cliPathText(&options).toStr(), "example/demo");
+}
+
+/// Every project-file override reaches the options a build reads.
+@test
+function cliParsesProjectOverrides(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "build");
+  cliPush(&mut arguments, "--out-dir");
+  cliPush(&mut arguments, "build/other");
+  cliPush(&mut arguments, "--std-path");
+  cliPush(&mut arguments, "./std");
+  cliPush(&mut arguments, "--cc");
+  cliPush(&mut arguments, "clang");
+  cliPush(&mut arguments, "--target-triple");
+  cliPush(&mut arguments, "x86_64-unknown-linux-gnu");
+  cliPush(&mut arguments, "-O");
+  cliPush(&mut arguments, "2");
+  cliPush(&mut arguments, "--debug");
+  cliPush(&mut arguments, "--features");
+  cliPush(&mut arguments, "alpha,beta");
+  cliPush(&mut arguments, "--feature");
+  cliPush(&mut arguments, "gamma");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliOptionText(&options.outDir).toStr(), "build/other");
+  Test::assertEq<str>(cliOptionText(&options.stdPath).toStr(), "./std");
+  Test::assertEq<str>(cliOptionText(&options.cc).toStr(), "clang");
+  Test::assertEq<str>(cliOptionText(&options.targetTriple).toStr(), "x86_64-unknown-linux-gnu");
+  Test::assertEq<u64>(options.optLevel.unwrapOr(0), 2);
+  Test::assertEq<boolean>(options.debug.unwrapOr(false), true);
+  Test::assertEq<u64>(options.features.length(), 3);
+}
+
+/// `--no-debug` selects a build without debug information.
+@test
+function cliNoDebugOverridesTheProjectFile(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "build");
+  cliPush(&mut arguments, "--no-debug");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<boolean>(options.debug.unwrapOr(true), false);
+}
+
+/// The test flags are only read by a test run.
+@test
+function cliParsesTestFlags(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "test");
+  cliPush(&mut arguments, "--filter");
+  cliPush(&mut arguments, "resolver");
+  cliPush(&mut arguments, "--update-snapshots");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(options.filter.toStr(), "resolver");
+  Test::assertEq<boolean>(options.updateSnapshots, true);
+}
+
+/// A build has no `--filter`, so the flag is rejected instead of ignored.
+@test
+function cliRejectsTestFlagsOutsideTestMode(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "build");
+  cliPush(&mut arguments, "--filter");
+  cliPush(&mut arguments, "resolver");
+
+  Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: unknown argument: --filter");
+}
+
+/// A flag this compiler does not answer is an error, not a path.
+@test
+function cliRejectsUnknownFlags(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "--nope");
+
+  Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: unknown argument: --nope");
+}
+
+/// A first argument that is neither a subcommand nor a path is a typo.
+@test
+function cliRejectsUnknownSubcommands(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "buld");
+
+  Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: unrecognized subcommand 'buld'");
+}
+
+/// A flag whose value is missing is an error rather than a silent default.
+@test
+function cliRejectsFlagsMissingTheirValue(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "build");
+  cliPush(&mut arguments, "--out-dir");
+
+  Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: --out-dir requires a directory");
+}
+
+/// An optimization level the C toolchain would not accept is rejected.
+@test
+function cliRejectsInvalidOptimizationLevels(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "build");
+  cliPush(&mut arguments, "-O");
+  cliPush(&mut arguments, "9");
+
+  Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: invalid optimization level: 9");
+}
+
+/// `--help` and `--version` answer whatever else the command line carries.
+@test
+function cliHelpAndVersionWinOverTheSubcommand(): void {
+  let mut helpArguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut helpArguments, "build");
+  cliPush(&mut helpArguments, "--help");
+  Test::assertEq<str>(cliCommandName(cliParse(&helpArguments).command), "help");
+
+  let mut versionArguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut versionArguments, "--version");
+  Test::assertEq<str>(cliCommandName(cliParse(&versionArguments).command), "version");
+}
+
+/// The version string is the one the host compiler prints.
+@test
+function cliVersionTextMatchesTheHost(): void {
+  Test::assertEq<str>(versionText().toStr(), "ignis 0.4.0");
+}
