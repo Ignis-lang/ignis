@@ -8,6 +8,11 @@ the given compiler binary and runs it. The observed exit code, stdout and stderr
 are formatted exactly like the host's `format_e2e_result` and compared with the
 recorded insta snapshot.
 
+Cases the host compiles under LeakSanitizer are replayed the same way: the
+generated project asks for `-fsanitize=leak` through `[build] cflags` and the
+binary runs with leak checking on, so a selfhost whose output leaks memory is
+reported as `leak` instead of passing. `--no-leak-check` turns that off.
+
 `--corpus err` runs the error corpus (`crates/ignis_driver/tests/e2e_err.rs`)
 under the "equal or better" rule: every diagnostic line the host records must
 appear in the selfhost's output, while diagnostics the host does not emit are
@@ -57,6 +62,15 @@ CORPUS_FILE = {
 
 SNAPSHOT_PREFIX = {CORPUS_OK: "e2e_ok__", CORPUS_ERR: "e2e_err__"}
 
+# `e2e_test_allow_leak` is the host's escape hatch for a case whose leak is
+# known and accepted; it compiles without the sanitizer, and so does the replay.
+LEAK_EXEMPT_HELPERS = {"e2e_test_allow_leak"}
+
+LEAK_CFLAGS = ("-fsanitize=leak", "-g", "-fno-omit-frame-pointer")
+LSAN_ENVIRONMENT = "detect_leaks=1:leak_check_at_exit=1"
+LSAN_EXIT_CODE = 23
+LSAN_HEADER = "ERROR: LeakSanitizer:"
+
 COMPILE_TIMEOUT_SECONDS = 120
 RUN_TIMEOUT_SECONDS = 10
 
@@ -64,6 +78,7 @@ OBSERVED_OUTPUT_LINES = 10
 
 CLASS_PASS = "pass"
 CLASS_MISMATCH = "mismatch"
+CLASS_LEAK = "leak"
 CLASS_MISSING = "missing"
 CLASS_COMPILED = "compiled"
 CLASS_COMPILE_ERROR = "compile-error"
@@ -75,6 +90,7 @@ CLASS_ORDER = {
   CORPUS_OK: (
     CLASS_PASS,
     CLASS_MISMATCH,
+    CLASS_LEAK,
     CLASS_COMPILE_ERROR,
     CLASS_COMPILE_TIMEOUT,
     CLASS_RUN_TIMEOUT,
@@ -110,6 +126,7 @@ class CaseResult:
   compiler_tail: list[str] = field(default_factory=list)
   expected_lines: list[str] = field(default_factory=list)
   missing_lines: list[str] = field(default_factory=list)
+  leak_report: str = ""
 
 
 class SourceScanner:
@@ -283,7 +300,9 @@ def format_e2e_result(exit_code: int, stdout: str, stderr: str) -> str:
   )
 
 
-def project_manifest(std_path: Path) -> str:
+def project_manifest(std_path: Path, leak_check: bool) -> str:
+  cflags = ", ".join(f'"{flag}"' for flag in LEAK_CFLAGS) if leak_check else ""
+
   return (
     "[package]\n"
     'name = "case"\n'
@@ -301,7 +320,49 @@ def project_manifest(std_path: Path) -> str:
     'out_dir = "build"\n'
     'target = "c"\n'
     'cc = "gcc"\n'
+    f"cflags = [{cflags}]\n"
   )
+
+
+def leak_checked(case: Case, leak_check: bool) -> bool:
+  """Whether this case is compiled and run under LeakSanitizer."""
+  return leak_check and case.kind == KIND_RUN and case.helper not in LEAK_EXEMPT_HELPERS
+
+
+def split_lsan_output(stderr: str) -> tuple[str, str]:
+  """Split stderr into the program's own output and the LeakSanitizer report.
+
+  Mirrors the host harness: the report starts at the `==<pid>==ERROR:
+  LeakSanitizer:` line and runs to the end, so removing it leaves exactly what
+  the recorded snapshot was taken from.
+  """
+  if LSAN_HEADER not in stderr:
+    return stderr, ""
+
+  user_lines = []
+  leak_lines = []
+  in_lsan = False
+
+  for line in stderr.splitlines():
+    if not in_lsan and line.startswith("==") and LSAN_HEADER in line:
+      in_lsan = True
+
+    if in_lsan:
+      leak_lines.append(line)
+    else:
+      user_lines.append(line)
+
+  return "\n".join(user_lines), "\n".join(leak_lines)
+
+
+LSAN_SUMMARY_PATTERN = re.compile(r"SUMMARY: LeakSanitizer: (.+)$", re.MULTILINE)
+
+
+def leak_summary(report: str) -> str:
+  """The one line of an LSan report that says how much leaked."""
+  match = LSAN_SUMMARY_PATTERN.search(report)
+
+  return match.group(1).strip() if match else "LeakSanitizer reported a leak"
 
 
 ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -343,12 +404,12 @@ def first_problem_line(output: str) -> str:
   return interesting[-1] if interesting else "no compiler output"
 
 
-def materialise_case(case: Case, std_path: Path, work_dir: Path) -> Path:
+def materialise_case(case: Case, std_path: Path, work_dir: Path, leak_check: bool = False) -> Path:
   """Write the case as a single-file Ignis project and return its directory."""
   case_dir = work_dir / case.name
   shutil.rmtree(case_dir, ignore_errors=True)
   (case_dir / "src").mkdir(parents=True, exist_ok=True)
-  (case_dir / "ignis.toml").write_text(project_manifest(std_path), encoding="utf-8")
+  (case_dir / "ignis.toml").write_text(project_manifest(std_path, leak_check), encoding="utf-8")
   (case_dir / "src" / "main.ign").write_text(case.source or "", encoding="utf-8")
 
   return case_dir
@@ -373,7 +434,13 @@ def compile_case(
     return None
 
 
-def run_case(case: Case, compiler: Path, std_path: Path, work_dir: Path) -> CaseResult:
+def run_case(
+  case: Case,
+  compiler: Path,
+  std_path: Path,
+  work_dir: Path,
+  leak_check: bool,
+) -> CaseResult:
   if case.skip_reason is not None:
     return CaseResult(case, CLASS_SKIPPED, case.skip_reason)
 
@@ -381,13 +448,20 @@ def run_case(case: Case, compiler: Path, std_path: Path, work_dir: Path) -> Case
     return CaseResult(case, CLASS_SKIPPED, "no snapshot recorded")
 
   if case.kind == KIND_RUN:
-    return run_ok_case(case, compiler, std_path, work_dir)
+    return run_ok_case(case, compiler, std_path, work_dir, leak_check)
 
   return run_err_case(case, compiler, std_path, work_dir)
 
 
-def run_ok_case(case: Case, compiler: Path, std_path: Path, work_dir: Path) -> CaseResult:
-  case_dir = materialise_case(case, std_path, work_dir)
+def run_ok_case(
+  case: Case,
+  compiler: Path,
+  std_path: Path,
+  work_dir: Path,
+  leak_check: bool,
+) -> CaseResult:
+  checked = leak_checked(case, leak_check)
+  case_dir = materialise_case(case, std_path, work_dir, checked)
   binary_path = case_dir / "case_bin"
   compilation = compile_case(compiler, case_dir, binary_path)
 
@@ -408,6 +482,9 @@ def run_ok_case(case: Case, compiler: Path, std_path: Path, work_dir: Path) -> C
 
     return CaseResult(case, CLASS_COMPILE_ERROR, reason, compiler_tail=tail)
 
+  environment = dict(os.environ)
+  environment["LSAN_OPTIONS"] = LSAN_ENVIRONMENT if checked else "detect_leaks=0"
+
   try:
     execution = subprocess.run(
       [str(binary_path)],
@@ -416,11 +493,20 @@ def run_ok_case(case: Case, compiler: Path, std_path: Path, work_dir: Path) -> C
       text=True,
       errors="replace",
       timeout=RUN_TIMEOUT_SECONDS,
+      env=environment,
     )
   except subprocess.TimeoutExpired:
     return CaseResult(case, CLASS_RUN_TIMEOUT, f"program exceeded {RUN_TIMEOUT_SECONDS}s")
 
-  observed = format_e2e_result(execution.returncode, execution.stdout, execution.stderr)
+  user_stderr, leak_report = split_lsan_output(execution.stderr)
+  leaked = checked and execution.returncode == LSAN_EXIT_CODE and leak_report != ""
+
+  if leaked:
+    return CaseResult(case, CLASS_LEAK, leak_summary(leak_report), leak_report=leak_report)
+
+  # LSan writes nothing when the program is clean, so stripping its report only
+  # matters for a binary that leaked without failing the run.
+  observed = format_e2e_result(execution.returncode, execution.stdout, user_stderr)
 
   if observed == case.snapshot:
     return CaseResult(case, CLASS_PASS)
@@ -678,6 +764,9 @@ def build_report(results: list[CaseResult], counts: dict[str, int], corpus: str)
         lines.extend(f"- `{line}`" for line in result.missing_lines)
         lines.append("")
 
+      if result.leak_report:
+        lines.extend(["```", result.leak_report, "```", ""])
+
       if result.compiler_tail:
         label = "Selfhost printed:" if result.case.kind != KIND_RUN else ""
 
@@ -723,6 +812,13 @@ def main() -> int:
     help="which host corpus to replay (default: ok)",
   )
   parser.add_argument("--std", help="std directory (default: <repo>/std)")
+  parser.add_argument(
+    "--leak-check",
+    dest="leak_check",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="compile and run the cases under LeakSanitizer (default: on for the ok corpus)",
+  )
   parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1, help="parallel cases")
   parser.add_argument("--filter", help="only run cases whose name contains this substring")
   parser.add_argument("--report", help="write a Markdown report to this path")
@@ -733,6 +829,7 @@ def main() -> int:
 
   corpus = arguments.corpus
   class_order = CLASS_ORDER[corpus]
+  leak_check = arguments.leak_check if arguments.leak_check is not None else corpus == CORPUS_OK
   repository_root = Path(__file__).resolve().parent.parent
   compiler = Path(arguments.compiler).resolve()
 
@@ -762,9 +859,10 @@ def main() -> int:
   print(f"[parity] compiler: {compiler}")
   print(f"[parity] corpus:   {corpus} ({corpus_path.relative_to(repository_root)})")
   print(f"[parity] cases:    {len(cases)} (jobs: {arguments.jobs})")
+  print(f"[parity] leaks:    {'checked' if leak_check else 'not checked'}")
 
   with ThreadPoolExecutor(max_workers=max(1, arguments.jobs)) as executor:
-    futures = [executor.submit(run_case, case, compiler, std_path, work_dir) for case in cases]
+    futures = [executor.submit(run_case, case, compiler, std_path, work_dir, leak_check) for case in cases]
     results = []
 
     for index, future in enumerate(futures, start=1):
