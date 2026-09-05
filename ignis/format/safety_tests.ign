@@ -1,0 +1,137 @@
+import String from "std::string";
+import Test from "std::test";
+
+import FormatError from "./error";
+import Format from "./safety";
+
+function validate(source: str, formatted: str, sortImports: boolean): Result<void, FormatError> {
+  let sourceText: String = String::create(source);
+  let formattedText: String = String::create(formatted);
+  return Format::validateFormattedOutput(&sourceText, &formattedText, sortImports);
+}
+
+function assertRejects(source: str, formatted: str, expectedFragment: str): void {
+  let Result::ERROR(error) = validate(source, formatted, false) else {
+    Test::fail();
+    return;
+  };
+
+  let described: String = error.describe();
+  let fragment: String = String::create(expectedFragment);
+
+  if (!described.contains(&fragment)) {
+    Test::fail();
+  }
+}
+
+function assertAccepts(source: str, formatted: str, sortImports: boolean): void {
+  let Result::OK(_) = validate(source, formatted, sortImports) else {
+    Test::fail();
+    return;
+  };
+}
+
+@test
+function safetyRejectsFormattedTextThatDoesNotLexBack(): void {
+  assertRejects(
+    "function main(): void { return; }\n",
+    "function main(): void { return; \"unterminated }\n",
+    "parse-back"
+  );
+}
+
+@test
+function safetyRejectsFormattedTextWithMissingTokens(): void {
+  assertRejects(
+    "function main(): void { let x: i32 = 1; return x; }\n",
+    "function main(): void {\n  return;\n}\n",
+    "token"
+  );
+}
+
+@test
+function safetyRejectsFormattedTextWithExtraTokens(): void {
+  assertRejects(
+    "function main(): void { return; }\n",
+    "function main(): void { let extra: i32 = 1; return; }\n",
+    "token"
+  );
+}
+
+@test
+function safetyRejectsTrailingWhitespace(): void {
+  assertRejects(
+    "function main(): void { return; }\n",
+    "function main(): void {\n  return;   \n}\n",
+    "trailing whitespace"
+  );
+}
+
+@test
+function safetyRejectsAMissingFinalNewline(): void {
+  assertRejects(
+    "function main(): void { return; }\n",
+    "function main(): void {\n  return;\n}",
+    "final newline"
+  );
+}
+
+@test
+function safetyRejectsADroppedComment(): void {
+  assertRejects(
+    "// important comment\nfunction main(): void { return; }\n",
+    "function main(): void {\n  return;\n}\n",
+    "comment"
+  );
+}
+
+@test
+function safetyRejectsAMissingSemicolon(): void {
+  assertRejects(
+    "function main(): void { return; }\n",
+    "function main(): void {\n  return\n}\n",
+    "token shape"
+  );
+}
+
+@test
+function safetyRejectsReorderedImports(): void {
+  assertRejects(
+    "import String from \"std::string\";\nimport LibC from \"std::libc\";\n\nimport _ from \"std::io\";\n",
+    "import LibC from \"std::libc\";\nimport String from \"std::string\";\n\nimport _ from \"std::io\";\n",
+    "token shape"
+  );
+}
+
+@test
+function safetyAcceptsReorderedImportsWhenSortingIsEnabled(): void {
+  assertAccepts(
+    "import String from \"std::string\";\nimport LibC from \"std::libc\";\n\nimport _ from \"std::io\";\n",
+    "import LibC from \"std::libc\";\nimport String from \"std::string\";\n\nimport _ from \"std::io\";\n",
+    true
+  );
+}
+
+@test
+function safetyAcceptsAReindentedBody(): void {
+  assertAccepts("function main(): void { return; }\n", "function main(): void {\n  return;\n}\n", false);
+}
+
+@test
+function safetyAcceptsAnEmptyFinalNewlineCheck(): void {
+  let empty: String = String::new();
+
+  let Result::OK(_) = Format::validateFinalNewline(&empty) else {
+    Test::fail();
+    return;
+  };
+}
+
+@test
+function safetyAcceptsGroupedImportsFromTheSameModule(): void {
+  assertAccepts(
+    "import Foo from \"std::foo\";\nimport Bar from \"std::foo\";\n",
+    "import Foo, Bar from \"std::foo\";\n",
+    false
+  );
+}
