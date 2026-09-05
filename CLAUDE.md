@@ -74,14 +74,17 @@ scripts/bootstrap.sh parity                    # host e2e corpus through stage2 
 scripts/bootstrap.sh gate-g5                   # host error corpus through stage2 -> build/bootstrap/gates/G5.json
 scripts/bootstrap.sh gate-g6                   # host vs stage2 parse verdicts -> build/bootstrap/gates/G6.json
 scripts/bootstrap.sh gate-g4                   # stage2 vs stage1 RSS/wall budget -> build/bootstrap/gates/G4.json
+scripts/bootstrap.sh stages                    # stage1 -> stage2 -> gate-g4 -> stage3 (what the nightly's ladder job runs)
 scripts/bootstrap.sh gates                     # every stage and gate (G1..G6) -> build/bootstrap/gates/, then report
+scripts/bootstrap.sh seal-gates                # write a skipped placeholder for every gate that has no result yet
 scripts/bootstrap.sh report                    # gates/*.json -> build/bootstrap/report.md + promotion.json (candidate verdict)
 scripts/selfhost_e2e_parity.py --compiler <bin> --report parity.md  # same harness, any selfhost binary
 scripts/selfhost_e2e_parity.py --compiler <bin> --corpus err --report parity-err.md  # diagnostics parity
 scripts/selfhost_syntax_parity.py --compiler <bin> --report parity-syntax.md  # parse-verdict parity, any selfhost binary
 
 # Language-level tests
-ignis test                                     # Run project tests
+ignis test                                     # Run project tests (tests and C units run through a job pool sized to the CPU count)
+ignis test -j 4                                # Cap the pool; IGNIS_TEST_JOBS is the env fallback
 ignis test path/to/file.ign                    # Run tests from a single file
 ignis test --update-snapshots                  # Recreate selected snapshots
 
