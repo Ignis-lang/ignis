@@ -211,33 +211,49 @@ jobs:
   # Each self-compilation takes around fifteen minutes locally, so it runs here
   # once per green commit instead of on every pull request.
   #
+  # Shape
+  # -----
+  # The ladder is built once in `stages` and published as one artifact; the four
+  # gates that only read stage2 then run as a matrix against that artifact, so
+  # the wall time is the slowest gate rather than their sum. G4 stays with the
+  # ladder because it compares two measurements, which only means something when
+  # both were taken on the same machine. `report` collects the gate files and
+  # decides the verdict. `scripts/bootstrap.sh gates` still runs the same steps
+  # serially on a developer machine.
+  #
   # Promotion flow
   # --------------
-  # `scripts/bootstrap.sh gates` runs every stage and gate and writes
-  # build/bootstrap/promotion.json. A run is a *candidate* when every gate
-  # passes; the job's own red or green is that verdict, decided after the
-  # artifacts are uploaded so a failing run is still readable.
+  # Every gate writes build/bootstrap/gates/<gate>.json, and
+  # `scripts/bootstrap.sh report` turns those into build/bootstrap/promotion.json.
+  # A run is a *candidate* when every gate passes; the `report` job's own red or
+  # green is that verdict, decided after the artifacts are uploaded so a failing
+  # run is still readable.
   #
   # The streak of consecutive candidate runs lives in the `promotion-streak.json`
-  # asset of the rolling nightly release: it is read at the start of the job and
-  # written back at the end. At three consecutive candidates the stage2 binary is
-  # published as `ignis-selfhost-linux-amd64`, and the streak keeps counting.
-  # A run that is not a candidate resets the streak to zero and uploads no
-  # selfhost binary, which leaves the last published one in place.
-  bootstrap:
+  # asset of the rolling nightly release: it is read and written back by `report`.
+  # At three consecutive candidates the stage2 binary is published as
+  # `ignis-selfhost-linux-amd64`, and the streak keeps counting. A run that is
+  # not a candidate resets the streak to zero and uploads no selfhost binary,
+  # which leaves the last published one in place.
+  #
+  # Supersede
+  # ---------
+  # The ladder holds the `nightly` concurrency group for as long as it runs, so a
+  # run whose commit `main` has already moved past keeps the run for the current
+  # head queued behind a verdict nobody will use. `stages` polls the remote head
+  # while it works and every later job checks it once, and a moved head ends the
+  # run early as superseded rather than as a failure. A superseded run never
+  # touches the streak.
+  stages:
     name: Bootstrap ladder
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 300
-
-    # The job publishes the streak and the promoted binary to the nightly release.
-    permissions:
-      contents: write
+    timeout-minutes: 120
 
     outputs:
-      superseded: ${{ steps.gates.outputs.superseded }}
+      superseded: ${{ steps.stages.outputs.superseded }}
 
     steps:
       - name: Checkout repository
@@ -279,52 +295,33 @@ jobs:
       - name: Add Ignis to PATH
         run: echo "${GITHUB_WORKSPACE}/target/debug" >> "$GITHUB_PATH"
 
-      # Read before the gates run, which is also before the `release` job has
-      # replaced this release's assets. A missing asset is the first run.
-      - name: Read the promotion streak
-        id: streak
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          PREVIOUS_STREAK=0
-
-          if gh release download nightly --pattern promotion-streak.json --dir streak 2>/dev/null; then
-            PREVIOUS_STREAK=$(jq -r '.streak // 0' streak/promotion-streak.json)
-          else
-            echo "No promotion-streak.json on the nightly release; starting from zero."
-          fi
-
-          echo "previous_streak=${PREVIOUS_STREAK}" >> "$GITHUB_OUTPUT"
-
-      # Every gate writes its own result and the report is produced even when
-      # gates fail, so this step is expected to succeed whatever the verdict is.
+      # stage1 and stage2 have to succeed because every gate runs against
+      # stage2's binary. G4 belongs to this job because its two measurements
+      # only compare when they come from one machine. A G4 or stage3 failure is
+      # that gate's verdict and is left to the report, so it does not keep the
+      # rest of the gates from running.
       #
-      # The ladder holds the `nightly` concurrency group for as long as it runs,
-      # so a run whose commit `main` has already moved past keeps the run for the
-      # current head queued behind a verdict nobody will use. The gates run in
-      # their own process group while the remote head is polled, and a moved head
-      # ends the run early as superseded rather than as a failure.
-      - name: Run the bootstrap gates
-        id: gates
+      # The ladder runs in its own process group while the remote head is
+      # polled, so a moved head can end it early.
+      - name: Build the bootstrap stages
+        id: stages
         env:
           BUILT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           POLL_INTERVAL_SECONDS: 300
         run: |
           set -uo pipefail
 
-          PGID_FILE="${RUNNER_TEMP}/bootstrap-gates.pgid"
+          PGID_FILE="${RUNNER_TEMP}/bootstrap-stages.pgid"
           rm -f "$PGID_FILE"
 
           # shellcheck disable=SC2016 # $$ is the wrapper's own pid, expanded by it.
-          setsid --wait bash -c 'echo $$ > "$1"; exec scripts/bootstrap.sh gates' _ "$PGID_FILE" &
-          GATES_WAITER=$!
+          setsid --wait bash -c 'echo $$ > "$1"; exec scripts/bootstrap.sh stages' _ "$PGID_FILE" &
+          STAGES_WAITER=$!
 
-          GATES_PGID=""
+          STAGES_PGID=""
           for _ in $(seq 1 10); do
             if [ -s "$PGID_FILE" ]; then
-              GATES_PGID=$(cat "$PGID_FILE")
+              STAGES_PGID=$(cat "$PGID_FILE")
               break
             fi
             sleep 1
@@ -337,7 +334,7 @@ jobs:
           SUPERSEDED_BY=""
           ELAPSED=0
 
-          while kill -0 "$GATES_WAITER" 2>/dev/null; do
+          while kill -0 "$STAGES_WAITER" 2>/dev/null; do
             sleep 10
             ELAPSED=$((ELAPSED + 10))
 
@@ -355,27 +352,222 @@ jobs:
           done
 
           if [ -n "$SUPERSEDED_BY" ]; then
-            if [ -n "$GATES_PGID" ]; then
-              kill -TERM "-${GATES_PGID}" 2>/dev/null || true
+            if [ -n "$STAGES_PGID" ]; then
+              kill -TERM "-${STAGES_PGID}" 2>/dev/null || true
               sleep 10
-              kill -KILL "-${GATES_PGID}" 2>/dev/null || true
+              kill -KILL "-${STAGES_PGID}" 2>/dev/null || true
             fi
 
-            wait "$GATES_WAITER" 2>/dev/null || true
+            wait "$STAGES_WAITER" 2>/dev/null || true
 
             echo "superseded by ${SUPERSEDED_BY}"
             echo "superseded=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          wait "$GATES_WAITER"
+          wait "$STAGES_WAITER"
           STATUS=$?
 
           echo "superseded=false" >> "$GITHUB_OUTPUT"
           exit "$STATUS"
 
+      # Everything a gate job needs to run without rebuilding anything: the two
+      # stage binaries `ensure_stage` accepts on sight, stage2's emitted C, the
+      # host compiler, the runtime archive the selfhost linker looks for at a
+      # fixed path, and the std objects the host test run reuses. The ladder's
+      # own results, G1 and G4 with the measurements behind them, travel with it
+      # for the report. Paths are relative to the workspace, so a gate job
+      # unpacks the artifact over its own checkout.
+      - name: Upload the bootstrap stages
+        if: always() && steps.stages.outputs.superseded != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-stages
+          path: |
+            build/bootstrap/stage1/ignis
+            build/bootstrap/stage2/ignis
+            build/bootstrap/stage2/selfhost_emit.c
+            build/bootstrap/*/measure.json
+            build/bootstrap/*/log.txt
+            build/bootstrap/gates/G1.json
+            build/bootstrap/gates/G4.json
+            build/selfhost/std/**
+            std/runtime/libignis_rt.a
+            target/debug/ignis
+          if-no-files-found: ignore
+
+  gate:
+    name: Gate ${{ matrix.gate }}
+    needs: stages
+    if: needs.stages.outputs.superseded != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gate: G2
+            command: parity
+          - gate: G3
+            command: gate-g3
+          - gate: G5
+            command: gate-g5
+          - gate: G6
+            command: gate-g6
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Download the bootstrap stages
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-stages
+
+      # Artifacts carry no permission bits, and `ensure_stage` takes an existing
+      # executable as the stage rather than rebuilding it.
+      - name: Restore the executable bits
+        run: |
+          set -euo pipefail
+
+          chmod +x build/bootstrap/stage1/ignis build/bootstrap/stage2/ignis target/debug/ignis
+          echo "${GITHUB_WORKSPACE}/target/debug" >> "$GITHUB_PATH"
+
+      # A gate is only worth its runner while its commit is still the head.
+      - name: Check whether the head moved
+        id: head
+        env:
+          BUILT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -uo pipefail
+
+          # An unreachable remote is not evidence that the head moved.
+          REMOTE_HEAD=$(git ls-remote --exit-code --heads origin refs/heads/main | awk '{print $1}') || REMOTE_HEAD=""
+
+          if [ -n "$REMOTE_HEAD" ] && [ "$REMOTE_HEAD" != "$BUILT_SHA" ]; then
+            echo "superseded by ${REMOTE_HEAD}"
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "superseded=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The gate file is the product: a non-zero exit is a recorded failure the
+      # report reads, not a reason to lose the result.
+      - name: Run ${{ matrix.gate }}
+        if: steps.head.outputs.superseded != 'true'
+        run: |
+          scripts/bootstrap.sh ${{ matrix.command }} ||
+            echo "${{ matrix.command }} exited non-zero; the gate file holds the verdict"
+
+      # upload-artifact roots an artifact at the common ancestor of the files it
+      # finds, which moves when a gate writes no report. Staging a fixed tree
+      # keeps every gate artifact mergeable straight back into build/bootstrap.
+      - name: Stage the gate result
+        if: always() && steps.head.outputs.superseded != 'true'
+        run: |
+          set -euo pipefail
+
+          mkdir -p upload/gates
+
+          if [ -f "build/bootstrap/gates/${{ matrix.gate }}.json" ]; then
+            cp "build/bootstrap/gates/${{ matrix.gate }}.json" upload/gates/
+          fi
+
+          for REPORT in parity.md parity-err.md parity-err.json parity-syntax.md parity-syntax.json; do
+            if [ -f "build/bootstrap/${REPORT}" ]; then
+              cp "build/bootstrap/${REPORT}" upload/
+            fi
+          done
+
+          if [ -d build/bootstrap/stage2-tests ]; then
+            mkdir -p upload/stage2-tests
+            cp build/bootstrap/stage2-tests/*.txt upload/stage2-tests/ || true
+          fi
+
+      - name: Upload the gate result
+        if: always() && steps.head.outputs.superseded != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-gate-${{ matrix.gate }}
+          path: upload/
+          if-no-files-found: ignore
+
+  report:
+    name: Promotion report
+    needs: [stages, gate]
+    # Runs on a failed or partly failed matrix too: a gate that produced no
+    # result is a skipped gate, which is already not a candidate. `always()`
+    # also runs a job whose dependencies were skipped, so the event condition
+    # the ladder carries has to be repeated here.
+    if: >-
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.workflow_run.conclusion == 'success') &&
+      needs.stages.outputs.superseded != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # The job publishes the streak and the promoted binary to the nightly release.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      # A verdict for a commit `main` has moved past is not worth publishing, and
+      # the streak must not move for it either.
+      - name: Check whether the head moved
+        id: head
+        env:
+          BUILT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          set -uo pipefail
+
+          # An unreachable remote is not evidence that the head moved.
+          REMOTE_HEAD=$(git ls-remote --exit-code --heads origin refs/heads/main | awk '{print $1}') || REMOTE_HEAD=""
+
+          if [ -n "$REMOTE_HEAD" ] && [ "$REMOTE_HEAD" != "$BUILT_SHA" ]; then
+            echo "superseded by ${REMOTE_HEAD}"
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "superseded=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # G1 and the stage logs come from the ladder, the rest from the matrix. A
+      # missing artifact is a job that failed before it produced one, which the
+      # report records as a skipped gate.
+      - name: Download the bootstrap stages
+        if: steps.head.outputs.superseded != 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-stages
+
+      - name: Download the gate results
+        if: steps.head.outputs.superseded != 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bootstrap-gate-*
+          merge-multiple: true
+          path: build/bootstrap
+
+      - name: Write the promotion report
+        if: steps.head.outputs.superseded != 'true'
+        run: |
+          set -euo pipefail
+
+          scripts/bootstrap.sh seal-gates
+          scripts/bootstrap.sh report
+
       - name: Upload the bootstrap report
-        if: always()
+        if: always() && steps.head.outputs.superseded != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: bootstrap-report
@@ -389,8 +581,29 @@ jobs:
             build/bootstrap/stage2/ignis
           if-no-files-found: ignore
 
+      # The `release` job replaces this release's own assets and leaves the
+      # streak file alone, so reading it here is the same value the job read
+      # before its gates when they were serial.
+      - name: Read the promotion streak
+        id: streak
+        if: steps.head.outputs.superseded != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          PREVIOUS_STREAK=0
+
+          if gh release download nightly --pattern promotion-streak.json --dir streak 2>/dev/null; then
+            PREVIOUS_STREAK=$(jq -r '.streak // 0' streak/promotion-streak.json)
+          else
+            echo "No promotion-streak.json on the nightly release; starting from zero."
+          fi
+
+          echo "previous_streak=${PREVIOUS_STREAK}" >> "$GITHUB_OUTPUT"
+
       - name: Publish the promotion state
-        if: always() && steps.gates.outputs.superseded != 'true'
+        if: always() && steps.head.outputs.superseded != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PREVIOUS_STREAK: ${{ steps.streak.outputs.previous_streak }}
@@ -439,7 +652,7 @@ jobs:
 
       # Last, so that a failed run still leaves the report and the streak behind.
       - name: Fail when the run is not a promotion candidate
-        if: success() && steps.gates.outputs.superseded != 'true'
+        if: success() && steps.head.outputs.superseded != 'true'
         run: |
           set -euo pipefail
 

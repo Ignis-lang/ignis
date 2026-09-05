@@ -24,7 +24,10 @@
 #   G6  syntax: stage2 accepts and rejects exactly what the host parser does
 #
 # `gates` runs all of them and then `report`, which turns the gate files into
-# build/bootstrap/report.md and build/bootstrap/promotion.json.
+# build/bootstrap/report.md and build/bootstrap/promotion.json. The nightly
+# splits that same work across runners instead: `stages` on one, each gate
+# subcommand on its own, then `seal-gates` and `report` over the collected
+# gate files.
 
 set -euo pipefail
 
@@ -55,12 +58,14 @@ Commands:
   stage2   Build stage2 with stage1 (builds stage1 first when missing).
   stage3   Build stage3 with stage2 and check that its C matches stage2's (fixed point, G1).
   all      stage1, stage2, stage3 in order.
+  stages   stage1, stage2, stage3, where only a stage3 failure is left to G1.
   parity   Run the host e2e corpus through stage2 (builds stage2 first when missing, G2).
   gate-g3  Run the selfhost test suite under stage2 and under the host and compare them (G3).
   gate-g5  Run the host error corpus through stage2 and write gates/G5.json.
   gate-g6  Compare stage2's parse verdicts with the host's and write gates/G6.json.
   gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
   gates    Run every stage and gate in order, then write the promotion report.
+  seal-gates  Record a skipped result for every gate that produced no file.
   report   Turn build/bootstrap/gates/*.json into report.md and promotion.json.
   status   Show which stage artifacts exist.
   clean    Remove build/bootstrap.
@@ -346,6 +351,34 @@ run_report() {
     --project-root "$PROJECT_ROOT"
 }
 
+# A gate that produced no file at all is neither a pass nor a failure, and the
+# report only decides a candidate from results it can read.
+seal_missing_gates() {
+  mkdir -p "$GATES_DIR"
+
+  local gate
+  for gate in "${GATE_IDS[@]}"; do
+    [[ -f "${GATES_DIR}/${gate}.json" ]] ||
+      write_gate "$gate" skipped "no ${gate} result was produced by this run"
+  done
+}
+
+# The ladder on its own: stage1 and stage2 have to succeed because every gate
+# runs against stage2's binary, while a stage3 failure is the G1 verdict and is
+# left for the report rather than ending the run.
+#
+# G4 compares stage2's measurement with stage1's over the same corpus, so it
+# belongs here rather than with the other gates: a ratio only means something
+# when both runs were measured on the same machine.
+run_stages() {
+  build_stage1
+  build_stage2
+
+  run_gate_g4 || info "stages: gate-g4 exited non-zero, G4 holds the verdict"
+
+  build_stage3 || info "stages: stage3 exited non-zero, G1 holds the verdict"
+}
+
 # Run every stage and gate, then the report. A failing step never stops the run:
 # the report is the product and a missing gate result is recorded as skipped.
 run_gates() {
@@ -358,11 +391,7 @@ run_gates() {
     "$SELF" "$step" || info "gates: ${step} exited non-zero, continuing"
   done
 
-  local gate
-  for gate in "${GATE_IDS[@]}"; do
-    [[ -f "${GATES_DIR}/${gate}.json" ]] ||
-      write_gate "$gate" skipped "no ${gate} result was produced by this run"
-  done
+  seal_missing_gates
 
   run_report
 }
@@ -549,12 +578,14 @@ main() {
       build_stage2
       build_stage3
       ;;
+    stages) run_stages ;;
     parity) run_parity ;;
     gate-g5) run_gate_g5 ;;
     gate-g6) run_gate_g6 ;;
     gate-g4) run_gate_g4 ;;
     gate-g3) run_gate_g3 ;;
     gates) run_gates ;;
+    seal-gates) seal_missing_gates ;;
     report) run_report ;;
     status) show_status ;;
     clean) rm -rf "$BOOTSTRAP_ROOT"; info "removed ${BOOTSTRAP_ROOT}" ;;
