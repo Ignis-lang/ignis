@@ -405,11 +405,15 @@ impl<'a> BackendInput<'a> {
   }
 }
 
+/// Definition ids are dense indices into the store, so membership is a bounds
+/// check. The scan this replaces ran once per lowered function on every backend
+/// request, which is quadratic: the selfhost test build issues one request per
+/// emitted module over roughly six thousand functions.
 fn has_definition(
   defs: &DefinitionStore,
   definition_id: DefinitionId,
 ) -> bool {
-  defs.iter().any(|(candidate_id, _)| candidate_id == definition_id)
+  (definition_id.index() as usize) < defs.get_all().len()
 }
 
 #[cfg(test)]
