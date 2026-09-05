@@ -262,7 +262,7 @@ fn signature_of(
       let (receiver, rest) = if method.is_static {
         (None, method.params.as_slice())
       } else {
-        let receiver = if method.self_mutable { "&mut self" } else { "&self" };
+        let receiver = method.self_receiver.spelling();
         (Some(receiver), method.params.split_first().map(|(_, rest)| rest).unwrap_or(&[]))
       };
 

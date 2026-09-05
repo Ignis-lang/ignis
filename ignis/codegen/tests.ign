@@ -218,6 +218,66 @@ function codegenDropsAMonomorphizedNominal(): void {
   Test::assert(emission.source.contains(&expectedCall));
 }
 
+/// The C spelling of the record `name` declares, as the emitter mangles it.
+function codegenMangledStructName(emission: &mut CodegenEmission, name: str): Option<String> {
+  let target: String = String::create(name);
+  let mut rawId: u64 = 0;
+
+  while (rawId < emission.defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+    let mut nameSym: Option<Analyzer::SymbolId> = Option::NONE;
+
+    if (let Option::SOME(Analyzer::Definition::Record(recordDef)) = emission.defStore.get(defId)) {
+      nameSym = Option::SOME(recordDef.name);
+    }
+
+    if (let Option::SOME(recordName) = nameSym) {
+      if (let Option::SOME(text) = emission.symbols.resolve(recordName)) {
+        let written: String = String::create(text);
+
+        if (written.equals(&target)) {
+          return Option::SOME(
+            CodegenC::structName(&mut emission.defStore, &mut emission.symbols, defId),
+          );
+        }
+      }
+    }
+
+    rawId += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// A consuming receiver reaches C as an ordinary by-value parameter, while a
+/// borrowing receiver stays a pointer to the owner struct.
+@test
+function codegenEmitsConsumingReceiverByValue(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "@implements(Drop)\nrecord Payload {\n  public value: i32;\n\n  public drop(&mut self): void {\n    return;\n  }\n}\n\nrecord Holder {\n  public payload: Payload;\n\n  public intoPayload(self): Payload {\n    return self.payload;\n  }\n\n  public peek(&self): i32 {\n    return self.payload.value;\n  }\n}\n\nfunction main(): i32 {\n  let holder: Holder = Holder { payload: Payload { value: 7 } };\n  let seen: i32 = holder.peek();\n  let taken: Payload = holder.intoPayload();\n  return seen + taken.value;\n}\n",
+  );
+
+  let Option::SOME(holderStruct) = codegenMangledStructName(&mut emission, "Holder") else {
+    @panic("the emitted program declares no 'Holder' record");
+  };
+  let Option::SOME(consumingName) = codegenMangledMethodStartingWith(&mut emission, "intoPayload") else {
+    @panic("the emitted program declares no 'intoPayload' method");
+  };
+  let Option::SOME(borrowingName) = codegenMangledMethodStartingWith(&mut emission, "peek") else {
+    @panic("the emitted program declares no 'peek' method");
+  };
+
+  let consumingReceiver: String = `${consumingName.toStr()}(struct ${holderStruct.toStr()} `;
+  let borrowingReceiver: String = `${borrowingName.toStr()}(struct ${holderStruct.toStr()}* `;
+
+  Test::assert(emission.source.contains(&consumingReceiver));
+  Test::assert(emission.source.contains(&borrowingReceiver));
+
+  let consumingByPointer: String = `${consumingName.toStr()}(struct ${holderStruct.toStr()}* `;
+
+  Test::assert(!emission.source.contains(&consumingByPointer));
+}
+
 /// The emitted unit owns every definition it holds, so a function nothing
 /// outside it names gets internal linkage on both its prototype and its
 /// definition. The two exceptions keep external linkage: the C entry wrapper,

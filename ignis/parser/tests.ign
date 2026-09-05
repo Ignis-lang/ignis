@@ -2229,6 +2229,82 @@ function parserParsesCaptureOverrideExpressions(): void {
 }
 
 @test
+function parserParsesConsumingSelfReceiver(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_consuming_self_receiver.ign",
+    "record Holder { name: String; intoName(self): String { return self.name; } read(&self): void { return; } }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let recordId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record root"),
+  };
+
+  match (module.items.get(recordId)) {
+    Option::SOME(Ast::Item::Node::Record(recordItem)) -> {
+      Test::assertEq<u64>(recordItem.methods.length(), 2);
+
+      let consumingId: Ast::ItemId = match (recordItem.methods.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing consuming method"),
+      };
+      let borrowingId: Ast::ItemId = match (recordItem.methods.get(1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing borrowing method"),
+      };
+
+      assertSelfReceiverIsByValue(&module, consumingId, true);
+      assertSelfReceiverIsByValue(&module, borrowingId, false);
+    },
+    _ -> @panic("expected record item for consuming receiver test"),
+  };
+}
+
+/// Asserts the receiver of `methodId` is the `self` binding, annotated with the
+/// bare owner type when it is consuming and with a reference otherwise.
+function assertSelfReceiverIsByValue(
+  module: &Ast::Module,
+  methodId: Ast::ItemId,
+  byValue: boolean
+): void {
+  match (module.items.get(methodId)) {
+    Option::SOME(Ast::Item::Node::Function(methodItem)) -> {
+      let receiverId: Ast::PatternId = match (methodItem.parameters.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing receiver parameter"),
+      };
+
+      match (expectPattern(module, receiverId)) {
+        Ast::Pattern::Node::Binding(binding) -> {
+          Test::assertEq<str>(binding.name.toStr(), "self");
+
+          let receiverTypeId: Ast::TypeId = match (binding.annotation) {
+            Option::SOME(value) -> value,
+            Option::NONE -> @panic("missing receiver type"),
+          };
+
+          match (expectType(module, receiverTypeId)) {
+            Ast::Type::Node::Path(pathType) -> {
+              Test::assertEq<boolean>(byValue, true);
+              Test::assertEq<u64>(pathType.segments.length(), 1);
+            },
+            Ast::Type::Node::Reference(_) -> Test::assertEq<boolean>(byValue, false),
+            _ -> @panic("unexpected receiver type"),
+          };
+        },
+        _ -> @panic("expected binding receiver pattern"),
+      };
+    },
+    _ -> @panic("expected function item for receiver"),
+  };
+}
+
+@test
 function parserParsesTraitDeclarationsAndExportedTraits(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_trait_declarations.ign",

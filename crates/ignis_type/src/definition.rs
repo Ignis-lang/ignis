@@ -317,6 +317,37 @@ pub struct VariantDefinition {
   pub tag_value: u32,
 }
 
+/// How an instance method takes its receiver.
+///
+/// `Value` is the consuming form `method(self)`: calling it moves the receiver,
+/// and inside the body `self` is an owned local that is dropped at scope end
+/// unless it is moved out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SelfReceiver {
+  Value,
+  Ref,
+  RefMut,
+}
+
+impl SelfReceiver {
+  pub fn is_by_value(&self) -> bool {
+    matches!(self, SelfReceiver::Value)
+  }
+
+  pub fn is_mutable(&self) -> bool {
+    matches!(self, SelfReceiver::RefMut)
+  }
+
+  /// Source spelling of the receiver, for diagnostics and formatting.
+  pub fn spelling(&self) -> &'static str {
+    match self {
+      SelfReceiver::Value => "self",
+      SelfReceiver::Ref => "&self",
+      SelfReceiver::RefMut => "&mut self",
+    }
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MethodDefinition {
   pub owner_type: DefinitionId,
@@ -324,11 +355,20 @@ pub struct MethodDefinition {
   pub params: Vec<DefinitionId>,
   pub return_type: TypeId,
   pub is_static: bool,
-  /// Whether the method has `&mut self` (true) or `&self` (false).
-  /// Only meaningful for instance methods (is_static=false).
-  pub self_mutable: bool,
+  /// How the receiver is taken. Only meaningful for instance methods (is_static=false).
+  pub self_receiver: SelfReceiver,
   pub inline_mode: InlineMode,
   pub attrs: Vec<FunctionAttr>,
+}
+
+impl MethodDefinition {
+  pub fn self_mutable(&self) -> bool {
+    self.self_receiver.is_mutable()
+  }
+
+  pub fn self_by_value(&self) -> bool {
+    self.self_receiver.is_by_value()
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

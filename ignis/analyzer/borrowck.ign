@@ -848,6 +848,21 @@ export namespace Borrowck {
     };
   }
 
+  /// Whether `methodDefId` takes its receiver by value, so the call moves it.
+  function methodSelfByValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    methodDefId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(methodDefId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Method(method) -> method.selfByValue,
+      _ -> false,
+    };
+  }
+
   /// Whether the receiver of `methodDefId` is bound mutably. Static methods
   /// and non-methods answer `false`, matching the oracle's early return.
   function methodSelfMutable(
@@ -2648,6 +2663,14 @@ export namespace Borrowck {
         }
 
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, receiver);
+
+        if (Borrowck::methodSelfByValue(defStore, call.method)) {
+          Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, receiver);
+
+          if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, receiver)) {
+            Borrowck::tryConsume(state, source);
+          }
+        }
       }
 
       Borrowck::checkReceiverBorrow(defStore, symbols, hir, state, diagnostics, receiver, call.method, span);

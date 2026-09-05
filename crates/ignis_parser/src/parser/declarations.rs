@@ -17,7 +17,11 @@ use ignis_ast::{
 };
 use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_token::token_types::TokenType;
-use ignis_type::{definition::InlineMode, span::Span, symbol::SymbolId};
+use ignis_type::{
+  definition::{InlineMode, SelfReceiver},
+  span::Span,
+  symbol::SymbolId,
+};
 
 use crate::parser::ParserResult;
 
@@ -1445,9 +1449,17 @@ impl super::IgnisParser {
     ))
   }
 
-  /// Try to parse `&self` or `&mut self` as first parameter of method.
-  /// Returns Some(true) for &mut self, Some(false) for &self, None otherwise.
-  fn try_parse_self_param(&mut self) -> Option<bool> {
+  /// Try to parse `self`, `&self` or `&mut self` as first parameter of method.
+  ///
+  /// A bare `self` is the consuming receiver: the call moves the receiver and the
+  /// body owns it. There is no `mut self` form because parameters have no `mut`
+  /// modifier in the grammar; rebind with `let mut` inside the body instead.
+  fn try_parse_self_param(&mut self) -> Option<SelfReceiver> {
+    if self.at(TokenType::Self_) {
+      self.bump();
+      return Some(SelfReceiver::Value);
+    }
+
     // Check for & followed by (mut)? self
     if !self.at(TokenType::Ampersand) {
       return None;
@@ -1471,7 +1483,12 @@ impl super::IgnisParser {
         self.bump(); // mut
       }
       self.bump(); // self
-      Some(mutable)
+
+      Some(if mutable {
+        SelfReceiver::RefMut
+      } else {
+        SelfReceiver::Ref
+      })
     } else {
       None
     }
@@ -2592,6 +2609,70 @@ mod tests {
       },
       other => panic!("expected record, got {:?}", other),
     }
+  }
+
+  #[test]
+  fn parses_self_receiver_forms() {
+    use ignis_ast::statements::ASTRecordItem;
+    use ignis_type::definition::SelfReceiver;
+
+    let result = parse(
+      r#"record Holder {
+        consume(self): void { }
+        read(&self): void { }
+        write(&mut self): void { }
+        make(): void { }
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    let ASTStatement::Record(record) = stmt else {
+      panic!("expected record, got {:?}", stmt);
+    };
+
+    let receivers: Vec<Option<SelfReceiver>> = record
+      .items
+      .iter()
+      .map(|item| match item {
+        ASTRecordItem::Method(method) => method.self_param,
+        other => panic!("expected method, got {:?}", other),
+      })
+      .collect();
+
+    assert_eq!(
+      receivers,
+      vec![
+        Some(SelfReceiver::Value),
+        Some(SelfReceiver::Ref),
+        Some(SelfReceiver::RefMut),
+        None,
+      ]
+    );
+  }
+
+  #[test]
+  fn parses_consuming_self_receiver_with_extra_parameters() {
+    use ignis_ast::statements::ASTRecordItem;
+    use ignis_type::definition::SelfReceiver;
+
+    let result = parse(
+      r#"record Holder {
+        merge(self, other: i32): void { }
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    let ASTStatement::Record(record) = stmt else {
+      panic!("expected record, got {:?}", stmt);
+    };
+
+    let ASTRecordItem::Method(method) = &record.items[0] else {
+      panic!("expected method");
+    };
+
+    assert_eq!(method.self_param, Some(SelfReceiver::Value));
+    assert_eq!(method.parameters.len(), 1);
+    assert_eq!(symbol_name(&result, &method.parameters[0].name), "other");
   }
 
   #[test]

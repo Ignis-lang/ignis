@@ -8002,3 +8002,35 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_consuming_self_receiver() {
+  e2e_workspace_std_test(
+    "consuming_self_receiver",
+    r#"
+import Io from "std::io";
+
+record Holder {
+  name: String;
+
+  intoName(self): String {
+    return self.name;
+  }
+
+  discard(self): void {
+  }
+}
+
+function main(): i32 {
+  let taken = Holder { name: String::create("alpha") };
+  let name = taken.intoName();
+  Io::println(name.toStr());
+
+  let dropped = Holder { name: String::create("beta") };
+  dropped.discard();
+
+  return 0;
+}
+"#,
+  );
+}

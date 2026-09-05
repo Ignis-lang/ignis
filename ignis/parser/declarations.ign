@@ -547,26 +547,36 @@ export namespace ParserDeclarations {
     return false;
   }
 
+  /// Builds the `self` binding a receiver stands for.
+  ///
+  /// `startSpan` is the span of the `&` of a borrowing receiver, or the `self`
+  /// keyword itself for the consuming form, which annotates `self` with `Self`
+  /// rather than a reference to it.
   function createSelfReceiverPattern(
     parser: &mut ParserShared::State,
-    ampersandToken: Token,
+    startSpan: SourceSpan,
+    byValue: boolean,
     mutable: boolean,
     selfToken: Token,
     metadata: &Ast::Metadata
   ): Ast::PatternId {
     let mut parserRef: &mut ParserShared::State = parser;
-    let receiverSpan: SourceSpan = ParserShared::mergeSpans(ampersandToken.span, selfToken.span);
+    let receiverSpan: SourceSpan = ParserShared::mergeSpans(startSpan, selfToken.span);
     let mut selfSegments: Vector<String> = Vector::new<String>();
     selfSegments.push(String::create("Self"));
     let selfTypeId: Ast::TypeId = parserRef.module.addType(Ast::Type::Node::Path(Ast::Type::Path {
       span: selfToken.span,
       segments: ParserShared::copyStrings(&selfSegments),
     }));
-    let receiverTypeId: Ast::TypeId = parserRef.module.addType(Ast::Type::Node::Reference(Ast::Type::Reference {
-      span: receiverSpan,
-      mutable: mutable,
-      target: selfTypeId,
-    }));
+    let mut receiverTypeId: Ast::TypeId = selfTypeId;
+
+    if (!byValue) {
+      receiverTypeId = parserRef.module.addType(Ast::Type::Node::Reference(Ast::Type::Reference {
+        span: receiverSpan,
+        mutable: mutable,
+        target: selfTypeId,
+      }));
+    }
 
     return parserRef.module.addPattern(Ast::Pattern::Node::Binding(Ast::Pattern::Binding {
       span: receiverSpan,
@@ -583,12 +593,19 @@ export namespace ParserDeclarations {
   ): Option<Ast::PatternId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
+    if (parserRef.atKeyword(Keyword::SELF_)) {
+      let selfToken = parserRef.expectKeyword(Keyword::SELF_, "expected 'self' receiver")!;
+      let selfSpan: SourceSpan = selfToken.span;
+
+      return Option::SOME(ParserDeclarations::createSelfReceiverPattern(parserRef, selfSpan, true, false, selfToken, metadata));
+    }
+
     if (parserRef.atPunctuation(Punctuation::AMPERSAND)) {
       let ampersandToken = parserRef.expectPunctuation(Punctuation::AMPERSAND, "expected '&' to start receiver")!;
       let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
       let selfToken = parserRef.expectKeyword(Keyword::SELF_, "expected 'self' receiver")!;
 
-      return Option::SOME(ParserDeclarations::createSelfReceiverPattern(parserRef, ampersandToken, mutable, selfToken, metadata));
+      return Option::SOME(ParserDeclarations::createSelfReceiverPattern(parserRef, ampersandToken.span, false, mutable, selfToken, metadata));
     }
 
     return ParserDeclarations::parseBindingPatternWithMetadata(parserRef, metadata);

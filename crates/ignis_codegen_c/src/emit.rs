@@ -6423,7 +6423,7 @@ mod tests {
   use ignis_type::attribute::FunctionAttr;
   use ignis_type::definition::{
     Definition, DefinitionKind, FieldDefinition, FunctionDefinition, LangTraitSet, MethodDefinition,
-    ParameterDefinition, NamespaceDefinition, RecordDefinition, RecordFieldDef, Visibility,
+    ParameterDefinition, NamespaceDefinition, RecordDefinition, RecordFieldDef, SelfReceiver, Visibility,
   };
   use ignis_type::file::FileId;
   use ignis_type::module::ModuleId;
@@ -6556,7 +6556,7 @@ mod tests {
         params: Vec::new(),
         return_type,
         is_static: true,
-        self_mutable: false,
+        self_receiver: SelfReceiver::Ref,
         inline_mode: InlineMode::None,
         attrs: Vec::new(),
       }),
@@ -6964,7 +6964,7 @@ mod tests {
         params: vec![push_param],
         return_type: void_type,
         is_static: false,
-        self_mutable: true,
+        self_receiver: SelfReceiver::RefMut,
         inline_mode: InlineMode::None,
         attrs: Vec::new(),
       }),

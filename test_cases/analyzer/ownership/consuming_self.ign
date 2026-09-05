@@ -1,0 +1,40 @@
+// Test: the consuming receiver `method(self)` moves its receiver
+// Expected: OK — each holder is consumed exactly once
+
+@implements(Drop)
+record Payload {
+    public id: i32;
+    drop(&mut self): void { return; }
+}
+
+record Holder {
+    public payload: Payload;
+
+    intoPayload(self): Payload {
+        return self.payload;
+    }
+
+    discard(self): void {
+        return;
+    }
+
+    id(&self): i32 {
+        return self.payload.id;
+    }
+
+    bump(&mut self): void {
+        self.payload.id += 1;
+    }
+}
+
+function main(): i32 {
+    let mut borrowed: Holder = Holder { payload: Payload { id: 1 } };
+    borrowed.bump();
+    let borrowedId: i32 = borrowed.id();
+    borrowed.discard();
+
+    let taken: Holder = Holder { payload: Payload { id: 2 } };
+    let payload: Payload = taken.intoPayload();
+
+    return borrowedId + payload.id;
+}

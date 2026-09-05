@@ -464,6 +464,76 @@ enum Option<T> {
 }
 
 #[test]
+fn consuming_method_moves_its_receiver() {
+  // Line 22: the second call, after the first one already moved `holder`.
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+record Holder {
+    public payload: Payload;
+
+    intoPayload(self): Payload {
+        return self.payload;
+    }
+}
+
+function main(): i32 {
+    let holder: Holder = Holder { payload: Payload { value: 1 } };
+    let first: Payload = holder.intoPayload();
+    let second: Payload = holder.intoPayload();
+    return first.value + second.value;
+}
+"#,
+    "O0001", // UseAfterMove
+    22,
+  );
+}
+
+#[test]
+fn consuming_method_cannot_be_reached_through_a_reference() {
+  // Line 20: the call on a `&Holder` binding.
+  common::assert_diagnostic_at_line(
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+record Holder {
+    public payload: Payload;
+
+    intoPayload(self): Payload {
+        return self.payload;
+    }
+}
+
+function consume(holder: &Holder): Payload {
+    return holder.intoPayload();
+}
+
+function main(): i32 {
+    let holder: Holder = Holder { payload: Payload { value: 1 } };
+    return consume(&holder).value;
+}
+"#,
+    "A0186", // CannotMoveOutOfBorrowedValue
+    20,
+  );
+}
+
+#[test]
 fn cannot_move_out_of_borrowed_result_unwrap() {
   common::assert_diagnostic_at_line(
     r#"

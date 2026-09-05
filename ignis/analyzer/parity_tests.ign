@@ -536,6 +536,40 @@ function parityRecordInstanceMethod(): void {
   );
 }
 
+/// Origin: e2e_ok::e2e_consuming_self_receiver.
+/// Host expectation: accepted with no diagnostics. A consuming receiver either
+/// hands its payload on or drops it with `self` at the end of the method.
+@test
+function parityConsumingSelfReceiver(): void {
+  parityAcceptsSource(
+    "@implements(Drop)\nrecord Payload {\n    public value: i32;\n\n    drop(&mut self): void {\n        return;\n    }\n}\n\nrecord Holder {\n    public payload: Payload;\n\n    intoPayload(self): Payload {\n        return self.payload;\n    }\n\n    discard(self): void {\n        return;\n    }\n}\n\nfunction main(): i32 {\n    let dropped: Holder = Holder { payload: Payload { value: 1 } };\n    dropped.discard();\n\n    let taken: Holder = Holder { payload: Payload { value: 2 } };\n    let payload: Payload = taken.intoPayload();\n    return payload.value;\n}\n",
+  );
+}
+
+/// Origin: diagnostics::consuming_method_moves_its_receiver.
+/// Host expectation: rejected with O0001 (UseAfterMove) at the second call —
+/// the first one already moved the receiver.
+@test
+function parityConsumingSelfReceiverMovesReceiver(): void {
+  parityRejectsSource(
+    "@implements(Drop)\nrecord Payload {\n    public value: i32;\n\n    drop(&mut self): void {\n        return;\n    }\n}\n\nrecord Holder {\n    public payload: Payload;\n\n    intoPayload(self): Payload {\n        return self.payload;\n    }\n}\n\nfunction main(): i32 {\n    let holder: Holder = Holder { payload: Payload { value: 1 } };\n    let first: Payload = holder.intoPayload();\n    let second: Payload = holder.intoPayload();\n    return first.value + second.value;\n}\n",
+    DiagnosticCode::USE_AFTER_MOVE,
+    1,
+  );
+}
+
+/// Origin: diagnostics::consuming_method_cannot_be_reached_through_a_reference.
+/// Host expectation: rejected with A0186 (CannotMoveOutOfBorrowedValue); the
+/// selfhost code space numbers the same contract `O0002`.
+@test
+function parityConsumingSelfReceiverThroughReference(): void {
+  parityRejectsSource(
+    "@implements(Drop)\nrecord Payload {\n    public value: i32;\n\n    drop(&mut self): void {\n        return;\n    }\n}\n\nrecord Holder {\n    public payload: Payload;\n\n    intoPayload(self): Payload {\n        return self.payload;\n    }\n}\n\nfunction steal(holder: &Holder): Payload {\n    return holder.intoPayload();\n}\n\nfunction main(): i32 {\n    let holder: Holder = Holder { payload: Payload { value: 1 } };\n    return steal(&holder).value;\n}\n",
+    DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW,
+    1,
+  );
+}
+
 /// Origin: diagnostics::method_must_be_called.
 /// Host expectation: rejected with A0061 (MethodMustBeCalled) — `c.get` names a
 /// method without applying it.

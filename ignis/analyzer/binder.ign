@@ -1764,6 +1764,54 @@ export namespace Analyzer {
       return isSelfBinding(ast, *firstParam);
     }
 
+    /// Return true for a consuming receiver, written `self` and annotated with the
+    /// owner type itself rather than a reference to it.
+    function functionSelfByValue(ast: &Ast::Module, fn_: &Ast::Item::Function): boolean {
+      let Option::SOME(firstParam) = fn_.parameters.get(0) else {
+        return false;
+      };
+
+      let Option::SOME(pattern) = ast.patterns.get(*firstParam) else {
+        return false;
+      };
+
+      match (pattern) {
+        Ast::Pattern::Node::Binding(binding) -> {
+          if (!binding.name.equals("self")) {
+            return false;
+          }
+
+          let Option::SOME(annotationId) = binding.annotation else {
+            return false;
+          };
+
+          let Option::SOME(typeNode) = ast.types.get(annotationId) else {
+            return false;
+          };
+
+          match (typeNode) {
+            Ast::Type::Node::Path(_) -> {
+              return true;
+            },
+            Ast::Type::Node::Reference(_) -> {},
+            Ast::Type::Node::Pointer(_) -> {},
+            Ast::Type::Node::Tuple(_) -> {},
+            Ast::Type::Node::Function(_) -> {},
+            Ast::Type::Node::Slice(_) -> {},
+            Ast::Type::Node::FixedArray(_) -> {},
+            Ast::Type::Node::Generic(_) -> {},
+          };
+        },
+        Ast::Pattern::Node::Wildcard(_) -> {},
+        Ast::Pattern::Node::Literal(_) -> {},
+        Ast::Pattern::Node::Path(_) -> {},
+        Ast::Pattern::Node::Tuple(_) -> {},
+        Ast::Pattern::Node::Or(_) -> {},
+      };
+
+      return false;
+    }
+
     /// Return true for `self: &mut Self` / `self: *mut Self` style receiver annotations.
     function functionSelfMutable(ast: &Ast::Module, fn_: &Ast::Item::Function): boolean {
       let Option::SOME(firstParam) = fn_.parameters.get(0) else {
@@ -1847,6 +1895,7 @@ export namespace Analyzer {
         returnType: sentinelId,
         isStatic: isStatic,
         selfMutable: false,
+        selfByValue: false,
         isDeprecated: false,
         deprecatedMessage: Option::NONE,
       };
@@ -1857,6 +1906,7 @@ export namespace Analyzer {
       let typeParams: Vector<Analyzer::DefinitionId> = bindTypeParams(state, defStore, symbols, &fn_.genericParameters, defId);
       let params: Vector<Analyzer::DefinitionId> = bindParameters(state, defStore, typeStore, symbols, ast, &fn_.parameters);
       let selfMutable: boolean = !isStatic && functionSelfMutable(ast, fn_);
+      let selfByValue: boolean = !isStatic && functionSelfByValue(ast, fn_);
 
       let updated: Analyzer::MethodDef = Analyzer::MethodDef {
         name: sym,
@@ -1867,6 +1917,7 @@ export namespace Analyzer {
         returnType: sentinelId,
         isStatic: isStatic,
         selfMutable: selfMutable,
+        selfByValue: selfByValue,
         isDeprecated: Analyzer::Binder::hasDeprecatedAttribute(&fn_.metadata),
         deprecatedMessage: Analyzer::Binder::deprecatedAttributeMessage(&fn_.metadata),
       };

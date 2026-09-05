@@ -45,7 +45,7 @@ use ignis_type::{
   Store as ASTStore,
 };
 use ignis_type::types::{TypeId, TypeStore};
-use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, SymbolEntry, Visibility};
+use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, SelfReceiver, SymbolEntry, Visibility};
 use ignis_type::lint::{LintId, LintLevel};
 use ignis_type::module::ModuleId;
 use ignis_type::namespace::{NamespaceId, NamespaceStore};
@@ -125,7 +125,7 @@ pub enum PipeResolution {
     method_id: DefinitionId,
     extra_args: Vec<NodeId>,
     type_args: Vec<TypeId>,
-    self_mutable: bool,
+    self_receiver: SelfReceiver,
     insertion: PipeArgInsertion,
   },
 }

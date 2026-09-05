@@ -1,4 +1,8 @@
-use ignis_type::{definition::InlineMode, span::Span, symbol::SymbolId};
+use ignis_type::{
+  definition::{InlineMode, SelfReceiver},
+  span::Span,
+  symbol::SymbolId,
+};
 
 use crate::{attribute::ASTAttribute, generics::ASTGenericParams, metadata::ASTMetadata, type_::IgnisTypeSyntax, NodeId};
 
@@ -100,9 +104,9 @@ pub struct ASTMethod {
   pub return_type: IgnisTypeSyntax,
   pub body: NodeId,
   pub metadata: ASTMetadata,
-  /// Whether the method has `&mut self` (true) or `&self` (false) or no self (None).
-  /// None means static method or instance method without explicit self.
-  pub self_param: Option<bool>,
+  /// How the method takes its receiver, or `None` for a static method or an
+  /// instance method written without an explicit receiver.
+  pub self_param: Option<SelfReceiver>,
   pub span: Span,
   pub doc: Option<String>,
   pub inline_mode: InlineMode,
@@ -118,7 +122,7 @@ impl ASTMethod {
     return_type: IgnisTypeSyntax,
     body: NodeId,
     metadata: ASTMetadata,
-    self_param: Option<bool>,
+    self_param: Option<SelfReceiver>,
     span: Span,
     doc: Option<String>,
     inline_mode: InlineMode,
@@ -146,10 +150,10 @@ impl ASTMethod {
 
   /// Returns true if method has `&mut self`
   pub fn has_mut_self(&self) -> bool {
-    self.self_param == Some(true)
+    self.self_param == Some(SelfReceiver::RefMut)
   }
 
-  /// Returns true if method has `&self` (immutable)
+  /// Returns true if the method has any explicit receiver
   pub fn has_self(&self) -> bool {
     self.self_param.is_some()
   }
