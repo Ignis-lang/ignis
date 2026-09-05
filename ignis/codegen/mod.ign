@@ -1,3 +1,4 @@
+import HashSet from "std::collections";
 import Vector from "std::vector";
 
 import Id from "@compiler::ids";
@@ -2199,7 +2200,7 @@ export namespace CodegenC {
     typeStore: &mut Analyzer::TypeStore,
   ): Vector<Analyzer::DefinitionId> {
     let mut ordered: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
-    let mut emitted: Vector<u32> = Vector::new<u32>();
+    let mut emitted: HashSet<u32> = HashSet::new<u32>();
     let mut visiting: Vector<u32> = Vector::new<u32>();
 
     let mut rawId: u64 = 0;
@@ -3412,16 +3413,18 @@ export namespace CodegenC {
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     ordered: &mut Vector<Analyzer::DefinitionId>,
-    emitted: &mut Vector<u32>,
+    emitted: &mut HashSet<u32>,
     visiting: &mut Vector<u32>,
     defId: Analyzer::DefinitionId,
   ): void {
-    if (CodegenC::containsRaw(emitted, defId.raw())) {
+    let raw: u32 = defId.raw();
+
+    if (emitted.contains(&raw)) {
       return;
     }
 
     // A cycle can only be spelled through a pointer, which needs no ordering.
-    if (CodegenC::containsRaw(visiting, defId.raw())) {
+    if (CodegenC::containsRaw(visiting, raw)) {
       return;
     }
 
@@ -3444,7 +3447,7 @@ export namespace CodegenC {
     }
 
     let mut visitingRef: &mut Vector<u32> = visiting;
-    visitingRef.push(defId.raw());
+    visitingRef.push(raw);
 
     let componentTypeIds: Vector<Analyzer::TypeId> = CodegenC::componentTypesOf(defStore, defId);
     let mut componentIndex: u64 = 0;
@@ -3462,8 +3465,8 @@ export namespace CodegenC {
     let mut popRef: &mut Vector<u32> = visiting;
     let _ = popRef.pop();
 
-    let mut emittedRef: &mut Vector<u32> = emitted;
-    emittedRef.push(defId.raw());
+    let mut emittedRef: &mut HashSet<u32> = emitted;
+    emittedRef.insert(raw);
 
     let mut orderedRef: &mut Vector<Analyzer::DefinitionId> = ordered;
     orderedRef.push(defId);
