@@ -341,6 +341,14 @@
 
 // A `static` property is a namespaced constant on the type and requires an
 // initializer: `static MAX: i32 = 10;`. It is read as `TypeName::MAX`.
+//
+// `static mut` declares one writable storage location for the whole program:
+// `static mut TOTAL: i32 = 0;`. It also requires an initializer, which has to
+// be a constant expression, and it is read, assigned and borrowed through
+// `TypeName::TOTAL`. Assigning to a property that is `static` without `mut` is
+// an error, and so is taking `&mut` of it. A value stored in a `static mut` is
+// never dropped automatically: the storage outlives every scope, so nothing
+// schedules a drop for it.
 
 <record-method> ::= <method-modifier>* <identifier> <generic-type>?
                     "(" <method-parameters>? ")" "?"? ":" <type>
@@ -355,7 +363,7 @@
 // rejected. There is no `mut self` form, because parameters carry no `mut`
 // modifier; rebind with `let mut` inside the body instead.
 
-<property-modifier> ::= "public" | "private" | "static"
+<property-modifier> ::= "public" | "private" | "static" "mut"?
 <method-modifier> ::= "public" | "private" | "static" | <inline-modifier>
 
 <enum> ::= <directive-attrs>? "enum" <identifier> <generic-type>?
@@ -372,6 +380,8 @@
 
 // Like record properties, an enum field declared `static` is a namespaced
 // constant on the enum and requires an initializer: `static COUNT: i32 = 2;`.
+// `static mut` gives the field writable storage under the same rules as a
+// record property, including that its value is never dropped automatically.
 // `static` is rejected on a variant, not on a field.
 
 <type-alias> ::= <directive-attrs>? "type" <identifier> <generic-type>? "=" <type> ";"

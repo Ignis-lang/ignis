@@ -256,6 +256,21 @@ export namespace LirLowering {
     return Lir::ConstValue::Int(bits, ty);
   }
 
+  /// Whether `defId` names a `static mut` field, whose reads and writes go
+  /// through its global storage instead of its constant initializer.
+  function isMutableStatic(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId
+  ): boolean {
+    let defsRef: &mut Analyzer::DefinitionStore = defStore;
+
+    if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defsRef.get(defId)) {
+      return variable.mutable;
+    }
+
+    return false;
+  }
+
   /// The folded operand for a reference to a constant with an evaluated value.
   /// The analyzer keeps every integer as an `i64` bit pattern, so an unsigned
   /// constant is reinterpreted here, the way the oracle does, to keep C from
@@ -266,7 +281,18 @@ export namespace LirLowering {
     defId: Analyzer::DefinitionId,
     ty: Analyzer::TypeId,
   ): Option<Lir::Operand> {
-    let Option::SOME(value) = Analyzer::ConstEval::findConstValue(&mut state.constValues, defId.raw()) else {
+    return LirLowering::constOperandFromMap(typeStore, &mut state.constValues, defId, ty);
+  }
+
+  /// `foldedConstOperand` against a constant-value map that is not held by a
+  /// `LowerState`, which is how the global initializers are collected.
+  function constOperandFromMap(
+    typeStore: &mut Analyzer::TypeStore,
+    constValues: &mut Analyzer::ConstEval::ConstValueMap,
+    defId: Analyzer::DefinitionId,
+    ty: Analyzer::TypeId,
+  ): Option<Lir::Operand> {
+    let Option::SOME(value) = Analyzer::ConstEval::findConstValue(constValues, defId.raw()) else {
       return Option::NONE;
     };
 
@@ -1145,6 +1171,11 @@ export namespace LirLowering {
           return Lir::Operand::Temp(dest);
         }
 
+        // A `static mut` field reads from its storage, never from its seed.
+        if (LirLowering::isMutableStatic(defStore, defId)) {
+          return Lir::Operand::GlobalRef(defId);
+        }
+
         if (let Option::SOME(folded) = LirLowering::foldedConstOperand(typeStore, state, defId, nodeType)) {
           return folded;
         }
@@ -2014,6 +2045,23 @@ export namespace LirLowering {
         }));
 
         return Lir::Operand::Temp(dest);
+      }
+
+      // A `static mut` field owns no slot: `Type::NAME` is the one global
+      // storage location the whole program shares, and its address is that
+      // global rather than a spilled copy of its value.
+      if (LirLowering::isMutableStatic(defStore, defId)) {
+        let mut staticPtrTypeStoreRef: &mut Analyzer::TypeStore = typeStore;
+        let staticPtrType: Analyzer::TypeId = staticPtrTypeStoreRef.pointer(nodeType);
+        let staticPtr: Lir::TempId = LirLowering::freshTemp(function_, staticPtrType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::AddrOfGlobal(Lir::InstrAddrOfGlobal {
+          dest: staticPtr,
+          def: defId,
+          mutable: true,
+        }));
+
+        return Lir::Operand::Temp(staticPtr);
       }
     }
 
@@ -3929,6 +3977,48 @@ export namespace LirLowering {
     }
   }
 
+  /// Records one `GlobalInit` per `static mut` field, in definition order.
+  ///
+  /// A `static mut` field is the only declaration with storage of its own that
+  /// no function owns: every read is a `GlobalRef` and every write goes through
+  /// `AddrOfGlobal`, so the emitter needs the constant its storage starts at.
+  function collectStaticMutGlobals(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    constValues: &Analyzer::ConstEval::ConstValueMap,
+    program: &mut Lir::LirProgram,
+  ): void {
+    let mut values: Analyzer::ConstEval::ConstValueMap = LirLowering::copyConstValueMap(constValues);
+    let mut index: u64 = 0;
+
+    while (index < defStore.length()) {
+      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+      index += 1;
+
+      let mut declaredType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+      let mut isStaticMut: boolean = false;
+
+      if (let Option::SOME(Analyzer::Definition::Variable(variable)) = defStore.get(defId)) {
+        isStaticMut = variable.mutable;
+        declaredType = variable.declaredType;
+      }
+
+      if (!isStaticMut) {
+        continue;
+      }
+
+      let Option::SOME(value) = LirLowering::constOperandFromMap(typeStore, &mut values, defId, declaredType) else {
+        continue;
+      };
+
+      let mut programRef: &mut Lir::LirProgram = program;
+      programRef.globalInits.push(Lir::GlobalInit {
+        defId: defId,
+        value: value,
+      });
+    }
+  }
+
   /// Lowers every function body of one module's HIR store.
   function lowerModule(
     defStore: &mut Analyzer::DefinitionStore,
@@ -4035,6 +4125,8 @@ export namespace LirLowering {
     if (let Option::SOME(entryDef) = hirStore.entryPoint) {
       program.entryPoint = Option::SOME(entryDef);
     }
+
+    LirLowering::collectStaticMutGlobals(defStore, typeStore, constValues, &mut program);
 
     return LirLowering::LowerModuleResult {
       program: program,

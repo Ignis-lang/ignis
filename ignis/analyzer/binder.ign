@@ -1441,7 +1441,7 @@ export namespace Analyzer {
                   name: sym,
                   visibility: Analyzer::Visibility::PUBLIC,
                   declaredType: sentinelId,
-                  mutable: false,
+                  mutable: Analyzer::Binder::metadataIsMutable(&b.metadata),
                   takes: false,
                   noEscape: false,
                   isExtern: false,
@@ -1539,7 +1539,7 @@ export namespace Analyzer {
                   name: sym,
                   visibility: Analyzer::Visibility::PUBLIC,
                   declaredType: sentinelId,
-                  mutable: false,
+                  mutable: Analyzer::Binder::metadataIsMutable(&b.metadata),
                   takes: false,
                   noEscape: false,
                   isExtern: false,
@@ -1720,6 +1720,38 @@ export namespace Analyzer {
           Ast::Modifier::Static -> {
             return true;
           },
+          Ast::Modifier::Public -> {},
+          Ast::Modifier::Private -> {},
+          Ast::Modifier::Mutable -> {},
+          Ast::Modifier::Inline -> {},
+          Ast::Modifier::InlineAlways -> {},
+          Ast::Modifier::InlineNever -> {},
+          Ast::Modifier::Meta -> {},
+          Ast::Modifier::Declare -> {},
+        };
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    /// Return true when metadata contains the `mut` modifier, which the parser
+    /// only ever attaches to a `static mut` field.
+    function metadataIsMutable(metadata: &Ast::Metadata): boolean {
+      let mut index: u64 = 0;
+
+      while (index < metadata.modifiers.length()) {
+        let Option::SOME(modifier) = metadata.modifiers.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        match (modifier) {
+          Ast::Modifier::Mutable -> {
+            return true;
+          },
+          Ast::Modifier::Static -> {},
           Ast::Modifier::Public -> {},
           Ast::Modifier::Private -> {},
           Ast::Modifier::Inline -> {},

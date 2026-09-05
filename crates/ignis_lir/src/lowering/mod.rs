@@ -717,6 +717,11 @@ impl<'a> LoweringContext<'a> {
         DefinitionKind::Function(_) => Some(Operand::FuncRef(def_id)),
 
         DefinitionKind::Constant(const_def) => {
+          // A `static mut` field reads from its storage, never from its seed.
+          if const_def.mutable {
+            return Some(Operand::GlobalRef(def_id));
+          }
+
           // Try to inline the constant value directly. An aggregate has no LIR
           // constant form, so it falls through to the global reference below
           // rather than collapsing the whole expression to `None` — the base of
@@ -1411,6 +1416,17 @@ impl<'a> LoweringContext<'a> {
         self.lower_hir_node(inner)
       },
 
+      // `&Type::NAME` on a `static mut` field points at the one global storage
+      // location. Every other static access has no storage of its own, so it
+      // keeps falling through to the spill below.
+      HIRKind::StaticAccess { def } if self.is_mutable_static(*def) => {
+        let def = *def;
+        let dest = self.fn_builder().alloc_temp(ref_ty, span);
+        self.fn_builder().emit(Instr::AddrOfGlobal { dest, def, mutable });
+
+        Some(Operand::Temp(dest))
+      },
+
       // Other expressions: spill into a synthetic local, then take its address.
       _ => {
         let value = self.lower_hir_node(expr)?;
@@ -1823,6 +1839,45 @@ impl<'a> LoweringContext<'a> {
               value: val,
             });
           }
+        }
+      },
+      HIRKind::StaticAccess { def } => {
+        let def = *def;
+        let value_ty = target_node.type_id;
+        let ptr_ty = self.types.pointer(value_ty, true);
+
+        let ptr = self.fn_builder().alloc_temp(ptr_ty, Span::default());
+        self.fn_builder().emit(Instr::AddrOfGlobal {
+          dest: ptr,
+          def,
+          mutable: true,
+        });
+
+        if let Some(op) = operation {
+          let current = self.fn_builder().alloc_temp(value_ty, Span::default());
+          self.fn_builder().emit(Instr::LoadPtr {
+            dest: current,
+            ptr: Operand::Temp(ptr),
+          });
+
+          if let Some(rhs) = self.lower_hir_node(value) {
+            let result = self.fn_builder().alloc_temp(value_ty, Span::default());
+            self.fn_builder().emit(Instr::BinOp {
+              dest: result,
+              op,
+              left: Operand::Temp(current),
+              right: rhs,
+            });
+            self.fn_builder().emit(Instr::StorePtr {
+              ptr: Operand::Temp(ptr),
+              value: Operand::Temp(result),
+            });
+          }
+        } else if let Some(val) = self.lower_hir_node(value) {
+          self.fn_builder().emit(Instr::StorePtr {
+            ptr: Operand::Temp(ptr),
+            value: val,
+          });
         }
       },
       HIRKind::Index { base, index } => {
@@ -3658,6 +3713,15 @@ impl<'a> LoweringContext<'a> {
     Some(Operand::Temp(dest))
   }
 
+  /// Whether `def` is a `static mut` field, whose reads and writes go through
+  /// its global storage instead of its constant initializer.
+  fn is_mutable_static(
+    &self,
+    def: DefinitionId,
+  ) -> bool {
+    matches!(&self.defs.get(&def).kind, DefinitionKind::Constant(const_def) if const_def.mutable)
+  }
+
   fn lower_static_access(
     &mut self,
     def: DefinitionId,
@@ -3674,7 +3738,10 @@ impl<'a> LoweringContext<'a> {
       let def_data = self.defs.get(&def);
       match &def_data.kind {
         DefinitionKind::Constant(const_def) => {
-          if let Some(value) = &const_def.value
+          // A `static mut` field has a constant initializer but not a constant
+          // value: folding a read of it would return the seed after a write.
+          if !const_def.mutable
+            && let Some(value) = &const_def.value
             && let Some(lir_const) = self.definition_const_to_lir_const(value, result_ty)
           {
             return Some(Operand::Const(lir_const));

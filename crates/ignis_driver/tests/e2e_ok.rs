@@ -1268,6 +1268,66 @@ function main(): i32 {
 }
 
 #[test]
+fn e2e_record_static_mut_field() {
+  e2e_test(
+    "record_static_mut_field",
+    r#"
+record Counter {
+    static mut TOTAL: i32 = 0;
+}
+
+function bump(): void {
+    Counter::TOTAL += 1;
+}
+
+function main(): i32 {
+    bump();
+    bump();
+
+    return Counter::TOTAL - 2;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_static_mut_field_borrow() {
+  e2e_workspace_std_test(
+    "static_mut_field_borrow",
+    r#"
+import Io from "std::io";
+
+record Registry {
+    static mut LABEL: str = "start";
+    static mut COUNT: i32 = 1;
+}
+
+enum Slot {
+    A,
+
+    static mut PICKED: i32 = 3;
+}
+
+function rename(): void {
+    Registry::LABEL = "done";
+}
+
+function main(): i32 {
+    let count: &mut i32 = &mut Registry::COUNT;
+    *count = *count + 4;
+
+    rename();
+    Io::println(Registry::LABEL);
+
+    Slot::PICKED = Slot::PICKED * 2;
+
+    return Registry::COUNT + Slot::PICKED - 11;
+}
+"#,
+  );
+}
+
+#[test]
 fn e2e_enum_static_method() {
   e2e_test(
     "enum_static_method",

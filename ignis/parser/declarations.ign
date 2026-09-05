@@ -331,6 +331,12 @@ export namespace ParserDeclarations {
 
     if (parserRef.consumeKeyword(Keyword::STATIC).isSome()) {
       metadataRef.modifiers.push(Ast::Modifier::Static);
+
+      if (parserRef.atKeyword(Keyword::MUT) && ParserDeclarations::staticMutFieldAhead(parserRef)) {
+        let _mutKeyword: Option<Token> = parserRef.consumeKeyword(Keyword::MUT);
+        metadataRef.modifiers.push(Ast::Modifier::Mutable);
+      }
+
       ParserDeclarations::consumeLeadingModifiers(parserRef, metadataRef);
       return;
     }
@@ -352,6 +358,47 @@ export namespace ParserDeclarations {
       ParserDeclarations::consumeLeadingModifiers(parserRef, metadataRef);
       return;
     }
+  }
+
+  /// The `index`-th significant token from the cursor, trivia skipped.
+  function significantTokenAt(parser: &mut ParserShared::State, index: u64): Token {
+    let parserRef: &mut ParserShared::State = parser;
+    let mut offset: u64 = 0;
+    let mut seen: u64 = 0;
+
+    while (offset < 16) {
+      let token: Token = parserRef.tokens.peekNth(offset);
+
+      if (ParserShared::isTrivia(token.clone())) {
+        offset += 1;
+        continue;
+      }
+
+      if (seen == index) {
+        return token;
+      }
+
+      seen += 1;
+      offset += 1;
+    }
+
+    return parserRef.tokens.peekNth(offset);
+  }
+
+  /// Whether the `mut` at the cursor is the second half of `static mut` on a
+  /// field. Only `mut <name>:` is a field modifier, so a `static mut` written
+  /// in front of a method leaves the `mut` for the member loop to reject.
+  function staticMutFieldAhead(parser: &mut ParserShared::State): boolean {
+    let parserRef: &mut ParserShared::State = parser;
+    let name: Token = ParserDeclarations::significantTokenAt(parserRef, 1);
+
+    if (name.kindValue() != TokenKind::IDENTIFIER) {
+      return false;
+    }
+
+    let colon: Token = ParserDeclarations::significantTokenAt(parserRef, 2);
+
+    return colon.kindValue() == TokenKind::PUNCTUATION && colon.punctuationValue() == Punctuation::COLON;
   }
 
   function parseLeadingMetadata(parser: &mut ParserShared::State): Option<Ast::Metadata> {

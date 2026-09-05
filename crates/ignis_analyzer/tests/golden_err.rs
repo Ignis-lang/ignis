@@ -1630,6 +1630,52 @@ function main(): void {
 // =============================================================================
 
 #[test]
+fn assign_to_immutable_static_field() {
+  let source = r#"
+record Config {
+    static MAX: i32 = 1024;
+}
+
+function main(): void {
+    Config::MAX = 1;
+    return;
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0013"]);
+
+  assert_snapshot!(
+    "assign_to_immutable_static_field",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
+fn mutable_borrow_of_immutable_static_field() {
+  let source = r#"
+record Config {
+    static MAX: i32 = 1024;
+}
+
+function main(): void {
+    let handle: &mut i32 = &mut Config::MAX;
+    return;
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0014"]);
+
+  assert_snapshot!(
+    "mutable_borrow_of_immutable_static_field",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}
+
+#[test]
 fn static_field_no_init() {
   let result = common::analyze(
     r#"
@@ -1657,6 +1703,28 @@ function main(): void {
   );
 
   assert_snapshot!("static_field_no_init", common::format_diagnostics(&result.output.diagnostics));
+}
+
+#[test]
+fn static_mut_field_no_init() {
+  let source = r#"
+record Counter {
+    static mut TOTAL: i32;
+}
+
+function main(): void {
+    return;
+}
+"#;
+
+  let result = common::analyze(source);
+
+  common::assert_err(source, &["A0065"]);
+
+  assert_snapshot!(
+    "static_mut_field_no_init",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
 }
 
 #[test]

@@ -435,6 +435,7 @@ impl<'a> Analyzer<'a> {
                 type_id: self.types.error(), // Resolved in typeck
                 value: None,
                 owner_type: Some(record_def_id),
+                mutable: field.metadata.is_mutable(),
               }),
               name: field.name,
               span: field.span.clone(),
@@ -677,6 +678,7 @@ impl<'a> Analyzer<'a> {
               type_id: self.types.error(), // Resolved in typeck
               value: None,
               owner_type: Some(enum_def_id),
+              mutable: field.metadata.is_mutable(),
             }),
             name: field.name,
             span: field.span.clone(),
@@ -1368,6 +1370,7 @@ impl<'a> Analyzer<'a> {
       type_id: self.types.error(),
       value: None,
       owner_type: None,
+      mutable: false,
     };
 
     let def = Definition {

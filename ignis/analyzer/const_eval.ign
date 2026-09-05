@@ -25,7 +25,10 @@ import Vector from "std::vector";
 /// Scoped out relative to the Rust oracle:
 ///   - function-body and local-statement walking (selfhost constants are
 ///     module-level only),
-///   - record/enum static fields and their A0068 diagnostic,
+///   - the A0068 diagnostic for a static field whose initializer is not
+///     constant, and the values of every static field except a `static mut`
+///     one, which is the only static field with storage the emitter has to
+///     seed,
 ///   - `ConstValue::Array` / `ConstValue::Tuple` and vector-index folding
 ///     (nothing consumes const arrays in the selfhost yet),
 ///   - enum tag evaluation, `configFlag`, and the A0048/A0074 typecheck
@@ -818,6 +821,145 @@ export namespace Analyzer {
       return Analyzer::Binder::findDef(pass1, itemId.raw());
     }
 
+    /// Copy of the static-field definition ids `defId` owns, in the order the
+    /// binder pushed them.
+    function ownerStaticFieldDefs(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): Vector<Analyzer::DefinitionId> {
+      let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      if (let Option::SOME(definition) = defStore.get(defId)) {
+        match (definition) {
+          Analyzer::Definition::Record(recordDef) -> {
+            let mut index: u64 = 0;
+
+            while (index < recordDef.staticFields.length()) {
+              if (let Option::SOME(staticId) = recordDef.staticFields.get(index)) {
+                out.push(*staticId);
+              }
+
+              index += 1;
+            }
+          },
+          Analyzer::Definition::Enum(enumDef) -> {
+            let mut index: u64 = 0;
+
+            while (index < enumDef.staticFields.length()) {
+              if (let Option::SOME(staticId) = enumDef.staticFields.get(index)) {
+                out.push(*staticId);
+              }
+
+              index += 1;
+            }
+          },
+          _ -> {},
+        };
+      }
+
+      return out;
+    }
+
+    /// Folds the initializers of the `static mut` fields `ownerItemId` declares.
+    ///
+    /// A `static mut` field is the only static field with storage of its own:
+    /// the emitter needs the constant that storage starts at, while every other
+    /// static field folds into its uses from its initializer expression and is
+    /// left alone here.
+    ///
+    /// `fieldPatternIds` is walked with the binder's own static-field filter, so
+    /// the k-th static field it accepts is the k-th id the binder pushed into
+    /// the owner's `staticFields`.
+    function evalOwnerStaticMutFields(
+      values: &mut Analyzer::ConstEval::ConstValueMap,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      pass1: &Analyzer::Binder::BinderOutput,
+      pass2: &Analyzer::Binder::BinderOutput,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      typecheck: &Analyzer::Typecheck::TypecheckOutput,
+      ownerItemId: Ast::ItemId,
+      fieldPatternIds: &Vector<Ast::PatternId>,
+      enumMembers: boolean,
+    ): void {
+      let Option::SOME(ownerDefId) = Analyzer::ConstEval::constantItemDef(pass1, pass2, ownerItemId) else {
+        return;
+      };
+
+      let staticFieldDefs: Vector<Analyzer::DefinitionId> = Analyzer::ConstEval::ownerStaticFieldDefs(defStore, ownerDefId);
+
+      let mut patternIndex: u64 = 0;
+      let mut staticIndex: u64 = 0;
+
+      while (patternIndex < fieldPatternIds.length()) {
+        let Option::SOME(patternId) = fieldPatternIds.get(patternIndex) else {
+          patternIndex += 1;
+          continue;
+        };
+
+        patternIndex += 1;
+
+        let isStatic: boolean = match (enumMembers) {
+          true -> Analyzer::Binder::variantPatternIsStaticField(module, *patternId),
+          false -> Analyzer::Binder::fieldPatternIsStatic(module, *patternId),
+        };
+
+        if (!isStatic) {
+          continue;
+        }
+
+        let fieldDefIdOpt: Option<Analyzer::DefinitionId> = match (staticFieldDefs.get(staticIndex)) {
+          Option::SOME(value) -> Option::SOME(*value),
+          Option::NONE -> Option::NONE,
+        };
+
+        staticIndex += 1;
+
+        let Option::SOME(fieldDefId) = fieldDefIdOpt else {
+          continue;
+        };
+
+        let mut isMutable: boolean = false;
+
+        if (let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(fieldDefId)) {
+          isMutable = variableDef.mutable;
+        }
+
+        if (!isMutable) {
+          continue;
+        }
+
+        let mut initializerOpt: Option<Ast::ExpressionId> = Option::NONE;
+
+        if (let Option::SOME(Ast::Pattern::Node::Binding(binding)) = module.patterns.get(*patternId)) {
+          initializerOpt = binding.initializer;
+        }
+
+        let Option::SOME(initializer) = initializerOpt else {
+          continue;
+        };
+
+        let valueOpt: Option<Analyzer::ConstEval::ConstValue> = Analyzer::ConstEval::evalExpression(
+          values,
+          defStore,
+          typeStore,
+          module,
+          resolvedBodies,
+          typecheck,
+          initializer,
+        );
+
+        if (let Option::SOME(value) = &valueOpt) {
+          Analyzer::ConstEval::insertConstValue(
+            values,
+            fieldDefId.raw(),
+            Analyzer::ConstEval::copyConstValue(&value),
+          );
+        }
+      }
+    }
+
     /// Evaluate one item: constants fold, namespaces recurse, exports unwrap,
     /// everything else is skipped (mirroring the pass-2 binder walk).
     function evalItem(
@@ -854,6 +996,36 @@ export namespace Analyzer {
           if (let Option::SOME(value) = valueOpt) {
             Analyzer::ConstEval::insertConstValue(values, defId.raw(), value);
           }
+        },
+        Ast::Item::Node::Record(recordItem) -> {
+          Analyzer::ConstEval::evalOwnerStaticMutFields(
+            values,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            resolvedBodies,
+            typecheck,
+            itemId,
+            &recordItem.fields,
+            false,
+          );
+        },
+        Ast::Item::Node::Enum(enumItem) -> {
+          Analyzer::ConstEval::evalOwnerStaticMutFields(
+            values,
+            defStore,
+            typeStore,
+            module,
+            pass1,
+            pass2,
+            resolvedBodies,
+            typecheck,
+            itemId,
+            &enumItem.variants,
+            true,
+          );
         },
         Ast::Item::Node::Namespace(namespaceItem) -> {
           Analyzer::ConstEval::evalItems(

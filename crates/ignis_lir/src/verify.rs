@@ -239,6 +239,9 @@ impl<'a> LirVerifier<'a> {
         self.check_local_exists(func, func_name, block_name, *local);
         defined_temps.insert(*dest);
       },
+      Instr::AddrOfGlobal { dest, .. } => {
+        defined_temps.insert(*dest);
+      },
       Instr::GetElementPtr { dest, base, index, .. } => {
         self.check_operand(func, func_name, block_name, base, defined_temps);
         self.check_operand(func, func_name, block_name, index, defined_temps);

@@ -1297,6 +1297,18 @@ impl super::IgnisParser {
           meta |= ASTMetadata::STATIC;
           self.bump();
         },
+        // `mut` is a member modifier only as the second half of `static mut` on
+        // a field. Leaving it unconsumed anywhere else — a bare `mut`, or
+        // `static mut` in front of a method — makes the member loop report it
+        // as an unexpected token at the `mut` itself.
+        TokenType::Mut
+          if meta.contains(ASTMetadata::STATIC)
+            && self.peek_nth(1).type_ == TokenType::Identifier
+            && self.peek_nth(2).type_ == TokenType::Colon =>
+        {
+          meta |= ASTMetadata::MUTABLE;
+          self.bump();
+        },
         TokenType::Public => {
           meta |= ASTMetadata::PUBLIC;
           self.bump();
@@ -3069,6 +3081,135 @@ mod tests {
       },
       other => panic!("expected export-from, got {:?}", other),
     }
+  }
+
+  #[test]
+  fn parses_static_mut_record_field() {
+    use ignis_ast::metadata::ASTMetadata;
+    use ignis_ast::statements::ASTRecordItem;
+
+    let result = parse(
+      r#"record Counter {
+        static mut TOTAL: i32 = 0;
+        static SEED: i32 = 7;
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => {
+        let ASTRecordItem::Field(total) = &rec.items[0] else {
+          panic!("expected field, got {:?}", rec.items[0]);
+        };
+        assert_eq!(symbol_name(&result, &total.name), "TOTAL");
+        assert!(total.metadata.contains(ASTMetadata::STATIC));
+        assert!(total.metadata.contains(ASTMetadata::MUTABLE));
+        assert!(total.value.is_some());
+
+        let ASTRecordItem::Field(seed) = &rec.items[1] else {
+          panic!("expected field, got {:?}", rec.items[1]);
+        };
+        assert!(seed.metadata.contains(ASTMetadata::STATIC));
+        assert!(!seed.metadata.contains(ASTMetadata::MUTABLE));
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_static_mut_enum_field() {
+    use ignis_ast::metadata::ASTMetadata;
+    use ignis_ast::statements::ASTEnumItem;
+
+    let result = parse(
+      r#"enum Slot {
+        A,
+        static mut PICKED: i32 = 3;
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Enum(enum_) => {
+        let ASTEnumItem::Field(picked) = &enum_.items[1] else {
+          panic!("expected field, got {:?}", enum_.items[1]);
+        };
+        assert_eq!(symbol_name(&result, &picked.name), "PICKED");
+        assert!(picked.metadata.contains(ASTMetadata::STATIC));
+        assert!(picked.metadata.contains(ASTMetadata::MUTABLE));
+      },
+      other => panic!("expected enum, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn static_mut_without_initializer_still_parses_as_a_field() {
+    use ignis_ast::metadata::ASTMetadata;
+    use ignis_ast::statements::ASTRecordItem;
+
+    // The missing initializer is an analyzer error (A0065), not a parse error,
+    // so the field has to reach the analyzer carrying both modifiers.
+    let result = parse(
+      r#"record Counter {
+        static mut TOTAL: i32;
+      }"#,
+    );
+    let stmt = first_root(&result);
+
+    match stmt {
+      ASTStatement::Record(rec) => {
+        let ASTRecordItem::Field(total) = &rec.items[0] else {
+          panic!("expected field, got {:?}", rec.items[0]);
+        };
+        assert!(total.metadata.contains(ASTMetadata::MUTABLE));
+        assert!(total.value.is_none());
+      },
+      other => panic!("expected record, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn static_mut_on_a_method_is_rejected() {
+    let source = r#"record Counter {
+        static mut reset(): void {}
+      }"#;
+    let mut sm = SourceMap::new();
+    let file_id = sm.add_file("test.ign", source.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols);
+    let errs = parser.parse().expect_err("should reject static mut on a method");
+
+    assert!(
+      errs
+        .iter()
+        .any(|e| matches!(e, DiagnosticMessage::UnexpectedToken { .. }))
+    );
+  }
+
+  #[test]
+  fn mut_without_static_on_a_field_is_rejected() {
+    let source = r#"record Counter {
+        mut total: i32;
+      }"#;
+    let mut sm = SourceMap::new();
+    let file_id = sm.add_file("test.ign", source.to_string());
+
+    let mut lexer = IgnisLexer::new(file_id, source);
+    lexer.scan_tokens();
+
+    let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+    let mut parser = IgnisParser::new(lexer.tokens, symbols);
+    let errs = parser.parse().expect_err("should reject a bare mut field modifier");
+
+    assert!(
+      errs
+        .iter()
+        .any(|e| matches!(e, DiagnosticMessage::UnexpectedToken { .. }))
+    );
   }
 
   #[test]

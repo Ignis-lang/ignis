@@ -4869,6 +4869,146 @@ function parserParsesRecordStaticFields(): void {
   };
 }
 
+/// The modifiers of the binding `id` carries, in source order, joined by a
+/// space.
+function bindingModifiers(module: &Ast::Module, id: Ast::PatternId): String {
+  match (expectPattern(module, id)) {
+    Ast::Pattern::Node::Binding(binding) -> {
+      let mut rendered: String = String::create("");
+      let mut index: u64 = 0;
+
+      while (index < binding.metadata.modifiers.length()) {
+        let Option::SOME(modifier) = binding.metadata.modifiers.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (rendered.length() > 0) {
+          rendered.pushStr(" ");
+        }
+
+        rendered.pushStr(Ast::Serializer::renderModifier(*modifier).toStr());
+        index += 1;
+      }
+
+      return rendered;
+    },
+    _ -> @panic("pattern is not a binding"),
+  };
+
+  @panic("unreachable: bindingModifiers match did not return");
+}
+
+/// Scenario: a record field written `static mut NAME: Type = value;` carries
+/// both modifiers, while a plain `static` field carries only `static`.
+/// Spec: parity fixture e2e_ok::record_static_mut_field.
+@test
+function parserParsesStaticMutRecordField(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_record_static_mut_field.ign",
+    "record Counter { static mut TOTAL: i32 = 0; static SEED: i32 = 7; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let recordId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing record root"),
+  };
+
+  match (expectItem(&module, recordId)) {
+    Ast::Item::Node::Record(recordItem) -> {
+      Test::assertEq<u64>(recordItem.fields.length(), 2);
+
+      let mutableId: Ast::PatternId = match (recordItem.fields.get(0)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing static mut field"),
+      };
+      let plainId: Ast::PatternId = match (recordItem.fields.get(1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing static field"),
+      };
+
+      Test::assertEq<str>(bindingName(&module, mutableId).toStr(), "TOTAL");
+      Test::assertEq<str>(bindingModifiers(&module, mutableId).toStr(), "static mut");
+      Test::assert(bindingInitializer(&module, mutableId).isSome());
+
+      Test::assertEq<str>(bindingName(&module, plainId).toStr(), "SEED");
+      Test::assertEq<str>(bindingModifiers(&module, plainId).toStr(), "static");
+    },
+    _ -> @panic("root is not a record"),
+  };
+}
+
+/// Scenario: an enum field written `static mut NAME: Type = value;` carries
+/// both modifiers and stays a field among the variants.
+/// Spec: parity fixture e2e_ok::static_mut_field_borrow.
+@test
+function parserParsesStaticMutEnumField(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_enum_static_mut_field.ign",
+    "enum Slot { A, static mut PICKED: i32 = 3; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let enumId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing enum root"),
+  };
+
+  match (expectItem(&module, enumId)) {
+    Ast::Item::Node::Enum(enumItem) -> {
+      Test::assertEq<u64>(enumItem.variants.length(), 2);
+
+      let staticId: Ast::PatternId = match (enumItem.variants.get(1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> @panic("missing enum static mut field"),
+      };
+
+      Test::assertEq<str>(bindingName(&module, staticId).toStr(), "PICKED");
+      Test::assertEq<str>(bindingModifiers(&module, staticId).toStr(), "static mut");
+    },
+    _ -> @panic("root is not an enum"),
+  };
+}
+
+/// Scenario: `static mut` on a method is not a field modifier. The `mut` stays
+/// unconsumed and the member is rejected, the way the host rejects it.
+/// Spec: parity fixture e2e_err::static_mut_on_method.
+@test
+function parserRejectsStaticMutOnMethod(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_static_mut_on_method.ign",
+    "record Counter { static mut reset(): void {} }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assert(diagnostics.length() > 0);
+}
+
+/// Scenario: a bare `mut` is not a member modifier on its own.
+@test
+function parserRejectsMutWithoutStaticOnField(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_mut_without_static_field.ign",
+    "record Counter { mut total: i32; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assert(diagnostics.length() > 0);
+}
+
 /// Scenario: an enum member written `NAME: Type = value;` is a static field.
 /// It joins the variant list carrying its value, and the unit variants around
 /// it stay variants.

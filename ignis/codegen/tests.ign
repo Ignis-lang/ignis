@@ -137,17 +137,17 @@ function codegenEmitExposing(source: str, externalNames: &Vector<String>): Codeg
 
   Test::assertEq<u64>(codegenCountErrors(&checked.diagnostics), 0);
 
-  let constValues: Analyzer::ConstEval::ConstValueMap = Analyzer::ConstEval::ConstValueMap {
-    defIdRaws: Vector::new<u32>(),
-    values: Vector::new<Analyzer::ConstEval::ConstValue>(),
-  };
+  // The driver hands LIR lowering the values const-eval folded; a `static mut`
+  // field's global is seeded from them, so the harness has to hand over the
+  // same map rather than an empty one.
+  let constValues: &Analyzer::ConstEval::ConstValueMap = &output.constValues.values;
 
   let lowered: LirLowering::LowerModuleResult = LirLowering::lowerModule(
     &mut defStore,
     &mut typeStore,
     &monoResult.hir,
     &checked.dropSchedules,
-    &constValues,
+    constValues,
   );
 
   let externalSymbols: Vector<u32> = codegenFunctionDefIds(&mut defStore, &mut symbols, externalNames);
@@ -196,6 +196,93 @@ function codegenMangledMethodStartingWith(
   }
 
   return Option::NONE;
+}
+
+/// Raw definition ids of every variable whose written name `names` lists.
+/// Static fields are bound as variables, so this is how a test names one.
+function codegenVariableDefIds(
+  defStore: &mut Analyzer::DefinitionStore,
+  symbols: &mut Analyzer::SymbolTable,
+  names: &Vector<String>,
+): Vector<u32> {
+  let mut ids: Vector<u32> = Vector::new<u32>();
+  let mut rawId: u64 = 0;
+
+  while (rawId < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+    let mut nameSym: Option<Analyzer::SymbolId> = Option::NONE;
+
+    if (let Option::SOME(Analyzer::Definition::Variable(variableDef)) = defStore.get(defId)) {
+      nameSym = Option::SOME(variableDef.name);
+    }
+
+    if (let Option::SOME(variableName) = nameSym) {
+      if (let Option::SOME(text) = symbols.resolve(variableName)) {
+        let written: String = String::create(text);
+        let mut nameIndex: u64 = 0;
+
+        while (nameIndex < names.length()) {
+          if (let Option::SOME(candidate) = names.get(nameIndex)) {
+            if (written.equals(candidate)) {
+              ids.push(defId.raw());
+              break;
+            }
+          }
+
+          nameIndex += 1;
+        }
+      }
+    }
+
+    rawId += 1;
+  }
+
+  return ids;
+}
+
+/// A `static mut` field is the one declaration with storage of its own that no
+/// function owns: it becomes a writable C global seeded with its initializer,
+/// its writes go through the global's address, and its reads stop folding. A
+/// `static` field without `mut` keeps folding into its uses and gets no
+/// storage at all.
+@test
+function codegenEmitsStaticMutFieldsAsWritableGlobals(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "record Counter {\n  static mut TOTAL: i32 = 0;\n  static SEED: i32 = 7;\n}\n\nfunction bump(): void {\n  Counter::TOTAL += 1;\n}\n\nfunction main(): i32 {\n  bump();\n\n  return Counter::TOTAL + Counter::SEED;\n}\n",
+  );
+
+  let mut fieldNames: Vector<String> = Vector::new<String>();
+  fieldNames.push(String::create("TOTAL"));
+
+  let fieldIds: Vector<u32> = codegenVariableDefIds(&mut emission.defStore, &mut emission.symbols, &fieldNames);
+
+  let Option::SOME(totalRaw) = fieldIds.get(0) else {
+    @panic("the emitted program declares no static field named 'TOTAL'");
+  };
+
+  let totalId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*totalRaw);
+  let totalName: String = CodegenC::mangledName(&mut emission.defStore, &mut emission.symbols, totalId);
+
+  let global: String = `static i32 ${totalName.toStr()} = 0;`;
+  let address: String = `= &${totalName.toStr()};`;
+
+  Test::assert(emission.source.contains(&global));
+  Test::assert(emission.source.contains(&address));
+
+  // `SEED` has no `mut`, so it folds into its use and never becomes storage.
+  let mut seedNames: Vector<String> = Vector::new<String>();
+  seedNames.push(String::create("SEED"));
+
+  let seedIds: Vector<u32> = codegenVariableDefIds(&mut emission.defStore, &mut emission.symbols, &seedNames);
+
+  let Option::SOME(seedRaw) = seedIds.get(0) else {
+    @panic("the emitted program declares no static field named 'SEED'");
+  };
+
+  let seedId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*seedRaw);
+  let seedName: String = CodegenC::mangledName(&mut emission.defStore, &mut emission.symbols, seedId);
+
+  Test::assert(!emission.source.contains(&seedName));
 }
 
 /// A generic nominal that declares `@implements(Drop)` reaches the emitter as

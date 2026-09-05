@@ -1,0 +1,31 @@
+// Test: `static mut` fields accept assignment and mutable borrows, while a
+// plain `static` field stays immutable (A0013 on assignment, A0014 on `&mut`).
+
+record Counter {
+  static mut TOTAL: i32 = 0;
+  static SEED: i32 = 7;
+}
+
+enum Slot {
+  A,
+
+  static mut PICKED: i32 = 3;
+}
+
+function bump(): void {
+  Counter::TOTAL += 1;
+}
+
+function main(): i32 {
+  bump();
+
+  let handle: &mut i32 = &mut Counter::TOTAL;
+  *handle = *handle + 1;
+
+  Slot::PICKED = 9;
+
+  Counter::SEED = 1; // Error: Cannot assign to immutable variable
+  let seed: &mut i32 = &mut Counter::SEED; // Error: Cannot take mutable reference to immutable
+
+  return Counter::TOTAL + Slot::PICKED;
+}
