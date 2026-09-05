@@ -415,10 +415,13 @@ export namespace Analyzer {
 
       let resolvedOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupExprRef(resolvedBodies, value.target);
       let Option::SOME(resolved) = resolvedOpt else {
-        Analyzer::Typecheck::emitDiagnostic(
+        let targetName: String = Analyzer::Typecheck::placeDisplayName(module, value.target);
+        let message: String = `Cannot assign to immutable variable '${targetName.toStr()}'`;
+        Analyzer::Typecheck::emitDiagnosticLabeled(
           state,
           value.span,
-          DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+          DiagnosticCode::IMMUTABLE_ASSIGNMENT,
+          message.toStr(),
           "assignment target must resolve to a local binding",
         );
         return Option::NONE;
@@ -438,13 +441,13 @@ export namespace Analyzer {
         }
 
         if (isVariable && !isMutable) {
-          let targetName: String = Analyzer::Typecheck::referenceTargetName(module, value.target);
+          let targetName: String = Analyzer::Typecheck::placeDisplayName(module, value.target);
           let message: String = `Cannot assign to immutable variable '${targetName.toStr()}'`;
 
           Analyzer::Typecheck::emitDiagnostic(
             state,
             value.span,
-            DiagnosticCode::MUTABILITY_VIOLATION,
+            DiagnosticCode::IMMUTABLE_ASSIGNMENT,
             message.toStr(),
           );
           return Option::NONE;
@@ -467,40 +470,28 @@ export namespace Analyzer {
       let localId: Analyzer::ResolverBodies::LocalId = match (resolved) {
         Analyzer::ResolverBodies::ResolvedRef::Local(localId) -> localId,
         Analyzer::ResolverBodies::ResolvedRef::Definition(_) -> {
-          Analyzer::Typecheck::emitDiagnostic(
-            state,
-            value.span,
-            DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
-            "assignment target must resolve to a local binding",
-          );
+          Analyzer::Typecheck::emitImmutableAssignment(state, module, value.span, value.target);
           return Option::NONE;
         },
         Analyzer::ResolverBodies::ResolvedRef::TypeParam(_) -> {
-          Analyzer::Typecheck::emitDiagnostic(
-            state,
-            value.span,
-            DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
-            "assignment target must resolve to a local binding",
-          );
+          Analyzer::Typecheck::emitImmutableAssignment(state, module, value.span, value.target);
           return Option::NONE;
         },
         Analyzer::ResolverBodies::ResolvedRef::Unresolved(_) -> {
-          Analyzer::Typecheck::emitDiagnostic(
-            state,
-            value.span,
-            DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
-            "assignment target must resolve to a local binding",
-          );
+          Analyzer::Typecheck::emitImmutableAssignment(state, module, value.span, value.target);
           return Option::NONE;
         },
       };
 
       let localBindingOpt: Option<Analyzer::Typecheck::LocalBindingInfo> = Analyzer::Typecheck::lookupLocalBinding(state, localId);
       let Option::SOME(localBinding) = localBindingOpt else {
-        Analyzer::Typecheck::emitDiagnostic(
+        let targetName: String = Analyzer::Typecheck::placeDisplayName(module, value.target);
+        let message: String = `Cannot assign to immutable variable '${targetName.toStr()}'`;
+        Analyzer::Typecheck::emitDiagnosticLabeled(
           state,
           value.span,
-          DiagnosticCode::INVALID_ASSIGNMENT_TARGET,
+          DiagnosticCode::IMMUTABLE_ASSIGNMENT,
+          message.toStr(),
           "assignment target must resolve to a local binding",
         );
         return Option::NONE;
@@ -543,7 +534,7 @@ export namespace Analyzer {
       }
 
       if (!targetIsMutable) {
-        Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot assign to immutable local");
+        Analyzer::Typecheck::emitImmutableAssignment(state, module, value.span, value.target);
         return Option::NONE;
       }
 
@@ -614,11 +605,13 @@ export namespace Analyzer {
       let valueNumeric: boolean = Analyzer::Typecheck::isNumericTypeQuiet(defStore, typeStore, actualType);
 
       if (!targetNumeric || !valueNumeric) {
+        let operatorName: String = Ast::Serializer::renderAssignmentOperator(operator);
+        let message: String = `Compound assignment operator '${operatorName.toStr()}' cannot be applied to type '${typeStore.nameOf(targetType).toStr()}'`;
         Analyzer::Typecheck::emitDiagnostic(
           state,
           span,
           DiagnosticCode::COMPOUND_ASSIGNMENT_NON_NUMERIC,
-          "compound assignment requires numeric operands",
+          message.toStr(),
         );
         return false;
       }
@@ -690,12 +683,7 @@ export namespace Analyzer {
       };
 
       if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, operandId)) {
-        Analyzer::Typecheck::emitDiagnostic(
-          state,
-          span,
-          DiagnosticCode::MUTABILITY_VIOLATION,
-          "cannot assign to an immutable place",
-        );
+        Analyzer::Typecheck::emitImmutableAssignment(state, module, span, operandId);
         return Option::NONE;
       }
 
@@ -747,12 +735,7 @@ export namespace Analyzer {
       };
 
       if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, value.target)) {
-        Analyzer::Typecheck::emitDiagnostic(
-          state,
-          value.span,
-          DiagnosticCode::MUTABILITY_VIOLATION,
-          "cannot assign to an immutable place",
-        );
+        Analyzer::Typecheck::emitImmutableAssignment(state, module, value.span, value.target);
         return Option::NONE;
       }
 
@@ -899,7 +882,9 @@ export namespace Analyzer {
           Analyzer::Typecheck::recordExprType(state, call.callee, calleeType);
 
           if (!methodInfo.isStatic) {
-            Analyzer::Typecheck::emitDiagnostic(state, call.span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, "instance method calls require a receiver");
+            let calleeName: String = Analyzer::Typecheck::calleeDisplayName(module, call.callee);
+            let message: String = `Undeclared identifier '${calleeName.toStr()}'`;
+            Analyzer::Typecheck::emitDiagnosticLabeled(state, call.span, DiagnosticCode::UNDECLARED_IDENTIFIER, message.toStr(), "an instance method needs a receiver");
             return Option::NONE;
           }
 
@@ -2003,13 +1988,14 @@ export namespace Analyzer {
           symbols,
         );
 
+        let ownerName: String = Analyzer::Typecheck::definitionDisplayName(defStore, symbols, owner.defId);
+
         if (staticOpt.isSome()) {
-          let message: String = `static method \`${memberName}\` cannot be called through an instance`;
-          Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, message.toStr());
+          Analyzer::Typecheck::emitFieldNotFound(state, ma.span, memberName, ownerName.toStr(), "a static method cannot be called through an instance");
           return Option::NONE;
         }
 
-        Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, ma.span, DiagnosticCode::UNKNOWN_MEMBER, "unknown method", memberName);
+        Analyzer::Typecheck::emitFieldNotFound(state, ma.span, memberName, ownerName.toStr(), "no instance method of this name");
         return Option::NONE;
       };
 
@@ -2033,7 +2019,7 @@ export namespace Analyzer {
 
         if (let Option::SOME(referenceMutable) = referenceMutability) {
           if (!referenceMutable) {
-            Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method through a shared reference");
+            Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver is a shared reference");
             return Option::NONE;
           }
         } else {
@@ -2046,7 +2032,7 @@ export namespace Analyzer {
 
                 if (let Option::SOME(binding) = bindingOpt) {
                   if (!binding.mutable) {
-                    Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method on immutable receiver");
+                    Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
                     return Option::NONE;
                   }
                 }
@@ -2407,6 +2393,103 @@ export namespace Analyzer {
     }
 
     /// The declared parameter types of a static method — no self slot to skip.
+    /// One overload's signature as the reference analyzer renders it in an
+    /// overload diagnostic: the parameter types it takes and the type it
+    /// returns.
+    function overloadSignatureText(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      defId: Analyzer::DefinitionId,
+    ): String {
+      let Option::SOME(signature) = Analyzer::Typecheck::extractFunctionSignature(defStore, defId) else {
+        return String::create("<unknown>");
+      };
+
+      let mut rendered: String = String::create("(");
+      let mut paramIndex: u64 = 0;
+      let mut written: u64 = 0;
+
+      while (paramIndex < signature.params.length()) {
+        let Option::SOME(paramDefId) = signature.params.get(paramIndex) else {
+          paramIndex += 1;
+          continue;
+        };
+
+        if (let Option::SOME(Analyzer::Definition::Variable(parameter)) = defStore.get(*paramDefId)) {
+          if (written > 0) {
+            rendered.pushStr(", ");
+          }
+
+          let paramName: String = typeStore.nameOf(parameter.declaredType);
+          rendered.pushStr(paramName.toStr());
+          written += 1;
+        }
+
+        paramIndex += 1;
+      }
+
+      let returnName: String = typeStore.nameOf(signature.returnType);
+      rendered.pushStr("): ");
+      rendered.pushStr(returnName.toStr());
+
+      return rendered;
+    }
+
+    /// The argument types of a rejected call, rendered as the reference
+    /// analyzer lists them inside the parentheses of an overload diagnostic.
+    function overloadArgumentTypesText(
+      typeStore: &mut Analyzer::TypeStore,
+      argTypes: &Vector<Analyzer::TypeId>,
+    ): String {
+      let mut rendered: String = String::create("");
+      let mut index: u64 = 0;
+
+      while (index < argTypes.length()) {
+        let Option::SOME(argType) = argTypes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          rendered.pushStr(", ");
+        }
+
+        let argName: String = typeStore.nameOf(*argType);
+        rendered.pushStr(argName.toStr());
+        index += 1;
+      }
+
+      return rendered;
+    }
+
+    /// The candidate signatures of an overload diagnostic, one per line and
+    /// indented the way the reference analyzer indents them.
+    function overloadSignatureListText(
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      candidates: &Vector<Analyzer::DefinitionId>,
+    ): String {
+      let mut rendered: String = String::create("");
+      let mut index: u64 = 0;
+
+      while (index < candidates.length()) {
+        let Option::SOME(candidateDefId) = candidates.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          rendered.pushStr("\n    - ");
+        }
+
+        let signature: String = Analyzer::Typecheck::overloadSignatureText(defStore, typeStore, *candidateDefId);
+        rendered.pushStr(signature.toStr());
+        index += 1;
+      }
+
+      return rendered;
+    }
+
     function staticOverloadParamTypes(
       defStore: &mut Analyzer::DefinitionStore,
       methodDefId: Analyzer::DefinitionId,
@@ -2648,13 +2731,17 @@ export namespace Analyzer {
       }
 
       if (bestDefIds.length() == 0) {
-        let message: String = `no overload of \`${memberName}\` matches the call's argument types`;
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(typeStore, &argTypes);
+        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, candidates);
+        let message: String = `No overload matches call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Available signatures:\n    - ${signaturesText.toStr()}`;
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
         return Option::NONE;
       }
 
       if (bestDefIds.length() > 1) {
-        let message: String = `ambiguous call to overloaded \`${memberName}\``;
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(typeStore, &argTypes);
+        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, &bestDefIds);
+        let message: String = `Ambiguous overload call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Matching signatures:\n    - ${signaturesText.toStr()}`;
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
         return Option::NONE;
       }
@@ -2748,13 +2835,17 @@ export namespace Analyzer {
       }
 
       if (bestDefIds.length() == 0) {
-        let message: String = `no overload of \`${memberName}\` matches the call's argument types`;
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(typeStore, &argTypes);
+        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, candidates);
+        let message: String = `No overload matches call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Available signatures:\n    - ${signaturesText.toStr()}`;
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
         return Option::NONE;
       }
 
       if (bestDefIds.length() > 1) {
-        let message: String = `ambiguous call to overloaded \`${memberName}\``;
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(typeStore, &argTypes);
+        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, &bestDefIds);
+        let message: String = `Ambiguous overload call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Matching signatures:\n    - ${signaturesText.toStr()}`;
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
         return Option::NONE;
       }
@@ -2916,9 +3007,28 @@ export namespace Analyzer {
         return;
       }
 
+      Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
+    }
+
+    /// Reports reaching a `mut self` method through a receiver that cannot lend
+    /// it. The reference analyzer reports every such receiver — an immutable
+    /// binding or a shared reference — with one message; `detail` says which
+    /// one applied without changing that message.
+    function emitMutatingMethodOnImmutable(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      module: &Ast::Module,
+      ma: &Ast::Expression::MemberAccess,
+      detail: str,
+    ): void {
       let receiverName: String = Analyzer::Typecheck::receiverBindingName(module, ma.object);
       let message: String = `Cannot call mutating method '${ma.member.toStr()}' on immutable variable '${receiverName.toStr()}'`;
-      Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTATING_METHOD_ON_IMMUTABLE, message.toStr());
+      Analyzer::Typecheck::emitDiagnosticLabeled(
+        state,
+        ma.span,
+        DiagnosticCode::MUTATING_METHOD_ON_IMMUTABLE,
+        message.toStr(),
+        detail,
+      );
     }
 
     /// The written name of a receiver expression, for a diagnostic that names
@@ -3407,15 +3517,38 @@ export namespace Analyzer {
       return Option::NONE;
     }
 
-    function emitNamedRecordFieldDiagnostic(
+    /// The declared name of `defId`, for diagnostics that name the owner of a
+    /// member rather than its type.
+    function definitionDisplayName(
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      defId: Analyzer::DefinitionId,
+    ): String {
+      let Option::SOME(definition) = defStore.get(defId) else {
+        return String::create("<unknown>");
+      };
+
+      let name: Analyzer::SymbolId = definition.name();
+
+      return match (symbols.resolve(name)) {
+        Option::SOME(text) -> String::create(text),
+        Option::NONE -> String::create("<unknown>"),
+      };
+    }
+
+    /// Reports a member that its owner does not declare. The reference
+    /// analyzer reports a missing field and a missing method alike, naming the
+    /// member and the type it was looked for on; `detail` records which lookup
+    /// failed without changing that message.
+    function emitFieldNotFound(
       state: &mut Analyzer::Typecheck::TypecheckState,
       span: SourceSpan,
-      code: str,
-      prefix: str,
       name: str,
+      ownerName: str,
+      detail: str,
     ): void {
-      let message: String = String::create(prefix).concat(" `").concat(name).concat("`");
-      Analyzer::Typecheck::emitDiagnostic(state, span, code, message.toStr());
+      let message: String = `Field '${name}' not found in type '${ownerName}'`;
+      Analyzer::Typecheck::emitDiagnosticLabeled(state, span, DiagnosticCode::FIELD_NOT_FOUND, message.toStr(), detail);
     }
 
     /// S2 (design D5) branch of `checkMemberAccessExpr` for an `Instance`
@@ -3531,7 +3664,7 @@ export namespace Analyzer {
       // which keeps owning the cycle and generic-record rejections unchanged.
       if (peeked.cycleAlias.isNone() && !isRecordReceiver) {
         let receiverName: String = typeStore.nameOf(peeked.typeId);
-        let message: String = `cannot access a field of non-record type \`${receiverName.toStr()}\``;
+        let message: String = `Cannot access field of non-record type '${receiverName.toStr()}'`;
         Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::MEMBER_ACCESS_ON_NON_RECORD, message.toStr());
         return Option::NONE;
       }
@@ -3607,12 +3740,13 @@ export namespace Analyzer {
       }
 
       if (methodHit.isSome()) {
-        let message: String = `method \`${memberName}\` requires a call`;
-        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, message.toStr());
+        let message: String = `Method '${memberName}' must be called`;
+        Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::METHOD_MUST_BE_CALLED, message.toStr());
         return;
       }
 
-      Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, span, DiagnosticCode::UNKNOWN_MEMBER, "unknown record field", memberName);
+      let ownerName: String = Analyzer::Typecheck::definitionDisplayName(defStore, symbols, recordDef.defId);
+      Analyzer::Typecheck::emitFieldNotFound(state, span, memberName, ownerName.toStr(), "the record declares no such field");
     }
 
     function copyTypeIdVector(source: &Vector<Analyzer::TypeId>): Vector<Analyzer::TypeId> {
@@ -3912,7 +4046,8 @@ export namespace Analyzer {
           field.name.toStr(),
         );
         let Option::SOME(fieldDef) = fieldDefOpt else {
-          Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, DiagnosticCode::UNKNOWN_MEMBER, "unknown record field", field.name.toStr());
+          let ownerName: String = Analyzer::Typecheck::definitionDisplayName(defStore, symbols, recordDef.defId);
+          Analyzer::Typecheck::emitFieldNotFound(state, value.span, field.name.toStr(), ownerName.toStr(), "the record declares no such field");
           return Option::NONE;
         };
 
@@ -3924,7 +4059,8 @@ export namespace Analyzer {
           };
 
           if (seenFieldName.raw() == fieldDef.name.raw()) {
-            Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, DiagnosticCode::DUPLICATE_RECORD_FIELD_INIT, "duplicate record field", field.name.toStr());
+            let message: String = `Duplicate field '${field.name.toStr()}' in initializer`;
+            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::DUPLICATE_RECORD_FIELD_INIT, message.toStr());
             return Option::NONE;
           }
 
@@ -3993,7 +4129,9 @@ export namespace Analyzer {
                 Option::SOME(name) -> String::create(name),
                 Option::NONE -> String::create("<unknown>"),
               };
-              Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, value.span, DiagnosticCode::MISSING_RECORD_FIELD_INIT, "missing record field", missingName.toStr());
+              let ownerName: String = Analyzer::Typecheck::definitionDisplayName(defStore, symbols, recordDef.defId);
+              let message: String = `Missing field '${missingName.toStr()}' in record '${ownerName.toStr()}' initializer`;
+              Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::MISSING_RECORD_FIELD_INIT, message.toStr());
               return Option::NONE;
             }
           },
@@ -4228,6 +4366,8 @@ export namespace Analyzer {
     ): Option<Analyzer::TypeId> {
       let operandType: Analyzer::TypeId = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression)!;
 
+      let operandTypeName: String = typeStore.nameOf(operandType);
+      let operandNotTry: String = `try operator \`!\` cannot be used on type '${operandTypeName.toStr()}' (not marked with @lang(try))`;
       let operandView: Analyzer::Typecheck::TryEnumView = Analyzer::Typecheck::requireTryEnumView(
         state,
         defStore,
@@ -4235,7 +4375,7 @@ export namespace Analyzer {
         value.span,
         operandType,
         DiagnosticCode::TRY_ON_NON_TRY_TYPE,
-        "the `!` operator requires a `@lang(try)` enum operand",
+        operandNotTry.toStr(),
       )!;
 
       let returnViewOpt: Option<Analyzer::Typecheck::TryEnumView> = Analyzer::Typecheck::requireTryEnumView(
@@ -4244,24 +4384,30 @@ export namespace Analyzer {
         typeStore,
         value.span,
         state.currentReturnType,
-        DiagnosticCode::TRY_RETURN_TYPE_MISMATCH,
-        "`!` propagates its error to the caller, so the enclosing function must return a `@lang(try)` enum",
+        DiagnosticCode::TRY_OUTSIDE_TRY_FUNCTION,
+        "try operator `!` can only be used inside a function that returns a try-capable type",
       );
 
       if (let Option::SOME(returnView) = returnViewOpt) {
+        let returnTypeName: String = typeStore.nameOf(state.currentReturnType);
+
         if (returnView.enumDefId.raw() != operandView.enumDefId.raw()) {
+          let message: String = `try operator \`!\` type '${operandTypeName.toStr()}' does not match function return type '${returnTypeName.toStr()}'`;
           Analyzer::Typecheck::emitDiagnostic(
             state,
             value.span,
             DiagnosticCode::TRY_RETURN_TYPE_MISMATCH,
-            "`!` propagates its error to the caller, so the enclosing function must return the operand's `@lang(try)` enum",
+            message.toStr(),
           );
         } else if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, operandView.errType, returnView.errType)) {
+          let operandErrName: String = typeStore.nameOf(operandView.errType);
+          let returnErrName: String = typeStore.nameOf(returnView.errType);
+          let message: String = `try operator \`!\` error type '${operandErrName.toStr()}' does not match function's error type '${returnErrName.toStr()}'`;
           Analyzer::Typecheck::emitDiagnostic(
             state,
             value.span,
             DiagnosticCode::TRY_ERROR_TYPE_MISMATCH,
-            "the operand's error payload does not match the enclosing return type's error payload",
+            message.toStr(),
           );
         }
       }
@@ -4470,6 +4616,7 @@ export namespace Analyzer {
             state,
             defStore,
             typeStore,
+            symbols,
             resolvedBodies,
             exprId,
             variable.span,
@@ -4481,6 +4628,7 @@ export namespace Analyzer {
             state,
             defStore,
             typeStore,
+            symbols,
             resolvedBodies,
             exprId,
             path.span,
@@ -5129,11 +5277,10 @@ export namespace Analyzer {
 
       let verdict: Analyzer::Typecheck::ExhaustiveVerdict = Analyzer::Typecheck::analyzeMatchExhaustiveness(defStore, typeStore, symbols, module, resolvedBodies, scrutineeTypeOpt, &value.arms);
       if (let Analyzer::Typecheck::ExhaustiveVerdict::Missing(reason) = verdict) {
-        let message: String = `non-exhaustive match: ${reason.toStr()}`;
         if (valuePosition) {
-          Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::NON_EXHAUSTIVE_MATCH, message.toStr());
+          Analyzer::Typecheck::emitDiagnosticLabeled(state, value.span, DiagnosticCode::NON_EXHAUSTIVE_MATCH, "non-exhaustive match", reason.toStr());
         } else {
-          Analyzer::Typecheck::emitWarning(state, value.span, DiagnosticCode::NON_EXHAUSTIVE_MATCH, message.toStr());
+          Analyzer::Typecheck::emitWarningLabeled(state, value.span, DiagnosticCode::NON_EXHAUSTIVE_MATCH, "non-exhaustive match", reason.toStr());
         }
       }
 
@@ -5647,34 +5794,6 @@ export namespace Analyzer {
       @panic("unreachable: resolvedRefIsMutableBinding match did not return");
     }
 
-    function referenceTargetName(module: &Ast::Module, exprId: Ast::ExpressionId): String {
-      let Option::SOME(expr) = module.expressions.get(exprId) else {
-        return String::create("<expression>");
-      };
-
-      match (expr) {
-        Ast::Expression::Node::Variable(variable) -> {
-          return variable.name.clone();
-        },
-        Ast::Expression::Node::Path(path) -> {
-          if (path.segments.length() == 0) {
-            return String::create("<expression>");
-          }
-
-          let Option::SOME(lastSegment) = path.segments.get(path.segments.length() - 1) else {
-            return String::create("<expression>");
-          };
-
-          return lastSegment.clone();
-        },
-        _ -> {
-          return String::create("<expression>");
-        },
-      };
-
-      @panic("unreachable: referenceTargetName match did not return");
-    }
-
     function checkReferenceExpr(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -5698,7 +5817,7 @@ export namespace Analyzer {
       }
 
       if (value.mutable && !Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, value.target)) {
-        let targetName: String = Analyzer::Typecheck::referenceTargetName(module, value.target);
+        let targetName: String = Analyzer::Typecheck::placeDisplayName(module, value.target);
         Analyzer::Typecheck::emitMutableReferenceToImmutable(state, value.span, targetName.toStr());
       }
 
@@ -6882,6 +7001,71 @@ export namespace Analyzer {
       };
     }
 
+    /// Reports a write through a place that is not mutable, named the way the
+    /// reference analyzer names it.
+    function emitImmutableAssignment(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      module: &Ast::Module,
+      span: SourceSpan,
+      target: Ast::ExpressionId,
+    ): void {
+      let targetName: String = Analyzer::Typecheck::placeDisplayName(module, target);
+      let message: String = `Cannot assign to immutable variable '${targetName.toStr()}'`;
+      Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::IMMUTABLE_ASSIGNMENT, message.toStr());
+    }
+
+    /// How a mutability diagnostic names the place `exprId` denotes.
+    ///
+    /// Mirrors the reference analyzer's `get_var_name_from_expr`: a binding is
+    /// named directly, a path by its last segment, a dereference as `(*inner)`,
+    /// a field as `base.field`, a vector element as `<vector element>`, and
+    /// anything else as `<expression>`.
+    function placeDisplayName(module: &Ast::Module, exprId: Ast::ExpressionId): String {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return String::create("<expression>");
+      };
+
+      match (expr) {
+        Ast::Expression::Node::Variable(variable) -> {
+          return variable.name.clone();
+        },
+        Ast::Expression::Node::Path(path) -> {
+          return Analyzer::Typecheck::pathLastSegmentName(&path.segments);
+        },
+        Ast::Expression::Node::Dereference(dereference) -> {
+          let inner: String = Analyzer::Typecheck::placeDisplayName(module, dereference.operand);
+          return `(*${inner.toStr()})`;
+        },
+        Ast::Expression::Node::MemberAccess(memberAccess) -> {
+          let base: String = Analyzer::Typecheck::placeDisplayName(module, memberAccess.object);
+          return `${base.toStr()}.${memberAccess.member.toStr()}`;
+        },
+        Ast::Expression::Node::VectorAccess(_) -> {
+          return String::create("<vector element>");
+        },
+        Ast::Expression::Node::Grouped(grouped) -> {
+          return Analyzer::Typecheck::placeDisplayName(module, grouped.expression);
+        },
+        _ -> {
+          return String::create("<expression>");
+        },
+      };
+
+      @panic("unreachable: placeDisplayName match did not return");
+    }
+
+    function pathLastSegmentName(segments: &Vector<String>): String {
+      if (segments.length() == 0) {
+        return String::create("<unknown>");
+      }
+
+      let Option::SOME(last) = segments.get(segments.length() - 1) else {
+        return String::create("<unknown>");
+      };
+
+      return last.clone();
+    }
+
     /// How a diagnostic names the callee of `exprId`: the identifier, path or
     /// member the source wrote. A callee with no written name, such as a lambda
     /// or the result of another expression, is named `<function>`, as the
@@ -7130,13 +7314,14 @@ export namespace Analyzer {
           symbols,
         );
 
+        let ownerName: String = Analyzer::Typecheck::definitionDisplayName(defStore, symbols, owner.defId);
+
         if (staticOpt.isSome()) {
-          let message: String = `static method \`${memberName}\` cannot be called through an instance`;
-          Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, message.toStr());
+          Analyzer::Typecheck::emitFieldNotFound(state, ma.span, memberName, ownerName.toStr(), "a static method cannot be called through an instance");
           return Option::NONE;
         }
 
-        Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, ma.span, DiagnosticCode::UNKNOWN_MEMBER, "unknown method", memberName);
+        Analyzer::Typecheck::emitFieldNotFound(state, ma.span, memberName, ownerName.toStr(), "no instance method of this name");
         return Option::NONE;
       };
 
@@ -7155,11 +7340,11 @@ export namespace Analyzer {
 
         if (let Option::SOME(referenceMutable) = referenceMutability) {
           if (!referenceMutable) {
-            Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method through a shared reference");
+            Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver is a shared reference");
             return Option::NONE;
           }
         } else if (!Analyzer::Typecheck::pipeReceiverIsMutable(state, resolvedBodies, ma.object)) {
-          Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method on immutable receiver");
+          Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
           return Option::NONE;
         }
       }
@@ -7608,13 +7793,14 @@ export namespace Analyzer {
           symbols,
         );
 
+        let ownerName: String = Analyzer::Typecheck::definitionDisplayName(defStore, symbols, owner.defId);
+
         if (staticOpt.isSome()) {
-          let message: String = `static method \`${memberName}\` cannot be called through an instance`;
-          Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, message.toStr());
+          Analyzer::Typecheck::emitFieldNotFound(state, ma.span, memberName, ownerName.toStr(), "a static method cannot be called through an instance");
           return Option::NONE;
         }
 
-        Analyzer::Typecheck::emitNamedRecordFieldDiagnostic(state, ma.span, DiagnosticCode::UNKNOWN_MEMBER, "unknown method", memberName);
+        Analyzer::Typecheck::emitFieldNotFound(state, ma.span, memberName, ownerName.toStr(), "no instance method of this name");
         return Option::NONE;
       };
 
@@ -7633,11 +7819,11 @@ export namespace Analyzer {
 
         if (let Option::SOME(referenceMutable) = referenceMutability) {
           if (!referenceMutable) {
-            Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method through a shared reference");
+            Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver is a shared reference");
             return Option::NONE;
           }
         } else if (!Analyzer::Typecheck::pipeReceiverIsMutable(state, resolvedBodies, ma.object)) {
-          Analyzer::Typecheck::emitDiagnostic(state, ma.span, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method on immutable receiver");
+          Analyzer::Typecheck::emitMutatingMethodOnImmutable(state, module, ma, "the receiver binding is not `mut`");
           return Option::NONE;
         }
       }
@@ -8698,7 +8884,7 @@ export namespace Analyzer {
         },
         Ast::Statement::Node::Break(value) -> {
           if (state.loopDepth == 0) {
-            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::CONTROL_FLOW_OUTSIDE_LOOP, "`break` used outside of loop");
+            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::BREAK_OUTSIDE_LOOP, "Break statement outside of loop");
             return;
           }
 
@@ -8709,7 +8895,7 @@ export namespace Analyzer {
         },
         Ast::Statement::Node::Continue(value) -> {
           if (state.loopDepth == 0) {
-            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::CONTROL_FLOW_OUTSIDE_LOOP, "`continue` used outside of loop");
+            Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::CONTINUE_OUTSIDE_LOOP, "Continue statement outside of loop");
           }
         },
         Ast::Statement::Node::Defer(value) -> {

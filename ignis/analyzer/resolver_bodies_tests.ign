@@ -1599,7 +1599,7 @@ function resolveBodiesVariantPayloadPatternRejectsMissingArgument(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "pattern expects 1 arguments, found 0");
+  assertSingleDiagnosticMessage(&output, "variant 'E::A' expects 1 payload values, got 0");
 }
 
 /// Scenario: a variant pattern with more arguments than the variant declares
@@ -1627,7 +1627,7 @@ function resolveBodiesVariantPayloadPatternRejectsExtraArgument(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "pattern expects 1 arguments, found 2");
+  assertSingleDiagnosticMessage(&output, "variant 'E::A' expects 1 payload values, got 2");
 }
 
 // ============================================================
@@ -3649,7 +3649,7 @@ function resolveBodiesUndeclaredNamespacePrefixIsRejected(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "undeclared name in path: `Namespace::Owner::staticMethod`");
+  assertSingleDiagnosticMessage(&output, "Undeclared identifier 'Namespace::Owner::staticMethod'");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -3837,7 +3837,7 @@ function resolveBodiesInstanceMethodPathRequiresReceiver(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "instance method `instanceMethod` requires a receiver");
+  assertSingleDiagnosticMessage(&output, "Undeclared identifier 'Tipo::instanceMethod'");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -3880,7 +3880,7 @@ function resolveBodiesTraitPathQualifierEmitsDiagnostic(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "trait `Trt` cannot be used as a path qualifier");
+  assertSingleDiagnosticMessage(&output, "Expected a type, but 'Trt' refers to a trait");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -3907,7 +3907,7 @@ function resolveBodiesUnknownOwnerInPathEmitsUndeclaredVariable(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "undeclared name in path: `Zzz`");
+  assertSingleDiagnosticMessage(&output, "Undeclared identifier 'Zzz::member'");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -3944,7 +3944,7 @@ function resolveBodiesUnknownMemberOnRecordEmitsDiagnostic(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "unknown method or type in path: `zzz`");
+  assertSingleDiagnosticMessage(&output, "Undeclared identifier 'R::zzz'");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -3982,7 +3982,7 @@ function resolveBodiesUnknownMemberOnEnumEmitsDiagnostic(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "unknown variant or static method: `zzz`");
+  assertSingleDiagnosticMessage(&output, "unknown variant 'E::zzz'");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -4200,7 +4200,7 @@ function resolveBodiesMethodsInPatternPositionEmitDiagnostic(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "methods are not valid in pattern position");
+  assertSingleDiagnosticMessage(&output, "unknown variant 'R::staticMethod'");
 
   let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
   let Option::SOME(patRef) = patResult else {
@@ -4229,7 +4229,7 @@ function resolveBodiesPatternUnknownOwnerEmitsUndeclaredVariable(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "undeclared name in path: `Zzz`");
+  assertSingleDiagnosticMessage(&output, "unknown variant 'Zzz::member'");
 
   let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
   let Option::SOME(patRef) = patResult else {
@@ -4320,12 +4320,12 @@ function resolveBodiesFunctionAsPathOwnerEmitsInvalidQualifierDiagnostic(): void
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "left of '::' must be a record or enum");
+  assertSingleDiagnosticMessage(&output, "'helper' is not an enum");
 
   let Option::SOME(diagnostic) = output.diagnostics.get(0) else {
     @panic("resolveBodiesFunctionAsPathOwnerEmitsInvalidQualifierDiagnostic: missing diagnostic");
   };
-  Test::assertNe<str>(diagnostic.messageText(), "left of '::' is not an enum");
+  Test::assertNe<str>(diagnostic.messageText(), "Undeclared identifier 'helper::x'");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -4366,12 +4366,12 @@ function resolveBodiesFunctionAsPatternPathOwnerEmitsInvalidQualifierDiagnostic(
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "left of '::' must be a record or enum");
+  assertSingleDiagnosticMessage(&output, "'helper' is not an enum");
 
   let Option::SOME(diagnostic) = output.diagnostics.get(0) else {
     @panic("resolveBodiesFunctionAsPatternPathOwnerEmitsInvalidQualifierDiagnostic: missing diagnostic");
   };
-  Test::assertNe<str>(diagnostic.messageText(), "left of '::' is not an enum");
+  Test::assertNe<str>(diagnostic.messageText(), "Undeclared identifier 'helper::x'");
 
   let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
   let Option::SOME(patRef) = patResult else {
@@ -4559,7 +4559,7 @@ function resolveBodiesWrongNamespacePrefixIsRejected(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "undeclared name in path: `WrongNs::Owner::staticMethod`");
+  assertSingleDiagnosticMessage(&output, "Undeclared identifier 'WrongNs::Owner::staticMethod'");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -4635,7 +4635,7 @@ function resolveBodiesNestedNamespaceWrongInnerPrefixIsRejected(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "undeclared name in path: `Outer::WrongInner::Owner::staticMethod`");
+  assertSingleDiagnosticMessage(&output, "Undeclared identifier 'Outer::WrongInner::Owner::staticMethod'");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
@@ -4678,7 +4678,7 @@ function resolveBodiesPatternWrongNamespacePrefixIsRejected(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "undeclared name in path: `Bogus::E::A`");
+  assertSingleDiagnosticMessage(&output, "unknown variant 'Bogus::E::A'");
 
   let patResult: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::ResolverBodies::findPatternRef(&output.bodyResolution, armPat.raw());
   let Option::SOME(patRef) = patResult else {
@@ -4766,7 +4766,7 @@ function resolveBodiesFirstItemNamespaceWrongPrefixIsRejected(): void {
     &module,
   );
 
-  assertSingleDiagnosticMessage(&output, "undeclared name in path: `Bogus::Owner::staticMethod`");
+  assertSingleDiagnosticMessage(&output, "Undeclared identifier 'Bogus::Owner::staticMethod'");
 
   let ref_: Analyzer::ResolverBodies::ResolvedRef = assertExprRef(&output.bodyResolution, pathExpr);
   assertUnresolved(ref_);
