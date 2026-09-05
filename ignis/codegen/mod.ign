@@ -568,6 +568,25 @@ export namespace CodegenC {
     };
   }
 
+  /// Whether `defId` is a definition exported under a fixed C symbol.
+  ///
+  /// `@externName` on an `extern` declaration names a symbol the C side owns.
+  /// The same attribute on a definition means the opposite direction: this unit
+  /// owns the symbol and every other unit, Ignis or C, reaches it by that name.
+  function isExportedSymbol(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return false;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Function(functionDef) -> !functionDef.isExtern && functionDef.externName.isSome(),
+      _ -> false,
+    };
+  }
+
   /// Whether the emitted unit gives `defId` internal linkage.
   ///
   /// The host writes `static` on every function that is neither public, a
@@ -590,6 +609,12 @@ export namespace CodegenC {
     externalSymbols: &Vector<u32>,
   ): boolean {
     if (CodegenC::isExternFunction(defStore, defId)) {
+      return false;
+    }
+
+    // An exported definition owns its C symbol for the whole program, so it
+    // outranks the single-unit rule that makes everything else `static`.
+    if (CodegenC::isExportedSymbol(defStore, defId)) {
       return false;
     }
 

@@ -268,6 +268,39 @@ function codegenGivesLocalFunctionsInternalLinkage(): void {
   Test::assert(!codegenContains(&emission.source, "static i32 ignisTestExternProbe"));
 }
 
+/// `@externName` on a definition exports it: the unit emits the written C
+/// symbol, unmangled, with external linkage, so another unit -- Ignis or C --
+/// can name it. The single-unit rule that makes everything else `static` does
+/// not apply to it.
+@test
+function codegenExportsDefinitionsUnderTheirWrittenSymbol(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "@externName(\"ignis_test_exported\")\nfunction exported(value: i32): i32 {\n  return value + 1;\n}\n\nfunction main(): i32 {\n  return exported(1);\n}\n",
+  );
+
+  let mut exportedNames: Vector<String> = Vector::new<String>();
+  exportedNames.push(String::create("exported"));
+
+  let exportedIds: Vector<u32> = codegenFunctionDefIds(&mut emission.defStore, &mut emission.symbols, &exportedNames);
+
+  let Option::SOME(exportedRaw) = exportedIds.get(0) else {
+    @panic("the emitted program declares no function named 'exported'");
+  };
+
+  let exportedId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*exportedRaw);
+  let noExternalSymbols: Vector<u32> = Vector::new<u32>();
+
+  Test::assert(CodegenC::isExportedSymbol(&mut emission.defStore, exportedId));
+  Test::assert(!CodegenC::hasInternalLinkage(&mut emission.defStore, exportedId, &noExternalSymbols));
+
+  let mangled: String = CodegenC::mangledName(&mut emission.defStore, &mut emission.symbols, exportedId);
+
+  Test::assert(mangled.equals("ignis_test_exported"));
+  Test::assert(codegenContains(&emission.source, "i32 ignis_test_exported(i32 t0);"));
+  Test::assert(codegenContains(&emission.source, "i32 ignis_test_exported(i32 t0) {"));
+  Test::assert(!codegenContains(&emission.source, "static i32 ignis_test_exported"));
+}
+
 /// A `@test` function is called from the harness translation unit, which
 /// declares it `extern void`, so the program unit has to leave its symbol
 /// externally visible.

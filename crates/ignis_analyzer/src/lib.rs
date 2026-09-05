@@ -198,6 +198,10 @@ pub struct Analyzer<'a> {
   /// When true, the resolver suppresses diagnostics for undeclared variables and identifiers.
   /// Used when resolving method bodies for `node_defs` population only.
   resolve_suppress_errors: bool,
+
+  /// C symbols claimed by `@externName` on a definition, keyed by symbol name.
+  /// Two definitions claiming one symbol would emit two C definitions of it.
+  exported_c_symbols: HashMap<String, ignis_type::span::Span>,
 }
 
 pub struct AnalyzerOutput {
@@ -433,6 +437,7 @@ impl<'a> Analyzer<'a> {
       pipe_lhs_hir_stack: Vec::new(),
       lowering_return_type_stack: Vec::new(),
       resolve_suppress_errors: false,
+      exported_c_symbols: HashMap::new(),
     }
   }
 
@@ -576,6 +581,7 @@ impl<'a> Analyzer<'a> {
       pipe_lhs_hir_stack: Vec::new(),
       lowering_return_type_stack: Vec::new(),
       resolve_suppress_errors: false,
+      exported_c_symbols: HashMap::new(),
     };
 
     phases::run_semantic_passes(&mut analyzer, roots);

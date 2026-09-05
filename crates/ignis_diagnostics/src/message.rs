@@ -630,6 +630,15 @@ pub enum DiagnosticMessage {
     value: u64,
     span: Span,
   },
+  ExportedSymbolIsGeneric {
+    symbol: String,
+    span: Span,
+  },
+  DuplicateExportedSymbol {
+    symbol: String,
+    span: Span,
+    previous_span: Span,
+  },
   // Lint diagnostics
   UnusedVariable {
     name: String,
@@ -1557,6 +1566,16 @@ impl fmt::Display for DiagnosticMessage {
       DiagnosticMessage::AlignmentNotPowerOfTwo { value, .. } => {
         write!(f, "alignment {} is not a power of two", value)
       },
+      DiagnosticMessage::ExportedSymbolIsGeneric { symbol, .. } => {
+        write!(
+          f,
+          "generic function cannot be exported as C symbol '{}': every instantiation would claim the same name",
+          symbol
+        )
+      },
+      DiagnosticMessage::DuplicateExportedSymbol { symbol, .. } => {
+        write!(f, "C symbol '{}' is already exported by another definition", symbol)
+      },
       DiagnosticMessage::UnusedVariable { name, .. } => {
         write!(f, "unused variable '{}'", name)
       },
@@ -2088,6 +2107,8 @@ impl DiagnosticMessage {
       | DiagnosticMessage::AttributeExpectedString { span, .. }
       | DiagnosticMessage::AttributeExpectedInt { span, .. }
       | DiagnosticMessage::AlignmentNotPowerOfTwo { span, .. }
+      | DiagnosticMessage::ExportedSymbolIsGeneric { span, .. }
+      | DiagnosticMessage::DuplicateExportedSymbol { span, .. }
       | DiagnosticMessage::UnusedVariable { span, .. }
       | DiagnosticMessage::UnusedImport { span, .. }
       | DiagnosticMessage::UnusedMut { span, .. }
@@ -2321,6 +2342,8 @@ impl DiagnosticMessage {
       DiagnosticMessage::AttributeExpectedString { .. } => "A0119",
       DiagnosticMessage::AttributeExpectedInt { .. } => "A0120",
       DiagnosticMessage::AlignmentNotPowerOfTwo { .. } => "A0121",
+      DiagnosticMessage::ExportedSymbolIsGeneric { .. } => "A0204",
+      DiagnosticMessage::DuplicateExportedSymbol { .. } => "A0205",
       DiagnosticMessage::UnusedVariable { .. } => "A0122",
       DiagnosticMessage::UnusedImport { .. } => "A0123",
       DiagnosticMessage::UnusedMut { .. } => "A0127",

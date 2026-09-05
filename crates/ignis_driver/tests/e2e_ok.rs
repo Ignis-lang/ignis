@@ -2247,6 +2247,30 @@ function main(): i32 {
   );
 }
 
+// A module-private definition would otherwise be emitted `static`, which the C
+// compiler rejects next to an `extern` declaration of the same symbol. The
+// export has to win over module visibility for the extern block to reach it.
+#[test]
+fn e2e_attr_extern_name_export_is_linkable() {
+  e2e_test(
+    "attr_extern_name_export_is_linkable",
+    r#"
+@externName("ignis_test_exported_answer")
+function exportedAnswer(): i32 {
+    return 42;
+}
+
+extern __exported {
+    function ignis_test_exported_answer(): i32;
+}
+
+function main(): i32 {
+    return __exported::ignis_test_exported_answer() - exportedAnswer();
+}
+"#,
+  );
+}
+
 #[test]
 fn e2e_attr_packed_aligned() {
   e2e_test(
