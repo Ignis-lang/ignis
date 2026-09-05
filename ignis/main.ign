@@ -215,6 +215,30 @@ function mapImportSourcesToDiscoveryTargets(
   return true;
 }
 
+/// The C toolchain profile a build runs under.
+record BuildProfile {
+  public optLevel: u64;
+  public debug: boolean;
+}
+
+/// Resolve the profile the C toolchain is invoked with.
+///
+/// The debug half is whatever discovery already resolved for `@debug()`, so the
+/// `-g` the compiler receives and the predicate the source sees can never
+/// disagree. `-O` / `--opt-level` overrides the project's `[build] opt_level`.
+function resolveBuildProfile(discovery: &DiscoveryResult, optLevel: Option<u64>): BuildProfile {
+  let mut profile: BuildProfile = BuildProfile {
+    optLevel: discovery.optLevel,
+    debug: discovery.flags.debug,
+  };
+
+  if (let Option::SOME(level) = optLevel) {
+    profile.optLevel = level;
+  }
+
+  return profile;
+}
+
 /// Compile every emitted translation unit and link them into an executable.
 ///
 /// Returns 0 when every toolchain step succeeds and 1 when any one fails.
@@ -223,6 +247,7 @@ function compileAndLinkUnits(
   objectPaths: &Vector<Path::PathBuf>,
   outputPath: &Path::PathBuf,
   stdRoot: &Path::PathBuf,
+  profile: &BuildProfile,
   file: &SourceFile,
 ): u64 {
   let runtimeDir: Path::PathBuf = stdRoot.join("runtime");
@@ -230,9 +255,7 @@ function compileAndLinkUnits(
   let mut includeDirs: Vector<String> = Vector::new<String>();
   includeDirs.push(runtimeDir.toString());
 
-  let mut extraFlags: Vector<String> = Vector::new<String>();
-  extraFlags.push(String::create("-O0"));
-  extraFlags.push(String::create("-g"));
+  let extraFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug);
 
   let mut objects: Vector<String> = Vector::new<String>();
   let mut unitIndex: u64 = 0;
@@ -267,7 +290,7 @@ function compileAndLinkUnits(
   let mut libs: Vector<String> = Vector::new<String>();
   libs.push(String::create("m"));
 
-  let linkFlags: Vector<String> = Vector::new<String>();
+  let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug);
 
   if (let Result::ERROR(linkBag) = Linker::link(
     "gcc",
@@ -636,6 +659,7 @@ function compileFile(
   path: &String,
   outputPath: &String,
   debug: Option<boolean>,
+  optLevel: Option<u64>,
   features: &Vector<String>,
 ): i32 {
   Io::println(String::create("ignis selfhost (partial pipeline)"));
@@ -656,6 +680,7 @@ function compileFile(
     },
   };
 
+  let profile: BuildProfile = resolveBuildProfile(&discovery, optLevel);
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, false);
   let mut linkErrors: u64 = 0;
 
@@ -683,6 +708,7 @@ function compileFile(
         &objectPaths,
         &outputPathBuf,
         &discovery.stdRoot,
+        &profile,
         &file,
       );
     }
@@ -711,6 +737,7 @@ function runProjectTests(
   filter: &String,
   updateSnapshots: boolean,
   debug: Option<boolean>,
+  optLevel: Option<u64>,
   features: &Vector<String>,
 ): i32 {
   Io::eprintln(`Testing ${path.toStr()}\n`);
@@ -730,6 +757,7 @@ function runProjectTests(
     },
   };
 
+  let profile: BuildProfile = resolveBuildProfile(&discovery, optLevel);
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, true);
 
   if (compiled.source.length() == 0) {
@@ -785,7 +813,7 @@ function runProjectTests(
 
   let binaryPath: Path::PathBuf = Path::PathBuf::fromString(outputPath);
 
-  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &binaryPath, &discovery.stdRoot, &file) > 0) {
+  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &binaryPath, &discovery.stdRoot, &profile, &file) > 0) {
     Io::eprintln(String::create("error: test setup failed"));
     return 1;
   }
@@ -841,12 +869,34 @@ function splitCommaSeparated(value: &String): Vector<String> {
 /// `selfhost_out` for a build and `selfhost_tests` for a test run. An unknown
 /// flag exits with 2.
 ///
+/// `-O <level>` / `--opt-level <level>` overrides `[build] opt_level` from
+/// `ignis.toml`, which is the level the C toolchain is invoked with. The C
+/// toolchain is asked for debug information under the same `--debug` value the
+/// compile-time predicates use.
+///
 /// The compile-time predicates read `--debug`/`--no-debug`, `--feature <name>`
 /// and `--features <list>`: `--debug`/`--no-debug` overrides `[build] debug`
 /// from `ignis.toml` and decides `@debug()` and `@release()`; with neither
 /// flag the project file's value applies, and with no project file the build
 /// is not debug. The feature flags add to the project's declared default
 /// features.
+/// Read an `--opt-level` / `-O` value, which the C toolchain takes as `-O<level>`.
+function parseOptLevelArgument(text: &String): Option<u64> {
+  if (text.length() != 1) {
+    return Option::NONE;
+  }
+
+  let Option::SOME(digit) = text.charAt(0) else {
+    return Option::NONE;
+  };
+
+  if (digit < '0' || digit > '3') {
+    return Option::NONE;
+  }
+
+  return Option::SOME((digit as u64) - ('0' as u64));
+}
+
 function main(): i32 {
   let args: Vector<String> = Process::args();
   let mut sourcePath: Option<String> = Option::NONE;
@@ -855,6 +905,7 @@ function main(): i32 {
   let mut updateSnapshots: boolean = false;
   let mut testMode: boolean = false;
   let mut debug: Option<boolean> = Option::NONE;
+  let mut optLevel: Option<u64> = Option::NONE;
   let mut features: Vector<String> = Vector::new<String>();
   let mut index: u64 = 1;
 
@@ -894,6 +945,22 @@ function main(): i32 {
     if (testMode && arg.equals("--update-snapshots")) {
       updateSnapshots = true;
       index += 1;
+      continue;
+    }
+
+    if (arg.equals("-O") || arg.equals("--opt-level")) {
+      let Option::SOME(value) = args.get(index + 1) else {
+        Io::eprintln(String::create("error: --opt-level requires a level between 0 and 3"));
+        return 2;
+      };
+
+      let Option::SOME(level) = parseOptLevelArgument(value) else {
+        Io::eprintln(`error: invalid optimization level: ${value.toStr()}`);
+        return 2;
+      };
+
+      optLevel = Option::SOME(level);
+      index += 2;
       continue;
     }
 
@@ -955,8 +1022,8 @@ function main(): i32 {
   };
 
   if (testMode) {
-    return runProjectTests(&source, &outputPath, &filter, updateSnapshots, debug, &features);
+    return runProjectTests(&source, &outputPath, &filter, updateSnapshots, debug, optLevel, &features);
   }
 
-  return compileFile(&source, &outputPath, debug, &features);
+  return compileFile(&source, &outputPath, debug, optLevel, &features);
 }
