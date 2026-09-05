@@ -1,0 +1,91 @@
+//!
+//! # Process Runtime
+//!
+//! Startup argument capture for `std::process`.
+//!
+//! ## Overview
+//!
+//! The compiler's generated C `main` wrapper calls `ignis_runtime_init` before
+//! it enters user code. This module owns that entry point and the two process
+//! globals it fills.
+//!
+//! ```text
+//!   C entrypoint
+//!   ┌──────────────────────────────────────────────────────────────┐
+//!   │ int main(int argc, char** argv)                              │
+//!   └───────────────────────┬──────────────────────────────────────┘
+//!                           │ ignis_runtime_init(argc, argv)
+//!                           ▼
+//!   ProcessSlots
+//!   ┌──────────────────────────────────────────────────────────────┐
+//!   │ static mut ARGC: i32                                         │
+//!   │ static mut ARGV: *mut void                                   │
+//!   └───────────────────────┬──────────────────────────────────────┘
+//!                           │ ProcessRuntime::argCount / argAt
+//!                           ▼
+//!   Process::args() -> Vector<String>
+//! ```
+//!
+//! ## Why this is its own module
+//!
+//! The slots have translation-unit linkage, so every reader has to sit next to
+//! the writer. Keeping only the reader pair here lets the module stay free of
+//! `String`, `Vector` and `LibC` dependencies, which is what makes it cheap
+//! enough to auto-load into every program. Every program needs it, because the
+//! generated entrypoint calls `ignis_runtime_init` unconditionally.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import ProcessRuntime from "std::process::runtime";
+//!
+//! function main(): i32 {
+//!   return ProcessRuntime::argCount() > 0 ? 0 : 1;
+//! }
+//! ```
+
+/// Startup argument slots filled by the generated C entrypoint.
+record ProcessSlots {
+  /// Host `argc`, clamped to zero for a negative host value.
+  static mut ARGC: i32 = 0;
+
+  /// Host `argv`, borrowed for the whole process lifetime.
+  ///
+  /// The slot is untyped because the generated C wrapper hands over a `char**`
+  /// and C only converts that implicitly to `void*`.
+  static mut ARGV: *mut void = null;
+}
+
+/// Stores the host `argv` snapshot for `Process`.
+///
+/// The generated C `main` wrapper reaches this under the fixed symbol
+/// `ignis_runtime_init`.
+@externName("ignis_runtime_init")
+export function ignisRuntimeInit(argc: i32, argv: *mut void): void {
+  ProcessSlots::ARGC = argc < 0 ? 0 : argc;
+  ProcessSlots::ARGV = argv;
+}
+
+/// Borrowed access to the captured startup arguments.
+export namespace ProcessRuntime {
+  /// Returns the captured argument count, including `argv[0]`.
+  ///
+  /// The result is 0 until the generated entrypoint has run.
+  function argCount(): i32 {
+    return ProcessSlots::ARGC;
+  }
+
+  /// Returns a borrowed `argv[index]`, or an empty view when out of range.
+  ///
+  /// The returned view points into host memory that stays alive for the whole
+  /// process, but callers that need an owned value should copy it.
+  function argAt(index: i32): str {
+    if (index < 0 || index >= ProcessSlots::ARGC || ProcessSlots::ARGV == null) {
+      return "";
+    }
+
+    let argv: *str = ProcessSlots::ARGV as *str;
+
+    return argv[index];
+  }
+}

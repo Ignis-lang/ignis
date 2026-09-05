@@ -87,25 +87,6 @@ typedef struct IgnisString {
 typedef void *null;
 
 // =============================================================================
-// Process bootstrap helpers
-// =============================================================================
-
-/**
- * Stores the host argv snapshot for std::process.
- */
-void ignis_runtime_init(i32 argc, char **argv);
-
-/**
- * Returns the stored startup argument count, including argv[0].
- */
-i32 ignis_process_arg_count(void);
-
-/**
- * Returns the stored argument at index, or NULL when out of range.
- */
-const char *ignis_process_arg_at(i32 index);
-
-// =============================================================================
 // Reference counting (Rc)
 // =============================================================================
 
@@ -197,92 +178,6 @@ void ignis_weak_release(IgnisRcBox *rc);
  * Returns the current weak reference count.
  */
 uint32_t ignis_weak_count(const IgnisRcBox *rc);
-
-// =============================================================================
-// Memory allocation
-// =============================================================================
-
-typedef struct {
-  size_t allocs_live;
-  size_t bytes_live;
-  size_t alloc_total;
-  size_t free_total;
-} IgnisMemStats;
-
-IgnisMemStats ignis_mem_stats(void);
-void ignis_mem_reset_stats(void);
-
-/**
- * Allocates `size` bytes with the runtime allocator.
- * Aborts the process on allocation failure (OOM).
- */
-void *ignis_alloc(size_t size);
-
-/**
- * Allocates `size` bytes with at least `alignment` alignment.
- * `alignment` must be a non-zero power of two.
- * Returns NULL only when `size == 0`.
- * Aborts the process on allocation failure (OOM) or invalid alignment.
- */
-void *ignis_alloc_aligned(size_t size, size_t alignment);
-
-/**
- * Resizes a previously allocated block.
- * Aborts the process on allocation failure (OOM).
- */
-void *ignis_realloc(void *ptr, size_t size);
-
-/**
- * Reallocates a block so the resulting storage satisfies `alignment`.
- * `alignment` must be a non-zero power of two.
- * Returns NULL only when `size == 0`.
- * Aborts the process on allocation failure (OOM) or invalid alignment.
- */
-void *ignis_realloc_aligned(void *ptr, size_t size, size_t alignment);
-
-/**
- * Allocates `count` elements of `size` bytes, zero-initialized.
- */
-void *ignis_calloc(size_t count, size_t size);
-
-/**
- * Allocates `count * size` bytes with `alignment` alignment and zero-fills them.
- * Returns NULL only when the total size is 0.
- * Aborts on overflow, allocation failure, or invalid alignment.
- */
-void *ignis_calloc_aligned(size_t count, size_t size, size_t alignment);
-
-/**
- * Frees a previously allocated block.
- */
-void ignis_free(void *ptr);
-
-/**
- * Copies `n` bytes from `src` to `dest`. Regions must not overlap.
- */
-void ignis_memcpy(void *dest, const void *src, size_t n);
-
-/**
- * Copies `n` bytes from `src` to `dest`. Handles overlapping regions.
- */
-void ignis_memmove(void *dest, const void *src, size_t n);
-
-// =============================================================================
-// Arena allocation
-// =============================================================================
-
-typedef struct IgnisArena IgnisArena;
-
-IgnisArena *ignis_arena_create(size_t block_size);
-void *ignis_arena_allocate(IgnisArena *arena, size_t size, size_t alignment);
-void ignis_arena_reset(IgnisArena *arena);
-void ignis_arena_destroy(IgnisArena *arena);
-
-// =============================================================================
-// Hashing
-// =============================================================================
-
-u64 ignis_hash_fnv1a_cstr(u64 state, const char *value);
 
 // =============================================================================
 // String base API

@@ -20,12 +20,12 @@
 //!   ┌──────────────────────────────────────────────────────────────┐
 //!   │ int main(int argc, char** argv)                              │
 //!   └───────────────────────┬──────────────────────────────────────┘
-//!                           │ stores argc/argv in runtime slots
+//!                           │ ignis_runtime_init(argc, argv)
 //!                           ▼
-//!   __process_rt
+//!   ProcessRuntime (std::process::runtime)
 //!   ┌──────────────────────────────────────────────────────────────┐
-//!   │ ignis_process_arg_count() -> argc                            │
-//!   │ ignis_process_arg_at(i) -> argv[i] or null                   │
+//!   │ argCount() -> argc                                           │
+//!   │ argAt(i) -> argv[i] or an empty view                         │
 //!   └───────────────────────┬──────────────────────────────────────┘
 //!                           │ copied into owned String values
 //!                           ▼
@@ -120,14 +120,6 @@ import Path from "std::path";
 import String from "std::string";
 import Vector from "std::vector";
 
-extern __process_rt {
-  /// Returns the `argc` value captured by the generated runtime entrypoint.
-  function ignis_process_arg_count(): i32;
-
-  /// Returns a borrowed `argv[index]` pointer captured by the runtime.
-  function ignis_process_arg_at(index: i32): *mut u8;
-}
-
 /// POSIX wait-status mask for the terminating signal bits.
 const PROCESS_SIGNAL_MASK: i32 = 127;
 
@@ -161,13 +153,7 @@ const PROCESS_EXEC_FAILURE_EXIT: i32 = 127;
 /// reports a null pointer. Callers normally use `Process::args` instead of this
 /// helper.
 function processOwnedArgAt(index: i32): String {
-  let raw: *mut u8 = __process_rt::ignis_process_arg_at(index);
-
-  if (raw == null) {
-    return String::create("");
-  }
-
-  return String::create(raw as str);
+  return String::create(ProcessRuntime::argAt(index));
 }
 
 /// Returns true when a POSIX wait status represents normal child exit.
@@ -1134,7 +1120,7 @@ export namespace Process {
   /// ```
   @configFlag(@platform("linux") || @platform("macos"))
   function argCount(): i32 {
-    return __process_rt::ignis_process_arg_count();
+    return ProcessRuntime::argCount();
   }
 
   /// Returns the current process identifier.

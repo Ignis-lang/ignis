@@ -13,6 +13,16 @@ function expectArg(args: &Vector<String>, index: u64, expected: str): void {
   };
 }
 
+/// Reads one owned argument through the public API, tolerating an out-of-range index.
+function processArgAtOrEmpty(index: i32): String {
+  let values: Vector<String> = Process::args();
+
+  return match (values.get(index as u64)) {
+    Option::SOME(value) -> value.clone(),
+    Option::NONE -> String::create(""),
+  };
+}
+
 function shellCommand(script: str): Process::Command {
   let mut command: Process::Command = Process::command("/bin/sh");
   command.arg("-c");
@@ -69,6 +79,19 @@ function argsPreserveHarnessOrdering(): void {
 
   expectArg(&values, 1, "--ignis-test");
   expectArg(&values, 2, "process::tests::argsPreserveHarnessOrdering");
+}
+
+@test
+function argCountMatchesTheOwnedArgumentVector(): void {
+  Test::assertEq<i32>(Process::argCount(), Process::args().length() as i32);
+}
+
+@test
+function argsAreEmptyPastTheCapturedRange(): void {
+  let values: Vector<String> = Process::args();
+  let past: String = processArgAtOrEmpty(values.length() as i32);
+
+  Test::assertEq<u64>(past.length(), 0);
 }
 
 @test

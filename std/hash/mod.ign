@@ -13,9 +13,24 @@
 const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
 const FNV_PRIME: u64 = 1099511628211;
 
-extern __hash_rt {
-  /// Continues an FNV-1a hash over a NUL-terminated C string.
-  function ignis_hash_fnv1a_cstr(state: u64, value: str): u64;
+/// Continues an FNV-1a hash over the bytes of a NUL-terminated `str`.
+function hashCStr(state: u64, value: str): u64 {
+  let bytes: *mut u8 = value as *mut u8;
+
+  if (bytes == null) {
+    return state;
+  }
+
+  let mut result: u64 = state;
+  let mut index: u64 = 0;
+
+  while (@read<u8>(bytes + index) != 0) {
+    result ^= @read<u8>(bytes + index) as u64;
+    result *= FNV_PRIME;
+    index += 1;
+  }
+
+  return result;
 }
 
 /// Trait for values that can feed their canonical bytes into a `Hasher`.
@@ -118,7 +133,7 @@ export record Hasher {
   /// string view. Owned `String` hashing should not use this for interior-NUL
   /// preserving behavior.
   public writeStr(&mut self, value: str): void {
-    self.state = __hash_rt::ignis_hash_fnv1a_cstr(self.state, value);
+    self.state = hashCStr(self.state, value);
   }
 
   /// Returns the current 64-bit hash state without resetting the hasher.

@@ -1,7 +1,7 @@
 //!
 //! # Arena Allocator
 //!
-//! Growable block-based arena allocator backed by the runtime.
+//! Growable block-based arena allocator written in Ignis.
 //!
 //! ## Overview
 //!
@@ -23,7 +23,7 @@
 //!
 //! 1. **Fast allocation**
 //!    - allocate from the current backing block
-//!    - if the block has no room, request or switch to another runtime block
+//!    - if the block has no room, switch to or append another block
 //!
 //! 2. **No individual deallocation**
 //!    - there is no per-allocation `free`
@@ -38,19 +38,20 @@
 //! ```text
 //!   ArenaAllocator
 //!   ┌─────────────────────────────────────────────────────────────────┐
-//!   │ handle -> runtime arena state                                  │
-//!   │ blockSize -> preferred block size for future growth            │
+//!   │ head    -> first block                                          │
+//!   │ current -> block the next allocation is tried against first     │
+//!   │ blockSize -> preferred block size for future growth             │
 //!   └─────────────────────────────────────────────────────────────────┘
 //!
-//!   Runtime-owned backing blocks
+//!   Arena-owned backing blocks
 //!   ┌────────────────────────┐  ┌────────────────────────┐
-//!   │ [used][used][free...]  │  │ [used][free.........] │
+//!   │ [used][used][free...]  │─▶│ [used][free.........] │
 //!   └────────────────────────┘  └────────────────────────┘
 //! ```
 //!
-//! The exact block metadata lives in the runtime, not in this Ignis wrapper.
-//! At the stdlib level, `ArenaAllocator` is a lightweight handle over that
-//! runtime-managed arena state.
+//! Block metadata lives in `ArenaBlock` records the arena allocates through the
+//! process allocator, so a returned pointer keeps pointing at stable storage
+//! until the arena is reset or destroyed.
 //!
 //! ## Allocation Semantics
 //!
@@ -58,7 +59,7 @@
 //! - `allocate<T>()` allocates space for exactly one `T`
 //! - `allocate<T>(count)` allocates space for `count` contiguous `T` values
 //! - zero-sized requests return `null`
-//! - if the arena handle has been destroyed, allocation returns `null`
+//! - once the arena has been destroyed, allocation returns `null`
 //!
 //! ## Reset vs Destroy
 //!
@@ -69,8 +70,8 @@
 //!     - makes arena space reusable
 //!
 //!   destroy()
-//!     - releases all backing blocks through the runtime
-//!     - sets handle to null
+//!     - releases all backing blocks
+//!     - marks the arena dead
 //!     - allocator becomes unusable until reinitialized
 //! ```
 //!
@@ -116,36 +117,163 @@
 //! }
 //! ```
 
+import Align from "./align";
+import RawAllocator from "./allocator";
 import Layout from "./layout";
 
-extern __arena {
-  /// Creates a runtime arena handle with the requested block size.
-  function ignis_arena_create(blockSize: u64): *mut void;
-  /// Allocates `size` bytes from an arena handle with `alignment`.
-  function ignis_arena_allocate(handle: *mut void, size: u64, alignment: u64): *mut u8;
-  /// Resets an arena, invalidating all allocations made from it.
-  function ignis_arena_reset(handle: *mut void): void;
-  /// Destroys an arena handle and releases all backing blocks.
-  function ignis_arena_destroy(handle: *mut void): void;
+/// Alignment floor for a backing block, matching the process allocator.
+const ARENA_MIN_ALIGNMENT: u64 = 16;
+
+/// Default backing block size when the caller asks for zero.
+const ARENA_DEFAULT_BLOCK_SIZE: u64 = 1024;
+
+/// One backing block in an arena's singly linked block list.
+///
+/// Blocks are raw allocations rather than owned records: an arena hands out
+/// interior pointers into `data`, so the list cannot move while it is alive.
+record ArenaBlock {
+  /// Backing storage for this block.
+  public data: *mut u8;
+
+  /// Usable bytes in `data`.
+  public capacity: u64;
+
+  /// Bytes already handed out from the front of `data`.
+  public used: u64;
+
+  /// Strongest alignment this block can satisfy.
+  public alignment: u64;
+
+  /// Next block in the list, or null at the tail.
+  public next: *mut ArenaBlock;
+}
+
+/// Allocates one backing block with `capacity` bytes at `alignment`.
+function arenaBlockCreate(capacity: u64, alignment: u64): *mut ArenaBlock {
+  let effective: u64 = alignment < ARENA_MIN_ALIGNMENT ? ARENA_MIN_ALIGNMENT : alignment;
+  let block: *mut ArenaBlock = RawAllocator::allocateAligned(
+    @sizeOf<ArenaBlock>(),
+    @alignOf<ArenaBlock>(),
+  ) as *mut ArenaBlock;
+
+  @write<ArenaBlock>(block, ArenaBlock {
+      data: RawAllocator::allocateAligned(capacity, alignment),
+      capacity: capacity,
+      used: 0,
+      alignment: effective,
+      next: null,
+    });
+
+  return block;
+}
+
+/// Bumps `block` by `size` bytes at `alignment`, or returns null when it cannot.
+function arenaBlockAllocate(block: *mut ArenaBlock, size: u64, alignment: u64): *mut u8 {
+  if (block == null || size == 0) {
+    return null;
+  }
+
+  let mut state: ArenaBlock = @read<ArenaBlock>(block);
+
+  if (alignment > state.alignment) {
+    return null;
+  }
+
+  let aligned: u64 = Align::alignUp(state.data as u64 + state.used, alignment);
+  let nextUsed: u64 = (aligned - (state.data as u64)) + size;
+
+  if (nextUsed > state.capacity) {
+    return null;
+  }
+
+  state.used = nextUsed;
+  @write<ArenaBlock>(block, state);
+
+  return aligned as *mut u8;
+}
+
+/// Rewinds every block in the list starting at `block`.
+function arenaBlockListReset(block: *mut ArenaBlock): void {
+  let mut cursor: *mut ArenaBlock = block;
+
+  while (cursor != null) {
+    let mut state: ArenaBlock = @read<ArenaBlock>(cursor);
+    let next: *mut ArenaBlock = state.next;
+
+    state.used = 0;
+    @write<ArenaBlock>(cursor, state);
+
+    cursor = next;
+  }
+}
+
+/// Releases every block in the list starting at `block`.
+function arenaBlockListDestroy(block: *mut ArenaBlock): void {
+  let mut cursor: *mut ArenaBlock = block;
+
+  while (cursor != null) {
+    let state: ArenaBlock = @read<ArenaBlock>(cursor);
+
+    RawAllocator::free(state.data);
+    RawAllocator::free(cursor as *mut u8);
+
+    cursor = state.next;
+  }
+}
+
+/// Appends `block` to the list, keeping `head` and `current` consistent.
+function arenaBlockListAppend(
+  head: *mut ArenaBlock,
+  current: *mut ArenaBlock,
+  block: *mut ArenaBlock
+): void {
+  if (current != null) {
+    let mut state: ArenaBlock = @read<ArenaBlock>(current);
+    state.next = block;
+    @write<ArenaBlock>(current, state);
+
+    return;
+  }
+
+  let mut tail: *mut ArenaBlock = head;
+
+  while (true) {
+    let mut state: ArenaBlock = @read<ArenaBlock>(tail);
+
+    if (state.next == null) {
+      state.next = block;
+      @write<ArenaBlock>(tail, state);
+
+      return;
+    }
+
+    tail = state.next;
+  }
 }
 
 @implements(Drop)
-/// Arena-style allocator backed by runtime-managed memory blocks.
+/// Arena-style allocator backed by a linked list of bump-allocated blocks.
 ///
-/// This stdlib type is intentionally small: it stores only a runtime handle and
-/// the preferred block size used when the runtime grows the arena.
+/// The arena owns every block it allocates and hands out interior pointers into
+/// them. Those pointers stay valid until `reset()` or `destroy()`.
 export record ArenaAllocator {
-  /// Opaque runtime handle for the arena state.
-  handle: *mut void;
+  /// First block in the list, or null before the first allocation.
+  head: *mut ArenaBlock;
 
-  /// Preferred backing block size used by the runtime arena implementation.
+  /// Block the next allocation is tried against first.
+  current: *mut ArenaBlock;
+
+  /// Preferred backing block size used when the arena grows.
   blockSize: u64;
+
+  /// False once `destroy()` has released the blocks.
+  alive: boolean;
 
   /// Creates a new arena allocator with the given preferred block size.
   ///
   /// # Arguments
   ///
-  /// * `blockSize` - preferred growth size for runtime backing blocks.
+  /// * `blockSize` - preferred growth size for backing blocks.
   ///
   /// # Example
   ///
@@ -156,8 +284,10 @@ export record ArenaAllocator {
   /// ```
   public static new(blockSize: u64): ArenaAllocator {
     return ArenaAllocator {
-      handle: __arena::ignis_arena_create(blockSize),
-      blockSize: blockSize,
+      head: null,
+      current: null,
+      blockSize: blockSize == 0 ? ARENA_DEFAULT_BLOCK_SIZE : blockSize,
+      alive: true,
     };
   }
 
@@ -171,15 +301,53 @@ export record ArenaAllocator {
   /// Returns `null` when the arena has been destroyed or when `layout`
   /// represents a zero-sized allocation.
   public allocate(&mut self, layout: Layout): *mut u8 {
-    if (self.handle == null) {
+    if (!self.alive) {
       return null;
     }
 
-    if (layout.size() == 0) {
+    let size: u64 = layout.size();
+    let alignment: u64 = layout.align();
+
+    if (size == 0) {
       return null;
     }
 
-    return __arena::ignis_arena_allocate(self.handle, layout.size(), layout.align());
+    if (!Align::isPowerOfTwo(alignment)) {
+      @panic("ignis: invalid alignment");
+    }
+
+    let mut block: *mut ArenaBlock = self.current;
+
+    while (block != null) {
+      let pointer: *mut u8 = arenaBlockAllocate(block, size, alignment);
+
+      if (pointer != null) {
+        self.current = block;
+        return pointer;
+      }
+
+      block = @read<ArenaBlock>(block).next;
+    }
+
+    let minCapacity: u64 = size + alignment - 1;
+    let growthBase: u64 = self.current != null ? @read<ArenaBlock>(self.current).capacity * 2 : self.blockSize;
+    let mut capacity: u64 = growthBase > self.blockSize ? growthBase : self.blockSize;
+
+    if (capacity < minCapacity) {
+      capacity = minCapacity;
+    }
+
+    let fresh: *mut ArenaBlock = arenaBlockCreate(capacity, alignment);
+
+    if (self.head == null) {
+      self.head = fresh;
+    } else {
+      arenaBlockListAppend(self.head, self.current, fresh);
+    }
+
+    self.current = fresh;
+
+    return arenaBlockAllocate(fresh, size, alignment);
   }
 
   /// Allocates enough arena memory for a single value of type `T`.
@@ -214,20 +382,28 @@ export record ArenaAllocator {
   ///
   /// All previously returned pointers become invalid after this call.
   public reset(&mut self): void {
-    if (self.handle != null) {
-      __arena::ignis_arena_reset(self.handle);
+    if (!self.alive) {
+      return;
     }
+
+    arenaBlockListReset(self.head);
+    self.current = self.head;
   }
 
-  /// Releases all runtime-managed backing blocks and invalidates the arena.
+  /// Releases all arena-owned backing blocks and invalidates the arena.
   ///
   /// After `destroy()`, further allocations return `null` until the allocator
   /// is recreated with `init`.
   public destroy(&mut self): void {
-    if (self.handle != null) {
-      __arena::ignis_arena_destroy(self.handle);
-      self.handle = null;
+    if (!self.alive) {
+      return;
     }
+
+    arenaBlockListDestroy(self.head);
+
+    self.head = null;
+    self.current = null;
+    self.alive = false;
   }
 
   /// Automatically destroys the arena when it goes out of scope.

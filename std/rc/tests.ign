@@ -1,0 +1,71 @@
+import Memory, Stats from "std::memory";
+import Rc, Weak from "std::rc";
+import Test from "std::test";
+
+/// Leak coverage the C runtime smoke suite used to carry over `ignis_mem_stats`.
+///
+/// `Rc` allocates its control block through the process allocator, so the
+/// allocator counters observe every box a test creates and releases.
+@test
+function severalLiveBoxesAreAllReleased(): void {
+  let before: Stats = Memory::stats();
+
+  {
+    let first: Rc<i32> = Rc::new<i32>(1);
+    let second: Rc<i32> = Rc::new<i32>(2);
+    let third: Rc<i32> = Rc::new<i32>(3);
+
+    Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive + 3);
+    Test::assertEq<i32>(*first.get(), 1);
+    Test::assertEq<i32>(*second.get(), 2);
+    Test::assertEq<i32>(*third.get(), 3);
+  }
+
+  let after: Stats = Memory::stats();
+
+  Test::assertEq<u64>(after.allocsLive, before.allocsLive);
+  Test::assertEq<u64>(after.bytesLive, before.bytesLive);
+}
+
+@test
+function sharedClonesReleaseTheBoxExactlyOnce(): void {
+  let before: Stats = Memory::stats();
+
+  {
+    let owner: Rc<i32> = Rc::new<i32>(42);
+    let secondHandle: Rc<i32> = owner.clone();
+    let thirdHandle: Rc<i32> = owner.clone();
+
+    Test::assertEq<u32>(owner.strongCount(), 3);
+    Test::assertEq<i32>(*thirdHandle.get(), 42);
+    Test::assertEq<i32>(*secondHandle.get(), 42);
+    Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive + 1);
+  }
+
+  let after: Stats = Memory::stats();
+
+  Test::assertEq<u64>(after.allocsLive, before.allocsLive);
+  Test::assertEq<u64>(after.bytesLive, before.bytesLive);
+}
+
+@test
+function aWeakHandleKeepsTheBoxAliveUntilItIsAlsoReleased(): void {
+  let before: Stats = Memory::stats();
+
+  {
+    let observer: Weak<i32> = weakObserverOfDeadValue();
+
+    Test::assertEq<u32>(observer.strongCount(), 0);
+    Test::assert(observer.upgrade().isNone());
+    Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive + 1);
+  }
+
+  Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive);
+}
+
+/// Returns a `Weak` whose strong handle is already gone.
+function weakObserverOfDeadValue(): Weak<i32> {
+  let value: Rc<i32> = Rc::new<i32>(7);
+
+  return value.downgrade();
+}

@@ -5755,6 +5755,21 @@ fn build_mangled_name_standalone(
   let def = defs.get(&def_id);
   let raw_name = symbols.get(&def.name).to_string();
 
+  // `@externName` fixes the C symbol in both directions: an `extern` declaration
+  // names a symbol C owns, and a definition owns that symbol for the program.
+  // The header has to declare the exported name, not the mangled one.
+  let function_attrs: &[FunctionAttr] = match &def.kind {
+    DefinitionKind::Function(f) => &f.attrs,
+    DefinitionKind::Method(m) => &m.attrs,
+    _ => &[],
+  };
+
+  for attr in function_attrs {
+    if let FunctionAttr::ExternName(name) = attr {
+      return name.clone();
+    }
+  }
+
   let is_extern = match &def.kind {
     DefinitionKind::Function(f) => f.is_extern,
     // Methods are never extern in Ignis
