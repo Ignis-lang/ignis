@@ -1,0 +1,27 @@
+// e2e: err
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source<T> {
+    SOME(T),
+    NONE,
+}
+
+function takeFromBorrow<T>(src: &Source<T>, fallback: T): T {
+    return match (src) {
+        Source::SOME(payload) -> payload,
+        Source::NONE -> fallback,
+    };
+}
+
+function main(): i32 {
+    let source: Source<Payload> = Source::SOME(Payload { value: 42 });
+    let taken: Payload = takeFromBorrow<Payload>(&source, Payload { value: 0 });
+    return taken.value;
+}
