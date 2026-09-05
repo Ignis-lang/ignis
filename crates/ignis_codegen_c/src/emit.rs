@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -14,8 +15,8 @@ use ignis_type::{
   },
   file::{FileId, SourceMap},
   module::{ModuleId, ModulePath},
-  namespace::NamespaceStore,
-  symbol::SymbolTable,
+  namespace::{NamespaceId, NamespaceStore},
+  symbol::{SymbolId, SymbolTable},
   types::{Type, TypeId, TypeStore},
 };
 
@@ -55,6 +56,69 @@ enum EntryMainArgs {
   ArgcArgv,
 }
 
+/// Lookup tables derived from the whole `DefinitionStore` in a single pass.
+///
+/// Name mangling, drop-glue resolution and linkage decisions each used to answer
+/// their question with a linear scan over every definition. Because an emitter is
+/// built per module and asks those questions once per emitted symbol, the scans
+/// made emission quadratic in the size of the program. Every map here is built in
+/// definition-id order so that "first match wins" lookups keep the answer the
+/// scans produced.
+#[derive(Default)]
+struct DefinitionIndex {
+  method_overloads: HashMap<(SymbolId, DefinitionId), usize>,
+  function_overloads: HashMap<(SymbolId, Option<NamespaceId>), usize>,
+  nominal_types_by_module_and_name: HashMap<(ModuleId, SymbolId), DefinitionId>,
+  drop_methods_by_owner_type: HashMap<DefinitionId, DefinitionId>,
+  namespace_definitions: HashMap<NamespaceId, DefinitionId>,
+}
+
+impl DefinitionIndex {
+  fn build(
+    defs: &DefinitionStore,
+    symbols: &SymbolTable,
+  ) -> Self {
+    let mut index = Self::default();
+
+    for (def_id, def) in defs.iter() {
+      match &def.kind {
+        DefinitionKind::Function(_) => {
+          *index
+            .function_overloads
+            .entry((def.name, def.owner_namespace))
+            .or_insert(0) += 1;
+        },
+        DefinitionKind::Method(method) => {
+          *index.method_overloads.entry((def.name, method.owner_type)).or_insert(0) += 1;
+
+          let method_name = symbols.get(&def.name);
+          if method_name == "drop" || method_name.ends_with("__drop") {
+            index
+              .drop_methods_by_owner_type
+              .entry(method.owner_type)
+              .or_insert(def_id);
+          }
+        },
+        DefinitionKind::Record(_) | DefinitionKind::Enum(_) => {
+          index
+            .nominal_types_by_module_and_name
+            .entry((def.owner_module, def.name))
+            .or_insert(def_id);
+        },
+        DefinitionKind::Namespace(namespace) => {
+          index
+            .namespace_definitions
+            .entry(namespace.namespace_id)
+            .or_insert(def_id);
+        },
+        _ => {},
+      }
+    }
+
+    index
+  }
+}
+
 /// C code emitter for LIR programs.
 pub struct CEmitter<'a> {
   program: &'a LirProgram,
@@ -88,6 +152,10 @@ pub struct CEmitter<'a> {
 
   /// Optional native test harness dispatch table.
   test_harness: Option<&'a [TestHarnessEntry]>,
+
+  /// Lazily built lookup tables over `defs`, shared by every query that would
+  /// otherwise scan the whole definition store.
+  definition_index: OnceCell<DefinitionIndex>,
 }
 
 impl<'a> CEmitter<'a> {
@@ -117,6 +185,7 @@ impl<'a> CEmitter<'a> {
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
       test_harness: None,
+      definition_index: OnceCell::new(),
     }
   }
 
@@ -150,6 +219,7 @@ impl<'a> CEmitter<'a> {
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
       test_harness: None,
+      definition_index: OnceCell::new(),
     }
   }
 
@@ -185,6 +255,7 @@ impl<'a> CEmitter<'a> {
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
       test_harness: None,
+      definition_index: OnceCell::new(),
     }
   }
 
@@ -219,6 +290,7 @@ impl<'a> CEmitter<'a> {
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
       test_harness: None,
+      definition_index: OnceCell::new(),
     }
   }
 
@@ -251,6 +323,7 @@ impl<'a> CEmitter<'a> {
       closure_struct_names: HashMap::new(),
       closure_env_names: HashMap::new(),
       test_harness: Some(test_harness),
+      definition_index: OnceCell::new(),
     }
   }
 
@@ -260,6 +333,12 @@ impl<'a> CEmitter<'a> {
   ) -> Self {
     self.source_map = source_map;
     self
+  }
+
+  fn definition_index(&self) -> &DefinitionIndex {
+    self
+      .definition_index
+      .get_or_init(|| DefinitionIndex::build(self.defs, self.symbols))
   }
 
   pub fn emit(mut self) -> String {
@@ -688,10 +767,11 @@ impl<'a> CEmitter<'a> {
     &self,
     namespace_id: ignis_type::namespace::NamespaceId,
   ) -> Option<DefinitionId> {
-    self.defs.iter().find_map(|(def_id, def)| match &def.kind {
-      DefinitionKind::Namespace(namespace_def) if namespace_def.namespace_id == namespace_id => Some(def_id),
-      _ => None,
-    })
+    self
+      .definition_index()
+      .namespace_definitions
+      .get(&namespace_id)
+      .copied()
   }
 
   fn is_force_emit_seed(
@@ -3514,16 +3594,7 @@ impl<'a> CEmitter<'a> {
     }
 
     if has_drop && instance_methods.is_empty() {
-      for (method_def_id, method_def) in self.defs.iter() {
-        if let DefinitionKind::Method(md) = &method_def.kind
-          && md.owner_type == def_id
-        {
-          let method_name = self.symbols.get(&method_def.name);
-          if method_name == "drop" || method_name.ends_with("__drop") {
-            return Some(method_def_id);
-          }
-        }
-      }
+      return self.definition_index().drop_methods_by_owner_type.get(&def_id).copied();
     }
 
     None
@@ -4100,38 +4171,16 @@ impl<'a> CEmitter<'a> {
       _ => None,
     };
 
-    let mut count = 0;
-    for (_, def) in self.defs.iter() {
-      if def.name == target_name {
-        // Check if it's the right kind (Function/Method)
-        if !matches!(def.kind, DefinitionKind::Function(_) | DefinitionKind::Method(_)) {
-          continue;
-        }
+    let index = self.definition_index();
 
-        let def_owner_type = match &def.kind {
-          DefinitionKind::Method(md) => Some(md.owner_type),
-          _ => None,
-        };
+    // A method only collides with methods of the same owner type; a free function
+    // only collides with free functions in the same namespace.
+    let count = match target_owner_type {
+      Some(owner_type) => index.method_overloads.get(&(target_name, owner_type)).copied(),
+      None => index.function_overloads.get(&(target_name, target_ns)).copied(),
+    };
 
-        if target_owner_type.is_some() {
-          // Target is a method: check if other is method of same type
-          if target_owner_type == def_owner_type {
-            count += 1;
-          }
-        } else {
-          // Target is a function: check if other is function in same namespace
-          // AND ensure other is NOT a method (def_owner_type is None)
-          if def.owner_namespace == target_ns && def_owner_type.is_none() {
-            count += 1;
-          }
-        }
-
-        if count > 1 {
-          return true;
-        }
-      }
-    }
-    false
+    count.unwrap_or(0) > 1
   }
 
   fn original_generic_method_has_overloads(
@@ -4154,16 +4203,16 @@ impl<'a> CEmitter<'a> {
       return false;
     };
 
-    let Some(original_owner_def_id) = self.defs.iter().find_map(|(candidate_id, candidate)| {
-      if candidate.owner_module == target_owner_def.owner_module
-        && matches!(candidate.kind, DefinitionKind::Record(_) | DefinitionKind::Enum(_))
-        && self.symbols.get(&candidate.name) == original_owner_name
-      {
-        Some(candidate_id)
-      } else {
-        None
-      }
-    }) else {
+    let index = self.definition_index();
+
+    let Some(&original_owner_symbol) = self.symbols.map.get(original_owner_name) else {
+      return false;
+    };
+
+    let Some(&original_owner_def_id) = index
+      .nominal_types_by_module_and_name
+      .get(&(target_owner_def.owner_module, original_owner_symbol))
+    else {
       return false;
     };
 
@@ -4171,18 +4220,10 @@ impl<'a> CEmitter<'a> {
       return false;
     };
 
-    let overload_count = self
-      .defs
-      .iter()
-      .filter(|(_, candidate)| {
-        candidate.name == method_symbol
-          && matches!(candidate.kind, DefinitionKind::Method(_))
-          && matches!(&candidate.kind, DefinitionKind::Method(method) if method.owner_type == original_owner_def_id)
-      })
-      .take(2)
-      .count();
-
-    overload_count > 1
+    index
+      .method_overloads
+      .get(&(method_symbol, original_owner_def_id))
+      .is_some_and(|count| *count > 1)
   }
 
   fn format_param_types_for_mangling(
