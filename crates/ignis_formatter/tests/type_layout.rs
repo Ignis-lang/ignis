@@ -303,6 +303,29 @@ fn formats_record_with_static_fields_and_methods() {
 }
 
 #[test]
+fn formats_record_static_and_static_mut_fields() {
+  let source = "record  Counter  {  static mut  TOTAL: i32 = 0;  static  SEED: i32 = 7;  }\n";
+
+  let formatted =
+    format_text(source, &FormatOptions::default()).expect("record with static mut field should format successfully");
+
+  assert_eq!(
+    formatted,
+    "record Counter {\n  static mut TOTAL: i32 = 0;\n  static SEED: i32 = 7;\n}\n"
+  );
+}
+
+#[test]
+fn formats_enum_static_mut_field() {
+  let source = "enum  Slot  {  A,  static mut  PICKED: i32 = 3;  }\n";
+
+  let formatted =
+    format_text(source, &FormatOptions::default()).expect("enum with static mut field should format successfully");
+
+  assert_eq!(formatted, "enum Slot {\n  A,\n  static mut PICKED: i32 = 3;\n}\n");
+}
+
+#[test]
 fn formats_enum_with_fields_and_methods() {
   let source =
     "enum  Color  {  RED,  GREEN,  BLUE,  public static fromName(name: str): Color { return Color::RED; } }\n";

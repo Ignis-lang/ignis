@@ -1425,6 +1425,9 @@ impl<'a> AstChunkFormatter<'a> {
     self.push_visibility_modifier(&mut formatted, field.metadata);
     if field.is_static() {
       formatted.push_str("static ");
+      if field.metadata.contains(ASTMetadata::MUTABLE) {
+        formatted.push_str("mut ");
+      }
     }
     formatted.push_str(self.slice_span(&field.name_span).trim());
     formatted.push_str(": ");
@@ -1445,6 +1448,12 @@ impl<'a> AstChunkFormatter<'a> {
     let mut formatted = self.format_attributes(&[], indent_level);
     formatted.push_str(&self.indent(indent_level));
     self.push_visibility_modifier(&mut formatted, field.metadata);
+    if field.metadata.contains(ASTMetadata::STATIC) {
+      formatted.push_str("static ");
+      if field.metadata.contains(ASTMetadata::MUTABLE) {
+        formatted.push_str("mut ");
+      }
+    }
     formatted.push_str(self.slice_span(&field.name_span).trim());
     formatted.push_str(": ");
     formatted.push_str(&self.format_type(&field.type_));
