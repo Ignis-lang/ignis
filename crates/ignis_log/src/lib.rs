@@ -4,12 +4,33 @@
 //! - Phase logging (`phase_log!`, `phase_ok!`, `phase_warn!`)
 //! - Debug traces by category (`trace_dbg!`)
 //! - Verbose logging (`log_dbg!`, `log_trc!`)
+//! - Opt-in phase timings (`phase_time!`)
 //!
 //! All output goes to stderr to avoid mixing with dumps/stdout.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use ignis_config::{DebugTrace, IgnisConfig, OutputLevel};
+
+/// Environment variable that turns on the per-phase wall-clock breakdown.
+const TIMINGS_ENV: &str = "IGNIS_TIMINGS";
+
+static SHOW_TIMINGS: OnceLock<bool> = OnceLock::new();
+
+/// Returns true when the per-phase timing breakdown is enabled.
+///
+/// Timings are opt-in through `IGNIS_TIMINGS` so that normal command output
+/// stays byte-identical for snapshot tests and for the selfhost report parity
+/// gate.
+pub fn show_timings() -> bool {
+  *SHOW_TIMINGS.get_or_init(|| {
+    std::env::var(TIMINGS_ENV).is_ok_and(|value| {
+      let value = value.trim();
+      !value.is_empty() && value != "0"
+    })
+  })
+}
 
 pub fn effective_verbose(config: &IgnisConfig) -> u8 {
   if config.quiet {
@@ -45,6 +66,31 @@ pub fn format_duration(d: Duration) -> String {
   } else {
     format!("{:.1}s", d.as_secs_f64())
   }
+}
+
+/// Print one phase of the wall-clock breakdown.
+///
+/// Nothing is printed unless `IGNIS_TIMINGS` is set, which keeps the default
+/// output of every command unchanged.
+///
+/// # Examples
+///
+/// ```ignore
+/// phase_time!("Analyzing", started.elapsed());
+/// ```
+#[macro_export]
+macro_rules! phase_time {
+  ($label:expr, $elapsed:expr) => {{
+    if $crate::show_timings() {
+      use colored::Colorize;
+      eprintln!(
+        "  {} {:<24} {}",
+        "timing".bright_magenta().bold(),
+        $label,
+        $crate::format_duration($elapsed)
+      );
+    }
+  }};
 }
 
 pub fn log_info(config: &IgnisConfig) -> bool {

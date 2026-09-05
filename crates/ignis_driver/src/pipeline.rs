@@ -993,6 +993,8 @@ pub fn compile_project(
 
           // Phase 3: Generate C files and compile to objects (with per-module caching)
           let mut object_files: Vec<PathBuf> = Vec::new();
+          let mut pending_units: Vec<CompileUnit> = Vec::new();
+          let mut pending_stamps: Vec<(PathBuf, ModuleStamp)> = Vec::new();
           let mut any_module_recompiled = false;
           let mut link_plan_with_user_includes = link_plan.clone();
           link_plan_with_user_includes
@@ -1095,20 +1097,44 @@ pub fn compile_project(
               return Err(());
             }
 
-            // Compile to object
-            let suppress_link_logs = !ignis_log::show_verbose(&config);
-            if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan_with_user_includes, suppress_link_logs) {
-              cmd_fail!(&config, "Build failed", start.elapsed());
-              eprintln!("{} {}", "Error:".red().bold(), e);
-              return Err(());
+            // Queue the object; the whole set is compiled in parallel below.
+            // The stamp is written only after that compilation succeeds.
+            pending_units.push(CompileUnit {
+              c_path,
+              obj_path: obj_path.clone(),
+            });
+            pending_stamps.push((
+              stamp_path,
+              ModuleStamp::new(fingerprint.clone(), source_path.clone(), self_hash, current_stamp_sources),
+            ));
+          }
+
+          let suppress_link_logs = !ignis_log::show_verbose(&config);
+          let compile_started = Instant::now();
+
+          let compile_results =
+            compile_units_parallel(&pending_units, &link_plan_with_user_includes, suppress_link_logs);
+
+          ignis_log::phase_time!("user gcc -c", compile_started.elapsed());
+
+          // Stamp only the modules whose object really compiled. Skipping this
+          // on any failure would make the next build recompile modules that
+          // were already up to date.
+          for ((stamp_path, stamp), result) in pending_stamps.iter().zip(compile_results.iter()) {
+            if result.is_err() {
+              continue;
             }
 
-            // Write per-module stamp after successful compilation
-            let stamp = ModuleStamp::new(fingerprint.clone(), source_path.clone(), self_hash, current_stamp_sources);
-            if let Err(e) = write_module_stamp(&stamp_path, &stamp) {
+            if let Err(e) = write_module_stamp(stamp_path, stamp) {
               // Non-fatal: warn but don't fail the build
               eprintln!("{} Failed to write module stamp: {}", "Warning:".yellow().bold(), e);
             }
+          }
+
+          if let Some(e) = first_compile_error(compile_results) {
+            cmd_fail!(&config, "Build failed", start.elapsed());
+            eprintln!("{} {}", "Error:".red().bold(), e);
+            return Err(());
           }
 
           // Phase 4: Create user archive and link (only if any module changed or binary doesn't exist)
@@ -1827,39 +1853,110 @@ fn test_harness_paths(project: &crate::project::Project) -> (PathBuf, PathBuf) {
   (harness_c_path, bin_path)
 }
 
+fn snapshot_dir_for_test(test: &crate::backend::TestCase) -> Result<PathBuf, String> {
+  test
+    .source_path
+    .parent()
+    .map(|parent| parent.join("__snapshots__"))
+    .ok_or_else(|| format!("Test '{}' has no parent module directory", test.fq_name))
+}
+
+/// One translation unit waiting for the C compiler.
+struct CompileUnit {
+  c_path: PathBuf,
+  obj_path: PathBuf,
+}
+
+/// Compiles every pending translation unit through the bounded worker pool.
+///
+/// Each `gcc -c` writes its own object file, so the only ordering requirement
+/// is that all of them exist before archiving or linking. Results come back in
+/// unit order, so a caller can tell exactly which units produced an object and
+/// the reported error does not depend on which worker failed first.
+fn compile_units_parallel(
+  units: &[CompileUnit],
+  link_plan: &LinkPlan,
+  quiet: bool,
+) -> Vec<Result<(), String>> {
+  let jobs = crate::jobs::job_limit();
+
+  crate::jobs::map_parallel(units, jobs, |unit| {
+    compile_to_object(&unit.c_path, &unit.obj_path, link_plan, quiet)
+  })
+}
+
+/// Returns the first compilation failure in unit order.
+fn first_compile_error(results: Vec<Result<(), String>>) -> Option<String> {
+  results.into_iter().find_map(|result| result.err())
+}
+
+fn run_single_test(
+  binary_path: &Path,
+  test: &crate::backend::TestCase,
+  update_snapshots: bool,
+) -> Result<TestExecutionResult, String> {
+  let snapshot_dir = snapshot_dir_for_test(test)?;
+
+  let output = Command::new(binary_path)
+    .arg("--ignis-test")
+    .arg(&test.fq_name)
+    .env("IGNIS_TEST_NAME", &test.fq_name)
+    .env("IGNIS_TEST_SNAPSHOT_DIR", &snapshot_dir)
+    .env("IGNIS_TEST_UPDATE_SNAPSHOTS", if update_snapshots { "1" } else { "0" })
+    .output()
+    .map_err(|error| format!("Failed to run test '{}': {}", test.fq_name, error))?;
+
+  Ok(TestExecutionResult {
+    fq_name: test.fq_name.clone(),
+    success: output.status.success(),
+    exit_code: output.status.code().unwrap_or(1),
+    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+  })
+}
+
+/// Creates every snapshot directory the selected tests may write into.
+///
+/// `std::test` creates the directory lazily with a check-then-act `mkdir`, so
+/// two tests sharing a module directory could otherwise race and fail the
+/// loser. Creating the directories up front removes the race without changing
+/// what the tests themselves do.
+fn prepare_snapshot_directories(plan: &crate::backend::TestHarnessPlan) -> Result<(), String> {
+  let mut prepared = HashSet::new();
+
+  for test in &plan.tests {
+    let snapshot_dir = snapshot_dir_for_test(test)?;
+
+    if !prepared.insert(snapshot_dir.clone()) {
+      continue;
+    }
+
+    std::fs::create_dir_all(&snapshot_dir)
+      .map_err(|error| format!("Failed to create snapshot directory '{}': {}", snapshot_dir.display(), error))?;
+  }
+
+  Ok(())
+}
+
+/// Runs every selected test in its own process through a bounded worker pool.
+///
+/// Each test writes only to snapshot files named after its own fully qualified
+/// name, so concurrent runs never contend for the same file. Results come back
+/// in plan order, which keeps the printed report identical to a serial run.
 fn execute_test_harness_binary(
   binary_path: &Path,
   plan: &crate::backend::TestHarnessPlan,
   update_snapshots: bool,
 ) -> Result<Vec<TestExecutionResult>, String> {
-  let mut results = Vec::with_capacity(plan.tests.len());
-
-  for test in &plan.tests {
-    let snapshot_dir = test
-      .source_path
-      .parent()
-      .map(|parent| parent.join("__snapshots__"))
-      .ok_or_else(|| format!("Test '{}' has no parent module directory", test.fq_name))?;
-
-    let output = Command::new(binary_path)
-      .arg("--ignis-test")
-      .arg(&test.fq_name)
-      .env("IGNIS_TEST_NAME", &test.fq_name)
-      .env("IGNIS_TEST_SNAPSHOT_DIR", &snapshot_dir)
-      .env("IGNIS_TEST_UPDATE_SNAPSHOTS", if update_snapshots { "1" } else { "0" })
-      .output()
-      .map_err(|error| format!("Failed to run test '{}': {}", test.fq_name, error))?;
-
-    results.push(TestExecutionResult {
-      fq_name: test.fq_name.clone(),
-      success: output.status.success(),
-      exit_code: output.status.code().unwrap_or(1),
-      stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-      stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    });
+  if update_snapshots {
+    prepare_snapshot_directories(plan)?;
   }
 
-  Ok(results)
+  let jobs = crate::jobs::job_limit();
+
+  crate::jobs::map_parallel(&plan.tests, jobs, |test| run_single_test(binary_path, test, update_snapshots))
+    .into_iter()
+    .collect()
 }
 
 #[cfg(test)]
@@ -1970,12 +2067,15 @@ pub fn run_project_tests(
 
   section!(&config, "Analyzing");
 
+  let analysis_started = Instant::now();
   let (output, has_errors) = ctx.compile_collect_all(root_id, &config)?;
 
   if has_errors {
     cmd_fail!(&config, "Test setup failed", start.elapsed());
     return Err(());
   }
+
+  ignis_log::phase_time!("analysis", analysis_started.elapsed());
 
   let module_paths = build_module_paths_from_graph(&ctx.module_graph);
   let discovered_tests = {
@@ -1997,6 +2097,7 @@ pub fn run_project_tests(
 
   section!(&config, "Codegen & linking");
 
+  let codegen_started = Instant::now();
   let used_modules = ctx.module_graph.all_modules_topological();
   let mut test_module_ids = HashSet::new();
   for test in &plan.tests {
@@ -2195,6 +2296,7 @@ pub fn run_project_tests(
     .push(layout.user_include_dir());
 
   let mut user_object_paths = Vec::with_capacity(user_modules.len());
+  let mut pending_units: Vec<CompileUnit> = Vec::with_capacity(user_modules.len());
 
   for module_id in &user_modules {
     let module = ctx.module_graph.modules.get(module_id);
@@ -2267,19 +2369,27 @@ pub fn run_project_tests(
     }
 
     let module_object_path = layout.user_module_obj(&source_path);
-    if let Err(error) = compile_to_object(
-      &module_c_path,
-      &module_object_path,
-      &link_plan_with_user_includes,
-      !ignis_log::show_verbose(&config),
-    ) {
-      cmd_fail!(&config, "Test setup failed", start.elapsed());
-      eprintln!("{} {}", "Error:".red().bold(), error);
-      return Err(());
-    }
 
+    pending_units.push(CompileUnit {
+      c_path: module_c_path,
+      obj_path: module_object_path.clone(),
+    });
     user_object_paths.push(module_object_path);
   }
+
+  let module_compile_started = Instant::now();
+
+  if let Some(error) = first_compile_error(compile_units_parallel(
+    &pending_units,
+    &link_plan_with_user_includes,
+    !ignis_log::show_verbose(&config),
+  )) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  ignis_log::phase_time!("test module gcc -c", module_compile_started.elapsed());
 
   let harness_c_code = match emit_text(
     &selected_backend,
@@ -2345,6 +2455,7 @@ pub fn run_project_tests(
 
   let harness_object_path = harness_c_path.with_extension("o");
   let suppress_link_logs = !ignis_log::show_verbose(&config);
+  let harness_started = Instant::now();
 
   if let Err(error) = compile_to_object(&harness_c_path, &harness_object_path, &link_plan, suppress_link_logs) {
     cmd_fail!(&config, "Test setup failed", start.elapsed());
@@ -2352,8 +2463,12 @@ pub fn run_project_tests(
     return Err(());
   }
 
+  ignis_log::phase_time!("harness gcc -c", harness_started.elapsed());
+
   let mut executable_objects = user_object_paths;
   executable_objects.push(harness_object_path);
+
+  let link_started = Instant::now();
 
   if let Err(error) = link_executable_multi(&executable_objects, &bin_path, &link_plan, suppress_link_logs) {
     cmd_fail!(&config, "Test setup failed", start.elapsed());
@@ -2361,8 +2476,12 @@ pub fn run_project_tests(
     return Err(());
   }
 
+  ignis_log::phase_time!("link", link_started.elapsed());
+  ignis_log::phase_time!("codegen & linking", codegen_started.elapsed());
+
   section!(&config, "Running");
 
+  let run_started = Instant::now();
   let results = match execute_test_harness_binary(&bin_path, &plan, update_snapshots) {
     Ok(results) => results,
     Err(error) => {
@@ -2371,6 +2490,8 @@ pub fn run_project_tests(
       return Err(());
     },
   };
+
+  ignis_log::phase_time!("running tests", run_started.elapsed());
 
   let passed = results.iter().filter(|result| result.success).count();
   let total = results.len();
@@ -2642,6 +2763,7 @@ pub fn run_single_file_tests(
     .push(input.layout.user_include_dir());
 
   let mut user_object_paths = Vec::with_capacity(user_modules.len());
+  let mut pending_units: Vec<CompileUnit> = Vec::with_capacity(user_modules.len());
 
   for module_id in &user_modules {
     let module = ctx.module_graph.modules.get(module_id);
@@ -2714,19 +2836,27 @@ pub fn run_single_file_tests(
     }
 
     let module_object_path = input.layout.user_module_obj(&source_path);
-    if let Err(error) = compile_to_object(
-      &module_c_path,
-      &module_object_path,
-      &link_plan_with_user_includes,
-      !ignis_log::show_verbose(&config),
-    ) {
-      cmd_fail!(&config, "Test setup failed", start.elapsed());
-      eprintln!("{} {}", "Error:".red().bold(), error);
-      return Err(());
-    }
 
+    pending_units.push(CompileUnit {
+      c_path: module_c_path,
+      obj_path: module_object_path.clone(),
+    });
     user_object_paths.push(module_object_path);
   }
+
+  let module_compile_started = Instant::now();
+
+  if let Some(error) = first_compile_error(compile_units_parallel(
+    &pending_units,
+    &link_plan_with_user_includes,
+    !ignis_log::show_verbose(&config),
+  )) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  ignis_log::phase_time!("test module gcc -c", module_compile_started.elapsed());
 
   let harness_c_code = match emit_text(
     &selected_backend,
@@ -3065,6 +3195,7 @@ pub fn run_std_tests(
   };
 
   let mut user_object_paths = Vec::new();
+  let mut pending_units: Vec<CompileUnit> = Vec::new();
 
   for source_path in &test_sources {
     if !plan.tests.iter().any(|test| &test.source_path == source_path) {
@@ -3189,19 +3320,27 @@ pub fn run_std_tests(
     }
 
     let module_object_path = input.layout.user_module_obj(source_path);
-    if let Err(error) = compile_to_object(
-      &module_c_path,
-      &module_object_path,
-      &link_plan_with_user_includes,
-      !ignis_log::show_verbose(&config),
-    ) {
-      cmd_fail!(&config, "Test setup failed", start.elapsed());
-      eprintln!("{} {}", "Error:".red().bold(), error);
-      return Err(());
-    }
 
+    pending_units.push(CompileUnit {
+      c_path: module_c_path,
+      obj_path: module_object_path.clone(),
+    });
     user_object_paths.push(module_object_path);
   }
+
+  let module_compile_started = Instant::now();
+
+  if let Some(error) = first_compile_error(compile_units_parallel(
+    &pending_units,
+    &link_plan_with_user_includes,
+    !ignis_log::show_verbose(&config),
+  )) {
+    cmd_fail!(&config, "Test setup failed", start.elapsed());
+    eprintln!("{} {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  ignis_log::phase_time!("test module gcc -c", module_compile_started.elapsed());
 
   let Some(harness_root_id) = plan.tests.first().and_then(|test| {
     ctx
@@ -3597,6 +3736,7 @@ pub fn build_std(
   // Phase 3: Generate C files and compile objects
   // We need to redo the processing because we can't easily store all the intermediate state
   let mut object_files: Vec<std::path::PathBuf> = Vec::new();
+  let mut pending_units: Vec<CompileUnit> = Vec::new();
   processed_modules.clear();
 
   for module_id in &all_module_ids {
@@ -3707,19 +3847,27 @@ pub fn build_std(
       return Err(());
     }
 
-    // Compile to object file
+    // Queue the object file; the whole set is compiled in parallel below.
     let obj_path = layout.std_module_obj(&module_name);
-    trace_dbg!(&config, DebugTrace::Link, "std compiling object for module {}", module_name);
+    trace_dbg!(&config, DebugTrace::Link, "std scheduling object for module {}", module_name);
 
-    let suppress_link_logs = !ignis_log::show_verbose(&config);
-    if let Err(e) = compile_to_object(&c_path, &obj_path, &link_plan, suppress_link_logs) {
-      cmd_fail!(&config, "Build failed", start.elapsed());
-      eprintln!("{} {}", "Error:".red().bold(), e);
-      return Err(());
-    }
-
+    pending_units.push(CompileUnit {
+      c_path,
+      obj_path: obj_path.clone(),
+    });
     object_files.push(obj_path);
   }
+
+  let suppress_link_logs = !ignis_log::show_verbose(&config);
+  let compile_started = Instant::now();
+
+  if let Some(e) = first_compile_error(compile_units_parallel(&pending_units, &link_plan, suppress_link_logs)) {
+    cmd_fail!(&config, "Build failed", start.elapsed());
+    eprintln!("{} {}", "Error:".red().bold(), e);
+    return Err(());
+  }
+
+  ignis_log::phase_time!("std gcc -c", compile_started.elapsed());
 
   if object_files.is_empty() {
     cmd_fail!(&config, "Build failed", start.elapsed());

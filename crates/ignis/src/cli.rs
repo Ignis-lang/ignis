@@ -438,6 +438,13 @@ pub struct Cli {
   #[arg(long, global = true)]
   pub dump_hir: Option<String>,
 
+  /// Number of parallel workers for C compilation and test execution
+  ///
+  /// Defaults to the host's available parallelism. `IGNIS_TEST_JOBS` is used
+  /// when this option is absent.
+  #[arg(long, short = 'j', global = true, value_parser = clap::value_parser!(u32).range(1..))]
+  pub jobs: Option<u32>,
+
   /// Enable internal debug mode
   #[arg(long, default_value = "false", global = true)]
   pub debug: bool,

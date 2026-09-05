@@ -214,3 +214,87 @@ function commandBuilderConvenienceFunctionUsesOwnedState(): void {
 
   Test::assert(!Env::has("IGNIS_PROCESS_CHAIN_CHILD"));
 }
+
+@test
+function spawnCapturingReportsTheSameOutputAsABlockingRun(): void {
+  let command: Process::Command = shellCommand("printf out; printf err 1>&2; exit 3");
+
+  match (command.spawnCapturing()) {
+    Result::OK(child) -> {
+      let mut running: Process::Child = child;
+
+      match (running.wait()) {
+        Result::OK(output) -> {
+          assertOutputStatus(&output, 3, false);
+          assertOutputStdout(&output, "out");
+          assertOutputStderr(&output, "err");
+        },
+        Result::ERROR(_) -> Test::fail(),
+      };
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function severalSpawnedChildrenKeepTheirOwnCapturedOutput(): void {
+  let first: Process::Command = shellCommand("printf first");
+  let second: Process::Command = shellCommand("printf second");
+  let third: Process::Command = shellCommand("printf third");
+
+  // All three run at once, so a shared capture file or a shared wait would
+  // scramble the results instead of keeping them per child.
+  let Result::OK(firstChild) = first.spawnCapturing() else {
+    Test::fail();
+    return;
+  };
+  let Result::OK(secondChild) = second.spawnCapturing() else {
+    Test::fail();
+    return;
+  };
+  let Result::OK(thirdChild) = third.spawnCapturing() else {
+    Test::fail();
+    return;
+  };
+
+  let mut firstRunning: Process::Child = firstChild;
+  let mut secondRunning: Process::Child = secondChild;
+  let mut thirdRunning: Process::Child = thirdChild;
+
+  match (firstRunning.wait()) {
+    Result::OK(output) -> assertOutputStdout(&output, "first"),
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  match (secondRunning.wait()) {
+    Result::OK(output) -> assertOutputStdout(&output, "second"),
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  match (thirdRunning.wait()) {
+    Result::OK(output) -> assertOutputStdout(&output, "third"),
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+@test
+function spawnCapturingReportsAMissingProgram(): void {
+  let command: Process::Command = Process::command("/nonexistent/ignis-process-binary");
+
+  match (command.spawnCapturing()) {
+    Result::OK(child) -> {
+      let mut running: Process::Child = child;
+
+      match (running.wait()) {
+        Result::OK(_) -> Test::fail(),
+        Result::ERROR(error) -> assertIsNotFoundIoError(error),
+      };
+    },
+    Result::ERROR(error) -> assertIsNotFoundIoError(error),
+  };
+}
+
+@test
+function availableParallelismIsAtLeastOne(): void {
+  Test::assert(Process::availableParallelism() >= 1);
+}

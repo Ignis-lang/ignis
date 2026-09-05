@@ -2,6 +2,7 @@ import Ast from "@compiler::ast";
 import Analyzer from "@compiler::analyzer";
 
 import Env from "std::env";
+import Fs from "std::fs";
 import Io from "std::io";
 import Path from "std::path";
 import Process from "std::process";
@@ -392,14 +393,115 @@ export namespace TestRunner {
 
   /// Run the harness binary once per selected test, with the snapshot context
   /// the `std::test` helpers read out of the environment.
+  ///
+  /// Up to `jobs` harness processes run at once. Children are started and
+  /// awaited in plan order, so the returned outcomes match the plan regardless
+  /// of which child finishes first and the report stays byte-identical to a
+  /// serial run.
   function execute(
     binaryPath: &Path::PathBuf,
     cases: &Vector<TestCase>,
     updateSnapshots: boolean,
+    jobs: u64,
   ): Vector<TestOutcome> {
     let mut outcomes: Vector<TestOutcome> = Vector::new<TestOutcome>();
     let program: Path::PathBuf = TestRunner::resolveAgainstCurrentDir(binaryPath);
     let updateFlag: str = updateSnapshots ? "1" : "0";
+    let window: u64 = jobs == 0 ? 1 : jobs;
+
+    if (updateSnapshots) {
+      TestRunner::prepareSnapshotDirectories(cases);
+    }
+
+    // Slot `i` holds the child for case `i`. A slot with `pid == -1` records a
+    // spawn that never happened, so slot indices stay aligned with plan order.
+    let mut children: Vector<Process::Child> = Vector::new<Process::Child>();
+    let mut spawnCursor: u64 = 0;
+    let mut waitCursor: u64 = 0;
+
+    while (waitCursor < cases.length()) {
+      while (spawnCursor < cases.length() && (spawnCursor - waitCursor) < window) {
+        let Option::SOME(testCase) = cases.get(spawnCursor) else {
+          break;
+        };
+
+        let mut command: Process::Command = Process::Command::new(program.asStr());
+        command.arg("--ignis-test");
+        command.arg(testCase.fqName.toStr());
+        command.env("IGNIS_TEST_NAME", testCase.fqName.toStr());
+        command.env("IGNIS_TEST_SNAPSHOT_DIR", testCase.snapshotDir.toStr());
+        command.env("IGNIS_TEST_UPDATE_SNAPSHOTS", updateFlag);
+
+        match (command.spawnCapturing()) {
+          Result::OK(child) -> children.push(child),
+          Result::ERROR(_) -> children.push(Process::Child {
+            pid: -1,
+            errorReadFd: -1,
+            stdoutFd: -1,
+            stderrFd: -1,
+          }),
+        };
+
+        spawnCursor += 1;
+      }
+
+      let Option::SOME(testCase) = cases.get(waitCursor) else {
+        break;
+      };
+
+      let mut failed: boolean = true;
+
+      if (waitCursor < children.length()) {
+        let mut child: &mut Process::Child = match (children.getMut(waitCursor)) {
+          Option::SOME(value) -> value,
+          Option::NONE -> @panic("unreachable: TestRunner::execute lost a child slot"),
+        };
+
+        if (child.pid != -1) {
+          match (child.wait()) {
+            Result::OK(output) -> {
+              let status: Process::ExitStatus = output.status();
+
+              outcomes.push(TestOutcome {
+                fqName: testCase.fqName.clone(),
+                success: status.success,
+                exitCode: status.code,
+                stdout: output.stdout(),
+                stderr: output.stderr(),
+              });
+
+              failed = false;
+            },
+            Result::ERROR(_) -> {},
+          };
+        }
+      }
+
+      if (failed) {
+        outcomes.push(TestOutcome {
+          fqName: testCase.fqName.clone(),
+          success: false,
+          exitCode: 1,
+          stdout: String::new(),
+          stderr: `failed to run test '${testCase.fqName.toStr()}'`,
+        });
+      }
+
+      waitCursor += 1;
+    }
+
+    return outcomes;
+  }
+
+  /// Create every snapshot directory the selected tests may write into.
+  ///
+  /// `std::test` creates the directory lazily with a check-then-act `mkdir`, so
+  /// two concurrent tests sharing a module directory would otherwise race and
+  /// fail the loser. Creating them up front removes the race without changing
+  /// what the tests themselves do. A failure here is left to the test that
+  /// actually needs the directory to report.
+  function prepareSnapshotDirectories(cases: &Vector<TestCase>): void {
+    let mut prepared: Vector<String> = Vector::new<String>();
     let mut index: u64 = 0;
 
     while (index < cases.length()) {
@@ -407,40 +509,68 @@ export namespace TestRunner {
         break;
       };
 
-      let mut command: Process::Command = Process::Command::new(program.asStr());
-      command.arg("--ignis-test");
-      command.arg(testCase.fqName.toStr());
-      command.env("IGNIS_TEST_NAME", testCase.fqName.toStr());
-      command.env("IGNIS_TEST_SNAPSHOT_DIR", testCase.snapshotDir.toStr());
-      command.env("IGNIS_TEST_UPDATE_SNAPSHOTS", updateFlag);
+      let mut seen: boolean = false;
+      let mut preparedIndex: u64 = 0;
 
-      match (command.output()) {
-        Result::OK(output) -> {
-          let status: Process::ExitStatus = output.status();
+      while (preparedIndex < prepared.length()) {
+        let Option::SOME(existing) = prepared.get(preparedIndex) else {
+          break;
+        };
 
-          outcomes.push(TestOutcome {
-            fqName: testCase.fqName.clone(),
-            success: status.success,
-            exitCode: status.code,
-            stdout: output.stdout(),
-            stderr: output.stderr(),
-          });
-        },
-        Result::ERROR(_) -> {
-          outcomes.push(TestOutcome {
-            fqName: testCase.fqName.clone(),
-            success: false,
-            exitCode: 1,
-            stdout: String::new(),
-            stderr: `failed to run test '${testCase.fqName.toStr()}'`,
-          });
-        },
-      };
+        if (existing.equals(&testCase.snapshotDir)) {
+          seen = true;
+          break;
+        }
+
+        preparedIndex += 1;
+      }
+
+      if (!seen) {
+        let _ = Fs::createDirAll(testCase.snapshotDir.toStr());
+        prepared.push(testCase.snapshotDir.clone());
+      }
 
       index += 1;
     }
+  }
 
-    return outcomes;
+  /// Number of harness processes and `gcc -c` invocations to keep in flight.
+  ///
+  /// `IGNIS_TEST_JOBS` wins when it parses to a positive decimal number.
+  /// Anything else falls back to the host processor count, which is the same
+  /// default the host compiler uses.
+  function jobLimit(): u64 {
+    let Option::SOME(raw) = Env::get("IGNIS_TEST_JOBS") else {
+      return Process::availableParallelism();
+    };
+
+    let trimmed: String = raw.trimAsciiWhitespace();
+
+    if (trimmed.length() == 0) {
+      return Process::availableParallelism();
+    }
+
+    let mut parsed: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < trimmed.length()) {
+      let Option::SOME(digit) = trimmed.byteAt(index) else {
+        return Process::availableParallelism();
+      };
+
+      if (digit < 48 || digit > 57) {
+        return Process::availableParallelism();
+      }
+
+      parsed = parsed * 10 + ((digit - 48) as u64);
+      index += 1;
+    }
+
+    if (parsed == 0) {
+      return Process::availableParallelism();
+    }
+
+    return parsed;
   }
 
   /// One failure stream, indented under its label and cut at
