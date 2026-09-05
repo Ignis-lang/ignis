@@ -772,6 +772,20 @@ function borrowckSchedulesSuppressesFieldOwnerDrop(): void {
   Test::assertEq<str>(rendered.toStr(), "scope-end: taken\nexit return: taken\n");
 }
 
+/// Scenario: the same move out of an owned field, but the arm only reads its
+/// binding instead of handing it on. Suppressing the owner's drop left nothing
+/// else to free the payload, so the binding owes the drop at the arm's end
+/// even though the scrutinee names a field.
+/// Spec: IGN-39 — `arm_bindings_own_payload` lifts the external-storage veto.
+@test
+function borrowckSchedulesArmBindingOwningMovedFieldPayload(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nrecord Holder {\n  public first: Maybe;\n  public second: Maybe;\n}\n\nfunction run(holder: Holder): u32 {\n  return match (holder.first) {\n    Maybe::SOME(payload) -> payload.id,\n    Maybe::NONE -> 0,\n  };\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "match-arm-end: payload\n");
+}
+
 /// Scenario: the same match, but the field is reached through a reference.
 /// Suppressing the owner's drop there would silently accept a move out of
 /// storage the function does not own, so the move is rejected instead: once
@@ -785,6 +799,19 @@ function borrowckReportsFieldOwnerMoveThroughReference(): void {
 
   Test::assertEq<u64>(borrowckCountCode(&diagnostics, DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW), 2);
   Test::assertEq<u64>(diagnostics.length(), 2);
+}
+
+/// Scenario: a borrowed base whose arm only reads its binding. No owner drop
+/// was suppressed, so the payload is still the referenced storage's and its
+/// schedule frees it; scheduling an arm-end drop here would free it twice.
+/// Spec: IGN-178 — the external-storage veto stands without a suppressed owner.
+@test
+function borrowckSchedulesNoArmEndDropForBorrowedFieldBase(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nrecord Holder {\n  public first: Maybe;\n}\n\nfunction run(holder: &Holder): u32 {\n  return match (holder.first) {\n    Maybe::SOME(payload) -> payload.id,\n    Maybe::NONE -> 0,\n  };\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "");
 }
 
 /// Scenario: the arms bind a `Copy` payload, so nothing leaves the field and

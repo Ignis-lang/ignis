@@ -1865,7 +1865,9 @@ export namespace Borrowck {
   /// Whether a match scrutinee names storage that belongs to something else: a
   /// field, an element, a dereference, a static. Its payload bindings borrow
   /// those bytes instead of owning them, so the base's own schedule frees them.
-  /// Mirrors `scrutinee_aliases_external_storage`.
+  /// This does not hold once the base's drop was suppressed for a payload that
+  /// left it, which `armBindingsOwnPayload` reports. Mirrors
+  /// `scrutinee_aliases_external_storage`.
   function aliasesExternalStorage(hir: &Hir::HirStore, scrutinee: Hir::HirId): boolean {
     let Option::SOME(node) = hir.get(scrutinee) else {
       return false;
@@ -2085,7 +2087,10 @@ export namespace Borrowck {
   /// distinct. Mirrors the `on_match_arm_end` block of `check_match`, including
   /// its three suppressions: a literal arm body (the `if let` desugaring, whose
   /// binding is still live after the arm), a scrutinee that aliases storage it
-  /// does not own, and bindings that borrow their payloads.
+  /// does not own, and bindings that borrow their payloads. The external
+  /// storage suppression lifts when `armBindingsOwnPayload` is set, because the
+  /// base's drop was suppressed precisely so the payload the bindings now own
+  /// is freed exactly once.
   function recordMatchArmDrops(
     state: &mut Borrowck::State,
     schedules: &mut Hir::DropSchedules,
@@ -2093,9 +2098,10 @@ export namespace Borrowck {
     bindings: &Vector<u32>,
     body: Hir::HirId,
     aliasesExternalStorage: boolean,
+    armBindingsOwnPayload: boolean,
     bindsBorrowedPayloads: boolean,
   ): void {
-    if (aliasesExternalStorage || bindsBorrowedPayloads) {
+    if ((aliasesExternalStorage && !armBindingsOwnPayload) || bindsBorrowedPayloads) {
       return;
     }
 
@@ -3195,6 +3201,13 @@ export namespace Borrowck {
     // and suppressing the owner's drop would accept it silently. Once the field
     // owner's drop is suppressed the rest of its fields leak, which the oracle
     // takes over freeing the moved payload twice.
+
+    // Set when the payload was moved out of a field of a value we own and the
+    // owner's drop was suppressed to keep that payload from being freed twice.
+    // Ownership of the payload then rests with the arm's pattern bindings and
+    // nowhere else.
+    let mut armBindingsOwnPayload: boolean = false;
+
     if (movesScrutineePayload) {
       if (scrutineeIsBorrowed) {
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, matchNode.scrutinee);
@@ -3203,6 +3216,7 @@ export namespace Borrowck {
       } else if (let Option::SOME(owner) = Borrowck::movedFieldOwner(defStore, typeStore, hir, matchNode.scrutinee)) {
         let mut suppressRef: &mut Borrowck::State = state;
         suppressRef.suppressDrop(owner.raw());
+        armBindingsOwnPayload = true;
       } else {
         // Neither a local nor a field of one we own, so the payload sits behind
         // a reference and cannot be moved out at all.
@@ -3288,6 +3302,7 @@ export namespace Borrowck {
         &bindings,
         arm.body,
         aliasesExternalStorage,
+        armBindingsOwnPayload,
         bindsBorrowedPayloads,
       );
 
