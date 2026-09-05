@@ -2,6 +2,7 @@ import String from "std::string";
 import Vector from "std::vector";
 
 import Ast from "@compiler::ast";
+import SourceSpan from "@compiler::diagnostics";
 
 function joinTypeSegments(segments: &Vector<String>): String {
   let mut result: String = String::new();
@@ -136,5 +137,58 @@ export namespace Format {
     }
 
     return result;
+  }
+
+  /// Shared by `layout_items.ign` (record/enum fields, parameters) and
+  /// `layout_statements.ign` (let-pattern targets); lives here, alongside
+  /// `formatType`, so both can depend on it without a circular import between
+  /// them.
+  function joinSegments(segments: &Vector<String>, separator: str): String {
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < segments.length()) {
+      let Option::SOME(segment) = segments.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        result.pushStr(separator);
+      }
+
+      result.push(segment);
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function patternSpanOf(node: &Ast::Pattern::Node): SourceSpan {
+    if (let Ast::Pattern::Node::Wildcard(wildcard) = node) {
+      return wildcard.span;
+    }
+
+    if (let Ast::Pattern::Node::Binding(binding) = node) {
+      return binding.span;
+    }
+
+    if (let Ast::Pattern::Node::Literal(literal) = node) {
+      return literal.span;
+    }
+
+    if (let Ast::Pattern::Node::Path(path) = node) {
+      return path.span;
+    }
+
+    if (let Ast::Pattern::Node::Tuple(tuple) = node) {
+      return tuple.span;
+    }
+
+    if (let Ast::Pattern::Node::Or(orPattern) = node) {
+      return orPattern.span;
+    }
+
+    return SourceSpan::new("", 0, 0);
   }
 }

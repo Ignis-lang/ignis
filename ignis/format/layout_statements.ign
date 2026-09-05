@@ -1,0 +1,467 @@
+import String from "std::string";
+import Vector from "std::vector";
+
+import Ast from "@compiler::ast";
+import SourceSpan from "@compiler::diagnostics";
+import TokenStream from "@compiler::syntax";
+
+import isCommentTrivia from "./comments";
+import FormatterConfig from "./config";
+import FormatError from "./error";
+import _ from "./layout_expressions";
+import _ from "./layout_types";
+
+function sliceStmtSpan(source: &String, span: &SourceSpan): String {
+  let mut start: u64 = span.start;
+  let mut end: u64 = span.end;
+
+  if (start > source.length()) {
+    start = source.length();
+  }
+
+  if (end > source.length()) {
+    end = source.length();
+  }
+
+  if (start > end) {
+    return String::new();
+  }
+
+  return source.substringBytes(start, end);
+}
+
+function isAsciiWhitespaceByteStmt(byte: u8): boolean {
+  return byte == ' ' as u8 || byte == '\t' as u8 || byte == '\n' as u8 || byte == '\r' as u8;
+}
+
+function trimStartAsciiStmt(text: &String): String {
+  let mut start: u64 = 0;
+
+  while (start < text.length()) {
+    let Option::SOME(byte) = text.byteAt(start) else {
+      break;
+    };
+
+    if (!isAsciiWhitespaceByteStmt(byte)) {
+      break;
+    }
+
+    start += 1;
+  }
+
+  return text.substringBytes(start, text.length());
+}
+
+export namespace Format {
+  /// True when any comment or doc-comment token in `tokens` falls (even
+  /// partially) inside `[span.start, span.end)`. `formatBlockStatement` never
+  /// runs on a block containing one: without a comment-aware statement
+  /// formatter (`model.ign`'s comment tracking is chunk-boundary-only, not
+  /// inside a single chunk's tokens), reformatting the block would silently
+  /// drop it. The caller falls back to a verbatim slice of the block instead.
+  function blockContainsComment(tokens: &TokenStream, span: &SourceSpan): boolean {
+    let mut index: u64 = 0;
+
+    while (index < tokens.length()) {
+      let Option::SOME(token) = tokens.get(index) else {
+        break;
+      };
+
+      if (isCommentTrivia(token) && token.spanStart() >= span.start && token.spanStart() < span.end) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function statementSpanOf(node: &Ast::Statement::Node): SourceSpan {
+    if (let Ast::Statement::Node::Variable(variableStatement) = node) {
+      return variableStatement.span;
+    }
+
+    if (let Ast::Statement::Node::Let(letStatement) = node) {
+      return letStatement.span;
+    }
+
+    if (let Ast::Statement::Node::LetElse(letElseStatement) = node) {
+      return letElseStatement.span;
+    }
+
+    if (let Ast::Statement::Node::Expression(expressionStatement) = node) {
+      return expressionStatement.span;
+    }
+
+    if (let Ast::Statement::Node::Block(block) = node) {
+      return block.span;
+    }
+
+    if (let Ast::Statement::Node::If(ifStatement) = node) {
+      return ifStatement.span;
+    }
+
+    if (let Ast::Statement::Node::While(whileStatement) = node) {
+      return whileStatement.span;
+    }
+
+    if (let Ast::Statement::Node::For(forStatement) = node) {
+      return forStatement.span;
+    }
+
+    if (let Ast::Statement::Node::ForOf(forOfStatement) = node) {
+      return forOfStatement.span;
+    }
+
+    if (let Ast::Statement::Node::Return(returnStatement) = node) {
+      return returnStatement.span;
+    }
+
+    if (let Ast::Statement::Node::Break(breakStatement) = node) {
+      return breakStatement.span;
+    }
+
+    if (let Ast::Statement::Node::Continue(continueStatement) = node) {
+      return continueStatement.span;
+    }
+
+    if (let Ast::Statement::Node::Defer(deferStatement) = node) {
+      return deferStatement.span;
+    }
+
+    if (let Ast::Statement::Node::Item(itemStatement) = node) {
+      return itemStatement.span;
+    }
+
+    if (let Ast::Statement::Node::Comment(commentStatement) = node) {
+      return commentStatement.span;
+    }
+
+    return SourceSpan::new("", 0, 0);
+  }
+
+  function formatPattern(module: &Ast::Module, patternId: Ast::PatternId, source: &String): String {
+    let Option::SOME(node) = module.patterns.get(patternId) else {
+      return String::new();
+    };
+
+    if (let Ast::Pattern::Node::Wildcard(_) = node) {
+      return String::create("_");
+    }
+
+    if (let Ast::Pattern::Node::Binding(binding) = node) {
+      return binding.name.clone();
+    }
+
+    if (let Ast::Pattern::Node::Tuple(tuple) = node) {
+      let mut result: String = String::create("(");
+      let mut index: u64 = 0;
+
+      while (index < tuple.elements.length()) {
+        let Option::SOME(elementId) = tuple.elements.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          result.pushStr(", ");
+        }
+
+        let elementText: String = Format::formatPattern(module, *elementId, source);
+        result.push(&elementText);
+        index += 1;
+      }
+
+      result.pushStr(")");
+      return result;
+    }
+
+    if (let Ast::Pattern::Node::Or(orPattern) = node) {
+      let mut result: String = String::new();
+      let mut index: u64 = 0;
+
+      while (index < orPattern.alternatives.length()) {
+        let Option::SOME(alternativeId) = orPattern.alternatives.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          result.pushStr(" | ");
+        }
+
+        let alternativeText: String = Format::formatPattern(module, *alternativeId, source);
+        result.push(&alternativeText);
+        index += 1;
+      }
+
+      return result;
+    }
+
+    if (let Ast::Pattern::Node::Path(path) = node) {
+      let mut result: String = Format::joinSegments(&path.segments, "::");
+
+      if (path.arguments.length() > 0) {
+        let mut argsText: String = String::create("(");
+        let mut index: u64 = 0;
+
+        while (index < path.arguments.length()) {
+          let Option::SOME(argumentId) = path.arguments.get(index) else {
+            index += 1;
+            continue;
+          };
+
+          if (index > 0) {
+            argsText.pushStr(", ");
+          }
+
+          let argumentText: String = Format::formatPattern(module, *argumentId, source);
+          argsText.push(&argumentText);
+          index += 1;
+        }
+
+        argsText.pushStr(")");
+        result.push(&argsText);
+      }
+
+      return result;
+    }
+
+    let span: SourceSpan = Format::patternSpanOf(node);
+    return sliceStmtSpan(source, &span).trimAsciiWhitespace();
+  }
+
+  function formatStatementNode(
+    module: &Ast::Module,
+    statementId: Ast::StatementId,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(node) = module.statements.get(statementId) else {
+      return Result::ERROR(FormatError::model("statement is missing from the module"));
+    };
+
+    return Format::formatStatement(module, node, source, config, indentLevel);
+  }
+
+  /// Renders an `Ast::Statement::Node`. `LetElse`/`For`/`ForOf`/`Item`
+  /// (a nested local declaration)/`Comment` do not have a dedicated case yet
+  /// and fall back to a verbatim slice of the statement's own span.
+  function formatStatement(
+    module: &Ast::Module,
+    node: &Ast::Statement::Node,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let indentText: String = config.indentString(indentLevel);
+
+    if (let Ast::Statement::Node::Expression(expressionStatement) = node) {
+      let expressionText: String = Format::formatExpressionNode(module, expressionStatement.expression, 0, source);
+      let mut result: String = indentText;
+      result.push(&expressionText);
+      result.pushStr(";");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Return(returnStatement) = node) {
+      let mut result: String = indentText;
+      result.pushStr("return");
+
+      if (let Option::SOME(value) = returnStatement.value) {
+        let valueText: String = Format::formatExpressionNode(module, value, 0, source);
+        result.pushStr(" ");
+        result.push(&valueText);
+      }
+
+      result.pushStr(";");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Break(breakStatement) = node) {
+      let mut result: String = indentText;
+      result.pushStr("break");
+
+      if (let Option::SOME(value) = breakStatement.value) {
+        let valueText: String = Format::formatExpressionNode(module, value, 0, source);
+        result.pushStr(" ");
+        result.push(&valueText);
+      }
+
+      result.pushStr(";");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Continue(_) = node) {
+      let mut result: String = indentText;
+      result.pushStr("continue;");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Defer(deferStatement) = node) {
+      let innerText: String = Format::formatStatementNode(module, deferStatement.statement, source, config, 0)!;
+      let trimmedInnerText: String = innerText.trimAsciiWhitespace();
+      let mut result: String = indentText;
+      result.pushStr("defer ");
+      result.push(&trimmedInnerText);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Let(letStatement) = node) {
+      let mut result: String = indentText;
+      result.pushStr("let ");
+
+      let patternText: String = Format::formatPattern(module, letStatement.pattern, source);
+      result.push(&patternText);
+
+      if (let Option::SOME(annotation) = letStatement.annotation) {
+        let annotationText: String = Format::formatType(module, annotation, source);
+        result.pushStr(": ");
+        result.push(&annotationText);
+      }
+
+      if (let Option::SOME(value) = letStatement.value) {
+        let valueText: String = Format::formatExpressionNode(module, value, 0, source);
+        result.pushStr(" = ");
+        result.push(&valueText);
+      }
+
+      result.pushStr(";");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Variable(variableStatement) = node) {
+      let mut result: String = indentText;
+      result.pushStr("let ");
+
+      if (variableStatement.mutable) {
+        result.pushStr("mut ");
+      }
+
+      let patternText: String = Format::formatPattern(module, variableStatement.pattern, source);
+      result.push(&patternText);
+
+      if (let Option::SOME(annotation) = variableStatement.annotation) {
+        let annotationText: String = Format::formatType(module, annotation, source);
+        result.pushStr(": ");
+        result.push(&annotationText);
+      }
+
+      if (let Option::SOME(value) = variableStatement.value) {
+        let valueText: String = Format::formatExpressionNode(module, value, 0, source);
+        result.pushStr(" = ");
+        result.push(&valueText);
+      }
+
+      result.pushStr(";");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::If(ifStatement) = node) {
+      let conditionText: String = Format::formatExpressionNode(module, ifStatement.condition, 0, source);
+      let thenText: String = Format::formatBlockLikeStatement(module, ifStatement.thenBranch, source, config, indentLevel)!;
+
+      let mut result: String = indentText;
+      result.pushStr("if (");
+      result.push(&conditionText);
+      result.pushStr(") ");
+      result.push(&thenText);
+
+      if (let Option::SOME(elseBranchId) = ifStatement.elseBranch) {
+        let Option::SOME(elseNode) = module.statements.get(elseBranchId) else {
+          return Result::OK(result);
+        };
+
+        result.pushStr(" else ");
+
+        if (let Ast::Statement::Node::If(_) = elseNode) {
+          let elseIfText: String = Format::formatStatement(module, elseNode, source, config, indentLevel)!;
+          let trimmedElseIfText: String = trimStartAsciiStmt(&elseIfText);
+          result.push(&trimmedElseIfText);
+        } else {
+          let elseText: String = Format::formatBlockLikeStatement(module, elseBranchId, source, config, indentLevel)!;
+          result.push(&elseText);
+        }
+      }
+
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::While(whileStatement) = node) {
+      let conditionText: String = Format::formatExpressionNode(module, whileStatement.condition, 0, source);
+      let bodyText: String = Format::formatBlockLikeStatement(module, whileStatement.body, source, config, indentLevel)!;
+
+      let mut result: String = indentText;
+      result.pushStr("while (");
+      result.push(&conditionText);
+      result.pushStr(") ");
+      result.push(&bodyText);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Block(block) = node) {
+      let blockText: String = Format::formatBlockStatement(module, &block, source, config, indentLevel)!;
+      let mut result: String = indentText;
+      result.push(&blockText);
+      return Result::OK(result);
+    }
+
+    let span: SourceSpan = Format::statementSpanOf(node);
+    return Result::OK(sliceStmtSpan(source, &span).trimAsciiWhitespace());
+  }
+
+  /// Renders a statement that is expected to be a `{ ... }` block (an `if`
+  /// then/else branch or a loop body). The grammar requires these to be
+  /// blocks, but this stays defensive and falls back to a plain statement
+  /// render if the parser ever hands back something else.
+  function formatBlockLikeStatement(
+    module: &Ast::Module,
+    statementId: Ast::StatementId,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(node) = module.statements.get(statementId) else {
+      return Result::ERROR(FormatError::model("block statement is missing from the module"));
+    };
+
+    if (let Ast::Statement::Node::Block(block) = node) {
+      return Format::formatBlockStatement(module, &block, source, config, indentLevel);
+    }
+
+    return Format::formatStatement(module, node, source, config, indentLevel);
+  }
+
+  function formatBlockStatement(
+    module: &Ast::Module,
+    block: &Ast::Statement::Block,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let mut result: String = String::create("{\n");
+    let mut index: u64 = 0;
+    let mut wroteStatement: boolean = false;
+
+    while (index < block.statements.length()) {
+      let Option::SOME(statementId) = block.statements.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let statementText: String = Format::formatStatementNode(module, *statementId, source, config, indentLevel + 1)!;
+      result.push(&statementText);
+      result.pushChar('\n');
+      wroteStatement = true;
+      index += 1;
+    }
+
+    let closingIndent: String = config.indentString(indentLevel);
+    result.push(&closingIndent);
+    result.pushStr("}");
+
+    return Result::OK(result);
+  }
+}

@@ -59,18 +59,24 @@ function layoutItemsWrapsAnImportListThatExceedsTheLineWidth(): void {
 }
 
 @test
-function layoutItemsFormatsAFunctionSignatureAndKeepsTheBodyVerbatim(): void {
-  // The body stays exactly as written (this batch's `renderBodyPlaceholder`
-  // seam): the host itself reformats the body onto multiple lines, which is
-  // `layout_statements.ign`'s job, not this file's.
+function layoutItemsFormatsAFunctionSignatureAndReformatsItsBody(): void {
+  // `renderBodyPlaceholder` is now only the fallback for a body containing a
+  // comment (see `Format::blockContainsComment`); a comment-free body goes
+  // through real statement layout, same as the host.
   let output: String = layoutOrFail("function   main ( ) : void {return;}");
-  Test::assertEq<str>(output.toStr(), "function main(): void {return;}");
+  Test::assertEq<str>(output.toStr(), "function main(): void {\n  return;\n}");
 }
 
 @test
 function layoutItemsFormatsATypedParameterList(): void {
   let output: String = layoutOrFail("function add(a:i32,b:i32):i32{return a+b;}");
-  Test::assertEq<str>(output.toStr(), "function add(a: i32, b: i32): i32 {return a+b;}");
+  Test::assertEq<str>(output.toStr(), "function add(a: i32, b: i32): i32 {\n  return a + b;\n}");
+}
+
+@test
+function layoutItemsKeepsAVerbatimBodyWhenItContainsAComment(): void {
+  let output: String = layoutOrFail("function main(): void {\n  // keep me\n  return;\n}");
+  Test::assertEq<str>(output.toStr(), "function main(): void {\n  // keep me\n  return;\n}");
 }
 
 @test

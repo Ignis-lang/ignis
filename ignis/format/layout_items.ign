@@ -11,6 +11,7 @@ import CommentBlock from "./comments";
 import FormatterConfig from "./config";
 import _ from "./doc";
 import FormatError from "./error";
+import _ from "./layout_statements";
 import _ from "./layout_types";
 import _ from "./model";
 
@@ -68,27 +69,6 @@ function sliceSpan(source: &String, span: &SourceSpan): String {
 }
 
 export namespace Format {
-  function joinSegments(segments: &Vector<String>, separator: str): String {
-    let mut result: String = String::new();
-    let mut index: u64 = 0;
-
-    while (index < segments.length()) {
-      let Option::SOME(segment) = segments.get(index) else {
-        index += 1;
-        continue;
-      };
-
-      if (index > 0) {
-        result.pushStr(separator);
-      }
-
-      result.push(segment);
-      index += 1;
-    }
-
-    return result;
-  }
-
   /// Formats one `@name(arg1, arg2)` attribute, each on its own line at
   /// `indentLevel`. Attribute arguments are already plain strings on the
   /// selfhost AST (`Ast::Attribute::arguments: Vector<String>`), unlike the
@@ -708,34 +688,6 @@ export namespace Format {
     return result;
   }
 
-  function patternSpanOf(node: &Ast::Pattern::Node): SourceSpan {
-    if (let Ast::Pattern::Node::Wildcard(wildcard) = node) {
-      return wildcard.span;
-    }
-
-    if (let Ast::Pattern::Node::Binding(binding) = node) {
-      return binding.span;
-    }
-
-    if (let Ast::Pattern::Node::Literal(literal) = node) {
-      return literal.span;
-    }
-
-    if (let Ast::Pattern::Node::Path(path) = node) {
-      return path.span;
-    }
-
-    if (let Ast::Pattern::Node::Tuple(tuple) = node) {
-      return tuple.span;
-    }
-
-    if (let Ast::Pattern::Node::Or(orPattern) = node) {
-      return orPattern.span;
-    }
-
-    return SourceSpan::new("", 0, 0);
-  }
-
   function formatParameterList(
     module: &Ast::Module,
     parameters: &Vector<Ast::PatternId>,
@@ -857,6 +809,7 @@ export namespace Format {
     module: &Ast::Module,
     functionItem: &Ast::Item::Function,
     source: &String,
+    tokens: &TokenStream,
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<String, FormatError> {
@@ -893,7 +846,25 @@ export namespace Format {
     let signatureText: String = Format::renderDoc(&signatureDoc, config, indentLevel);
     result.push(&signatureText);
     result.pushStr(" ");
-    let bodyText: String = Format::renderBodyPlaceholder(module, functionItem.body, source);
+
+    let mut bodyText: String = Format::renderBodyPlaceholder(module, functionItem.body, source);
+    let mut bodyIsSafeToReformat: boolean = false;
+
+    if (let Option::SOME(bodyNode) = module.statements.get(functionItem.body)) {
+      if (let Ast::Statement::Node::Block(block) = bodyNode) {
+        bodyIsSafeToReformat = !Format::blockContainsComment(tokens, &block.span);
+      }
+    }
+
+    // `layout_statements.ign` cannot yet preserve comments inside a block (see
+    // `Format::blockContainsComment`), so a body containing one keeps the
+    // verbatim placeholder rather than risk silently dropping it.
+    if (bodyIsSafeToReformat) {
+      if (let Result::OK(realBodyText) = Format::formatBlockLikeStatement(module, functionItem.body, source, config, indentLevel)) {
+        bodyText = realBodyText;
+      }
+    }
+
     result.push(&bodyText);
 
     return Result::OK(result);
@@ -903,6 +874,7 @@ export namespace Format {
     module: &Ast::Module,
     itemId: Ast::ItemId,
     source: &String,
+    tokens: &TokenStream,
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<String, FormatError> {
@@ -927,7 +899,7 @@ export namespace Format {
     }
 
     if (let Ast::Item::Node::Function(functionItem) = node) {
-      return Format::formatFunction(module, &functionItem, source, config, indentLevel);
+      return Format::formatFunction(module, &functionItem, source, tokens, config, indentLevel);
     }
 
     return Result::ERROR(FormatError::unsupported("records, enums, traits, namespaces, and extern blocks are not yet supported by layout_items"));
@@ -938,6 +910,7 @@ export namespace Format {
     roots: &Vector<Ast::ItemId>,
     startIndex: u64,
     source: &String,
+    tokens: &TokenStream,
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<Format::GroupedItemResult, FormatError> {
@@ -946,7 +919,7 @@ export namespace Format {
     };
 
     let Option::SOME(keyword) = Format::groupableModuleItemKeyword(module, *firstId) else {
-      let text: String = Format::formatItemNode(module, *firstId, source, config, indentLevel)!;
+      let text: String = Format::formatItemNode(module, *firstId, source, tokens, config, indentLevel)!;
       return Result::OK(Format::GroupedItemResult { text: text, consumed: 1 });
     };
 
@@ -991,7 +964,7 @@ export namespace Format {
     }
 
     if (consumed == 1) {
-      let text: String = Format::formatItemNode(module, *firstId, source, config, indentLevel)!;
+      let text: String = Format::formatItemNode(module, *firstId, source, tokens, config, indentLevel)!;
       return Result::OK(Format::GroupedItemResult { text: text, consumed: 1 });
     }
 
@@ -1009,6 +982,7 @@ export namespace Format {
   function formatProgramPreservingOrder(
     module: &Ast::Module,
     source: &String,
+    tokens: &TokenStream,
     config: &FormatterConfig
   ): Result<String, FormatError> {
     let mut formatted: String = String::new();
@@ -1021,7 +995,7 @@ export namespace Format {
         break;
       };
 
-      let grouped: Format::GroupedItemResult = Format::formatGroupedModuleItemNodes(module, &module.roots, index, source, config, 0)!;
+      let grouped: Format::GroupedItemResult = Format::formatGroupedModuleItemNodes(module, &module.roots, index, source, tokens, config, 0)!;
       let currentIsImport: boolean = Format::isImportNode(module, *rootId);
       let span: SourceSpan = Format::itemSpan(module, *rootId);
 
@@ -1135,7 +1109,7 @@ export namespace Format {
       return Result::ERROR(FormatError::parseFailure(messages));
     }
 
-    return Format::formatProgramPreservingOrder(&module, source, config);
+    return Format::formatProgramPreservingOrder(&module, source, &lexResult.tokens, config);
   }
 
   function layoutCodeChunk(raw: &String, config: &FormatterConfig): Result<String, FormatError> {

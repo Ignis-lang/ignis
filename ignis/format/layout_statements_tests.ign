@@ -1,0 +1,124 @@
+import String from "std::string";
+import Test from "std::test";
+
+import Ast from "@compiler::ast";
+import DiagnosticBag, SourceFile from "@compiler::diagnostics";
+import Parser from "@compiler::parser";
+
+import FormatterConfig from "./config";
+import Format from "./layout_statements";
+
+/// Parses `function __probe__(): void <body>`, pulls out the parsed body
+/// block, and renders it back through `Format::formatBlockStatement` at
+/// indent level 0. This isolates statement layout from the item shell above
+/// it (which also has to decide whether it's safe to reformat a body, given
+/// the comment-safety fallback).
+function formatBody(body: str): String {
+  let mut sourceText: String = String::create("function __probe__(): void ");
+  sourceText.pushStr(body);
+
+  let file: SourceFile = SourceFile::create("stmt_probe.ign", sourceText.toStr());
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+  Parser::parseInto(&file, &mut module, &mut diagnostics);
+
+  if (diagnostics.length() > 0) {
+    Test::fail();
+    return String::new();
+  }
+
+  let Option::SOME(rootId) = module.roots.get(0) else {
+    Test::fail();
+    return String::new();
+  };
+
+  let Option::SOME(node) = module.items.get(*rootId) else {
+    Test::fail();
+    return String::new();
+  };
+
+  let Ast::Item::Node::Function(functionItem) = node else {
+    Test::fail();
+    return String::new();
+  };
+
+  let Option::SOME(bodyNode) = module.statements.get(functionItem.body) else {
+    Test::fail();
+    return String::new();
+  };
+
+  let Ast::Statement::Node::Block(block) = bodyNode else {
+    Test::fail();
+    return String::new();
+  };
+
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Result::OK(output) = Format::formatBlockStatement(&module, &block, &sourceText, &config, 0) else {
+    Test::fail();
+    return String::new();
+  };
+
+  return output;
+}
+
+@test
+function layoutStatementsFormatsAnEmptyBlock(): void {
+  Test::assertEq<str>(formatBody("{}").toStr(), "{\n}");
+}
+
+@test
+function layoutStatementsFormatsAReturnStatement(): void {
+  Test::assertEq<str>(formatBody("{return;}").toStr(), "{\n  return;\n}");
+}
+
+@test
+function layoutStatementsFormatsAReturnWithAValue(): void {
+  Test::assertEq<str>(formatBody("{return 1+2;}").toStr(), "{\n  return 1 + 2;\n}");
+}
+
+@test
+function layoutStatementsFormatsALetStatement(): void {
+  Test::assertEq<str>(formatBody("{let x:i32=1;return;}").toStr(), "{\n  let x: i32 = 1;\n  return;\n}");
+}
+
+@test
+function layoutStatementsFormatsAMutableLetStatement(): void {
+  Test::assertEq<str>(formatBody("{let mut x:i32=1;return;}").toStr(), "{\n  let mut x: i32 = 1;\n  return;\n}");
+}
+
+@test
+function layoutStatementsFormatsAnExpressionStatement(): void {
+  Test::assertEq<str>(formatBody("{foo();return;}").toStr(), "{\n  foo();\n  return;\n}");
+}
+
+@test
+function layoutStatementsFormatsAnIfStatement(): void {
+  Test::assertEq<str>(formatBody("{if(x){return;}}").toStr(), "{\n  if (x) {\n    return;\n  }\n}");
+}
+
+@test
+function layoutStatementsFormatsAnIfElseStatement(): void {
+  Test::assertEq<str>(
+    formatBody("{if(x){return;}else{return;}}").toStr(),
+    "{\n  if (x) {\n    return;\n  } else {\n    return;\n  }\n}"
+  );
+}
+
+@test
+function layoutStatementsFormatsAnIfElseIfChain(): void {
+  Test::assertEq<str>(
+    formatBody("{if(x){return;}else if(y){return;}}").toStr(),
+    "{\n  if (x) {\n    return;\n  } else if (y) {\n    return;\n  }\n}"
+  );
+}
+
+@test
+function layoutStatementsFormatsAWhileStatement(): void {
+  Test::assertEq<str>(formatBody("{while(x){break;}}").toStr(), "{\n  while (x) {\n    break;\n  }\n}");
+}
+
+@test
+function layoutStatementsFormatsNestedBlocks(): void {
+  Test::assertEq<str>(formatBody("{{return;}}").toStr(), "{\n  {\n    return;\n  }\n}");
+}
