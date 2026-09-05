@@ -35,7 +35,18 @@ import ArchiveTool from "./build/archive";
 import CCompiler from "./build/c_compiler";
 import Linker from "./build/linker";
 import BuildOverrides, DiscoveryResult, Resolver from "./build/resolver";
-import TestCase, TestOutcome, TestRunner from "./build/test_runner";
+import FixtureCase, FixtureKind, FixtureLeakSplit, FixtureTests from "./build/fixture_tests";
+import
+  ProcessOutcome,
+  TestCase,
+  TestOutcome,
+  TestPartition,
+  TestPlan,
+  TestRunner,
+from "./build/test_runner";
+
+/// LeakSanitizer reports detected leaks by overwriting the process exit code.
+const LEAK_EXIT_CODE: i32 = 23;
 
 /// Count diagnostics in `bag` whose severity equals `target`.
 function countBySeverity(bag: &DiagnosticBag, target: Severity): u64 {
@@ -271,6 +282,65 @@ function resolveBuildProfile(discovery: &DiscoveryResult, optLevel: Option<u64>)
   return profile;
 }
 
+/// Compile and link one fixture's translation unit without reporting anything.
+///
+/// A fixture's toolchain failure belongs to that fixture's own report block,
+/// not to the run's output, so nothing is printed and nothing is rendered.
+///
+/// Returns 0 when every toolchain step succeeds and 1 when any one fails.
+function compileAndLinkQuietly(
+  sourcePaths: &Vector<Path::PathBuf>,
+  objectPaths: &Vector<Path::PathBuf>,
+  outputPath: &Path::PathBuf,
+  stdRoot: &Path::PathBuf,
+  profile: &BuildProfile,
+): u64 {
+  let cc: str = profile.cc.toStr();
+  let runtimeDir: Path::PathBuf = stdRoot.join("runtime");
+
+  let mut includeDirs: Vector<String> = Vector::new<String>();
+  includeDirs.push(runtimeDir.toString());
+
+  let extraFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+
+  let mut objects: Vector<String> = Vector::new<String>();
+  let mut unitIndex: u64 = 0;
+
+  while (unitIndex < objectPaths.length()) {
+    let Option::SOME(objectPath) = objectPaths.get(unitIndex) else {
+      break;
+    };
+
+    objects.push(objectPath.toString());
+    unitIndex += 1;
+  }
+
+  if (let Result::ERROR(_) = CCompiler::compileObjects(
+    cc,
+    sourcePaths,
+    objectPaths,
+    &includeDirs,
+    &extraFlags,
+    1,
+  )) {
+    return 1;
+  }
+
+  let mut archives: Vector<String> = Vector::new<String>();
+  archives.push(runtimeDir.join("libignis_rt.a").toString());
+
+  let mut libs: Vector<String> = Vector::new<String>();
+  libs.push(String::create("m"));
+
+  let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
+
+  if (let Result::ERROR(_) = Linker::link(cc, outputPath, &objects, &archives, &libs, &linkFlags)) {
+    return 1;
+  }
+
+  return 0;
+}
+
 /// Compile every emitted translation unit and link them into an executable.
 ///
 /// Returns 0 when every toolchain step succeeds and 1 when any one fails.
@@ -340,6 +410,56 @@ function compileAndLinkUnits(
   return 0;
 }
 
+/// How one run of the compile pipeline behaves.
+record CompileOptions {
+  /// Gather the project's `@test` functions and leave the entry wrapper out of
+  /// the emitted unit, because the harness owns `main` in that build.
+  public collectTests: boolean;
+  /// Run codegen and return the emitted translation unit.
+  public emitCode: boolean;
+  /// Give every function external linkage, which a standard-library build needs.
+  public exportAll: boolean;
+  /// Print nothing and collect the diagnostics into the result instead, which is
+  /// what a fixture compiled inside a test run needs.
+  public quiet: boolean;
+  /// Stop after the analysis phase, which is as far as a warning fixture looks.
+  public stopAfterAnalyze: boolean;
+
+  public static build(emitCode: boolean): CompileOptions {
+    return CompileOptions {
+      collectTests: false,
+      emitCode: emitCode,
+      exportAll: false,
+      quiet: false,
+      stopAfterAnalyze: false,
+    };
+  }
+}
+
+/// A test run compiles the project plus its test modules and hands `main` to
+/// the harness translation unit.
+function testCompileOptions(): CompileOptions {
+  let mut options: CompileOptions = CompileOptions::build(true);
+  options.collectTests = true;
+  return options;
+}
+
+/// A standard-library build exports every function, because the archive it
+/// produces is linked by translation units this build never sees.
+function stdCompileOptions(): CompileOptions {
+  let mut options: CompileOptions = CompileOptions::build(true);
+  options.exportAll = true;
+  return options;
+}
+
+/// A program fixture is compiled on its own and reports nothing of its own.
+function fixtureCompileOptions(emitCode: boolean, stopAfterAnalyze: boolean): CompileOptions {
+  let mut options: CompileOptions = CompileOptions::build(emitCode);
+  options.quiet = true;
+  options.stopAfterAnalyze = stopAfterAnalyze;
+  return options;
+}
+
 /// The emitted translation unit plus what the frontend measured.
 record CompiledProgram {
   /// The emitted C, empty when a phase before codegen failed.
@@ -348,6 +468,12 @@ record CompiledProgram {
   public tests: Vector<TestCase>;
   public errors: u64;
   public warnings: u64;
+  /// Error texts, collected only under `quiet`. Front-end entries carry the
+  /// bare message; ownership and borrow entries carry their notes too, because
+  /// that is what the fixture baselines hold.
+  public errorMessages: Vector<String>;
+  /// Warning texts, collected only under `quiet`, always bare.
+  public warningMessages: Vector<String>;
 }
 
 function failedCompilation(errors: u64, warnings: u64): CompiledProgram {
@@ -356,7 +482,53 @@ function failedCompilation(errors: u64, warnings: u64): CompiledProgram {
     tests: Vector::new<TestCase>(),
     errors: errors,
     warnings: warnings,
+    errorMessages: Vector::new<String>(),
+    warningMessages: Vector::new<String>(),
   };
+}
+
+/// Appends the messages of every diagnostic in `bag` with `target` severity.
+///
+/// `includeNotes` renders each note as its own `  note: <text>` line under the
+/// message, which is how the host records an ownership or borrow failure.
+function collectDiagnosticMessages(
+  bag: &DiagnosticBag,
+  target: Severity,
+  includeNotes: boolean,
+  out: &mut Vector<String>,
+): void {
+  let mut outRef: &mut Vector<String> = out;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity != target) {
+      index += 1;
+      continue;
+    }
+
+    let mut text: String = diagnostic.message.clone();
+
+    if (includeNotes) {
+      let mut noteIndex: u64 = 0;
+
+      while (noteIndex < diagnostic.notes.length()) {
+        if (let Option::SOME(note) = diagnostic.notes.get(noteIndex)) {
+          text.pushStr("\n  note: ");
+          text.push(&note.message);
+        }
+
+        noteIndex += 1;
+      }
+    }
+
+    outRef.push(text);
+    index += 1;
+  }
 }
 
 /// Render a module-discovery failure the way the phase lines do.
@@ -379,10 +551,16 @@ function reportDiscoveryFailure(diagnostics: &DiagnosticBag, file: &SourceFile):
 function compileDiscovered(
   discovery: &DiscoveryResult,
   file: &SourceFile,
-  collectTests: boolean,
-  emitCode: boolean,
-  exportAll: boolean,
+  options: &CompileOptions,
 ): CompiledProgram {
+  let collectTests: boolean = options.collectTests;
+  let exportAll: boolean = options.exportAll;
+  let quiet: boolean = options.quiet;
+  let emitCode: boolean = options.emitCode && !options.stopAfterAnalyze;
+
+  let mut errorMessages: Vector<String> = Vector::new<String>();
+  let mut warningMessages: Vector<String> = Vector::new<String>();
+
   let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
   let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
   let mut modulePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
@@ -419,8 +597,15 @@ function compileDiscovered(
     parseWarnings += countBySeverity(&output.parseDiagnostics, Severity::WARNING);
     rootCount += output.module.roots.length();
 
-    renderBagToStderr(&output.lexDiagnostics, &moduleFile);
-    renderBagToStderr(&output.parseDiagnostics, &moduleFile);
+    if (quiet) {
+      collectDiagnosticMessages(&output.lexDiagnostics, Severity::ERROR, false, &mut errorMessages);
+      collectDiagnosticMessages(&output.parseDiagnostics, Severity::ERROR, false, &mut errorMessages);
+      collectDiagnosticMessages(&output.lexDiagnostics, Severity::WARNING, false, &mut warningMessages);
+      collectDiagnosticMessages(&output.parseDiagnostics, Severity::WARNING, false, &mut warningMessages);
+    } else {
+      renderBagToStderr(&output.lexDiagnostics, &moduleFile);
+      renderBagToStderr(&output.parseDiagnostics, &moduleFile);
+    }
 
     if (!mapImportSourcesToDiscoveryTargets(&mut output.module, &discovery.graph, *nodeIndex)) {
       Io::eprintln(`error: discovery graph import mapping is incomplete for ${modulePath.toStr()}`);
@@ -446,16 +631,24 @@ function compileDiscovered(
     orderIndex += 1;
   }
 
-  Io::println(formatPhaseLine("lex  ", lexErrors, lexWarnings));
-  Io::println(formatPhaseLine("parse", parseErrors, parseWarnings));
-  Io::println(`  roots: ${rootCount}`);
+  if (!quiet) {
+    Io::println(formatPhaseLine("lex  ", lexErrors, lexWarnings));
+    Io::println(formatPhaseLine("parse", parseErrors, parseWarnings));
+    Io::println(`  roots: ${rootCount}`);
+  }
 
   let frontendErrors: u64 = lexErrors + parseErrors;
   let frontendWarnings: u64 = lexWarnings + parseWarnings;
 
   if (frontendErrors > 0) {
-    Io::println(String::create("  analyze: skipped (frontend errors)"));
-    return failedCompilation(frontendErrors, frontendWarnings);
+    if (!quiet) {
+      Io::println(String::create("  analyze: skipped (frontend errors)"));
+    }
+
+    let mut stopped: CompiledProgram = failedCompilation(frontendErrors, frontendWarnings);
+    stopped.errorMessages = errorMessages;
+    stopped.warningMessages = warningMessages;
+    return stopped;
   }
 
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
@@ -497,18 +690,49 @@ function compileDiscovered(
 
     analyzeErrors += countBySeverity(&analysisRecord.output.diagnostics, Severity::ERROR);
     analyzeWarnings += countBySeverity(&analysisRecord.output.diagnostics, Severity::WARNING);
-    renderBagToStderr(&analysisRecord.output.diagnostics, moduleFile);
+
+    if (quiet) {
+      collectDiagnosticMessages(&analysisRecord.output.diagnostics, Severity::ERROR, false, &mut errorMessages);
+      collectDiagnosticMessages(&analysisRecord.output.diagnostics, Severity::WARNING, false, &mut warningMessages);
+    } else {
+      renderBagToStderr(&analysisRecord.output.diagnostics, moduleFile);
+    }
+
     recordIndex += 1;
   }
 
-  Io::println(formatPhaseLine("analyze", analyzeErrors, analyzeWarnings));
+  if (!quiet) {
+    Io::println(formatPhaseLine("analyze", analyzeErrors, analyzeWarnings));
+  }
 
   // Lowering runs only over a clean analysis: its inputs assume every
   // reference resolved and every expression typed. Failures surface as
   // `HirKind::Error` nodes, counted per module.
   if (analyzeErrors > 0) {
-    Io::println(String::create("  lower: skipped (analyze errors)"));
-    return failedCompilation(frontendErrors + analyzeErrors, frontendWarnings + analyzeWarnings);
+    if (!quiet) {
+      Io::println(String::create("  lower: skipped (analyze errors)"));
+    }
+
+    let mut stopped: CompiledProgram = failedCompilation(
+      frontendErrors + analyzeErrors,
+      frontendWarnings + analyzeWarnings,
+    );
+    stopped.errorMessages = errorMessages;
+    stopped.warningMessages = warningMessages;
+    return stopped;
+  }
+
+  // A warning fixture asks whether the front end is clean and what it warned
+  // about, so nothing past analysis runs for it.
+  if (options.stopAfterAnalyze) {
+    return CompiledProgram {
+      source: String::new(),
+      tests: Vector::new<TestCase>(),
+      errors: frontendErrors + analyzeErrors,
+      warnings: frontendWarnings + analyzeWarnings,
+      errorMessages: errorMessages,
+      warningMessages: warningMessages,
+    };
   }
 
   let mut tests: Vector<TestCase> = Vector::new<TestCase>();
@@ -547,7 +771,9 @@ function compileDiscovered(
       testModuleIndex += 1;
     }
 
-    Io::println(`  tests: ${tests.length()} discovered`);
+    if (!quiet) {
+      Io::println(`  tests: ${tests.length()} discovered`);
+    }
   }
 
   let mut loweredModules: u64 = 0;
@@ -606,13 +832,20 @@ function compileDiscovered(
   let captureErrors: u64 = countBySeverity(&captureDiagnostics, Severity::ERROR);
   let captureWarnings: u64 = countBySeverity(&captureDiagnostics, Severity::WARNING);
 
-  Io::println(formatPhaseLine("capture", captureErrors, captureWarnings));
-  renderBagToStderr(&captureDiagnostics, file);
+  if (quiet) {
+    collectDiagnosticMessages(&captureDiagnostics, Severity::ERROR, true, &mut errorMessages);
+    collectDiagnosticMessages(&captureDiagnostics, Severity::WARNING, false, &mut warningMessages);
+  } else {
+    Io::println(formatPhaseLine("capture", captureErrors, captureWarnings));
+    renderBagToStderr(&captureDiagnostics, file);
+  }
 
   let monoResult: Mono::MonoOutput = Mono::run(&mut defStore, &mut typeStore, &mut symbols, &programHir);
   let monoGenericNodes: u64 = Mono::countRemainingGenerics(&mut typeStore, &monoResult.hir);
 
-  Io::println(`  mono: ${monoResult.instantiations} instantiations, ${monoResult.hir.nodes.length()} nodes, ${monoGenericNodes} generic nodes left`);
+  if (!quiet) {
+    Io::println(`  mono: ${monoResult.instantiations} instantiations, ${monoResult.hir.nodes.length()} nodes, ${monoGenericNodes} generic nodes left`);
+  }
 
   // Ownership and borrow checking runs over the monomorphized HIR, the same
   // program LIR lowering is about to walk: its drop schedules are keyed by
@@ -627,8 +860,13 @@ function compileDiscovered(
   let ownershipErrors: u64 = countBySeverity(&checked.diagnostics, Severity::ERROR);
   let ownershipWarnings: u64 = countBySeverity(&checked.diagnostics, Severity::WARNING);
 
-  Io::println(formatPhaseLine("ownership", ownershipErrors, ownershipWarnings));
-  renderBagToStderr(&checked.diagnostics, file);
+  if (quiet) {
+    collectDiagnosticMessages(&checked.diagnostics, Severity::ERROR, true, &mut errorMessages);
+    collectDiagnosticMessages(&checked.diagnostics, Severity::WARNING, false, &mut warningMessages);
+  } else {
+    Io::println(formatPhaseLine("ownership", ownershipErrors, ownershipWarnings));
+    renderBagToStderr(&checked.diagnostics, file);
+  }
 
   // A check answers whether the program is well formed, so it stops with the
   // last phase that can say no. Nothing past this point reports a diagnostic.
@@ -638,6 +876,8 @@ function compileDiscovered(
       tests: tests,
       errors: frontendErrors + analyzeErrors + captureErrors + ownershipErrors,
       warnings: frontendWarnings + analyzeWarnings + captureWarnings + ownershipWarnings,
+      errorMessages: errorMessages,
+      warningMessages: warningMessages,
     };
   }
 
@@ -653,8 +893,10 @@ function compileDiscovered(
 
   let verifyFindings: Vector<String> = LirVerify::verifyProgram(&mut defStore, &mut typeStore, &lirResult.program);
 
-  Io::println(`  lower: ${hirErrorNodes} error nodes, ${hirNodes} hir nodes, ${loweredModules} modules`);
-  Io::println(`  lir: ${lirResult.unsupported} unsupported, ${lirResult.loweredFunctions} functions, ${verifyFindings.length()} verify errors`);
+  if (!quiet) {
+    Io::println(`  lower: ${hirErrorNodes} error nodes, ${hirNodes} hir nodes, ${loweredModules} modules`);
+    Io::println(`  lir: ${lirResult.unsupported} unsupported, ${lirResult.loweredFunctions} functions, ${verifyFindings.length()} verify errors`);
+  }
 
   // The harness translation unit defines `main` and calls the selected tests
   // directly, so the program unit must not carry an entry wrapper too.
@@ -700,15 +942,19 @@ function compileDiscovered(
     &externalSymbols,
   );
 
-  Io::println(
-    `  codegen: ${emitResult.unsupported} unsupported, ${emitResult.functions} functions, ${emitResult.source.length()} bytes`
-  );
+  if (!quiet) {
+    Io::println(
+      `  codegen: ${emitResult.unsupported} unsupported, ${emitResult.functions} functions, ${emitResult.source.length()} bytes`
+    );
+  }
 
   return CompiledProgram {
     source: emitResult.source,
     tests: tests,
     errors: frontendErrors + analyzeErrors + captureErrors + ownershipErrors,
     warnings: frontendWarnings + analyzeWarnings + captureWarnings + ownershipWarnings,
+    errorMessages: errorMessages,
+    warningMessages: warningMessages,
   };
 }
 
@@ -810,7 +1056,8 @@ function runCompile(
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, false, !checkOnly, false);
+  let compileOptions: CompileOptions = CompileOptions::build(!checkOnly);
+  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
   let mut linkErrors: u64 = 0;
 
   // The emitted translation unit is the next thing to feed to a C compiler,
@@ -860,12 +1107,381 @@ function runCompile(
   return 0;
 }
 
+/// Every byte a fixture work directory name may carry, with anything else
+/// replaced by `_`, mirroring the host's dump-name sanitizer.
+function sanitizeFixtureName(name: &String): String {
+  let mut sanitized: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < name.length()) {
+    let Option::SOME(byte) = name.byteAt(index) else {
+      break;
+    };
+
+    let isDigit: boolean = byte >= 48 && byte <= 57;
+    let isUpper: boolean = byte >= 65 && byte <= 90;
+    let isLower: boolean = byte >= 97 && byte <= 122;
+
+    if (isDigit || isUpper || isLower || byte == 45 || byte == 95) {
+      sanitized.pushByte(byte);
+    } else {
+      sanitized.pushByte(95);
+    }
+
+    index += 1;
+  }
+
+  return sanitized;
+}
+
+/// The file name without its last extension.
+function fixtureStemOf(name: &String): String {
+  let mut index: u64 = name.length();
+
+  while (index > 1) {
+    let Option::SOME(byte) = name.byteAt(index - 1) else {
+      break;
+    };
+
+    if (byte == 46) {
+      return name.substringBytes(0, index - 1);
+    }
+
+    index -= 1;
+  }
+
+  return name.clone();
+}
+
+/// The fixture directories a run reads, in the order the host resolves them:
+/// what the project file declares, then what `--fixtures` added, without
+/// repeating a directory both name.
+function resolveFixtureDirs(
+  discovery: &DiscoveryResult,
+  options: &CliOptions
+): Vector<Path::PathBuf> {
+  let mut dirs: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut declaredIndex: u64 = 0;
+
+  while (declaredIndex < discovery.testFixtures.length()) {
+    if (let Option::SOME(dir) = discovery.testFixtures.get(declaredIndex)) {
+      dirs.push(dir.clone());
+    }
+
+    declaredIndex += 1;
+  }
+
+  let mut extraIndex: u64 = 0;
+
+  while (extraIndex < options.fixtureDirs.length()) {
+    let Option::SOME(rawDir) = options.fixtureDirs.get(extraIndex) else {
+      break;
+    };
+
+    extraIndex += 1;
+
+    let candidate: Path::PathBuf = Path::PathBuf::fromString(rawDir);
+    let mut resolved: Path::PathBuf = candidate.clone();
+
+    if (!candidate.isAbsolute()) {
+      resolved = discovery.root.join(candidate.asStr()).normalize();
+    }
+
+    let resolvedText: String = resolved.toString();
+    let mut seen: boolean = false;
+    let mut seenIndex: u64 = 0;
+
+    while (seenIndex < dirs.length()) {
+      let Option::SOME(existing) = dirs.get(seenIndex) else {
+        break;
+      };
+
+      if (existing.toString().equals(&resolvedText)) {
+        seen = true;
+        break;
+      }
+
+      seenIndex += 1;
+    }
+
+    if (!seen) {
+      dirs.push(resolved.clone());
+    }
+  }
+
+  return dirs;
+}
+
+/// Joins collected diagnostic texts with newlines, which is the body a
+/// diagnostics or warnings fixture compares against its baseline.
+function joinDiagnosticMessages(messages: &Vector<String>): String {
+  let mut body: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < messages.length()) {
+    let Option::SOME(message) = messages.get(index) else {
+      break;
+    };
+
+    if (index > 0) {
+      body.pushStr("\n");
+    }
+
+    body.push(message);
+    index += 1;
+  }
+
+  return body;
+}
+
+/// Discovers the module graph a fixture compiles as, reporting nothing.
+///
+/// The discovery diagnostics reach the caller as ordinary error texts, because
+/// a fixture that names a module it cannot reach fails on those.
+function discoverFixtureGraph(
+  fixture: &FixtureCase,
+  projectStart: &Path::PathBuf,
+  options: &CliOptions,
+  errorsOut: &mut Vector<String>,
+): Option<DiscoveryResult> {
+  let overrides: BuildOverrides = buildOverridesFrom(options);
+
+  match (Resolver::discoverFixture(&fixture.path, projectStart, &overrides)) {
+    Result::OK(value) -> {
+      return Option::SOME(value);
+    },
+    Result::ERROR(diagnostics) -> {
+      collectDiagnosticMessages(&diagnostics, Severity::ERROR, false, errorsOut);
+      return Option::NONE;
+    },
+  };
+
+  return Option::NONE;
+}
+
+/// Compiles a program fixture, runs it and compares what it produced against
+/// its baseline.
+///
+/// Returns an empty string when the fixture passed and the failure text
+/// otherwise.
+function runProgramFixture(
+  fixture: &FixtureCase,
+  projectStart: &Path::PathBuf,
+  discovery: &DiscoveryResult,
+  options: &CliOptions,
+  timeoutSeconds: u64,
+): String {
+  if (fixture.mode.forceStd && !discovery.stdEnabled) {
+    return String::create("fixture requires the standard library but the project has std disabled");
+  }
+
+  let sanitized: String = sanitizeFixtureName(&fixture.name);
+  let workDir: Path::PathBuf = discovery.outDir.join("fixtures").join(sanitized.toStr());
+  let _removed = Fs::removeDirAll(&workDir);
+
+  if (let Result::ERROR(_) = Fs::createDirAll(&workDir)) {
+    return `Failed to create fixture directory '${workDir.asStr()}'`;
+  }
+
+  let mut discoveryErrors: Vector<String> = Vector::new<String>();
+  let Option::SOME(fixtureDiscovery) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
+    let reported: String = joinDiagnosticMessages(&discoveryErrors);
+    return `compilation failed\n${reported.toStr()}`;
+  };
+
+  let file: SourceFile = entrySourceFile(&fixtureDiscovery.entry);
+  let compileOptions: CompileOptions = fixtureCompileOptions(true, false);
+  let compiled: CompiledProgram = compileDiscovered(&fixtureDiscovery, &file, &compileOptions);
+
+  if (compiled.errors > 0 || compiled.source.length() == 0) {
+    let body: String = joinDiagnosticMessages(&compiled.errorMessages);
+
+    if (body.length() == 0) {
+      return String::create("compilation failed");
+    }
+
+    return `compilation failed\n${body.toStr()}`;
+  }
+
+  let stem: String = match (fixture.path.fileName()) {
+    Option::SOME(name) -> fixtureStemOf(&name),
+    Option::NONE -> String::create("fixture"),
+  };
+
+  let sourceName: String = stem.concat(".c");
+  let objectName: String = stem.concat(".o");
+  let sourcePath: Path::PathBuf = workDir.join(sourceName.toStr());
+  let objectPath: Path::PathBuf = workDir.join(objectName.toStr());
+  let binaryPath: Path::PathBuf = workDir.join(stem.toStr());
+
+  if (let Result::ERROR(_) = Fs::writeString(&sourcePath, &compiled.source)) {
+    return `Failed to write fixture source '${sourcePath.asStr()}'`;
+  }
+
+  // Every fixture but one that leaks on purpose is linked leak-checkable, so a
+  // program that forgets to free reports it instead of passing.
+  let mut profile: BuildProfile = resolveBuildProfile(&fixtureDiscovery, options.optLevel);
+
+  if (!fixture.mode.allowLeak) {
+    profile.cflags.push(String::create("-fsanitize=leak"));
+    profile.cflags.push(String::create("-g"));
+    profile.cflags.push(String::create("-fno-omit-frame-pointer"));
+  }
+
+  let mut sourcePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  sourcePaths.push(sourcePath.clone());
+
+  let mut objectPaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  objectPaths.push(objectPath.clone());
+
+  if (compileAndLinkQuietly(&sourcePaths, &objectPaths, &binaryPath, &fixtureDiscovery.stdRoot, &profile) > 0) {
+    return String::create("compilation failed");
+  }
+
+  let leakOptions: str = fixture.mode.allowLeak ? "detect_leaks=0" : "detect_leaks=1:leak_check_at_exit=1:use_stacks=0";
+
+  let mut command: Process::Command = Process::Command::new(binaryPath.asStr());
+  command.env("LSAN_OPTIONS", leakOptions);
+
+  let Result::OK(spawned) = command.spawnCapturing() else {
+    return `Failed to run fixture '${fixture.name.toStr()}'`;
+  };
+
+  let mut child: Process::Child = spawned;
+  let outcome: ProcessOutcome = TestRunner::waitWithTimeout(&mut child, timeoutSeconds);
+
+  if (outcome.spawnFailed) {
+    return `Failed to run fixture '${fixture.name.toStr()}'`;
+  }
+
+  if (outcome.timedOut) {
+    return TestRunner::formatTimeoutFailure(timeoutSeconds);
+  }
+
+  let split: FixtureLeakSplit = FixtureTests::splitLeakReport(&outcome.stderr);
+
+  if (!fixture.mode.allowLeak && outcome.exitCode == LEAK_EXIT_CODE) {
+    return `LeakSanitizer detected a memory leak\n${split.leak.toStr()}`;
+  }
+
+  let body: String = FixtureTests::formatProgramSnapshot(outcome.exitCode, &outcome.stdout, &split.program);
+  let snapshotPath: Path::PathBuf = fixture.snapshotPath();
+
+  return FixtureTests::compareSnapshot(&snapshotPath, &body, options.updateSnapshots);
+}
+
+/// Compiles a fixture that is expected to fail and compares the errors it
+/// reported against its baseline.
+function runDiagnosticsFixture(
+  fixture: &FixtureCase,
+  projectStart: &Path::PathBuf,
+  options: &CliOptions,
+): String {
+  let mut discoveryErrors: Vector<String> = Vector::new<String>();
+  let Option::SOME(fixtureDiscovery) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
+    let snapshotPath: Path::PathBuf = fixture.snapshotPath();
+    let body: String = joinDiagnosticMessages(&discoveryErrors);
+
+    return FixtureTests::compareSnapshot(&snapshotPath, &body, options.updateSnapshots);
+  };
+
+  let file: SourceFile = entrySourceFile(&fixtureDiscovery.entry);
+  let compileOptions: CompileOptions = fixtureCompileOptions(false, false);
+  let compiled: CompiledProgram = compileDiscovered(&fixtureDiscovery, &file, &compileOptions);
+
+  if (compiled.errorMessages.length() == 0) {
+    return String::create("expected the fixture to fail compilation, but it compiled cleanly");
+  }
+
+  let snapshotPath: Path::PathBuf = fixture.snapshotPath();
+  let body: String = joinDiagnosticMessages(&compiled.errorMessages);
+
+  return FixtureTests::compareSnapshot(&snapshotPath, &body, options.updateSnapshots);
+}
+
+/// Compiles a fixture that is expected to build cleanly and compares the
+/// warnings it reported against its baseline.
+function runWarningsFixture(
+  fixture: &FixtureCase,
+  projectStart: &Path::PathBuf,
+  options: &CliOptions,
+): String {
+  let mut discoveryErrors: Vector<String> = Vector::new<String>();
+  let Option::SOME(fixtureDiscovery) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
+    let reported: String = joinDiagnosticMessages(&discoveryErrors);
+    return `expected the fixture to compile cleanly, but it reported errors:\n${reported.toStr()}`;
+  };
+
+  let file: SourceFile = entrySourceFile(&fixtureDiscovery.entry);
+  let compileOptions: CompileOptions = fixtureCompileOptions(false, true);
+  let compiled: CompiledProgram = compileDiscovered(&fixtureDiscovery, &file, &compileOptions);
+
+  if (compiled.errorMessages.length() > 0) {
+    let reported: String = joinDiagnosticMessages(&compiled.errorMessages);
+    return `expected the fixture to compile cleanly, but it reported errors:\n${reported.toStr()}`;
+  }
+
+  if (compiled.warningMessages.length() == 0) {
+    return String::create("expected the fixture to report warnings, but it compiled without any");
+  }
+
+  let snapshotPath: Path::PathBuf = fixture.snapshotPath();
+  let body: String = joinDiagnosticMessages(&compiled.warningMessages);
+
+  return FixtureTests::compareSnapshot(&snapshotPath, &body, options.updateSnapshots);
+}
+
+/// Runs one fixture and reports it as an ordinary plan entry.
+function runFixture(
+  fixture: &FixtureCase,
+  projectStart: &Path::PathBuf,
+  discovery: &DiscoveryResult,
+  options: &CliOptions,
+  timeoutSeconds: u64,
+): TestOutcome {
+  let mut failure: String = String::new();
+
+  if (fixture.modeError.length() > 0) {
+    failure = fixture.modeError.clone();
+  } else {
+    failure = match (fixture.mode.kind) {
+      FixtureKind::DIAGNOSTICS -> runDiagnosticsFixture(fixture, projectStart, options),
+      FixtureKind::WARNINGS -> runWarningsFixture(fixture, projectStart, options),
+      FixtureKind::PROGRAM -> runProgramFixture(fixture, projectStart, discovery, options, timeoutSeconds),
+    };
+  }
+
+  if (failure.length() == 0) {
+    return TestOutcome {
+      fqName: fixture.name.clone(),
+      success: true,
+      exitCode: 0,
+      stdout: String::new(),
+      stderr: String::new(),
+    };
+  }
+
+  return TestOutcome {
+    fqName: fixture.name.clone(),
+    success: false,
+    exitCode: 1,
+    stdout: String::new(),
+    stderr: failure,
+  };
+}
+
 /// Build the project's test harness and run every selected test in its own
 /// process, reporting the way the host `ignis test` runner does.
 ///
 /// Returns 0 when every selected test exits 0, and 1 on any failure.
 function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
-  Io::eprintln(`Testing ${startPath.asStr()}\n`);
+  let partition: TestPartition = match (&options.partition) {
+    Option::SOME(spec) -> TestPartition::create(spec.index, spec.count),
+    Option::NONE -> TestPartition::none(),
+  };
+  let timeoutSeconds: u64 = TestRunner::resolvedTimeoutSeconds(options.testTimeout);
+
+  Io::eprintln(`Testing ${TestRunner::runHeader(startPath, &partition).toStr()}\n`);
 
   let Option::SOME(discovery) = discoverFor(startPath, options, true) else {
     return 1;
@@ -873,18 +1489,23 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, true, true, false);
+  let compileOptions: CompileOptions = testCompileOptions();
+  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
 
   if (compiled.source.length() == 0) {
     Io::eprintln(String::create("error: test setup failed"));
     return 1;
   }
 
-  let selected: Vector<TestCase> = TestRunner::plan(&compiled.tests, &options.filter);
+  let fixtureDirs: Vector<Path::PathBuf> = resolveFixtureDirs(&discovery, options);
+  let discoveredFixtures: Vector<FixtureCase> = FixtureTests::discover(&fixtureDirs);
+  let plan: TestPlan = TestRunner::buildPlan(&compiled.tests, &discoveredFixtures, &options.filter, &partition);
+  let selected: Vector<TestCase> = plan.tests;
+  let selectedFixtures: Vector<FixtureCase> = plan.fixtures;
 
   Io::eprintln(TestRunner::sectionHeader("Planning"));
 
-  if (selected.length() == 0) {
+  if (selected.length() == 0 && selectedFixtures.length() == 0) {
     Io::eprintln(String::create("  - No tests selected"));
     return 0;
   }
@@ -897,6 +1518,20 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
     }
 
     plannedIndex += 1;
+  }
+
+  let mut plannedFixtureIndex: u64 = 0;
+
+  while (plannedFixtureIndex < selectedFixtures.length()) {
+    if (let Option::SOME(fixture) = selectedFixtures.get(plannedFixtureIndex)) {
+      Io::eprintln(`  - ${fixture.name.toStr()}`);
+    }
+
+    plannedFixtureIndex += 1;
+  }
+
+  if (options.updateSnapshots) {
+    FixtureTests::prepareSnapshotDirectories(&selectedFixtures);
   }
 
   let outputPath: String = options.outputPathOr("selfhost_tests");
@@ -936,12 +1571,27 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
 
   Io::eprintln(TestRunner::sectionHeader("Running"));
 
-  let outcomes: Vector<TestOutcome> = TestRunner::execute(
+  let mut outcomes: Vector<TestOutcome> = TestRunner::execute(
     &binaryPath,
     &selected,
     options.updateSnapshots,
     TestRunner::jobLimit(),
+    timeoutSeconds,
   );
+
+  // A fixture compiles and runs a program of its own inside this process, so it
+  // follows the harness runs rather than sharing their pool, which keeps the
+  // report in plan order.
+  let mut fixtureIndex: u64 = 0;
+
+  while (fixtureIndex < selectedFixtures.length()) {
+    let Option::SOME(fixture) = selectedFixtures.get(fixtureIndex) else {
+      break;
+    };
+
+    outcomes.push(runFixture(fixture, startPath, &discovery, options, timeoutSeconds));
+    fixtureIndex += 1;
+  }
 
   if (TestRunner::report(&outcomes, &binaryPath) > 0) {
     return 1;
@@ -1015,7 +1665,8 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
-  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, false, true, true);
+  let compileOptions: CompileOptions = stdCompileOptions();
+  let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
 
   if (compiled.errors > 0 || compiled.source.length() == 0) {
     Io::println(`  summary: ${compiled.errors} errors, ${compiled.warnings} warnings`);
