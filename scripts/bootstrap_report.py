@@ -306,6 +306,28 @@ def read_commit(project_root: Path) -> str:
   return completed.stdout.strip() or "unknown"
 
 
+def read_stage0(bootstrap_root: Path) -> dict:
+  path = bootstrap_root / "stage0.json"
+
+  if not path.is_file():
+    # No stage0.json means the ladder ran without the nightly's resolution
+    # step, e.g. a developer machine, which always starts stage1 from the host.
+    return {"kind": "host", "source": "ignis", "sha256": ""}
+
+  try:
+    return json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError):
+    return {"kind": "host", "source": "ignis", "sha256": ""}
+
+
+def format_stage0_line(stage0: dict) -> str:
+  if stage0.get("kind") == "official":
+    sha256 = stage0.get("sha256") or "unknown"
+    return f"stage0: official (sha {sha256})"
+
+  return "stage0: host"
+
+
 def collect_stage_logs(bootstrap_root: Path) -> list[dict]:
   logs = []
 
@@ -327,10 +349,12 @@ def format_report(
   gates: dict[str, dict],
   candidate: bool,
   stage_logs: list[dict],
+  stage0: dict,
 ) -> str:
   lines = [
     "# Selfhost bootstrap promotion report",
     "",
+    f"- {format_stage0_line(stage0)}",
     f"- Commit: `{commit}`",
     f"- Generated: {generated_at}",
     f"- Candidate: **{'yes' if candidate else 'no'}**",
@@ -397,12 +421,13 @@ def command_report(arguments: argparse.Namespace) -> int:
   commit = read_commit(project_root)
   generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
   candidate = all(gates[gate_id]["status"] == STATUS_PASS for gate_id in GATE_IDS)
+  stage0 = read_stage0(bootstrap_root)
 
   bootstrap_root.mkdir(parents=True, exist_ok=True)
 
   report_path = bootstrap_root / "report.md"
   report_path.write_text(
-    format_report(commit, generated_at, gates, candidate, collect_stage_logs(bootstrap_root)),
+    format_report(commit, generated_at, gates, candidate, collect_stage_logs(bootstrap_root), stage0),
     encoding="utf-8",
   )
 
@@ -413,6 +438,7 @@ def command_report(arguments: argparse.Namespace) -> int:
         "commit": commit,
         "generated_at": generated_at,
         "candidate": candidate,
+        "stage0": stage0,
         "gates": {
           gate_id: {"status": gate["status"], "summary": gate["summary"]} for gate_id, gate in gates.items()
         },
@@ -423,6 +449,7 @@ def command_report(arguments: argparse.Namespace) -> int:
     encoding="utf-8",
   )
 
+  print(f"[bootstrap] {format_stage0_line(stage0)}", file=sys.stderr)
   print(f"[bootstrap] report    -> {report_path}", file=sys.stderr)
   print(f"[bootstrap] promotion -> {promotion_path}", file=sys.stderr)
   print(f"[bootstrap] candidate: {'yes' if candidate else 'no'}", file=sys.stderr)

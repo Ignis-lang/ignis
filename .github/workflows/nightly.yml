@@ -12,6 +12,15 @@ on:
     types:
       - completed
   workflow_dispatch:
+    inputs:
+      stage0:
+        description: "Which compiler builds stage1"
+        type: choice
+        default: auto
+        options:
+          - auto
+          - host
+          - official
 
 # Unlike CI, an in-flight nightly is left to finish. The run force-moves a tag
 # and rewrites one release's assets, so two runs racing on the same rolling
@@ -297,6 +306,92 @@ jobs:
       - name: Add Ignis to PATH
         run: echo "${GITHUB_WORKSPACE}/target/debug" >> "$GITHUB_PATH"
 
+      # Once a selfhost binary has been promoted `official`, the ladder starts
+      # stage1 from it instead of the Rust host, so the ladder measures the
+      # selfhost lineage compiling itself rather than the host compiling it
+      # once more. The host stays the oracle for G3-host, G5, G6 and parity
+      # regardless of which binary builds stage1.
+      #
+      # `promotion-streak.json` is the only record of whether the asset
+      # currently on the release is still official: a later non-candidate run
+      # resets its streak to zero without removing the asset, so the streak is
+      # read fresh rather than assumed from the asset's mere presence.
+      - name: Resolve stage0
+        id: stage0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STAGE0_MODE: ${{ inputs.stage0 || 'auto' }}
+        run: |
+          set -uo pipefail
+
+          mkdir -p build/bootstrap
+          STAGE0_JSON="build/bootstrap/stage0.json"
+
+          write_host_stage0() {
+            printf '{"kind": "host", "source": "target/debug/ignis", "sha256": ""}\n' >"$STAGE0_JSON"
+          }
+
+          if [ "$STAGE0_MODE" = "host" ]; then
+            echo "stage0: host forced by workflow_dispatch input"
+            write_host_stage0
+            exit 0
+          fi
+
+          # `official` fails the step outright on any problem, since it exists
+          # to let a maintainer force and inspect that path; `auto` falls back
+          # to the host and leaves IGNIS_STAGE0 unset instead.
+          fall_back_or_fail() {
+            echo "stage0: $1"
+
+            if [ "$STAGE0_MODE" = "official" ]; then
+              echo "stage0: official was forced by workflow_dispatch input but is unavailable"
+              exit 1
+            fi
+
+            echo "stage0: falling back to the host compiler"
+            write_host_stage0
+            exit 0
+          }
+
+          WORKDIR="${RUNNER_TEMP}/stage0"
+          mkdir -p "$WORKDIR"
+
+          if ! gh release download nightly \
+            --pattern 'ignis-selfhost-linux-amd64' \
+            --pattern 'ignis-selfhost-linux-amd64.sha256' \
+            --pattern 'promotion-streak.json' \
+            --dir "$WORKDIR"; then
+            fall_back_or_fail "the official selfhost asset is not on the nightly release"
+          fi
+
+          if [ ! -f "$WORKDIR/ignis-selfhost-linux-amd64" ] || [ ! -f "$WORKDIR/ignis-selfhost-linux-amd64.sha256" ]; then
+            fall_back_or_fail "the official selfhost asset or its checksum is missing"
+          fi
+
+          if ! (cd "$WORKDIR" && sha256sum -c ignis-selfhost-linux-amd64.sha256); then
+            fall_back_or_fail "the official selfhost asset failed checksum verification"
+          fi
+
+          if [ ! -f "$WORKDIR/promotion-streak.json" ]; then
+            fall_back_or_fail "promotion-streak.json is missing; cannot confirm the asset is official"
+          fi
+
+          STREAK=$(jq -r '.streak // 0' "$WORKDIR/promotion-streak.json")
+
+          if [ "$STREAK" -lt 3 ]; then
+            fall_back_or_fail "the promotion streak is ${STREAK}, below the official threshold of 3"
+          fi
+
+          chmod +x "$WORKDIR/ignis-selfhost-linux-amd64"
+          SHA256=$(cut -d' ' -f1 "$WORKDIR/ignis-selfhost-linux-amd64.sha256")
+
+          echo "IGNIS_STAGE0=${WORKDIR}/ignis-selfhost-linux-amd64" >>"$GITHUB_ENV"
+
+          jq -n --arg source "${WORKDIR}/ignis-selfhost-linux-amd64" --arg sha256 "$SHA256" \
+            '{kind: "official", source: $source, sha256: $sha256}' >"$STAGE0_JSON"
+
+          echo "stage0: official (sha ${SHA256})"
+
       # stage1 and stage2 have to succeed because every gate runs against
       # stage2's binary. G4 belongs to this job because its two measurements
       # only compare when they come from one machine. A G4 or stage3 failure is
@@ -386,6 +481,7 @@ jobs:
         with:
           name: bootstrap-stages
           path: |
+            build/bootstrap/stage0.json
             build/bootstrap/stage1/ignis
             build/bootstrap/stage2/ignis
             build/bootstrap/stage2/selfhost_emit.c

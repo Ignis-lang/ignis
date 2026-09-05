@@ -179,10 +179,43 @@ compile_stage() {
   info "${stage}: ok -> ${dir}/ignis"
 }
 
+# stage0 is either the Rust host or a previously promoted selfhost binary
+# (`IGNIS_STAGE0` pointed at the nightly's official asset). The two take
+# different command forms: the host reads ignis.toml through `ignis build`,
+# while a selfhost binary is invoked directly like every other stage, on
+# `ignis/main.ign`. The nightly records which one it resolved in
+# `stage0.json`; a developer can say so with `IGNIS_STAGE0_KIND=selfhost|host`.
+# Only when neither is present does `--version` decide: the host's clap CLI
+# exits 0, while the selfhost CLI rejects the flag today. That probe stops
+# discriminating once the selfhost learns `--version`, which is why it is the
+# last resort and not the rule.
+stage0_is_selfhost() {
+  local bin="$1"
+  local recorded_kind=""
+
+  if [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]]; then
+    recorded_kind="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("kind", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
+  fi
+
+  case "${IGNIS_STAGE0_KIND:-$recorded_kind}" in
+    selfhost|official) return 0 ;;
+    host) return 1 ;;
+  esac
+
+  "$bin" --version >/dev/null 2>&1 && return 1
+  return 0
+}
+
 build_stage1() {
   local stage0_bin
   stage0_bin="$(command -v "$STAGE0" || true)"
   [[ -n "$stage0_bin" ]] || fail "stage0 compiler not found: ${STAGE0} (set IGNIS_STAGE0)"
+
+  if stage0_is_selfhost "$stage0_bin"; then
+    info "stage1: stage0 (${stage0_bin}) is a selfhost compiler, compiling ${ENTRY#"$PROJECT_ROOT/"} directly"
+    IGNIS_STD_PATH="${PROJECT_ROOT}/std" compile_stage stage1 "$stage0_bin"
+    return
+  fi
 
   local dir
   dir="$(stage_dir stage1)"
