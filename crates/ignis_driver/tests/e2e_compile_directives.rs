@@ -495,6 +495,7 @@ fn e2e_compile_directive_vm_warning_emits_diagnostic_and_allows_build() {
   assert!(warnings[0].message.contains("record warning from directive"));
 
   let result = common::compile_project_and_run_with_workspace_std(source).expect("warning should not block build");
+  assert!(!result.leaked, "LeakSanitizer detected a memory leak:\n{}", result.leak_report);
   assert_eq!(result.exit_code, 7);
 }
 
@@ -622,6 +623,7 @@ fn e2e_compile_directive_generated_items_participate_in_compile_and_run() {
   let result = common::compile_project_and_run_with_workspace_std(source)
     .expect("generated record, method, and trait attachments should compile and run");
 
+  assert!(!result.leaked, "LeakSanitizer detected a memory leak:\n{}", result.leak_report);
   assert_eq!(result.exit_code, 42);
 }
 
