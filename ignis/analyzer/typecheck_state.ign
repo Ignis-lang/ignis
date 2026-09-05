@@ -216,12 +216,14 @@ export namespace Analyzer {
 
     function emitTypeMismatch(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       expected: Analyzer::TypeId,
       actual: Analyzer::TypeId,
     ): void {
-      let message: String = `Type mismatch: expected '${typeStore.nameOf(expected).toStr()}', found '${typeStore.nameOf(actual).toStr()}'`;
+      let message: String = `Type mismatch: expected '${typeStore.nameOfResolved(expected, &*defStore, &*symbols).toStr()}', found '${typeStore.nameOfResolved(actual, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr());
     }
 
@@ -230,12 +232,14 @@ export namespace Analyzer {
     /// pattern side of the comparison has no type of its own.
     function emitPatternTypeMismatch(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       expected: Analyzer::TypeId,
       got: str,
     ): void {
-      let message: String = `pattern type mismatch: expected '${typeStore.nameOf(expected).toStr()}', got '${got}'`;
+      let message: String = `pattern type mismatch: expected '${typeStore.nameOfResolved(expected, &*defStore, &*symbols).toStr()}', got '${got}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::PATTERN_TYPE_MISMATCH, message.toStr());
     }
 
@@ -246,13 +250,15 @@ export namespace Analyzer {
     /// which of the selfhost's finer checks rejected it, on the label.
     function emitPatternShapeMismatch(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       scrutinee: Analyzer::TypeId,
       shape: str,
       detail: str,
     ): void {
-      let message: String = `pattern type mismatch: expected '${typeStore.nameOf(scrutinee).toStr()}', got '${shape}'`;
+      let message: String = `pattern type mismatch: expected '${typeStore.nameOfResolved(scrutinee, &*defStore, &*symbols).toStr()}', got '${shape}'`;
       Analyzer::Typecheck::emitDiagnosticLabeled(state, span, DiagnosticCode::PATTERN_TYPE_MISMATCH, message.toStr(), detail);
     }
 
@@ -291,23 +297,27 @@ export namespace Analyzer {
 
     function emitMatchArmTypeMismatch(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       expected: Analyzer::TypeId,
       actual: Analyzer::TypeId,
     ): void {
-      let message: String = `match arm type mismatch: expected '${typeStore.nameOf(expected).toStr()}', got '${typeStore.nameOf(actual).toStr()}'`;
+      let message: String = `match arm type mismatch: expected '${typeStore.nameOfResolved(expected, &*defStore, &*symbols).toStr()}', got '${typeStore.nameOfResolved(actual, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::MATCH_ARM_TYPE_MISMATCH, message.toStr());
     }
 
     function emitBranchTypeMismatch(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       expected: Analyzer::TypeId,
       actual: Analyzer::TypeId,
     ): void {
-      let message: String = `Type mismatch: expected '${typeStore.nameOf(expected).toStr()}', found '${typeStore.nameOf(actual).toStr()}'`;
+      let message: String = `Type mismatch: expected '${typeStore.nameOfResolved(expected, &*defStore, &*symbols).toStr()}', found '${typeStore.nameOfResolved(actual, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnosticLabeled(state, span, DiagnosticCode::TYPE_MISMATCH, message.toStr(), "the branches of this `if` disagree");
     }
 
@@ -425,11 +435,13 @@ export namespace Analyzer {
 
     function emitCallOnNonCallable(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       calleeType: Analyzer::TypeId,
     ): void {
-      let message: String = `Cannot call non-function type '${typeStore.nameOf(calleeType).toStr()}'`;
+      let message: String = `Cannot call non-function type '${typeStore.nameOfResolved(calleeType, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::CALL_ON_NON_CALLABLE, message.toStr());
     }
 
@@ -473,13 +485,15 @@ export namespace Analyzer {
     /// first argument, so the number matches what the source wrote.
     function emitInvalidArgumentType(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       argumentIndex: u64,
       expected: Analyzer::TypeId,
       actual: Analyzer::TypeId,
     ): void {
-      let message: String = `Argument ${argumentIndex} type mismatch: expected '${typeStore.nameOf(expected).toStr()}', got '${typeStore.nameOf(actual).toStr()}'`;
+      let message: String = `Argument ${argumentIndex} type mismatch: expected '${typeStore.nameOfResolved(expected, &*defStore, &*symbols).toStr()}', got '${typeStore.nameOfResolved(actual, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_ARGUMENT_TYPE, message.toStr());
     }
 
@@ -504,21 +518,25 @@ export namespace Analyzer {
 
     function emitForOfExpectsVector(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       got: Analyzer::TypeId,
     ): void {
-      let message: String = `for-of expects vector type, got '${typeStore.nameOf(got).toStr()}'`;
+      let message: String = `for-of expects vector type, got '${typeStore.nameOfResolved(got, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::FOR_OF_EXPECTS_VECTOR, message.toStr());
     }
 
     function emitForOfRequiresCopyOrRef(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       elementType: Analyzer::TypeId,
     ): void {
-      let name: String = typeStore.nameOf(elementType);
+      let name: String = typeStore.nameOfResolved(elementType, &*defStore, &*symbols);
       let message: String = `for-of by value requires Copy element type; '${name.toStr()}' is not Copy, use '&${name.toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::FOR_OF_REQUIRES_COPY_OR_REF, message.toStr());
     }
@@ -537,31 +555,37 @@ export namespace Analyzer {
 
     function emitDeferExpressionMustBeVoid(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       foundType: Analyzer::TypeId,
     ): void {
-      let message: String = `deferred expression must be of type 'void', found '${typeStore.nameOf(foundType).toStr()}'`;
+      let message: String = `deferred expression must be of type 'void', found '${typeStore.nameOfResolved(foundType, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::DEFER_EXPRESSION_MUST_BE_VOID, message.toStr());
     }
 
     function emitVectorIndexNonInteger(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       indexType: Analyzer::TypeId,
     ): void {
-      let message: String = `Vector index must be integer type, got '${typeStore.nameOf(indexType).toStr()}'`;
+      let message: String = `Vector index must be integer type, got '${typeStore.nameOfResolved(indexType, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::VECTOR_INDEX_NON_INTEGER, message.toStr());
     }
 
     function emitAccessNonVector(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       baseType: Analyzer::TypeId,
     ): void {
-      let message: String = `Cannot index non-vector type '${typeStore.nameOf(baseType).toStr()}'`;
+      let message: String = `Cannot index non-vector type '${typeStore.nameOfResolved(baseType, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::ACCESS_NON_VECTOR, message.toStr());
     }
 
@@ -648,22 +672,26 @@ export namespace Analyzer {
 
     function emitInvalidCast(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       fromType: Analyzer::TypeId,
       toType: Analyzer::TypeId,
     ): void {
-      let message: String = `Cannot cast from '${typeStore.nameOf(fromType).toStr()}' to '${typeStore.nameOf(toType).toStr()}'`;
+      let message: String = `Cannot cast from '${typeStore.nameOfResolved(fromType, &*defStore, &*symbols).toStr()}' to '${typeStore.nameOfResolved(toType, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_CAST, message.toStr());
     }
 
     function emitDereferenceNonPointer(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       operandType: Analyzer::TypeId,
     ): void {
-      let message: String = `Cannot dereference non-pointer type '${typeStore.nameOf(operandType).toStr()}'`;
+      let message: String = `Cannot dereference non-pointer type '${typeStore.nameOfResolved(operandType, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::DEREFERENCE_NON_POINTER, message.toStr());
     }
 
@@ -690,12 +718,14 @@ export namespace Analyzer {
 
     function emitIntegerOverflow(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       literalText: str,
       targetType: Analyzer::TypeId,
     ): void {
-      let message: String = `Integer literal ${literalText} overflows type '${typeStore.nameOf(targetType).toStr()}'`;
+      let message: String = `Integer literal ${literalText} overflows type '${typeStore.nameOfResolved(targetType, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INTEGER_OVERFLOW, message.toStr());
     }
 
@@ -713,7 +743,9 @@ export namespace Analyzer {
 
     function emitInvalidBinaryOperandType(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       operator: Ast::Expression::BinaryOperator,
       leftType: Analyzer::TypeId,
@@ -722,9 +754,9 @@ export namespace Analyzer {
       let message: String = String::create("Binary operator '")
         .concat(Analyzer::Typecheck::shiftOrBitwiseOperatorSymbol(operator))
         .concat("' cannot be applied to types '")
-        .concat(typeStore.nameOf(leftType).toStr())
+        .concat(typeStore.nameOfResolved(leftType, &*defStore, &*symbols).toStr())
         .concat("' and '")
-        .concat(typeStore.nameOf(rightType).toStr())
+        .concat(typeStore.nameOfResolved(rightType, &*defStore, &*symbols).toStr())
         .concat("'");
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_BINARY_OPERAND_TYPE, message.toStr());
     }
@@ -748,25 +780,29 @@ export namespace Analyzer {
     /// analyzer rejects: anything but a difference of pointers to one pointee.
     function emitInvalidPointerArithmetic(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       operator: Ast::Expression::BinaryOperator,
       leftType: Analyzer::TypeId,
       rightType: Analyzer::TypeId,
     ): void {
       let operatorName: String = Ast::Serializer::renderBinaryOperator(operator);
-      let message: String = `Pointer operator '${operatorName.toStr()}' cannot be applied to types '${typeStore.nameOf(leftType).toStr()}' and '${typeStore.nameOf(rightType).toStr()}'`;
+      let message: String = `Pointer operator '${operatorName.toStr()}' cannot be applied to types '${typeStore.nameOfResolved(leftType, &*defStore, &*symbols).toStr()}' and '${typeStore.nameOfResolved(rightType, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_POINTER_ARITHMETIC, message.toStr());
     }
 
     function emitInvalidUnaryOperandType(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       operator: str,
       operandType: Analyzer::TypeId,
     ): void {
-      let message: String = `Unary operator '${operator}' cannot be applied to type '${typeStore.nameOf(operandType).toStr()}'`;
+      let message: String = `Unary operator '${operator}' cannot be applied to type '${typeStore.nameOfResolved(operandType, &*defStore, &*symbols).toStr()}'`;
       Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::INVALID_UNARY_OPERAND_TYPE, message.toStr());
     }
 
@@ -1562,6 +1598,7 @@ export namespace Analyzer {
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       actual: Analyzer::TypeId,
     ): boolean {
@@ -1572,7 +1609,7 @@ export namespace Analyzer {
       let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
       let booleanType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::BOOLEAN);
       if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, booleanType, actual)) {
-        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, booleanType, actual);
+        Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, span, booleanType, actual);
       }
       return false;
     }
@@ -3078,21 +3115,21 @@ export namespace Analyzer {
 
       let refOpt: Option<Analyzer::ResolverBodies::ResolvedRef> = Analyzer::Typecheck::lookupPatternRef(resolvedBodies, patternId);
       let Option::SOME(ref_) = refOpt else {
-        Analyzer::Typecheck::emitPatternShapeMismatch(state, typeStore, span, typeId, "record destructure", "record destructure pattern must resolve to a non-generic record");
+        Analyzer::Typecheck::emitPatternShapeMismatch(state, defStore, typeStore, symbols, span, typeId, "record destructure", "record destructure pattern must resolve to a non-generic record");
         return false;
       };
 
       let constructorDefId: Analyzer::DefinitionId = match (ref_) {
         Analyzer::ResolverBodies::ResolvedRef::Definition(defId) -> defId,
         _ -> {
-          Analyzer::Typecheck::emitPatternShapeMismatch(state, typeStore, span, typeId, "record destructure", "record destructure pattern must resolve to a non-generic record");
+          Analyzer::Typecheck::emitPatternShapeMismatch(state, defStore, typeStore, symbols, span, typeId, "record destructure", "record destructure pattern must resolve to a non-generic record");
           return false;
         },
       };
 
       let constructorTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::definitionType(defStore, typeStore, constructorDefId);
       let Option::SOME(constructorType) = constructorTypeOpt else {
-        Analyzer::Typecheck::emitPatternShapeMismatch(state, typeStore, span, typeId, "record destructure", "record destructure pattern must resolve to a non-generic record");
+        Analyzer::Typecheck::emitPatternShapeMismatch(state, defStore, typeStore, symbols, span, typeId, "record destructure", "record destructure pattern must resolve to a non-generic record");
         return false;
       };
 
@@ -3110,13 +3147,13 @@ export namespace Analyzer {
       };
 
       if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, typeId, constructorType)) {
-        Analyzer::Typecheck::emitPatternShapeMismatch(state, typeStore, span, typeId, "record destructure", "record destructure pattern does not match annotated record type");
+        Analyzer::Typecheck::emitPatternShapeMismatch(state, defStore, typeStore, symbols, span, typeId, "record destructure", "record destructure pattern does not match annotated record type");
         return false;
       }
 
       let expectedFieldCount: u64 = Analyzer::Typecheck::recordFieldCount(defStore, expectedRecordDefId);
       if (pattern.arguments.length() != expectedFieldCount) {
-        Analyzer::Typecheck::emitPatternShapeMismatch(state, typeStore, span, typeId, "record destructure", "record destructure field count mismatch");
+        Analyzer::Typecheck::emitPatternShapeMismatch(state, defStore, typeStore, symbols, span, typeId, "record destructure", "record destructure field count mismatch");
         return false;
       }
 
@@ -3128,7 +3165,7 @@ export namespace Analyzer {
         };
         let fieldTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::astRecordFieldTypeAt(defStore, typeStore, symbols, module, pattern, index);
         let Option::SOME(fieldType) = fieldTypeOpt else {
-          Analyzer::Typecheck::emitPatternShapeMismatch(state, typeStore, span, typeId, "record destructure", "record destructure field type is unavailable");
+          Analyzer::Typecheck::emitPatternShapeMismatch(state, defStore, typeStore, symbols, span, typeId, "record destructure", "record destructure field type is unavailable");
           return false;
         };
 
@@ -3185,7 +3222,7 @@ export namespace Analyzer {
       let expectedEnumDefId: Analyzer::DefinitionId = enumOwner.defId;
 
       let Option::SOME(variantDefNode) = defStore.get(variantDefId) else {
-        Analyzer::Typecheck::emitPatternShapeMismatch(state, typeStore, span, typeId, "enum variant", "enum variant pattern must resolve to a variant of the scrutinee's enum");
+        Analyzer::Typecheck::emitPatternShapeMismatch(state, defStore, typeStore, symbols, span, typeId, "enum variant", "enum variant pattern must resolve to a variant of the scrutinee's enum");
         return false;
       };
 
@@ -3197,13 +3234,13 @@ export namespace Analyzer {
           tagValue: v.tagValue,
         },
         _ -> {
-          Analyzer::Typecheck::emitPatternShapeMismatch(state, typeStore, span, typeId, "enum variant", "enum variant pattern must resolve to a variant of the scrutinee's enum");
+          Analyzer::Typecheck::emitPatternShapeMismatch(state, defStore, typeStore, symbols, span, typeId, "enum variant", "enum variant pattern must resolve to a variant of the scrutinee's enum");
           return false;
         },
       };
 
       if (variant.owner.raw() != expectedEnumDefId.raw()) {
-        Analyzer::Typecheck::emitPatternShapeMismatch(state, typeStore, span, typeId, "enum variant", "enum variant pattern does not belong to the scrutinee's enum");
+        Analyzer::Typecheck::emitPatternShapeMismatch(state, defStore, typeStore, symbols, span, typeId, "enum variant", "enum variant pattern does not belong to the scrutinee's enum");
         return false;
       }
 
@@ -3222,7 +3259,7 @@ export namespace Analyzer {
           continue;
         };
         let Option::SOME(payloadType) = variant.payload.get(index) else {
-          Analyzer::Typecheck::emitPatternShapeMismatch(state, typeStore, span, typeId, "enum variant", "enum variant payload type is unavailable");
+          Analyzer::Typecheck::emitPatternShapeMismatch(state, defStore, typeStore, symbols, span, typeId, "enum variant", "enum variant payload type is unavailable");
           return false;
         };
 
@@ -3310,6 +3347,7 @@ export namespace Analyzer {
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
       pattern: &Ast::Pattern::Literal,
       typeId: Analyzer::TypeId,
@@ -3330,6 +3368,7 @@ export namespace Analyzer {
         state,
         defStore,
         typeStore,
+        symbols,
         pattern.expression,
         &literal,
         Option::SOME(typeId),
@@ -3342,7 +3381,7 @@ export namespace Analyzer {
       };
 
       if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, pattern.span, typeId, actualType)) {
-        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, pattern.span, typeId, actualType);
+        Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, pattern.span, typeId, actualType);
         return false;
       }
 
@@ -3388,13 +3427,13 @@ export namespace Analyzer {
       }
 
       if (!scrutineeIsTuple) {
-        Analyzer::Typecheck::emitPatternTypeMismatch(state, typeStore, pattern.span, typeId, "tuple");
+        Analyzer::Typecheck::emitPatternTypeMismatch(state, defStore, typeStore, symbols, pattern.span, typeId, "tuple");
         return false;
       }
 
       if (pattern.elements.length() != elementTypes.length()) {
         let got: String = `tuple with ${pattern.elements.length()} elements`;
-        Analyzer::Typecheck::emitPatternTypeMismatch(state, typeStore, pattern.span, typeId, got.toStr());
+        Analyzer::Typecheck::emitPatternTypeMismatch(state, defStore, typeStore, symbols, pattern.span, typeId, got.toStr());
         return false;
       }
 
@@ -3549,6 +3588,7 @@ export namespace Analyzer {
             state,
             defStore,
             typeStore,
+            symbols,
             module,
             &literal,
             typeId,
@@ -4724,6 +4764,7 @@ export namespace Analyzer {
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       exprId: Ast::ExpressionId,
       literal: &Ast::Expression::Literal,
       expected: Option<Analyzer::TypeId>,
@@ -4762,7 +4803,7 @@ export namespace Analyzer {
                 if (Analyzer::Typecheck::isIntegerTypeNode(expectedNode)) {
                   if (!Analyzer::Typecheck::signedLiteralFits(expectedNode, value)) {
                     let literalText: String = String::create(value);
-                    Analyzer::Typecheck::emitIntegerOverflow(state, typeStore, literal.span, literalText.toStr(), expectedType);
+                    Analyzer::Typecheck::emitIntegerOverflow(state, defStore, typeStore, symbols, literal.span, literalText.toStr(), expectedType);
                     return Option::NONE;
                   }
 
@@ -4774,7 +4815,7 @@ export namespace Analyzer {
                 if (Analyzer::Typecheck::isIntegerTypeNode(expectedNode)) {
                   if (!Analyzer::Typecheck::unsignedLiteralFits(expectedNode, value)) {
                     let literalText: String = String::create(value);
-                    Analyzer::Typecheck::emitIntegerOverflow(state, typeStore, literal.span, literalText.toStr(), expectedType);
+                    Analyzer::Typecheck::emitIntegerOverflow(state, defStore, typeStore, symbols, literal.span, literalText.toStr(), expectedType);
                     return Option::NONE;
                   }
 
