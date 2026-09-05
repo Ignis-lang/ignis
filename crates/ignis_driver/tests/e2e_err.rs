@@ -1659,3 +1659,44 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_err_consuming_combinator_on_borrowed_option() {
+  e2e_error_test(
+    "err_consuming_combinator_on_borrowed_option",
+    r#"
+@implements(Drop)
+record Payload {
+    public tag: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Maybe<S> {
+    SOME(S),
+    NONE,
+
+    public map<U>(self, @noescape f: (S) -> U): Maybe<U> {
+        return match (self) {
+            Maybe::SOME(s) -> Maybe::SOME(f(s)),
+            Maybe::NONE -> Maybe::NONE,
+        };
+    }
+}
+
+function tagOf(source: &Maybe<Payload>): Maybe<i32> {
+    return source.map<i32>((payload: Payload): i32 -> {
+        return payload.tag;
+    });
+}
+
+function main(): i32 {
+    let source: Maybe<Payload> = Maybe::SOME(Payload { tag: 42 });
+    tagOf(&source);
+    return 0;
+}
+"#,
+  );
+}

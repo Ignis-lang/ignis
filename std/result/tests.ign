@@ -1,0 +1,183 @@
+import Result from "std::result";
+import String from "std::string";
+import Test from "std::test";
+
+function ownedOk(text: str): Result<String, String> {
+  return Result::OK(String::create(text));
+}
+
+function ownedError(text: str): Result<String, String> {
+  return Result::ERROR(String::create(text));
+}
+
+@test
+function unwrapMovesTheOwningOkPayloadOut(): void {
+  let source: Result<String, String> = ownedOk("alpha");
+  let taken: String = source.unwrap();
+
+  Test::assertEq<str>(taken.toStr(), "alpha");
+}
+
+@test
+function unwrapErrMovesTheOwningErrorPayloadOut(): void {
+  let source: Result<String, String> = ownedError("boom");
+  let taken: String = source.unwrapErr();
+
+  Test::assertEq<str>(taken.toStr(), "boom");
+}
+
+@test
+function unwrapOrPicksTheOwningPayloadOrTheOwningDefault(): void {
+  let present: Result<String, String> = ownedOk("alpha");
+  let kept: String = present.unwrapOr(String::create("fallback"));
+
+  Test::assertEq<str>(kept.toStr(), "alpha");
+
+  let failed: Result<String, String> = ownedError("boom");
+  let replaced: String = failed.unwrapOr(String::create("fallback"));
+
+  Test::assertEq<str>(replaced.toStr(), "fallback");
+}
+
+@test
+function unwrapOrElseMovesTheOwningErrorIntoTheCallback(): void {
+  let failed: Result<String, String> = ownedError("boom");
+  let recovered: String = failed.unwrapOrElse((error: String): String -> {
+    let mut message: String = error;
+    message.pushStr("-handled");
+    return message;
+  });
+
+  Test::assertEq<str>(recovered.toStr(), "boom-handled");
+}
+
+@test
+function mapMovesTheOwningOkPayloadIntoTheCallback(): void {
+  let source: Result<String, String> = ownedOk("alpha");
+  let mapped: Result<u64, String> = source.map<u64>((text: String): u64 -> {
+    return text.length();
+  });
+
+  Test::assertEq<u64>(mapped.unwrap(), 5);
+}
+
+@test
+function mapLeavesTheOwningErrorPayloadUntouched(): void {
+  let failed: Result<String, String> = ownedError("boom");
+  let mapped: Result<u64, String> = failed.map<u64>((text: String): u64 -> {
+    return text.length();
+  });
+
+  Test::assertEq<str>(mapped.unwrapErr().toStr(), "boom");
+}
+
+@test
+function mapErrMovesTheOwningErrorPayloadIntoTheCallback(): void {
+  let failed: Result<String, String> = ownedError("boom");
+  let mapped: Result<String, u64> = failed.mapErr<u64>((error: String): u64 -> {
+    return error.length();
+  });
+
+  Test::assertEq<u64>(mapped.unwrapErr(), 4);
+}
+
+@test
+function andThenMovesTheOwningOkPayloadIntoTheCallback(): void {
+  let source: Result<String, String> = ownedOk("alpha");
+  let chained: Result<String, String> = source.andThen<String>((text: String): Result<String, String> -> {
+    let mut grown: String = text;
+    grown.pushStr("-chained");
+    return Result::OK(grown);
+  });
+
+  Test::assertEq<str>(chained.unwrap().toStr(), "alpha-chained");
+}
+
+@test
+function orElseMovesTheOwningErrorPayloadIntoTheCallback(): void {
+  let failed: Result<String, String> = ownedError("boom");
+  let recovered: Result<String, String> = failed.orElse<String>((error: String): Result<String, String> -> {
+    let mut message: String = error;
+    message.pushStr("-recovered");
+    return Result::OK(message);
+  });
+
+  Test::assertEq<str>(recovered.unwrap().toStr(), "boom-recovered");
+}
+
+@test
+function inspectBorrowsTheOwningOkPayloadAndHandsItBack(): void {
+  let mut seen: u64 = 0;
+
+  let passed: Result<String, String> = ownedOk("alpha").inspect((text: &String): void -> {
+    seen = text.length();
+  });
+
+  Test::assertEq<u64>(seen, 5);
+  Test::assertEq<str>(passed.unwrap().toStr(), "alpha");
+}
+
+@test
+function inspectErrBorrowsTheOwningErrorPayloadAndHandsItBack(): void {
+  let mut seen: u64 = 0;
+
+  let passed: Result<String, String> = ownedError("boom").inspectErr((error: &String): void -> {
+    seen = error.length();
+  });
+
+  Test::assertEq<u64>(seen, 4);
+  Test::assertEq<str>(passed.unwrapErr().toStr(), "boom");
+}
+
+@test
+function observersLeaveTheOwningResultUsable(): void {
+  let source: Result<String, String> = ownedOk("alpha");
+
+  Test::assert(source.isOk());
+  Test::assert(!source.isError());
+  Test::assert(source.isOk());
+
+  Test::assertEq<str>(source.unwrap().toStr(), "alpha");
+}
+
+@test
+function matchingOnABorrowAvoidsConsumingTheResult(): void {
+  let source: Result<String, String> = ownedOk("alpha");
+
+  let observed: u64 = match (&source) {
+    Result::OK(text) -> text.length(),
+    Result::ERROR(error) -> error.length(),
+  };
+
+  Test::assertEq<u64>(observed, 5);
+  Test::assertEq<str>(source.unwrap().toStr(), "alpha");
+}
+
+@test
+function cloningThePayloadAllowsASecondConsumingCall(): void {
+  let source: Result<String, String> = ownedOk("alpha");
+
+  let copy: Result<String, String> = match (&source) {
+    Result::OK(text) -> Result::OK(text.clone()),
+    Result::ERROR(error) -> Result::ERROR(error.clone()),
+  };
+
+  Test::assertEq<u64>(copy.unwrap().length(), 5);
+  Test::assertEq<str>(source.unwrap().toStr(), "alpha");
+}
+
+@test
+function chainedCombinatorsMoveTheOwningPayloadOnce(): void {
+  let total: Result<u64, String> = ownedOk("alpha")
+    .inspect((text: &String): void -> { Test::assert(text.length() == 5); })
+    .map<String>((text: String): String -> {
+      let mut grown: String = text;
+      grown.pushStr("!");
+      return grown;
+    })
+    .andThen<u64>((text: String): Result<u64, String> -> {
+      return Result::OK(text.length());
+    });
+
+  Test::assertEq<u64>(total.unwrap(), 6);
+}
