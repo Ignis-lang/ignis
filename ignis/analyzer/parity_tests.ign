@@ -154,6 +154,34 @@ function parityAcceptsSourceWithLint(source: str, code: str, expectedCount: u64)
   Test::assertEq<u64>(checked.diagnostics.length(), 0);
 }
 
+/// Runs `source` through the whole selfhost pipeline and asserts that it draws
+/// no errors and reports `code` exactly `expectedCount` times as a warning.
+///
+/// Unlike `parityAcceptsSourceWithLint`, other warnings the same source draws
+/// are left alone: a fixture whose point is one warning should not also freeze
+/// the lints that happen to fire on its scaffolding.
+function parityAcceptsSourceWithWarning(source: str, code: str, expectedCount: u64): void {
+  let file: SourceFile = SourceFile::create("parity_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parityCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(parityCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(parityCountErrors(&output.diagnostics), 0);
+  Test::assertEq<u64>(parityCountCode(&output.diagnostics, code), expectedCount);
+}
+
 /// Runs `source` through the same pipeline and asserts that `code` is reported
 /// exactly `expectedCount` times.
 ///
@@ -759,11 +787,10 @@ function parityArgumentCountMismatch(): void {
 }
 
 /// Origin: golden_err::unreachable_code.
-/// Host expectation: A0025.
-/// Divergence: the host reports this as a WARNING, the selfhost as an ERROR.
+/// Host expectation: A0025, reported as a warning, so the program still compiles.
 @test
 function parityUnreachableCode(): void {
-  parityRejectsSource(
+  parityAcceptsSourceWithWarning(
     "function main(): void {\n    return;\n    let x: i32 = 1;\n}\n",
     DiagnosticCode::UNREACHABLE_CODE,
     1,
