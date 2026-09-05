@@ -6,6 +6,7 @@ import
   Severity,
   SourceSpan,
 from "@compiler::diagnostics";
+import HashMap from "std::collections";
 
 export namespace Analyzer {
   namespace Imports {
@@ -86,6 +87,11 @@ export namespace Analyzer {
       public syms: Vector<Analyzer::SymbolId>;
       public defs: Vector<Analyzer::DefinitionId>;
       public qualifiedNames: Vector<String>;
+      /// Entry positions grouped by the raw symbol of the name they declare,
+      /// in insertion order. Every lookup by symbol filters on that symbol
+      /// first, so the bucket holds the same candidates the parallel vectors
+      /// would have been scanned for, in the same order.
+      public entriesBySym: HashMap<u32, Vector<u64>>;
     }
 
     function emptyProgramQualifiedIndex(): Analyzer::Imports::ProgramQualifiedIndex {
@@ -93,6 +99,7 @@ export namespace Analyzer {
         syms: Vector::new<Analyzer::SymbolId>(),
         defs: Vector::new<Analyzer::DefinitionId>(),
         qualifiedNames: Vector::new<String>(),
+        entriesBySym: HashMap::new<u32, Vector<u64>>(),
       };
     }
 
@@ -108,28 +115,44 @@ export namespace Analyzer {
         return;
       }
 
-      let mut i: u64 = 0;
-      while (i < index.syms.length()) {
-        let Option::SOME(existingSym) = index.syms.get(i) else {
-          i += 1;
-          continue;
-        };
+      let symRaw: u32 = sym.raw();
 
-        if (existingSym.raw() == sym.raw()) {
-          if (let Option::SOME(existingQualified) = index.qualifiedNames.get(i)) {
+      if (let Option::SOME(bucket) = index.entriesBySym.get(&symRaw)) {
+        let mut i: u64 = 0;
+
+        while (i < bucket.length()) {
+          let mut entry: u64 = 0;
+
+          if (let Option::SOME(position) = bucket.get(i)) {
+            entry = *position;
+          }
+
+          if (let Option::SOME(existingQualified) = index.qualifiedNames.get(entry)) {
             if (existingQualified.equals(qualifiedName.toStr())) {
               return;
             }
           }
-        }
 
-        i += 1;
+          i += 1;
+        }
       }
 
       let mut indexRef: &mut Analyzer::Imports::ProgramQualifiedIndex = index;
+      let position: u64 = indexRef.syms.length();
+
       indexRef.syms.push(sym);
       indexRef.defs.push(def);
       indexRef.qualifiedNames.push(qualifiedName);
+
+      if (let Option::SOME(bucket) = indexRef.entriesBySym.getMut(&symRaw)) {
+        let mut bucketRef: &mut Vector<u64> = bucket;
+        bucketRef.push(position);
+        return;
+      }
+
+      let mut bucket: Vector<u64> = Vector::new<u64>();
+      bucket.push(position);
+      indexRef.entriesBySym.insert(symRaw, bucket);
     }
 
     /// Whether `candidate` ends with `suffix`, byte for byte.
@@ -153,34 +176,34 @@ export namespace Analyzer {
       writtenPath: &String,
     ): Option<Analyzer::DefinitionId> {
       let suffix: String = `::${writtenPath.toStr()}`;
-      let mut i: u64 = 0;
+      let symRaw: u32 = sym.raw();
 
-      while (i < index.syms.length()) {
-        let Option::SOME(candidateSym) = index.syms.get(i) else {
-          i += 1;
-          continue;
-        };
+      let Option::SOME(bucket) = index.entriesBySym.get(&symRaw) else {
+        return Option::NONE;
+      };
 
-        if (candidateSym.raw() != sym.raw()) {
-          i += 1;
-          continue;
+      let mut position: u64 = 0;
+
+      while (position < bucket.length()) {
+        let mut i: u64 = 0;
+
+        if (let Option::SOME(entry) = bucket.get(position)) {
+          i = *entry;
         }
 
+        position += 1;
+
         let Option::SOME(candidate) = index.qualifiedNames.get(i) else {
-          i += 1;
           continue;
         };
 
         if (candidate.equals(writtenPath.toStr()) || Analyzer::Imports::programPathEndsWith(candidate, &suffix)) {
           let Option::SOME(defId) = index.defs.get(i) else {
-            i += 1;
             continue;
           };
 
           return Option::SOME(*defId);
         }
-
-        i += 1;
       }
 
       return Option::NONE;

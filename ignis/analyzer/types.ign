@@ -1,4 +1,5 @@
-import Eq from "std::hash";
+import Eq, Hasher from "std::hash";
+import HashMap from "std::collections";
 
 import Id from "@compiler::ids";
 import IndexVec from "@compiler::indexing";
@@ -948,11 +949,131 @@ export namespace Analyzer {
     }
   }
 
+  /// The key the type store's interning index uses.
+  ///
+  /// `Analyzer::Type` carries no `Hash` implementation, so a compound type is
+  /// keyed by a hash written from its variant tag and the ids its payload
+  /// holds — the same components `Analyzer::Type::equals` compares. A bucket
+  /// is therefore a candidate list and not an answer: `internCompound` still
+  /// compares every candidate, which keeps a collision costing one comparison
+  /// instead of merging two distinct types.
+  function compoundTypeKey(kind: &Analyzer::Type): u64 {
+    let mut hasher: Hasher = Hasher::new();
+
+    match (kind) {
+      Analyzer::Type::I8
+      | Analyzer::Type::I16
+      | Analyzer::Type::I32
+      | Analyzer::Type::I64
+      | Analyzer::Type::U8
+      | Analyzer::Type::U16
+      | Analyzer::Type::U32
+      | Analyzer::Type::U64
+      | Analyzer::Type::F32
+      | Analyzer::Type::F64
+      | Analyzer::Type::BOOLEAN
+      | Analyzer::Type::CHAR
+      | Analyzer::Type::STR
+      | Analyzer::Type::VOID
+      | Analyzer::Type::NEVER
+      | Analyzer::Type::ATOM -> {
+        hasher.writeByte(0);
+      },
+      Analyzer::Type::Pointer(pointer) -> {
+        hasher.writeByte(1);
+        hasher.writeU32(pointer.pointee.raw());
+        hasher.writeBoolean(pointer.mutable);
+      },
+      Analyzer::Type::Reference(reference) -> {
+        hasher.writeByte(2);
+        hasher.writeU32(reference.referent.raw());
+        hasher.writeBoolean(reference.mutable);
+      },
+      Analyzer::Type::Slice(element) -> {
+        hasher.writeByte(3);
+        hasher.writeU32(element.raw());
+      },
+      Analyzer::Type::FixedArray(element, length) -> {
+        hasher.writeByte(4);
+        hasher.writeU32(element.raw());
+        hasher.writeU64(length);
+      },
+      Analyzer::Type::Tuple(tuple) -> {
+        hasher.writeByte(5);
+        hasher.writeU64(tuple.elements.length());
+
+        let mut index: u64 = 0;
+
+        while (index < tuple.elements.length()) {
+          if (let Option::SOME(element) = tuple.elements.get(index)) {
+            hasher.writeU32(element.raw());
+          }
+
+          index += 1;
+        }
+      },
+      Analyzer::Type::Function(signature) -> {
+        hasher.writeByte(6);
+        hasher.writeU64(signature.params.length());
+
+        let mut index: u64 = 0;
+
+        while (index < signature.params.length()) {
+          if (let Option::SOME(param) = signature.params.get(index)) {
+            hasher.writeU32(param.raw());
+          }
+
+          index += 1;
+        }
+
+        hasher.writeU32(signature.returnType.raw());
+      },
+      Analyzer::Type::Record(defId) -> {
+        hasher.writeByte(7);
+        hasher.writeU32(defId.raw());
+      },
+      Analyzer::Type::Enum(defId) -> {
+        hasher.writeByte(8);
+        hasher.writeU32(defId.raw());
+      },
+      Analyzer::Type::Param(symbol) -> {
+        hasher.writeByte(9);
+        hasher.writeU32(symbol.raw());
+      },
+      Analyzer::Type::Instance(instance) -> {
+        hasher.writeByte(10);
+        hasher.writeU32(instance.definition.raw());
+        hasher.writeU64(instance.typeArguments.length());
+
+        let mut index: u64 = 0;
+
+        while (index < instance.typeArguments.length()) {
+          if (let Option::SOME(argument) = instance.typeArguments.get(index)) {
+            hasher.writeU32(argument.raw());
+          }
+
+          index += 1;
+        }
+      },
+      Analyzer::Type::Alias(defId) -> {
+        hasher.writeByte(11);
+        hasher.writeU32(defId.raw());
+      },
+    };
+
+    return hasher.finish();
+  }
+
   /// Owns all interned types and caches one canonical `Analyzer::TypeId` per primitive.
   /// The set of primitives is finite and known at construction time, so the
   /// store eagerly allocates one slot per variant during `init()`.
   record TypeStore {
     types: IndexVec<Analyzer::TypeTag, Analyzer::Type>;
+    /// Ids of the interned compound types, grouped by `compoundTypeKey`.
+    /// Interning used to walk the whole store; a bucket holds the same
+    /// candidates in the same order, so the first structural match is the
+    /// one the scan reached.
+    compoundIds: HashMap<u64, Vector<Analyzer::TypeId>>;
     primI8: Analyzer::TypeId;
     primI16: Analyzer::TypeId;
     primI32: Analyzer::TypeId;
@@ -992,6 +1113,7 @@ export namespace Analyzer {
 
       return TypeStore {
         types: storage,
+        compoundIds: HashMap::new<u64, Vector<Analyzer::TypeId>>(),
         primI8: idI8,
         primI16: idI16,
         primI32: idI32,
@@ -1048,29 +1170,43 @@ export namespace Analyzer {
       };
     }
 
-    /// Performs a linear scan of `self.types` for a structurally equal entry.
-    /// Inserts a new entry on miss and returns the resulting id.
+    /// Looks for a structurally equal entry among the ids that share `kind`'s
+    /// hash key. Inserts a new entry on miss and returns the resulting id.
     /// Must only be called for compound (non-primitive) variants.
     private internCompound(&mut self, kind: Analyzer::Type): Analyzer::TypeId {
-      let length: u64 = self.types.length();
-      let mut index: u64 = 0;
+      let key: u64 = Analyzer::compoundTypeKey(&kind);
 
-      while (index < length) {
-        let id: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(index as u32);
+      if (let Option::SOME(bucket) = self.compoundIds.get(&key)) {
+        let mut index: u64 = 0;
 
-        match (self.types.get(id)) {
-          Option::SOME(existing) -> {
-            if (existing.equals(&kind)) {
-              return id;
-            }
-          },
-          Option::NONE -> {},
-        };
+        while (index < bucket.length()) {
+          let mut candidate: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
 
-        index += 1;
+          if (let Option::SOME(entry) = bucket.get(index)) {
+            candidate = *entry;
+          }
+
+          if (let Option::SOME(existing) = self.types.get(candidate) && existing.equals(&kind)) {
+            return candidate;
+          }
+
+          index += 1;
+        }
       }
 
-      return self.types.push(kind);
+      let id: Analyzer::TypeId = self.types.push(kind);
+
+      if (let Option::SOME(bucket) = self.compoundIds.getMut(&key)) {
+        let mut bucketRef: &mut Vector<Analyzer::TypeId> = bucket;
+        bucketRef.push(id);
+        return id;
+      }
+
+      let mut bucket: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+      bucket.push(id);
+      self.compoundIds.insert(key, bucket);
+
+      return id;
     }
 
     /// Returns the canonical id for an immutable pointer-to-`pointee` type (`*T`).
