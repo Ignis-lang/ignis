@@ -183,11 +183,24 @@ compile_stage() {
 # (`IGNIS_STAGE0` pointed at the nightly's official asset). The two take
 # different command forms: the host reads ignis.toml through `ignis build`,
 # while a selfhost binary is invoked directly like every other stage, on
-# `ignis/main.ign`. `--version` tells them apart: the host's clap CLI prints a
-# version banner and exits 0; the selfhost CLI has no such flag and rejects it
-# as an unknown argument.
+# `ignis/main.ign`. The nightly records which one it resolved in
+# `stage0.json`; a developer can say so with `IGNIS_STAGE0_KIND=selfhost|host`.
+# Only when neither is present does `--version` decide: the host's clap CLI
+# exits 0, while the selfhost CLI rejects the flag today. That probe stops
+# discriminating once the selfhost learns `--version`, which is why it is the
+# last resort and not the rule.
 stage0_is_selfhost() {
   local bin="$1"
+  local recorded_kind=""
+
+  if [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]]; then
+    recorded_kind="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("kind", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
+  fi
+
+  case "${IGNIS_STAGE0_KIND:-$recorded_kind}" in
+    selfhost|official) return 0 ;;
+    host) return 1 ;;
+  esac
 
   "$bin" --version >/dev/null 2>&1 && return 1
   return 0
