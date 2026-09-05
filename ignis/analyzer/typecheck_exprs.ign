@@ -206,7 +206,7 @@ export namespace Analyzer {
         // Two pointers reach here only when they are not a same-pointee
         // difference, which the reference analyzer names as pointer arithmetic.
         if (bothPointers) {
-          Analyzer::Typecheck::emitInvalidPointerArithmetic(state, typeStore, b.span, b.operator, leftType, rightType);
+          Analyzer::Typecheck::emitInvalidPointerArithmetic(state, defStore, typeStore, symbols, b.span, b.operator, leftType, rightType);
           return Option::NONE;
         }
 
@@ -224,7 +224,7 @@ export namespace Analyzer {
           return Option::SOME(rightType);
         }
 
-        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
+        Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, b.span, leftType, rightType);
         return Option::NONE;
       }
 
@@ -273,7 +273,7 @@ export namespace Analyzer {
           return Option::SOME(booleanType);
         }
 
-        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
+        Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, b.span, leftType, rightType);
         return Option::NONE;
       }
 
@@ -297,13 +297,13 @@ export namespace Analyzer {
           return Option::SOME(booleanType);
         }
 
-        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, b.span, leftType, rightType);
+        Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, b.span, leftType, rightType);
         return Option::NONE;
       }
 
       if (Analyzer::Typecheck::isLogicalBinaryOperator(b.operator)) {
-        let leftValid: boolean = Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, b.span, leftType);
-        let rightValid: boolean = Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, b.span, rightType);
+        let leftValid: boolean = Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, symbols, b.span, leftType);
+        let rightValid: boolean = Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, symbols, b.span, rightType);
         if (leftValid && rightValid) {
           let booleanType: Analyzer::TypeId = Analyzer::Typecheck::binaryBooleanType(typeStore);
           Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
@@ -318,7 +318,7 @@ export namespace Analyzer {
         let rightIsInteger: boolean = Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, b.span, rightType);
 
         if (!leftIsInteger || !rightIsInteger) {
-          Analyzer::Typecheck::emitInvalidBinaryOperandType(state, typeStore, b.span, b.operator, leftType, rightType);
+          Analyzer::Typecheck::emitInvalidBinaryOperandType(state, defStore, typeStore, symbols, b.span, b.operator, leftType, rightType);
           return Option::NONE;
         }
 
@@ -554,7 +554,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      if (!Analyzer::Typecheck::assignmentValueMatchesTarget(state, defStore, typeStore, value.span, value.operator, targetType, actualType)) {
+      if (!Analyzer::Typecheck::assignmentValueMatchesTarget(state, defStore, typeStore, symbols, value.span, value.operator, targetType, actualType)) {
         return Option::NONE;
       }
 
@@ -587,6 +587,7 @@ export namespace Analyzer {
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       operator: Ast::Expression::AssignmentOperator,
       targetType: Analyzer::TypeId,
@@ -594,7 +595,7 @@ export namespace Analyzer {
     ): boolean {
       if (operator == Ast::Expression::AssignmentOperator::Assign) {
         if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, targetType, actualType)) {
-          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, targetType, actualType);
+          Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, span, targetType, actualType);
           return false;
         }
 
@@ -606,7 +607,7 @@ export namespace Analyzer {
 
       if (!targetNumeric || !valueNumeric) {
         let operatorName: String = Ast::Serializer::renderAssignmentOperator(operator);
-        let message: String = `Compound assignment operator '${operatorName.toStr()}' cannot be applied to type '${typeStore.nameOf(targetType).toStr()}'`;
+        let message: String = `Compound assignment operator '${operatorName.toStr()}' cannot be applied to type '${typeStore.nameOfResolved(targetType, &*defStore, &*symbols).toStr()}'`;
         Analyzer::Typecheck::emitDiagnostic(
           state,
           span,
@@ -617,7 +618,7 @@ export namespace Analyzer {
       }
 
       if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, targetType, actualType)) {
-        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, targetType, actualType);
+        Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, span, targetType, actualType);
         return false;
       }
 
@@ -755,7 +756,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      if (!Analyzer::Typecheck::assignmentValueMatchesTarget(state, defStore, typeStore, value.span, value.operator, targetType, actualType)) {
+      if (!Analyzer::Typecheck::assignmentValueMatchesTarget(state, defStore, typeStore, symbols, value.span, value.operator, targetType, actualType)) {
         return Option::NONE;
       }
 
@@ -1184,7 +1185,7 @@ export namespace Analyzer {
         if (let Option::SOME(expectedPayload) = expectedType) {
           if (let Option::SOME(actual) = actualOpt) {
             if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, expectedPayload, actual)) {
-              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, index + 1, expectedPayload, actual);
+              Analyzer::Typecheck::emitInvalidArgumentType(state, defStore, typeStore, symbols, call.span, index + 1, expectedPayload, actual);
             }
           }
         }
@@ -1257,7 +1258,7 @@ export namespace Analyzer {
       };
 
       let Analyzer::Type::Function(signature) = calleeType else {
-        Analyzer::Typecheck::emitCallOnNonCallable(state, typeStore, call.span, binding.typeId);
+        Analyzer::Typecheck::emitCallOnNonCallable(state, defStore, typeStore, symbols, call.span, binding.typeId);
         return Option::NONE;
       };
 
@@ -1327,7 +1328,7 @@ export namespace Analyzer {
         if (let Option::SOME(expectedType) = expectedParam) {
           if (let Option::SOME(actualType) = actualOpt) {
             if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, expectedType, actualType)) {
-              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, argIndex + 1, expectedType, actualType);
+              Analyzer::Typecheck::emitInvalidArgumentType(state, defStore, typeStore, symbols, call.span, argIndex + 1, expectedType, actualType);
             }
           }
         }
@@ -1813,7 +1814,7 @@ export namespace Analyzer {
         match (paramDef) {
           Analyzer::Definition::Variable(parameter) -> {
             if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, call.span, parameter.declaredType, argumentType)) {
-              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, call.span, index + 1, parameter.declaredType, argumentType);
+              Analyzer::Typecheck::emitInvalidArgumentType(state, defStore, typeStore, symbols, call.span, index + 1, parameter.declaredType, argumentType);
               Analyzer::Typecheck::recordExprType(state, callExprId, signature.returnType);
               return Option::SOME(signature.returnType);
             }
@@ -2399,6 +2400,7 @@ export namespace Analyzer {
     function overloadSignatureText(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       defId: Analyzer::DefinitionId,
     ): String {
       let Option::SOME(signature) = Analyzer::Typecheck::extractFunctionSignature(defStore, defId) else {
@@ -2420,7 +2422,7 @@ export namespace Analyzer {
             rendered.pushStr(", ");
           }
 
-          let paramName: String = typeStore.nameOf(parameter.declaredType);
+          let paramName: String = typeStore.nameOfResolved(parameter.declaredType, &*defStore, &*symbols);
           rendered.pushStr(paramName.toStr());
           written += 1;
         }
@@ -2428,7 +2430,7 @@ export namespace Analyzer {
         paramIndex += 1;
       }
 
-      let returnName: String = typeStore.nameOf(signature.returnType);
+      let returnName: String = typeStore.nameOfResolved(signature.returnType, &*defStore, &*symbols);
       rendered.pushStr("): ");
       rendered.pushStr(returnName.toStr());
 
@@ -2438,7 +2440,9 @@ export namespace Analyzer {
     /// The argument types of a rejected call, rendered as the reference
     /// analyzer lists them inside the parentheses of an overload diagnostic.
     function overloadArgumentTypesText(
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       argTypes: &Vector<Analyzer::TypeId>,
     ): String {
       let mut rendered: String = String::create("");
@@ -2454,7 +2458,7 @@ export namespace Analyzer {
           rendered.pushStr(", ");
         }
 
-        let argName: String = typeStore.nameOf(*argType);
+        let argName: String = typeStore.nameOfResolved(*argType, &*defStore, &*symbols);
         rendered.pushStr(argName.toStr());
         index += 1;
       }
@@ -2467,6 +2471,7 @@ export namespace Analyzer {
     function overloadSignatureListText(
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       candidates: &Vector<Analyzer::DefinitionId>,
     ): String {
       let mut rendered: String = String::create("");
@@ -2482,7 +2487,7 @@ export namespace Analyzer {
           rendered.pushStr("\n    - ");
         }
 
-        let signature: String = Analyzer::Typecheck::overloadSignatureText(defStore, typeStore, *candidateDefId);
+        let signature: String = Analyzer::Typecheck::overloadSignatureText(defStore, typeStore, symbols, *candidateDefId);
         rendered.pushStr(signature.toStr());
         index += 1;
       }
@@ -2731,16 +2736,16 @@ export namespace Analyzer {
       }
 
       if (bestDefIds.length() == 0) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(typeStore, &argTypes);
-        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, candidates);
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, &argTypes);
+        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, candidates);
         let message: String = `No overload matches call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Available signatures:\n    - ${signaturesText.toStr()}`;
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
         return Option::NONE;
       }
 
       if (bestDefIds.length() > 1) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(typeStore, &argTypes);
-        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, &bestDefIds);
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, &argTypes);
+        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, &bestDefIds);
         let message: String = `Ambiguous overload call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Matching signatures:\n    - ${signaturesText.toStr()}`;
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
         return Option::NONE;
@@ -2835,16 +2840,16 @@ export namespace Analyzer {
       }
 
       if (bestDefIds.length() == 0) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(typeStore, &argTypes);
-        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, candidates);
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, &argTypes);
+        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, candidates);
         let message: String = `No overload matches call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Available signatures:\n    - ${signaturesText.toStr()}`;
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::NO_OVERLOAD_MATCHES, message.toStr());
         return Option::NONE;
       }
 
       if (bestDefIds.length() > 1) {
-        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(typeStore, &argTypes);
-        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, &bestDefIds);
+        let argumentsText: String = Analyzer::Typecheck::overloadArgumentTypesText(defStore, typeStore, symbols, &argTypes);
+        let signaturesText: String = Analyzer::Typecheck::overloadSignatureListText(defStore, typeStore, symbols, &bestDefIds);
         let message: String = `Ambiguous overload call to '${memberName}' with arguments (${argumentsText.toStr()})\n  Matching signatures:\n    - ${signaturesText.toStr()}`;
         Analyzer::Typecheck::emitDiagnostic(state, span, DiagnosticCode::AMBIGUOUS_OVERLOAD, message.toStr());
         return Option::NONE;
@@ -2919,7 +2924,9 @@ export namespace Analyzer {
     /// call stops here. Returns `false` when it reported.
     function checkExtensionReceiverPlace(
       state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       module: &Ast::Module,
       ma: &Ast::Expression::MemberAccess,
       receiverType: Analyzer::TypeId,
@@ -2956,7 +2963,7 @@ export namespace Analyzer {
         return true;
       }
 
-      let typeName: str = typeStore.nameOf(receiverType).toStr();
+      let typeName: str = typeStore.nameOfResolved(receiverType, &*defStore, &*symbols).toStr();
 
       if (isLiteral) {
         let message: String = `cannot call extension method '${ma.member.toStr()}' on a ${typeName} literal; assign to a variable first`;
@@ -3087,7 +3094,7 @@ export namespace Analyzer {
         return Option::NONE;
       }
 
-      if (!Analyzer::Typecheck::checkExtensionReceiverPlace(state, typeStore, module, ma, receiverType)) {
+      if (!Analyzer::Typecheck::checkExtensionReceiverPlace(state, defStore, typeStore, symbols, module, ma, receiverType)) {
         return Option::NONE;
       }
 
@@ -3102,7 +3109,7 @@ export namespace Analyzer {
 
       if (let Option::SOME(receiverParam) = paramTypes.get(0)) {
         if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, ma.span, *receiverParam, receiverType)) {
-          Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, ma.span, 1, *receiverParam, receiverType);
+          Analyzer::Typecheck::emitInvalidArgumentType(state, defStore, typeStore, symbols, ma.span, 1, *receiverParam, receiverType);
         }
       }
 
@@ -3663,7 +3670,7 @@ export namespace Analyzer {
       // a `Type::Record` receiver fall through to `requireNonGenericRecord`,
       // which keeps owning the cycle and generic-record rejections unchanged.
       if (peeked.cycleAlias.isNone() && !isRecordReceiver) {
-        let receiverName: String = typeStore.nameOf(peeked.typeId);
+        let receiverName: String = typeStore.nameOfResolved(peeked.typeId, &*defStore, &*symbols);
         let message: String = `Cannot access field of non-record type '${receiverName.toStr()}'`;
         Analyzer::Typecheck::emitDiagnostic(state, value.span, DiagnosticCode::MEMBER_ACCESS_ON_NON_RECORD, message.toStr());
         return Option::NONE;
@@ -4087,7 +4094,7 @@ export namespace Analyzer {
         };
 
         if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, substitutedFieldType, actualType)) {
-          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, substitutedFieldType, actualType);
+          Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, value.span, substitutedFieldType, actualType);
           return Option::NONE;
         }
 
@@ -4366,7 +4373,7 @@ export namespace Analyzer {
     ): Option<Analyzer::TypeId> {
       let operandType: Analyzer::TypeId = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.expression)!;
 
-      let operandTypeName: String = typeStore.nameOf(operandType);
+      let operandTypeName: String = typeStore.nameOfResolved(operandType, &*defStore, &*symbols);
       let operandNotTry: String = `try operator \`!\` cannot be used on type '${operandTypeName.toStr()}' (not marked with @lang(try))`;
       let operandView: Analyzer::Typecheck::TryEnumView = Analyzer::Typecheck::requireTryEnumView(
         state,
@@ -4389,7 +4396,7 @@ export namespace Analyzer {
       );
 
       if (let Option::SOME(returnView) = returnViewOpt) {
-        let returnTypeName: String = typeStore.nameOf(state.currentReturnType);
+        let returnTypeName: String = typeStore.nameOfResolved(state.currentReturnType, &*defStore, &*symbols);
 
         if (returnView.enumDefId.raw() != operandView.enumDefId.raw()) {
           let message: String = `try operator \`!\` type '${operandTypeName.toStr()}' does not match function return type '${returnTypeName.toStr()}'`;
@@ -4400,8 +4407,8 @@ export namespace Analyzer {
             message.toStr(),
           );
         } else if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, operandView.errType, returnView.errType)) {
-          let operandErrName: String = typeStore.nameOf(operandView.errType);
-          let returnErrName: String = typeStore.nameOf(returnView.errType);
+          let operandErrName: String = typeStore.nameOfResolved(operandView.errType, &*defStore, &*symbols);
+          let returnErrName: String = typeStore.nameOfResolved(returnView.errType, &*defStore, &*symbols);
           let message: String = `try operator \`!\` error type '${operandErrName.toStr()}' does not match function's error type '${returnErrName.toStr()}'`;
           Analyzer::Typecheck::emitDiagnostic(
             state,
@@ -4609,7 +4616,7 @@ export namespace Analyzer {
 
       match (expr) {
         Ast::Expression::Node::Literal(literal) -> {
-          return Analyzer::Typecheck::checkLiteralExprExpected(state, defStore, typeStore, exprId, &literal, expected);
+          return Analyzer::Typecheck::checkLiteralExprExpected(state, defStore, typeStore, symbols, exprId, &literal, expected);
         },
         Ast::Expression::Node::Variable(variable) -> {
           return Analyzer::Typecheck::checkResolvedValueExpr(
@@ -4694,7 +4701,7 @@ export namespace Analyzer {
         Ast::Expression::Node::Ternary(value) -> {
           let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
           if (let Option::SOME(conditionType) = conditionTypeOpt) {
-            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, symbols, value.span, conditionType);
           }
 
           let thenTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExprExpected(state, defStore, typeStore, symbols, module, resolvedBodies, value.thenBranch, expected);
@@ -4708,7 +4715,7 @@ export namespace Analyzer {
             candidates.push(elseType);
           }
 
-          let ternaryTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::joinTypes(state, defStore, typeStore, value.span, &candidates, 2, Analyzer::Typecheck::JoinKind::Branches, expected);
+          let ternaryTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::joinTypes(state, defStore, typeStore, symbols, value.span, &candidates, 2, Analyzer::Typecheck::JoinKind::Branches, expected);
           let Option::SOME(ternaryType) = ternaryTypeOpt else {
             return Option::NONE;
           };
@@ -4896,7 +4903,7 @@ export namespace Analyzer {
 
             if (let Option::SOME(firstElementType) = firstElementTypeOpt) {
               if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, firstElementType, elementType)) {
-                Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, firstElementType, elementType);
+                Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, value.span, firstElementType, elementType);
                 allElementsMatch = false;
               }
             } else {
@@ -4930,7 +4937,7 @@ export namespace Analyzer {
 
           if (let Option::SOME(indexType) = indexTypeOpt) {
             if (!Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, value.span, indexType)) {
-              Analyzer::Typecheck::emitVectorIndexNonInteger(state, typeStore, value.span, indexType);
+              Analyzer::Typecheck::emitVectorIndexNonInteger(state, defStore, typeStore, symbols, value.span, indexType);
             }
           }
 
@@ -4960,7 +4967,7 @@ export namespace Analyzer {
           };
 
           let Option::SOME(elementType) = elementTypeOpt else {
-            Analyzer::Typecheck::emitAccessNonVector(state, typeStore, value.span, baseType);
+            Analyzer::Typecheck::emitAccessNonVector(state, defStore, typeStore, symbols, value.span, baseType);
             return Option::NONE;
           };
 
@@ -5171,6 +5178,7 @@ export namespace Analyzer {
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       candidates: &Vector<Analyzer::TypeId>,
       attemptedCount: u64,
@@ -5200,8 +5208,8 @@ export namespace Analyzer {
 
         if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, span, current, candidate)) {
           match (kind) {
-            Analyzer::Typecheck::JoinKind::MatchArms -> Analyzer::Typecheck::emitMatchArmTypeMismatch(state, typeStore, span, current, candidate),
-            Analyzer::Typecheck::JoinKind::Branches -> Analyzer::Typecheck::emitBranchTypeMismatch(state, typeStore, span, current, candidate),
+            Analyzer::Typecheck::JoinKind::MatchArms -> Analyzer::Typecheck::emitMatchArmTypeMismatch(state, defStore, typeStore, symbols, span, current, candidate),
+            Analyzer::Typecheck::JoinKind::Branches -> Analyzer::Typecheck::emitBranchTypeMismatch(state, defStore, typeStore, symbols, span, current, candidate),
           };
           return Option::NONE;
         }
@@ -5221,7 +5229,7 @@ export namespace Analyzer {
 
       if (let Option::SOME(expectedType) = expected) {
         if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, expectedType, joinedType)) {
-          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, expectedType, joinedType);
+          Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, span, expectedType, joinedType);
           return Option::NONE;
         }
       }
@@ -5259,7 +5267,7 @@ export namespace Analyzer {
         if (let Option::SOME(guardId) = arm.guard) {
           let guardTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, guardId);
           if (let Option::SOME(guardType) = guardTypeOpt) {
-            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, guardType);
+            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, symbols, value.span, guardType);
           }
         }
 
@@ -5292,7 +5300,7 @@ export namespace Analyzer {
         return Option::NONE;
       }
 
-      return Analyzer::Typecheck::joinTypes(state, defStore, typeStore, value.span, &armTypes, value.arms.length(), Analyzer::Typecheck::JoinKind::MatchArms, expected);
+      return Analyzer::Typecheck::joinTypes(state, defStore, typeStore, symbols, value.span, &armTypes, value.arms.length(), Analyzer::Typecheck::JoinKind::MatchArms, expected);
     }
 
     /// Types a single if-expression branch as a value, threading `expected`
@@ -5351,7 +5359,7 @@ export namespace Analyzer {
     ): Option<Analyzer::TypeId> {
       let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
       if (let Option::SOME(conditionType) = conditionTypeOpt) {
-        Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+        Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, symbols, value.span, conditionType);
       }
 
       let Option::SOME(elseId) = value.elseBranch else {
@@ -5371,7 +5379,7 @@ export namespace Analyzer {
         candidates.push(elseType);
       }
 
-      return Analyzer::Typecheck::joinTypes(state, defStore, typeStore, value.span, &candidates, 2, Analyzer::Typecheck::JoinKind::Branches, expected);
+      return Analyzer::Typecheck::joinTypes(state, defStore, typeStore, symbols, value.span, &candidates, 2, Analyzer::Typecheck::JoinKind::Branches, expected);
     }
 
     function typeIdIsPointer(
@@ -5508,6 +5516,7 @@ export namespace Analyzer {
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       fromType: Analyzer::TypeId,
       toType: Analyzer::TypeId,
@@ -5570,7 +5579,7 @@ export namespace Analyzer {
       }
 
       if (!valid) {
-        Analyzer::Typecheck::emitInvalidCast(state, typeStore, span, fromType, toType);
+        Analyzer::Typecheck::emitInvalidCast(state, defStore, typeStore, symbols, span, fromType, toType);
       }
     }
 
@@ -5605,7 +5614,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      Analyzer::Typecheck::checkCastValidity(state, defStore, typeStore, value.span, operandType, targetType);
+      Analyzer::Typecheck::checkCastValidity(state, defStore, typeStore, symbols, value.span, operandType, targetType);
 
       Analyzer::Typecheck::recordExprType(state, exprId, targetType);
       return Option::SOME(targetType);
@@ -5650,7 +5659,7 @@ export namespace Analyzer {
       };
 
       let Option::SOME(pointeeType) = pointeeTypeOpt else {
-        Analyzer::Typecheck::emitDereferenceNonPointer(state, typeStore, value.span, operandType);
+        Analyzer::Typecheck::emitDereferenceNonPointer(state, defStore, typeStore, symbols, value.span, operandType);
         return Option::NONE;
       };
 
@@ -5859,7 +5868,7 @@ export namespace Analyzer {
           let booleanType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::BOOLEAN);
 
           if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, value.span, booleanType, operandType)) {
-            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, typeStore, value.span, "!", operandType);
+            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, defStore, typeStore, symbols, value.span, "!", operandType);
           }
 
           Analyzer::Typecheck::recordExprType(state, exprId, booleanType);
@@ -5867,7 +5876,7 @@ export namespace Analyzer {
         },
         Ast::Expression::UnaryOperator::Negate -> {
           if (!Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, value.span, operandType)) {
-            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, typeStore, value.span, "-", operandType);
+            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, defStore, typeStore, symbols, value.span, "-", operandType);
             return Option::NONE;
           }
 
@@ -5876,7 +5885,7 @@ export namespace Analyzer {
         },
         Ast::Expression::UnaryOperator::BitNot -> {
           if (!Analyzer::Typecheck::isIntegerType(state, defStore, typeStore, value.span, operandType)) {
-            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, typeStore, value.span, "~", operandType);
+            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, defStore, typeStore, symbols, value.span, "~", operandType);
             return Option::NONE;
           }
 
@@ -5885,7 +5894,7 @@ export namespace Analyzer {
         },
         Ast::Expression::UnaryOperator::Increment -> {
           if (!Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, value.span, operandType)) {
-            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, typeStore, value.span, "++", operandType);
+            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, defStore, typeStore, symbols, value.span, "++", operandType);
             return Option::NONE;
           }
 
@@ -5894,7 +5903,7 @@ export namespace Analyzer {
         },
         Ast::Expression::UnaryOperator::Decrement -> {
           if (!Analyzer::Typecheck::isSupportedNumericType(state, defStore, typeStore, value.span, operandType)) {
-            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, typeStore, value.span, "--", operandType);
+            Analyzer::Typecheck::emitInvalidUnaryOperandType(state, defStore, typeStore, symbols, value.span, "--", operandType);
             return Option::NONE;
           }
 
@@ -5952,7 +5961,7 @@ export namespace Analyzer {
           return;
         };
 
-        let message: String = `\`let name = value else\` requires a @lang(try) value, got ${typeStore.nameOf(actualType).toStr()}`;
+        let message: String = `\`let name = value else\` requires a @lang(try) value, got ${typeStore.nameOfResolved(actualType, &*defStore, &*symbols).toStr()}`;
 
         let viewOpt: Option<Analyzer::Typecheck::TryEnumView> = Analyzer::Typecheck::requireTryEnumView(
           state,
@@ -5974,7 +5983,7 @@ export namespace Analyzer {
         if (let Option::SOME(annotationId) = value.annotation) {
           if (let Option::SOME(declaredType) = Analyzer::Typecheck::resolveLocalAnnotation(defStore, typeStore, symbols, module, annotationId, Option::SOME(state.currentFunction))) {
             if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, declaredType, view.okType)) {
-              Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, declaredType, view.okType);
+              Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, value.span, declaredType, view.okType);
             }
 
             bindingType = declaredType;
@@ -5996,7 +6005,7 @@ export namespace Analyzer {
       if (let Option::SOME(expectedType) = expectedTypeOpt) {
         if (let Option::SOME(actualType) = actualTypeOpt) {
           if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, value.span, expectedType, actualType)) {
-            Analyzer::Typecheck::emitTypeMismatch(state, typeStore, value.span, expectedType, actualType);
+            Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, value.span, expectedType, actualType);
           }
         }
 
@@ -6100,7 +6109,7 @@ export namespace Analyzer {
 
       if (let Option::SOME(actualType) = actualTypeOpt) {
         if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, expectedType, actualType)) {
-          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, span, expectedType, actualType);
+          Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, span, expectedType, actualType);
         }
       }
 
@@ -7524,7 +7533,7 @@ export namespace Analyzer {
             return Option::NONE;
           };
           let Analyzer::Type::Function(functionType) = bindingType else {
-            Analyzer::Typecheck::emitCallOnNonCallable(state, typeStore, span, binding.typeId);
+            Analyzer::Typecheck::emitCallOnNonCallable(state, defStore, typeStore, symbols, span, binding.typeId);
             return Option::NONE;
           };
 
@@ -7627,7 +7636,7 @@ export namespace Analyzer {
       // shifts one place right.
       if (let Option::SOME(firstParamType) = signature.paramTypes.get(0)) {
         if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, pipe.span, *firstParamType, leftType)) {
-          Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, pipe.span, 1, *firstParamType, leftType);
+          Analyzer::Typecheck::emitInvalidArgumentType(state, defStore, typeStore, symbols, pipe.span, 1, *firstParamType, leftType);
         }
       }
 
@@ -7658,7 +7667,7 @@ export namespace Analyzer {
         if (let Option::SOME(expected) = expectedType) {
           if (let Option::SOME(actual) = actualOpt) {
             if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, pipe.span, expected, actual)) {
-              Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, pipe.span, index + 2, expected, actual);
+              Analyzer::Typecheck::emitInvalidArgumentType(state, defStore, typeStore, symbols, pipe.span, index + 2, expected, actual);
             }
           }
         }
@@ -7685,6 +7694,7 @@ export namespace Analyzer {
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
       span: SourceSpan,
       calleeName: str,
       paramTypes: &Vector<Analyzer::TypeId>,
@@ -7701,7 +7711,7 @@ export namespace Analyzer {
       let expectedType: Analyzer::TypeId = *firstParamType;
 
       if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, span, expectedType, leftType)) {
-        Analyzer::Typecheck::emitInvalidArgumentType(state, typeStore, span, 1, expectedType, leftType);
+        Analyzer::Typecheck::emitInvalidArgumentType(state, defStore, typeStore, symbols, span, 1, expectedType, leftType);
       }
     }
 
@@ -7738,7 +7748,7 @@ export namespace Analyzer {
       let returnType: Analyzer::TypeId = functionType.returnType;
 
       let lambdaName: String = Analyzer::Typecheck::calleeDisplayName(module, lambdaExprId);
-      Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, lambdaName.toStr(), &paramTypes, leftType);
+      Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, symbols, pipe.span, lambdaName.toStr(), &paramTypes, leftType);
 
       // A lambda taking no parameter is not a callee this pipe can complete, so the pipe
       // has no type to offer — unlike a named callee, whose return type stands on its own.
@@ -7845,7 +7855,7 @@ export namespace Analyzer {
       // A wrong count is reported and the pipe still takes the method's return type, the
       // same way `checkPipePrepend` treats a miscounted call: the method is known, so
       // stripping the type would hide every later mistake behind one recompile.
-      Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, pipe.span, ma.member.toStr(), &specialized.paramTypes, leftType);
+      Analyzer::Typecheck::checkPipedValueAgainstFirstParam(state, defStore, typeStore, symbols, pipe.span, ma.member.toStr(), &specialized.paramTypes, leftType);
 
       Analyzer::Typecheck::recordExprType(state, pipe.right, specialized.returnType);
 
@@ -8484,7 +8494,7 @@ export namespace Analyzer {
       }
 
       let Option::SOME(elementType) = elementTypeOpt else {
-        Analyzer::Typecheck::emitForOfExpectsVector(state, typeStore, span, iterableType);
+        Analyzer::Typecheck::emitForOfExpectsVector(state, defStore, typeStore, symbols, span, iterableType);
         return Option::NONE;
       };
 
@@ -8523,7 +8533,7 @@ export namespace Analyzer {
           return Option::SOME(elementType);
         }
 
-        Analyzer::Typecheck::emitForOfRequiresCopyOrRef(state, typeStore, bindingSpan, elementType);
+        Analyzer::Typecheck::emitForOfRequiresCopyOrRef(state, defStore, typeStore, symbols, bindingSpan, elementType);
         return Option::NONE;
       };
 
@@ -8546,7 +8556,7 @@ export namespace Analyzer {
         };
 
         if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, bindingSpan, referentType, elementType)) {
-          Analyzer::Typecheck::emitTypeMismatch(state, typeStore, bindingSpan, elementType, referentType);
+          Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, bindingSpan, elementType, referentType);
         }
 
         // A `&mut` binding writes through the iterable, so iterating it is a
@@ -8581,11 +8591,11 @@ export namespace Analyzer {
       };
 
       if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, bindingSpan, annotatedType, elementType)) {
-        Analyzer::Typecheck::emitTypeMismatch(state, typeStore, bindingSpan, elementType, annotatedType);
+        Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, bindingSpan, elementType, annotatedType);
       }
 
       if (!Analyzer::Typecheck::isCopyType(defStore, typeStore, elementType)) {
-        Analyzer::Typecheck::emitForOfRequiresCopyOrRef(state, typeStore, bindingSpan, elementType);
+        Analyzer::Typecheck::emitForOfRequiresCopyOrRef(state, defStore, typeStore, symbols, bindingSpan, elementType);
       }
 
       return Option::SOME(elementType);
@@ -8708,7 +8718,7 @@ export namespace Analyzer {
       };
 
       if (!isExempt) {
-        Analyzer::Typecheck::emitDeferExpressionMustBeVoid(state, typeStore, deferStmt.span, expressionType);
+        Analyzer::Typecheck::emitDeferExpressionMustBeVoid(state, defStore, typeStore, symbols, deferStmt.span, expressionType);
       }
     }
 
@@ -8822,14 +8832,14 @@ export namespace Analyzer {
 
             if (let Option::SOME(actualType) = actualTypeOpt) {
               if (!Analyzer::Typecheck::valueSatisfiesType(state, defStore, typeStore, returnStmt.span, state.currentReturnType, actualType)) {
-                Analyzer::Typecheck::emitTypeMismatch(state, typeStore, returnStmt.span, state.currentReturnType, actualType);
+                Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, returnStmt.span, state.currentReturnType, actualType);
               }
             }
           } else {
             let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
             let voidType: Analyzer::TypeId = typeStoreRef.intern(Analyzer::Type::VOID);
             if (!Analyzer::Typecheck::typesEqual(state, defStore, typeStore, returnStmt.span, state.currentReturnType, voidType)) {
-              Analyzer::Typecheck::emitTypeMismatch(state, typeStore, returnStmt.span, state.currentReturnType, voidType);
+              Analyzer::Typecheck::emitTypeMismatch(state, defStore, typeStore, symbols, returnStmt.span, state.currentReturnType, voidType);
             }
           }
         },
@@ -8840,7 +8850,7 @@ export namespace Analyzer {
         Ast::Statement::Node::If(value) -> {
           let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
           if (let Option::SOME(conditionType) = conditionTypeOpt) {
-            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, symbols, value.span, conditionType);
           }
           Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.thenBranch);
           if (let Option::SOME(elseId) = value.elseBranch) {
@@ -8850,7 +8860,7 @@ export namespace Analyzer {
         Ast::Statement::Node::While(value) -> {
           let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, value.condition);
           if (let Option::SOME(conditionType) = conditionTypeOpt) {
-            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+            Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, symbols, value.span, conditionType);
           }
           Analyzer::Typecheck::enterLoop(state);
           Analyzer::Typecheck::checkStmt(state, defStore, typeStore, symbols, module, resolvedBodies, value.body);
@@ -8866,7 +8876,7 @@ export namespace Analyzer {
           if (let Option::SOME(conditionId) = value.condition) {
             let conditionTypeOpt: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkExpr(state, defStore, typeStore, symbols, module, resolvedBodies, conditionId);
             if (let Option::SOME(conditionType) = conditionTypeOpt) {
-              Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, value.span, conditionType);
+              Analyzer::Typecheck::requireBooleanType(state, defStore, typeStore, symbols, value.span, conditionType);
             }
           }
 
