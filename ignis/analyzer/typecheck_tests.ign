@@ -1410,7 +1410,7 @@ function typecheckAssignmentToImmutableLocalProducesDiagnostic(): void {
     &module,
   );
 
-  assertSingleDiagnostic(&output, DiagnosticCode::MUTABILITY_VIOLATION, "cannot assign to immutable local");
+  assertSingleDiagnostic(&output, DiagnosticCode::IMMUTABLE_ASSIGNMENT, "Cannot assign to immutable variable 'x'");
 }
 
 @test
@@ -1516,7 +1516,7 @@ function typecheckAssignmentToNonLocalTargetProducesDiagnostic(): void {
     &module,
   );
 
-  assertSingleDiagnostic(&output, DiagnosticCode::INVALID_ASSIGNMENT_TARGET, "assignment target must resolve to a local binding");
+  assertSingleDiagnostic(&output, DiagnosticCode::IMMUTABLE_ASSIGNMENT, "Cannot assign to immutable variable 'helper'");
 }
 
 @test
@@ -1697,7 +1697,7 @@ function typecheckSiblingBlockLocalReuseStaysDistinct(): void {
     &module,
   );
 
-  assertSingleDiagnostic(&output, DiagnosticCode::MUTABILITY_VIOLATION, "cannot assign to immutable local");
+  assertSingleDiagnostic(&output, DiagnosticCode::IMMUTABLE_ASSIGNMENT, "Cannot assign to immutable variable 'x'");
   assertExprType(&output, firstAssignment, typeStore.intern(Analyzer::Type::I32));
   assertExprType(&output, firstUse, typeStore.intern(Analyzer::Type::I32));
   assertExprType(&output, secondUse, typeStore.intern(Analyzer::Type::BOOLEAN));
@@ -2416,8 +2416,8 @@ function typecheckLoopControlDiagnosticsRespectLoopDepth(): void {
   let Option::SOME(secondDiagnostic) = output.diagnostics.get(1) else {
     @panic("typecheckLoopControlDiagnosticsRespectLoopDepth: missing second diagnostic");
   };
-  Test::assertEq<str>(firstDiagnostic.messageText(), "`break` used outside of loop");
-  Test::assertEq<str>(secondDiagnostic.messageText(), "`continue` used outside of loop");
+  Test::assertEq<str>(firstDiagnostic.messageText(), "Break statement outside of loop");
+  Test::assertEq<str>(secondDiagnostic.messageText(), "Continue statement outside of loop");
 }
 
 @test
@@ -3221,7 +3221,7 @@ function typecheckRecordInitRejectsUnknownField(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::UNKNOWN_MEMBER, "unknown record field `z`");
+  assertSingleDiagnostic(&output, DiagnosticCode::FIELD_NOT_FOUND, "Field 'z' not found in type 'Point'");
 }
 
 @test
@@ -3263,7 +3263,7 @@ function typecheckRecordInitRejectsMissingField(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::MISSING_RECORD_FIELD_INIT, "missing record field `y`");
+  assertSingleDiagnostic(&output, DiagnosticCode::MISSING_RECORD_FIELD_INIT, "Missing field 'y' in record 'Point' initializer");
 }
 
 @test
@@ -3303,7 +3303,7 @@ function typecheckRecordInitRejectsDuplicateField(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::DUPLICATE_RECORD_FIELD_INIT, "duplicate record field `x`");
+  assertSingleDiagnostic(&output, DiagnosticCode::DUPLICATE_RECORD_FIELD_INIT, "Duplicate field 'x' in initializer");
 }
 
 @test
@@ -3959,7 +3959,7 @@ function typecheckMemberAccessRejectsNonRecord(): void {
   assertSingleDiagnostic(
     &output,
     DiagnosticCode::MEMBER_ACCESS_ON_NON_RECORD,
-    "cannot access a field of non-record type `i32`",
+    "Cannot access field of non-record type 'i32'",
   );
 }
 
@@ -4179,7 +4179,7 @@ function typecheckMemberAccessRejectsUnknownField(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::UNKNOWN_MEMBER, "unknown record field `z`");
+  assertSingleDiagnostic(&output, DiagnosticCode::FIELD_NOT_FOUND, "Field 'z' not found in type 'Point'");
 }
 
 @test
@@ -4341,7 +4341,7 @@ function typecheckRecordDestructureRejectsFieldArityMismatch(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnosticCode(&output, DiagnosticCode::PATTERN_ARITY_MISMATCH);
+  assertSingleDiagnosticCode(&output, DiagnosticCode::PATTERN_TYPE_MISMATCH);
 }
 
 /// Scenario: `let (x): i32 = 1;` destructures a non-tuple scrutinee. A tuple
@@ -4368,7 +4368,7 @@ function typecheckTuplePatternAgainstNonTupleScrutineeIsRejected(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "pattern type mismatch: expected `i32`, got `tuple`");
+  assertSingleDiagnostic(&output, DiagnosticCode::PATTERN_TYPE_MISMATCH, "pattern type mismatch: expected 'i32', got 'tuple'");
 }
 
 // Phase 9: Method body typecheck traversal (selfhost-methods-binder PR6)
@@ -4867,7 +4867,7 @@ function typecheckMutSelfMethodThroughSharedReferenceIsRejected(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnosticCode(&output, DiagnosticCode::MUTABILITY_VIOLATION);
+  assertSingleDiagnosticCode(&output, DiagnosticCode::MUTATING_METHOD_ON_IMMUTABLE);
 }
 
 /// Scenario: `self.field` inside a method body resolves through the same
@@ -5090,7 +5090,7 @@ function typecheckInstanceMethodCallUnknownMethodProducesDiagnostic(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::UNKNOWN_MEMBER, "unknown method `unknown`");
+  assertSingleDiagnostic(&output, DiagnosticCode::FIELD_NOT_FOUND, "Field 'unknown' not found in type 'R'");
 }
 
 /// Scenario (ADR D10): calling a name that exists in `staticMethods` (but not
@@ -5148,7 +5148,7 @@ function typecheckInstanceMethodCallStaticThroughInstanceProducesDiagnostic(): v
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, "static method `create` cannot be called through an instance");
+  assertSingleDiagnostic(&output, DiagnosticCode::FIELD_NOT_FOUND, "Field 'create' not found in type 'R'");
 }
 
 /// Scenario (ADR D7, Local-only enforcement): calling a `&mut self` method
@@ -5204,7 +5204,7 @@ function typecheckInstanceMethodCallMutSelfOnImmutableLocalProducesDiagnostic():
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method on immutable receiver");
+  assertSingleDiagnostic(&output, DiagnosticCode::MUTATING_METHOD_ON_IMMUTABLE, "Cannot call mutating method 'mutate' on immutable variable 'value'");
 }
 
 /// Triangulates the mut-self check: the same `&mut self` method call succeeds
@@ -5418,7 +5418,7 @@ function typecheckBareStaticMethodReferenceProducesDiagnostic(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, "method references are not values; call the method instead");
+  assertSingleDiagnostic(&output, DiagnosticCode::METHOD_MUST_BE_CALLED, "Method 'create' must be called");
 }
 
 /// Scenario: a bare instance method reference used as a value (`value.add`
@@ -5476,7 +5476,7 @@ function typecheckBareInstanceMethodReferenceProducesDiagnostic(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::METHOD_CALL_KIND_MISMATCH, "method `add` requires a call");
+  assertSingleDiagnostic(&output, DiagnosticCode::METHOD_MUST_BE_CALLED, "Method 'add' must be called");
 }
 
 /// Regression pair for the WU3 guards above: a real static-method call
@@ -5954,7 +5954,7 @@ function typecheckEnumVariantPatternBindsNonGenericEnumScrutinee(): void {
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
   Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::NON_EXHAUSTIVE_MATCH);
-  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: enum scrutinee is missing variant `B`");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match");
 }
 
 /// Scenario: a bare variant pattern (`E::B`, zero arguments) matching a
@@ -6019,7 +6019,7 @@ function typecheckEnumVariantPatternRejectsPayloadArityMismatch(): void {
 
   // The body resolver owns the arity check and reports the mismatch against
   // the variant's real payload arity.
-  assertContainsDiagnosticCodeInBag(&output.resolvedBodies.diagnostics, DiagnosticCode::INVALID_NUMBER_OF_ARGUMENTS);
+  assertContainsDiagnosticCodeInBag(&output.resolvedBodies.diagnostics, DiagnosticCode::PATTERN_ARITY_MISMATCH);
 
   // With the pattern left unresolved, typecheck falls back to its record
   // destructure path (which rejects the enum scrutinee) and the arm credits
@@ -6028,7 +6028,7 @@ function typecheckEnumVariantPatternRejectsPayloadArityMismatch(): void {
   let Option::SOME(patternDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckEnumVariantPatternRejectsPayloadArityMismatch: missing pattern diagnostic");
   };
-  Test::assertEq<str>(patternDiagnostic.code, DiagnosticCode::TYPE_MISMATCH);
+  Test::assertEq<str>(patternDiagnostic.code, DiagnosticCode::PATTERN_TYPE_MISMATCH);
   Test::assertEq<str>(patternDiagnostic.messageText(), "record destructure annotation must be a non-generic record");
 
   let Option::SOME(coverageDiagnostic) = output.typecheck.diagnostics.get(1) else {
@@ -6224,7 +6224,7 @@ function typecheckMatchStatementBoolMissingFalseArmWarns(): void {
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
   Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::NON_EXHAUSTIVE_MATCH);
-  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: bool scrutinee requires both `true` and `false` arms, or a wildcard/irrefutable-binding arm");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match");
 }
 
 /// Scenario: a `bool` scrutinee with both `true` and `false` literal arms
@@ -6353,7 +6353,7 @@ function typecheckMatchExpressionNonExhaustiveIsError(): void {
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::ERROR);
   Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::NON_EXHAUSTIVE_MATCH);
-  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match");
 }
 
 /// Scenario: a guarded wildcard arm is the match's only arm. A guard cannot
@@ -6397,7 +6397,7 @@ function typecheckMatchStatementGuardedWildcardDoesNotCountAsCoverage(): void {
     @panic("typecheckMatchStatementGuardedWildcardDoesNotCountAsCoverage: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
-  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match");
 }
 
 /// Scenario: a parenthesised match used as an expression statement —
@@ -6443,7 +6443,7 @@ function typecheckGroupedMatchStatementTakesExpressionPositionPath(): void {
     @panic("typecheckGroupedMatchStatementTakesExpressionPositionPath: missing exhaustiveness diagnostic");
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: scrutinee requires a wildcard/irrefutable-binding arm");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match");
 }
 
 // Phase 13: enum variant coverage crediting (selfhost-match-exhaustiveness,
@@ -6666,7 +6666,7 @@ function typecheckMatchStatementEnumGuardedVariantArmDoesNotCountAsCoverage(): v
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
   Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::NON_EXHAUSTIVE_MATCH);
-  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: enum scrutinee is missing variant `Red`");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match");
 }
 
 /// Scenario: a match over a plain (non-generic) record scrutinee, with a
@@ -6806,7 +6806,7 @@ function typecheckMatchStatementGenericRecordInstanceScrutineeUsesRecordWordedMe
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
   Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::NON_EXHAUSTIVE_MATCH);
-  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match: generic record scrutinee requires a wildcard/irrefutable-binding arm");
+  Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match");
 }
 
 // Phase 14: match-as-expression + `joinTypes` (selfhost-bidirectional-typecheck,
@@ -6950,8 +6950,8 @@ function typecheckMatchExpressionArmTypeMismatchProducesDiagnostic(): void {
     @panic("typecheckMatchExpressionArmTypeMismatchProducesDiagnostic: missing arm-mismatch diagnostic");
   };
   Test::assertEq<Severity>(mismatchDiagnostic.severity, Severity::ERROR);
-  Test::assertEq<str>(mismatchDiagnostic.code, DiagnosticCode::ARM_OR_BRANCH_TYPE_MISMATCH);
-  Test::assertEq<str>(mismatchDiagnostic.messageText(), "match arm type mismatch: expected `i32`, found `bool`");
+  Test::assertEq<str>(mismatchDiagnostic.code, DiagnosticCode::MATCH_ARM_TYPE_MISMATCH);
+  Test::assertEq<str>(mismatchDiagnostic.messageText(), "match arm type mismatch: expected 'i32', got 'bool'");
 }
 
 /// Scenario: one arm's body is an unresolved reference (already diagnosed at
@@ -7222,7 +7222,7 @@ function typecheckIfExpressionBranchTypeMismatchProducesExactlyOneDiagnostic(): 
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::ARM_OR_BRANCH_TYPE_MISMATCH, "branch type mismatch: expected `i32`, found `bool`");
+  assertSingleDiagnostic(&output, DiagnosticCode::TYPE_MISMATCH, "Type mismatch: expected 'i32', found 'bool'");
 }
 
 /// Scenario: a ternary expression joins its `then`/`else` operand types the
@@ -9796,7 +9796,7 @@ function typecheckTryInNonTryReturningFunctionProducesDiagnostic(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnosticCode(&output, DiagnosticCode::TRY_RETURN_TYPE_MISMATCH);
+  assertSingleDiagnosticCode(&output, DiagnosticCode::TRY_OUTSIDE_TRY_FUNCTION);
 }
 
 /// Scenario: `r!` on one `@lang(try)` enum inside a function returning a
@@ -10056,7 +10056,7 @@ function typecheckPipeIntoStaticMethodThroughInstanceIsRejected(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertContainsDiagnosticCode(&output, DiagnosticCode::METHOD_CALL_KIND_MISMATCH);
+  assertContainsDiagnosticCode(&output, DiagnosticCode::FIELD_NOT_FOUND);
 }
 
 /// Scenario: piping into a mutating method whose receiver is an immutable binding is
@@ -10133,7 +10133,7 @@ function typecheckPipeIntoMutatingMethodOnImmutableReceiverIsRejected(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertContainsDiagnosticCode(&output, DiagnosticCode::MUTABILITY_VIOLATION);
+  assertContainsDiagnosticCode(&output, DiagnosticCode::MUTATING_METHOD_ON_IMMUTABLE);
 }
 
 /// Scenario: `1 |> R::m` naming an instance method is rejected, and the rejection comes
@@ -10164,7 +10164,7 @@ function typecheckPipeIntoInstanceMethodByPathIsRejected(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertContainsDiagnosticCodeInBag(&output.diagnostics, DiagnosticCode::METHOD_CALL_KIND_MISMATCH);
+  assertContainsDiagnosticCodeInBag(&output.diagnostics, DiagnosticCode::UNDECLARED_IDENTIFIER);
   assertLacksDiagnosticCode(&output, DiagnosticCode::UNSUPPORTED_CONSTRUCT);
 }
 
@@ -11527,7 +11527,7 @@ function typecheckMutSelfThroughSharedReferenceLocalIsRejected(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::MUTABILITY_VIOLATION, "cannot call mutable method through a shared reference");
+  assertSingleDiagnostic(&output, DiagnosticCode::MUTATING_METHOD_ON_IMMUTABLE, "Cannot call mutating method 'mutate' on immutable variable 'r'");
 }
 
 /// Triangulates IGN-93: `let r: &mut R = &mut value; r.mutate()` succeeds —
@@ -11761,7 +11761,7 @@ function typecheckIntLiteralOverflowingAnnotationProducesDiagnostic(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::INTEGER_OVERFLOW, "Integer literal overflows type 'u8'");
+  assertSingleDiagnostic(&output, DiagnosticCode::INTEGER_OVERFLOW, "Integer literal 300 overflows type 'u8'");
 }
 
 /// Scenario: `let ratio: f32 = 1.5;` adopts the annotated float type; an
@@ -12769,7 +12769,7 @@ function typecheckDereferenceAssignmentThroughSharedReferenceIsRejected(): void 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 1);
-  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::MUTABILITY_VIOLATION), 1);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::IMMUTABLE_ASSIGNMENT), 1);
 }
 
 /// A field assignment through a `&mut self` receiver is accepted: the field is
@@ -12813,7 +12813,7 @@ function typecheckFieldAssignmentOnImmutableLocalIsRejected(): void {
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
   Test::assertEq<u64>(typecheckCountErrors(&output.diagnostics), 1);
-  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::MUTABILITY_VIOLATION), 1);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::IMMUTABLE_ASSIGNMENT), 1);
 }
 
 /// A field assignment whose base is a mutable local is accepted.
@@ -12875,7 +12875,7 @@ function typecheckMemberAccessOnRecordWithUnknownFieldStillReportsUnknownMember(
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
-  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::UNKNOWN_MEMBER), 1);
+  Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::FIELD_NOT_FOUND), 1);
   Test::assertEq<u64>(typecheckCountDiagnosticCode(&output.diagnostics, DiagnosticCode::MEMBER_ACCESS_ON_NON_RECORD), 0);
 }
 
@@ -13054,7 +13054,7 @@ function typecheckLiteralPatternOverflowingTheScrutineeTypeIsRejected(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &module);
 
-  assertSingleDiagnostic(&output, DiagnosticCode::INTEGER_OVERFLOW, "Integer literal overflows type 'u8'");
+  assertSingleDiagnostic(&output, DiagnosticCode::INTEGER_OVERFLOW, "Integer literal 300 overflows type 'u8'");
 }
 
 /// Scenario: `let (_a, b): (i32, boolean) = (1, true); b;` binds each element
@@ -13138,8 +13138,8 @@ function typecheckTuplePatternArityMismatchIsRejected(): void {
 
   assertSingleDiagnostic(
     &output,
-    DiagnosticCode::TYPE_MISMATCH,
-    "pattern type mismatch: expected `(i32, bool)`, got `tuple with 1 elements`",
+    DiagnosticCode::PATTERN_TYPE_MISMATCH,
+    "pattern type mismatch: expected '(i32, bool)', got 'tuple with 1 elements'",
   );
 }
 
@@ -15620,7 +15620,7 @@ function typecheckRejectsAnExtensionCallOnASameNamedTypeElsewhere(): void {
 
   let output: Analyzer::AnalyzerOutput = typecheckAnalyzeModule(&mut defStore, &mut typeStore, &mut symbols, &parsed.module);
 
-  assertContainsDiagnosticCode(&output, DiagnosticCode::UNKNOWN_MEMBER);
+  assertContainsDiagnosticCode(&output, DiagnosticCode::FIELD_NOT_FOUND);
 }
 
 /// Scenario: two namespaces declare a record named `Point`, and a local

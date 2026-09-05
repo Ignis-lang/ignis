@@ -476,10 +476,6 @@ export namespace ParserShared {
       self.diagnostics.push(diagnostic);
     }
 
-    public expected(&mut self, span: SourceSpan, expected: str): void {
-      self.emitDiagnostic(span, DiagnosticCode::EXPECTED_TOKEN, "expected token", expected);
-    }
-
     /// Reports a token the reference compiler names in the message itself.
     ///
     /// Its `expect` renders the awaited `TokenType`, so the message is
@@ -488,6 +484,18 @@ export namespace ParserShared {
     public expectedToken(&mut self, span: SourceSpan, tokenName: str, label: str): void {
       let message: String = `Expected ${tokenName}`;
       self.emitDiagnostic(span, DiagnosticCode::EXPECTED_TOKEN, message.toStr(), label);
+    }
+
+    /// Consumes an identifier without reporting when there is none, for callers
+    /// that word the failure differently from `Expected Identifier`.
+    public consumeIdentifier(&mut self): Option<Token> {
+      self.skipTrivia();
+
+      if (self.current().kindValue() != TokenKind::IDENTIFIER) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(self.bump());
     }
 
     public expectIdentifier(&mut self, label: str): Option<Token> {

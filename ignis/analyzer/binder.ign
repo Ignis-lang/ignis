@@ -329,7 +329,7 @@ export namespace Analyzer {
 
       if (let Option::SOME(_firstSpan) = duplicateOpt) {
         // Duplicate name — emit diagnostic, skip allocation.
-        let message: String = `duplicate top-level type name: ${name.toStr()}`;
+        let message: String = `Type '${name.toStr()}' is already defined`;
         let mut diag: Diagnostic = Diagnostic::new(
           Severity::ERROR,
           DiagnosticCode::TYPE_ALREADY_DEFINED,
@@ -450,7 +450,7 @@ export namespace Analyzer {
             let sym: Analyzer::SymbolId = symbolsRef.intern(a.name.toStr());
             let duplicateOpt: Option<SourceSpan> = findDuplicateSpan(state, scopeKey, sym);
             if (let Option::SOME(_) = duplicateOpt) {
-              let message: String = `duplicate top-level type name: ${a.name.toStr()}`;
+              let message: String = `Type '${a.name.toStr()}' is already defined`;
               let mut diag: Diagnostic = Diagnostic::new(
                 Severity::ERROR,
                 DiagnosticCode::TYPE_ALREADY_DEFINED,
@@ -474,7 +474,7 @@ export namespace Analyzer {
             let sym: Analyzer::SymbolId = symbolsRef.intern(t.name.toStr());
             let duplicateOpt: Option<SourceSpan> = findDuplicateSpan(state, scopeKey, sym);
             if (let Option::SOME(_) = duplicateOpt) {
-              let message: String = `duplicate top-level type name: ${t.name.toStr()}`;
+              let message: String = `Type '${t.name.toStr()}' is already defined`;
               let mut diag: Diagnostic = Diagnostic::new(
                 Severity::ERROR,
                 DiagnosticCode::TYPE_ALREADY_DEFINED,
@@ -538,19 +538,69 @@ export namespace Analyzer {
       }
     }
 
-    /// Emit a diagnostic for a duplicate named slot (field, variant, parameter, or function).
-    /// Uses `DiagnosticCode::TYPE_ALREADY_DEFINED` per design §5 (reuse existing code with
-    /// a discriminator string rather than adding new diagnostic codes for each slot kind).
+    /// Whether `kind` names the slot the caller reported.
+    function duplicateNameKindIs(kind: str, expected: str): boolean {
+      let kindText: String = String::create(kind);
+      let expectedText: String = String::create(expected);
+
+      return kindText.equals(&expectedText);
+    }
+
+    /// The reference compiler's code for a duplicate slot of `kind`.
+    function duplicateNameCode(kind: str): str {
+      if (Analyzer::Binder::duplicateNameKindIs(kind, "parameter name")) {
+        return DiagnosticCode::PARAMETER_ALREADY_DEFINED;
+      }
+
+      if (Analyzer::Binder::duplicateNameKindIs(kind, "constant name")) {
+        return DiagnosticCode::CONSTANT_ALREADY_DEFINED;
+      }
+
+      if (Analyzer::Binder::duplicateNameKindIs(kind, "type parameter")) {
+        return DiagnosticCode::TYPE_PARAM_ALREADY_DEFINED;
+      }
+
+      return DiagnosticCode::TYPE_ALREADY_DEFINED;
+    }
+
+    /// The reference compiler's message for a duplicate slot of `kind`. A
+    /// record field and an enum variant have none, so they keep the selfhost's
+    /// own wording.
+    function duplicateNameMessage(kind: str, name: str): String {
+      if (Analyzer::Binder::duplicateNameKindIs(kind, "parameter name")) {
+        return `Parameter '${name}' is already defined`;
+      }
+
+      if (Analyzer::Binder::duplicateNameKindIs(kind, "constant name")) {
+        return `Constant '${name}' is already defined`;
+      }
+
+      if (Analyzer::Binder::duplicateNameKindIs(kind, "type parameter")) {
+        return `Type parameter '${name}' is already defined`;
+      }
+
+      return `duplicate ${kind}: ${name}`;
+    }
+
+    /// Emit a diagnostic for a duplicate named slot (field, variant, parameter, or
+    /// type parameter).
+    ///
+    /// The reference compiler numbers and words a duplicate parameter, constant and
+    /// type parameter apart, so each takes its own code and message. It diagnoses no
+    /// duplicate record field or enum variant at all; those keep the selfhost's own
+    /// wording under `TYPE_ALREADY_DEFINED`.
     function emitDuplicateNameDiagnostic(
       state: &mut Analyzer::Binder::BinderState,
       kind: str,
       name: str,
       span: SourceSpan,
     ): void {
-      let message: String = `duplicate ${kind}: ${name}`;
+      let code: str = Analyzer::Binder::duplicateNameCode(kind);
+      let message: String = Analyzer::Binder::duplicateNameMessage(kind, name);
+
       let mut diag: Diagnostic = Diagnostic::new(
         Severity::ERROR,
-        DiagnosticCode::TYPE_ALREADY_DEFINED,
+        code,
         message.toStr(),
         span,
       );
@@ -959,6 +1009,7 @@ export namespace Analyzer {
     function enumTryCapability(
       state: &mut Analyzer::Binder::BinderState,
       metadata: &Ast::Metadata,
+      enumName: str,
       variantCount: u64,
       span: SourceSpan,
     ): Option<Analyzer::TryCapability> {
@@ -978,7 +1029,8 @@ export namespace Analyzer {
         }
 
         if (attribute.arguments.length() != 1) {
-          Analyzer::Binder::emitInvalidLangAttribute(state, "`@lang` takes exactly one argument", span);
+          let message: String = `@lang expects 1 argument(s), got ${attribute.arguments.length()}`;
+          Analyzer::Binder::emitLangAttributeDiagnostic(state, DiagnosticCode::ATTRIBUTE_ARG_COUNT, message.toStr(), span);
           index += 1;
           continue;
         }
@@ -991,8 +1043,8 @@ export namespace Analyzer {
         if (argument.equals("try")) {
           requested = true;
         } else {
-          let detail: String = `unknown \`@lang\` argument: ${argument.toStr()}`;
-          Analyzer::Binder::emitInvalidLangAttribute(state, detail.toStr(), span);
+          let message: String = `unknown attribute '@lang(${argument.toStr()})' on record`;
+          Analyzer::Binder::emitLangAttributeDiagnostic(state, DiagnosticCode::UNKNOWN_ATTRIBUTE, message.toStr(), span);
         }
 
         index += 1;
@@ -1005,7 +1057,8 @@ export namespace Analyzer {
       // `?` unwraps one variant and propagates the other, so a different count leaves no
       // way to say which is which.
       if (variantCount != 2) {
-        Analyzer::Binder::emitInvalidLangAttribute(state, "`@lang(try)` requires exactly two variants", span);
+        let message: String = `@lang(try) on enum '${enumName}' requires exactly 2 variants, found ${variantCount}`;
+        Analyzer::Binder::emitLangAttributeDiagnostic(state, DiagnosticCode::LANG_TRY_REQUIRES_TWO_VARIANTS, message.toStr(), span);
         return Option::NONE;
       }
 
@@ -1018,15 +1071,16 @@ export namespace Analyzer {
     /// Emit a diagnostic for a malformed `@lang` attribute.
     /// Reuses `DiagnosticCode::INVALID_META_ENTITY` per design §5 (reuse an existing code
     /// with a discriminator message rather than minting one per attribute).
-    function emitInvalidLangAttribute(
+    function emitLangAttributeDiagnostic(
       state: &mut Analyzer::Binder::BinderState,
-      detail: str,
+      code: str,
+      message: str,
       span: SourceSpan,
     ): void {
       let mut diag: Diagnostic = Diagnostic::new(
         Severity::ERROR,
-        DiagnosticCode::INVALID_META_ENTITY,
-        detail,
+        code,
+        message,
         span,
       );
       diag.addLabel(LabelKind::PRIMARY, span, "on this declaration");
@@ -1201,10 +1255,10 @@ export namespace Analyzer {
       name: str,
       span: SourceSpan,
     ): void {
-      let message: String = `trait method requires self receiver: ${name}`;
+      let message: String = `trait method '${name}' must have a self parameter (&self or &mut self)`;
       let mut diag: Diagnostic = Diagnostic::new(
         Severity::ERROR,
-        DiagnosticCode::EXPECTED_PATTERN,
+        DiagnosticCode::TRAIT_METHOD_REQUIRES_SELF,
         message.toStr(),
         span,
       );
@@ -2268,6 +2322,7 @@ export namespace Analyzer {
       let tryCapable: Option<Analyzer::TryCapability> = Analyzer::Binder::enumTryCapability(
         state,
         &en.metadata,
+        en.name.toStr(),
         variantTables.variants.length(),
         en.span,
       );

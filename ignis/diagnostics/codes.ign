@@ -17,7 +17,10 @@ export namespace DiagnosticCode {
   const EXPECTED_RETURN_TYPE_AFTER_FUNCTION: str = "I0006";
   const EXPECTED_AFTER_EXPRESSION: str = "I0007";
   const EXPECTED_EXPRESSION_AFTER: str = "I0008";
-  const INVALID_ASSIGNMENT_TARGET: str = "I0009";
+  /// A write through a place that is not mutable, or that names no place at
+  /// all. The reference compiler reports both as one condition, naming the
+  /// place the source wrote.
+  const IMMUTABLE_ASSIGNMENT: str = "A0013";
   const EXPECTED_TYPE_AFTER_VARIABLE: str = "I0010";
   const INVALID_NUMBER_OF_ARGUMENTS: str = "A0017";
   /// The arity mismatch of a builtin, which the reference compiler numbers
@@ -44,6 +47,13 @@ export namespace DiagnosticCode {
   const INVALID_ARGUMENT_TYPE: str = "A0018";
   const TYPE_MISMATCH: str = "A0045";
   const UNDECLARED_VARIABLE: str = "I0033";
+  /// A written path that names nothing. The reference compiler numbers a
+  /// qualified path apart from a bare name.
+  const UNDECLARED_IDENTIFIER: str = "A0035";
+  /// A path in pattern position that names no variant of its enum.
+  const UNKNOWN_VARIANT: str = "A0160";
+  /// The left of `::` is a value rather than an enum.
+  const ENUM_NOT_FOUND: str = "A0058";
   const VARIABLE_ALREADY_DEFINED: str = "I0041";
   const FUNCTION_ALREADY_DEFINED: str = "I0042";
   const UNDEFINED_TYPE: str = "I0043";
@@ -81,24 +91,37 @@ export namespace DiagnosticCode {
   /// A constant index that falls outside a fixed array's declared size.
   const INDEX_OUT_OF_BOUNDS: str = "A0048";
   const TYPE_ALREADY_DEFINED: str = "A0052";
+  /// Two parameters of one callable share a name.
+  const PARAMETER_ALREADY_DEFINED: str = "A0033";
+  /// Two constants in one scope share a name.
+  const CONSTANT_ALREADY_DEFINED: str = "A0034";
+  /// Two type parameters of one declaration share a name.
+  const TYPE_PARAM_ALREADY_DEFINED: str = "A0069";
+  /// A trait method declared without a `&self`/`&mut self` receiver.
+  const TRAIT_METHOD_REQUIRES_SELF: str = "A0144";
   /// Construct not yet implemented by the selfhost compiler (a temporary
   /// wall). Shared by every "not supported"/"not yet supported" site across
   /// the resolver and typechecker; removed as each wall is lifted.
   const UNSUPPORTED_CONSTRUCT: str = "A0053";
   /// A generic type reference supplies the wrong number of type arguments.
-  const GENERIC_ARITY_MISMATCH: str = "A0054";
+  const GENERIC_ARITY_MISMATCH: str = "A0070";
   /// Generic arguments applied to a type-parameter or primitive base, which
   /// cannot take generic arguments.
-  const GENERIC_ARGS_NOT_ALLOWED: str = "A0055";
+  const GENERIC_ARGS_NOT_ALLOWED: str = "A0073";
   /// A definition kind is used where its kind is not valid syntactically
   /// (e.g. a trait name in type position, a method in pattern position).
-  const INVALID_ENTITY_POSITION: str = "A0056";
+  const INVALID_ENTITY_POSITION: str = "A0185";
   /// A direct import binds a name that already exists in the importing
   /// module's direct-import overlay.
-  const DUPLICATE_IMPORT_NAME: str = "A0057";
-  /// A `match` arm or `if`/`else` branch produces a type that disagrees with
-  /// its sibling arms/branches.
-  const ARM_OR_BRANCH_TYPE_MISMATCH: str = "A0058";
+  const DUPLICATE_IMPORT_NAME: str = "M0003";
+  /// An import naming a module the build cannot resolve.
+  const MODULE_NOT_FOUND: str = "M0001";
+  /// An import naming something the target module does not export.
+  const SYMBOL_NOT_EXPORTED: str = "M0002";
+  /// A `match` arm produces a type that disagrees with its sibling arms.
+  const MATCH_ARM_TYPE_MISMATCH: str = "A0163";
+  /// A pattern whose shape cannot describe the scrutinee type.
+  const PATTERN_TYPE_MISMATCH: str = "A0159";
   /// An `if` expression used in value position has no `else` branch.
   const IF_MISSING_ELSE: str = "A0059";
   /// A type alias chain refers back to itself.
@@ -109,25 +132,29 @@ export namespace DiagnosticCode {
   const NON_EXHAUSTIVE_MATCH: str = "A0061";
   /// A destructuring pattern supplies the wrong number of record fields or
   /// enum-variant payload elements.
-  const PATTERN_ARITY_MISMATCH: str = "A0062";
+  const PATTERN_ARITY_MISMATCH: str = "A0161";
   /// An or-pattern whose alternatives introduce bindings. The resolver has no
   /// binding-merge across alternatives yet (IGN-15), so only binding-free
   /// alternatives are accepted.
   const OR_PATTERN_BINDINGS_DISALLOWED: str = "A0157";
   /// A referenced record field or method does not exist on its owner type.
-  const UNKNOWN_MEMBER: str = "A0063";
+  const FIELD_NOT_FOUND: str = "A0054";
+  /// A method named without calling it.
+  const METHOD_MUST_BE_CALLED: str = "A0061";
   /// A record initializer supplies the same field more than once.
   const DUPLICATE_RECORD_FIELD_INIT: str = "A0064";
   /// A record initializer omits a field declared by the record.
-  const MISSING_RECORD_FIELD_INIT: str = "A0065";
+  const MISSING_RECORD_FIELD_INIT: str = "A0055";
   /// A method is called or referenced in a way that mismatches its static
   /// vs. instance calling convention (called without a receiver, called
   /// through an incompatible receiver, or referenced without a call).
   const METHOD_CALL_KIND_MISMATCH: str = "A0066";
   /// An assignment or mutable method call targets an immutable binding.
   const MUTABILITY_VIOLATION: str = "A0067";
-  /// `break` or `continue` used outside of a loop.
-  const CONTROL_FLOW_OUTSIDE_LOOP: str = "A0068";
+  /// `break` used outside of a loop.
+  const BREAK_OUTSIDE_LOOP: str = "A0040";
+  /// `continue` used outside of a loop.
+  const CONTINUE_OUTSIDE_LOOP: str = "A0041";
   /// A call expression whose callee is a value that is not a function.
   const CALL_ON_NON_CALLABLE: str = "A0069";
   /// A `@name(...)` call naming a builtin the compiler does not define.
@@ -155,13 +182,16 @@ export namespace DiagnosticCode {
   /// A `null` literal supplied where the expected type is not a pointer.
   const INVALID_NULL_LITERAL: str = "A0072";
   /// The operand of `!` is not a `@lang(try)` enum.
-  const TRY_ON_NON_TRY_TYPE: str = "A0078";
+  const TRY_ON_NON_TRY_TYPE: str = "A0178";
+  /// `!` used where the enclosing function's return type is not a
+  /// `@lang(try)` enum at all.
+  const TRY_OUTSIDE_TRY_FUNCTION: str = "A0179";
   /// The enclosing function's return type cannot carry the error `!` propagates:
   /// it is not the same `@lang(try)` enum as the operand's.
-  const TRY_RETURN_TYPE_MISMATCH: str = "A0079";
+  const TRY_RETURN_TYPE_MISMATCH: str = "A0180";
   /// The operand's error payload differs from the enclosing return type's
   /// error payload, so `!` cannot propagate it unchanged.
-  const TRY_ERROR_TYPE_MISMATCH: str = "A0080";
+  const TRY_ERROR_TYPE_MISMATCH: str = "A0181";
   /// A `for..of` iterable that is not a slice, fixed array, or iterable
   /// record (`data: *T` plus `length: u64`).
   const FOR_OF_EXPECTS_VECTOR: str = "A0069";
@@ -174,10 +204,10 @@ export namespace DiagnosticCode {
   const DEFER_EXPRESSION_MUST_BE_VOID: str = "A0182";
   /// A `.member` access whose receiver holds no fields — a primitive, an
   /// enum, a reference to one, or any other non-record type.
-  const MEMBER_ACCESS_ON_NON_RECORD: str = "A0085";
+  const MEMBER_ACCESS_ON_NON_RECORD: str = "A0060";
   /// A call whose explicit type arguments do not match the callee's declared
   /// type parameters in number.
-  const TYPE_ARGUMENT_COUNT_MISMATCH: str = "A0086";
+  const TYPE_ARGUMENT_COUNT_MISMATCH: str = "A0050";
   /// A dereference of a value that is the null pointer by inspection, such as
   /// a literal `null` handed to `@read`/`@write`.
   const NULL_DEREFERENCE: str = "A0074";
@@ -224,6 +254,8 @@ export namespace DiagnosticCode {
   const ATTRIBUTE_ARG_COUNT: str = "A0118";
   /// An attribute the declaration it is written on does not accept.
   const UNKNOWN_ATTRIBUTE: str = "A0117";
+  /// A `@lang(try)` enum that does not have exactly two variants.
+  const LANG_TRY_REQUIRES_TWO_VARIANTS: str = "A0177";
   /// An `@aligned(N)` whose `N` is not a power of two.
   const ALIGNMENT_NOT_POWER_OF_TWO: str = "A0121";
   /// An `@externName` export written on a generic function: every

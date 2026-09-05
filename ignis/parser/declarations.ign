@@ -1235,7 +1235,7 @@ export namespace ParserDeclarations {
       }
 
       if (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE)) {
-        parserRef.emitDiagnostic(parserRef.current().span, DiagnosticCode::EXPECTED_DELIMITER, "Expected ',' or '}'", "record fields must be separated by ';' or ','");
+        parserRef.expectedToken(parserRef.current().span, "SemiColon", "record fields must be separated by ';' or ','");
         ParserRecovery::synchronizeTopLevel(parserRef);
         break;
       }
@@ -1349,7 +1349,18 @@ export namespace ParserDeclarations {
         continue;
       }
 
-      let variantName = parserRef.expectIdentifier("expected enum variant name")!;
+      // The reference parser has no identifier expectation of its own here: an
+      // enum body that does not continue with a variant name is simply a token
+      // it did not expect.
+      let Option::SOME(variantName) = parserRef.consumeIdentifier() else {
+        parserRef.emitDiagnostic(
+          parserRef.current().span,
+          DiagnosticCode::UNEXPECTED_TOKEN,
+          "Unexpected token",
+          "expected enum variant name",
+        );
+        return Option::NONE;
+      };
       let variantId = ParserDeclarations::createEnumVariantPattern(parserRef, variantName)!;
       variants.push(variantId);
 
