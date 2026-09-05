@@ -746,6 +746,44 @@ function main(): i32 {
   );
 }
 
+// Same move as the test above, reached through a generic function. Monomorphization
+// used to keep the arm binding on the generic definition, so it stayed typed as the
+// type parameter and ownership analysis saw a payload that never needed dropping.
+#[test]
+fn e2e_err_move_reference_destructured_binding_by_value_generic() {
+  e2e_ownership_error_test(
+    "err_move_reference_destructured_binding_by_value_generic",
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+enum Source<T> {
+    SOME(T),
+    NONE,
+}
+
+function takeFromBorrow<T>(src: &Source<T>, fallback: T): T {
+    return match (src) {
+        Source::SOME(payload) -> payload,
+        Source::NONE -> fallback,
+    };
+}
+
+function main(): i32 {
+    let source: Source<Payload> = Source::SOME(Payload { value: 42 });
+    let taken: Payload = takeFromBorrow<Payload>(&source, Payload { value: 0 });
+    return taken.value;
+}
+"#,
+  );
+}
+
 #[test]
 fn e2e_err_conditional_drop_then_use() {
   e2e_ownership_error_test(

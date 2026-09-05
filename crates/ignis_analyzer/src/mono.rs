@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-use ignis_hir::{BuiltinEqKind, HIR, HIRId, HIRKind, HIRMatchArm, HIRNode, statement::LoopKind};
+use ignis_hir::{BuiltinEqKind, HIR, HIRId, HIRKind, HIRMatchArm, HIRNode, HIRPattern, statement::LoopKind};
 use ignis_type::definition::{
   ConstantDefinition, Definition, DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, EnumVariantDef,
   FieldDefinition, FunctionDefinition, MethodDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef,
@@ -2019,6 +2019,12 @@ impl<'a> Monomorphizer<'a> {
       return local_id;
     }
 
+    // Or-pattern alternatives name the same binding definition more than once;
+    // every alternative must keep pointing at a single specialized definition.
+    if let Some(existing) = self.current_def_remap.get(&local_id) {
+      return *existing;
+    }
+
     let def = self.input_defs.get(&local_id);
 
     let new_kind = match &def.kind {
@@ -2064,6 +2070,44 @@ impl<'a> Monomorphizer<'a> {
     let new_id = self.output_defs.alloc(new_def);
     self.current_def_remap.insert(local_id, new_id);
     new_id
+  }
+
+  /// Clone the bindings of a pattern into specialized definitions.
+  ///
+  /// Pattern bindings are locals just like `let` bindings: leaving them on the
+  /// generic definition keeps them typed `Type::Param` in the specialized body,
+  /// which hides them from every post-mono analysis that asks whether the bound
+  /// type needs dropping (ownership, borrow checking, drop scheduling).
+  fn substitute_pattern(
+    &mut self,
+    pattern: &HIRPattern,
+    subst: &Substitution,
+  ) -> HIRPattern {
+    match pattern {
+      HIRPattern::Binding { def_id } => HIRPattern::Binding {
+        def_id: self.instantiate_local(*def_id, subst),
+      },
+      HIRPattern::Variant {
+        enum_def,
+        variant_tag,
+        args,
+      } => HIRPattern::Variant {
+        enum_def: *enum_def,
+        variant_tag: *variant_tag,
+        args: args.iter().map(|arg| self.substitute_pattern(arg, subst)).collect(),
+      },
+      HIRPattern::Tuple { elements } => HIRPattern::Tuple {
+        elements: elements
+          .iter()
+          .map(|element| self.substitute_pattern(element, subst))
+          .collect(),
+      },
+      HIRPattern::Or { patterns } => HIRPattern::Or {
+        patterns: patterns.iter().map(|p| self.substitute_pattern(p, subst)).collect(),
+      },
+      // Constants name an existing declaration rather than introducing a binding.
+      HIRPattern::Wildcard | HIRPattern::Literal { .. } | HIRPattern::Constant { .. } => pattern.clone(),
+    }
   }
 
   // === Body Substitution Phase ===
@@ -2594,9 +2638,10 @@ impl<'a> Monomorphizer<'a> {
         else_block,
       } => {
         let new_value = self.substitute_hir(*value, subst);
+        let new_pattern = self.substitute_pattern(pattern, subst);
         let new_else_block = self.substitute_hir(*else_block, subst);
         HIRKind::LetElse {
-          pattern: pattern.clone(),
+          pattern: new_pattern,
           value: new_value,
           else_block: new_else_block,
         }
@@ -2627,10 +2672,14 @@ impl<'a> Monomorphizer<'a> {
         let new_scrutinee = self.substitute_hir(*scrutinee, subst);
         let new_arms: Vec<_> = arms
           .iter()
-          .map(|arm| HIRMatchArm {
-            pattern: arm.pattern.clone(),
-            guard: arm.guard.map(|g| self.substitute_hir(g, subst)),
-            body: self.substitute_hir(arm.body, subst),
+          .map(|arm| {
+            // The pattern first: the guard and the body reference its bindings.
+            let pattern = self.substitute_pattern(&arm.pattern, subst);
+            HIRMatchArm {
+              pattern,
+              guard: arm.guard.map(|g| self.substitute_hir(g, subst)),
+              body: self.substitute_hir(arm.body, subst),
+            }
           })
           .collect();
         HIRKind::Match {
