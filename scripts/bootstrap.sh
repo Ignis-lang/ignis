@@ -179,10 +179,30 @@ compile_stage() {
   info "${stage}: ok -> ${dir}/ignis"
 }
 
+# stage0 is either the Rust host or a previously promoted selfhost binary
+# (`IGNIS_STAGE0` pointed at the nightly's official asset). The two take
+# different command forms: the host reads ignis.toml through `ignis build`,
+# while a selfhost binary is invoked directly like every other stage, on
+# `ignis/main.ign`. `--version` tells them apart: the host's clap CLI prints a
+# version banner and exits 0; the selfhost CLI has no such flag and rejects it
+# as an unknown argument.
+stage0_is_selfhost() {
+  local bin="$1"
+
+  "$bin" --version >/dev/null 2>&1 && return 1
+  return 0
+}
+
 build_stage1() {
   local stage0_bin
   stage0_bin="$(command -v "$STAGE0" || true)"
   [[ -n "$stage0_bin" ]] || fail "stage0 compiler not found: ${STAGE0} (set IGNIS_STAGE0)"
+
+  if stage0_is_selfhost "$stage0_bin"; then
+    info "stage1: stage0 (${stage0_bin}) is a selfhost compiler, compiling ${ENTRY#"$PROJECT_ROOT/"} directly"
+    IGNIS_STD_PATH="${PROJECT_ROOT}/std" compile_stage stage1 "$stage0_bin"
+    return
+  fi
 
   local dir
   dir="$(stage_dir stage1)"
