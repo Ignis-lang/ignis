@@ -219,6 +219,24 @@ function mapImportSourcesToDiscoveryTargets(
 record BuildProfile {
   public optLevel: u64;
   public debug: boolean;
+  /// The project's `[build] cflags`, forwarded verbatim to the C toolchain.
+  public cflags: Vector<String>;
+}
+
+function buildProfileCloneStrings(source: &Vector<String>): Vector<String> {
+  let mut result: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < source.length()) {
+    let Option::SOME(value) = source.get(index) else {
+      break;
+    };
+
+    result.push(value.clone());
+    index += 1;
+  }
+
+  return result;
 }
 
 /// Resolve the profile the C toolchain is invoked with.
@@ -230,6 +248,7 @@ function resolveBuildProfile(discovery: &DiscoveryResult, optLevel: Option<u64>)
   let mut profile: BuildProfile = BuildProfile {
     optLevel: discovery.optLevel,
     debug: discovery.flags.debug,
+    cflags: buildProfileCloneStrings(&discovery.cflags),
   };
 
   if (let Option::SOME(level) = optLevel) {
@@ -255,7 +274,7 @@ function compileAndLinkUnits(
   let mut includeDirs: Vector<String> = Vector::new<String>();
   includeDirs.push(runtimeDir.toString());
 
-  let extraFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug);
+  let extraFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
 
   let mut objects: Vector<String> = Vector::new<String>();
   let mut unitIndex: u64 = 0;
@@ -288,7 +307,7 @@ function compileAndLinkUnits(
   let mut libs: Vector<String> = Vector::new<String>();
   libs.push(String::create("m"));
 
-  let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug);
+  let linkFlags: Vector<String> = CCompiler::profileFlags(profile.optLevel, profile.debug, &profile.cflags);
 
   if (let Result::ERROR(linkBag) = Linker::link(
     "gcc",
