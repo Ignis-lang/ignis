@@ -1,0 +1,91 @@
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import Format from "./doc";
+import FormatterConfig from "./config";
+
+@test
+function docRendersTextLineAndIndentWithConfiguredIndentWidth(): void {
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let mut items: Vector<Format::Doc> = Vector::new<Format::Doc>();
+  items.push(Format::Doc::text("function main() {"));
+  items.push(Format::Doc::indent(Format::Doc::list(buildBodyDocs())));
+  items.push(Format::Doc::line());
+  items.push(Format::Doc::text("}"));
+
+  let doc: Format::Doc = Format::Doc::list(items);
+  let rendered: String = Format::renderDoc(&doc, &config, 0);
+
+  Test::assertEq<str>(rendered.toStr(), "function main() {\n  return;\n}");
+}
+
+function buildBodyDocs(): Vector<Format::Doc> {
+  let mut body: Vector<Format::Doc> = Vector::new<Format::Doc>();
+  body.push(Format::Doc::line());
+  body.push(Format::Doc::text("return;"));
+  return body;
+}
+
+@test
+function docRendersNestedIndentAtIncreasingLevels(): void {
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let inner: Format::Doc = Format::Doc::indent(Format::Doc::list(buildBodyDocs()));
+  let outer: Format::Doc = Format::Doc::indent(inner);
+
+  let rendered: String = Format::renderDoc(&outer, &config, 0);
+
+  Test::assertEq<str>(rendered.toStr(), "\n    return;");
+}
+
+@test
+function formatInlineOrMultilineStaysInlineWhenItFitsTheLineWidth(): void {
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let mut items: Vector<String> = Vector::new<String>();
+  items.push(String::create("a: i32"));
+  items.push(String::create("b: i32"));
+
+  let doc: Format::Doc = Format::formatInlineOrMultiline("function add(", &items, "): i32", 0, &config, false, 0);
+  let rendered: String = Format::renderDoc(&doc, &config, 0);
+
+  Test::assertEq<str>(rendered.toStr(), "function add(a: i32, b: i32): i32");
+}
+
+@test
+function formatInlineOrMultilineWrapsEachItemWhenTooLongForTheLineWidth(): void {
+  let mut config: FormatterConfig = FormatterConfig::default();
+  config.lineWidth = 20;
+
+  let mut items: Vector<String> = Vector::new<String>();
+  items.push(String::create("firstParameter: i32"));
+  items.push(String::create("secondParameter: i32"));
+
+  let doc: Format::Doc = Format::formatInlineOrMultiline("function longName(", &items, "): void", 0, &config, true, 0);
+  let rendered: String = Format::renderDoc(&doc, &config, 0);
+
+  Test::assertEq<str>(
+    rendered.toStr(),
+    "function longName(\n  firstParameter: i32,\n  secondParameter: i32,\n): void"
+  );
+}
+
+@test
+function formatInlineOrMultilineOmitsTrailingCommaWhenNotRequested(): void {
+  let mut config: FormatterConfig = FormatterConfig::default();
+  config.lineWidth = 20;
+
+  let mut items: Vector<String> = Vector::new<String>();
+  items.push(String::create("firstParameter: i32"));
+  items.push(String::create("secondParameter: i32"));
+
+  let doc: Format::Doc = Format::formatInlineOrMultiline("function longName(", &items, "): void", 0, &config, false, 0);
+  let rendered: String = Format::renderDoc(&doc, &config, 0);
+
+  Test::assertEq<str>(
+    rendered.toStr(),
+    "function longName(\n  firstParameter: i32,\n  secondParameter: i32\n): void"
+  );
+}

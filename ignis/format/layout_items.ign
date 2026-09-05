@@ -1,0 +1,1369 @@
+import String from "std::string";
+import Vector from "std::vector";
+
+import Ast from "@compiler::ast";
+import DiagnosticBag, SourceFile, SourceSpan from "@compiler::diagnostics";
+import LexResult, Lexer from "@compiler::lexer";
+import Parser from "@compiler::parser";
+import Keyword, Punctuation, Token, TokenKind, TokenStream from "@compiler::syntax";
+
+import CommentBlock from "./comments";
+import FormatterConfig from "./config";
+import _ from "./doc";
+import FormatError from "./error";
+import _ from "./model";
+
+function collapseSpaces(text: &String): String {
+  let mut result: String = String::new();
+  let mut index: u64 = 0;
+  let mut previousWasSpace: boolean = true;
+
+  while (index < text.length()) {
+    let Option::SOME(byte) = text.byteAt(index) else {
+      break;
+    };
+
+    if (isAsciiWhitespaceByteLayout(byte)) {
+      if (!previousWasSpace) {
+        result.pushChar(' ');
+      }
+
+      previousWasSpace = true;
+    } else {
+      result.pushByte(byte);
+      previousWasSpace = false;
+    }
+
+    index += 1;
+  }
+
+  return result.trimAsciiWhitespace();
+}
+
+function isAsciiWhitespaceByteLayout(byte: u8): boolean {
+  return byte == ' ' as u8 || byte == '\t' as u8 || byte == '\n' as u8 || byte == '\r' as u8;
+}
+
+/// Byte length of the leading `@attribute`/comment-directive prefix isn't
+/// relevant here; this only slices a node's own span out of the original
+/// chunk text, mirroring the host's `AstChunkFormatter::slice_span`.
+function sliceSpan(source: &String, span: &SourceSpan): String {
+  let mut start: u64 = span.start;
+  let mut end: u64 = span.end;
+
+  if (start > source.length()) {
+    start = source.length();
+  }
+
+  if (end > source.length()) {
+    end = source.length();
+  }
+
+  if (start > end) {
+    return String::new();
+  }
+
+  return source.substringBytes(start, end);
+}
+
+export namespace Format {
+  function formatType(module: &Ast::Module, typeId: Ast::TypeId, source: &String): String {
+    let Option::SOME(node) = module.types.get(typeId) else {
+      return String::new();
+    };
+
+    if (let Ast::Type::Node::Path(path) = node) {
+      return Format::joinSegments(&path.segments, "::");
+    }
+
+    if (let Ast::Type::Node::Pointer(pointer) = node) {
+      let inner: String = Format::formatType(module, pointer.pointee, source);
+      let mut result: String = String::create("*");
+
+      if (pointer.mutable) {
+        result.pushStr("mut ");
+      }
+
+      result.push(&inner);
+      return result;
+    }
+
+    if (let Ast::Type::Node::Reference(reference) = node) {
+      let inner: String = Format::formatType(module, reference.target, source);
+      let mut result: String = String::create("&");
+
+      if (reference.mutable) {
+        result.pushStr("mut ");
+      }
+
+      result.push(&inner);
+      return result;
+    }
+
+    if (let Ast::Type::Node::Tuple(tuple) = node) {
+      let inner: String = Format::joinFormattedTypes(module, &tuple.elements, source);
+      let mut result: String = String::create("(");
+      result.push(&inner);
+      result.pushStr(")");
+      return result;
+    }
+
+    if (let Ast::Type::Node::Function(callable) = node) {
+      let params: String = Format::joinFormattedTypes(module, &callable.parameters, source);
+      let returnText: String = Format::formatType(module, callable.returnType, source);
+
+      let mut result: String = String::create("(");
+      result.push(&params);
+      result.pushStr(") -> ");
+      result.push(&returnText);
+      return result;
+    }
+
+    if (let Ast::Type::Node::Slice(slice) = node) {
+      let inner: String = Format::formatType(module, slice.element, source);
+      let mut result: String = inner;
+      result.pushStr("[]");
+      return result;
+    }
+
+    if (let Ast::Type::Node::FixedArray(fixedArray) = node) {
+      let inner: String = Format::formatType(module, fixedArray.element, source);
+      let sizeText: String = fixedArray.size.toString();
+
+      let mut result: String = inner;
+      result.pushStr("[");
+      result.push(&sizeText);
+      result.pushStr("]");
+      return result;
+    }
+
+    if (let Ast::Type::Node::Generic(generic) = node) {
+      let base: String = Format::formatType(module, generic.base, source);
+      let args: String = Format::joinFormattedTypes(module, &generic.arguments, source);
+
+      let mut result: String = base;
+      result.pushStr("<");
+      result.push(&args);
+      result.pushStr(">");
+      return result;
+    }
+
+    return String::new();
+  }
+
+  function joinFormattedTypes(
+    module: &Ast::Module,
+    ids: &Vector<Ast::TypeId>,
+    source: &String
+  ): String {
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      let Option::SOME(typeId) = ids.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        result.pushStr(", ");
+      }
+
+      let formatted: String = Format::formatType(module, *typeId, source);
+      result.push(&formatted);
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function joinSegments(segments: &Vector<String>, separator: str): String {
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < segments.length()) {
+      let Option::SOME(segment) = segments.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        result.pushStr(separator);
+      }
+
+      result.push(segment);
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// Formats one `@name(arg1, arg2)` attribute, each on its own line at
+  /// `indentLevel`. Attribute arguments are already plain strings on the
+  /// selfhost AST (`Ast::Attribute::arguments: Vector<String>`), unlike the
+  /// host, which slices them from source; both land on the same text.
+  function formatAttributes(
+    attributes: &Vector<Ast::Attribute>,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let prefix: String = config.indentString(indentLevel);
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < attributes.length()) {
+      let Option::SOME(attribute) = attributes.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      result.push(&prefix);
+      result.pushStr("@");
+      result.push(&attribute.name);
+
+      if (attribute.arguments.length() > 0) {
+        let argsText: String = Format::joinSegments(&attribute.arguments, ", ");
+        result.pushStr("(");
+        result.push(&argsText);
+        result.pushStr(")");
+      }
+
+      result.pushChar('\n');
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// Renders modifier keywords that prefix a declaration line (`public`,
+  /// `private`, `static`). `@inline`/`@inline(always)`/`@inline(never)` are
+  /// stored as `Ast::Modifier` values on the selfhost (unlike the host, which
+  /// keeps them as attributes), so they render as their own attribute lines
+  /// here to match the host's visible output.
+  ///
+  /// `Meta`/`Declare` are not rendered: their exact source syntax is not yet
+  /// confirmed against a host fixture, and guessing risks corrupting output.
+  function formatModifierAttributeLines(
+    modifiers: &Vector<Ast::Modifier>,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let prefix: String = config.indentString(indentLevel);
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < modifiers.length()) {
+      let Option::SOME(modifier) = modifiers.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (*modifier == Ast::Modifier::Inline) {
+        result.push(&prefix);
+        result.pushStr("@inline\n");
+      } else if (*modifier == Ast::Modifier::InlineAlways) {
+        result.push(&prefix);
+        result.pushStr("@inline(always)\n");
+      } else if (*modifier == Ast::Modifier::InlineNever) {
+        result.push(&prefix);
+        result.pushStr("@inline(never)\n");
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function formatModifierKeywords(modifiers: &Vector<Ast::Modifier>): String {
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < modifiers.length()) {
+      let Option::SOME(modifier) = modifiers.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (*modifier == Ast::Modifier::Public) {
+        result.pushStr("public ");
+      } else if (*modifier == Ast::Modifier::Private) {
+        result.pushStr("private ");
+      } else if (*modifier == Ast::Modifier::Static) {
+        result.pushStr("static ");
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function formatDeclarationPrefix(
+    metadata: &Ast::Metadata,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let mut result: String = Format::formatAttributes(&metadata.attributes, config, indentLevel);
+    let modifierLines: String = Format::formatModifierAttributeLines(&metadata.modifiers, config, indentLevel);
+    result.push(&modifierLines);
+    return result;
+  }
+
+  function nodeSpanOf(node: &Ast::Item::Node): SourceSpan {
+    if (let Ast::Item::Node::Function(functionItem) = node) {
+      return functionItem.span;
+    }
+
+    if (let Ast::Item::Node::Record(recordItem) = node) {
+      return recordItem.span;
+    }
+
+    if (let Ast::Item::Node::Enum(enumItem) = node) {
+      return enumItem.span;
+    }
+
+    if (let Ast::Item::Node::Namespace(namespaceItem) = node) {
+      return namespaceItem.span;
+    }
+
+    if (let Ast::Item::Node::Import(importItem) = node) {
+      return importItem.span;
+    }
+
+    if (let Ast::Item::Node::Extern(externItem) = node) {
+      return externItem.span;
+    }
+
+    if (let Ast::Item::Node::Constant(constant) = node) {
+      return constant.span;
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      return exportItem.span;
+    }
+
+    if (let Ast::Item::Node::TypeAlias(typeAlias) = node) {
+      return typeAlias.span;
+    }
+
+    if (let Ast::Item::Node::Trait(traitItem) = node) {
+      return traitItem.span;
+    }
+
+    return SourceSpan::new("", 0, 0);
+  }
+
+  function itemSpan(module: &Ast::Module, itemId: Ast::ItemId): SourceSpan {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return SourceSpan::new("", 0, 0);
+    };
+
+    return Format::nodeSpanOf(node);
+  }
+
+  /// The true end byte of an item, including a function's body. A function
+  /// item's own span only covers its signature; the body is a separate
+  /// statement node.
+  function itemTrueEnd(module: &Ast::Module, itemId: Ast::ItemId): u64 {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return 0;
+    };
+
+    if (let Ast::Item::Node::Function(functionItem) = node) {
+      let signatureEnd: u64 = functionItem.span.end;
+
+      let Option::SOME(bodyNode) = module.statements.get(functionItem.body) else {
+        return signatureEnd;
+      };
+
+      if (let Ast::Statement::Node::Block(block) = bodyNode) {
+        if (block.span.end > signatureEnd) {
+          return block.span.end;
+        }
+      }
+
+      return signatureEnd;
+    }
+
+    return Format::nodeSpanOf(node).end;
+  }
+
+  function renderBodyPlaceholder(
+    module: &Ast::Module,
+    bodyId: Ast::StatementId,
+    source: &String
+  ): String {
+    let Option::SOME(node) = module.statements.get(bodyId) else {
+      return String::create("{}");
+    };
+
+    if (let Ast::Statement::Node::Block(block) = node) {
+      return sliceSpan(source, &block.span);
+    }
+
+    return String::create("{}");
+  }
+
+  function renderExpressionPlaceholder(
+    module: &Ast::Module,
+    expressionId: Ast::ExpressionId,
+    source: &String
+  ): String {
+    let Option::SOME(node) = module.expressions.get(expressionId) else {
+      return String::new();
+    };
+
+    let span: SourceSpan = Ast::Serializer::expressionSpan(node);
+    return sliceSpan(source, &span);
+  }
+
+  function isImportNode(module: &Ast::Module, itemId: Ast::ItemId): boolean {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return false;
+    };
+
+    if (let Ast::Item::Node::Import(_) = node) {
+      return true;
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      if (let Option::SOME(_) = exportItem.source) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function isDiscardImportNode(module: &Ast::Module, itemId: Ast::ItemId): boolean {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return false;
+    };
+
+    let Ast::Item::Node::Import(importItem) = node else {
+      return false;
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < importItem.items.length()) {
+      let Option::SOME(binding) = importItem.items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (binding.kind == Ast::ImportBindingKind::Discard) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function moduleItemNames(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    source: &String
+  ): Vector<String> {
+    let mut names: Vector<String> = Vector::new<String>();
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return names;
+    };
+
+    let mut bindings: Option<&Vector<Ast::ImportBinding>> = Option::NONE;
+
+    if (let Ast::Item::Node::Import(importItem) = node) {
+      bindings = Option::SOME(&importItem.items);
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      bindings = Option::SOME(&exportItem.items);
+    }
+
+    let Option::SOME(bindingList) = bindings else {
+      return names;
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < bindingList.length()) {
+      let Option::SOME(binding) = bindingList.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let text: String = sliceSpan(source, &binding.span).trimAsciiWhitespace();
+      names.push(text);
+      index += 1;
+    }
+
+    return names;
+  }
+
+  function groupableModuleItemKeyword(module: &Ast::Module, itemId: Ast::ItemId): Option<String> {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return Option::NONE;
+    };
+
+    if (let Ast::Item::Node::Import(importItem) = node) {
+      if (Format::isDiscardImportNode(module, itemId)) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(String::create("import"));
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      if (let Option::SOME(_) = exportItem.source) {
+        return Option::SOME(String::create("export"));
+      }
+    }
+
+    return Option::NONE;
+  }
+
+  function groupableModuleItemFrom(module: &Ast::Module, itemId: Ast::ItemId): String {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return String::new();
+    };
+
+    if (let Ast::Item::Node::Import(importItem) = node) {
+      return importItem.source.clone();
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      if (let Option::SOME(fromPath) = &exportItem.source) {
+        return fromPath.clone();
+      }
+    }
+
+    return String::new();
+  }
+
+  function moduleItemSignatureMatches(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    keyword: &String,
+    fromPath: &String
+  ): boolean {
+    let Option::SOME(candidateKeyword) = Format::groupableModuleItemKeyword(module, itemId) else {
+      return false;
+    };
+
+    let candidateFrom: String = Format::groupableModuleItemFrom(module, itemId);
+    let keywordView: str = keyword.toStr();
+    let candidateKeywordView: str = candidateKeyword.toStr();
+    let fromView: str = fromPath.toStr();
+    let candidateFromView: str = candidateFrom.toStr();
+
+    return @eq<str>(&keywordView, &candidateKeywordView) && @eq<str>(&fromView, &candidateFromView);
+  }
+
+  function whitespaceGapHasIntentionalBlankLine(source: &String, start: u64, end: u64): boolean {
+    if (start >= end) {
+      return false;
+    }
+
+    let mut cursor: u64 = start;
+
+    while (cursor < end) {
+      let Option::SOME(byte) = source.byteAt(cursor) else {
+        break;
+      };
+
+      if (byte == ',' as u8 || byte == ';' as u8) {
+        cursor += 1;
+      } else {
+        break;
+      }
+    }
+
+    let mut newlineCount: u64 = 0;
+
+    while (cursor < end) {
+      let Option::SOME(byte) = source.byteAt(cursor) else {
+        break;
+      };
+
+      if (!isAsciiWhitespaceByteLayout(byte)) {
+        break;
+      }
+
+      if (byte == '\n' as u8) {
+        newlineCount += 1;
+      }
+
+      cursor += 1;
+    }
+
+    return newlineCount >= 2;
+  }
+
+  function layoutStringEndsWithByte(text: &String, byte: u8): boolean {
+    if (text.length() == 0) {
+      return false;
+    }
+
+    let Option::SOME(last) = text.byteAt(text.length() - 1) else {
+      return false;
+    };
+
+    return last == byte;
+  }
+
+  function layoutStringEndsWithStr(text: &String, suffix: str): boolean {
+    let suffixText: String = String::create(suffix);
+
+    if (text.length() < suffixText.length()) {
+      return false;
+    }
+
+    let tail: String = text.substringBytes(text.length() - suffixText.length(), text.length());
+    let tailView: str = tail.toStr();
+    let suffixView: str = suffixText.toStr();
+
+    return @eq<str>(&tailView, &suffixView);
+  }
+
+  function preserveSingleBlankLineForWhitespaceGap(
+    output: &mut String,
+    source: &String,
+    start: u64,
+    end: u64
+  ): void {
+    let mut outputRef: &mut String = output;
+
+    if (!Format::whitespaceGapHasIntentionalBlankLine(source, start, end)) {
+      return;
+    }
+
+    if (Format::layoutStringEndsWithByte(&*outputRef, '\n' as u8)) {
+      outputRef.pushChar('\n');
+    } else {
+      outputRef.pushStr("\n\n");
+    }
+  }
+
+  function formatModuleItemList(
+    keyword: str,
+    items: &Vector<String>,
+    fromPath: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let indentText: String = config.indentString(indentLevel);
+    let joined: String = Format::joinSegments(items, ", ");
+
+    let mut flat: String = String::create(keyword);
+    flat.pushStr(" ");
+    flat.push(&joined);
+    flat.pushStr(" from \"");
+    flat.push(fromPath);
+    flat.pushStr("\";");
+
+    if (config.indentColumns(indentLevel) + flat.length() <= config.lineWidth) {
+      let mut result: String = indentText;
+      result.push(&flat);
+      return result;
+    }
+
+    let itemIndent: String = config.indentString(indentLevel + 1);
+
+    let mut result: String = indentText.clone();
+    result.pushStr(keyword);
+    result.pushChar('\n');
+
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(item) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      result.push(&itemIndent);
+      result.push(item);
+      result.pushStr(",\n");
+      index += 1;
+    }
+
+    result.push(&indentText);
+    result.pushStr("from \"");
+    result.push(fromPath);
+    result.pushStr("\";");
+
+    return result;
+  }
+
+  function formatImportLikeItem(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return Result::ERROR(FormatError::model("import item is missing from the module"));
+    };
+
+    if (let Ast::Item::Node::Import(importItem) = node) {
+      let names: Vector<String> = Format::moduleItemNames(module, itemId, source);
+      return Result::OK(Format::formatModuleItemList("import", &names, &importItem.source, config, indentLevel));
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      if (let Option::SOME(fromPath) = &exportItem.source) {
+        let names: Vector<String> = Format::moduleItemNames(module, itemId, source);
+        return Result::OK(Format::formatModuleItemList("export", &names, &fromPath, config, indentLevel));
+      }
+
+      if (let Option::SOME(_) = exportItem.declaration) {
+        return Result::ERROR(FormatError::unsupported("export of a declaration is not yet supported by layout_items"));
+      }
+
+      return Result::ERROR(FormatError::model("export item has neither a re-export source nor a declaration"));
+    }
+
+    return Result::ERROR(FormatError::model("expected an import-like item"));
+  }
+
+  function formatConstant(
+    module: &Ast::Module,
+    constant: &Ast::Item::Constant,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let prefix: String = Format::formatDeclarationPrefix(&constant.metadata, config, indentLevel);
+    let modifierKeywords: String = Format::formatModifierKeywords(&constant.metadata.modifiers);
+    let indentText: String = config.indentString(indentLevel);
+
+    let mut result: String = prefix;
+    result.push(&indentText);
+    result.pushStr("const ");
+    result.push(&modifierKeywords);
+    result.push(&constant.name);
+
+    if (let Option::SOME(annotation) = constant.annotation) {
+      let annotationText: String = Format::formatType(module, annotation, source);
+      result.pushStr(": ");
+      result.push(&annotationText);
+    }
+
+    result.pushStr(" = ");
+    let valueText: String = Format::renderExpressionPlaceholder(module, constant.value, source);
+    result.push(&valueText);
+    result.pushStr(";");
+
+    return result;
+  }
+
+  function formatTypeAlias(
+    module: &Ast::Module,
+    typeAlias: &Ast::Item::TypeAlias,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let prefix: String = Format::formatDeclarationPrefix(&typeAlias.metadata, config, indentLevel);
+    let modifierKeywords: String = Format::formatModifierKeywords(&typeAlias.metadata.modifiers);
+    let indentText: String = config.indentString(indentLevel);
+
+    let mut result: String = prefix;
+    result.push(&indentText);
+    result.pushStr("type ");
+    result.push(&modifierKeywords);
+    result.push(&typeAlias.name);
+
+    if (typeAlias.genericParameters.length() > 0) {
+      result.pushStr(Format::formatGenericParamsAngleBracketed(&typeAlias.genericParameters, source).toStr());
+    }
+
+    result.pushStr(" = ");
+    let valueTypeText: String = Format::formatType(module, typeAlias.value, source);
+    result.push(&valueTypeText);
+    result.pushStr(";");
+
+    return result;
+  }
+
+  function formatGenericParamsAngleBracketed(
+    params: &Vector<Ast::GenericParam>,
+    source: &String
+  ): String {
+    let mut result: String = String::create("<");
+    let mut index: u64 = 0;
+
+    while (index < params.length()) {
+      let Option::SOME(param) = params.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        result.pushStr(", ");
+      }
+
+      let sliced: String = sliceSpan(source, &param.span);
+      let collapsed: String = collapseSpaces(&sliced);
+      result.push(&collapsed);
+      index += 1;
+    }
+
+    result.pushStr(">");
+    return result;
+  }
+
+  function patternSpanOf(node: &Ast::Pattern::Node): SourceSpan {
+    if (let Ast::Pattern::Node::Wildcard(wildcard) = node) {
+      return wildcard.span;
+    }
+
+    if (let Ast::Pattern::Node::Binding(binding) = node) {
+      return binding.span;
+    }
+
+    if (let Ast::Pattern::Node::Literal(literal) = node) {
+      return literal.span;
+    }
+
+    if (let Ast::Pattern::Node::Path(path) = node) {
+      return path.span;
+    }
+
+    if (let Ast::Pattern::Node::Tuple(tuple) = node) {
+      return tuple.span;
+    }
+
+    if (let Ast::Pattern::Node::Or(orPattern) = node) {
+      return orPattern.span;
+    }
+
+    return SourceSpan::new("", 0, 0);
+  }
+
+  function formatParameterList(
+    module: &Ast::Module,
+    parameters: &Vector<Ast::PatternId>,
+    source: &String
+  ): Vector<String> {
+    let mut result: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < parameters.length()) {
+      let Option::SOME(patternId) = parameters.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      result.push(Format::formatParameterPattern(module, *patternId, source));
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function formatParameterPattern(
+    module: &Ast::Module,
+    patternId: Ast::PatternId,
+    source: &String
+  ): String {
+    let Option::SOME(node) = module.patterns.get(patternId) else {
+      return String::new();
+    };
+
+    let Ast::Pattern::Node::Binding(binding) = node else {
+      let span: SourceSpan = Format::patternSpanOf(node);
+      return sliceSpan(source, &span).trimAsciiWhitespace();
+    };
+
+    let mut result: String = String::new();
+
+    if (binding.metadata.attributes.length() > 0) {
+      let mut attrIndex: u64 = 0;
+
+      while (attrIndex < binding.metadata.attributes.length()) {
+        let Option::SOME(attribute) = binding.metadata.attributes.get(attrIndex) else {
+          attrIndex += 1;
+          continue;
+        };
+
+        result.pushStr("@");
+        result.push(&attribute.name);
+
+        if (attribute.arguments.length() > 0) {
+          let argsText: String = Format::joinSegments(&attribute.arguments, ", ");
+          result.pushStr("(");
+          result.push(&argsText);
+          result.pushStr(")");
+        }
+
+        result.pushStr(" ");
+        attrIndex += 1;
+      }
+    }
+
+    result.push(&binding.name);
+
+    if (let Option::SOME(annotation) = binding.annotation) {
+      let annotationText: String = Format::formatType(module, annotation, source);
+      result.pushStr(": ");
+      result.push(&annotationText);
+    }
+
+    return result;
+  }
+
+  function hasTrailingCommaInSpan(source: &String, span: &SourceSpan): boolean {
+    let sliced: String = sliceSpan(source, span);
+    let Option::SOME(openIndex) = sliced.indexOfCharFrom('(', 0) else {
+      return false;
+    };
+
+    let mut depth: u64 = 0;
+    let mut closeIndex: Option<u64> = Option::NONE;
+    let mut cursor: u64 = openIndex;
+
+    while (cursor < sliced.length()) {
+      let Option::SOME(byte) = sliced.byteAt(cursor) else {
+        break;
+      };
+
+      if (byte == '(' as u8) {
+        depth += 1;
+      } else if (byte == ')' as u8) {
+        if (depth > 0) {
+          depth -= 1;
+        }
+
+        if (depth == 0) {
+          closeIndex = Option::SOME(cursor);
+          break;
+        }
+      }
+
+      cursor += 1;
+    }
+
+    let Option::SOME(closeIndexValue) = closeIndex else {
+      return false;
+    };
+
+    if (closeIndexValue <= openIndex + 1) {
+      return false;
+    }
+
+    let inner: String = sliced.substringBytes(openIndex + 1, closeIndexValue);
+    let trimmedInner: String = inner.trimAsciiWhitespace();
+
+    return Format::layoutStringEndsWithByte(&trimmedInner, ',' as u8);
+  }
+
+  function formatFunction(
+    module: &Ast::Module,
+    functionItem: &Ast::Item::Function,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let prefix: String = Format::formatDeclarationPrefix(&functionItem.metadata, config, indentLevel);
+    let modifierKeywords: String = Format::formatModifierKeywords(&functionItem.metadata.modifiers);
+    let indentText: String = config.indentString(indentLevel);
+
+    let mut header: String = indentText;
+    header.pushStr("function ");
+    header.push(&modifierKeywords);
+    header.push(&functionItem.name);
+
+    if (functionItem.genericParameters.length() > 0) {
+      let genericParamsText: String = Format::formatGenericParamsAngleBracketed(&functionItem.genericParameters, source);
+      header.push(&genericParamsText);
+    }
+
+    header.pushStr("(");
+
+    let parameters: Vector<String> = Format::formatParameterList(module, &functionItem.parameters, source);
+    let hasTrailingComma: boolean = Format::hasTrailingCommaInSpan(source, &functionItem.span);
+
+    let mut returnTypeText: String = String::create("void");
+
+    if (let Option::SOME(returnType) = functionItem.returnType) {
+      returnTypeText = Format::formatType(module, returnType, source);
+    }
+
+    let mut suffix: String = String::create("): ");
+    suffix.push(&returnTypeText);
+
+    let signatureDoc: Format::Doc = Format::formatInlineOrMultiline(header.toStr(), &parameters, suffix.toStr(), 0, config, hasTrailingComma, 2);
+    let mut result: String = prefix;
+    let signatureText: String = Format::renderDoc(&signatureDoc, config, indentLevel);
+    result.push(&signatureText);
+    result.pushStr(" ");
+    let bodyText: String = Format::renderBodyPlaceholder(module, functionItem.body, source);
+    result.push(&bodyText);
+
+    return Result::OK(result);
+  }
+
+  function formatItemNode(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return Result::ERROR(FormatError::model("item is missing from the module"));
+    };
+
+    if (let Ast::Item::Node::Import(_) = node) {
+      return Format::formatImportLikeItem(module, itemId, source, config, indentLevel);
+    }
+
+    if (let Ast::Item::Node::Export(_) = node) {
+      return Format::formatImportLikeItem(module, itemId, source, config, indentLevel);
+    }
+
+    if (let Ast::Item::Node::Constant(constant) = node) {
+      return Result::OK(Format::formatConstant(module, &constant, source, config, indentLevel));
+    }
+
+    if (let Ast::Item::Node::TypeAlias(typeAlias) = node) {
+      return Result::OK(Format::formatTypeAlias(module, &typeAlias, source, config, indentLevel));
+    }
+
+    if (let Ast::Item::Node::Function(functionItem) = node) {
+      return Format::formatFunction(module, &functionItem, source, config, indentLevel);
+    }
+
+    return Result::ERROR(FormatError::unsupported("records, enums, traits, namespaces, and extern blocks are not yet supported by layout_items"));
+  }
+
+  function formatGroupedModuleItemNodes(
+    module: &Ast::Module,
+    roots: &Vector<Ast::ItemId>,
+    startIndex: u64,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<Format::GroupedItemResult, FormatError> {
+    let Option::SOME(firstId) = roots.get(startIndex) else {
+      return Result::ERROR(FormatError::model("grouped item lookup is out of range"));
+    };
+
+    let Option::SOME(keyword) = Format::groupableModuleItemKeyword(module, *firstId) else {
+      let text: String = Format::formatItemNode(module, *firstId, source, config, indentLevel)!;
+      return Result::OK(Format::GroupedItemResult { text: text, consumed: 1 });
+    };
+
+    let fromPath: String = Format::groupableModuleItemFrom(module, *firstId);
+    let mut names: Vector<String> = Format::moduleItemNames(module, *firstId, source);
+    let mut consumed: u64 = 1;
+
+    while (startIndex + consumed < roots.length()) {
+      let Option::SOME(previousId) = roots.get(startIndex + consumed - 1) else {
+        break;
+      };
+
+      let Option::SOME(nextId) = roots.get(startIndex + consumed) else {
+        break;
+      };
+
+      let previousEnd: u64 = Format::itemTrueEnd(module, *previousId);
+      let nextSpan: SourceSpan = Format::itemSpan(module, *nextId);
+
+      if (Format::whitespaceGapHasIntentionalBlankLine(source, previousEnd, nextSpan.start)) {
+        break;
+      }
+
+      if (!Format::moduleItemSignatureMatches(module, *nextId, &keyword, &fromPath)) {
+        break;
+      }
+
+      let mut nextNames: Vector<String> = Format::moduleItemNames(module, *nextId, source);
+      let mut nameIndex: u64 = 0;
+
+      while (nameIndex < nextNames.length()) {
+        let Option::SOME(name) = nextNames.get(nameIndex) else {
+          nameIndex += 1;
+          continue;
+        };
+
+        names.push(name.clone());
+        nameIndex += 1;
+      }
+
+      consumed += 1;
+    }
+
+    if (consumed == 1) {
+      let text: String = Format::formatItemNode(module, *firstId, source, config, indentLevel)!;
+      return Result::OK(Format::GroupedItemResult { text: text, consumed: 1 });
+    }
+
+    let keywordStr: str = keyword.toStr();
+    let text: String = Format::formatModuleItemList(keywordStr, &names, &fromPath, config, indentLevel);
+
+    return Result::OK(Format::GroupedItemResult { text: text, consumed: consumed });
+  }
+
+  record GroupedItemResult {
+    public text: String;
+    public consumed: u64;
+  }
+
+  function formatProgramPreservingOrder(
+    module: &Ast::Module,
+    source: &String,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let mut formatted: String = String::new();
+    let mut previousWasImport: boolean = false;
+    let mut previousEnd: Option<u64> = Option::NONE;
+    let mut index: u64 = 0;
+
+    while (index < module.roots.length()) {
+      let Option::SOME(rootId) = module.roots.get(index) else {
+        break;
+      };
+
+      let grouped: Format::GroupedItemResult = Format::formatGroupedModuleItemNodes(module, &module.roots, index, source, config, 0)!;
+      let currentIsImport: boolean = Format::isImportNode(module, *rootId);
+      let span: SourceSpan = Format::itemSpan(module, *rootId);
+
+      if (index > 0) {
+        if (let Option::SOME(previousEndByte) = previousEnd) {
+          Format::preserveSingleBlankLineForWhitespaceGap(&mut formatted, source, previousEndByte, span.start);
+        }
+
+        if (!Format::layoutStringEndsWithByte(&formatted, '\n' as u8)) {
+          formatted.pushChar('\n');
+        }
+
+        if (previousWasImport && !currentIsImport && !Format::layoutStringEndsWithStr(&formatted, "\n\n")) {
+          formatted.pushChar('\n');
+        }
+      }
+
+      formatted.push(&grouped.text);
+      previousWasImport = currentIsImport;
+
+      let Option::SOME(lastConsumedId) = module.roots.get(index + grouped.consumed - 1) else {
+        break;
+      };
+
+      previousEnd = Option::SOME(Format::itemTrueEnd(module, *lastConsumedId));
+      index += grouped.consumed;
+    }
+
+    return Result::OK(formatted);
+  }
+
+  function guardAgainstRawDirectiveTokens(tokenStream: &TokenStream): Result<void, FormatError> {
+    let mut index: u64 = 0;
+
+    while (index < tokenStream.length()) {
+      let Option::SOME(token) = tokenStream.get(index) else {
+        break;
+      };
+
+      let Option::SOME(next) = tokenStream.get(index + 1) else {
+        break;
+      };
+
+      let isAt: boolean = token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::AT;
+
+      if (isAt) {
+        let isIfOrElse: boolean = next.kindValue() == TokenKind::KEYWORD && (next.keywordValue() == Keyword::IF || next.keywordValue() == Keyword::ELSE);
+
+        let mut isNamedDirective: boolean = false;
+
+        if (next.kindValue() == TokenKind::IDENTIFIER) {
+          let lexeme: str = next.lexemeTextLossy();
+          isNamedDirective = layoutStrEquals(lexeme, "ifelse") || layoutStrEquals(lexeme, "configFlag");
+        }
+
+        if (isIfOrElse || isNamedDirective) {
+          return Result::ERROR(FormatError::model("formatter chunks must not contain raw @if/@else/@ifelse/@configFlag directives"));
+        }
+      }
+
+      index += 1;
+    }
+
+    return Result::OK(());
+  }
+
+  function layoutProgramChunk(
+    source: &String,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let file: SourceFile = SourceFile::create("formatter_chunk.ign", source.toStr());
+    let mut lexResult: LexResult = Lexer::lex(&file);
+
+    if (lexResult.diagnostics.length() > 0) {
+      let mut messages: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < lexResult.diagnostics.length()) {
+        let Option::SOME(diagnostic) = lexResult.diagnostics.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        messages.push(String::create(diagnostic.messageText()));
+        index += 1;
+      }
+
+      return Result::ERROR(FormatError::lex(messages));
+    }
+
+    Format::guardAgainstRawDirectiveTokens(&lexResult.tokens)!;
+
+    let mut module: Ast::Module = Ast::Module::init();
+    let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+    Parser::parseInto(&file, &mut module, &mut diagnostics);
+
+    if (diagnostics.length() > 0) {
+      let mut messages: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < diagnostics.length()) {
+        let Option::SOME(diagnostic) = diagnostics.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        messages.push(String::create(diagnostic.messageText()));
+        index += 1;
+      }
+
+      return Result::ERROR(FormatError::parseFailure(messages));
+    }
+
+    return Format::formatProgramPreservingOrder(&module, source, config);
+  }
+
+  function layoutCodeChunk(raw: &String, config: &FormatterConfig): Result<String, FormatError> {
+    let trimmed: String = raw.trimAsciiWhitespace();
+
+    if (trimmed.length() == 0) {
+      return Result::OK(String::new());
+    }
+
+    return Format::layoutProgramChunk(&trimmed, config);
+  }
+
+  function layoutItems(
+    items: &Vector<Format::FormatItem>,
+    config: &FormatterConfig
+  ): Result<Vector<Format::FormatItem>, FormatError> {
+    let mut formatted: Vector<Format::FormatItem> = Vector::new<Format::FormatItem>();
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(item) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Format::FormatItem::Code(region) = item) {
+        let laidOutRaw: String = Format::layoutCodeChunk(&region.raw, config)!;
+
+        formatted.push(Format::FormatItem::Code(Format::CodeRegion {
+          raw: laidOutRaw,
+          leading: cloneCommentBlockVectorForLayout(&region.leading),
+          trailing: cloneCommentBlockVectorForLayout(&region.trailing),
+          leadingAfterAttrPrefix: region.leadingAfterAttrPrefix,
+        }));
+
+        index += 1;
+        continue;
+      }
+
+      if (let Format::FormatItem::DetachedComment(comment) = item) {
+        formatted.push(Format::FormatItem::DetachedComment(cloneCommentBlockForLayout(&comment)));
+        index += 1;
+        continue;
+      }
+
+      if (let Format::FormatItem::Directive(block) = item) {
+        let thenItems: Vector<Format::FormatItem> = Format::layoutItems(&block.thenItems, config)!;
+        let elseItems: Vector<Format::FormatItem> = Format::layoutItems(&block.elseItems, config)!;
+
+        formatted.push(Format::FormatItem::Directive(Format::DirectiveBlock {
+          leading: cloneCommentBlockVectorForLayout(&block.leading),
+          header: block.header.clone(),
+          thenItems: thenItems,
+          elseHeader: cloneOptionalStringForLayout(&block.elseHeader),
+          elseItems: elseItems,
+          trailing: cloneCommentBlockVectorForLayout(&block.trailing),
+          braced: block.braced,
+        }));
+
+        index += 1;
+        continue;
+      }
+
+      index += 1;
+    }
+
+    return Result::OK(formatted);
+  }
+
+  function layoutFile(
+    file: &Format::FormatFile,
+    config: &FormatterConfig
+  ): Result<Format::FormatFile, FormatError> {
+    let items: Vector<Format::FormatItem> = Format::layoutItems(&file.items, config)!;
+    return Result::OK(Format::FormatFile { items: items });
+  }
+}
+
+function layoutStrEquals(left: str, right: str): boolean {
+  return @eq<str>(&left, &right);
+}
+
+function cloneCommentBlockForLayout(block: &CommentBlock): CommentBlock {
+  let mut lines: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < block.lines.length()) {
+    let Option::SOME(line) = block.lines.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    lines.push(line.clone());
+    index += 1;
+  }
+
+  return CommentBlock { lines: lines, placement: block.placement };
+}
+
+function cloneCommentBlockVectorForLayout(items: &Vector<CommentBlock>): Vector<CommentBlock> {
+  let mut result: Vector<CommentBlock> = Vector::new<CommentBlock>();
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    let Option::SOME(item) = items.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    result.push(cloneCommentBlockForLayout(item));
+    index += 1;
+  }
+
+  return result;
+}
+
+function cloneOptionalStringForLayout(value: &Option<String>): Option<String> {
+  return match (value) {
+    Option::SOME(text) -> Option::SOME(text.clone()),
+    Option::NONE -> Option::NONE,
+  };
+}

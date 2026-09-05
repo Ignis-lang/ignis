@@ -1,0 +1,76 @@
+import String from "std::string";
+import Vector from "std::vector";
+
+/// Mirrors the host formatter's `FormatError` (`crates/ignis_formatter/src/api.rs`).
+/// Defined here rather than in `api.ign` because `model.ign` needs `Lex`/`Model`
+/// before the rest of the public API (`Format::formatSource`, diffing) exists.
+export enum FormatError {
+  Lex(Vector<String>),
+  Parse(Vector<String>),
+  Model(String),
+  Io(String),
+  Config(String),
+  Safety(String),
+  Unsupported(String),
+
+  public static lex(diagnostics: Vector<String>): FormatError {
+    return FormatError::Lex(diagnostics);
+  }
+
+  public static parseFailure(diagnostics: Vector<String>): FormatError {
+    return FormatError::Parse(diagnostics);
+  }
+
+  public static model(message: str): FormatError {
+    return FormatError::Model(String::create(message));
+  }
+
+  public static io(message: str): FormatError {
+    return FormatError::Io(String::create(message));
+  }
+
+  public static config(message: str): FormatError {
+    return FormatError::Config(String::create(message));
+  }
+
+  public static safety(message: str): FormatError {
+    return FormatError::Safety(String::create(message));
+  }
+
+  public static unsupported(message: str): FormatError {
+    return FormatError::Unsupported(String::create(message));
+  }
+
+  public describe(&self): String {
+    return match (self) {
+      FormatError::Lex(diagnostics) -> String::create("lexer failed: ").concat(joinWithSemicolonSpace(&diagnostics)),
+      FormatError::Parse(diagnostics) -> String::create("parser failed: ").concat(joinWithSemicolonSpace(&diagnostics)),
+      FormatError::Model(message) -> String::create("formatter model failed: ").concat(message.clone()),
+      FormatError::Io(message) -> String::create("formatter I/O failed: ").concat(message.clone()),
+      FormatError::Config(message) -> String::create("formatter configuration failed: ").concat(message.clone()),
+      FormatError::Safety(message) -> String::create("formatter safety check failed: ").concat(message.clone()),
+      FormatError::Unsupported(message) -> String::create("formatter does not support: ").concat(message.clone()),
+    };
+  }
+}
+
+function joinWithSemicolonSpace(items: &Vector<String>): String {
+  let mut result: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    let Option::SOME(item) = items.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (index > 0) {
+      result.pushStr("; ");
+    }
+
+    result.push(item);
+    index += 1;
+  }
+
+  return result;
+}

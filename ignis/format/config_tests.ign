@@ -1,0 +1,203 @@
+import Fs from "std::fs";
+import Path from "std::path";
+import Process from "std::process";
+import String from "std::string";
+import Test from "std::test";
+import Time from "std::time";
+
+import DiagnosticBag from "@compiler::diagnostics";
+
+import Format, FormatterCliOverrides, FormatterConfig, FormatterConfigPaths from "./config";
+import FormatConfigDiagnosticCode from "./diagnostics";
+
+function uniqueTempDir(label: str): Path::PathBuf {
+  let Result::OK(root) = Fs::tempDir() else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  let Result::OK(now) = Time::SystemTime::now() else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  let Result::OK(duration) = now.durationSinceUnixEpoch() else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  let mut name: String = String::create("ignis-formatter-config-");
+  name.pushStr(label);
+  name.pushStr("-");
+  let pid: u64 = Process::id() as u64;
+  let pidText: String = pid.toString();
+  name.pushStr(pidText.toStr());
+  name.pushStr("-");
+  let secsText: String = duration.secs.toString();
+  name.pushStr(secsText.toStr());
+  name.pushStr("-");
+  let nanos: u64 = duration.nanos as u64;
+  let nanosText: String = nanos.toString();
+  name.pushStr(nanosText.toStr());
+
+  let dir: Path::PathBuf = root.join(name.toStr());
+  let Result::OK(_) = Fs::createDirAll(&dir) else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  return dir;
+}
+
+function writeFile(root: &Path::PathBuf, relativePath: str, contents: str): void {
+  let filePath: Path::PathBuf = root.join(relativePath);
+  let contentsText: String = String::create(contents);
+  let Result::OK(_) = Fs::writeString(&filePath, &contentsText) else {
+    Test::fail();
+    return;
+  };
+}
+
+function expectSingleDiagnosticCode(
+  result: Result<FormatterConfig, DiagnosticBag>,
+  code: str
+): void {
+  let Result::ERROR(bag) = result else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(bag.length(), 1);
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code, code);
+}
+
+@test
+function formatConfigLoadsBoundedDefaultsWithoutProjectFiles(): void {
+  let root: Path::PathBuf = uniqueTempDir("defaults");
+
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: root,
+    ignisToml: Option::NONE,
+    dedicatedConfig: Option::NONE,
+    explicitConfig: Option::NONE,
+  };
+
+  let defaultOverrides: FormatterCliOverrides = FormatterCliOverrides::default();
+  let Result::OK(config) = Format::Config::load(&paths, &defaultOverrides) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(config.indentWidth, 2);
+  Test::assertEq<u64>(config.lineWidth, 100);
+  Test::assert(!config.useTabs);
+  Test::assert(!config.sortImports);
+}
+
+@test
+function formatConfigResolvesBridgeFileAndCliPrecedence(): void {
+  let root: Path::PathBuf = uniqueTempDir("precedence");
+  writeFile(
+    &root,
+    "ignis.toml",
+    "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n\n[formatter]\nindent_width = 4\nline_width = 90\nuse_tabs = true\n"
+  );
+  writeFile(&root, "ignisfmt.toml", "indent_width = 6\nline_width = 120\nuse_tabs = true\n");
+
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: root.clone(),
+    ignisToml: Option::SOME(root.join("ignis.toml")),
+    dedicatedConfig: Option::SOME(root.join("ignisfmt.toml")),
+    explicitConfig: Option::NONE,
+  };
+
+  let overrides: FormatterCliOverrides = FormatterCliOverrides {
+    indentWidth: Option::SOME(8),
+    lineWidth: Option::SOME(100),
+    useTabs: Option::SOME(false),
+    sortImports: Option::NONE,
+  };
+
+  let Result::OK(config) = Format::Config::load(&paths, &overrides) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(config.indentWidth, 8);
+  Test::assertEq<u64>(config.lineWidth, 100);
+  Test::assert(!config.useTabs);
+  Test::assert(!config.sortImports);
+}
+
+@test
+function formatConfigDedicatedConfigCanEnableTabsWithoutCliOverride(): void {
+  let root: Path::PathBuf = uniqueTempDir("tabs-dedicated");
+  writeFile(&root, "ignisfmt.toml", "indent_width = 4\nuse_tabs = true\n");
+
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: root.clone(),
+    ignisToml: Option::NONE,
+    dedicatedConfig: Option::SOME(root.join("ignisfmt.toml")),
+    explicitConfig: Option::NONE,
+  };
+
+  let defaultOverrides: FormatterCliOverrides = FormatterCliOverrides::default();
+  let Result::OK(config) = Format::Config::load(&paths, &defaultOverrides) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(config.indentWidth, 4);
+  Test::assertEq<u64>(config.lineWidth, 100);
+  Test::assert(config.useTabs);
+  Test::assert(!config.sortImports);
+}
+
+@test
+function formatConfigRejectsUnknownFormatterKeysInDedicatedConfig(): void {
+  let root: Path::PathBuf = uniqueTempDir("unknown-keys");
+  writeFile(&root, "ignisfmt.toml", "indent_width = 2\ntrailing_commas = true\n");
+
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: root.clone(),
+    ignisToml: Option::NONE,
+    dedicatedConfig: Option::SOME(root.join("ignisfmt.toml")),
+    explicitConfig: Option::NONE,
+  };
+
+  let defaultOverrides: FormatterCliOverrides = FormatterCliOverrides::default();
+  let result: Result<FormatterConfig, DiagnosticBag> = Format::Config::load(&paths, &defaultOverrides);
+  expectSingleDiagnosticCode(result, FormatConfigDiagnosticCode::UNKNOWN_KEY);
+}
+
+@test
+function formatConfigSortImportsDefaultsToFalse(): void {
+  let config: FormatterConfig = FormatterConfig::default();
+  Test::assert(!config.sortImports);
+}
+
+@test
+function formatConfigSortImportsIsAcceptedInDedicatedConfig(): void {
+  let root: Path::PathBuf = uniqueTempDir("sort-imports-config");
+  writeFile(&root, "ignisfmt.toml", "sort_imports = true\n");
+
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: root.clone(),
+    ignisToml: Option::NONE,
+    dedicatedConfig: Option::SOME(root.join("ignisfmt.toml")),
+    explicitConfig: Option::NONE,
+  };
+
+  let defaultOverrides: FormatterCliOverrides = FormatterCliOverrides::default();
+  let Result::OK(config) = Format::Config::load(&paths, &defaultOverrides) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(config.sortImports);
+}

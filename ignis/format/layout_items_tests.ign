@@ -1,0 +1,115 @@
+import String from "std::string";
+import Test from "std::test";
+
+import Format from "./layout_items";
+import FormatterConfig from "./config";
+import FormatError from "./error";
+
+function layoutOrFail(source: str): String {
+  let sourceText: String = String::create(source);
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Result::OK(output) = Format::layoutCodeChunk(&sourceText, &config) else {
+    Test::fail();
+    return String::new();
+  };
+
+  return output;
+}
+
+@test
+function layoutItemsFormatsASingleImport(): void {
+  let output: String = layoutOrFail("import   Foo   from   \"std::foo\";");
+  Test::assertEq<str>(output.toStr(), "import Foo from \"std::foo\";");
+}
+
+@test
+function layoutItemsGroupsConsecutiveImportsFromTheSameModule(): void {
+  let output: String = layoutOrFail("import Foo from \"std::foo\";\nimport Bar from \"std::foo\";");
+  Test::assertEq<str>(output.toStr(), "import Foo, Bar from \"std::foo\";");
+}
+
+@test
+function layoutItemsDoesNotGroupImportsSeparatedByABlankLine(): void {
+  let output: String = layoutOrFail("import Foo from \"std::foo\";\n\nimport Bar from \"std::foo\";");
+  Test::assertEq<str>(output.toStr(), "import Foo from \"std::foo\";\n\nimport Bar from \"std::foo\";");
+}
+
+@test
+function layoutItemsDoesNotGroupDiscardImports(): void {
+  let output: String = layoutOrFail("import _ from \"std::foo\";\nimport Bar from \"std::foo\";");
+  Test::assertEq<str>(output.toStr(), "import _ from \"std::foo\";\nimport Bar from \"std::foo\";");
+}
+
+@test
+function layoutItemsWrapsAnImportListThatExceedsTheLineWidth(): void {
+  let mut config: FormatterConfig = FormatterConfig::default();
+  config.lineWidth = 40;
+
+  let sourceText: String = String::create("import FirstBinding, SecondBinding, ThirdBinding from \"std::somewhere\";");
+  let Result::OK(output) = Format::layoutCodeChunk(&sourceText, &config) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    output.toStr(),
+    "import\n  FirstBinding,\n  SecondBinding,\n  ThirdBinding,\nfrom \"std::somewhere\";"
+  );
+}
+
+@test
+function layoutItemsFormatsAFunctionSignatureAndKeepsTheBodyVerbatim(): void {
+  // The body stays exactly as written (this batch's `renderBodyPlaceholder`
+  // seam): the host itself reformats the body onto multiple lines, which is
+  // `layout_statements.ign`'s job, not this file's.
+  let output: String = layoutOrFail("function   main ( ) : void {return;}");
+  Test::assertEq<str>(output.toStr(), "function main(): void {return;}");
+}
+
+@test
+function layoutItemsFormatsATypedParameterList(): void {
+  let output: String = layoutOrFail("function add(a:i32,b:i32):i32{return a+b;}");
+  Test::assertEq<str>(output.toStr(), "function add(a: i32, b: i32): i32 {return a+b;}");
+}
+
+@test
+function layoutItemsFormatsAConstant(): void {
+  let output: String = layoutOrFail("const   X : i32 = 1 ;");
+  Test::assertEq<str>(output.toStr(), "const X: i32 = 1;");
+}
+
+@test
+function layoutItemsFormatsATypeAlias(): void {
+  let output: String = layoutOrFail("type   Alias = i32 ;");
+  Test::assertEq<str>(output.toStr(), "type Alias = i32;");
+}
+
+@test
+function layoutItemsPreservesABlankLineBetweenTopLevelItems(): void {
+  let output: String = layoutOrFail("const X: i32 = 1;\n\nconst Y: i32 = 2;");
+  Test::assertEq<str>(output.toStr(), "const X: i32 = 1;\n\nconst Y: i32 = 2;");
+}
+
+@test
+function layoutItemsCollapsesMultipleBlankLinesBetweenTopLevelItems(): void {
+  let output: String = layoutOrFail("const X: i32 = 1;\n\n\n\nconst Y: i32 = 2;");
+  Test::assertEq<str>(output.toStr(), "const X: i32 = 1;\n\nconst Y: i32 = 2;");
+}
+
+@test
+function layoutItemsReportsUnsupportedForRecordDeclarations(): void {
+  let sourceText: String = String::create("record Foo {\n  public x: i32;\n}");
+  let config: FormatterConfig = FormatterConfig::default();
+  let result: Result<String, FormatError> = Format::layoutCodeChunk(&sourceText, &config);
+
+  let Result::ERROR(error) = result else {
+    Test::fail();
+    return;
+  };
+
+  let FormatError::Unsupported(_) = error else {
+    Test::fail();
+    return;
+  };
+}

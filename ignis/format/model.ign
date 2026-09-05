@@ -1,0 +1,1061 @@
+import Char from "std::char";
+import String from "std::string";
+import Vector from "std::vector";
+
+import SourceFile from "@compiler::diagnostics";
+import LexResult, Lexer from "@compiler::lexer";
+import Keyword, Punctuation, Token, TokenKind, TokenStream from "@compiler::syntax";
+
+import
+  CommentBlock,
+  CommentPlacement,
+  CommentTrivia,
+  classifyCommentPlacement,
+  isCommentTrivia,
+from "./comments";
+import FormatError from "./error";
+
+/// `String::lines()` appends a spurious trailing empty entry when the string
+/// ends with '\n' (`"\n".lines()` is 1 element in Rust but 2 here), unlike
+/// Rust's `str::lines()`. Filed as a language-gap repro
+/// ("string-lines-trailing-newline"); this works around it locally rather
+/// than changing the shared `std::string` behavior.
+function rustStyleLines(text: &String): Vector<String> {
+  let mut lines: Vector<String> = text.lines();
+
+  if (text.length() > 0 && lines.length() > 0) {
+    let Option::SOME(lastByte) = text.byteAt(text.length() - 1) else {
+      return lines;
+    };
+
+    if (lastByte == '\n' as u8) {
+      lines.pop();
+    }
+  }
+
+  return lines;
+}
+
+/// Counts blank (whitespace-only) lines in the half-open byte range
+/// `[start, end)` of `source`. Mirrors the host formatter's `SiblingGap`,
+/// which keeps a single blank line between sibling items but collapses runs
+/// of 2+ blank lines down to exactly one.
+function countBlankLinesInGap(source: &String, start: u64, end: u64): u64 {
+  if (start >= end) {
+    return 0;
+  }
+
+  let mut clampedStart: u64 = start;
+  let mut clampedEnd: u64 = end;
+
+  if (clampedStart > source.length()) {
+    clampedStart = source.length();
+  }
+
+  if (clampedEnd > source.length()) {
+    clampedEnd = source.length();
+  }
+
+  let slice: String = source.substringBytes(clampedStart, clampedEnd);
+  let lines: Vector<String> = rustStyleLines(&slice);
+
+  let mut blankCount: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < lines.length()) {
+    let Option::SOME(line) = lines.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    let trimmed: String = line.trimAsciiWhitespace();
+
+    if (trimmed.length() == 0) {
+      blankCount += 1;
+    }
+
+    index += 1;
+  }
+
+  return blankCount;
+}
+
+function cloneStringVector(items: &Vector<String>): Vector<String> {
+  let mut result: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    let Option::SOME(item) = items.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    result.push(item.clone());
+    index += 1;
+  }
+
+  return result;
+}
+
+function cloneCommentBlock(block: &CommentBlock): CommentBlock {
+  return CommentBlock {
+    lines: cloneStringVector(&block.lines),
+    placement: block.placement,
+  };
+}
+
+function cloneCommentBlockVector(items: &Vector<CommentBlock>): Vector<CommentBlock> {
+  let mut result: Vector<CommentBlock> = Vector::new<CommentBlock>();
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    let Option::SOME(item) = items.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    result.push(cloneCommentBlock(item));
+    index += 1;
+  }
+
+  return result;
+}
+
+function cloneOptionalString(value: &Option<String>): Option<String> {
+  return match (value) {
+    Option::SOME(text) -> Option::SOME(text.clone()),
+    Option::NONE -> Option::NONE,
+  };
+}
+
+function minU64(left: u64, right: u64): u64 {
+  if (left < right) {
+    return left;
+  }
+
+  return right;
+}
+
+/// A pair of a token index and a byte offset, used for the small multi-value
+/// returns the model builder's brace/statement scanners need.
+record IndexBytePair {
+  public tokenIndex: u64;
+  public byteOffset: u64;
+}
+
+record ConsumeCommentBlockResult {
+  public lines: Vector<String>;
+  public nextIndex: u64;
+  public nextCodeStartByte: u64;
+}
+
+export namespace Format {
+  /// Describes the normalized gap between two sibling items in a sequence.
+  record SiblingGap {
+    public blankLines: u64;
+
+    public static fromSourceGap(source: &String, start: u64, end: u64): Format::SiblingGap {
+      let blankCount: u64 = countBlankLinesInGap(source, start, end);
+      return Format::SiblingGap { blankLines: minU64(blankCount, 1) };
+    }
+
+    public static none(): Format::SiblingGap {
+      return Format::SiblingGap { blankLines: 0 };
+    }
+
+    public static single(): Format::SiblingGap {
+      return Format::SiblingGap { blankLines: 1 };
+    }
+  }
+
+  record CodeRegion {
+    public raw: String;
+    public leading: Vector<CommentBlock>;
+    public trailing: Vector<CommentBlock>;
+    /// True when the leading comments appeared in the source AFTER an
+    /// attribute annotation prefix (e.g. `@implements(Drop)\n/// doc\nexport
+    /// record`). False means the comments appeared BEFORE any attributes.
+    public leadingAfterAttrPrefix: boolean;
+  }
+
+  record DirectiveBlock {
+    public leading: Vector<CommentBlock>;
+    public header: String;
+    public thenItems: Vector<Format::FormatItem>;
+    public elseHeader: Option<String>;
+    public elseItems: Vector<Format::FormatItem>;
+    public trailing: Vector<CommentBlock>;
+    /// False for `@configFlag(cond)\nstatement` (annotation form, no braces).
+    public braced: boolean;
+  }
+
+  enum FormatItem {
+    Code(Format::CodeRegion),
+    DetachedComment(CommentBlock),
+    Directive(Format::DirectiveBlock),
+  }
+
+  function appendFlattenedBlock(output: &mut Vector<CommentTrivia>, block: &CommentBlock): void {
+    let mut outputRef: &mut Vector<CommentTrivia> = output;
+    let flattened: Vector<CommentTrivia> = block.flatten();
+    let mut index: u64 = 0;
+
+    while (index < flattened.length()) {
+      let Option::SOME(trivia) = flattened.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      outputRef.push(CommentTrivia {
+        raw: trivia.raw.clone(),
+        placement: trivia.placement,
+      });
+
+      index += 1;
+    }
+  }
+
+  function appendFlattened(
+    output: &mut Vector<CommentTrivia>,
+    blocks: &Vector<CommentBlock>
+  ): void {
+    let mut outputRef: &mut Vector<CommentTrivia> = output;
+    let mut index: u64 = 0;
+
+    while (index < blocks.length()) {
+      let Option::SOME(block) = blocks.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      Format::appendFlattenedBlock(outputRef, block);
+      index += 1;
+    }
+  }
+
+  function collectComments(
+    items: &Vector<Format::FormatItem>,
+    output: &mut Vector<CommentTrivia>
+  ): void {
+    let mut outputRef: &mut Vector<CommentTrivia> = output;
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(item) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      match (item) {
+        Format::FormatItem::Code(region) -> {
+          Format::appendFlattened(outputRef, &region.leading);
+          Format::appendFlattened(outputRef, &region.trailing);
+        },
+        Format::FormatItem::DetachedComment(comment) -> Format::appendFlattenedBlock(outputRef, &comment),
+        Format::FormatItem::Directive(directive) -> {
+          Format::appendFlattened(outputRef, &directive.leading);
+          Format::collectComments(&directive.thenItems, outputRef);
+          Format::collectComments(&directive.elseItems, outputRef);
+          Format::appendFlattened(outputRef, &directive.trailing);
+        },
+      };
+
+      index += 1;
+    }
+  }
+
+  function copyBlocksInto(output: &mut Vector<CommentBlock>, blocks: &Vector<CommentBlock>): void {
+    let mut outputRef: &mut Vector<CommentBlock> = output;
+    let mut index: u64 = 0;
+
+    while (index < blocks.length()) {
+      let Option::SOME(block) = blocks.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      outputRef.push(cloneCommentBlock(block));
+      index += 1;
+    }
+  }
+
+  function collectCommentBlocks(
+    items: &Vector<Format::FormatItem>,
+    output: &mut Vector<CommentBlock>
+  ): void {
+    let mut outputRef: &mut Vector<CommentBlock> = output;
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(item) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      match (item) {
+        Format::FormatItem::Code(region) -> {
+          Format::copyBlocksInto(outputRef, &region.leading);
+          Format::copyBlocksInto(outputRef, &region.trailing);
+        },
+        Format::FormatItem::DetachedComment(comment) -> outputRef.push(cloneCommentBlock(&comment)),
+        Format::FormatItem::Directive(directive) -> {
+          Format::copyBlocksInto(outputRef, &directive.leading);
+          Format::collectCommentBlocks(&directive.thenItems, outputRef);
+          Format::collectCommentBlocks(&directive.elseItems, outputRef);
+          Format::copyBlocksInto(outputRef, &directive.trailing);
+        },
+      };
+
+      index += 1;
+    }
+  }
+
+  record FormatFile {
+    public items: Vector<Format::FormatItem>;
+
+    public static fromSource(source: &String): Result<Format::FormatFile, FormatError> {
+      let file: SourceFile = SourceFile::create("formatter.ign", source.toStr());
+      let mut lexResult: LexResult = Lexer::lex(&file);
+
+      if (lexResult.diagnostics.length() > 0) {
+        let mut messages: Vector<String> = Vector::new<String>();
+        let mut index: u64 = 0;
+
+        while (index < lexResult.diagnostics.length()) {
+          let Option::SOME(diagnostic) = lexResult.diagnostics.get(index) else {
+            index += 1;
+            continue;
+          };
+
+          messages.push(String::create(diagnostic.messageText()));
+          index += 1;
+        }
+
+        return Result::ERROR(FormatError::lex(messages));
+      }
+
+      let tokenCount: u64 = lexResult.tokens.length();
+      let mut eofIndex: u64 = 0;
+
+      if (tokenCount > 0) {
+        eofIndex = tokenCount - 1;
+      }
+
+      let builder: ModelBuilder = ModelBuilder::create(source, &lexResult.tokens);
+      let items: Vector<Format::FormatItem> = builder.parseRegion(0, eofIndex, 0, source.length())!;
+
+      return Result::OK(Format::FormatFile { items: items });
+    }
+
+    public comments(&self): Vector<CommentTrivia> {
+      let mut comments: Vector<CommentTrivia> = Vector::new<CommentTrivia>();
+      collectComments(&self.items, &mut comments);
+      return comments;
+    }
+
+    public commentBlocks(&self): Vector<CommentBlock> {
+      let mut blocks: Vector<CommentBlock> = Vector::new<CommentBlock>();
+      collectCommentBlocks(&self.items, &mut blocks);
+      return blocks;
+    }
+  }
+}
+
+/// Deep-clones a `Format::FormatItem`, since `Vector<T>` has no generic
+/// `clone()` and the model builder occasionally needs to rebuild a
+/// `Format::FormatItem` it holds through a `&mut` reference (see
+/// `ModelBuilder::attachCommentBlock`) rather than mutate a field of it in
+/// place.
+function cloneFormatItem(item: &Format::FormatItem): Format::FormatItem {
+  return match (item) {
+    Format::FormatItem::Code(region) -> Format::FormatItem::Code(Format::CodeRegion {
+      raw: region.raw.clone(),
+      leading: cloneCommentBlockVector(&region.leading),
+      trailing: cloneCommentBlockVector(&region.trailing),
+      leadingAfterAttrPrefix: region.leadingAfterAttrPrefix,
+    }),
+    Format::FormatItem::DetachedComment(comment) -> Format::FormatItem::DetachedComment(cloneCommentBlock(&comment)),
+    Format::FormatItem::Directive(directive) -> Format::FormatItem::Directive(Format::DirectiveBlock {
+      leading: cloneCommentBlockVector(&directive.leading),
+      header: directive.header.clone(),
+      thenItems: cloneFormatItemVector(&directive.thenItems),
+      elseHeader: cloneOptionalString(&directive.elseHeader),
+      elseItems: cloneFormatItemVector(&directive.elseItems),
+      trailing: cloneCommentBlockVector(&directive.trailing),
+      braced: directive.braced,
+    }),
+  };
+}
+
+function cloneFormatItemVector(items: &Vector<Format::FormatItem>): Vector<Format::FormatItem> {
+  let mut result: Vector<Format::FormatItem> = Vector::new<Format::FormatItem>();
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    let Option::SOME(item) = items.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    result.push(cloneFormatItem(item));
+    index += 1;
+  }
+
+  return result;
+}
+
+/// Segments a `.ign` source file's token stream into `Format::FormatItem`s:
+/// opaque code regions (later re-parsed and laid out independently), detached
+/// comments, and `@if`/`@ifelse`/`@configFlag`/`@else` directive blocks.
+///
+/// Unlike the rest of the selfhost pipeline, this stage never builds an AST:
+/// it only tracks brace depth and comment/directive token positions, matching
+/// the host formatter's `FormatModelBuilder`.
+record ModelBuilder {
+  source: &String;
+  tokens: &TokenStream;
+
+  public static create(source: &String, tokens: &TokenStream): ModelBuilder {
+    return ModelBuilder { source: source, tokens: tokens };
+  }
+
+  parseRegion(
+    &self,
+    startIndex: u64,
+    endIndex: u64,
+    regionStartByte: u64,
+    regionEndByte: u64
+  ): Result<Vector<Format::FormatItem>, FormatError> {
+    let mut items: Vector<Format::FormatItem> = Vector::new<Format::FormatItem>();
+    let mut cursor: u64 = startIndex;
+    let mut codeStartByte: u64 = regionStartByte;
+    let mut braceDepth: u64 = 0;
+    let mut pendingLeading: Vector<CommentBlock> = Vector::new<CommentBlock>();
+
+    // Byte position after the last complete top-level statement (`;` or `}`
+    // at depth 0). Used to detect attribute-only code between a complete
+    // statement and an upcoming comment.
+    let mut lastStmtEndByte: u64 = regionStartByte;
+
+    // Attribute text from before the current comment that belongs to the
+    // NEXT declaration. When a `///` comment falls between `@attribute`
+    // tokens and their declaration, splitting there would leave the
+    // attributes without their declaration in the current chunk (which would
+    // fail to parse). This string carries the orphaned attribute prefix over
+    // to the following code region.
+    let mut pendingAttrPrefix: String = String::new();
+
+    while (cursor < endIndex) {
+      let Option::SOME(token) = self.tokens.get(cursor) else {
+        break;
+      };
+
+      if (braceDepth == 0 && isCommentTrivia(token)) {
+        let commentStart: u64 = token.spanStart();
+        let trailingSinceStmt: String = self.source.substringBytes(lastStmtEndByte, commentStart);
+        let trimmedTrailing: String = trailingSinceStmt.trimAsciiWhitespace();
+
+        if (trimmedTrailing.startsWith("@")) {
+          self.pushCodeItem(&mut items, &mut pendingLeading, &mut pendingAttrPrefix, codeStartByte, lastStmtEndByte);
+          pendingAttrPrefix = trailingSinceStmt.clone();
+
+          let consumed: ConsumeCommentBlockResult = self.consumeCommentBlock(cursor);
+          let placement: CommentPlacement = classifyCommentPlacement(
+            self.source,
+            self.tokens,
+            consumed.nextIndex - 1,
+            startIndex,
+            endIndex,
+          );
+
+          self.attachCommentBlock(&mut items, &mut pendingLeading, CommentBlock {
+            lines: consumed.lines,
+            placement: placement,
+          })!;
+
+          codeStartByte = consumed.nextCodeStartByte;
+          cursor = consumed.nextIndex;
+          continue;
+        }
+
+        self.pushCodeItem(&mut items, &mut pendingLeading, &mut pendingAttrPrefix, codeStartByte, commentStart);
+
+        let consumed: ConsumeCommentBlockResult = self.consumeCommentBlock(cursor);
+        let placement: CommentPlacement = classifyCommentPlacement(
+          self.source,
+          self.tokens,
+          consumed.nextIndex - 1,
+          startIndex,
+          endIndex,
+        );
+
+        self.attachCommentBlock(&mut items, &mut pendingLeading, CommentBlock {
+          lines: consumed.lines,
+          placement: placement,
+        })!;
+
+        codeStartByte = consumed.nextCodeStartByte;
+        cursor = consumed.nextIndex;
+        continue;
+      }
+
+      if (braceDepth == 0 && self.isDirectiveStart(cursor)) {
+        self.pushCodeItem(&mut items, &mut pendingLeading, &mut pendingAttrPrefix, codeStartByte, token.spanStart());
+
+        let parsed: ParsedDirectiveBlock = self.parseDirectiveBlock(cursor)!;
+        let mut block: Format::DirectiveBlock = parsed.block;
+        block.leading = pendingLeading;
+        pendingLeading = Vector::new<CommentBlock>();
+        items.push(Format::FormatItem::Directive(block));
+
+        cursor = parsed.nextIndex;
+        codeStartByte = parsed.nextCodeStartByte;
+        lastStmtEndByte = parsed.nextCodeStartByte;
+        continue;
+      }
+
+      if (token.kindValue() == TokenKind::PUNCTUATION) {
+        let punctuation: Punctuation = token.punctuationValue();
+
+        if (punctuation == Punctuation::LEFT_BRACE) {
+          braceDepth += 1;
+        } else if (punctuation == Punctuation::RIGHT_BRACE) {
+          if (braceDepth > 0) {
+            braceDepth -= 1;
+          }
+
+          if (braceDepth == 0) {
+            lastStmtEndByte = token.spanEnd();
+          }
+        } else if (punctuation == Punctuation::SEMICOLON && braceDepth == 0) {
+          lastStmtEndByte = token.spanEnd();
+        }
+      }
+
+      cursor += 1;
+    }
+
+    self.pushCodeItem(&mut items, &mut pendingLeading, &mut pendingAttrPrefix, codeStartByte, regionEndByte);
+
+    let mut pendingIndex: u64 = 0;
+
+    while (pendingIndex < pendingLeading.length()) {
+      let Option::SOME(comment) = pendingLeading.get(pendingIndex) else {
+        pendingIndex += 1;
+        continue;
+      };
+
+      items.push(Format::FormatItem::DetachedComment(cloneCommentBlock(comment)));
+
+      pendingIndex += 1;
+    }
+
+    return Result::OK(items);
+  }
+
+  attachCommentBlock(
+    &self,
+    items: &mut Vector<Format::FormatItem>,
+    pendingLeading: &mut Vector<CommentBlock>,
+    block: CommentBlock
+  ): Result<void, FormatError> {
+    let mut itemsRef: &mut Vector<Format::FormatItem> = items;
+    let mut pendingRef: &mut Vector<CommentBlock> = pendingLeading;
+
+    if (block.placement == CommentPlacement::LEADING) {
+      pendingRef.push(block);
+      return Result::OK(());
+    }
+
+    if (block.placement == CommentPlacement::DETACHED) {
+      itemsRef.push(Format::FormatItem::DetachedComment(block));
+      return Result::OK(());
+    }
+
+    if (itemsRef.length() == 0) {
+      return Result::ERROR(FormatError::model("trailing comment is missing an owning formatter region"));
+    }
+
+    let lastIndex: u64 = itemsRef.length() - 1;
+    let Option::SOME(lastItem) = itemsRef.getMut(lastIndex) else {
+      return Result::ERROR(FormatError::model("trailing comment is missing an owning formatter region"));
+    };
+
+    let mut lastItemRef: &mut Format::FormatItem = lastItem;
+
+    // Enum payloads bound by a match on a `&mut` reference are read as plain
+    // values, not aliases into the original storage, so mutating a field
+    // through them would be silently lost. Instead, read the current fields,
+    // build a new payload with the comment appended, and overwrite the whole
+    // slot through the reference (`*lastItemRef = ...`).
+    //
+    // `block` (the comment being attached) is only consumed on exactly one of
+    // these paths, so they are sequential `if let`s with early returns rather
+    // than match arms: the ownership checker requires a moved value's fate to
+    // agree across every arm of one match, even when only one arm can run.
+    if (let Format::FormatItem::Code(region) = lastItemRef) {
+      let mut trailing: Vector<CommentBlock> = cloneCommentBlockVector(&region.trailing);
+      trailing.push(block);
+
+      *lastItemRef = Format::FormatItem::Code(Format::CodeRegion {
+        raw: region.raw.clone(),
+        leading: cloneCommentBlockVector(&region.leading),
+        trailing: trailing,
+        leadingAfterAttrPrefix: region.leadingAfterAttrPrefix,
+      });
+
+      return Result::OK(());
+    }
+
+    if (let Format::FormatItem::Directive(directive) = lastItemRef) {
+      let mut trailing: Vector<CommentBlock> = cloneCommentBlockVector(&directive.trailing);
+      trailing.push(block);
+
+      *lastItemRef = Format::FormatItem::Directive(Format::DirectiveBlock {
+        leading: cloneCommentBlockVector(&directive.leading),
+        header: directive.header.clone(),
+        thenItems: cloneFormatItemVector(&directive.thenItems),
+        elseHeader: cloneOptionalString(&directive.elseHeader),
+        elseItems: cloneFormatItemVector(&directive.elseItems),
+        trailing: trailing,
+        braced: directive.braced,
+      });
+
+      return Result::OK(());
+    }
+
+    return Result::ERROR(FormatError::model("trailing comment cannot attach to detached trivia"));
+  }
+
+  consumeCommentBlock(&self, startIndex: u64): ConsumeCommentBlockResult {
+    let mut lines: Vector<String> = Vector::new<String>();
+    let mut cursor: u64 = startIndex;
+    let mut lastEnd: u64 = startIndex;
+
+    let Option::SOME(startToken) = self.tokens.get(startIndex) else {
+      return ConsumeCommentBlockResult {
+        lines: lines,
+        nextIndex: cursor,
+        nextCodeStartByte: lastEnd,
+      };
+    };
+
+    lastEnd = startToken.spanEnd();
+
+    while (cursor < self.tokens.length()) {
+      let Option::SOME(token) = self.tokens.get(cursor) else {
+        break;
+      };
+
+      if (!isCommentTrivia(token)) {
+        break;
+      }
+
+      lines.push(String::create(token.lexemeTextLossy()));
+      lastEnd = token.spanEnd();
+
+      let nextIndex: u64 = cursor + 1;
+      let Option::SOME(nextToken) = self.tokens.get(nextIndex) else {
+        cursor = nextIndex;
+        break;
+      };
+
+      if (!isCommentTrivia(nextToken) || !self.commentsAreContiguous(cursor, nextIndex)) {
+        cursor = nextIndex;
+        break;
+      }
+
+      cursor = nextIndex;
+    }
+
+    return ConsumeCommentBlockResult { lines: lines, nextIndex: cursor, nextCodeStartByte: lastEnd };
+  }
+
+  commentsAreContiguous(&self, leftIndex: u64, rightIndex: u64): boolean {
+    let Option::SOME(leftToken) = self.tokens.get(leftIndex) else {
+      return false;
+    };
+
+    let Option::SOME(rightToken) = self.tokens.get(rightIndex) else {
+      return false;
+    };
+
+    let between: String = self.source.substringBytes(leftToken.spanEnd(), rightToken.spanStart());
+
+    let mut byteIndex: u64 = 0;
+    let mut newlineCount: u64 = 0;
+
+    while (byteIndex < between.length()) {
+      let mut endByte: u64 = byteIndex;
+      let Option::SOME(character) = between.charAt(byteIndex, &mut endByte) else {
+        return false;
+      };
+
+      if (!Char::isWhitespace(character)) {
+        return false;
+      }
+
+      if (character == '\n') {
+        newlineCount += 1;
+      }
+
+      byteIndex = endByte;
+    }
+
+    return newlineCount <= 1;
+  }
+
+  pushCodeItem(
+    &self,
+    items: &mut Vector<Format::FormatItem>,
+    pendingLeading: &mut Vector<CommentBlock>,
+    attrPrefix: &mut String,
+    startByte: u64,
+    endByte: u64
+  ): void {
+    let mut itemsRef: &mut Vector<Format::FormatItem> = items;
+    let mut pendingRef: &mut Vector<CommentBlock> = pendingLeading;
+    let mut attrPrefixRef: &mut String = attrPrefix;
+
+    let mut rawBytes: String = String::new();
+
+    if (startByte < endByte) {
+      rawBytes = self.source.substringBytes(startByte, endByte);
+    }
+
+    let mut raw: String = String::new();
+    let mut leadingAfterAttrPrefix: boolean = false;
+
+    if (attrPrefixRef.length() == 0) {
+      let trimmed: String = rawBytes.trimAsciiWhitespace();
+
+      if (trimmed.length() == 0) {
+        return;
+      }
+
+      raw = rawBytes.clone();
+    } else {
+      let mut combined: String = attrPrefixRef.clone();
+      combined.push(&rawBytes);
+      *attrPrefixRef = String::new();
+
+      let trimmedCombined: String = combined.trimAsciiWhitespace();
+
+      if (trimmedCombined.length() == 0) {
+        return;
+      }
+
+      raw = combined;
+      leadingAfterAttrPrefix = true;
+    }
+
+    let leadingForRegion: Vector<CommentBlock> = cloneCommentBlockVector(&*pendingRef);
+    *pendingRef = Vector::new<CommentBlock>();
+
+    itemsRef.push(Format::FormatItem::Code(Format::CodeRegion {
+      raw: raw,
+      leading: leadingForRegion,
+      trailing: Vector::new<CommentBlock>(),
+      leadingAfterAttrPrefix: leadingAfterAttrPrefix,
+    }));
+  }
+
+  parseDirectiveBlock(&self, startIndex: u64): Result<ParsedDirectiveBlock, FormatError> {
+    let headerEndIndex: u64 = self.findHeaderEnd(startIndex)!;
+
+    let Option::SOME(startToken) = self.tokens.get(startIndex) else {
+      return Result::ERROR(FormatError::model("directive header is missing its opening token"));
+    };
+
+    let Option::SOME(headerEndToken) = self.tokens.get(headerEndIndex) else {
+      return Result::ERROR(FormatError::model("directive header is missing its closing token"));
+    };
+
+    let header: String = self.source.substringBytes(startToken.spanStart(), headerEndToken.spanEnd());
+
+    let afterHeader: u64 = headerEndIndex + 1;
+    let mut isBraced: boolean = false;
+
+    if (let Option::SOME(afterHeaderToken) = self.tokens.get(afterHeader)) {
+      isBraced = afterHeaderToken.kindValue() == TokenKind::PUNCTUATION && afterHeaderToken.punctuationValue() == Punctuation::LEFT_BRACE;
+    }
+
+    if (!isBraced) {
+      // Brace-less form: `@configFlag(cond)\nstatement` — the next single
+      // top-level declaration is the then-item.
+      let stmtStartToken: u64 = afterHeader;
+
+      if (stmtStartToken >= self.tokens.length()) {
+        return Result::ERROR(FormatError::model("directive header is missing a following statement"));
+      }
+
+      let stmtEnd: IndexBytePair = self.findSingleDeclarationEnd(stmtStartToken)!;
+      let Option::SOME(stmtStartTokenValue) = self.tokens.get(stmtStartToken) else {
+        return Result::ERROR(FormatError::model("directive statement is missing its opening token"));
+      };
+
+      let stmtStartByte: u64 = stmtStartTokenValue.spanStart();
+      let thenItems: Vector<Format::FormatItem> = self.parseRegion(stmtStartToken, stmtEnd.tokenIndex, stmtStartByte, stmtEnd.byteOffset)!;
+
+      return Result::OK(ParsedDirectiveBlock {
+        block: Format::DirectiveBlock {
+          leading: Vector::new<CommentBlock>(),
+          header: header,
+          thenItems: thenItems,
+          elseHeader: Option::NONE,
+          elseItems: Vector::new<Format::FormatItem>(),
+          trailing: Vector::new<CommentBlock>(),
+          braced: false,
+        },
+        nextIndex: stmtEnd.tokenIndex,
+        nextCodeStartByte: stmtEnd.byteOffset,
+      });
+    }
+
+    let thenLeftBrace: u64 = afterHeader;
+    let thenRightBrace: u64 = self.findMatchingRightBrace(thenLeftBrace)!;
+
+    let Option::SOME(thenLeftBraceToken) = self.tokens.get(thenLeftBrace) else {
+      return Result::ERROR(FormatError::model("directive branch is missing its opening brace"));
+    };
+
+    let Option::SOME(thenRightBraceToken) = self.tokens.get(thenRightBrace) else {
+      return Result::ERROR(FormatError::model("directive branch is missing its closing brace"));
+    };
+
+    let thenItems: Vector<Format::FormatItem> = self.parseRegion(
+      thenLeftBrace + 1,
+      thenRightBrace,
+      thenLeftBraceToken.spanEnd(),
+      thenRightBraceToken.spanStart(),
+    )!;
+
+    let mut nextIndex: u64 = thenRightBrace + 1;
+    let mut elseHeader: Option<String> = Option::NONE;
+    let mut elseItems: Vector<Format::FormatItem> = Vector::new<Format::FormatItem>();
+
+    if (self.isElseDirectiveStart(nextIndex)) {
+      let Option::SOME(elseAtToken) = self.tokens.get(nextIndex) else {
+        return Result::ERROR(FormatError::model("@else directive is missing its token"));
+      };
+
+      let Option::SOME(elseKeywordToken) = self.tokens.get(nextIndex + 1) else {
+        return Result::ERROR(FormatError::model("@else directive is missing its keyword"));
+      };
+
+      elseHeader = Option::SOME(self.source.substringBytes(elseAtToken.spanStart(), elseKeywordToken.spanEnd()));
+
+      let elseLeftBrace: u64 = nextIndex + 2;
+      let mut elseLeftBraceIsBrace: boolean = false;
+
+      if (let Option::SOME(elseLeftBraceToken) = self.tokens.get(elseLeftBrace)) {
+        elseLeftBraceIsBrace = elseLeftBraceToken.kindValue() == TokenKind::PUNCTUATION && elseLeftBraceToken.punctuationValue() == Punctuation::LEFT_BRACE;
+      }
+
+      if (!elseLeftBraceIsBrace) {
+        return Result::ERROR(FormatError::model("@else directive is missing a branch body"));
+      }
+
+      let elseRightBrace: u64 = self.findMatchingRightBrace(elseLeftBrace)!;
+
+      let Option::SOME(elseLeftBraceToken) = self.tokens.get(elseLeftBrace) else {
+        return Result::ERROR(FormatError::model("@else directive is missing its opening brace"));
+      };
+
+      let Option::SOME(elseRightBraceToken) = self.tokens.get(elseRightBrace) else {
+        return Result::ERROR(FormatError::model("@else directive is missing its closing brace"));
+      };
+
+      elseItems = self.parseRegion(
+        elseLeftBrace + 1,
+        elseRightBrace,
+        elseLeftBraceToken.spanEnd(),
+        elseRightBraceToken.spanStart(),
+      )!;
+
+      nextIndex = elseRightBrace + 1;
+    }
+
+    let mut nextCodeStartByte: u64 = self.source.length();
+
+    if (nextIndex < self.tokens.length() && nextIndex > 0) {
+      let Option::SOME(previousToken) = self.tokens.get(nextIndex - 1) else {
+        return Result::ERROR(FormatError::model("directive block lost track of its last token"));
+      };
+
+      nextCodeStartByte = previousToken.spanEnd();
+    }
+
+    return Result::OK(ParsedDirectiveBlock {
+      block: Format::DirectiveBlock {
+        leading: Vector::new<CommentBlock>(),
+        header: header,
+        thenItems: thenItems,
+        elseHeader: elseHeader,
+        elseItems: elseItems,
+        trailing: Vector::new<CommentBlock>(),
+        braced: true,
+      },
+      nextIndex: nextIndex,
+      nextCodeStartByte: nextCodeStartByte,
+    });
+  }
+
+  /// Finds the end of a single top-level declaration starting at
+  /// `startIndex`. The returned token index is the first token AFTER the
+  /// declaration; the byte offset is the declaration's end (after `;` or `}`).
+  findSingleDeclarationEnd(&self, startIndex: u64): Result<IndexBytePair, FormatError> {
+    let mut cursor: u64 = startIndex;
+    let mut depth: u64 = 0;
+
+    while (cursor < self.tokens.length()) {
+      let Option::SOME(token) = self.tokens.get(cursor) else {
+        break;
+      };
+
+      if (token.kindValue() == TokenKind::PUNCTUATION) {
+        let punctuation: Punctuation = token.punctuationValue();
+
+        if (punctuation == Punctuation::LEFT_BRACE) {
+          depth += 1;
+        } else if (punctuation == Punctuation::RIGHT_BRACE) {
+          if (depth > 0) {
+            depth -= 1;
+          }
+
+          if (depth == 0) {
+            return Result::OK(IndexBytePair { tokenIndex: cursor + 1, byteOffset: token.spanEnd() });
+          }
+        } else if (punctuation == Punctuation::SEMICOLON && depth == 0) {
+          return Result::OK(IndexBytePair { tokenIndex: cursor + 1, byteOffset: token.spanEnd() });
+        }
+      }
+
+      cursor += 1;
+    }
+
+    return Result::ERROR(FormatError::model("brace-less directive statement has no clear end"));
+  }
+
+  findHeaderEnd(&self, startIndex: u64): Result<u64, FormatError> {
+    let mut cursor: u64 = startIndex + 1;
+
+    while (cursor < self.tokens.length()) {
+      let Option::SOME(token) = self.tokens.get(cursor) else {
+        break;
+      };
+
+      if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::LEFT_PAREN) {
+        break;
+      }
+
+      cursor += 1;
+    }
+
+    if (cursor >= self.tokens.length()) {
+      return Result::ERROR(FormatError::model("directive header is missing '('"));
+    }
+
+    let mut depth: u64 = 0;
+
+    while (cursor < self.tokens.length()) {
+      let Option::SOME(token) = self.tokens.get(cursor) else {
+        break;
+      };
+
+      if (token.kindValue() == TokenKind::PUNCTUATION) {
+        let punctuation: Punctuation = token.punctuationValue();
+
+        if (punctuation == Punctuation::LEFT_PAREN) {
+          depth += 1;
+        } else if (punctuation == Punctuation::RIGHT_PAREN) {
+          depth -= 1;
+
+          if (depth == 0) {
+            return Result::OK(cursor);
+          }
+        }
+      }
+
+      cursor += 1;
+    }
+
+    return Result::ERROR(FormatError::model("directive header has unbalanced parentheses"));
+  }
+
+  findMatchingRightBrace(&self, leftBraceIndex: u64): Result<u64, FormatError> {
+    let mut depth: u64 = 0;
+    let mut cursor: u64 = leftBraceIndex;
+
+    while (cursor < self.tokens.length()) {
+      let Option::SOME(token) = self.tokens.get(cursor) else {
+        break;
+      };
+
+      if (token.kindValue() == TokenKind::PUNCTUATION) {
+        let punctuation: Punctuation = token.punctuationValue();
+
+        if (punctuation == Punctuation::LEFT_BRACE) {
+          depth += 1;
+        } else if (punctuation == Punctuation::RIGHT_BRACE) {
+          depth -= 1;
+
+          if (depth == 0) {
+            return Result::OK(cursor);
+          }
+        }
+      }
+
+      cursor += 1;
+    }
+
+    return Result::ERROR(FormatError::model("directive branch has unbalanced braces"));
+  }
+
+  isDirectiveStart(&self, index: u64): boolean {
+    let Option::SOME(token) = self.tokens.get(index) else {
+      return false;
+    };
+
+    let Option::SOME(next) = self.tokens.get(index + 1) else {
+      return false;
+    };
+
+    if (token.kindValue() != TokenKind::PUNCTUATION || token.punctuationValue() != Punctuation::AT) {
+      return false;
+    }
+
+    if (next.kindValue() == TokenKind::KEYWORD && next.keywordValue() == Keyword::IF) {
+      return true;
+    }
+
+    if (next.kindValue() == TokenKind::IDENTIFIER) {
+      let lexeme: str = next.lexemeTextLossy();
+      return strEqualsIgnisFmt(lexeme, "ifelse") || strEqualsIgnisFmt(lexeme, "configFlag");
+    }
+
+    return false;
+  }
+
+  isElseDirectiveStart(&self, index: u64): boolean {
+    let Option::SOME(token) = self.tokens.get(index) else {
+      return false;
+    };
+
+    let Option::SOME(next) = self.tokens.get(index + 1) else {
+      return false;
+    };
+
+    return token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::AT && next.kindValue() == TokenKind::KEYWORD && next.keywordValue() == Keyword::ELSE;
+  }
+}
+
+record ParsedDirectiveBlock {
+  public block: Format::DirectiveBlock;
+  public nextIndex: u64;
+  public nextCodeStartByte: u64;
+}
+
+function strEqualsIgnisFmt(left: str, right: str): boolean {
+  return @eq<str>(&left, &right);
+}
