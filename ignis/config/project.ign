@@ -56,6 +56,9 @@ export record ResolvedProject {
   public runtimeRoot: Option<Path::PathBuf>;
   public stdManifestPath: Option<Path::PathBuf>;
   public aliases: Vector<AliasBinding>;
+  /// `[test] fixtures`, resolved against the project root. A directory that
+  /// does not exist stays in the list; discovery skips it silently.
+  public testFixtures: Vector<Path::PathBuf>;
 
   public rootText(&self): Option<String> {
     return match (&self.root) {
@@ -199,6 +202,17 @@ export record ResolvedProject {
     return self.aliases.length();
   }
 
+  public testFixtureCount(&self): u64 {
+    return self.testFixtures.length();
+  }
+
+  public testFixtureText(&self, index: u64): Option<String> {
+    return match (self.testFixtures.get(index)) {
+      Option::SOME(value) -> Option::SOME(value.toString()),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
   public aliasRawPathText(&self, name: str): Option<String> {
     let mut index: u64 = 0;
 
@@ -322,6 +336,22 @@ function integerOrDefault(
 
 function cloneStringVector(source: &Vector<String>): Vector<String> {
   let mut values: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < source.length()) {
+    let Option::SOME(value) = source.get(index) else {
+      break;
+    };
+
+    values.push(value.clone());
+    index += 1;
+  }
+
+  return values;
+}
+
+function clonePathVector(source: &Vector<Path::PathBuf>): Vector<Path::PathBuf> {
+  let mut values: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
   let mut index: u64 = 0;
 
   while (index < source.length()) {
@@ -759,6 +789,9 @@ export namespace Config {
     let emptyKnownFeatures: Vector<String> = Vector::new<String>();
     let knownFeatures: Vector<String> = stringArrayOrDefault(&document, configPath, "build.known_features", &emptyKnownFeatures)!;
 
+    let emptyFixtures: Vector<String> = Vector::new<String>();
+    let fixtureEntries: Vector<String> = stringArrayOrDefault(&document, configPath, "test.fixtures", &emptyFixtures)!;
+
     let stdEnabled: boolean = booleanOrDefault(&document, configPath, "ignis.std", true)!;
 
     let sourceDirResolved: Path::PathBuf = resolveProjectPath(&root, &sourceDirValue.value);
@@ -770,6 +803,17 @@ export namespace Config {
     let outDirResolved: Path::PathBuf = resolveProjectPath(&root, &outDirValue.value);
 
     let aliases: Vector<AliasBinding> = parseAliases(configPath, &root, &source)!;
+
+    let mut testFixtures: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    let mut fixtureIndex: u64 = 0;
+
+    while (fixtureIndex < fixtureEntries.length()) {
+      if (let Option::SOME(entry) = fixtureEntries.get(fixtureIndex)) {
+        testFixtures.push(resolveProjectPath(&root, entry));
+      }
+
+      fixtureIndex += 1;
+    }
 
     let stdPathValue: Option<ConfigStringValue> = optionalString(&document, configPath, "ignis.std_path")!;
     let runtimePathValue: Option<ConfigStringValue> = optionalString(&document, configPath, "ignis.runtime_path")!;
@@ -863,6 +907,7 @@ export namespace Config {
       runtimeRoot: cloneOptionPath(&runtimeRoot),
       stdManifestPath: cloneOptionPath(&stdManifestPath),
       aliases: cloneAliases(&aliases),
+      testFixtures: clonePathVector(&testFixtures),
     });
   }
 
@@ -952,6 +997,7 @@ function emptyProject(): ResolvedProject {
     runtimeRoot: Option::NONE,
     stdManifestPath: Option::NONE,
     aliases: Vector::new<AliasBinding>(),
+    testFixtures: Vector::new<Path::PathBuf>(),
   };
 }
 
@@ -1098,7 +1144,22 @@ function projectLoaderConsumesBuildFixtureFields(): void {
       assertSomeString(project.emitText(0), "c");
       assertSomeString(project.emitText(1), "obj");
       assertSomeStringEndsWith(project.stdManifestPathText(), "/test_cases/selfhost/build/config_project/std/manifest.toml");
+      Test::assertEq<u64>(project.testFixtureCount(), 2);
+      assertSomeStringEndsWith(project.testFixtureText(0), "/test_cases/selfhost/build/config_project/cases/ok");
+      assertSomeStringEndsWith(project.testFixtureText(1), "/test_cases/selfhost/build/config_project/cases/err");
     },
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+/// A project that declares no `[test] fixtures` carries an empty corpus, which
+/// is what makes the table optional.
+@test
+function projectLoaderDefaultsTestFixturesToNothing(): void {
+  let start: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/project_mode/nested/deeper");
+
+  match (Config::loadProject(&start)) {
+    Result::OK(project) -> Test::assertEq<u64>(project.testFixtureCount(), 0),
     Result::ERROR(_) -> Test::fail(),
   };
 }

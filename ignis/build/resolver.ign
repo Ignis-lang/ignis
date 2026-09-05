@@ -63,6 +63,11 @@ record ResolverProject {
   /// False when discovery ran without an `ignis.toml`, which is what a
   /// single-file build does.
   public hasProjectFile: boolean;
+  /// `[ignis] std`, which a fixture that forces the standard library on has to
+  /// find enabled.
+  public stdEnabled: boolean;
+  /// `[test] fixtures`, already resolved against the project root.
+  public testFixtures: Vector<Path::PathBuf>;
 }
 
 /// Command-line values a build applies on top of what the project file declares.
@@ -133,6 +138,12 @@ export record DiscoveryResult {
   public entry: Path::PathBuf;
   /// False when discovery ran without an `ignis.toml`.
   public hasProjectFile: boolean;
+  /// The project root every relative fixture directory is resolved against.
+  public root: Path::PathBuf;
+  /// `[ignis] std`, which a fixture forcing the standard library on consults.
+  public stdEnabled: boolean;
+  /// `[test] fixtures`, already resolved against the project root.
+  public testFixtures: Vector<Path::PathBuf>;
 
   public orderCount(&self): u64 {
     return self.order.length();
@@ -226,6 +237,22 @@ function resolverSimpleDiagnostic(path: &Path::PathBuf, code: str, message: str)
     resolverPathSpan(path, 0, 0),
   );
   return resolverSingleDiagnostic(diagnostic);
+}
+
+function resolverClonePaths(source: &Vector<Path::PathBuf>): Vector<Path::PathBuf> {
+  let mut result: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut index: u64 = 0;
+
+  while (index < source.length()) {
+    let Option::SOME(value) = source.get(index) else {
+      break;
+    };
+
+    result.push(value.clone());
+    index += 1;
+  }
+
+  return result;
 }
 
 function resolverCloneStrings(source: &Vector<String>): Vector<String> {
@@ -497,6 +524,8 @@ function resolverLoadProject(
     bin: resolved.bin,
     emitC: resolverEmitsC(&resolved.emit),
     hasProjectFile: true,
+    stdEnabled: resolved.stdEnabled,
+    testFixtures: resolverClonePaths(&resolved.testFixtures),
   });
 }
 
@@ -593,6 +622,8 @@ function resolverSingleFileProject(
     bin: true,
     emitC: false,
     hasProjectFile: false,
+    stdEnabled: true,
+    testFixtures: Vector::new<Path::PathBuf>(),
   });
 }
 
@@ -645,6 +676,8 @@ function resolverStdOnlyProject(
     bin: false,
     emitC: false,
     hasProjectFile: false,
+    stdEnabled: true,
+    testFixtures: Vector::new<Path::PathBuf>(),
   });
 }
 
@@ -1252,6 +1285,9 @@ function resolverDiscoverProjectRoots(
     emitC: project.emitC,
     entry: project.entry.clone(),
     hasProjectFile: project.hasProjectFile,
+    root: project.root.clone(),
+    stdEnabled: project.stdEnabled,
+    testFixtures: resolverClonePaths(&project.testFixtures),
   });
 }
 
@@ -1340,6 +1376,9 @@ function resolverDiscoverStdRoots(
     emitC: project.emitC,
     entry: project.entry.clone(),
     hasProjectFile: project.hasProjectFile,
+    root: project.root.clone(),
+    stdEnabled: project.stdEnabled,
+    testFixtures: resolverClonePaths(&project.testFixtures),
   });
 }
 
@@ -1403,6 +1442,38 @@ export namespace Resolver {
     let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
 
     return resolverDiscoverProjectRoots(&project, &manifest, includeTests);
+  }
+
+  /// Discovers the module graph a program fixture compiles as: the fixture on
+  /// its own, under the settings of the project that governs `projectStart`.
+  ///
+  /// A fixture observes what a project build observes — the same standard
+  /// library, aliases, features and C profile — rather than a private
+  /// toolchain, so the project is loaded first and only the entry and the
+  /// source root are replaced. A fixture no project file governs falls back to
+  /// the single-file settings.
+  function discoverFixture(
+    fixturePath: &Path::PathBuf,
+    projectStart: &Path::PathBuf,
+    overrides: &BuildOverrides,
+  ): Result<DiscoveryResult, DiagnosticBag> {
+    let mut project: ResolverProject = match (Config::findProjectFile(projectStart)) {
+      Option::SOME(_) -> resolverLoadProject(projectStart, overrides)!,
+      Option::NONE -> resolverSingleFileProject(fixturePath, overrides)!,
+    };
+
+    let entry: Path::PathBuf = resolverCanonicalPath(fixturePath, "fixture file could not be resolved")!;
+
+    if (let Option::SOME(parent) = entry.parent()) {
+      project.sourceRoot = parent.clone();
+    }
+
+    project.entry = entry.clone();
+
+    let manifestPath: Path::PathBuf = project.stdManifestPath.clone();
+    let manifest: StdManifest = Manifest::loadFile(&manifestPath)!;
+
+    return resolverDiscoverProjectRoots(&project, &manifest, false);
   }
 
   /// Discovers the standard library's own module graph, which is what

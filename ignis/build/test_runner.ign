@@ -4,13 +4,17 @@ import Analyzer from "@compiler::analyzer";
 import Env from "std::env";
 import Fs from "std::fs";
 import Io from "std::io";
+import LibC from "std::libc";
+import Memory from "std::memory";
 import Path from "std::path";
 import Process from "std::process";
 import String from "std::string";
 import Test from "std::test";
+import Time from "std::time";
 import Vector from "std::vector";
 
 import CodegenC from "../codegen/mod";
+import FixtureCase, FixtureMode, FixtureTests from "./fixture_tests";
 import BuildGraph from "./module_graph";
 
 /// One `@test` function selected for execution.
@@ -50,6 +54,175 @@ export record TestOutcome {
 
 /// Longest failure stream excerpt reported per stream, in characters.
 const FAILED_TEST_OUTPUT_LIMIT: u64 = 240;
+
+/// Environment variable consulted when no explicit `--test-timeout` was given.
+const TEST_TIMEOUT_ENV: str = "IGNIS_TEST_TIMEOUT";
+
+/// Wall-clock budget applied to one test process when nothing else selects one.
+const DEFAULT_TEST_TIMEOUT_SECONDS: u64 = 300;
+
+/// Exit code reported for a process the runner had to kill.
+const TIMEOUT_EXIT_CODE: i32 = 124;
+
+/// Interval between liveness checks while waiting for a child, in microseconds.
+const PROCESS_POLL_INTERVAL_MICROS: u32 = 5000;
+
+/// POSIX `WNOHANG`, which `std::libc` does not name yet. It is `1` on every
+/// platform this compiler targets.
+const PROCESS_WAIT_NO_HANG: i32 = 1;
+
+/// Bits of a POSIX wait status that carry the terminating signal.
+const PROCESS_SIGNAL_MASK: i32 = 127;
+
+/// Bits of a POSIX wait status that identify a stopped child.
+const PROCESS_STOPPED_MASK: i32 = 255;
+
+/// Value those bits carry for a stopped child.
+const PROCESS_STOPPED_VALUE: i32 = 127;
+
+/// `k/n` shard selection, disabled when no command line named one.
+export record TestPartition {
+  public enabled: boolean;
+  public index: u64;
+  public count: u64;
+
+  public static none(): TestPartition {
+    return TestPartition {
+      enabled: false,
+      index: 0,
+      count: 0,
+    };
+  }
+
+  public static create(index: u64, count: u64): TestPartition {
+    return TestPartition {
+      enabled: true,
+      index: index,
+      count: count,
+    };
+  }
+}
+
+/// Everything one test run will execute, in report order: the `@test` entries
+/// first and the program fixtures after them.
+export record TestPlan {
+  public tests: Vector<TestCase>;
+  public fixtures: Vector<FixtureCase>;
+}
+
+/// What one bounded child process produced.
+///
+/// `spawnFailed` marks a child the runner could not observe at all, which the
+/// caller reports the way a failed spawn has always been reported.
+export record ProcessOutcome {
+  public success: boolean;
+  public exitCode: i32;
+  public stdout: String;
+  public stderr: String;
+  public timedOut: boolean;
+  public spawnFailed: boolean;
+}
+
+/// Converts a POSIX wait status into a shell-like status code.
+function testRunnerWaitStatusCode(rawStatus: i32): i32 {
+  let exited: boolean = (rawStatus & PROCESS_SIGNAL_MASK) == 0;
+  let stopped: boolean = (rawStatus & PROCESS_STOPPED_MASK) == PROCESS_STOPPED_VALUE;
+
+  if (exited || stopped) {
+    return (rawStatus >> 8) & 255;
+  }
+
+  return 128 + (rawStatus & PROCESS_SIGNAL_MASK);
+}
+
+/// True only for a normal exit with status code 0.
+function testRunnerWaitStatusSuccess(rawStatus: i32): boolean {
+  return (rawStatus & PROCESS_SIGNAL_MASK) == 0 && testRunnerWaitStatusCode(rawStatus) == 0;
+}
+
+/// Reads a seekable capture file into an owned string and leaves `fd` open.
+///
+/// `std::process` keeps its own reader private and only exposes it through the
+/// blocking `Child::wait`, so a bounded wait has to read the descriptors the
+/// spawned child handed over itself.
+function testRunnerReadCapture(fd: i32): String {
+  let length: i64 = LibC::File::lseek(fd, 0, LibC::File::SEEK_END);
+
+  if (length <= 0) {
+    return String::new();
+  }
+
+  if (LibC::File::lseek(fd, 0, LibC::File::SEEK_SET) == -1) {
+    return String::new();
+  }
+
+  let buffer: *mut u8 = Memory::allocateVector<u8>(length as u64);
+  let mut offset: u64 = 0;
+
+  while (offset < length as u64) {
+    let chunk: i64 = LibC::File::read(fd, (buffer + offset) as *mut void, (length as u64) - offset);
+
+    if (chunk == -1) {
+      if (LibC::Errno::get() == LibC::Errno::EINTR) {
+        continue;
+      }
+
+      break;
+    }
+
+    if (chunk == 0) {
+      break;
+    }
+
+    offset += chunk as u64;
+  }
+
+  let text: String = String::create(buffer, offset);
+  Memory::free(buffer);
+
+  return text;
+}
+
+/// Drains the child's exec-status pipe and closes it.
+///
+/// The pipe is close-on-exec, so EOF means `execvp` succeeded while bytes on it
+/// carry the setup errno. Returns that errno, or 0 when the child reached its
+/// program.
+function testRunnerDrainExecPipe(errorReadFd: i32): i32 {
+  let mut childErrno: i32 = 0;
+  let mut bytesRead: i64 = -1;
+
+  while (true) {
+    bytesRead = LibC::File::read(errorReadFd, (&mut childErrno) as *mut void, @sizeOf<i32>());
+
+    if (bytesRead == -1 && LibC::Errno::get() == LibC::Errno::EINTR) {
+      continue;
+    }
+
+    break;
+  }
+
+  let readErrno: i32 = bytesRead == -1 ? LibC::Errno::get() : 0;
+  LibC::File::close(errorReadFd);
+
+  if (bytesRead > 0) {
+    return childErrno == 0 ? LibC::Errno::EIO : childErrno;
+  }
+
+  if (bytesRead == -1) {
+    return readErrno == 0 ? LibC::Errno::EIO : readErrno;
+  }
+
+  return 0;
+}
+
+/// Seconds elapsed since `started`, or 0 when the clock could not be read.
+function testRunnerElapsedSeconds(started: &Time::MonotonicInstant): u64 {
+  return match (started.elapsed()) {
+    Result::OK(duration) -> duration.secs,
+    Result::ERROR(_) -> 0,
+  };
+}
 
 function testRunnerEndsWith(value: &String, suffix: str): boolean {
   let suffixText: String = String::create(suffix);
@@ -403,6 +576,7 @@ export namespace TestRunner {
     cases: &Vector<TestCase>,
     updateSnapshots: boolean,
     jobs: u64,
+    timeoutSeconds: u64,
   ): Vector<TestOutcome> {
     let mut outcomes: Vector<TestOutcome> = Vector::new<TestOutcome>();
     let program: Path::PathBuf = TestRunner::resolveAgainstCurrentDir(binaryPath);
@@ -452,28 +626,27 @@ export namespace TestRunner {
       let mut failed: boolean = true;
 
       if (waitCursor < children.length()) {
-        let mut child: &mut Process::Child = match (children.getMut(waitCursor)) {
+        let child: &mut Process::Child = match (children.getMut(waitCursor)) {
           Option::SOME(value) -> value,
           Option::NONE -> @panic("unreachable: TestRunner::execute lost a child slot"),
         };
 
         if (child.pid != -1) {
-          match (child.wait()) {
-            Result::OK(output) -> {
-              let status: Process::ExitStatus = output.status();
+          let outcome: ProcessOutcome = TestRunner::waitWithTimeout(child, timeoutSeconds);
 
-              outcomes.push(TestOutcome {
-                fqName: testCase.fqName.clone(),
-                success: status.success,
-                exitCode: status.code,
-                stdout: output.stdout(),
-                stderr: output.stderr(),
-              });
+          if (!outcome.spawnFailed) {
+            let reportedError: String = outcome.timedOut ? TestRunner::formatTimeoutFailure(timeoutSeconds) : outcome.stderr.clone();
 
-              failed = false;
-            },
-            Result::ERROR(_) -> {},
-          };
+            outcomes.push(TestOutcome {
+              fqName: testCase.fqName.clone(),
+              success: outcome.success,
+              exitCode: outcome.exitCode,
+              stdout: outcome.stdout.clone(),
+              stderr: reportedError,
+            });
+
+            failed = false;
+          }
         }
       }
 
@@ -571,6 +744,272 @@ export namespace TestRunner {
     }
 
     return parsed;
+  }
+
+  /// The wall-clock budget one test process is given.
+  ///
+  /// `--test-timeout` wins, then `IGNIS_TEST_TIMEOUT` when it parses to a
+  /// positive decimal number, and the built-in default otherwise.
+  function resolvedTimeoutSeconds(explicit: Option<u64>): u64 {
+    if (let Option::SOME(seconds) = explicit) {
+      return seconds;
+    }
+
+    let Option::SOME(raw) = Env::get(TEST_TIMEOUT_ENV) else {
+      return DEFAULT_TEST_TIMEOUT_SECONDS;
+    };
+
+    let trimmed: String = raw.trimAsciiWhitespace();
+
+    if (trimmed.length() == 0) {
+      return DEFAULT_TEST_TIMEOUT_SECONDS;
+    }
+
+    let mut parsed: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < trimmed.length()) {
+      let Option::SOME(digit) = trimmed.byteAt(index) else {
+        return DEFAULT_TEST_TIMEOUT_SECONDS;
+      };
+
+      if (digit < 48 || digit > 57) {
+        return DEFAULT_TEST_TIMEOUT_SECONDS;
+      }
+
+      parsed = parsed * 10 + ((digit - 48) as u64);
+      index += 1;
+    }
+
+    if (parsed == 0) {
+      return DEFAULT_TEST_TIMEOUT_SECONDS;
+    }
+
+    return parsed;
+  }
+
+  /// Failure text for a test process the runner had to kill.
+  function formatTimeoutFailure(seconds: u64): String {
+    return `timed out after ${seconds}s`;
+  }
+
+  /// Describes the entry a test run targets, naming the shard when one is
+  /// selected.
+  function runHeader(entryPath: &Path::PathBuf, partition: &TestPartition): String {
+    if (!partition.enabled) {
+      return entryPath.toString();
+    }
+
+    return `${entryPath.asStr()} (partition ${partition.index}/${partition.count})`;
+  }
+
+  /// Builds the full plan: `@test` functions sorted by name first, then the
+  /// fixtures in discovery order, with the filter applied to both kinds and the
+  /// shard selected across the two of them.
+  function buildPlan(
+    cases: &Vector<TestCase>,
+    fixtures: &Vector<FixtureCase>,
+    filter: &String,
+    partition: &TestPartition,
+  ): TestPlan {
+    let plan: TestPlan = TestPlan {
+      tests: TestRunner::plan(cases, filter),
+      fixtures: FixtureTests::filterCases(fixtures, filter),
+    };
+
+    return TestRunner::applyPartition(&plan, partition);
+  }
+
+  /// Keeps only the entries this shard owns, counting across the whole plan.
+  ///
+  /// The plan is built in full first, so every shard agrees on which entry sits
+  /// at which index no matter how many of them a shard ends up running.
+  function applyPartition(plan: &TestPlan, partition: &TestPartition): TestPlan {
+    if (!partition.enabled) {
+      let mut everyTest: Vector<TestCase> = Vector::new<TestCase>();
+      let mut testIndex: u64 = 0;
+
+      while (testIndex < plan.tests.length()) {
+        if (let Option::SOME(testCase) = plan.tests.get(testIndex)) {
+          everyTest.push(testCase.clone());
+        }
+
+        testIndex += 1;
+      }
+
+      let mut everyFixture: Vector<FixtureCase> = Vector::new<FixtureCase>();
+      let mut fixtureIndex: u64 = 0;
+
+      while (fixtureIndex < plan.fixtures.length()) {
+        if (let Option::SOME(fixture) = plan.fixtures.get(fixtureIndex)) {
+          everyFixture.push(fixture.clone());
+        }
+
+        fixtureIndex += 1;
+      }
+
+      return TestPlan {
+        tests: everyTest,
+        fixtures: everyFixture,
+      };
+    }
+
+    let mut selectedTests: Vector<TestCase> = Vector::new<TestCase>();
+    let mut selectedFixtures: Vector<FixtureCase> = Vector::new<FixtureCase>();
+    let mut position: u64 = 0;
+    let mut testIndex: u64 = 0;
+
+    while (testIndex < plan.tests.length()) {
+      let Option::SOME(testCase) = plan.tests.get(testIndex) else {
+        break;
+      };
+
+      if (position % partition.count == partition.index - 1) {
+        selectedTests.push(testCase.clone());
+      }
+
+      position += 1;
+      testIndex += 1;
+    }
+
+    let mut fixtureIndex: u64 = 0;
+
+    while (fixtureIndex < plan.fixtures.length()) {
+      let Option::SOME(fixture) = plan.fixtures.get(fixtureIndex) else {
+        break;
+      };
+
+      if (position % partition.count == partition.index - 1) {
+        selectedFixtures.push(fixture.clone());
+      }
+
+      position += 1;
+      fixtureIndex += 1;
+    }
+
+    return TestPlan {
+      tests: selectedTests,
+      fixtures: selectedFixtures,
+    };
+  }
+
+  /// Waits for `child` to exit, killing it once `timeoutSeconds` elapses.
+  ///
+  /// `std::process` only offers an unbounded `Child::wait`, so the deadline is
+  /// driven here: the exec-status pipe is drained first, then `waitpid` is
+  /// polled without blocking until the child is reaped or the budget runs out.
+  function waitWithTimeout(child: &mut Process::Child, timeoutSeconds: u64): ProcessOutcome {
+    let mut childRef: &mut Process::Child = child;
+    let execErrno: i32 = testRunnerDrainExecPipe(childRef.errorReadFd);
+    childRef.errorReadFd = -1;
+
+    let Result::OK(started) = Time::MonotonicInstant::now() else {
+      return TestRunner::failedProcessOutcome(childRef);
+    };
+
+    let mut rawStatus: i32 = 0;
+    let mut timedOut: boolean = false;
+    let mut reaped: boolean = false;
+
+    while (!reaped) {
+      let waitResult: i32 = LibC::Wait::waitpid(
+        childRef.pid,
+        (&mut rawStatus) as *mut i32,
+        PROCESS_WAIT_NO_HANG,
+      );
+
+      if (waitResult == childRef.pid) {
+        reaped = true;
+        break;
+      }
+
+      if (waitResult == -1) {
+        if (LibC::Errno::get() == LibC::Errno::EINTR) {
+          continue;
+        }
+
+        return TestRunner::failedProcessOutcome(childRef);
+      }
+
+      if (testRunnerElapsedSeconds(&started) >= timeoutSeconds) {
+        timedOut = true;
+        let _killed: i32 = LibC::Signals::kill(childRef.pid, LibC::Signals::SIGKILL);
+
+        while (true) {
+          let finalResult: i32 = LibC::Wait::waitpid(childRef.pid, (&mut rawStatus) as *mut i32, 0);
+
+          if (finalResult == -1 && LibC::Errno::get() == LibC::Errno::EINTR) {
+            continue;
+          }
+
+          break;
+        }
+
+        reaped = true;
+        break;
+      }
+
+      let _slept: i32 = LibC::Process::usleep(PROCESS_POLL_INTERVAL_MICROS);
+    }
+
+    let stdout: String = testRunnerReadCapture(childRef.stdoutFd);
+    LibC::File::close(childRef.stdoutFd);
+    childRef.stdoutFd = -1;
+
+    let stderr: String = testRunnerReadCapture(childRef.stderrFd);
+    LibC::File::close(childRef.stderrFd);
+    childRef.stderrFd = -1;
+
+    childRef.pid = -1;
+
+    if (execErrno != 0) {
+      return ProcessOutcome {
+        success: false,
+        exitCode: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+        timedOut: false,
+        spawnFailed: true,
+      };
+    }
+
+    let exitCode: i32 = timedOut ? TIMEOUT_EXIT_CODE : testRunnerWaitStatusCode(rawStatus);
+
+    return ProcessOutcome {
+      success: !timedOut && testRunnerWaitStatusSuccess(rawStatus),
+      exitCode: exitCode,
+      stdout: stdout,
+      stderr: stderr,
+      timedOut: timedOut,
+      spawnFailed: false,
+    };
+  }
+
+  /// Releases whatever `child` still owns and reports a child the runner could
+  /// not observe.
+  function failedProcessOutcome(child: &mut Process::Child): ProcessOutcome {
+    let mut childRef: &mut Process::Child = child;
+
+    if (childRef.stdoutFd != -1) {
+      LibC::File::close(childRef.stdoutFd);
+      childRef.stdoutFd = -1;
+    }
+
+    if (childRef.stderrFd != -1) {
+      LibC::File::close(childRef.stderrFd);
+      childRef.stderrFd = -1;
+    }
+
+    childRef.pid = -1;
+
+    return ProcessOutcome {
+      success: false,
+      exitCode: 1,
+      stdout: String::new(),
+      stderr: String::new(),
+      timedOut: false,
+      spawnFailed: true,
+    };
   }
 
   /// One failure stream, indented under its label and cut at
@@ -697,6 +1136,148 @@ export namespace TestRunner {
 
     return failed;
   }
+}
+
+function testRunnerFixtureNamed(name: str): FixtureCase {
+  return FixtureCase {
+    name: String::create(name),
+    path: Path::PathBuf::create("/corpus/ok/case.ign"),
+    mode: FixtureMode::program(),
+    modeError: String::new(),
+  };
+}
+
+function testRunnerCaseNamed(name: str, defIdRaw: u32): TestCase {
+  return TestCase {
+    fqName: String::create(name),
+    symbolName: String::create("symbol"),
+    defIdRaw: defIdRaw,
+    snapshotDir: String::new(),
+  };
+}
+
+function testRunnerPlanNames(plan: &TestPlan): String {
+  let mut names: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < plan.tests.length()) {
+    let Option::SOME(testCase) = plan.tests.get(index) else {
+      break;
+    };
+
+    if (names.length() > 0) {
+      names.pushStr(",");
+    }
+
+    names.push(&testCase.fqName);
+    index += 1;
+  }
+
+  let mut fixtureIndex: u64 = 0;
+
+  while (fixtureIndex < plan.fixtures.length()) {
+    let Option::SOME(fixture) = plan.fixtures.get(fixtureIndex) else {
+      break;
+    };
+
+    if (names.length() > 0) {
+      names.pushStr(",");
+    }
+
+    names.push(&fixture.name);
+    fixtureIndex += 1;
+  }
+
+  return names;
+}
+
+function testRunnerSamplePlanInput(
+  cases: &mut Vector<TestCase>,
+  fixtures: &mut Vector<FixtureCase>
+): void {
+  let mut casesRef: &mut Vector<TestCase> = cases;
+  casesRef.push(testRunnerCaseNamed("a::one", 1));
+  casesRef.push(testRunnerCaseNamed("a::two", 2));
+  casesRef.push(testRunnerCaseNamed("a::three", 3));
+
+  let mut fixturesRef: &mut Vector<FixtureCase> = fixtures;
+  fixturesRef.push(testRunnerFixtureNamed("e2e::alpha"));
+  fixturesRef.push(testRunnerFixtureNamed("e2e::beta"));
+}
+
+/// The plan is the `@test` entries sorted by name, then the fixtures in
+/// discovery order.
+@test
+function testRunnerPlanPutsSortedTestsBeforeFixtures(): void {
+  let mut cases: Vector<TestCase> = Vector::new<TestCase>();
+  let mut fixtures: Vector<FixtureCase> = Vector::new<FixtureCase>();
+  testRunnerSamplePlanInput(&mut cases, &mut fixtures);
+
+  let filter: String = String::new();
+  let partition: TestPartition = TestPartition::none();
+  let plan: TestPlan = TestRunner::buildPlan(&cases, &fixtures, &filter, &partition);
+
+  Test::assertEq<str>(testRunnerPlanNames(&plan).toStr(), "a::one,a::three,a::two,e2e::alpha,e2e::beta");
+}
+
+/// The shard is counted continuously across both kinds of entry, so no entry
+/// belongs to two shards and none belongs to none of them.
+@test
+function testRunnerPartitionKeepsEveryThirdEntryAcrossBothKinds(): void {
+  let mut cases: Vector<TestCase> = Vector::new<TestCase>();
+  let mut fixtures: Vector<FixtureCase> = Vector::new<FixtureCase>();
+  testRunnerSamplePlanInput(&mut cases, &mut fixtures);
+
+  let filter: String = String::new();
+  let first: TestPartition = TestPartition::create(1, 3);
+  let second: TestPartition = TestPartition::create(2, 3);
+  let third: TestPartition = TestPartition::create(3, 3);
+
+  let firstPlan: TestPlan = TestRunner::buildPlan(&cases, &fixtures, &filter, &first);
+  let secondPlan: TestPlan = TestRunner::buildPlan(&cases, &fixtures, &filter, &second);
+  let thirdPlan: TestPlan = TestRunner::buildPlan(&cases, &fixtures, &filter, &third);
+
+  Test::assertEq<str>(testRunnerPlanNames(&firstPlan).toStr(), "a::one,e2e::alpha");
+  Test::assertEq<str>(testRunnerPlanNames(&secondPlan).toStr(), "a::three,e2e::beta");
+  Test::assertEq<str>(testRunnerPlanNames(&thirdPlan).toStr(), "a::two");
+}
+
+/// The filter runs before the shard, so both halves of a sharded run agree on
+/// which entry sits at which position.
+@test
+function testRunnerPartitionCountsPositionsAfterTheFilter(): void {
+  let mut cases: Vector<TestCase> = Vector::new<TestCase>();
+  let mut fixtures: Vector<FixtureCase> = Vector::new<FixtureCase>();
+  testRunnerSamplePlanInput(&mut cases, &mut fixtures);
+
+  let filter: String = String::create("e2e::");
+  let partition: TestPartition = TestPartition::create(2, 2);
+  let plan: TestPlan = TestRunner::buildPlan(&cases, &fixtures, &filter, &partition);
+
+  Test::assertEq<str>(testRunnerPlanNames(&plan).toStr(), "e2e::beta");
+}
+
+@test
+function testRunnerHeaderNamesTheShardOnlyWhenOneWasSelected(): void {
+  let entry: Path::PathBuf = Path::PathBuf::create("/project/ignis/main.ign");
+  let none: TestPartition = TestPartition::none();
+  let shard: TestPartition = TestPartition::create(2, 4);
+
+  Test::assertEq<str>(TestRunner::runHeader(&entry, &none).toStr(), "/project/ignis/main.ign");
+  Test::assertEq<str>(
+    TestRunner::runHeader(&entry, &shard).toStr(),
+    "/project/ignis/main.ign (partition 2/4)",
+  );
+}
+
+@test
+function testRunnerTimeoutPrefersTheExplicitBudget(): void {
+  Test::assertEq<u64>(TestRunner::resolvedTimeoutSeconds(Option::SOME(45)), 45);
+}
+
+@test
+function testRunnerTimeoutFailureNamesWholeSeconds(): void {
+  Test::assertEq<str>(TestRunner::formatTimeoutFailure(300).toStr(), "timed out after 300s");
 }
 
 @test

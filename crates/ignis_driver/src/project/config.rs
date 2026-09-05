@@ -19,6 +19,9 @@ pub struct ProjectToml {
   #[serde(default)]
   pub build: BuildTomlConfig,
 
+  #[serde(default)]
+  pub test: TestTomlConfig,
+
   /// Import path aliases: first segment -> directory path (relative to project root).
   #[serde(default)]
   pub aliases: HashMap<String, String>,
@@ -69,6 +72,14 @@ impl Default for IgnisTomlConfig {
       runtime_path: None,
     }
   }
+}
+
+/// The `[test]` section.
+#[derive(Debug, Default, Deserialize)]
+pub struct TestTomlConfig {
+  /// Directories holding program fixture files, relative to the project root.
+  #[serde(default)]
+  pub fixtures: Vec<String>,
 }
 
 /// The `[build]` section.

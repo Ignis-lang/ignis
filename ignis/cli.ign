@@ -17,6 +17,12 @@ export enum CliCommand {
   VERSION,
 }
 
+/// A `k/n` shard selector, 1-based, as the command line spells it.
+export record PartitionSpec {
+  public index: u64;
+  public count: u64;
+}
+
 /// Everything a parsed command line carries.
 ///
 /// `path` is the project directory or source file the command runs against,
@@ -36,6 +42,12 @@ export record CliOptions {
   public features: Vector<String>;
   public filter: String;
   public updateSnapshots: boolean;
+  /// Fixture directories added to the ones the project file declares.
+  public fixtureDirs: Vector<String>;
+  /// The shard a run executes, absent when the command line named none.
+  public partition: Option<PartitionSpec>;
+  /// Wall-clock budget in seconds for a single test process.
+  public testTimeout: Option<u64>;
 
   public static create(command: CliCommand): CliOptions {
     return CliOptions {
@@ -51,6 +63,9 @@ export record CliOptions {
       features: Vector::new<String>(),
       filter: String::new(),
       updateSnapshots: false,
+      fixtureDirs: Vector::new<String>(),
+      partition: Option::NONE,
+      testTimeout: Option::NONE,
     };
   }
 
@@ -100,6 +115,71 @@ export function splitCommaSeparated(value: &String): Vector<String> {
   }
 
   return items;
+}
+
+/// Read a decimal number, rejecting an empty string and any non-digit byte.
+function parseDecimal(text: &String): Option<u64> {
+  if (text.length() == 0) {
+    return Option::NONE;
+  }
+
+  let mut parsed: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    let Option::SOME(digit) = text.byteAt(index) else {
+      return Option::NONE;
+    };
+
+    if (digit < 48 || digit > 57) {
+      return Option::NONE;
+    }
+
+    parsed = parsed * 10 + ((digit - 48) as u64);
+    index += 1;
+  }
+
+  return Option::SOME(parsed);
+}
+
+/// Parses a `k/n` shard selector, which is 1-based and has to name a shard the
+/// count actually holds.
+export function parsePartitionSpec(raw: &String): Result<PartitionSpec, String> {
+  let malformed: String = `Invalid partition '${raw.toStr()}': expected the form k/n, for example 1/4`;
+  let mut separator: u64 = raw.length();
+  let mut index: u64 = 0;
+
+  while (index < raw.length()) {
+    if (let Option::SOME(byte) = raw.byteAt(index) && byte == '/' as u8) {
+      separator = index;
+      break;
+    }
+
+    index += 1;
+  }
+
+  if (separator == raw.length()) {
+    return Result::ERROR(malformed);
+  }
+
+  let indexText: String = raw.substringBytes(0, separator).trimAsciiWhitespace();
+  let countText: String = raw.substringBytes(separator + 1, raw.length()).trimAsciiWhitespace();
+
+  let Option::SOME(shardIndex) = parseDecimal(&indexText) else {
+    return Result::ERROR(malformed);
+  };
+  let Option::SOME(shardCount) = parseDecimal(&countText) else {
+    return Result::ERROR(malformed);
+  };
+
+  if (shardCount == 0 || shardIndex == 0 || shardIndex > shardCount) {
+    return Result::ERROR(`Invalid partition '${raw.toStr()}': expected 1 <= k <= n with n >= 1`);
+  }
+
+  return Result::OK(PartitionSpec {
+    index: shardIndex,
+    count: shardCount,
+  });
 }
 
 /// Read an `--opt-level` / `-O` value, which the C toolchain takes as `-O<level>`.
@@ -319,6 +399,46 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    if (options.isTestMode() && argument.equals("--fixtures")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--fixtures", "a directory"));
+      };
+
+      options.fixtureDirs.push(value.clone());
+      index += 2;
+      continue;
+    }
+
+    if (options.isTestMode() && argument.equals("--partition")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--partition", "a shard written as k/n"));
+      };
+
+      match (parsePartitionSpec(value)) {
+        Result::OK(spec) -> options.partition = Option::SOME(spec),
+        Result::ERROR(message) -> {
+          return Result::ERROR(message);
+        },
+      };
+
+      index += 2;
+      continue;
+    }
+
+    if (options.isTestMode() && argument.equals("--test-timeout")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--test-timeout", "a number of seconds"));
+      };
+
+      let Option::SOME(seconds) = parseDecimal(value) else {
+        return Result::ERROR(`error: invalid test timeout: ${value.toStr()}`);
+      };
+
+      options.testTimeout = Option::SOME(seconds);
+      index += 2;
+      continue;
+    }
+
     if (argument.startsWith("-")) {
       return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
     }
@@ -359,6 +479,9 @@ export function helpText(): String {
   text.pushStr("      --features <LIST>     Enable features separated by commas\n");
   text.pushStr("      --filter <SUBSTRING>  Select tests whose name contains it (test only)\n");
   text.pushStr("      --update-snapshots    Create or replace selected snapshots (test only)\n");
+  text.pushStr("      --fixtures <DIR>      Add a directory of program fixture cases (test only)\n");
+  text.pushStr("      --partition <K/N>     Run only shard K of N, 1-based (test only)\n");
+  text.pushStr("      --test-timeout <SECS> Wall-clock budget for one test process (test only)\n");
   text.pushStr("  -h, --help                Print this message\n");
   text.pushStr("  -V, --version             Print the compiler version\n");
   return text;
@@ -561,6 +684,100 @@ function cliParsesTestFlags(): void {
 }
 
 /// A build has no `--filter`, so the flag is rejected instead of ignored.
+/// The fixture, shard and timeout flags are only read by a test run.
+@test
+function cliParsesFixturePartitionAndTimeoutFlags(): void {
+  let mut values: Vector<String> = Vector::new<String>();
+  cliPush(&mut values, "test");
+  cliPush(&mut values, "--fixtures");
+  cliPush(&mut values, "test_cases/e2e/ok");
+  cliPush(&mut values, "--partition");
+  cliPush(&mut values, "2/4");
+  cliPush(&mut values, "--test-timeout");
+  cliPush(&mut values, "45");
+
+  let options: CliOptions = cliParse(&values);
+
+  Test::assertEq<u64>(options.fixtureDirs.length(), 1);
+
+  let Option::SOME(fixtureDir) = options.fixtureDirs.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(fixtureDir.toStr(), "test_cases/e2e/ok");
+
+  let Option::SOME(partition) = &options.partition else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(partition.index, 2);
+  Test::assertEq<u64>(partition.count, 4);
+  Test::assertEq<u64>(options.testTimeout.unwrapOr(0), 45);
+}
+
+@test
+function cliLeavesFixturePartitionAndTimeoutUnsetByDefault(): void {
+  let mut values: Vector<String> = Vector::new<String>();
+  cliPush(&mut values, "test");
+
+  let options: CliOptions = cliParse(&values);
+
+  Test::assertEq<u64>(options.fixtureDirs.length(), 0);
+  Test::assertEq<boolean>(options.partition.isNone(), true);
+  Test::assertEq<u64>(options.testTimeout.unwrapOr(0), 0);
+}
+
+@test
+function cliRejectsAMalformedPartition(): void {
+  let mut values: Vector<String> = Vector::new<String>();
+  cliPush(&mut values, "test");
+  cliPush(&mut values, "--partition");
+  cliPush(&mut values, "half");
+
+  Test::assertEq<str>(
+    cliParseError(&values).toStr(),
+    "Invalid partition 'half': expected the form k/n, for example 1/4",
+  );
+}
+
+@test
+function cliRejectsAPartitionOutsideItsCount(): void {
+  let mut values: Vector<String> = Vector::new<String>();
+  cliPush(&mut values, "test");
+  cliPush(&mut values, "--partition");
+  cliPush(&mut values, "5/4");
+
+  Test::assertEq<str>(
+    cliParseError(&values).toStr(),
+    "Invalid partition '5/4': expected 1 <= k <= n with n >= 1",
+  );
+}
+
+@test
+function cliRejectsAZeroPartitionCount(): void {
+  let mut values: Vector<String> = Vector::new<String>();
+  cliPush(&mut values, "test");
+  cliPush(&mut values, "--partition");
+  cliPush(&mut values, "1/0");
+
+  Test::assertEq<str>(
+    cliParseError(&values).toStr(),
+    "Invalid partition '1/0': expected 1 <= k <= n with n >= 1",
+  );
+}
+
+@test
+function cliRejectsFixtureFlagsOutsideTestMode(): void {
+  let mut values: Vector<String> = Vector::new<String>();
+  cliPush(&mut values, "build");
+  cliPush(&mut values, "--partition");
+  cliPush(&mut values, "1/2");
+
+  Test::assertEq<str>(cliParseError(&values).toStr(), "error: unknown argument: --partition");
+}
+
 @test
 function cliRejectsTestFlagsOutsideTestMode(): void {
   let mut arguments: Vector<String> = Vector::new<String>();
