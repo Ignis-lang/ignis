@@ -391,6 +391,9 @@ pub struct IgnisConfig {
   /// Resolved from `ignis.toml [build] debug` / `--debug` / `--no-debug`,
   /// independent of the internal `debug` flag above.
   pub build_debug: bool,
+  /// Optimization level handed to the C toolchain as `-O<level>`.
+  /// Resolved from `ignis.toml [build] opt_level` / `-O` / `--opt-level`.
+  pub opt_level: u8,
   pub debug_trace: Vec<DebugTrace>,
   pub quiet: bool,
   pub verbose: u8,
@@ -452,6 +455,7 @@ impl IgnisConfig {
       init_config,
       debug,
       build_debug: false,
+      opt_level: 0,
       debug_trace,
       quiet,
       verbose,

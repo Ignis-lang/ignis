@@ -23,6 +23,11 @@ import Manifest, StdManifest from "./manifest";
 const MISSING_MODULE: str = "B2001";
 const AMBIGUOUS_IMPORT: str = "B2002";
 const CYCLIC_IMPORT: str = "B2003";
+const INVALID_BUILD_PROFILE: str = "B2004";
+
+/// Highest optimization level the C toolchain is asked for, matching the host
+/// driver's own bound.
+const MAX_OPT_LEVEL: u64 = 3;
 
 record ResolvedImportTarget {
   public path: Path::PathBuf;
@@ -47,6 +52,7 @@ record ResolverProject {
   public stdManifestPath: Path::PathBuf;
   public aliases: Vector<ResolverAlias>;
   public flags: CompileFlags;
+  public optLevel: u64;
 }
 
 record AliasResolution {
@@ -68,6 +74,9 @@ export record DiscoveryResult {
   /// has to parse every module again with the same one, or the two passes
   /// would disagree on which branches exist.
   public flags: CompileFlags;
+  /// `[build] opt_level` from the project file, handed to the C toolchain as
+  /// `-O<level>` so the level never depends on the host driver's own default.
+  public optLevel: u64;
 
   public orderCount(&self): u64 {
     return self.order.length();
@@ -367,6 +376,7 @@ function resolverLoadProject(
   let mut stdPath: String = String::create("std");
   let mut targetTriple: String = CompileFlags::defaultTargetTriple();
   let mut tomlDebug: boolean = false;
+  let mut optLevel: u64 = 0;
   let mut defaultFeatures: Vector<String> = Vector::new<String>();
   let mut knownFeatures: Vector<String> = Vector::new<String>();
   let mut aliases: Vector<ResolverAlias> = Vector::new<ResolverAlias>();
@@ -419,6 +429,17 @@ function resolverLoadProject(
         tomlDebug = value.equals("true");
       }
 
+      if (key.equals("opt_level")) {
+        let Option::SOME(level) = resolverParseOptLevel(&value) else {
+          return Result::ERROR(resolverSimpleDiagnostic(
+            &configPath,
+            INVALID_BUILD_PROFILE,
+            "build.opt_level must be an integer between 0 and 3",
+          ));
+        };
+        optLevel = level;
+      }
+
       if (key.equals("default_features")) {
         defaultFeatures = resolverStringArray(&valueText);
       }
@@ -467,7 +488,39 @@ function resolverLoadProject(
     stdManifestPath: stdManifestPath,
     aliases: aliases,
     flags: CompileFlags::create(&targetTriple, debug, &features, &knownFeatures),
+    optLevel: optLevel,
   });
+}
+
+/// Read a `[build] opt_level` value, rejecting anything that is not a decimal
+/// integer the C toolchain accepts as `-O<level>`.
+function resolverParseOptLevel(text: &String): Option<u64> {
+  if (text.length() == 0) {
+    return Option::NONE;
+  }
+
+  let mut value: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    let Option::SOME(digit) = text.charAt(index) else {
+      return Option::NONE;
+    };
+
+    if (digit < '0' || digit > '9') {
+      return Option::NONE;
+    }
+
+    value = value * 10 + ((digit as u64) - ('0' as u64));
+
+    if (value > MAX_OPT_LEVEL) {
+      return Option::NONE;
+    }
+
+    index += 1;
+  }
+
+  return Option::SOME(value);
 }
 
 function resolverMissingModuleDiagnostic(
@@ -1065,6 +1118,7 @@ function resolverDiscoverProjectRoots(
     preludePaths: preludePaths,
     stdRoot: project.stdRoot.clone(),
     flags: project.flags.clone(),
+    optLevel: project.optLevel,
   });
 }
 
@@ -1164,6 +1218,49 @@ function resolverReadsDebugTrueFromProjectFile(): void {
   };
 
   Test::assertEq<boolean>(discovery.flags.debug, true);
+}
+
+/// `[build] opt_level` in the project's `ignis.toml` is the level the C
+/// toolchain is invoked with.
+@test
+function resolverReadsOptLevelFromProjectFile(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/build_profile");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<u64>(discovery.optLevel, 2);
+}
+
+/// A project file without `[build] opt_level` resolves to level 0, which the
+/// toolchain is still told explicitly.
+@test
+function resolverDefaultsOptLevelToZeroWithoutProjectSetting(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/acyclic");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<u64>(discovery.optLevel, 0);
+}
+
+/// An `[build] opt_level` value the toolchain would not accept is rejected
+/// instead of silently falling back to an unoptimized build.
+@test
+function resolverReportsInvalidOptLevel(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/invalid_opt_level");
+  let expectedPath: Path::PathBuf = fixtureRoot.join("expected_diagnostic.txt");
+  let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
+  let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
 }
 
 /// A project file without `[build] debug` resolves to `debug = false`.

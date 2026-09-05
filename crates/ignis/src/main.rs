@@ -685,6 +685,7 @@ fn build_config_from_project(
   config.std = project.std_path.is_some();
   config.auto_load_std = project.std_path.is_some();
   config.build_debug = project.debug;
+  config.opt_level = project.opt_level;
 
   // Load manifest
   config.manifest = load_manifest(&config.std_path);
@@ -768,6 +769,7 @@ fn build_config_for_single_file(
   config.std = !cli.std;
   config.auto_load_std = !cli.auto_load_std;
   config.build_debug = !cmd.no_debug && cmd.debug;
+  config.opt_level = cmd.opt_level.unwrap_or(0);
   config.manifest = load_manifest(&config.std_path);
   config.c_compiler = cmd.cc.clone().unwrap_or_else(|| "gcc".to_string());
   config.cflags = Vec::new();

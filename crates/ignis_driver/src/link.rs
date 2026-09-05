@@ -53,6 +53,10 @@ pub struct LinkPlan {
   pub cc: String,
   /// Additional compiler/linker flags.
   pub cflags: Vec<String>,
+  /// Optimization level passed to the C toolchain as `-O<level>`.
+  pub opt_level: u8,
+  /// Whether to ask the C toolchain for debug information (`-g`).
+  pub debug: bool,
 }
 
 impl LinkPlan {
@@ -261,6 +265,26 @@ fn selects_c_standard(flag: &str) -> bool {
   flag.starts_with("-std=") || flag.starts_with("--std=") || flag == "-std" || flag == "--std"
 }
 
+/// The optimization and debug flags derived from the resolved build profile.
+///
+/// The level is always spelled out, including `-O0`. Omitting it would leave the
+/// decision to the C driver's own default, which differs between toolchains: a
+/// wrapper that injects `-O2` and a bare gcc that assumes `-O0` would then build the
+/// same project at levels an order of magnitude apart. These come before the
+/// project's own `cflags`, so a project can still override them.
+fn profile_arguments(
+  opt_level: u8,
+  debug: bool,
+) -> Vec<OsString> {
+  let mut arguments = vec![OsString::from(format!("-O{}", opt_level))];
+
+  if debug {
+    arguments.push(OsString::from("-g"));
+  }
+
+  arguments
+}
+
 /// Build the full argument list for compiling one C file to an object file.
 ///
 /// Split out from the spawn so the flag policy — in particular whether the pinned
@@ -281,6 +305,8 @@ fn compile_arguments(
   if !link_plan.cflags.iter().any(|flag| selects_c_standard(flag)) {
     args.push(OsString::from(DEFAULT_C_STANDARD));
   }
+
+  args.extend(profile_arguments(link_plan.opt_level, link_plan.debug));
 
   for flag in &link_plan.cflags {
     args.push(OsString::from(flag));
@@ -344,6 +370,7 @@ pub fn link_executable(
 
   let mut cmd = Command::new(compiler);
   cmd.arg(obj_path);
+  cmd.args(profile_arguments(link_plan.opt_level, link_plan.debug));
 
   for flag in &link_plan.cflags {
     cmd.arg(flag);
@@ -397,6 +424,7 @@ pub fn link_executable_multi(
   };
 
   let mut cmd = Command::new(compiler);
+  cmd.args(profile_arguments(link_plan.opt_level, link_plan.debug));
 
   for flag in &link_plan.cflags {
     cmd.arg(flag);
@@ -663,6 +691,14 @@ mod tests {
   }
 
   fn plan_with_cflags(cflags: Vec<String>) -> LinkPlan {
+    plan_with_profile(cflags, 0, false)
+  }
+
+  fn plan_with_profile(
+    cflags: Vec<String>,
+    opt_level: u8,
+    debug: bool,
+  ) -> LinkPlan {
     LinkPlan {
       headers: Vec::new(),
       objects: Vec::new(),
@@ -672,14 +708,78 @@ mod tests {
       include_dirs: Vec::new(),
       cc: "gcc".to_string(),
       cflags,
+      opt_level,
+      debug,
     }
   }
 
   fn arguments_for(cflags: Vec<String>) -> Vec<String> {
-    compile_arguments(Path::new("/tmp/in.c"), Path::new("/tmp/out.o"), &plan_with_cflags(cflags))
-      .into_iter()
-      .map(|argument| argument.to_string_lossy().into_owned())
-      .collect()
+    arguments_for_profile(cflags, 0, false)
+  }
+
+  fn arguments_for_profile(
+    cflags: Vec<String>,
+    opt_level: u8,
+    debug: bool,
+  ) -> Vec<String> {
+    compile_arguments(
+      Path::new("/tmp/in.c"),
+      Path::new("/tmp/out.o"),
+      &plan_with_profile(cflags, opt_level, debug),
+    )
+    .into_iter()
+    .map(|argument| argument.to_string_lossy().into_owned())
+    .collect()
+  }
+
+  /// Every level is asserted, including zero: the absent flag is exactly the defect
+  /// this guards, because an omitted `-O` lets the host C driver pick the level.
+  #[test]
+  fn compilation_always_states_the_optimization_level() {
+    for level in 0..=3u8 {
+      let arguments = arguments_for_profile(Vec::new(), level, false);
+
+      assert!(
+        arguments.iter().any(|argument| argument == &format!("-O{}", level)),
+        "expected -O{} in {:?}",
+        level,
+        arguments
+      );
+    }
+  }
+
+  #[test]
+  fn debug_information_is_requested_only_when_the_profile_asks_for_it() {
+    let without_debug = arguments_for_profile(Vec::new(), 2, false);
+    let with_debug = arguments_for_profile(Vec::new(), 2, true);
+
+    assert!(
+      !without_debug.iter().any(|argument| argument == "-g"),
+      "did not expect -g in {:?}",
+      without_debug
+    );
+
+    assert!(
+      with_debug.iter().any(|argument| argument == "-g"),
+      "expected -g in {:?}",
+      with_debug
+    );
+  }
+
+  /// The project's own flags land after the profile's, so a project that wants a
+  /// different level than its `opt_level` still gets the last word from the compiler.
+  #[test]
+  fn project_flags_follow_the_profile_flags() {
+    let arguments = arguments_for_profile(vec!["-O3".to_string()], 0, false);
+
+    let optimization: Vec<&String> = arguments.iter().filter(|argument| argument.starts_with("-O")).collect();
+
+    assert_eq!(
+      optimization,
+      vec![&"-O0".to_string(), &"-O3".to_string()],
+      "expected the project's flag last, got {:?}",
+      arguments
+    );
   }
 
   /// Asserted on the argument list rather than on compiler behavior on purpose. A

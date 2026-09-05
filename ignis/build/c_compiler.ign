@@ -68,6 +68,23 @@ function toolchainErrorDiag(code: str, error: &ToolchainError): DiagnosticBag {
 ///
 /// Mirrors the Rust oracle `compile_to_object` in `crates/ignis_driver/src/link.rs`.
 export namespace CCompiler {
+  /// The optimization and debug flags a build profile asks the C toolchain for.
+  ///
+  /// The level is always stated, including `-O0`. Leaving it out would hand the
+  /// decision to the C driver's own default, which differs between toolchains, so
+  /// the same project would be built at levels an order of magnitude apart.
+  function profileFlags(optLevel: u64, debug: boolean): Vector<String> {
+    let mut flags: Vector<String> = Vector::new<String>();
+    let level: String = `-O${optLevel}`;
+    flags.push(level);
+
+    if (debug) {
+      flags.push(String::create("-g"));
+    }
+
+    return flags;
+  }
+
   /// Compile one C source file to an object file.
   ///
   /// - `cc`: compiler executable name (e.g. `"gcc"`); defaults to `"gcc"` when empty.
@@ -238,6 +255,47 @@ function cCompilerDefaultsToGccWhenCcEmpty(): void {
     actual = String::create("compile_ok");
   }
   Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+function cCompilerFlagsText(flags: &Vector<String>): String {
+  let mut text: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < flags.length()) {
+    let Option::SOME(flag) = flags.get(index) else {
+      break;
+    };
+
+    if (index > 0) {
+      text.pushStr(" ");
+    }
+
+    text.push(flag);
+    index += 1;
+  }
+
+  return text;
+}
+
+@test
+function cCompilerProfileFlagsStateTheOptimizationLevel(): void {
+  let flags: Vector<String> = CCompiler::profileFlags(2, false);
+  let text: String = cCompilerFlagsText(&flags);
+  Test::assertEq<str>(text.toStr(), "-O2");
+}
+
+@test
+function cCompilerProfileFlagsStateLevelZeroInsteadOfOmittingIt(): void {
+  let flags: Vector<String> = CCompiler::profileFlags(0, false);
+  let text: String = cCompilerFlagsText(&flags);
+  Test::assertEq<str>(text.toStr(), "-O0");
+}
+
+@test
+function cCompilerProfileFlagsRequestDebugInfoOnlyWhenAsked(): void {
+  let flags: Vector<String> = CCompiler::profileFlags(2, true);
+  let text: String = cCompilerFlagsText(&flags);
+  Test::assertEq<str>(text.toStr(), "-O2 -g");
 }
 
 @test

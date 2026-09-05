@@ -658,6 +658,8 @@ pub fn compile_project(
       );
       link_plan.cc = config.c_compiler.clone();
       link_plan.cflags = config.cflags.clone();
+      link_plan.opt_level = config.opt_level;
+      link_plan.debug = config.build_debug;
 
       if bc.rebuild_std {
         trace_dbg!(&config, DebugTrace::Std, "rebuilding standard library runtime");
@@ -1329,6 +1331,8 @@ fn build_test_driver_config(project_root: &Path) -> Result<(Arc<IgnisConfig>, cr
   config.std = project.std_path.is_some();
   config.auto_load_std = project.std_path.is_some();
   config.test = true;
+  config.build_debug = project.debug;
+  config.opt_level = project.opt_level;
   config.c_compiler = project.cc.clone();
   config.cflags = project.cflags.clone();
   config.aliases = project.aliases.clone();
@@ -2039,6 +2043,8 @@ pub fn run_project_tests(
   );
   link_plan.cc = config.c_compiler.clone();
   link_plan.cflags = config.cflags.clone();
+  link_plan.opt_level = config.opt_level;
+  link_plan.debug = config.build_debug;
   let std_defined_symbols = match &link_plan.std_archive {
     Some(archive_path) => match collect_archive_defined_symbols(archive_path) {
       Ok(symbols) => Some(symbols),
@@ -2486,6 +2492,8 @@ pub fn run_single_file_tests(
   );
   link_plan.cc = config.c_compiler.clone();
   link_plan.cflags = config.cflags.clone();
+  link_plan.opt_level = config.opt_level;
+  link_plan.debug = config.build_debug;
   let std_defined_symbols = match &link_plan.std_archive {
     Some(archive_path) => match collect_archive_defined_symbols(archive_path) {
       Ok(symbols) => Some(symbols),
@@ -2969,6 +2977,8 @@ pub fn run_std_tests(
   );
   link_plan.cc = config.c_compiler.clone();
   link_plan.cflags = config.cflags.clone();
+  link_plan.opt_level = config.opt_level;
+  link_plan.debug = config.build_debug;
   let mut types = output.types.clone();
   let mono_output = ignis_analyzer::mono::Monomorphizer::new(
     &output.hir,
@@ -3407,6 +3417,8 @@ pub fn build_std(
   let mut link_plan = LinkPlan::from_manifest(&config.manifest, std_path);
   link_plan.cc = config.c_compiler.clone();
   link_plan.cflags = config.cflags.clone();
+  link_plan.opt_level = config.opt_level;
+  link_plan.debug = config.build_debug;
 
   // Add std include directory for std module inter-dependencies
   // This allows std module C files to #include "ignis_std.h"
@@ -3831,6 +3843,8 @@ pub fn check_std(
   let mut link_plan = LinkPlan::from_manifest(&config.manifest, std_path);
   link_plan.cc = config.c_compiler.clone();
   link_plan.cflags = config.cflags.clone();
+  link_plan.opt_level = config.opt_level;
+  link_plan.debug = config.build_debug;
 
   section!(&config, "Codegen (check)");
   let selected_backend = select_backend_or_report(&config, "Check failed", start)?;
