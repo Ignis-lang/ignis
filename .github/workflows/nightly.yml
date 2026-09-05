@@ -213,13 +213,15 @@ jobs:
   #
   # Shape
   # -----
-  # The ladder is built once in `stages` and published as one artifact; the four
-  # gates that only read stage2 then run as a matrix against that artifact, so
-  # the wall time is the slowest gate rather than their sum. G4 stays with the
-  # ladder because it compares two measurements, which only means something when
-  # both were taken on the same machine. `report` collects the gate files and
-  # decides the verdict. `scripts/bootstrap.sh gates` still runs the same steps
-  # serially on a developer machine.
+  # The ladder is built once in `stages` and published as one artifact; the gates
+  # that only read stage2 then run as a matrix against that artifact, so the wall
+  # time is the slowest gate rather than their sum. G3 is two full runs of the
+  # selfhost test suite, one under stage2 and one under the host, so it takes a
+  # matrix entry per run and `report` compares the collected logs. G4 stays with
+  # the ladder because it compares two measurements, which only means something
+  # when both were taken on the same machine. `report` collects the gate files
+  # and decides the verdict. `scripts/bootstrap.sh gates` still runs the same
+  # steps serially on a developer machine.
   #
   # Promotion flow
   # --------------
@@ -409,12 +411,22 @@ jobs:
         include:
           - gate: G2
             command: parity
-          - gate: G3
-            command: gate-g3
+            result: G2.json
+          # Neither half decides anything on its own: they leave a log and an
+          # exit status behind and `report` runs the comparison. The only result
+          # file either can write is the one for a missing host compiler.
+          - gate: G3-stage2
+            command: gate-g3-stage2
+            result: G3.json
+          - gate: G3-host
+            command: gate-g3-host
+            result: G3.json
           - gate: G5
             command: gate-g5
+            result: G5.json
           - gate: G6
             command: gate-g6
+            result: G6.json
 
     steps:
       - name: Checkout repository
@@ -472,8 +484,8 @@ jobs:
 
           mkdir -p upload/gates
 
-          if [ -f "build/bootstrap/gates/${{ matrix.gate }}.json" ]; then
-            cp "build/bootstrap/gates/${{ matrix.gate }}.json" upload/gates/
+          if [ -f "build/bootstrap/gates/${{ matrix.result }}" ]; then
+            cp "build/bootstrap/gates/${{ matrix.result }}" upload/gates/
           fi
 
           for REPORT in parity.md parity-err.md parity-err.json parity-syntax.md parity-syntax.json; do
@@ -482,9 +494,12 @@ jobs:
             fi
           done
 
+          # The log and the status file are the G3 halves' product; the test
+          # binary next to them is not worth an artifact.
           if [ -d build/bootstrap/stage2-tests ]; then
             mkdir -p upload/stage2-tests
-            cp build/bootstrap/stage2-tests/*.txt upload/stage2-tests/ || true
+            cp build/bootstrap/stage2-tests/log*.txt upload/stage2-tests/ || true
+            cp build/bootstrap/stage2-tests/status-*.json upload/stage2-tests/ || true
           fi
 
       - name: Upload the gate result
@@ -557,6 +572,13 @@ jobs:
           pattern: bootstrap-gate-*
           merge-multiple: true
           path: build/bootstrap
+
+      # G3's two runs happened on a runner each and their logs only met here.
+      # A half that produced nothing leaves the comparison with nothing to read,
+      # which it records as a failed gate rather than a missing one.
+      - name: Compare the G3 test runs
+        if: steps.head.outputs.superseded != 'true'
+        run: scripts/bootstrap.sh gate-g3-compare
 
       - name: Write the promotion report
         if: steps.head.outputs.superseded != 'true'
