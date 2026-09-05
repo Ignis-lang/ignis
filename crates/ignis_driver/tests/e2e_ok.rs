@@ -1963,7 +1963,20 @@ function main(): i32 {
 /// `[build] debug = false` and no `--debug`/`--no-debug` override).
 #[test]
 fn e2e_config_flag_build_debug_default() {
-  e2e_test("config_flag_build_debug_default", CONFIG_FLAG_BUILD_DEBUG_SOURCE);
+  // The source is spelled out here rather than shared through the constant
+  // because the selfhost parity harness only extracts literal `e2e_test` sources.
+  e2e_test(
+    "config_flag_build_debug_default",
+    r#"
+function main(): i32 {
+    let debug: boolean = @configFlag(@debug());
+    if (debug) {
+        return 42;
+    }
+    return 0;
+}
+"#,
+  );
 }
 
 /// `@debug()` reflects the project's build profile, not the host compiler's
