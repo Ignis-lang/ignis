@@ -365,6 +365,18 @@ pub struct TestCommand {
   /// Create or replace selected snapshots during the test run
   #[arg(long)]
   pub update_snapshots: bool,
+
+  /// Extra directory of program fixture cases, added to the ones ignis.toml declares
+  #[arg(long)]
+  pub fixtures: Option<String>,
+
+  /// Run only shard k of n, written as `k/n` (1-based)
+  #[arg(long)]
+  pub partition: Option<String>,
+
+  /// Wall-clock budget in seconds for a single test process
+  #[arg(long)]
+  pub test_timeout: Option<u64>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -516,6 +528,45 @@ mod tests {
         assert_eq!(cmd.filter.as_deref(), Some("math"));
         assert_eq!(cmd.project.as_deref(), Some("demo"));
         assert!(cmd.update_snapshots);
+      },
+      other => panic!("expected test subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn parses_test_subcommand_with_fixture_partition_and_timeout_flags() {
+    let cli = Cli::parse_from([
+      "ignis",
+      "test",
+      "e2e::",
+      "--fixtures",
+      "test_cases/e2e/ok",
+      "--partition",
+      "2/4",
+      "--test-timeout",
+      "45",
+    ]);
+
+    match cli.subcommand {
+      SubCommand::Test(cmd) => {
+        assert_eq!(cmd.filter.as_deref(), Some("e2e::"));
+        assert_eq!(cmd.fixtures.as_deref(), Some("test_cases/e2e/ok"));
+        assert_eq!(cmd.partition.as_deref(), Some("2/4"));
+        assert_eq!(cmd.test_timeout, Some(45));
+      },
+      other => panic!("expected test subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_subcommand_defaults_leave_fixture_partition_and_timeout_unset() {
+    let cli = Cli::parse_from(["ignis", "test"]);
+
+    match cli.subcommand {
+      SubCommand::Test(cmd) => {
+        assert_eq!(cmd.fixtures, None);
+        assert_eq!(cmd.partition, None);
+        assert_eq!(cmd.test_timeout, None);
       },
       other => panic!("expected test subcommand, got {:?}", other),
     }
