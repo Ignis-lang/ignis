@@ -11,6 +11,7 @@ import CommentBlock from "./comments";
 import FormatterConfig from "./config";
 import _ from "./doc";
 import FormatError from "./error";
+import _ from "./layout_types";
 import _ from "./model";
 
 function collapseSpaces(text: &String): String {
@@ -67,116 +68,6 @@ function sliceSpan(source: &String, span: &SourceSpan): String {
 }
 
 export namespace Format {
-  function formatType(module: &Ast::Module, typeId: Ast::TypeId, source: &String): String {
-    let Option::SOME(node) = module.types.get(typeId) else {
-      return String::new();
-    };
-
-    if (let Ast::Type::Node::Path(path) = node) {
-      return Format::joinSegments(&path.segments, "::");
-    }
-
-    if (let Ast::Type::Node::Pointer(pointer) = node) {
-      let inner: String = Format::formatType(module, pointer.pointee, source);
-      let mut result: String = String::create("*");
-
-      if (pointer.mutable) {
-        result.pushStr("mut ");
-      }
-
-      result.push(&inner);
-      return result;
-    }
-
-    if (let Ast::Type::Node::Reference(reference) = node) {
-      let inner: String = Format::formatType(module, reference.target, source);
-      let mut result: String = String::create("&");
-
-      if (reference.mutable) {
-        result.pushStr("mut ");
-      }
-
-      result.push(&inner);
-      return result;
-    }
-
-    if (let Ast::Type::Node::Tuple(tuple) = node) {
-      let inner: String = Format::joinFormattedTypes(module, &tuple.elements, source);
-      let mut result: String = String::create("(");
-      result.push(&inner);
-      result.pushStr(")");
-      return result;
-    }
-
-    if (let Ast::Type::Node::Function(callable) = node) {
-      let params: String = Format::joinFormattedTypes(module, &callable.parameters, source);
-      let returnText: String = Format::formatType(module, callable.returnType, source);
-
-      let mut result: String = String::create("(");
-      result.push(&params);
-      result.pushStr(") -> ");
-      result.push(&returnText);
-      return result;
-    }
-
-    if (let Ast::Type::Node::Slice(slice) = node) {
-      let inner: String = Format::formatType(module, slice.element, source);
-      let mut result: String = inner;
-      result.pushStr("[]");
-      return result;
-    }
-
-    if (let Ast::Type::Node::FixedArray(fixedArray) = node) {
-      let inner: String = Format::formatType(module, fixedArray.element, source);
-      let sizeText: String = fixedArray.size.toString();
-
-      let mut result: String = inner;
-      result.pushStr("[");
-      result.push(&sizeText);
-      result.pushStr("]");
-      return result;
-    }
-
-    if (let Ast::Type::Node::Generic(generic) = node) {
-      let base: String = Format::formatType(module, generic.base, source);
-      let args: String = Format::joinFormattedTypes(module, &generic.arguments, source);
-
-      let mut result: String = base;
-      result.pushStr("<");
-      result.push(&args);
-      result.pushStr(">");
-      return result;
-    }
-
-    return String::new();
-  }
-
-  function joinFormattedTypes(
-    module: &Ast::Module,
-    ids: &Vector<Ast::TypeId>,
-    source: &String
-  ): String {
-    let mut result: String = String::new();
-    let mut index: u64 = 0;
-
-    while (index < ids.length()) {
-      let Option::SOME(typeId) = ids.get(index) else {
-        index += 1;
-        continue;
-      };
-
-      if (index > 0) {
-        result.pushStr(", ");
-      }
-
-      let formatted: String = Format::formatType(module, *typeId, source);
-      result.push(&formatted);
-      index += 1;
-    }
-
-    return result;
-  }
-
   function joinSegments(segments: &Vector<String>, separator: str): String {
     let mut result: String = String::new();
     let mut index: u64 = 0;
