@@ -1,6 +1,91 @@
-import Memory, Stats from "std::memory";
+import Memory, RawAllocator, Stats from "std::memory";
 import Rc, Weak from "std::rc";
+import String from "std::string";
 import Test from "std::test";
+
+/// A payload whose destructor is observable through the allocator counters.
+@implements(Drop)
+record Tracked {
+  public storage: *mut u8;
+
+  public static create(): Tracked {
+    return Tracked {
+      storage: RawAllocator::allocateAligned(32, 16),
+    };
+  }
+
+  drop(&mut self): void {
+    RawAllocator::free(self.storage);
+    self.storage = null;
+  }
+}
+
+@test
+function newStartsAtOneStrongReferenceAndNoWeakOnes(): void {
+  let value: Rc<i32> = Rc::new<i32>(42);
+
+  Test::assertEq<u32>(value.strongCount(), 1);
+  Test::assertEq<u32>(value.weakCount(), 0);
+  Test::assertEq<i32>(*value.get(), 42);
+}
+
+@test
+function cloningAndDroppingWalkTheStrongCount(): void {
+  let owner: Rc<i32> = Rc::new<i32>(1);
+
+  {
+    let second: Rc<i32> = owner.clone();
+    Test::assertEq<u32>(owner.strongCount(), 2);
+
+    {
+      let third: Rc<i32> = second.clone();
+      Test::assertEq<u32>(owner.strongCount(), 3);
+    }
+
+    Test::assertEq<u32>(owner.strongCount(), 2);
+  }
+
+  Test::assertEq<u32>(owner.strongCount(), 1);
+}
+
+@test
+function aZeroSizedPayloadStillGetsAControlBlock(): void {
+  let before: Stats = Memory::stats();
+
+  {
+    let empty: Rc<Empty> = Rc::new<Empty>(Empty {  });
+
+    Test::assertEq<u32>(empty.strongCount(), 1);
+    Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive + 1);
+  }
+
+  Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive);
+}
+
+@test
+function thePayloadIsAlignedForItsType(): void {
+  let value: Rc<u64> = Rc::new<u64>(3141592653589793238);
+  let payload: *u64 = value.get() as *u64;
+
+  Test::assertEq<u64>((payload as u64) % 16, 0);
+  Test::assertEq<u64>(*value.get(), 3141592653589793238);
+}
+
+@test
+function getMutIsAvailableOnlyToASoleOwner(): void {
+  let mut owner: Rc<i32> = Rc::new<i32>(10);
+
+  match (owner.getMut()) {
+    Option::SOME(slot) -> @write<i32>(slot, 11),
+    Option::NONE -> Test::fail(),
+  };
+
+  Test::assertEq<i32>(*owner.get(), 11);
+
+  let shared: Rc<i32> = owner.clone();
+
+  Test::assert(owner.getMut().isNone());
+}
 
 /// Leak coverage the C runtime smoke suite used to carry over `ignis_mem_stats`.
 ///
@@ -48,6 +133,71 @@ function sharedClonesReleaseTheBoxExactlyOnce(): void {
   Test::assertEq<u64>(after.bytesLive, before.bytesLive);
 }
 
+/// `Rc::new` used to copy the payload and then drop the value it was handed,
+/// which destroyed the payload the caller had just given away.
+@test
+function anOwnedPayloadOutlivesTheCallThatStoredIt(): void {
+  let before: Stats = Memory::stats();
+
+  {
+    let shared: Rc<Tracked> = Rc::new<Tracked>(Tracked::create());
+
+    Test::assert(shared.get().storage != null);
+    Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive + 2);
+  }
+
+  let after: Stats = Memory::stats();
+
+  Test::assertEq<u64>(after.allocsLive, before.allocsLive);
+  Test::assertEq<u64>(after.bytesLive, before.bytesLive);
+}
+
+@test
+function anOwnedStringPayloadIsFreedWithItsBox(): void {
+  let before: Stats = Memory::stats();
+
+  {
+    let shared: Rc<String> = Rc::new<String>(String::create("payload"));
+
+    Test::assertEq<str>(shared.get().toStr(), "payload");
+  }
+
+  let after: Stats = Memory::stats();
+
+  Test::assertEq<u64>(after.allocsLive, before.allocsLive);
+  Test::assertEq<u64>(after.bytesLive, before.bytesLive);
+}
+
+@test
+function droppingTheLastStrongReferenceDestroysThePayloadOnce(): void {
+  let before: Stats = Memory::stats();
+
+  let observer: Weak<Tracked> = trackedObserverOfDeadValue();
+
+  Test::assertEq<u32>(observer.strongCount(), 0);
+  Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive + 1);
+
+  Test::assert(observer.upgrade().isNone());
+}
+
+/// A nested `Rc` used to trip `Type::Instance reached C codegen`, because the
+/// old control block asked for `@dropGlue<Rc<i32>>` and monomorphization could
+/// not concretize the glue for a generic instance inside a generic instance.
+@test
+function anRcPayloadThatIsItselfAnRcCascadesOnDrop(): void {
+  let before: Stats = Memory::stats();
+
+  {
+    let inner: Rc<i32> = Rc::new<i32>(99);
+    let outer: Rc<Rc<i32>> = Rc::new<Rc<i32>>(inner);
+
+    Test::assertEq<i32>(*outer.get().get(), 99);
+    Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive + 2);
+  }
+
+  Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive);
+}
+
 @test
 function aWeakHandleKeepsTheBoxAliveUntilItIsAlsoReleased(): void {
   let before: Stats = Memory::stats();
@@ -63,9 +213,53 @@ function aWeakHandleKeepsTheBoxAliveUntilItIsAlsoReleased(): void {
   Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive);
 }
 
+@test
+function upgradingAWeakHandleAddsAStrongReferenceItThenReturns(): void {
+  let before: Stats = Memory::stats();
+
+  {
+    let owner: Rc<i32> = Rc::new<i32>(7);
+    let observer: Weak<i32> = owner.downgrade();
+
+    Test::assertEq<u32>(owner.weakCount(), 1);
+
+    {
+      let upgraded: Rc<i32> = expectUpgrade(&observer);
+
+      Test::assertEq<i32>(*upgraded.get(), 7);
+      Test::assertEq<u32>(owner.strongCount(), 2);
+    }
+
+    Test::assertEq<u32>(owner.strongCount(), 1);
+    Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive + 1);
+  }
+
+  Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive);
+}
+
+/// A payload with no fields, used to check the zero-sized allocation path.
+record Empty {}
+
 /// Returns a `Weak` whose strong handle is already gone.
 function weakObserverOfDeadValue(): Weak<i32> {
   let value: Rc<i32> = Rc::new<i32>(7);
 
   return value.downgrade();
+}
+
+/// Returns a `Weak` over a destroyed owned payload.
+function trackedObserverOfDeadValue(): Weak<Tracked> {
+  let value: Rc<Tracked> = Rc::new<Tracked>(Tracked::create());
+
+  return value.downgrade();
+}
+
+/// Unwraps an upgrade that the caller knows must succeed.
+function expectUpgrade(observer: &Weak<i32>): Rc<i32> {
+  let Option::SOME(upgraded) = observer.upgrade() else {
+    Test::fail();
+    return Rc::new<i32>(0);
+  };
+
+  return upgraded;
 }

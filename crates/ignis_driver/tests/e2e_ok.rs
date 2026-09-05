@@ -3474,53 +3474,16 @@ function main(): i32 {
 
 #[test]
 fn e2e_library_rc_basic() {
-  e2e_test(
+  e2e_workspace_std_test(
     "library_rc_basic",
     r#"
-extern __rc_ffi {
-    @externName("ignis_rc_alloc")
-    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
-
-    @externName("ignis_rc_get")
-    function ignis_rc_get(handle: *mut void): *mut void;
-
-    @externName("ignis_rc_retain")
-    function ignis_rc_retain(handle: *mut void): void;
-
-    @externName("ignis_rc_release")
-    function ignis_rc_release(handle: *mut void): void;
-}
-
-@implements(Drop, Clone)
-record SharedRef<T> {
-    public handle: *mut void;
-
-    public static new(value: T): SharedRef<T> {
-        let h: *mut void = __rc_ffi::ignis_rc_alloc(
-            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
-        );
-        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
-        @write<T>(payload as *mut T, value);
-        return SharedRef { handle: h };
-    }
-
-    clone(&self): SharedRef<T> {
-        __rc_ffi::ignis_rc_retain(self.handle);
-        return SharedRef { handle: self.handle };
-    }
-
-    drop(&mut self): void {
-        __rc_ffi::ignis_rc_release(self.handle);
-    }
-}
+import Rc from "std::rc";
 
 function main(): i32 {
-    let a: SharedRef<i32> = SharedRef::new<i32>(42);
-    let b: SharedRef<i32> = a.clone();
+    let a: Rc<i32> = Rc::new<i32>(42);
+    let b: Rc<i32> = a.clone();
 
-    let payload_b: *mut void = __rc_ffi::ignis_rc_get(b.handle);
-    let val: i32 = @read<i32>(payload_b as *mut i32);
-    return val;
+    return *b.get();
 }
 "#,
   );
@@ -3567,58 +3530,17 @@ function main(): i32 {
 
 #[test]
 fn e2e_rc_strong_count() {
-  e2e_test(
+  e2e_workspace_std_test(
     "rc_strong_count",
     r#"
-extern __rc_ffi {
-    @externName("ignis_rc_alloc")
-    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
-
-    @externName("ignis_rc_get")
-    function ignis_rc_get(handle: *mut void): *mut void;
-
-    @externName("ignis_rc_retain")
-    function ignis_rc_retain(handle: *mut void): void;
-
-    @externName("ignis_rc_release")
-    function ignis_rc_release(handle: *mut void): void;
-
-    @externName("ignis_rc_count")
-    function ignis_rc_count(handle: *mut void): u32;
-}
-
-@implements(Drop, Clone)
-record Rc<T> {
-    handle: *mut void;
-
-    public static new(value: T): Rc<T> {
-        let h: *mut void = __rc_ffi::ignis_rc_alloc(
-            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
-        );
-        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
-        @write<T>(payload as *mut T, value);
-        return Rc { handle: h };
-    }
-
-    public strongCount(&self): u32 {
-        return __rc_ffi::ignis_rc_count(self.handle);
-    }
-
-    clone(&self): Rc<T> {
-        __rc_ffi::ignis_rc_retain(self.handle);
-        return Rc { handle: self.handle };
-    }
-
-    drop(&mut self): void {
-        __rc_ffi::ignis_rc_release(self.handle);
-    }
-}
+import Rc from "std::rc";
 
 function main(): i32 {
     let a: Rc<i32> = Rc::new<i32>(10);
     let count1: u32 = a.strongCount();
     let b: Rc<i32> = a.clone();
     let count2: u32 = a.strongCount();
+
     // count1 = 1, count2 = 2, sum = 3
     return (count1 + count2) as i32;
 }
@@ -3628,54 +3550,15 @@ function main(): i32 {
 
 #[test]
 fn e2e_rc_get() {
-  e2e_test(
+  e2e_workspace_std_test(
     "rc_get",
     r#"
-extern __rc_ffi {
-    @externName("ignis_rc_alloc")
-    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
-
-    @externName("ignis_rc_get")
-    function ignis_rc_get(handle: *mut void): *mut void;
-
-    @externName("ignis_rc_retain")
-    function ignis_rc_retain(handle: *mut void): void;
-
-    @externName("ignis_rc_release")
-    function ignis_rc_release(handle: *mut void): void;
-}
-
-@implements(Drop, Clone)
-record Rc<T> {
-    handle: *mut void;
-
-    public static new(value: T): Rc<T> {
-        let h: *mut void = __rc_ffi::ignis_rc_alloc(
-            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
-        );
-        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
-        @write<T>(payload as *mut T, value);
-        return Rc { handle: h };
-    }
-
-    public get(&self): &T {
-        let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
-        return (payload as *mut T) as &T;
-    }
-
-    clone(&self): Rc<T> {
-        __rc_ffi::ignis_rc_retain(self.handle);
-        return Rc { handle: self.handle };
-    }
-
-    drop(&mut self): void {
-        __rc_ffi::ignis_rc_release(self.handle);
-    }
-}
+import Rc from "std::rc";
 
 function main(): i32 {
     let a: Rc<i32> = Rc::new<i32>(42);
     let val: &i32 = a.get();
+
     return *val;
 }
 "#,
@@ -3684,68 +3567,21 @@ function main(): i32 {
 
 #[test]
 fn e2e_rc_get_mut_unique() {
-  e2e_test(
+  e2e_workspace_std_test(
     "rc_get_mut_unique",
     r#"
-extern __rc_ffi {
-    @externName("ignis_rc_alloc")
-    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
-
-    @externName("ignis_rc_get")
-    function ignis_rc_get(handle: *mut void): *mut void;
-
-    @externName("ignis_rc_retain")
-    function ignis_rc_retain(handle: *mut void): void;
-
-    @externName("ignis_rc_release")
-    function ignis_rc_release(handle: *mut void): void;
-
-    @externName("ignis_rc_count")
-    function ignis_rc_count(handle: *mut void): u32;
-}
-
-@implements(Drop, Clone)
-record Rc<T> {
-    handle: *mut void;
-
-    public static new(value: T): Rc<T> {
-        let h: *mut void = __rc_ffi::ignis_rc_alloc(
-            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
-        );
-        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
-        @write<T>(payload as *mut T, value);
-        return Rc { handle: h };
-    }
-
-    public get(&self): &T {
-        let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
-        return (payload as *mut T) as &T;
-    }
-
-    public getMut(&mut self): *mut T {
-        if (__rc_ffi::ignis_rc_count(self.handle) == 1) {
-            let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
-            return payload as *mut T;
-        }
-        return 0 as *mut T;
-    }
-
-    clone(&self): Rc<T> {
-        __rc_ffi::ignis_rc_retain(self.handle);
-        return Rc { handle: self.handle };
-    }
-
-    drop(&mut self): void {
-        __rc_ffi::ignis_rc_release(self.handle);
-    }
-}
+import Rc from "std::rc";
 
 function main(): i32 {
     let mut a: Rc<i32> = Rc::new<i32>(10);
-    let ptr: *mut i32 = a.getMut(); // unique owner -> non-null
-    *ptr = 42;
-    let val: &i32 = a.get();
-    return *val;
+
+    let Option::SOME(ptr) = a.getMut() else {
+        return 1;
+    };
+
+    @write<i32>(ptr, 42);
+
+    return *a.get();
 }
 "#,
   );
@@ -3753,62 +3589,21 @@ function main(): i32 {
 
 #[test]
 fn e2e_rc_get_mut_shared() {
-  e2e_test(
+  e2e_workspace_std_test(
     "rc_get_mut_shared",
     r#"
-extern __rc_ffi {
-    @externName("ignis_rc_alloc")
-    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
-
-    @externName("ignis_rc_get")
-    function ignis_rc_get(handle: *mut void): *mut void;
-
-    @externName("ignis_rc_retain")
-    function ignis_rc_retain(handle: *mut void): void;
-
-    @externName("ignis_rc_release")
-    function ignis_rc_release(handle: *mut void): void;
-
-    @externName("ignis_rc_count")
-    function ignis_rc_count(handle: *mut void): u32;
-}
-
-@implements(Drop, Clone)
-record Rc<T> {
-    handle: *mut void;
-
-    public static new(value: T): Rc<T> {
-        let h: *mut void = __rc_ffi::ignis_rc_alloc(
-            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
-        );
-        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
-        @write<T>(payload as *mut T, value);
-        return Rc { handle: h };
-    }
-
-    public getMut(&mut self): *mut T {
-        if (__rc_ffi::ignis_rc_count(self.handle) == 1) {
-            let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
-            return payload as *mut T;
-        }
-        return 0 as *mut T;
-    }
-
-    clone(&self): Rc<T> {
-        __rc_ffi::ignis_rc_retain(self.handle);
-        return Rc { handle: self.handle };
-    }
-
-    drop(&mut self): void {
-        __rc_ffi::ignis_rc_release(self.handle);
-    }
-}
+import Rc from "std::rc";
 
 function main(): i32 {
     let mut a: Rc<i32> = Rc::new<i32>(10);
-    let _b: Rc<i32> = a.clone();
-    let ptr: *mut i32 = a.getMut(); // shared -> null
-    return ptr as i32;
+    let b: Rc<i32> = a.clone();
+
+    // Shared, so there is no unique owner to hand a mutable pointer to.
+    if (a.getMut().isNone()) {
+        return 0;
+    }
+
+    return 1;
 }
 "#,
   );
@@ -3820,121 +3615,21 @@ function main(): i32 {
 
 #[test]
 fn e2e_weak_downgrade_upgrade() {
-  e2e_test(
+  e2e_workspace_std_test(
     "weak_downgrade_upgrade",
     r#"
-extern __rc_ffi {
-    @externName("ignis_rc_alloc")
-    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
-
-    @externName("ignis_rc_get")
-    function ignis_rc_get(handle: *mut void): *mut void;
-
-    @externName("ignis_rc_retain")
-    function ignis_rc_retain(handle: *mut void): void;
-
-    @externName("ignis_rc_release")
-    function ignis_rc_release(handle: *mut void): void;
-
-    @externName("ignis_rc_count")
-    function ignis_rc_count(handle: *mut void): u32;
-
-    @externName("ignis_rc_downgrade")
-    function ignis_rc_downgrade(handle: *mut void): void;
-
-    @externName("ignis_rc_upgrade")
-    function ignis_rc_upgrade(handle: *mut void): *mut void;
-
-    @externName("ignis_weak_retain")
-    function ignis_weak_retain(handle: *mut void): void;
-
-    @externName("ignis_weak_release")
-    function ignis_weak_release(handle: *mut void): void;
-
-    @externName("ignis_weak_count")
-    function ignis_weak_count(handle: *mut void): u32;
-}
-
-@implements(Drop, Clone)
-record Rc<T> {
-    handle: *mut void;
-
-    public static new(value: T): Rc<T> {
-        let h: *mut void = __rc_ffi::ignis_rc_alloc(
-            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
-        );
-        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
-        @write<T>(payload as *mut T, value);
-        return Rc { handle: h };
-    }
-
-    public strongCount(&self): u32 {
-        return __rc_ffi::ignis_rc_count(self.handle);
-    }
-
-    public downgrade(&self): Weak<T> {
-        __rc_ffi::ignis_rc_downgrade(self.handle);
-        return Weak { handle: self.handle };
-    }
-
-    public get(&self): &T {
-        let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
-        return (payload as *mut T) as &T;
-    }
-
-    clone(&self): Rc<T> {
-        __rc_ffi::ignis_rc_retain(self.handle);
-        return Rc { handle: self.handle };
-    }
-
-    drop(&mut self): void {
-        __rc_ffi::ignis_rc_release(self.handle);
-    }
-}
-
-@implements(Drop, Clone)
-record Weak<T> {
-    handle: *mut void;
-
-    public upgrade(&self): *mut void {
-        return __rc_ffi::ignis_rc_upgrade(self.handle);
-    }
-
-    public weakCount(&self): u32 {
-        return __rc_ffi::ignis_weak_count(self.handle);
-    }
-
-    public strongCount(&self): u32 {
-        return __rc_ffi::ignis_rc_count(self.handle);
-    }
-
-    clone(&self): Weak<T> {
-        __rc_ffi::ignis_weak_retain(self.handle);
-        return Weak { handle: self.handle };
-    }
-
-    drop(&mut self): void {
-        __rc_ffi::ignis_weak_release(self.handle);
-    }
-}
+import Rc, Weak from "std::rc";
 
 function main(): i32 {
     let a: Rc<i32> = Rc::new<i32>(42);
     let w: Weak<i32> = a.downgrade();
 
-    // Rc alive -> upgrade succeeds (non-null)
-    let upgraded: *mut void = w.upgrade();
-    if (upgraded as u64 == 0) {
+    let Option::SOME(upgraded) = w.upgrade() else {
         return 1;
-    }
+    };
 
-    // upgrade incremented strong count: was 1, now 2
-    // release the extra strong ref so cleanup is correct
-    __rc_ffi::ignis_rc_release(upgraded);
-
-    // Read through original Rc to verify payload intact
-    let val: &i32 = a.get();
-    return *val; // 42
+    // The upgrade added a strong reference; `upgraded` releases it at scope end.
+    return *upgraded.get();
 }
 "#,
   );
@@ -3942,96 +3637,22 @@ function main(): i32 {
 
 #[test]
 fn e2e_weak_upgrade_after_drop() {
-  e2e_test(
+  e2e_workspace_std_test(
     "weak_upgrade_after_drop",
     r#"
-extern __rc_ffi {
-    @externName("ignis_rc_alloc")
-    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
-
-    @externName("ignis_rc_get")
-    function ignis_rc_get(handle: *mut void): *mut void;
-
-    @externName("ignis_rc_retain")
-    function ignis_rc_retain(handle: *mut void): void;
-
-    @externName("ignis_rc_release")
-    function ignis_rc_release(handle: *mut void): void;
-
-    @externName("ignis_rc_count")
-    function ignis_rc_count(handle: *mut void): u32;
-
-    @externName("ignis_rc_downgrade")
-    function ignis_rc_downgrade(handle: *mut void): void;
-
-    @externName("ignis_rc_upgrade")
-    function ignis_rc_upgrade(handle: *mut void): *mut void;
-
-    @externName("ignis_weak_retain")
-    function ignis_weak_retain(handle: *mut void): void;
-
-    @externName("ignis_weak_release")
-    function ignis_weak_release(handle: *mut void): void;
-}
-
-@implements(Drop, Clone)
-record Rc<T> {
-    handle: *mut void;
-
-    public static new(value: T): Rc<T> {
-        let h: *mut void = __rc_ffi::ignis_rc_alloc(
-            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
-        );
-        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
-        @write<T>(payload as *mut T, value);
-        return Rc { handle: h };
-    }
-
-    public downgrade(&self): Weak<T> {
-        __rc_ffi::ignis_rc_downgrade(self.handle);
-        return Weak { handle: self.handle };
-    }
-
-    clone(&self): Rc<T> {
-        __rc_ffi::ignis_rc_retain(self.handle);
-        return Rc { handle: self.handle };
-    }
-
-    drop(&mut self): void {
-        __rc_ffi::ignis_rc_release(self.handle);
-    }
-}
-
-@implements(Drop, Clone)
-record Weak<T> {
-    handle: *mut void;
-
-    public upgrade(&self): *mut void {
-        return __rc_ffi::ignis_rc_upgrade(self.handle);
-    }
-
-    clone(&self): Weak<T> {
-        __rc_ffi::ignis_weak_retain(self.handle);
-        return Weak { handle: self.handle };
-    }
-
-    drop(&mut self): void {
-        __rc_ffi::ignis_weak_release(self.handle);
-    }
-}
+import Rc, Weak from "std::rc";
 
 function main(): i32 {
     let mut a: Rc<i32> = Rc::new<i32>(99);
     let w: Weak<i32> = a.downgrade();
+
     a.drop();
 
-    // Rc is dead -> upgrade should return null
-    let upgraded: *mut void = w.upgrade();
-    if (upgraded as u64 == 0) {
-        return 0; // success
+    if (w.upgrade().isNone()) {
+        return 0;
     }
 
-    return 1; // should not reach here
+    return 1;
 }
 "#,
   );
@@ -4039,100 +3660,20 @@ function main(): i32 {
 
 #[test]
 fn e2e_weak_clone_count() {
-  e2e_test(
+  e2e_workspace_std_test(
     "weak_clone_count",
     r#"
-extern __rc_ffi {
-    @externName("ignis_rc_alloc")
-    function ignis_rc_alloc(payload_size: u64, payload_align: u64, drop_fn: (*mut u8) -> void): *mut void;
-
-    @externName("ignis_rc_get")
-    function ignis_rc_get(handle: *mut void): *mut void;
-
-    @externName("ignis_rc_retain")
-    function ignis_rc_retain(handle: *mut void): void;
-
-    @externName("ignis_rc_release")
-    function ignis_rc_release(handle: *mut void): void;
-
-    @externName("ignis_rc_count")
-    function ignis_rc_count(handle: *mut void): u32;
-
-    @externName("ignis_rc_downgrade")
-    function ignis_rc_downgrade(handle: *mut void): void;
-
-    @externName("ignis_rc_upgrade")
-    function ignis_rc_upgrade(handle: *mut void): *mut void;
-
-    @externName("ignis_weak_retain")
-    function ignis_weak_retain(handle: *mut void): void;
-
-    @externName("ignis_weak_release")
-    function ignis_weak_release(handle: *mut void): void;
-
-    @externName("ignis_weak_count")
-    function ignis_weak_count(handle: *mut void): u32;
-}
-
-@implements(Drop, Clone)
-record Rc<T> {
-    handle: *mut void;
-
-    public static new(value: T): Rc<T> {
-        let h: *mut void = __rc_ffi::ignis_rc_alloc(
-            @sizeOf<T>(), @alignOf<T>(), @dropGlue<T>()
-        );
-        let payload: *mut void = __rc_ffi::ignis_rc_get(h);
-        @write<T>(payload as *mut T, value);
-        return Rc { handle: h };
-    }
-
-    public downgrade(&self): Weak<T> {
-        __rc_ffi::ignis_rc_downgrade(self.handle);
-        return Weak { handle: self.handle };
-    }
-
-    public weakCount(&self): u32 {
-        return __rc_ffi::ignis_weak_count(self.handle);
-    }
-
-    clone(&self): Rc<T> {
-        __rc_ffi::ignis_rc_retain(self.handle);
-        return Rc { handle: self.handle };
-    }
-
-    drop(&mut self): void {
-        __rc_ffi::ignis_rc_release(self.handle);
-    }
-}
-
-@implements(Drop, Clone)
-record Weak<T> {
-    handle: *mut void;
-
-    public weakCount(&self): u32 {
-        return __rc_ffi::ignis_weak_count(self.handle);
-    }
-
-    clone(&self): Weak<T> {
-        __rc_ffi::ignis_weak_retain(self.handle);
-        return Weak { handle: self.handle };
-    }
-
-    drop(&mut self): void {
-        __rc_ffi::ignis_weak_release(self.handle);
-    }
-}
+import Rc, Weak from "std::rc";
 
 function main(): i32 {
     let a: Rc<i32> = Rc::new<i32>(5);
     let w1: Weak<i32> = a.downgrade();
-    let wc1: u32 = a.weakCount();         // 1
+    let wc1: u32 = a.weakCount();
 
     let w2: Weak<i32> = w1.clone();
-    let wc2: u32 = a.weakCount();         // 2
+    let wc2: u32 = a.weakCount();
 
-    // wc1=1, wc2=2 -> sum=3
+    // wc1 = 1, wc2 = 2, sum = 3
     return (wc1 + wc2) as i32;
 }
 "#,

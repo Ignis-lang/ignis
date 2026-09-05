@@ -1,10 +1,10 @@
 /**
  * Smoke tests for the parts of the Ignis runtime that are still C.
  *
- * Allocator, arena and hashing coverage moved to `std/memory/tests.ign` when
- * those pieces moved into the standard library; reference-counting leak
- * coverage moved to `std/rc/tests.ign`, which observes the same counters
- * through `Memory::stats()`.
+ * Allocator, arena and hashing coverage moved to `std/memory/tests.ign` and
+ * reference counting to `std/rc/tests.ign` when those pieces moved into the
+ * standard library. What is left here is the string and number-formatting C
+ * this suite can still exercise on its own.
  */
 
 #include "../ignis_rt.h"
@@ -16,7 +16,7 @@
 // The allocator these symbols name now lives in `std/memory/allocator.ign`,
 // which this binary deliberately does not link: the point of the smoke test is
 // to exercise the C that is left, on its own. Plain libc wrappers satisfy the
-// string and Rc code under test, which only needs allocate/resize/release.
+// string code under test, which only needs allocate/resize/release.
 
 void *ignis_alloc(size_t size) {
   return size == 0 ? NULL : malloc(size);
@@ -167,104 +167,6 @@ static void test_number_to_string(void) {
   ignis_string_drop(&s3);
 }
 
-// =============================================================================
-// Rc tests
-// =============================================================================
-
-static void test_rc_alloc_and_get(void) {
-  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), _Alignof(int), NULL);
-  assert(rc != NULL);
-  assert(ignis_rc_count(rc) == 1);
-
-  int *payload = (int *)ignis_rc_get(rc);
-  assert(payload != NULL);
-
-  *payload = 42;
-  assert(*(int *)ignis_rc_get(rc) == 42);
-
-  ignis_rc_release(rc);
-}
-
-static void test_rc_retain_release(void) {
-  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), _Alignof(int), NULL);
-  assert(ignis_rc_count(rc) == 1);
-
-  ignis_rc_retain(rc);
-  assert(ignis_rc_count(rc) == 2);
-
-  ignis_rc_retain(rc);
-  assert(ignis_rc_count(rc) == 3);
-
-  ignis_rc_release(rc);
-  assert(ignis_rc_count(rc) == 2);
-
-  ignis_rc_release(rc);
-  assert(ignis_rc_count(rc) == 1);
-
-  // Final release frees the allocation
-  ignis_rc_release(rc);
-}
-
-static int drop_called_count = 0;
-
-static void test_drop_fn(void *payload) {
-  (void)payload;
-  drop_called_count += 1;
-}
-
-static void test_rc_drop_fn_called(void) {
-  drop_called_count = 0;
-
-  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int), _Alignof(int), test_drop_fn);
-  ignis_rc_retain(rc);
-
-  // First release should NOT call drop (refcount goes to 1)
-  ignis_rc_release(rc);
-  assert(drop_called_count == 0);
-
-  // Second release should call drop (refcount goes to 0)
-  ignis_rc_release(rc);
-  assert(drop_called_count == 1);
-}
-
-static void test_rc_payload_with_drop(void) {
-  drop_called_count = 0;
-
-  IgnisRcBox *rc = ignis_rc_alloc(sizeof(int) * 4, _Alignof(int), test_drop_fn);
-  int *arr = (int *)ignis_rc_get(rc);
-
-  arr[0] = 10;
-  arr[1] = 20;
-  arr[2] = 30;
-  arr[3] = 40;
-
-  assert(arr[0] == 10);
-  assert(arr[3] == 40);
-
-  ignis_rc_release(rc);
-  assert(drop_called_count == 1);
-}
-
-static void test_rc_zero_payload(void) {
-  IgnisRcBox *rc = ignis_rc_alloc(0, _Alignof(max_align_t), NULL);
-  assert(rc != NULL);
-  assert(ignis_rc_count(rc) == 1);
-  ignis_rc_release(rc);
-}
-
-static void test_rc_payload_alignment(void) {
-  IgnisRcBox *rc = ignis_rc_alloc(sizeof(double), _Alignof(double), NULL);
-  void *payload = ignis_rc_get(rc);
-
-  // Payload must be aligned to max_align_t (at least 8 bytes on all platforms)
-  assert(((uintptr_t)payload % _Alignof(max_align_t)) == 0);
-
-  *(double *)payload = 3.14159;
-  assert(*(double *)ignis_rc_get(rc) == 3.14159);
-
-  ignis_rc_release(rc);
-}
-
 int main(void) {
   test_string_basic();
   test_string_cstr_is_zero_copy_view();
@@ -277,11 +179,5 @@ int main(void) {
   test_string_from_len_preserves_trailing_nul_and_interior_nul();
   test_string_compare_uses_len_across_interior_nul();
   test_number_to_string();
-  test_rc_alloc_and_get();
-  test_rc_retain_release();
-  test_rc_drop_fn_called();
-  test_rc_payload_with_drop();
-  test_rc_zero_payload();
-  test_rc_payload_alignment();
   return 0;
 }
