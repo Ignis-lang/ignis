@@ -281,7 +281,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v0-rust"
-          shared-key: "ci-selfhost"
+          # Suffixed with the profile, matching ci.yml's selfhost job: the
+          # target subdirectory moved from target/debug to target/ci.
+          shared-key: "ci-selfhost-profile-ci"
           cache-targets: true
           cache-on-failure: true
 
@@ -300,11 +302,14 @@ jobs:
       - name: Build the C runtime archive
         run: make -C std/runtime
 
+      # Built with the `ci` profile: the gates below rely on `debug_assert!`
+      # and `mono_output.verify_no_generics()`, which `--release` strips, while
+      # plain debug is too slow for the ladder's budget.
       - name: Build Ignis
-        run: cargo build --locked -p ignis
+        run: cargo build --locked --profile ci -p ignis
 
       - name: Add Ignis to PATH
-        run: echo "${GITHUB_WORKSPACE}/target/debug" >> "$GITHUB_PATH"
+        run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
 
       # Once a selfhost binary has been promoted `official`, the ladder starts
       # stage1 from it instead of the Rust host, so the ladder measures the
@@ -328,7 +333,7 @@ jobs:
           STAGE0_JSON="build/bootstrap/stage0.json"
 
           write_host_stage0() {
-            printf '{"kind": "host", "source": "target/debug/ignis", "sha256": ""}\n' >"$STAGE0_JSON"
+            printf '{"kind": "host", "source": "target/ci/ignis", "sha256": ""}\n' >"$STAGE0_JSON"
           }
 
           if [ "$STAGE0_MODE" = "host" ]; then
@@ -491,7 +496,7 @@ jobs:
             build/bootstrap/gates/G4.json
             build/selfhost/std/**
             std/runtime/libignis_rt.a
-            target/debug/ignis
+            target/ci/ignis
           if-no-files-found: ignore
 
   gate:
@@ -541,8 +546,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          chmod +x build/bootstrap/stage1/ignis build/bootstrap/stage2/ignis target/debug/ignis
-          echo "${GITHUB_WORKSPACE}/target/debug" >> "$GITHUB_PATH"
+          chmod +x build/bootstrap/stage1/ignis build/bootstrap/stage2/ignis target/ci/ignis
+          echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
 
       # A gate is only worth its runner while its commit is still the head.
       - name: Check whether the head moved
