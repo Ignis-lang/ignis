@@ -5,11 +5,15 @@ import Ast from "@compiler::ast";
 import DiagnosticBag, SourceFile from "@compiler::diagnostics";
 import Parser from "@compiler::parser";
 
-import Format from "./layout_expressions";
+import FormatterConfig from "./config";
+import Format from "./layout_statements";
 
 /// Parses `const __probe__ = <expr>;`, pulls out the parsed value expression,
 /// and renders it back through `Format::formatExpressionNode`. This isolates
-/// expression layout without needing the item/statement layers above it.
+/// expression layout without needing the item layer above it.
+///
+/// The renderer lives in `layout_statements.ign`: expression and statement
+/// layout are mutually recursive, and Ignis rejects module import cycles.
 function formatExpr(expr: str): String {
   let mut sourceText: String = String::create("const __probe__: i32 = ");
   sourceText.pushStr(expr);
@@ -40,7 +44,14 @@ function formatExpr(expr: str): String {
     return String::new();
   };
 
-  return Format::formatExpressionNode(&module, constant.value, 0, &sourceText);
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Result::OK(output) = Format::formatExpressionNode(&module, constant.value, 0, &sourceText, &config, 0) else {
+    Test::fail();
+    return String::new();
+  };
+
+  return output;
 }
 
 @test

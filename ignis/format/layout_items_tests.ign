@@ -3,7 +3,6 @@ import Test from "std::test";
 
 import Format from "./layout_items";
 import FormatterConfig from "./config";
-import FormatError from "./error";
 
 function layoutOrFail(source: str): String {
   let sourceText: String = String::create(source);
@@ -113,18 +112,59 @@ function layoutItemsCollapsesMultipleBlankLinesBetweenTopLevelItems(): void {
 }
 
 @test
-function layoutItemsReportsUnsupportedForRecordDeclarations(): void {
-  let sourceText: String = String::create("record Foo {\n  public x: i32;\n}");
-  let config: FormatterConfig = FormatterConfig::default();
-  let result: Result<String, FormatError> = Format::layoutCodeChunk(&sourceText, &config);
+function layoutItemsFormatsARecordWithFieldsAndMethods(): void {
+  let output: String = layoutOrFail(
+    "record Foo {\n  public x: i32;\n  private y: str;\n\n  public get(&self): i32 { return self.x; }\n}"
+  );
 
-  let Result::ERROR(error) = result else {
-    Test::fail();
-    return;
-  };
+  Test::assertEq<str>(
+    output.toStr(),
+    "record Foo {\n  public x: i32;\n  private y: str;\n\n  public get(&self): i32 {\n    return self.x;\n  }\n}"
+  );
+}
 
-  let FormatError::Unsupported(_) = error else {
-    Test::fail();
-    return;
-  };
+@test
+function layoutItemsFormatsAnEnumWithAPayloadVariantAndAMethod(): void {
+  let output: String = layoutOrFail(
+    "enum Color {\n  RED,\n  Payload(i32, str),\n\n  public name(&self): str { return \"x\"; }\n}"
+  );
+
+  Test::assertEq<str>(
+    output.toStr(),
+    "enum Color {\n  RED,\n  Payload(i32, str),\n\n  public name(&self): str {\n    return \"x\";\n  }\n}"
+  );
+}
+
+@test
+function layoutItemsFormatsANamespaceWithNestedItems(): void {
+  let output: String = layoutOrFail("namespace Foo::Bar {\n  function baz(): i32 { return 1; }\n}");
+  Test::assertEq<str>(output.toStr(), "namespace Foo::Bar {\n  function baz(): i32 {\n    return 1;\n  }\n}");
+}
+
+@test
+function layoutItemsFormatsATraitWithARequiredAndADefaultMethod(): void {
+  let output: String = layoutOrFail("trait Shape {\n  area(&self): i32;\n  name(&self): str { return \"s\"; }\n}");
+
+  Test::assertEq<str>(
+    output.toStr(),
+    "trait Shape {\n  area(&self): i32;\n\n  name(&self): str {\n    return \"s\";\n  }\n}"
+  );
+}
+
+@test
+function layoutItemsFormatsAnExternBlockOfSignatures(): void {
+  let output: String = layoutOrFail("extern C {\n  function puts(s: str): i32;\n  const ERR: i32;\n}");
+  Test::assertEq<str>(output.toStr(), "extern C {\n  function puts(s: str): i32;\n  const ERR: i32;\n}");
+}
+
+@test
+function layoutItemsFormatsAnExportedRecordDeclaration(): void {
+  let output: String = layoutOrFail("export record Foo {\n  public x: i32;\n}");
+  Test::assertEq<str>(output.toStr(), "export record Foo {\n  public x: i32;\n}");
+}
+
+@test
+function layoutItemsFormatsAnEmptyNamespaceInline(): void {
+  let output: String = layoutOrFail("namespace Foo {\n}");
+  Test::assertEq<str>(output.toStr(), "namespace Foo {}");
 }

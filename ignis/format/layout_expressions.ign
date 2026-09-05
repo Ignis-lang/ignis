@@ -6,81 +6,221 @@ import SourceSpan from "@compiler::diagnostics";
 
 import _ from "./layout_types";
 
-function containsNewlineByteExpr(text: &String): boolean {
-  let mut index: u64 = 0;
+export namespace Format {
+  /// Expression and statement layout are mutually recursive (a lambda body or
+  /// a `match` arm holds statements, and every statement holds expressions),
+  /// so the recursive renderer lives in `layout_statements.ign` alone: Ignis
+  /// rejects a module import cycle outright. This file keeps the leaf pieces
+  /// both layers need — precedence tables, operator spellings, source slicing
+  /// and parameter rendering.
+  function expressionContainsNewline(text: &String): boolean {
+    let mut index: u64 = 0;
 
-  while (index < text.length()) {
-    let Option::SOME(byte) = text.byteAt(index) else {
-      break;
-    };
+    while (index < text.length()) {
+      let Option::SOME(byte) = text.byteAt(index) else {
+        break;
+      };
 
-    if (byte == '\n' as u8) {
-      return true;
+      if (byte == '\n' as u8) {
+        return true;
+      }
+
+      index += 1;
     }
 
-    index += 1;
-  }
-
-  return false;
-}
-
-function sliceExprSpan(source: &String, span: &SourceSpan): String {
-  let mut start: u64 = span.start;
-  let mut end: u64 = span.end;
-
-  if (start > source.length()) {
-    start = source.length();
-  }
-
-  if (end > source.length()) {
-    end = source.length();
-  }
-
-  if (start > end) {
-    return String::new();
-  }
-
-  return source.substringBytes(start, end);
-}
-
-/// True when the byte range `[start, end)` of `source` contains a comma.
-/// Used to detect an original single-line call's trailing comma before its
-/// closing paren, mirroring the host's own text-based check for the same
-/// thing (it does not derive this from the AST either).
-function rangeContainsComma(source: &String, start: u64, end: u64): boolean {
-  let mut clampedStart: u64 = start;
-  let mut clampedEnd: u64 = end;
-
-  if (clampedStart > source.length()) {
-    clampedStart = source.length();
-  }
-
-  if (clampedEnd > source.length()) {
-    clampedEnd = source.length();
-  }
-
-  if (clampedStart >= clampedEnd) {
     return false;
   }
 
-  let mut cursor: u64 = clampedStart;
-
-  while (cursor < clampedEnd) {
-    let Option::SOME(byte) = source.byteAt(cursor) else {
-      break;
-    };
-
-    if (byte == ',' as u8) {
-      return true;
-    }
-
-    cursor += 1;
+  function isLayoutWhitespaceByte(byte: u8): boolean {
+    return byte == ' ' as u8 || byte == '\t' as u8 || byte == '\n' as u8 || byte == '\r' as u8;
   }
 
-  return false;
-}
+  function endsWithByte(text: &String, byte: u8): boolean {
+    if (text.length() == 0) {
+      return false;
+    }
 
-export namespace Format {
+    let Option::SOME(last) = text.byteAt(text.length() - 1) else {
+      return false;
+    };
+
+    return last == byte;
+  }
+
+  function endsWithText(text: &String, suffix: str): boolean {
+    let suffixText: String = String::create(suffix);
+
+    if (text.length() < suffixText.length()) {
+      return false;
+    }
+
+    let tail: String = text.substringBytes(text.length() - suffixText.length(), text.length());
+    let tailView: str = tail.toStr();
+    let suffixView: str = suffixText.toStr();
+
+    return @eq<str>(&tailView, &suffixView);
+  }
+
+  function trimTrailingWhitespace(text: &String): String {
+    let mut end: u64 = text.length();
+
+    while (end > 0) {
+      let Option::SOME(byte) = text.byteAt(end - 1) else {
+        break;
+      };
+
+      if (!Format::isLayoutWhitespaceByte(byte)) {
+        break;
+      }
+
+      end -= 1;
+    }
+
+    return text.substringBytes(0, end);
+  }
+
+  function trimLeadingWhitespace(text: &String): String {
+    let mut start: u64 = 0;
+
+    while (start < text.length()) {
+      let Option::SOME(byte) = text.byteAt(start) else {
+        break;
+      };
+
+      if (!Format::isLayoutWhitespaceByte(byte)) {
+        break;
+      }
+
+      start += 1;
+    }
+
+    return text.substringBytes(start, text.length());
+  }
+
+  /// Collapses every run of whitespace into a single space and trims the ends,
+  /// mirroring the host's `collapse_spaces`.
+  function collapseWhitespace(text: &String): String {
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+    let mut previousWasSpace: boolean = true;
+
+    while (index < text.length()) {
+      let Option::SOME(byte) = text.byteAt(index) else {
+        break;
+      };
+
+      if (Format::isLayoutWhitespaceByte(byte)) {
+        if (!previousWasSpace) {
+          result.pushChar(' ');
+        }
+
+        previousWasSpace = true;
+      } else {
+        result.pushByte(byte);
+        previousWasSpace = false;
+      }
+
+      index += 1;
+    }
+
+    return result.trimAsciiWhitespace();
+  }
+
+  function sliceSource(source: &String, start: u64, end: u64): String {
+    let mut clampedStart: u64 = start;
+    let mut clampedEnd: u64 = end;
+
+    if (clampedStart > source.length()) {
+      clampedStart = source.length();
+    }
+
+    if (clampedEnd > source.length()) {
+      clampedEnd = source.length();
+    }
+
+    if (clampedStart > clampedEnd) {
+      return String::new();
+    }
+
+    return source.substringBytes(clampedStart, clampedEnd);
+  }
+
+  function sliceSpanText(source: &String, span: &SourceSpan): String {
+    return Format::sliceSource(source, span.start, span.end);
+  }
+
+  /// Byte offset of the start of the line containing `byteIndex`.
+  function lineStartOffset(source: &String, byteIndex: u64): u64 {
+    let mut clamped: u64 = byteIndex;
+
+    if (clamped > source.length()) {
+      clamped = source.length();
+    }
+
+    let mut cursor: u64 = clamped;
+
+    while (cursor > 0) {
+      let Option::SOME(byte) = source.byteAt(cursor - 1) else {
+        break;
+      };
+
+      if (byte == '\n' as u8) {
+        return cursor;
+      }
+
+      cursor -= 1;
+    }
+
+    return 0;
+  }
+
+  /// Byte offset of the newline that ends the line containing `byteIndex`, or
+  /// the end of `source` when the last line has no terminator.
+  function lineEndOffset(source: &String, byteIndex: u64): u64 {
+    let mut cursor: u64 = byteIndex;
+
+    if (cursor > source.length()) {
+      cursor = source.length();
+    }
+
+    while (cursor < source.length()) {
+      let Option::SOME(byte) = source.byteAt(cursor) else {
+        break;
+      };
+
+      if (byte == '\n' as u8) {
+        return cursor;
+      }
+
+      cursor += 1;
+    }
+
+    return source.length();
+  }
+
+  /// True when the byte range `[start, end)` of `source` contains a comma.
+  /// Used to detect an original single-line call's trailing comma before its
+  /// closing paren, mirroring the host's own text-based check for the same
+  /// thing (it does not derive this from the AST either).
+  function rangeContainsComma(source: &String, start: u64, end: u64): boolean {
+    let slice: String = Format::sliceSource(source, start, end);
+    let mut cursor: u64 = 0;
+
+    while (cursor < slice.length()) {
+      let Option::SOME(byte) = slice.byteAt(cursor) else {
+        break;
+      };
+
+      if (byte == ',' as u8) {
+        return true;
+      }
+
+      cursor += 1;
+    }
+
+    return false;
+  }
+
   function binaryPrecedence(operator: Ast::Expression::BinaryOperator): u8 {
     if (operator == Ast::Expression::BinaryOperator::Or) {
       return 2;
@@ -265,11 +405,9 @@ export namespace Format {
     return "~";
   }
 
-  /// Precedence host assigns each expression kind for parenthesization
-  /// decisions. Kinds this file does not render with a dedicated case (and
-  /// instead falls back to a verbatim span slice for) use `u8` max, matching
-  /// the host's own fallback for kinds it does not special-case either
-  /// (`_ => u8::MAX`).
+  /// Precedence the host assigns each expression kind for parenthesization
+  /// decisions. Kinds the host does not special-case use `u8` max (`_ =>
+  /// u8::MAX`), which is what the final `return 255` stands for here.
   function expressionPrecedence(node: &Ast::Expression::Node): u8 {
     if (let Ast::Expression::Node::Assignment(_) = node) {
       return 1;
@@ -338,380 +476,94 @@ export namespace Format {
     return 255;
   }
 
-  function formatBinaryChild(
+  /// Renders one callable parameter: its attribute prefix, its name and its
+  /// type annotation. Record fields and lambda parameters are `Binding`
+  /// patterns too, so this is shared by every callable-shaped renderer.
+  function formatParameterPattern(
     module: &Ast::Module,
-    expressionId: Ast::ExpressionId,
-    parentPrecedence: u8,
-    isRightChild: boolean,
+    patternId: Ast::PatternId,
     source: &String
   ): String {
-    let Option::SOME(node) = module.expressions.get(expressionId) else {
+    let Option::SOME(node) = module.patterns.get(patternId) else {
       return String::new();
     };
 
-    let childPrecedence: u8 = Format::expressionPrecedence(node);
-    let formatted: String = Format::formatExpressionNode(module, expressionId, parentPrecedence, source);
+    let Ast::Pattern::Node::Binding(binding) = node else {
+      let span: SourceSpan = Format::patternSpanOf(node);
+      return Format::sliceSpanText(source, &span).trimAsciiWhitespace();
+    };
 
-    let mut isBinary: boolean = false;
+    // The parser stores a method receiver as a binding named `self` annotated
+    // with `&Self`/`&mut Self`, which must print back as the `&self` shorthand
+    // the source wrote.
+    if (binding.name.equals("self")) {
+      if (let Option::SOME(annotation) = binding.annotation) {
+        if (let Option::SOME(annotationNode) = module.types.get(annotation)) {
+          if (let Ast::Type::Node::Reference(reference) = annotationNode) {
+            if (reference.mutable) {
+              return String::create("&mut self");
+            }
 
-    if (let Ast::Expression::Node::Binary(_) = node) {
-      isBinary = true;
+            return String::create("&self");
+          }
+        }
+      }
+
+      return String::create("self");
     }
 
-    if (childPrecedence < parentPrecedence || (isRightChild && childPrecedence == parentPrecedence && isBinary)) {
-      let mut wrapped: String = String::create("(");
-      wrapped.push(&formatted);
-      wrapped.pushStr(")");
-      return wrapped;
-    }
-
-    return formatted;
-  }
-
-  function joinFormattedExpressions(
-    module: &Ast::Module,
-    ids: &Vector<Ast::ExpressionId>,
-    source: &String
-  ): String {
     let mut result: String = String::new();
-    let mut index: u64 = 0;
+    let mut attributeIndex: u64 = 0;
 
-    while (index < ids.length()) {
-      let Option::SOME(expressionId) = ids.get(index) else {
-        index += 1;
+    while (attributeIndex < binding.metadata.attributes.length()) {
+      let Option::SOME(attribute) = binding.metadata.attributes.get(attributeIndex) else {
+        attributeIndex += 1;
         continue;
       };
 
-      if (index > 0) {
-        result.pushStr(", ");
+      result.pushStr("@");
+      result.push(&attribute.name);
+
+      if (attribute.arguments.length() > 0) {
+        let argumentsText: String = Format::joinSegments(&attribute.arguments, ", ");
+        result.pushStr("(");
+        result.push(&argumentsText);
+        result.pushStr(")");
       }
 
-      let formatted: String = Format::formatExpressionNode(module, *expressionId, 0, source);
-      result.push(&formatted);
-      index += 1;
+      result.pushStr(" ");
+      attributeIndex += 1;
+    }
+
+    result.push(&binding.name);
+
+    if (let Option::SOME(annotation) = binding.annotation) {
+      let annotationText: String = Format::formatType(module, annotation, source);
+      result.pushStr(": ");
+      result.push(&annotationText);
     }
 
     return result;
   }
 
-  function formatExpressionNode(
+  function formatParameterList(
     module: &Ast::Module,
-    expressionId: Ast::ExpressionId,
-    parentPrecedence: u8,
+    parameters: &Vector<Ast::PatternId>,
     source: &String
-  ): String {
-    let Option::SOME(node) = module.expressions.get(expressionId) else {
-      return String::new();
-    };
+  ): Vector<String> {
+    let mut result: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
 
-    return Format::formatExpression(module, node, parentPrecedence, source);
-  }
+    while (index < parameters.length()) {
+      let Option::SOME(patternId) = parameters.get(index) else {
+        index += 1;
+        continue;
+      };
 
-  /// Renders an `Ast::Expression::Node`. Kinds without a dedicated case here
-  /// (`Match`, `Lambda`, `RecordInit` when it spans one line, `Pipe`, `Block`,
-  /// `If`-expression, `VectorLiteral`) fall back to a verbatim slice of that
-  /// expression's own span, the same graceful-degradation strategy the host
-  /// itself uses for multiline calls/record-inits/matches (`is_multiline_source`).
-  function formatExpression(
-    module: &Ast::Module,
-    node: &Ast::Expression::Node,
-    parentPrecedence: u8,
-    source: &String
-  ): String {
-    if (let Ast::Expression::Node::Variable(variable) = node) {
-      return sliceExprSpan(source, &variable.span).trimAsciiWhitespace();
+      result.push(Format::formatParameterPattern(module, *patternId, source));
+      index += 1;
     }
 
-    if (let Ast::Expression::Node::Path(path) = node) {
-      return sliceExprSpan(source, &path.span).trimAsciiWhitespace();
-    }
-
-    if (let Ast::Expression::Node::Literal(literal) = node) {
-      return sliceExprSpan(source, &literal.span).trimAsciiWhitespace();
-    }
-
-    if (let Ast::Expression::Node::Unit(_) = node) {
-      return String::create("()");
-    }
-
-    if (let Ast::Expression::Node::Grouped(grouped) = node) {
-      let inner: String = Format::formatExpressionNode(module, grouped.expression, 0, source);
-      let mut result: String = String::create("(");
-      result.push(&inner);
-      result.pushStr(")");
-      return result;
-    }
-
-    if (let Ast::Expression::Node::Tuple(tuple) = node) {
-      let inner: String = Format::joinFormattedExpressions(module, &tuple.elements, source);
-      let mut result: String = String::create("(");
-      result.push(&inner);
-      result.pushStr(")");
-      return result;
-    }
-
-    if (let Ast::Expression::Node::Unary(unary) = node) {
-      let operand: String = Format::formatExpressionNode(module, unary.operand, 9, source);
-      let mut result: String = String::create(Format::unaryOperatorText(unary.operator));
-      result.push(&operand);
-      return result;
-    }
-
-    if (let Ast::Expression::Node::Binary(binaryExpr) = node) {
-      let precedence: u8 = Format::binaryPrecedence(binaryExpr.operator);
-      let left: String = Format::formatBinaryChild(module, binaryExpr.left, precedence, false, source);
-      let right: String = Format::formatBinaryChild(module, binaryExpr.right, precedence, true, source);
-
-      let mut formatted: String = left;
-      formatted.pushChar(' ');
-      formatted.pushStr(Format::binaryOperatorText(binaryExpr.operator));
-      formatted.pushChar(' ');
-      formatted.push(&right);
-
-      if (precedence < parentPrecedence) {
-        let mut wrapped: String = String::create("(");
-        wrapped.push(&formatted);
-        wrapped.pushStr(")");
-        return wrapped;
-      }
-
-      return formatted;
-    }
-
-    if (let Ast::Expression::Node::Assignment(assignment) = node) {
-      let target: String = Format::formatExpressionNode(module, assignment.target, 1, source);
-      let value: String = Format::formatExpressionNode(module, assignment.value, 1, source);
-
-      let mut formatted: String = target;
-      formatted.pushChar(' ');
-      formatted.pushStr(Format::assignmentOperatorText(assignment.operator));
-      formatted.pushChar(' ');
-      formatted.push(&value);
-
-      if (parentPrecedence > 1) {
-        let mut wrapped: String = String::create("(");
-        wrapped.push(&formatted);
-        wrapped.pushStr(")");
-        return wrapped;
-      }
-
-      return formatted;
-    }
-
-    if (let Ast::Expression::Node::Ternary(ternary) = node) {
-      let condition: String = Format::formatExpressionNode(module, ternary.condition, 0, source);
-      let thenText: String = Format::formatExpressionNode(module, ternary.thenBranch, 0, source);
-      let elseText: String = Format::formatExpressionNode(module, ternary.elseBranch, 0, source);
-
-      let mut formatted: String = condition;
-      formatted.pushStr(" ? ");
-      formatted.push(&thenText);
-      formatted.pushStr(" : ");
-      formatted.push(&elseText);
-
-      if (parentPrecedence > 1) {
-        let mut wrapped: String = String::create("(");
-        wrapped.push(&formatted);
-        wrapped.pushStr(")");
-        return wrapped;
-      }
-
-      return formatted;
-    }
-
-    if (let Ast::Expression::Node::Call(call) = node) {
-      let sourceText: String = sliceExprSpan(source, &call.span).trimAsciiWhitespace();
-
-      if (containsNewlineByteExpr(&sourceText)) {
-        return sourceText;
-      }
-
-      let mut formatted: String = Format::formatExpressionNode(module, call.callee, 10, source);
-
-      if (call.typeArguments.length() > 0) {
-        let typeArgs: String = Format::joinFormattedTypes(module, &call.typeArguments, source);
-        formatted.pushStr("<");
-        formatted.push(&typeArgs);
-        formatted.pushStr(">");
-      }
-
-      let argumentsText: String = Format::joinFormattedExpressions(module, &call.arguments, source);
-
-      let mut trailing: str = "";
-
-      if (call.arguments.length() > 0) {
-        let Option::SOME(lastArgumentId) = call.arguments.get(call.arguments.length() - 1) else {
-          return formatted;
-        };
-
-        let Option::SOME(lastArgumentNode) = module.expressions.get(*lastArgumentId) else {
-          return formatted;
-        };
-
-        let lastArgumentSpan: SourceSpan = Ast::Serializer::expressionSpan(lastArgumentNode);
-
-        if (rangeContainsComma(source, lastArgumentSpan.end, call.span.end)) {
-          trailing = ",";
-        }
-      }
-
-      formatted.pushStr("(");
-      formatted.push(&argumentsText);
-      formatted.pushStr(trailing);
-      formatted.pushStr(")");
-
-      return formatted;
-    }
-
-    if (let Ast::Expression::Node::Cast(cast) = node) {
-      let inner: String = Format::formatExpressionNode(module, cast.expression, 11, source);
-      let targetTypeText: String = Format::formatType(module, cast.targetType, source);
-
-      let mut formatted: String = inner;
-      formatted.pushStr(" as ");
-      formatted.push(&targetTypeText);
-
-      if (parentPrecedence > 10) {
-        let mut wrapped: String = String::create("(");
-        wrapped.push(&formatted);
-        wrapped.pushStr(")");
-        return wrapped;
-      }
-
-      return formatted;
-    }
-
-    if (let Ast::Expression::Node::Reference(reference) = node) {
-      let inner: String = Format::formatExpressionNode(module, reference.target, 11, source);
-      let mut result: String = String::new();
-
-      if (reference.mutable) {
-        result.pushStr("&mut ");
-      } else {
-        result.pushStr("&");
-      }
-
-      result.push(&inner);
-      return result;
-    }
-
-    if (let Ast::Expression::Node::Dereference(dereference) = node) {
-      let inner: String = Format::formatExpressionNode(module, dereference.operand, 11, source);
-      let mut result: String = String::create("*");
-      result.push(&inner);
-      return result;
-    }
-
-    if (let Ast::Expression::Node::MemberAccess(access) = node) {
-      let objectText: String = Format::formatExpressionNode(module, access.object, 10, source);
-      let mut result: String = objectText;
-
-      if (access.operator == Ast::Expression::AccessOperator::DoubleColon) {
-        result.pushStr("::");
-      } else {
-        result.pushStr(".");
-      }
-
-      result.push(&access.member);
-      return result;
-    }
-
-    if (let Ast::Expression::Node::VectorAccess(access) = node) {
-      let vectorText: String = Format::formatExpressionNode(module, access.vector, 12, source);
-      let indexText: String = Format::formatExpressionNode(module, access.index, 0, source);
-
-      let mut result: String = vectorText;
-      result.pushStr("[");
-      result.push(&indexText);
-      result.pushStr("]");
-      return result;
-    }
-
-    if (let Ast::Expression::Node::PostfixIncrement(postfix) = node) {
-      let operandText: String = Format::formatExpressionNode(module, postfix.operand, 12, source);
-      let mut result: String = operandText;
-      result.pushStr("++");
-      return result;
-    }
-
-    if (let Ast::Expression::Node::PostfixDecrement(postfix) = node) {
-      let operandText: String = Format::formatExpressionNode(module, postfix.operand, 12, source);
-      let mut result: String = operandText;
-      result.pushStr("--");
-      return result;
-    }
-
-    if (let Ast::Expression::Node::Try(tryExpr) = node) {
-      let innerText: String = Format::formatExpressionNode(module, tryExpr.expression, 12, source);
-      let mut result: String = innerText;
-      result.pushStr("!");
-      return result;
-    }
-
-    if (let Ast::Expression::Node::Vector(vectorLiteral) = node) {
-      let sourceText: String = sliceExprSpan(source, &vectorLiteral.span).trimAsciiWhitespace();
-
-      if (containsNewlineByteExpr(&sourceText)) {
-        return sourceText;
-      }
-
-      let inner: String = Format::joinFormattedExpressions(module, &vectorLiteral.elements, source);
-      let mut result: String = String::create("[");
-      result.push(&inner);
-      result.pushStr("]");
-      return result;
-    }
-
-    if (let Ast::Expression::Node::LetCondition(letCondition) = node) {
-      let patternText: String = Format::formatPattern(module, letCondition.pattern, source);
-      let valueText: String = Format::formatExpressionNode(module, letCondition.value, 0, source);
-
-      let mut result: String = String::create("let ");
-      result.push(&patternText);
-      result.pushStr(" = ");
-      result.push(&valueText);
-      return result;
-    }
-
-    if (let Ast::Expression::Node::PipePlaceholder(_) = node) {
-      return String::create("_");
-    }
-
-    if (let Ast::Expression::Node::CaptureOverride(captureOverride) = node) {
-      let inner: String = Format::formatExpressionNode(module, captureOverride.expression, 11, source);
-      let mut result: String = String::new();
-
-      if (captureOverride.kind == Ast::Expression::CaptureOverrideKind::Move) {
-        result.pushStr("@move ");
-      } else if (captureOverride.kind == Ast::Expression::CaptureOverrideKind::Ref) {
-        result.pushStr("@ref ");
-      } else {
-        result.pushStr("@refMut ");
-      }
-
-      result.push(&inner);
-      return result;
-    }
-
-    if (let Ast::Expression::Node::BuiltinCall(builtinCall) = node) {
-      let mut formatted: String = String::create("@");
-      formatted.push(&builtinCall.name);
-
-      if (builtinCall.typeArguments.length() > 0) {
-        let typeArgs: String = Format::joinFormattedTypes(module, &builtinCall.typeArguments, source);
-        formatted.pushStr("<");
-        formatted.push(&typeArgs);
-        formatted.pushStr(">");
-      }
-
-      let argumentsText: String = Format::joinFormattedExpressions(module, &builtinCall.arguments, source);
-      formatted.pushStr("(");
-      formatted.push(&argumentsText);
-      formatted.pushStr(")");
-      return formatted;
-    }
-
-    let span: SourceSpan = Ast::Serializer::expressionSpan(node);
-    return sliceExprSpan(source, &span).trimAsciiWhitespace();
+    return result;
   }
 }
