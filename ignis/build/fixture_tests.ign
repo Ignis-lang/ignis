@@ -1,0 +1,1220 @@
+import Env from "std::env";
+import Fs from "std::fs";
+import Path from "std::path";
+import Sort from "std::sort";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+/// Directory holding the baselines for the fixtures next to it.
+const SNAPSHOT_DIR_NAME: str = "__snapshots__";
+
+/// Extension of a fixture baseline file.
+const SNAPSHOT_EXTENSION: str = ".snap";
+
+/// Prefix every fixture plan entry carries.
+const FIXTURE_NAME_PREFIX: str = "e2e";
+
+/// Marker introducing a fixture header option.
+const HEADER_MARKER: str = "// e2e:";
+
+/// Longest side a quadratic diff is computed for, in lines.
+const MAX_DIFF_LINES: u64 = 2000;
+
+/// How a fixture is compiled and what its baseline records.
+export enum FixtureKind {
+  /// Compile, link and run the program; the baseline holds exit code and streams.
+  PROGRAM,
+  /// Compile only and expect failure; the baseline holds the reported errors.
+  DIAGNOSTICS,
+  /// Compile only and expect a clean build with warnings; the baseline holds them.
+  WARNINGS,
+}
+
+/// The header a fixture selected, once every leading option line was read.
+export record FixtureMode {
+  public kind: FixtureKind;
+  /// Force the standard library on even when the project disabled it.
+  public forceStd: boolean;
+  /// Skip leak checking for a fixture that leaks on purpose.
+  public allowLeak: boolean;
+
+  public static program(): FixtureMode {
+    return FixtureMode {
+      kind: FixtureKind::PROGRAM,
+      forceStd: false,
+      allowLeak: false,
+    };
+  }
+
+  public clone(&self): FixtureMode {
+    return FixtureMode {
+      kind: self.kind,
+      forceStd: self.forceStd,
+      allowLeak: self.allowLeak,
+    };
+  }
+}
+
+/// A parsed header, or the reason the header could not be understood.
+///
+/// `error` is empty when `mode` is the answer, which is how this module stands
+/// in for the host's `Result<FixtureMode, String>`.
+export record FixtureHeader {
+  public mode: FixtureMode;
+  public error: String;
+
+  public static failed(message: String): FixtureHeader {
+    return FixtureHeader {
+      mode: FixtureMode::program(),
+      error: message,
+    };
+  }
+}
+
+/// One discovered fixture file and the mode its header selected.
+export record FixtureCase {
+  /// Plan entry name, for example `e2e::arithmetic::add`.
+  public name: String;
+  /// Absolute path to the fixture source.
+  public path: Path::PathBuf;
+  public mode: FixtureMode;
+  /// Non-empty when the header was rejected; the fixture fails carrying it.
+  public modeError: String;
+
+  public clone(&self): FixtureCase {
+    return FixtureCase {
+      name: self.name.clone(),
+      path: self.path.clone(),
+      mode: self.mode.clone(),
+      modeError: self.modeError.clone(),
+    };
+  }
+
+  /// Absolute path of the baseline this fixture compares against.
+  public snapshotPath(&self): Path::PathBuf {
+    let directory: Path::PathBuf = match (self.path.parent()) {
+      Option::SOME(parent) -> parent,
+      Option::NONE -> Path::PathBuf::create("."),
+    };
+
+    let stem: String = fixtureFileStem(&self.path);
+    let baselineName: String = stem.concat(SNAPSHOT_EXTENSION);
+
+    return directory.join(SNAPSHOT_DIR_NAME).join(baselineName.toStr());
+  }
+}
+
+/// A stderr stream split into the program's own output and the leak report.
+export record FixtureLeakSplit {
+  public program: String;
+  public leak: String;
+}
+
+/// The file name without its last extension, the way `Path::file_stem` reads it.
+function fixtureFileStem(path: &Path::PathBuf): String {
+  let Option::SOME(name) = path.fileName() else {
+    return String::new();
+  };
+
+  let mut index: u64 = name.length();
+
+  while (index > 1) {
+    let Option::SOME(byte) = name.byteAt(index - 1) else {
+      break;
+    };
+
+    if (byte == '.' as u8) {
+      return name.substringBytes(0, index - 1);
+    }
+
+    index -= 1;
+  }
+
+  return name.clone();
+}
+
+function fixtureEndsWith(value: &String, suffix: str): boolean {
+  let suffixText: String = String::create(suffix);
+
+  if (value.length() < suffixText.length()) {
+    return false;
+  }
+
+  let actual: String = value.substringBytes(value.length() - suffixText.length(), value.length());
+  return actual.equals(&suffixText);
+}
+
+/// Split `value` on `\n` the way the host's `str::lines` does: a trailing
+/// newline closes the last line instead of opening an empty one, and a `\r`
+/// before the separator belongs to the separator.
+export function fixtureLines(value: &String): Vector<String> {
+  let mut lines: Vector<String> = Vector::new<String>();
+  let mut start: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < value.length()) {
+    let Option::SOME(byte) = value.byteAt(index) else {
+      break;
+    };
+
+    if (byte == 10) {
+      let mut end: u64 = index;
+
+      if (end > start) {
+        if (let Option::SOME(previous) = value.byteAt(end - 1) && previous == 13) {
+          end -= 1;
+        }
+      }
+
+      lines.push(value.substringBytes(start, end));
+      start = index + 1;
+    }
+
+    index += 1;
+  }
+
+  if (start < value.length()) {
+    let mut end: u64 = value.length();
+
+    if (let Option::SOME(previous) = value.byteAt(end - 1) && previous == 13) {
+      end -= 1;
+    }
+
+    lines.push(value.substringBytes(start, end));
+  }
+
+  return lines;
+}
+
+/// Drop trailing ASCII whitespace, leaving the leading bytes untouched.
+export function fixtureTrimEnd(value: &String): String {
+  let mut end: u64 = value.length();
+
+  while (end > 0) {
+    let Option::SOME(byte) = value.byteAt(end - 1) else {
+      break;
+    };
+
+    if (byte != 32 && byte != 9 && byte != 10 && byte != 13) {
+      break;
+    }
+
+    end -= 1;
+  }
+
+  return value.substringBytes(0, end);
+}
+
+/// Split a comma-separated option list, trimming each item and dropping empties.
+function fixtureHeaderOptions(value: &String): Vector<String> {
+  let mut items: Vector<String> = Vector::new<String>();
+  let mut start: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index <= value.length()) {
+    let mut atSeparator: boolean = index == value.length();
+
+    if (!atSeparator) {
+      if (let Option::SOME(byte) = value.byteAt(index)) {
+        atSeparator = byte == ',' as u8;
+      }
+    }
+
+    if (atSeparator) {
+      let item: String = value.substringBytes(start, index).trimAsciiWhitespace();
+
+      if (item.length() > 0) {
+        items.push(item.clone());
+      }
+
+      start = index + 1;
+    }
+
+    index += 1;
+  }
+
+  return items;
+}
+
+export namespace FixtureTests {
+  /// Reads the fixture mode from the leading `// e2e: <option>` comment lines.
+  ///
+  /// Scanning stops at the first line that is neither blank nor a comment, so a
+  /// fixture cannot change its mode from the middle of the file.
+  function parseHeader(source: &String): FixtureHeader {
+    let mut forceStd: boolean = false;
+    let mut allowLeak: boolean = false;
+    let mut diagnostics: boolean = false;
+    let mut warnings: boolean = false;
+
+    let markerLength: u64 = String::create(HEADER_MARKER).length();
+    let sourceLines: Vector<String> = fixtureLines(source);
+    let mut lineIndex: u64 = 0;
+
+    while (lineIndex < sourceLines.length()) {
+      let Option::SOME(line) = sourceLines.get(lineIndex) else {
+        break;
+      };
+
+      let trimmed: String = line.trimAsciiWhitespace();
+      lineIndex += 1;
+
+      if (trimmed.length() == 0) {
+        continue;
+      }
+
+      if (!trimmed.startsWith("//")) {
+        break;
+      }
+
+      if (!trimmed.startsWith(HEADER_MARKER)) {
+        continue;
+      }
+
+      let options: String = trimmed.substringBytes(markerLength, trimmed.length());
+      let items: Vector<String> = fixtureHeaderOptions(&options);
+      let mut itemIndex: u64 = 0;
+
+      while (itemIndex < items.length()) {
+        let Option::SOME(option) = items.get(itemIndex) else {
+          break;
+        };
+
+        if (option.equals("std")) {
+          forceStd = true;
+        } else if (option.equals("allow-leak")) {
+          allowLeak = true;
+        } else if (option.equals("err")) {
+          diagnostics = true;
+        } else if (option.equals("warn")) {
+          warnings = true;
+        } else {
+          return FixtureHeader::failed(`Unknown fixture header option '${option.toStr()}'`);
+        }
+
+        itemIndex += 1;
+      }
+    }
+
+    if (warnings) {
+      if (forceStd || allowLeak) {
+        return FixtureHeader::failed(
+          String::create("Fixture header option 'warn' cannot be combined with 'std' or 'allow-leak'"),
+        );
+      }
+
+      if (diagnostics) {
+        return FixtureHeader::failed(
+          String::create("Fixture header option 'warn' cannot be combined with 'std', 'allow-leak' or 'err'"),
+        );
+      }
+
+      return FixtureHeader {
+        mode: FixtureMode {
+          kind: FixtureKind::WARNINGS,
+          forceStd: false,
+          allowLeak: false,
+        },
+        error: String::new(),
+      };
+    }
+
+    if (diagnostics) {
+      if (forceStd || allowLeak) {
+        return FixtureHeader::failed(
+          String::create("Fixture header option 'err' cannot be combined with 'std' or 'allow-leak'"),
+        );
+      }
+
+      return FixtureHeader {
+        mode: FixtureMode {
+          kind: FixtureKind::DIAGNOSTICS,
+          forceStd: false,
+          allowLeak: false,
+        },
+        error: String::new(),
+      };
+    }
+
+    return FixtureHeader {
+      mode: FixtureMode {
+        kind: FixtureKind::PROGRAM,
+        forceStd: forceStd,
+        allowLeak: allowLeak,
+      },
+      error: String::new(),
+    };
+  }
+
+  function isDirectory(path: &Path::PathBuf): boolean {
+    return match (Fs::metadata(path)) {
+      Result::OK(metadata) -> metadata.isDir(),
+      Result::ERROR(_) -> false,
+    };
+  }
+
+  /// Recursively gathers `.ign` files under `currentDir`, skipping snapshot
+  /// directories. Every level is visited in path order, which is what makes the
+  /// collected list deterministic before it is sorted.
+  function collectSources(currentDir: &Path::PathBuf, discovered: &mut Vector<String>): void {
+    let Result::OK(opened) = Fs::ReadDir::open(currentDir.asStr()) else {
+      return;
+    };
+
+    let mut directory: Fs::ReadDir = opened;
+    let mut entryPaths: Vector<String> = Vector::new<String>();
+
+    while (true) {
+      let Result::OK(maybeEntry) = directory.next() else {
+        break;
+      };
+      let Option::SOME(entry) = maybeEntry else {
+        break;
+      };
+
+      // `Fs::ReadDir` hands back `.` and `..`; walking into either of them
+      // would never terminate.
+      if (entry.name.equals(".") || entry.name.equals("..")) {
+        continue;
+      }
+
+      entryPaths.push(entry.path.toString());
+    }
+
+    directory.close();
+    Sort::stableLexicalStrings(&mut entryPaths);
+
+    let mut index: u64 = 0;
+
+    while (index < entryPaths.length()) {
+      let Option::SOME(entryText) = entryPaths.get(index) else {
+        break;
+      };
+
+      let entryPath: Path::PathBuf = Path::PathBuf::fromString(entryText);
+      index += 1;
+
+      if (FixtureTests::isDirectory(&entryPath)) {
+        if (let Option::SOME(name) = entryPath.fileName() && name.equals(SNAPSHOT_DIR_NAME)) {
+          continue;
+        }
+
+        FixtureTests::collectSources(&entryPath, discovered);
+        continue;
+      }
+
+      if (let Option::SOME(extension) = entryPath.extension() && extension.equals("ign")) {
+        let mut discoveredRef: &mut Vector<String> = discovered;
+        discoveredRef.push(entryPath.toString());
+      }
+    }
+  }
+
+  /// Builds the plan entry name from the fixture's path relative to its
+  /// directory. An empty name means the path does not live under `fixtureDir`,
+  /// which is how a caller skips it.
+  function caseName(fixtureDir: &Path::PathBuf, sourcePath: &Path::PathBuf): String {
+    let pathText: String = sourcePath.toString();
+    let rootText: String = fixtureDir.toString();
+
+    if (!pathText.startsWith(rootText.toStr())) {
+      return String::new();
+    }
+
+    let mut start: u64 = rootText.length();
+
+    if (pathText.length() > start) {
+      if (let Option::SOME(separator) = pathText.byteAt(start) && separator == 47) {
+        start += 1;
+      }
+    }
+
+    let mut relative: String = pathText.substringBytes(start, pathText.length());
+
+    if (relative.length() == 0) {
+      return String::new();
+    }
+
+    if (fixtureEndsWith(&relative, ".ign")) {
+      relative = relative.substringBytes(0, relative.length() - 4);
+    }
+
+    let mut name: String = String::create(FIXTURE_NAME_PREFIX);
+    name.pushStr("::");
+
+    let mut index: u64 = 0;
+
+    while (index < relative.length()) {
+      let Option::SOME(byte) = relative.byteAt(index) else {
+        break;
+      };
+
+      if (byte == 47) {
+        name.pushStr("::");
+      } else {
+        name.pushByte(byte);
+      }
+
+      index += 1;
+    }
+
+    return name;
+  }
+
+  /// Collects every fixture under `fixtureDirs`, in directory order and then by
+  /// path.
+  ///
+  /// A directory that does not exist contributes nothing: a project may declare
+  /// a corpus that only some checkouts carry, and that must not fail the run.
+  function discover(fixtureDirs: &Vector<Path::PathBuf>): Vector<FixtureCase> {
+    let mut cases: Vector<FixtureCase> = Vector::new<FixtureCase>();
+    let mut dirIndex: u64 = 0;
+
+    while (dirIndex < fixtureDirs.length()) {
+      let Option::SOME(fixtureDir) = fixtureDirs.get(dirIndex) else {
+        break;
+      };
+
+      dirIndex += 1;
+
+      let mut sources: Vector<String> = Vector::new<String>();
+      FixtureTests::collectSources(fixtureDir, &mut sources);
+      Sort::stableLexicalStrings(&mut sources);
+
+      let mut sourceIndex: u64 = 0;
+
+      while (sourceIndex < sources.length()) {
+        let Option::SOME(sourceText) = sources.get(sourceIndex) else {
+          break;
+        };
+
+        sourceIndex += 1;
+
+        let sourcePath: Path::PathBuf = Path::PathBuf::fromString(sourceText);
+        let name: String = FixtureTests::caseName(fixtureDir, &sourcePath);
+
+        if (name.length() == 0) {
+          continue;
+        }
+
+        let header: FixtureHeader = match (Fs::readToString(&sourcePath)) {
+          Result::OK(source) -> FixtureTests::parseHeader(&source),
+          Result::ERROR(error) -> FixtureHeader::failed(
+            `Failed to read fixture '${sourcePath.asStr()}': ${error.errorMessage()} (os error ${error.rawCode()})`,
+          ),
+        };
+
+        cases.push(FixtureCase {
+          name: name,
+          path: sourcePath,
+          mode: header.mode,
+          modeError: header.error,
+        });
+      }
+    }
+
+    return cases;
+  }
+
+  /// Keeps only the fixtures whose name contains `filter`. An empty filter keeps
+  /// every one of them.
+  function filterCases(cases: &Vector<FixtureCase>, filter: &String): Vector<FixtureCase> {
+    let mut selected: Vector<FixtureCase> = Vector::new<FixtureCase>();
+    let mut index: u64 = 0;
+
+    while (index < cases.length()) {
+      let Option::SOME(fixture) = cases.get(index) else {
+        break;
+      };
+
+      if (filter.length() == 0 || fixture.name.contains(filter)) {
+        selected.push(fixture.clone());
+      }
+
+      index += 1;
+    }
+
+    return selected;
+  }
+
+  /// One rendered stream of a program baseline.
+  function displayStream(stream: &String): String {
+    if (stream.length() == 0) {
+      return String::create("(empty)");
+    }
+
+    return fixtureTrimEnd(stream);
+  }
+
+  /// Renders the baseline body of a program fixture.
+  ///
+  /// The layout matches the one the migrated host `e2e_ok` snapshots used, so a
+  /// migrated case keeps the exact expectation it had as a host test.
+  function formatProgramSnapshot(exitCode: i32, outText: &String, errText: &String): String {
+    let renderedOut: String = FixtureTests::displayStream(outText);
+    let renderedErr: String = FixtureTests::displayStream(errText);
+
+    return `exit_code: ${exitCode}\nstdout: ${renderedOut.toStr()}\nstderr: ${renderedErr.toStr()}`;
+  }
+
+  /// Splits stderr into the program's own output and the LeakSanitizer report.
+  ///
+  /// The report starts at the `==<pid>==ERROR: LeakSanitizer:` line and runs to
+  /// the end of the stream.
+  function splitLeakReport(errText: &String): FixtureLeakSplit {
+    let header: String = String::create("ERROR: LeakSanitizer:");
+
+    if (!errText.contains(&header)) {
+      return FixtureLeakSplit {
+        program: errText.clone(),
+        leak: String::new(),
+      };
+    }
+
+    let mut program: String = String::new();
+    let mut leak: String = String::new();
+    let mut inLeakReport: boolean = false;
+    let mut programLines: u64 = 0;
+    let mut leakLines: u64 = 0;
+
+    let streamLines: Vector<String> = fixtureLines(errText);
+    let mut index: u64 = 0;
+
+    while (index < streamLines.length()) {
+      let Option::SOME(line) = streamLines.get(index) else {
+        break;
+      };
+
+      index += 1;
+
+      if (!inLeakReport && line.startsWith("==") && line.contains(&header)) {
+        inLeakReport = true;
+      }
+
+      if (inLeakReport) {
+        if (leakLines > 0) {
+          leak.pushStr("\n");
+        }
+
+        leak.push(line);
+        leakLines += 1;
+      } else {
+        if (programLines > 0) {
+          program.pushStr("\n");
+        }
+
+        program.push(line);
+        programLines += 1;
+      }
+    }
+
+    return FixtureLeakSplit {
+      program: program,
+      leak: leak,
+    };
+  }
+
+  function cellAt(common: &Vector<u64>, columns: u64, row: u64, column: u64): u64 {
+    return match (common.get(row * columns + column)) {
+      Option::SOME(value) -> *value,
+      Option::NONE -> 0,
+    };
+  }
+
+  /// Line-level diff driven by a longest-common-subsequence table.
+  ///
+  /// The table is quadratic in the line counts, which is fine for snapshot
+  /// bodies but not for an accidental multi-megabyte output, so a very large
+  /// side degrades to every deletion followed by every insertion.
+  function diffLines(expected: &Vector<String>, actual: &Vector<String>): Vector<String> {
+    let mut edits: Vector<String> = Vector::new<String>();
+
+    if (expected.length() > MAX_DIFF_LINES || actual.length() > MAX_DIFF_LINES) {
+      let mut deleteIndex: u64 = 0;
+
+      while (deleteIndex < expected.length()) {
+        if (let Option::SOME(line) = expected.get(deleteIndex)) {
+          edits.push(`-${line.toStr()}`);
+        }
+
+        deleteIndex += 1;
+      }
+
+      let mut insertIndex: u64 = 0;
+
+      while (insertIndex < actual.length()) {
+        if (let Option::SOME(line) = actual.get(insertIndex)) {
+          edits.push(`+${line.toStr()}`);
+        }
+
+        insertIndex += 1;
+      }
+
+      return edits;
+    }
+
+    let rows: u64 = expected.length() + 1;
+    let columns: u64 = actual.length() + 1;
+    let mut common: Vector<u64> = Vector::new<u64>();
+    let mut cell: u64 = 0;
+
+    while (cell < rows * columns) {
+      common.push(0);
+      cell += 1;
+    }
+
+    let mut row: u64 = expected.length();
+
+    while (row > 0) {
+      row -= 1;
+
+      let mut column: u64 = actual.length();
+
+      while (column > 0) {
+        column -= 1;
+
+        let Option::SOME(expectedLine) = expected.get(row) else {
+          break;
+        };
+        let Option::SOME(actualLine) = actual.get(column) else {
+          break;
+        };
+
+        let mut value: u64 = 0;
+
+        if (expectedLine.equals(actualLine)) {
+          value = FixtureTests::cellAt(&common, columns, row + 1, column + 1) + 1;
+        } else {
+          let skipExpected: u64 = FixtureTests::cellAt(&common, columns, row + 1, column);
+          let skipActual: u64 = FixtureTests::cellAt(&common, columns, row, column + 1);
+
+          value = skipExpected > skipActual ? skipExpected : skipActual;
+        }
+
+        let _stored: boolean = common.set(row * columns + column, value);
+      }
+    }
+
+    let mut expectedIndex: u64 = 0;
+    let mut actualIndex: u64 = 0;
+
+    while (expectedIndex < expected.length() && actualIndex < actual.length()) {
+      let Option::SOME(expectedLine) = expected.get(expectedIndex) else {
+        break;
+      };
+      let Option::SOME(actualLine) = actual.get(actualIndex) else {
+        break;
+      };
+
+      if (expectedLine.equals(actualLine)) {
+        edits.push(` ${expectedLine.toStr()}`);
+        expectedIndex += 1;
+        actualIndex += 1;
+        continue;
+      }
+
+      let skipExpected: u64 = FixtureTests::cellAt(&common, columns, expectedIndex + 1, actualIndex);
+      let skipActual: u64 = FixtureTests::cellAt(&common, columns, expectedIndex, actualIndex + 1);
+
+      if (skipExpected >= skipActual) {
+        edits.push(`-${expectedLine.toStr()}`);
+        expectedIndex += 1;
+      } else {
+        edits.push(`+${actualLine.toStr()}`);
+        actualIndex += 1;
+      }
+    }
+
+    while (expectedIndex < expected.length()) {
+      if (let Option::SOME(line) = expected.get(expectedIndex)) {
+        edits.push(`-${line.toStr()}`);
+      }
+
+      expectedIndex += 1;
+    }
+
+    while (actualIndex < actual.length()) {
+      if (let Option::SOME(line) = actual.get(actualIndex)) {
+        edits.push(`+${line.toStr()}`);
+      }
+
+      actualIndex += 1;
+    }
+
+    return edits;
+  }
+
+  /// Renders a single-hunk unified diff between a baseline and an observed body.
+  ///
+  /// Snapshot bodies are small, so one hunk covering the whole file reads better
+  /// than context windows and stays deterministic.
+  function unifiedDiff(snapshotPath: &Path::PathBuf, expected: &String, actual: &String): String {
+    let expectedLines: Vector<String> = fixtureLines(expected);
+    let actualLines: Vector<String> = fixtureLines(actual);
+
+    let expectedCount: u64 = expectedLines.length() > 0 ? expectedLines.length() : 1;
+    let actualCount: u64 = actualLines.length() > 0 ? actualLines.length() : 1;
+
+    let mut diff: String = `--- expected: ${snapshotPath.asStr()}`;
+    diff.pushStr("\n+++ actual\n");
+
+    let hunk: String = `@@ -1,${expectedCount} +1,${actualCount} @@`;
+    diff.push(&hunk);
+
+    let edits: Vector<String> = FixtureTests::diffLines(&expectedLines, &actualLines);
+    let mut index: u64 = 0;
+
+    while (index < edits.length()) {
+      let Option::SOME(edit) = edits.get(index) else {
+        break;
+      };
+
+      diff.pushStr("\n");
+      diff.push(edit);
+      index += 1;
+    }
+
+    return diff;
+  }
+
+  /// Writes `body` to `snapshotPath`, creating the directory it lives in.
+  ///
+  /// Returns an empty string on success and the failure text otherwise.
+  function writeSnapshot(snapshotPath: &Path::PathBuf, body: &String): String {
+    if (let Option::SOME(parent) = snapshotPath.parent()) {
+      if (let Result::ERROR(error) = Fs::createDirAll(&parent)) {
+        return `Failed to create snapshot directory '${parent.asStr()}': ${error.errorMessage()} (os error ${error.rawCode()})`;
+      }
+    }
+
+    if (let Result::ERROR(error) = Fs::writeString(snapshotPath, body)) {
+      return `Failed to write snapshot '${snapshotPath.asStr()}': ${error.errorMessage()} (os error ${error.rawCode()})`;
+    }
+
+    return String::new();
+  }
+
+  /// Compares an observed body against the fixture's baseline.
+  ///
+  /// With `updateSnapshots` on, a missing or differing baseline is rewritten and
+  /// the fixture passes, which mirrors what `Test::assertSnapshot` does for
+  /// `@test` snapshots under `--update-snapshots`. An empty return means the
+  /// fixture passed.
+  function compareSnapshot(
+    snapshotPath: &Path::PathBuf,
+    actual: &String,
+    updateSnapshots: boolean,
+  ): String {
+    if (!Fs::exists(snapshotPath.asStr())) {
+      if (updateSnapshots) {
+        return FixtureTests::writeSnapshot(snapshotPath, actual);
+      }
+
+      return `snapshot missing: ${snapshotPath.asStr()}\nobserved:\n${actual.toStr()}`;
+    }
+
+    let Result::OK(expected) = Fs::readToString(snapshotPath) else {
+      return `Failed to read snapshot '${snapshotPath.asStr()}'`;
+    };
+
+    if (expected.equals(actual)) {
+      return String::new();
+    }
+
+    if (updateSnapshots) {
+      return FixtureTests::writeSnapshot(snapshotPath, actual);
+    }
+
+    let diff: String = FixtureTests::unifiedDiff(snapshotPath, &expected, actual);
+    return `snapshot mismatch: ${snapshotPath.asStr()}\n${diff.toStr()}`;
+  }
+
+  /// Creates every snapshot directory the selected fixtures may write into.
+  ///
+  /// Two fixtures in one directory would otherwise race on the same lazily
+  /// created directory when the runner starts them concurrently.
+  function prepareSnapshotDirectories(cases: &Vector<FixtureCase>): void {
+    let mut prepared: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < cases.length()) {
+      let Option::SOME(fixture) = cases.get(index) else {
+        break;
+      };
+
+      index += 1;
+
+      let Option::SOME(snapshotDir) = fixture.snapshotPath().parent() else {
+        continue;
+      };
+
+      let snapshotDirText: String = snapshotDir.toString();
+      let mut seen: boolean = false;
+      let mut preparedIndex: u64 = 0;
+
+      while (preparedIndex < prepared.length()) {
+        let Option::SOME(existing) = prepared.get(preparedIndex) else {
+          break;
+        };
+
+        if (existing.equals(&snapshotDirText)) {
+          seen = true;
+          break;
+        }
+
+        preparedIndex += 1;
+      }
+
+      if (!seen) {
+        let _ = Fs::createDirAll(&snapshotDir);
+        prepared.push(snapshotDirText.clone());
+      }
+    }
+  }
+}
+
+function fixtureCorpusPath(relativePath: str): Path::PathBuf {
+  match (Env::currentDir()) {
+    Result::OK(root) -> {
+      return root.join(relativePath).normalize();
+    },
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::new();
+    },
+  };
+
+  return Path::PathBuf::new();
+}
+
+/// A private directory under the system temporary directory, wiped first so a
+/// rerun never observes what an earlier run left behind.
+function fixtureScratchDir(name: str): Path::PathBuf {
+  let Result::OK(tempRoot) = Fs::tempDir() else {
+    Test::fail();
+    return Path::PathBuf::new();
+  };
+
+  let scratch: Path::PathBuf = tempRoot.join("ignis-selfhost-fixtures").join(name);
+  let _removed = Fs::removeDirAll(&scratch);
+  let _created = Fs::createDirAll(&scratch);
+
+  return scratch;
+}
+
+function fixtureNamesOf(cases: &Vector<FixtureCase>): String {
+  let mut names: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < cases.length()) {
+    let Option::SOME(fixture) = cases.get(index) else {
+      break;
+    };
+
+    if (index > 0) {
+      names.pushStr(",");
+    }
+
+    names.push(&fixture.name);
+    index += 1;
+  }
+
+  return names;
+}
+
+@test
+function fixturesAreDiscoveredRecursivelyInPathOrderPerDirectory(): void {
+  let mut dirs: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  dirs.push(fixtureCorpusPath("test_cases/selfhost/fixtures/ok"));
+  dirs.push(fixtureCorpusPath("test_cases/selfhost/fixtures/err"));
+
+  let cases: Vector<FixtureCase> = FixtureTests::discover(&dirs);
+
+  Test::assertEq<str>(
+    fixtureNamesOf(&cases).toStr(),
+    "e2e::alpha,e2e::nested::deeper,e2e::zebra,e2e::broken",
+  );
+
+  let Option::SOME(broken) = cases.get(3) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(broken.mode.kind == FixtureKind::DIAGNOSTICS, true);
+}
+
+@test
+function aMissingFixtureDirectoryContributesNothing(): void {
+  let mut dirs: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  dirs.push(fixtureCorpusPath("test_cases/selfhost/fixtures/absent"));
+
+  Test::assertEq<u64>(FixtureTests::discover(&dirs).length(), 0);
+}
+
+@test
+function fixturesAreFilteredBySubstringOnTheirName(): void {
+  let mut dirs: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  dirs.push(fixtureCorpusPath("test_cases/selfhost/fixtures/ok"));
+
+  let cases: Vector<FixtureCase> = FixtureTests::discover(&dirs);
+  let filter: String = String::create("nested");
+  let selected: Vector<FixtureCase> = FixtureTests::filterCases(&cases, &filter);
+
+  Test::assertEq<str>(fixtureNamesOf(&selected).toStr(), "e2e::nested::deeper");
+}
+
+@test
+function anEqualBaselineMakesAFixturePass(): void {
+  let scratch: Path::PathBuf = fixtureScratchDir("equal");
+  let snapshotPath: Path::PathBuf = scratch.join("case.snap");
+  let body: String = String::create("exit_code: 0\nstdout: (empty)\nstderr: (empty)");
+  let _written = Fs::writeString(&snapshotPath, &body);
+
+  Test::assertEq<str>(FixtureTests::compareSnapshot(&snapshotPath, &body, false).toStr(), "");
+}
+
+@test
+function aDifferingBaselineReportsAMismatchWithItsDiff(): void {
+  let scratch: Path::PathBuf = fixtureScratchDir("mismatch");
+  let snapshotPath: Path::PathBuf = scratch.join("case.snap");
+  let expected: String = String::create("exit_code: 0\nstdout: a\nstderr: (empty)");
+  let actual: String = String::create("exit_code: 0\nstdout: b\nstderr: (empty)");
+  let _written = Fs::writeString(&snapshotPath, &expected);
+
+  let failure: String = FixtureTests::compareSnapshot(&snapshotPath, &actual, false);
+  let mut expectedFailure: String = `snapshot mismatch: ${snapshotPath.asStr()}\n`;
+  expectedFailure.pushStr("--- expected: ");
+  expectedFailure.pushStr(snapshotPath.asStr());
+  expectedFailure.pushStr("\n+++ actual\n@@ -1,3 +1,3 @@\n exit_code: 0\n-stdout: a\n+stdout: b\n stderr: (empty)");
+
+  Test::assertEq<str>(failure.toStr(), expectedFailure.toStr());
+}
+
+@test
+function aMissingBaselineReportsWhatWasObserved(): void {
+  let scratch: Path::PathBuf = fixtureScratchDir("missing");
+  let snapshotPath: Path::PathBuf = scratch.join("case.snap");
+  let body: String = String::create("exit_code: 7\nstdout: (empty)\nstderr: (empty)");
+
+  let failure: String = FixtureTests::compareSnapshot(&snapshotPath, &body, false);
+
+  Test::assertEq<str>(
+    failure.toStr(),
+    `snapshot missing: ${snapshotPath.asStr()}\nobserved:\n${body.toStr()}`.toStr(),
+  );
+}
+
+@test
+function updateModeCreatesAMissingBaselineAndPasses(): void {
+  let scratch: Path::PathBuf = fixtureScratchDir("update-missing");
+  let snapshotPath: Path::PathBuf = scratch.join("nested").join("case.snap");
+  let body: String = String::create("exit_code: 0\nstdout: created\nstderr: (empty)");
+
+  Test::assertEq<str>(FixtureTests::compareSnapshot(&snapshotPath, &body, true).toStr(), "");
+
+  let Result::OK(written) = Fs::readToString(&snapshotPath) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(written.toStr(), body.toStr());
+}
+
+@test
+function updateModeRewritesADifferingBaselineAndPasses(): void {
+  let scratch: Path::PathBuf = fixtureScratchDir("update-mismatch");
+  let snapshotPath: Path::PathBuf = scratch.join("case.snap");
+  let stale: String = String::create("exit_code: 1\nstdout: (empty)\nstderr: (empty)");
+  let _written = Fs::writeString(&snapshotPath, &stale);
+
+  let fresh: String = String::create("exit_code: 0\nstdout: (empty)\nstderr: (empty)");
+
+  Test::assertEq<str>(FixtureTests::compareSnapshot(&snapshotPath, &fresh, true).toStr(), "");
+
+  let Result::OK(rewritten) = Fs::readToString(&snapshotPath) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(rewritten.toStr(), fresh.toStr());
+}
+
+@test
+function fixtureHeaderWithoutOptionsIsAPlainProgram(): void {
+  let source: String = String::create("function main(): i32 { return 0; }");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "");
+  Test::assertEq<boolean>(header.mode.kind == FixtureKind::PROGRAM, true);
+  Test::assertEq<boolean>(header.mode.forceStd, false);
+  Test::assertEq<boolean>(header.mode.allowLeak, false);
+}
+
+@test
+function fixtureHeaderOptionsAccumulateAcrossLeadingCommentLines(): void {
+  let source: String = String::create("// e2e: std\n// e2e: allow-leak\nfunction main(): void {}");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "");
+  Test::assertEq<boolean>(header.mode.forceStd, true);
+  Test::assertEq<boolean>(header.mode.allowLeak, true);
+}
+
+@test
+function fixtureHeaderErrOptionSelectsDiagnosticsMode(): void {
+  let source: String = String::create("// e2e: err\nfunction main(): i32 {}");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "");
+  Test::assertEq<boolean>(header.mode.kind == FixtureKind::DIAGNOSTICS, true);
+}
+
+@test
+function fixtureHeaderWarnOptionSelectsWarningsMode(): void {
+  let source: String = String::create("// e2e: warn\nfunction main(): void {}");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "");
+  Test::assertEq<boolean>(header.mode.kind == FixtureKind::WARNINGS, true);
+}
+
+@test
+function fixtureHeaderAfterTheFirstCodeLineIsIgnored(): void {
+  let source: String = String::create("function main(): void {}\n// e2e: err");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "");
+  Test::assertEq<boolean>(header.mode.kind == FixtureKind::PROGRAM, true);
+}
+
+@test
+function fixtureHeaderRejectsAnUnknownOption(): void {
+  let source: String = String::create("// e2e: nope\n");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "Unknown fixture header option 'nope'");
+}
+
+@test
+function fixtureHeaderRejectsErrCombinedWithStd(): void {
+  let source: String = String::create("// e2e: err, std\n");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(
+    header.error.toStr(),
+    "Fixture header option 'err' cannot be combined with 'std' or 'allow-leak'",
+  );
+}
+
+@test
+function fixtureHeaderRejectsErrCombinedWithAllowLeak(): void {
+  let source: String = String::create("// e2e: err, allow-leak\n");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(
+    header.error.toStr(),
+    "Fixture header option 'err' cannot be combined with 'std' or 'allow-leak'",
+  );
+}
+
+@test
+function fixtureHeaderRejectsWarnCombinedWithStd(): void {
+  let source: String = String::create("// e2e: warn, std\n");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(
+    header.error.toStr(),
+    "Fixture header option 'warn' cannot be combined with 'std' or 'allow-leak'",
+  );
+}
+
+@test
+function fixtureHeaderRejectsWarnCombinedWithAllowLeak(): void {
+  let source: String = String::create("// e2e: warn, allow-leak\n");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(
+    header.error.toStr(),
+    "Fixture header option 'warn' cannot be combined with 'std' or 'allow-leak'",
+  );
+}
+
+@test
+function fixtureHeaderRejectsWarnCombinedWithErr(): void {
+  let source: String = String::create("// e2e: warn, err\n");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(
+    header.error.toStr(),
+    "Fixture header option 'warn' cannot be combined with 'std', 'allow-leak' or 'err'",
+  );
+}
+
+@test
+function fixtureBaselineSitsInASnapshotDirectoryNextToItsFixture(): void {
+  let fixture: FixtureCase = FixtureCase {
+    name: String::create("e2e::nested::deeper"),
+    path: Path::PathBuf::create("/corpus/ok/nested/deeper.ign"),
+    mode: FixtureMode::program(),
+    modeError: String::new(),
+  };
+
+  Test::assertEq<str>(fixture.snapshotPath().asStr(), "/corpus/ok/nested/__snapshots__/deeper.snap");
+}
+
+@test
+function fixtureCaseNameJoinsPathSegmentsUnderTheE2ePrefix(): void {
+  let fixtureDir: Path::PathBuf = Path::PathBuf::create("/corpus/ok");
+  let sourcePath: Path::PathBuf = Path::PathBuf::create("/corpus/ok/nested/deeper.ign");
+
+  Test::assertEq<str>(FixtureTests::caseName(&fixtureDir, &sourcePath).toStr(), "e2e::nested::deeper");
+}
+
+@test
+function fixtureCaseNameOfADirectChildCarriesOneSeparator(): void {
+  let fixtureDir: Path::PathBuf = Path::PathBuf::create("/corpus/ok");
+  let sourcePath: Path::PathBuf = Path::PathBuf::create("/corpus/ok/alpha.ign");
+
+  Test::assertEq<str>(FixtureTests::caseName(&fixtureDir, &sourcePath).toStr(), "e2e::alpha");
+}
+
+@test
+function fixtureEmptyStreamsRenderAsTheEmptyMarker(): void {
+  let empty: String = String::new();
+  let body: String = FixtureTests::formatProgramSnapshot(0, &empty, &empty);
+
+  Test::assertEq<str>(body.toStr(), "exit_code: 0\nstdout: (empty)\nstderr: (empty)");
+}
+
+@test
+function fixtureTrailingNewlinesAreTrimmedFromRenderedStreams(): void {
+  let outText: String = String::create("dropped\ndropped\n");
+  let errText: String = String::new();
+  let body: String = FixtureTests::formatProgramSnapshot(3, &outText, &errText);
+
+  Test::assertEq<str>(body.toStr(), "exit_code: 3\nstdout: dropped\ndropped\nstderr: (empty)");
+}
+
+@test
+function fixtureLeakReportIsSplitAwayFromProgramOutput(): void {
+  let errText: String = String::create("hello\n==12==ERROR: LeakSanitizer: detected memory leaks\ndetail");
+  let split: FixtureLeakSplit = FixtureTests::splitLeakReport(&errText);
+
+  Test::assertEq<str>(split.program.toStr(), "hello");
+  Test::assertEq<str>(split.leak.toStr(), "==12==ERROR: LeakSanitizer: detected memory leaks\ndetail");
+}
+
+@test
+function fixtureDiffMarksOnlyTheChangedLine(): void {
+  let snapshotPath: Path::PathBuf = Path::PathBuf::create("/tmp/case.snap");
+  let expected: String = String::create("exit_code: 0\nstdout: a\nstderr: (empty)");
+  let actual: String = String::create("exit_code: 0\nstdout: b\nstderr: (empty)");
+
+  let diff: String = FixtureTests::unifiedDiff(&snapshotPath, &expected, &actual);
+
+  Test::assertEq<str>(
+    diff.toStr(),
+    "--- expected: /tmp/case.snap\n+++ actual\n@@ -1,3 +1,3 @@\n exit_code: 0\n-stdout: a\n+stdout: b\n stderr: (empty)",
+  );
+}
