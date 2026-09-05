@@ -24,3 +24,18 @@ keywords = ["programming", "language", "compiler"]
 license = "GPL-3.0-only"
 repository = "https://github.com/Ignis-lang/ignis"
 version = "0.4.0"
+
+# The selfhost gates in CI and the nightly bootstrap ladder run the compiler
+# under test against its own source for tens of minutes. A plain debug build
+# is too slow for that budget, but a plain `--release` silently drops
+# `mono_output.verify_no_generics()` and every `debug_assert!` (both are
+# `#[cfg(debug_assertions)]`), which those gates rely on to catch
+# monomorphization and invariant bugs. This profile keeps release codegen
+# speed while restoring debug assertions and overflow checks.
+[profile.ci]
+inherits = "release"
+opt-level = 3
+debug = 1
+lto = false
+debug-assertions = true
+overflow-checks = true

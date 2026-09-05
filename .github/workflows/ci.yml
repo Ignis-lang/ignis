@@ -129,7 +129,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "v0-rust"
-          shared-key: "ci-selfhost"
+          # Suffixed with the profile: the job used to build target/debug and
+          # now builds target/ci, and a shared key across two different target
+          # subdirectories would only cost a one-time cache miss, but keeping
+          # them apart avoids ever mixing the two.
+          shared-key: "ci-selfhost-profile-ci"
           cache-targets: true
           cache-on-failure: true
 
@@ -154,11 +158,15 @@ jobs:
       - name: Build the C runtime archive
         run: make -C std/runtime
 
+      # Built with the `ci` profile rather than plain debug or `--release`: the
+      # selfhost gates rely on `debug_assert!` and
+      # `mono_output.verify_no_generics()`, which `--release` strips, while
+      # plain debug is too slow for this job's budget.
       - name: Build Ignis
-        run: cargo build --locked -p ignis
+        run: cargo build --locked --profile ci -p ignis
 
       - name: Add Ignis to PATH
-        run: echo "${GITHUB_WORKSPACE}/target/debug" >> "$GITHUB_PATH"
+        run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
 
       # `ignis fmt --check` exits non-zero listing every file that is not in
       # canonical layout. `example/add.ign` is excluded because it hits the
