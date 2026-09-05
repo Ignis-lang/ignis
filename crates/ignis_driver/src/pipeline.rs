@@ -2099,15 +2099,6 @@ pub fn run_project_tests(
 
   let codegen_started = Instant::now();
   let used_modules = ctx.module_graph.all_modules_topological();
-  let mut test_module_ids = HashSet::new();
-  for test in &plan.tests {
-    let owner_module = output.defs.get(&test.def_id).owner_module;
-    test_module_ids.insert(owner_module);
-
-    for dep_id in ctx.module_graph.transitive_deps(owner_module) {
-      test_module_ids.insert(dep_id);
-    }
-  }
 
   if ensure_std_built(&used_modules, &ctx.module_graph, &config).is_err() {
     cmd_fail!(&config, "Test setup failed", start.elapsed());
@@ -2196,7 +2187,7 @@ pub fn run_project_tests(
   }
 
   let used_module_set: std::collections::HashSet<ModuleId> = used_modules.iter().copied().collect();
-  let (lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
+  let (mut lir_program, verify_result) = ignis_lir::lowering::lower_and_verify(
     &mono_output.hir,
     &mut types,
     &mono_output.defs,
@@ -2204,6 +2195,10 @@ pub fn run_project_tests(
     &drop_schedules,
     Some(&used_module_set),
   );
+
+  // The harness translation unit defines `main` and calls the selected tests directly, so
+  // the module that owns the project's `main` must not emit an entry wrapper too.
+  lir_program.entry_point = None;
 
   if let Err(errors) = &verify_result {
     eprintln!("{} Cannot execute tests: LIR verification failed", "Error:".red().bold());
@@ -2226,11 +2221,18 @@ pub fn run_project_tests(
   }
 
   let std_dir = ctx.module_graph.std_path();
+
+  // Every discovered project module is emitted, whether or not the filter selected a
+  // test inside it. Narrowing the set to the import closure of the selected tests is
+  // unsound: a module body can call a symbol whose owner module it never imports, so
+  // the import graph under-approximates the symbols the emitted objects reference and
+  // the link fails on the missing definition. An unfiltered run compiles the whole
+  // project already, so restricting the set would only save codegen time.
   let user_modules: Vec<_> = used_modules
     .iter()
     .filter(|module_id| {
       let module = ctx.module_graph.modules.get(module_id);
-      test_module_ids.contains(module_id) && module.path.is_project() && !module.path.is_inside_dir(std_dir)
+      module.path.is_project() && !module.path.is_inside_dir(std_dir)
     })
     .collect();
 

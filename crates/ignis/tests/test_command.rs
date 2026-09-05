@@ -50,6 +50,27 @@ fn selfhost_compiler() -> &'static Path {
   })
 }
 
+/// Run the selfhost compiler against `entry`, with the fixture project as its working
+/// directory and its binary written inside that project.
+///
+/// The selfhost compiler writes `selfhost_emit.c` and `selfhost_emit.o` relative to its
+/// working directory, and the binary defaults to `selfhost_out` there too. Cargo runs the
+/// adapter tests on separate threads, so sharing one working directory lets them overwrite
+/// each other's emitted C and objects mid-link, and it leaves `selfhost_out` behind in the
+/// crate directory.
+fn run_selfhost_compiler(
+  project_dir: &Path,
+  entry: &Path,
+) -> std::process::Output {
+  Command::new(selfhost_compiler())
+    .current_dir(project_dir)
+    .arg(entry)
+    .arg("-o")
+    .arg(project_dir.join("selfhost_out"))
+    .output()
+    .expect("execute selfhost compiler")
+}
+
 fn make_temp_project_dir(label: &str) -> PathBuf {
   let unique = SystemTime::now()
     .duration_since(UNIX_EPOCH)
@@ -340,10 +361,7 @@ export function increment(): i32 {
 "#,
   );
 
-  let selfhost_output = Command::new(selfhost_compiler())
-    .arg(project_dir.join("src/main.ign"))
-    .output()
-    .expect("execute selfhost compiler");
+  let selfhost_output = run_selfhost_compiler(&project_dir, &project_dir.join("src/main.ign"));
 
   let selfhost_stdout = String::from_utf8_lossy(&selfhost_output.stdout).into_owned();
   let selfhost_stderr = String::from_utf8_lossy(&selfhost_output.stderr).into_owned();
@@ -383,10 +401,7 @@ export function doubleIncrement(): i32 {
 "#,
   );
 
-  let selfhost_output = Command::new(selfhost_compiler())
-    .arg(project_dir.join("src/main.ign"))
-    .output()
-    .expect("execute selfhost compiler");
+  let selfhost_output = run_selfhost_compiler(&project_dir, &project_dir.join("src/main.ign"));
 
   let selfhost_stdout = String::from_utf8_lossy(&selfhost_output.stdout).into_owned();
   let selfhost_stderr = String::from_utf8_lossy(&selfhost_output.stderr).into_owned();
@@ -412,10 +427,7 @@ function main(): i32 {
 "#,
   );
 
-  let selfhost_output = Command::new(selfhost_compiler())
-    .arg(project_dir.join("src/main.ign"))
-    .output()
-    .expect("execute selfhost compiler");
+  let selfhost_output = run_selfhost_compiler(&project_dir, &project_dir.join("src/main.ign"));
 
   let selfhost_stdout = String::from_utf8_lossy(&selfhost_output.stdout).into_owned();
   let selfhost_stderr = String::from_utf8_lossy(&selfhost_output.stderr).into_owned();
@@ -455,10 +467,7 @@ function main(): void {
 "#,
   );
 
-  let selfhost_output = Command::new(selfhost_compiler())
-    .arg(project_dir.join("src/main.ign"))
-    .output()
-    .expect("execute selfhost compiler");
+  let selfhost_output = run_selfhost_compiler(&project_dir, &project_dir.join("src/main.ign"));
 
   let selfhost_stdout = String::from_utf8_lossy(&selfhost_output.stdout).into_owned();
   let selfhost_stderr = String::from_utf8_lossy(&selfhost_output.stderr).into_owned();
