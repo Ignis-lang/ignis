@@ -80,6 +80,9 @@ pub struct Project {
 
   /// Import path aliases: first segment -> absolute directory path.
   pub aliases: HashMap<String, PathBuf>,
+
+  /// Absolute directories scanned for program fixture test cases.
+  pub test_fixture_dirs: Vec<PathBuf>,
 }
 
 /// Set of extra artifacts to emit during compilation.
@@ -262,6 +265,16 @@ pub fn resolve_project(
   let emit_values = overrides.emit.as_ref().unwrap_or(&toml.build.emit);
   let emit = parse_emit_set(emit_values)?;
 
+  // Fixture directories are resolved but not validated: a project may declare a
+  // corpus directory that only exists on some checkouts, and a missing directory
+  // must not break `ignis build`.
+  let test_fixture_dirs: Vec<PathBuf> = toml
+    .test
+    .fixtures
+    .iter()
+    .map(|fixture_dir| resolve_path(&root, fixture_dir))
+    .collect();
+
   // Resolve aliases
   let mut aliases = HashMap::new();
   for (key, value) in &toml.aliases {
@@ -303,6 +316,7 @@ pub fn resolve_project(
     cflags,
     emit,
     aliases,
+    test_fixture_dirs,
   })
 }
 
@@ -343,7 +357,7 @@ mod tests {
   use ignis_config::TargetBackend;
 
   use super::*;
-  use crate::project::config::{BuildTomlConfig, IgnisTomlConfig, PackageConfig, ProjectToml};
+  use crate::project::config::{BuildTomlConfig, IgnisTomlConfig, PackageConfig, ProjectToml, TestTomlConfig};
   use std::fs;
 
   fn minimal_toml(name: &str) -> ProjectToml {
@@ -377,6 +391,7 @@ mod tests {
         cflags: vec![],
         emit: vec![],
       },
+      test: TestTomlConfig::default(),
       aliases: HashMap::new(),
     }
   }

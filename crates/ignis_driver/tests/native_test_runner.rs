@@ -2,8 +2,11 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use ignis_driver::{run_project_tests, run_single_file_tests, run_std_tests};
+use ignis_driver::{
+  run_project_tests, run_project_tests_with_options, run_single_file_tests, run_std_tests, TestRunOptions,
+};
 use tempfile::TempDir;
 
 fn workspace_std_path() -> PathBuf {
@@ -11,21 +14,91 @@ fn workspace_std_path() -> PathBuf {
 }
 
 fn write_test_project(source: &str) -> TempDir {
+  write_test_project_with_fixture_dirs(source, &[])
+}
+
+fn write_test_project_with_fixture_dirs(
+  source: &str,
+  fixture_dirs: &[&str],
+) -> TempDir {
   let temp_dir = TempDir::new().expect("temporary project dir");
   let src_dir = temp_dir.path().join("src");
 
   fs::create_dir_all(&src_dir).expect("create src dir");
   fs::write(src_dir.join("main.ign"), source).expect("write main module");
+
+  let fixture_section = if fixture_dirs.is_empty() {
+    String::new()
+  } else {
+    let entries: Vec<String> = fixture_dirs.iter().map(|dir| format!("\"{}\"", dir)).collect();
+    format!("\n[test]\nfixtures = [{}]\n", entries.join(", "))
+  };
+
   fs::write(
     temp_dir.path().join("ignis.toml"),
     format!(
-      "[package]\nname = \"native_test_runner_fixture\"\nversion = \"0.1.0\"\nauthors = []\ndescription = \"fixture\"\nkeywords = []\nlicense = \"MIT\"\nrepository = \"\"\n\n[ignis]\nstd = true\nstd_path = \"{}\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 0\ndebug = false\ntarget = \"c\"\ncc = \"cc\"\ncflags = []\nemit = []\n",
-      workspace_std_path().display()
+      "[package]\nname = \"native_test_runner_fixture\"\nversion = \"0.1.0\"\nauthors = []\ndescription = \"fixture\"\nkeywords = []\nlicense = \"MIT\"\nrepository = \"\"\n\n[ignis]\nstd = true\nstd_path = \"{}\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 0\ndebug = false\ntarget = \"c\"\ncc = \"cc\"\ncflags = []\nemit = []\n{}",
+      workspace_std_path().display(),
+      fixture_section
     ),
   )
   .expect("write ignis.toml");
 
   temp_dir
+}
+
+/// The `@test`-free project body used by fixture-only runs.
+const NO_TESTS_MAIN: &str = "function main(): void {}\n";
+
+/// A program that allocates through libc and never frees, so LSan flags it.
+const LEAKING_FIXTURE_SOURCE: &str = concat!(
+  "import LibC, CType from \"std::libc\";\n",
+  "\n",
+  "function main(): i32 {\n",
+  "  let leaked: CType::CVoidPtr = LibC::Allocator::malloc(64);\n",
+  "  if (leaked == null) {\n",
+  "    return 1;\n",
+  "  }\n",
+  "\n",
+  "  return 0;\n",
+  "}\n",
+);
+
+fn write_fixture_file(
+  project_root: &Path,
+  relative_path: &str,
+  source: &str,
+) -> PathBuf {
+  let path = project_root.join(relative_path);
+  fs::create_dir_all(path.parent().expect("fixture parent")).expect("create fixture dir");
+  fs::write(&path, source).expect("write fixture source");
+  path
+}
+
+fn fixture_snapshot_path(
+  project_root: &Path,
+  relative_path: &str,
+) -> PathBuf {
+  let fixture_path = project_root.join(relative_path);
+  let directory = fixture_path.parent().expect("fixture parent");
+  let stem = fixture_path.file_stem().expect("fixture stem");
+
+  directory.join("__snapshots__").join(stem).with_extension("snap")
+}
+
+fn write_fixture_snapshot(
+  project_root: &Path,
+  relative_path: &str,
+  body: &str,
+) -> PathBuf {
+  let snapshot_path = fixture_snapshot_path(project_root, relative_path);
+  fs::create_dir_all(snapshot_path.parent().expect("snapshot dir")).expect("create snapshot dir");
+  fs::write(&snapshot_path, body).expect("write fixture snapshot");
+  snapshot_path
+}
+
+fn fixture_options() -> TestRunOptions {
+  TestRunOptions::default()
 }
 
 fn write_project_module(
@@ -1126,5 +1199,425 @@ function moduleSnapshot(): void {
   assert_ne!(
     root_snapshot, module_snapshot,
     "expected module snapshots to use distinct filenames"
+  );
+}
+
+#[test]
+fn fixture_program_passes_against_a_matching_snapshot() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/ok/returns_42.ign",
+    "function main(): i32 {\n  return 42;\n}\n",
+  );
+  write_fixture_snapshot(
+    project.path(),
+    "corpus/ok/returns_42.ign",
+    "exit_code: 42\nstdout: (empty)\nstderr: (empty)",
+  );
+
+  let result = run_project_tests_with_options(project.path(), &fixture_options());
+
+  assert!(result.is_ok(), "expected the matching fixture snapshot to pass");
+}
+
+#[test]
+fn fixture_program_fails_against_a_mismatched_snapshot() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/ok/returns_42.ign",
+    "function main(): i32 {\n  return 42;\n}\n",
+  );
+  let snapshot_path = write_fixture_snapshot(
+    project.path(),
+    "corpus/ok/returns_42.ign",
+    "exit_code: 7\nstdout: (empty)\nstderr: (empty)",
+  );
+
+  let result = run_project_tests_with_options(project.path(), &fixture_options());
+
+  assert!(result.is_err(), "expected a mismatched fixture snapshot to fail");
+  assert_eq!(
+    fs::read_to_string(&snapshot_path).expect("read fixture snapshot"),
+    "exit_code: 7\nstdout: (empty)\nstderr: (empty)",
+    "expected a failing run to leave the baseline untouched"
+  );
+}
+
+#[test]
+fn fixture_program_fails_when_its_snapshot_is_missing() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/ok/returns_42.ign",
+    "function main(): i32 {\n  return 42;\n}\n",
+  );
+  let snapshot_path = fixture_snapshot_path(project.path(), "corpus/ok/returns_42.ign");
+
+  let result = run_project_tests_with_options(project.path(), &fixture_options());
+
+  assert!(result.is_err(), "expected a missing fixture snapshot to fail");
+  assert!(!snapshot_path.exists(), "expected a failing run to avoid creating a baseline");
+}
+
+#[test]
+fn fixture_program_snapshot_is_written_in_update_mode() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/ok/prints_and_exits.ign",
+    "import Io from \"std::io\";\n\nfunction main(): i32 {\n  Io::println(\"hello\");\n  return 3;\n}\n",
+  );
+  let snapshot_path = fixture_snapshot_path(project.path(), "corpus/ok/prints_and_exits.ign");
+
+  let options = TestRunOptions {
+    update_snapshots: true,
+    ..TestRunOptions::default()
+  };
+  let result = run_project_tests_with_options(project.path(), &options);
+
+  assert!(result.is_ok(), "expected update mode to create the fixture baseline");
+  assert_eq!(
+    fs::read_to_string(&snapshot_path).expect("read fixture snapshot"),
+    "exit_code: 3\nstdout: hello\nstderr: (empty)"
+  );
+}
+
+#[test]
+fn fixture_err_mode_snapshots_the_reported_diagnostics() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/err"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/err/undefined_name.ign",
+    "// e2e: err\nfunction main(): i32 {\n  return missingValue;\n}\n",
+  );
+  let snapshot_path = fixture_snapshot_path(project.path(), "corpus/err/undefined_name.ign");
+
+  let options = TestRunOptions {
+    update_snapshots: true,
+    ..TestRunOptions::default()
+  };
+
+  assert!(
+    run_project_tests_with_options(project.path(), &options).is_ok(),
+    "expected update mode to record the diagnostics baseline"
+  );
+
+  let baseline = fs::read_to_string(&snapshot_path).expect("read diagnostics snapshot");
+  assert!(
+    !baseline.trim().is_empty(),
+    "expected the diagnostics baseline to hold at least one error"
+  );
+
+  assert!(
+    run_project_tests_with_options(project.path(), &fixture_options()).is_ok(),
+    "expected the recorded diagnostics to compare equal on a second run"
+  );
+}
+
+#[test]
+fn fixture_err_mode_reports_a_parse_failure() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/err"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/err/missing_semicolon.ign",
+    "// e2e: err\nfunction main(): i32 {\n  return 42\n}\n",
+  );
+  let snapshot_path = fixture_snapshot_path(project.path(), "corpus/err/missing_semicolon.ign");
+
+  let options = TestRunOptions {
+    update_snapshots: true,
+    ..TestRunOptions::default()
+  };
+
+  assert!(
+    run_project_tests_with_options(project.path(), &options).is_ok(),
+    "expected a parse failure to record a diagnostics baseline"
+  );
+  assert!(
+    !fs::read_to_string(&snapshot_path)
+      .expect("read diagnostics snapshot")
+      .trim()
+      .is_empty(),
+    "expected the parse failure to produce at least one diagnostic"
+  );
+}
+
+#[test]
+fn fixture_err_mode_fails_when_the_program_compiles_cleanly() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/err"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/err/compiles_fine.ign",
+    "// e2e: err\nfunction main(): i32 {\n  return 0;\n}\n",
+  );
+
+  let options = TestRunOptions {
+    update_snapshots: true,
+    ..TestRunOptions::default()
+  };
+  let result = run_project_tests_with_options(project.path(), &options);
+
+  assert!(result.is_err(), "expected an err fixture that compiles to fail");
+}
+
+#[test]
+fn fixture_std_header_compiles_against_the_standard_library() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/ok/uses_std_string.ign",
+    "// e2e: std\nimport String from \"std::string\";\nimport Io from \"std::io\";\n\nfunction main(): i32 {\n  let greeting: String = String::create(\"hi\");\n  Io::println(greeting.toStr());\n  return 0;\n}\n",
+  );
+  write_fixture_snapshot(
+    project.path(),
+    "corpus/ok/uses_std_string.ign",
+    "exit_code: 0\nstdout: hi\nstderr: (empty)",
+  );
+
+  let result = run_project_tests_with_options(project.path(), &fixture_options());
+
+  assert!(result.is_ok(), "expected the std fixture to compile, run and match");
+}
+
+#[test]
+fn a_leaking_fixture_is_reported_as_a_failure() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+
+  write_fixture_file(project.path(), "corpus/ok/leaks.ign", LEAKING_FIXTURE_SOURCE);
+  write_fixture_snapshot(
+    project.path(),
+    "corpus/ok/leaks.ign",
+    "exit_code: 0\nstdout: (empty)\nstderr: (empty)",
+  );
+
+  let result = run_project_tests_with_options(project.path(), &fixture_options());
+
+  assert!(result.is_err(), "expected a leaking fixture to fail the run");
+}
+
+#[test]
+fn the_allow_leak_header_keeps_a_leaking_fixture_passing() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/ok/leaks_on_purpose.ign",
+    &format!("// e2e: allow-leak\n{}", LEAKING_FIXTURE_SOURCE),
+  );
+  write_fixture_snapshot(
+    project.path(),
+    "corpus/ok/leaks_on_purpose.ign",
+    "exit_code: 0\nstdout: (empty)\nstderr: (empty)",
+  );
+
+  let result = run_project_tests_with_options(project.path(), &fixture_options());
+
+  assert!(result.is_ok(), "expected an allow-leak fixture to pass despite leaking");
+}
+
+#[test]
+fn a_filter_selects_fixtures_by_their_plan_entry_name() {
+  let project = write_test_project_with_fixture_dirs(
+    r#"
+import Test from "std::test";
+
+@test
+function alwaysFails(): void {
+    Test::fail();
+}
+"#,
+    &["corpus/ok"],
+  );
+
+  write_fixture_file(
+    project.path(),
+    "corpus/ok/returns_42.ign",
+    "function main(): i32 {\n  return 42;\n}\n",
+  );
+  write_fixture_snapshot(
+    project.path(),
+    "corpus/ok/returns_42.ign",
+    "exit_code: 42\nstdout: (empty)\nstderr: (empty)",
+  );
+
+  let options = TestRunOptions {
+    filter: Some("e2e::".to_string()),
+    ..TestRunOptions::default()
+  };
+  let result = run_project_tests_with_options(project.path(), &options);
+
+  assert!(result.is_ok(), "expected the e2e:: filter to select only the passing fixture");
+}
+
+#[test]
+fn a_project_without_fixtures_runs_exactly_as_before() {
+  let project = write_test_project(
+    r#"
+import Test from "std::test";
+
+@test
+function passes(): void {}
+"#,
+  );
+
+  let result = run_project_tests_with_options(project.path(), &fixture_options());
+
+  assert!(result.is_ok(), "expected a fixture-free project to keep passing");
+  assert!(
+    !project.path().join("build/fixtures").exists(),
+    "expected no fixture work directories for a project without fixtures"
+  );
+}
+
+#[test]
+fn a_partition_runs_only_the_entries_it_owns() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/ok/a_passes.ign",
+    "function main(): i32 {\n  return 0;\n}\n",
+  );
+  write_fixture_snapshot(
+    project.path(),
+    "corpus/ok/a_passes.ign",
+    "exit_code: 0\nstdout: (empty)\nstderr: (empty)",
+  );
+
+  write_fixture_file(
+    project.path(),
+    "corpus/ok/b_fails.ign",
+    "function main(): i32 {\n  return 1;\n}\n",
+  );
+  write_fixture_snapshot(
+    project.path(),
+    "corpus/ok/b_fails.ign",
+    "exit_code: 0\nstdout: (empty)\nstderr: (empty)",
+  );
+
+  let first_shard = TestRunOptions {
+    partition: Some((1, 2)),
+    ..TestRunOptions::default()
+  };
+  let second_shard = TestRunOptions {
+    partition: Some((2, 2)),
+    ..TestRunOptions::default()
+  };
+
+  assert!(
+    run_project_tests_with_options(project.path(), &first_shard).is_ok(),
+    "expected shard 1/2 to hold only the passing fixture"
+  );
+  assert!(
+    run_project_tests_with_options(project.path(), &second_shard).is_err(),
+    "expected shard 2/2 to hold only the failing fixture"
+  );
+}
+
+#[test]
+fn an_invalid_partition_is_rejected_before_anything_runs() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+
+  let options = TestRunOptions {
+    partition: Some((3, 2)),
+    ..TestRunOptions::default()
+  };
+
+  assert!(
+    run_project_tests_with_options(project.path(), &options).is_err(),
+    "expected an out-of-range partition to be rejected"
+  );
+}
+
+#[test]
+fn a_test_exceeding_the_timeout_is_killed_and_reported_as_a_failure() {
+  let project = write_test_project(
+    r#"
+import LibC from "std::libc";
+
+@test
+function hangs(): void {
+    LibC::Process::sleep(600);
+}
+"#,
+  );
+
+  let options = TestRunOptions {
+    timeout: Some(Duration::from_millis(500)),
+    ..TestRunOptions::default()
+  };
+
+  let started = Instant::now();
+  let result = run_project_tests_with_options(project.path(), &options);
+
+  assert!(result.is_err(), "expected a hanging test to fail the run");
+  assert!(
+    started.elapsed() < Duration::from_secs(300),
+    "expected the runner to kill the hanging test instead of waiting for it"
+  );
+}
+
+#[test]
+fn a_fixture_exceeding_the_timeout_is_killed_and_reported_as_a_failure() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/ok/hangs.ign",
+    "import LibC from \"std::libc\";\n\nfunction main(): i32 {\n  LibC::Process::sleep(600);\n  return 0;\n}\n",
+  );
+  write_fixture_snapshot(
+    project.path(),
+    "corpus/ok/hangs.ign",
+    "exit_code: 0\nstdout: (empty)\nstderr: (empty)",
+  );
+
+  let options = TestRunOptions {
+    timeout: Some(Duration::from_millis(500)),
+    ..TestRunOptions::default()
+  };
+
+  let started = Instant::now();
+  let result = run_project_tests_with_options(project.path(), &options);
+
+  assert!(result.is_err(), "expected a hanging fixture to fail the run");
+  assert!(
+    started.elapsed() < Duration::from_secs(300),
+    "expected the runner to kill the hanging fixture instead of waiting for it"
+  );
+}
+
+#[test]
+fn a_cli_fixture_directory_is_added_to_the_project_corpus() {
+  let project = write_test_project(NO_TESTS_MAIN);
+
+  write_fixture_file(
+    project.path(),
+    "extra/returns_9.ign",
+    "function main(): i32 {\n  return 9;\n}\n",
+  );
+  let snapshot_path = fixture_snapshot_path(project.path(), "extra/returns_9.ign");
+
+  let options = TestRunOptions {
+    update_snapshots: true,
+    fixture_dirs: vec![PathBuf::from("extra")],
+    ..TestRunOptions::default()
+  };
+  let result = run_project_tests_with_options(project.path(), &options);
+
+  assert!(result.is_ok(), "expected the CLI fixture directory to be scanned");
+  assert_eq!(
+    fs::read_to_string(&snapshot_path).expect("read fixture snapshot"),
+    "exit_code: 9\nstdout: (empty)\nstderr: (empty)"
   );
 }
