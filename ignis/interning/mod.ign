@@ -1,8 +1,17 @@
 import Symbol from "@compiler::symbols";
+import HashMap from "std::collections";
+import Hasher from "std::hash";
 
 @implements(Display)
 export record StringInterner {
   texts: Vector<String>;
+  /// Indices into `texts`, grouped by the hash of the text they hold.
+  ///
+  /// `String` carries no `Hash` implementation, so the text cannot key a map
+  /// directly. A bucket is a candidate list that `intern` still compares
+  /// against, which keeps a hash collision costing one comparison rather than
+  /// handing back the wrong symbol.
+  byTextHash: HashMap<u64, Vector<u32>>;
 
   public static init(): StringInterner {
     return StringInterner {
@@ -11,24 +20,46 @@ export record StringInterner {
         length: 0,
         capacity: 0,
       },
+      byTextHash: HashMap::new<u64, Vector<u32>>(),
     };
   }
 
   public intern(&mut self, text: str): Symbol {
-    let ownedText: String = String::create(text);
-    let mut index: u64 = 0;
+    let mut hasher: Hasher = Hasher::new();
+    hasher.writeStr(text);
+    let key: u64 = hasher.finish();
 
-    while (index < self.texts.length()) {
-      if (let Option::SOME(existing) = self.texts.get(index) && existing.equals(&ownedText)) {
-        return Symbol::fromRaw(index as u32);
+    if (let Option::SOME(bucket) = self.byTextHash.get(&key)) {
+      let mut index: u64 = 0;
+
+      while (index < bucket.length()) {
+        let mut candidate: u32 = 0;
+        if (let Option::SOME(entry) = bucket.get(index)) {
+          candidate = *entry;
+        }
+
+        if (let Option::SOME(existing) = self.texts.get(candidate as u64) && existing.equals(text)) {
+          return Symbol::fromRaw(candidate);
+        }
+
+        index += 1;
       }
-
-      index += 1;
     }
 
-    self.texts.push(ownedText);
+    self.texts.push(String::create(text));
+    let symbolRaw: u32 = (self.texts.length() - 1) as u32;
 
-    return Symbol::fromRaw((self.texts.length() - 1) as u32);
+    if (let Option::SOME(bucket) = self.byTextHash.getMut(&key)) {
+      let mut bucketRef: &mut Vector<u32> = bucket;
+      bucketRef.push(symbolRaw);
+      return Symbol::fromRaw(symbolRaw);
+    }
+
+    let mut bucket: Vector<u32> = Vector::new<u32>();
+    bucket.push(symbolRaw);
+    self.byTextHash.insert(key, bucket);
+
+    return Symbol::fromRaw(symbolRaw);
   }
 
   public resolve(&self, symbol: Symbol): Option<str> {

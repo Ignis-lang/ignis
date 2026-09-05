@@ -1,7 +1,113 @@
 import IndexVec from "@compiler::indexing";
+import Id from "@compiler::ids";
 import HashMap from "std::collections";
+import Hasher from "std::hash";
 
 export namespace Analyzer {
+  /// The key the definition store's written-path index uses.
+  ///
+  /// `String` carries no `Hash` implementation, so paths are keyed by their
+  /// hash rather than by the text. A bucket is therefore a candidate list and
+  /// not an answer: every caller still compares the stored path, which keeps a
+  /// collision costing one comparison instead of changing a result.
+  function pathIndexKey(path: str): u64 {
+    let mut hasher: Hasher = Hasher::new();
+    hasher.writeStr(path);
+    return hasher.finish();
+  }
+
+  /// Insert `id` into `bucket` keeping ids ascending.
+  ///
+  /// Ascending order is what lets an index lookup stand in for a scan over the
+  /// whole store: both reach the same first match. Ids arrive ascending from
+  /// `push`, so this walks back no slots at all in the common case;
+  /// `replace` renaming a definition is what makes the general case necessary.
+  function insertDefIdSorted(
+    bucket: &mut Vector<Analyzer::DefinitionId>,
+    id: Analyzer::DefinitionId,
+  ): void {
+    let raw: u32 = id.raw();
+    let mut bucketRef: &mut Vector<Analyzer::DefinitionId> = bucket;
+    bucketRef.push(id);
+
+    let mut index: u64 = bucketRef.length() - 1;
+    while (index > 0) {
+      let mut previous: u32 = 0;
+      if (let Option::SOME(value) = bucketRef.get(index - 1)) {
+        previous = value.raw();
+      }
+
+      if (previous <= raw) {
+        return;
+      }
+
+      let _shifted: boolean = bucketRef.set(index, Id::fromRaw<Analyzer::DefinitionTag>(previous));
+      let _placed: boolean = bucketRef.set(index - 1, Id::fromRaw<Analyzer::DefinitionTag>(raw));
+      index -= 1;
+    }
+  }
+
+  /// Drop every occurrence of `id` from `bucket`, preserving order.
+  function removeDefIdFromBucket(
+    bucket: &mut Vector<Analyzer::DefinitionId>,
+    id: Analyzer::DefinitionId,
+  ): void {
+    let raw: u32 = id.raw();
+    let mut bucketRef: &mut Vector<Analyzer::DefinitionId> = bucket;
+    let mut kept: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut index: u64 = 0;
+
+    while (index < bucketRef.length()) {
+      let mut candidate: u32 = raw;
+      if (let Option::SOME(value) = bucketRef.get(index)) {
+        candidate = value.raw();
+      }
+
+      if (candidate != raw) {
+        kept.push(Id::fromRaw<Analyzer::DefinitionTag>(candidate));
+      }
+
+      index += 1;
+    }
+
+    let mut writeIndex: u64 = 0;
+    while (writeIndex < kept.length()) {
+      let mut value: u32 = 0;
+      if (let Option::SOME(entry) = kept.get(writeIndex)) {
+        value = entry.raw();
+      }
+
+      let _written: boolean = bucketRef.set(writeIndex, Id::fromRaw<Analyzer::DefinitionTag>(value));
+      writeIndex += 1;
+    }
+
+    while (bucketRef.length() > kept.length()) {
+      let _removed: Option<Analyzer::DefinitionId> = bucketRef.pop();
+    }
+  }
+
+  /// A copy of `bucket`, or an empty vector when the index holds no entry.
+  function copyDefIdBucket(
+    bucket: Option<&Vector<Analyzer::DefinitionId>>
+  ): Vector<Analyzer::DefinitionId> {
+    let mut out: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    let Option::SOME(entries) = bucket else {
+      return out;
+    };
+
+    let mut index: u64 = 0;
+    while (index < entries.length()) {
+      if (let Option::SOME(entry) = entries.get(index)) {
+        out.push(Id::fromRaw<Analyzer::DefinitionTag>(entry.raw()));
+      }
+
+      index += 1;
+    }
+
+    return out;
+  }
+
   /// Visibility of a top-level declaration in a module.
   /// Stored on `FunctionDef`, `RecordDef`, `EnumDef`, and `VariableDef`.
   /// Sub-definition wrappers (FieldDef, VariantDef, TypeParamDef) inherit access
@@ -302,6 +408,22 @@ export namespace Analyzer {
     /// module, where nothing can come from elsewhere.
     visibleDefs: HashMap<u32, boolean>;
     visibleDefsPublished: boolean;
+    /// Definition ids grouped by the raw symbol of the name they declare,
+    /// ascending. Every lookup by name used to walk the whole store; the
+    /// bucket holds the same candidates in the same order.
+    bySymbol: HashMap<u32, Vector<Analyzer::DefinitionId>>;
+    /// Definition ids grouped by `pathIndexKey` of every `::`-boundary suffix
+    /// of the written path they are published under. A reference may omit
+    /// leading namespaces — `Typecheck::TypecheckState` names
+    /// `Analyzer::Typecheck::TypecheckState` — and the suffixes are exactly
+    /// the paths that reach a declaration.
+    byPathSuffix: HashMap<u64, Vector<Analyzer::DefinitionId>>;
+    /// Method ids grouped by the raw id of the record, enum or trait they are
+    /// declared on, ascending. `RecordDef::instanceMethods` covers what the
+    /// binder recorded; this covers the reverse question a later phase asks,
+    /// which is which methods a nominal owns after monomorphization has added
+    /// specializations.
+    byMethodOwner: HashMap<u32, Vector<Analyzer::DefinitionId>>;
 
     public static init(): DefinitionStore {
       return DefinitionStore {
@@ -311,7 +433,124 @@ export namespace Analyzer {
         activeModule: 0,
         visibleDefs: HashMap::new<u32, boolean>(),
         visibleDefsPublished: false,
+        bySymbol: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
+        byPathSuffix: HashMap::new<u64, Vector<Analyzer::DefinitionId>>(),
+        byMethodOwner: HashMap::new<u32, Vector<Analyzer::DefinitionId>>(),
       };
+    }
+
+    /// Every definition declaring `symbol`, ascending by id.
+    ///
+    /// Returned by value: the store is threaded as `&mut` through the
+    /// analyzer, so a borrowed bucket would pin it for the whole walk.
+    public definitionsNamed(&self, symbol: Analyzer::SymbolId): Vector<Analyzer::DefinitionId> {
+      let raw: u32 = symbol.raw();
+      return Analyzer::copyDefIdBucket(self.bySymbol.get(&raw));
+    }
+
+    /// Every definition a reference written as `path` can name: those
+    /// published under exactly `path` and those published under a path ending
+    /// in `::path`, ascending by id.
+    ///
+    /// The result is a candidate list. Callers compare `qualifiedNameOf`
+    /// themselves, both because the key is a hash and because they filter on
+    /// the definition's kind.
+    public definitionsWithPathSuffix(&self, path: str): Vector<Analyzer::DefinitionId> {
+      let key: u64 = Analyzer::pathIndexKey(path);
+      return Analyzer::copyDefIdBucket(self.byPathSuffix.get(&key));
+    }
+
+    /// Every method declared on `owner`, ascending by id.
+    public methodsOwnedBy(&self, owner: Analyzer::DefinitionId): Vector<Analyzer::DefinitionId> {
+      let raw: u32 = owner.raw();
+      return Analyzer::copyDefIdBucket(self.byMethodOwner.get(&raw));
+    }
+
+    /// Add `id` to the owner index under `ownerRaw`.
+    indexByMethodOwner(&mut self, ownerRaw: u32, id: Analyzer::DefinitionId): void {
+      if (let Option::SOME(bucket) = self.byMethodOwner.getMut(&ownerRaw)) {
+        Analyzer::insertDefIdSorted(bucket, id);
+        return;
+      }
+
+      let mut bucket: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      bucket.push(id);
+      self.byMethodOwner.insert(ownerRaw, bucket);
+    }
+
+    /// Drop `id` from the owner index under `ownerRaw`.
+    unindexByMethodOwner(&mut self, ownerRaw: u32, id: Analyzer::DefinitionId): void {
+      if (let Option::SOME(bucket) = self.byMethodOwner.getMut(&ownerRaw)) {
+        Analyzer::removeDefIdFromBucket(bucket, id);
+      }
+    }
+
+    /// The raw id of the nominal the definition stored at `id` is a method of.
+    /// `NONE` for every other definition kind, which keeps the owner index
+    /// method-only.
+    methodOwnerAt(&self, id: Analyzer::DefinitionId): Option<u32> {
+      if (let Option::SOME(Analyzer::Definition::Method(methodDef)) = self.definitions.get(id)) {
+        return Option::SOME(methodDef.owner.raw());
+      }
+
+      return Option::NONE;
+    }
+
+    /// Add `id` to the name index under `symbolRaw`.
+    indexBySymbol(&mut self, symbolRaw: u32, id: Analyzer::DefinitionId): void {
+      if (let Option::SOME(bucket) = self.bySymbol.getMut(&symbolRaw)) {
+        Analyzer::insertDefIdSorted(bucket, id);
+        return;
+      }
+
+      let mut bucket: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      bucket.push(id);
+      self.bySymbol.insert(symbolRaw, bucket);
+    }
+
+    /// Drop `id` from the name index under `symbolRaw`.
+    unindexBySymbol(&mut self, symbolRaw: u32, id: Analyzer::DefinitionId): void {
+      if (let Option::SOME(bucket) = self.bySymbol.getMut(&symbolRaw)) {
+        Analyzer::removeDefIdFromBucket(bucket, id);
+      }
+    }
+
+    /// Add `id` to the path index under `key`.
+    indexByPathKey(&mut self, key: u64, id: Analyzer::DefinitionId): void {
+      if (let Option::SOME(bucket) = self.byPathSuffix.getMut(&key)) {
+        Analyzer::insertDefIdSorted(bucket, id);
+        return;
+      }
+
+      let mut bucket: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      bucket.push(id);
+      self.byPathSuffix.insert(key, bucket);
+    }
+
+    /// Index `id` under `path` and under every suffix of it that starts right
+    /// after a `::`.
+    indexQualifiedPath(&mut self, id: Analyzer::DefinitionId, path: &String): void {
+      self.indexByPathKey(Analyzer::pathIndexKey(path.toStr()), id);
+
+      let mut index: u64 = 0;
+      while (index + 1 < path.length()) {
+        let mut separator: boolean = false;
+
+        if (let Option::SOME(first) = path.byteAt(index)) {
+          if (first == 58) {
+            if (let Option::SOME(second) = path.byteAt(index + 1)) {
+              separator = second == 58;
+            }
+          }
+        }
+
+        if (separator && index + 2 < path.length()) {
+          let suffix: String = path.substringBytes(index + 2, path.length());
+          self.indexByPathKey(Analyzer::pathIndexKey(suffix.toStr()), id);
+        }
+
+        index += 1;
+      }
     }
 
     /// Record which module published `id`. First write wins.
@@ -384,6 +623,7 @@ export namespace Analyzer {
         return;
       }
 
+      self.indexQualifiedPath(id, &qualifiedName);
       self.qualifiedNames.insert(id.raw(), qualifiedName);
     }
 
@@ -394,7 +634,16 @@ export namespace Analyzer {
     }
 
     public push(&mut self, def: Analyzer::Definition): Analyzer::DefinitionId {
-      return self.definitions.push(def);
+      let symbolRaw: u32 = def.name().raw();
+      let id: Analyzer::DefinitionId = self.definitions.push(def);
+
+      self.indexBySymbol(symbolRaw, id);
+
+      if (let Option::SOME(ownerRaw) = self.methodOwnerAt(id)) {
+        self.indexByMethodOwner(ownerRaw, id);
+      }
+
+      return id;
     }
 
     public get(&self, id: Analyzer::DefinitionId): Option<&Analyzer::Definition> {
@@ -413,18 +662,52 @@ export namespace Analyzer {
     /// specialization instead of a separate public mutable-reference accessor.
     public replace(&mut self, id: Analyzer::DefinitionId, def: Analyzer::Definition): boolean {
       let mut tagMismatch: boolean = false;
+      let mut previousSymbol: u32 = 0;
+      let mut previousOwner: u32 = 0;
+      let mut hadPreviousOwner: boolean = false;
+      let mut hadPrevious: boolean = false;
 
       if (let Option::SOME(existing) = self.definitions.get(id)) {
         if (existing.variantTag() != def.variantTag()) {
           tagMismatch = true;
         }
+
+        previousSymbol = existing.name().raw();
+        hadPrevious = true;
+      }
+
+      if (let Option::SOME(owner) = self.methodOwnerAt(id)) {
+        previousOwner = owner;
+        hadPreviousOwner = true;
       }
 
       if (tagMismatch) {
         @panic("DefinitionStore::replace: replacement definition changes variant tag, which breaks every downstream invariant");
       }
 
-      return self.definitions.set(id, def);
+      // Monomorphization patches a generic declaration into a specialized one
+      // under a new name and, for a method, a new owner, so both indexes have
+      // to follow the replacement.
+      let symbolRaw: u32 = def.name().raw();
+      let replaced: boolean = self.definitions.set(id, def);
+
+      if (!replaced || !hadPrevious) {
+        return replaced;
+      }
+
+      if (previousSymbol != symbolRaw) {
+        self.unindexBySymbol(previousSymbol, id);
+        self.indexBySymbol(symbolRaw, id);
+      }
+
+      if (let Option::SOME(ownerRaw) = self.methodOwnerAt(id)) {
+        if (hadPreviousOwner && previousOwner != ownerRaw) {
+          self.unindexByMethodOwner(previousOwner, id);
+          self.indexByMethodOwner(ownerRaw, id);
+        }
+      }
+
+      return replaced;
     }
   }
 }
