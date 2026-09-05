@@ -170,7 +170,7 @@ export namespace ParserDeclarations {
 
     let checkpoint: Token = parserRef.current();
     let Option::SOME(parsedArguments) = ParserDeclarations::parseAttributeArguments(parserRef) else {
-      parserRef.emitDiagnostic(span, DiagnosticCode::EXPECTED_TOKEN, "unterminated attribute", "expected ')' to close attribute arguments");
+      parserRef.expectedToken(span, "RightParen", "expected ')' to close attribute arguments");
       return Option::NONE;
     };
     span = ParserShared::mergeSpans(span, checkpoint.span);
@@ -292,7 +292,7 @@ export namespace ParserDeclarations {
       parserRef.emitDiagnostic(
         modeToken.span,
         DiagnosticCode::UNEXPECTED_TOKEN,
-        "unexpected inline mode",
+        "Unexpected token",
         "expected 'always' or 'never'",
       );
     }
@@ -811,7 +811,7 @@ export namespace ParserDeclarations {
 
     if (items.length() == 0) {
       let current: Token = parserRef.current();
-      parserRef.emitDiagnostic(current.span, DiagnosticCode::EXPECTED_TOKEN, "expected import/export item", label);
+      parserRef.expectedToken(current.span, "Identifier", label);
       return Option::NONE;
     }
 
@@ -834,7 +834,7 @@ export namespace ParserDeclarations {
     let pathToken: Token = parserRef.current();
 
     if (pathToken.kindValue() != TokenKind::LITERAL || pathToken.literalKindValue() != LiteralKind::STRING) {
-      parserRef.emitDiagnostic(pathToken.span, DiagnosticCode::EXPECTED_TOKEN, "expected import path", "import path must be a string literal");
+      parserRef.expectedToken(pathToken.span, "String", "import path must be a string literal");
       return Option::NONE;
     }
 
@@ -1082,7 +1082,7 @@ export namespace ParserDeclarations {
       return true;
     }
 
-    parserRef.emitDiagnostic(parserRef.current().span, DiagnosticCode::EXPECTED_TOKEN, "expected token", "expected ';' after extern function signature");
+    parserRef.expectedToken(parserRef.current().span, "SemiColon", "expected ';' after extern function signature");
     return false;
   }
 
@@ -1235,7 +1235,7 @@ export namespace ParserDeclarations {
       }
 
       if (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE)) {
-        parserRef.emitDiagnostic(parserRef.current().span, DiagnosticCode::EXPECTED_DELIMITER, "expected field delimiter", "record fields must be separated by ';' or ','");
+        parserRef.emitDiagnostic(parserRef.current().span, DiagnosticCode::EXPECTED_DELIMITER, "Expected ',' or '}'", "record fields must be separated by ';' or ','");
         ParserRecovery::synchronizeTopLevel(parserRef);
         break;
       }
@@ -1489,7 +1489,7 @@ export namespace ParserDeclarations {
         continue;
       }
 
-      parserRef.emitDiagnostic(parserRef.current().span, DiagnosticCode::UNEXPECTED_TOKEN, "unexpected token in extern block", "expected function or const declaration");
+      parserRef.emitDiagnostic(parserRef.current().span, DiagnosticCode::UNEXPECTED_TOKEN, "Unexpected token", "expected function or const declaration");
       return Option::NONE;
     }
 
@@ -1546,7 +1546,7 @@ export namespace ParserDeclarations {
     }
 
     let token: Token = parserRef.current();
-    parserRef.emitDiagnostic(token.span, DiagnosticCode::UNEXPECTED_TOKEN, "unexpected token after export", "expected import, type, record, namespace, function, const, extern, enum, or trait declaration");
+    parserRef.emitDiagnostic(token.span, DiagnosticCode::UNEXPECTED_TOKEN, "Unexpected token", "expected import, type, record, namespace, function, const, extern, enum, or trait declaration");
     return Option::NONE;
   }
 
@@ -1588,7 +1588,7 @@ export namespace ParserDeclarations {
         let pathToken: Token = parserRef.current();
 
         if (pathToken.kindValue() != TokenKind::LITERAL || pathToken.literalKindValue() != LiteralKind::STRING) {
-          parserRef.emitDiagnostic(pathToken.span, DiagnosticCode::EXPECTED_TOKEN, "expected export path", "re-export path must be a string literal");
+          parserRef.expectedToken(pathToken.span, "String", "re-export path must be a string literal");
           return Option::NONE;
         }
 
@@ -1657,7 +1657,7 @@ export namespace ParserDeclarations {
     }
 
     let token: Token = parserRef.current();
-    parserRef.emitDiagnostic(token.span, DiagnosticCode::UNEXPECTED_TOKEN, "unexpected token at top level", "expected import, type, record, namespace, function, const, extern, enum, trait, or export declaration");
+    parserRef.emitDiagnostic(token.span, DiagnosticCode::UNEXPECTED_TOKEN, "Unexpected token", "expected import, type, record, namespace, function, const, extern, enum, trait, or export declaration");
     return Option::NONE;
   }
 
@@ -1742,7 +1742,7 @@ export namespace ParserDeclarations {
       return ParserDeclarations::parseCompileBranchItems(parserRef, !condition, items);
     }
 
-    parserRef.emitDiagnostic(directiveSpan, DiagnosticCode::EXPECTED_TOKEN, "expected token", "'@ifelse' requires an else branch");
+    parserRef.expectedToken(directiveSpan, "At", "'@ifelse' requires an else branch");
     return false;
   }
 

@@ -115,7 +115,7 @@ record LexerScanner {
   private emitInvalidToken(&mut self, start: SourceMark): void {
     let span = self.cursor.spanFrom(start);
     let lexeme: String = self.cursor.lexemeFrom(start);
-    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::INVALID_TOKEN, "invalid token", span);
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::INVALID_TOKEN, "Invalid token", span);
     diagnostic.addLabel(LabelKind::PRIMARY, span, "token is not valid here");
     self.diagnostics.push(diagnostic);
     self.emitToken(Token::badOwned(span, &lexeme));
@@ -124,14 +124,14 @@ record LexerScanner {
   private emitUnterminatedComment(&mut self, start: SourceMark): void {
     let span = self.cursor.spanFrom(start);
     let lexeme: String = self.cursor.lexemeFrom(start);
-    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::UNTERMINATED_COMMENT, "unterminated comment", span);
+    let mut diagnostic: Diagnostic = Diagnostic::new(Severity::ERROR, DiagnosticCode::UNTERMINATED_COMMENT, "Unterminated comment", span);
     diagnostic.addLabel(LabelKind::PRIMARY, span, "comment must end with */");
     self.diagnostics.push(diagnostic);
     self.emitToken(Token::badOwned(span, &lexeme));
   }
 
   private emitRawNulInSource(&mut self, start: SourceMark): void {
-    self.emitDiagnostic(start, DiagnosticCode::RAW_NUL_IN_SOURCE, "raw NUL in source", "source text cannot contain raw NUL bytes");
+    self.emitDiagnostic(start, DiagnosticCode::RAW_NUL_IN_SOURCE, "Raw NUL byte is not allowed in source text", "source text cannot contain raw NUL bytes");
   }
 
   private matchAscii(&mut self, expected: char): boolean {
@@ -193,7 +193,7 @@ record LexerScanner {
   private scanDecimalOrFloatLiteral(&mut self, start: SourceMark): void {
     if (!self.scanDigitsWithSeparators()) {
       self.scanNumericRecoveryTail();
-      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_INTEGER, "malformed integer literal", "integer separators must stay between digits");
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_INTEGER, "Expected integer literal", "integer separators must stay between digits");
       return;
     }
 
@@ -219,7 +219,7 @@ record LexerScanner {
 
     self.cursor.advanceChar();
     let Option::SOME(_) = self.cursor.peekChar() else {
-      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_FLOAT, "malformed float literal", "float literal needs digits after the decimal point");
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_FLOAT, "Expected float literal", "float literal needs digits after the decimal point");
       return;
     };
 
@@ -227,7 +227,7 @@ record LexerScanner {
 
     if (!self.scanDigitsWithSeparators()) {
       self.scanNumericRecoveryTail();
-      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_FLOAT, "malformed float literal", "float separators must stay between digits");
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_FLOAT, "Expected float literal", "float separators must stay between digits");
       return;
     }
 
@@ -236,13 +236,13 @@ record LexerScanner {
 
   private scanBinaryLiteral(&mut self, start: SourceMark): void {
     let Option::SOME(first) = self.cursor.peekChar() else {
-      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_BINARY, "malformed binary literal", "binary literal needs at least one digit after 0b");
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_BINARY, "Expected binary literal", "binary literal needs at least one digit after 0b");
       return;
     };
 
     if (first != '0' && first != '1') {
       self.scanNumericRecoveryTail();
-      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_BINARY, "malformed binary literal", "binary literal only allows 0 or 1 digits");
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_BINARY, "Expected binary literal", "binary literal only allows 0 or 1 digits");
       return;
     }
 
@@ -254,7 +254,7 @@ record LexerScanner {
 
       if (next.isAlphanumeric() || next == '_') {
         self.scanNumericRecoveryTail();
-        self.emitBadLiteral(start, DiagnosticCode::EXPECTED_BINARY, "malformed binary literal", "binary literal only allows 0 or 1 digits");
+        self.emitBadLiteral(start, DiagnosticCode::EXPECTED_BINARY, "Expected binary literal", "binary literal only allows 0 or 1 digits");
         return;
       }
 
@@ -267,13 +267,13 @@ record LexerScanner {
 
   private scanHexLiteral(&mut self, start: SourceMark): void {
     let Option::SOME(first) = self.cursor.peekChar() else {
-      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_HEX, "malformed hex literal", "hex literal needs at least one digit after 0x");
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_HEX, "Expected hexadecimal literal", "hex literal needs at least one digit after 0x");
       return;
     };
 
     if (!first.isHexDigit()) {
       self.scanNumericRecoveryTail();
-      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_HEX, "malformed hex literal", "hex literal only allows 0-9, a-f, and A-F digits");
+      self.emitBadLiteral(start, DiagnosticCode::EXPECTED_HEX, "Expected hexadecimal literal", "hex literal only allows 0-9, a-f, and A-F digits");
       return;
     }
 
@@ -285,7 +285,7 @@ record LexerScanner {
 
       if (next.isAlphanumeric() || next == '_') {
         self.scanNumericRecoveryTail();
-        self.emitBadLiteral(start, DiagnosticCode::EXPECTED_HEX, "malformed hex literal", "hex literal only allows 0-9, a-f, and A-F digits");
+        self.emitBadLiteral(start, DiagnosticCode::EXPECTED_HEX, "Expected hexadecimal literal", "hex literal only allows 0-9, a-f, and A-F digits");
         return;
       }
 
@@ -405,7 +405,7 @@ record LexerScanner {
         self.cursor.advanceChar();
 
         if (self.cursor.isAtEnd()) {
-          self.emitDiagnostic(start, DiagnosticCode::UNTERMINATED_TEMPLATE_STRING, "unterminated template literal", "template literal must end with a closing backtick");
+          self.emitDiagnostic(start, DiagnosticCode::UNTERMINATED_TEMPLATE_STRING, "Unterminated template literal", "template literal must end with a closing backtick");
           return false;
         }
 
@@ -425,7 +425,7 @@ record LexerScanner {
       self.cursor.advanceChar();
     }
 
-    self.emitDiagnostic(start, DiagnosticCode::UNTERMINATED_TEMPLATE_STRING, "unterminated template literal", "template literal must end with a closing backtick");
+    self.emitDiagnostic(start, DiagnosticCode::UNTERMINATED_TEMPLATE_STRING, "Unterminated template literal", "template literal must end with a closing backtick");
     return false;
   }
 
@@ -446,7 +446,7 @@ record LexerScanner {
       }
 
       if (self.isLineTerminator(next)) {
-        self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "unterminated string literal", "string literal must close before the end of the line");
+        self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "Unterminated string literal", "string literal must close before the end of the line");
         return;
       }
 
@@ -454,17 +454,17 @@ record LexerScanner {
         self.cursor.advanceChar();
 
         if (self.cursor.isAtEnd()) {
-          self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "unterminated string literal", "string literal must end with a closing quote");
+          self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "Unterminated string literal", "string literal must end with a closing quote");
           return;
         }
 
         let Option::SOME(escaped) = self.cursor.peekChar() else {
-          self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "unterminated string literal", "string literal must end with a closing quote");
+          self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "Unterminated string literal", "string literal must end with a closing quote");
           return;
         };
 
         if (self.isLineTerminator(escaped)) {
-          self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "unterminated string literal", "string literal must close before the end of the line");
+          self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "Unterminated string literal", "string literal must close before the end of the line");
           return;
         }
 
@@ -521,7 +521,7 @@ record LexerScanner {
       self.cursor.advanceChar();
     }
 
-    self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "unterminated string literal", "string literal must end with a closing quote");
+    self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_STRING, "Unterminated string literal", "string literal must end with a closing quote");
   }
 
   private recoverMalformedCharLiteral(&mut self): void {
@@ -590,7 +590,7 @@ record LexerScanner {
 
   private scanCharEscape(&mut self, start: SourceMark): boolean {
     let Option::SOME(next) = self.cursor.peekChar() else {
-      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "unterminated char literal", "char literal must end with a closing quote");
+      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "Unterminated character literal", "char literal must end with a closing quote");
       return false;
     };
 
@@ -612,20 +612,20 @@ record LexerScanner {
 
     if (next != 'u') {
       self.recoverMalformedCharLiteral();
-      self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER_ESCAPE_SEQUENCE, "invalid char escape", "char escape must be a known escape or \\u{...}");
+      self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER_ESCAPE_SEQUENCE, "Invalid char escape: expected a valid Unicode scalar", "char escape must be a known escape or \\u{...}");
       return false;
     }
 
     self.cursor.advanceChar();
     let Option::SOME(codepoint) = self.scanUnicodeEscapeValue() else {
       self.recoverMalformedCharLiteral();
-      self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER_ESCAPE_SEQUENCE, "invalid char escape", "unicode escape must contain one valid scalar value");
+      self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER_ESCAPE_SEQUENCE, "Invalid char escape: expected a valid Unicode scalar", "unicode escape must contain one valid scalar value");
       return false;
     };
 
     if (codepoint > 1114111 || (codepoint >= 55296 && codepoint <= 57343)) {
       self.recoverMalformedCharLiteral();
-      self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER_ESCAPE_SEQUENCE, "invalid char escape", "unicode escape must contain one valid scalar value");
+      self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER_ESCAPE_SEQUENCE, "Invalid char escape: expected a valid Unicode scalar", "unicode escape must contain one valid scalar value");
       return false;
     }
 
@@ -634,18 +634,18 @@ record LexerScanner {
 
   private scanCharLiteral(&mut self, start: SourceMark): void {
     let Option::SOME(next) = self.cursor.peekChar() else {
-      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "unterminated char literal", "char literal must end with a closing quote");
+      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "Unterminated character literal", "char literal must end with a closing quote");
       return;
     };
 
     if (next == '\'') {
       self.cursor.advanceChar();
-      self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER, "invalid char literal", "char literal must contain exactly one UTF-8 scalar");
+      self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER, "Invalid char literal: expected exactly one Unicode scalar value", "char literal must contain exactly one UTF-8 scalar");
       return;
     }
 
     if (self.isLineTerminator(next)) {
-      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "unterminated char literal", "char literal must end with a closing quote");
+      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "Unterminated character literal", "char literal must end with a closing quote");
       return;
     }
 
@@ -671,7 +671,7 @@ record LexerScanner {
     }
 
     let Option::SOME(closer) = self.cursor.peekChar() else {
-      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "unterminated char literal", "char literal must end with a closing quote");
+      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "Unterminated character literal", "char literal must end with a closing quote");
       return;
     };
 
@@ -682,12 +682,12 @@ record LexerScanner {
     }
 
     if (self.isLineTerminator(closer)) {
-      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "unterminated char literal", "char literal must end with a closing quote");
+      self.emitBadLiteral(start, DiagnosticCode::UNTERMINATED_CHARACTER, "Unterminated character literal", "char literal must end with a closing quote");
       return;
     }
 
     self.recoverMalformedCharLiteral();
-    self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER, "invalid char literal", "char literal must contain exactly one UTF-8 scalar");
+    self.emitBadLiteral(start, DiagnosticCode::INVALID_CHARACTER, "Invalid char literal: expected exactly one Unicode scalar value", "char literal must contain exactly one UTF-8 scalar");
   }
 
   private scanIdentifierTail(&mut self): void {
