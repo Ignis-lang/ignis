@@ -46,10 +46,59 @@ record CodegenEmission {
   public symbols: Analyzer::SymbolTable;
 }
 
+/// Raw definition ids of every function whose written name `names` lists.
+function codegenFunctionDefIds(
+  defStore: &mut Analyzer::DefinitionStore,
+  symbols: &mut Analyzer::SymbolTable,
+  names: &Vector<String>,
+): Vector<u32> {
+  let mut ids: Vector<u32> = Vector::new<u32>();
+  let mut rawId: u64 = 0;
+
+  while (rawId < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+    let mut nameSym: Option<Analyzer::SymbolId> = Option::NONE;
+
+    if (let Option::SOME(Analyzer::Definition::Function(functionDef)) = defStore.get(defId)) {
+      nameSym = Option::SOME(functionDef.name);
+    }
+
+    if (let Option::SOME(functionName) = nameSym) {
+      if (let Option::SOME(text) = symbols.resolve(functionName)) {
+        let written: String = String::create(text);
+        let mut nameIndex: u64 = 0;
+
+        while (nameIndex < names.length()) {
+          if (let Option::SOME(candidate) = names.get(nameIndex)) {
+            if (written.equals(candidate)) {
+              ids.push(defId.raw());
+              break;
+            }
+          }
+
+          nameIndex += 1;
+        }
+      }
+    }
+
+    rawId += 1;
+  }
+
+  return ids;
+}
+
 /// Runs `source` through the whole pipeline the driver uses and returns the
 /// C it emitted. Parse, analyzer and ownership errors are rejected: emitted C
 /// from a program the rest of the pipeline refuses says nothing.
 function codegenEmit(source: str): CodegenEmission {
+  let externalNames: Vector<String> = Vector::new<String>();
+
+  return codegenEmitExposing(source, &externalNames);
+}
+
+/// `codegenEmit`, with the functions `externalNames` names kept externally
+/// visible the way the test harness unit needs its `@test` functions.
+function codegenEmitExposing(source: str, externalNames: &Vector<String>): CodegenEmission {
   let file: SourceFile = SourceFile::create("codegen_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
@@ -101,11 +150,14 @@ function codegenEmit(source: str): CodegenEmission {
     &constValues,
   );
 
+  let externalSymbols: Vector<u32> = codegenFunctionDefIds(&mut defStore, &mut symbols, externalNames);
+
   let emitted: CodegenC::EmitOutput = CodegenC::emitProgram(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
     &lowered.program,
+    &externalSymbols,
   );
 
   return CodegenEmission {
@@ -164,4 +216,71 @@ function codegenDropsAMonomorphizedNominal(): void {
   let expectedCall: String = `${dropName.toStr()}(&`;
 
   Test::assert(emission.source.contains(&expectedCall));
+}
+
+/// The emitted unit owns every definition it holds, so a function nothing
+/// outside it names gets internal linkage on both its prototype and its
+/// definition. The two exceptions keep external linkage: the C entry wrapper,
+/// which the process starts at, and an extern function the C side defines.
+@test
+function codegenGivesLocalFunctionsInternalLinkage(): void {
+  let mut emission: CodegenEmission = codegenEmit(
+    "extern __codegen_link {\n  function ignisTestExternProbe(value: i32): i32;\n}\n\nfunction helper(value: i32): i32 {\n  return value + 1;\n}\n\nfunction main(): i32 {\n  return helper(ignisTestExternProbe(1));\n}\n",
+  );
+
+  let mut helperNames: Vector<String> = Vector::new<String>();
+  helperNames.push(String::create("helper"));
+
+  let helperIds: Vector<u32> = codegenFunctionDefIds(&mut emission.defStore, &mut emission.symbols, &helperNames);
+
+  let Option::SOME(helperRaw) = helperIds.get(0) else {
+    @panic("the emitted program declares no function named 'helper'");
+  };
+
+  let helperId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*helperRaw);
+  let helperName: String = CodegenC::mangledName(&mut emission.defStore, &mut emission.symbols, helperId);
+
+  let prototype: String = `static i32 ${helperName.toStr()}(i32 t0);`;
+  let definition: String = `static i32 ${helperName.toStr()}(i32 t0) {`;
+
+  Test::assert(emission.source.contains(&prototype));
+  Test::assert(emission.source.contains(&definition));
+
+  Test::assert(codegenContains(&emission.source, "\nint main(int argc, char** argv) {"));
+  Test::assert(!codegenContains(&emission.source, "static int main("));
+
+  // An extern function has no body, so it never reaches the LIR program and
+  // the unit only ever calls it. The rule still has to refuse it internal
+  // linkage: the C side owns that symbol.
+  let mut externNames: Vector<String> = Vector::new<String>();
+  externNames.push(String::create("ignisTestExternProbe"));
+
+  let externIds: Vector<u32> = codegenFunctionDefIds(&mut emission.defStore, &mut emission.symbols, &externNames);
+
+  let Option::SOME(externRaw) = externIds.get(0) else {
+    @panic("the analyzed program declares no extern function named 'ignisTestExternProbe'");
+  };
+
+  let externId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(*externRaw);
+  let noExternalSymbols: Vector<u32> = Vector::new<u32>();
+
+  Test::assert(!CodegenC::hasInternalLinkage(&mut emission.defStore, externId, &noExternalSymbols));
+  Test::assert(!codegenContains(&emission.source, "static i32 ignisTestExternProbe"));
+}
+
+/// A `@test` function is called from the harness translation unit, which
+/// declares it `extern void`, so the program unit has to leave its symbol
+/// externally visible.
+@test
+function codegenKeepsHarnessSymbolsExternallyVisible(): void {
+  let mut externalNames: Vector<String> = Vector::new<String>();
+  externalNames.push(String::create("harnessed"));
+
+  let emission: CodegenEmission = codegenEmitExposing(
+    "function harnessed(): void {\n  return;\n}\n\nfunction main(): i32 {\n  harnessed();\n\n  return 0;\n}\n",
+    &externalNames,
+  );
+
+  Test::assert(codegenContains(&emission.source, "void harnessed_"));
+  Test::assert(!codegenContains(&emission.source, "static void harnessed_"));
 }

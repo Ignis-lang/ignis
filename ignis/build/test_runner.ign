@@ -19,6 +19,11 @@ import BuildGraph from "./module_graph";
 export record TestCase {
   public fqName: String;
   public symbolName: String;
+  /// Raw definition id of the test function. The harness is its own
+  /// translation unit, so the emitter has to keep this symbol externally
+  /// visible instead of giving it the internal linkage every other definition
+  /// in the program unit gets.
+  public defIdRaw: u32;
   /// `<module directory>/__snapshots__`, the directory `std::test` snapshot
   /// helpers read and write through `IGNIS_TEST_SNAPSHOT_DIR`.
   public snapshotDir: String;
@@ -27,6 +32,7 @@ export record TestCase {
     return TestCase {
       fqName: self.fqName.clone(),
       symbolName: self.symbolName.clone(),
+      defIdRaw: self.defIdRaw,
       snapshotDir: self.snapshotDir.clone(),
     };
   }
@@ -196,6 +202,7 @@ export namespace TestRunner {
         outRef.push(TestCase {
           fqName: TestRunner::joinName(prefix, &functionItem.name),
           symbolName: CodegenC::mangledName(defStore, symbols, defId),
+          defIdRaw: defId.raw(),
           snapshotDir: snapshotDir.clone(),
         });
       },
@@ -599,16 +606,19 @@ function testRunnerPlanSortsByNameAndKeepsOnlyFilterMatches(): void {
   cases.push(TestCase {
     fqName: String::create("b::second"),
     symbolName: String::create("second_2"),
+    defIdRaw: 2,
     snapshotDir: String::new(),
   });
   cases.push(TestCase {
     fqName: String::create("a::first"),
     symbolName: String::create("first_1"),
+    defIdRaw: 1,
     snapshotDir: String::new(),
   });
   cases.push(TestCase {
     fqName: String::create("a::third"),
     symbolName: String::create("third_3"),
+    defIdRaw: 3,
     snapshotDir: String::new(),
   });
 
@@ -639,6 +649,7 @@ function testRunnerHarnessDispatchesEveryTestByName(): void {
   cases.push(TestCase {
     fqName: String::create("syntax::token_tests::keywordLookup"),
     symbolName: String::create("keywordLookup_42"),
+    defIdRaw: 42,
     snapshotDir: String::new(),
   });
 

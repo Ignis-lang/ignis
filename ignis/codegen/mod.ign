@@ -567,6 +567,34 @@ export namespace CodegenC {
     };
   }
 
+  /// Whether the emitted unit gives `defId` internal linkage.
+  ///
+  /// The host writes `static` on every function that is neither public, a
+  /// method, a `@test` function nor extern (`emit_function_signature` in
+  /// `crates/ignis_codegen_c/src/emit.rs`), because it emits one translation
+  /// unit per module: a symbol another unit calls has to survive linking. The
+  /// selfhost emits the whole program, std included, as a single unit, so the
+  /// public and method exceptions have no cross-unit caller left to serve, and
+  /// the C entry wrapper reaches the entry point from inside the same unit.
+  /// Two cases still need external linkage, and both are the host's own: an
+  /// extern function, which the C side defines, and a `@test` function, which
+  /// the separate harness unit declares and calls by symbol.
+  ///
+  /// Internal linkage is also what lets gcc inline: under `-fPIC` an
+  /// externally-visible function may be interposed at load time, so a small
+  /// hot accessor stays an out-of-line call for as long as it is not `static`.
+  function hasInternalLinkage(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+    externalSymbols: &Vector<u32>,
+  ): boolean {
+    if (CodegenC::isExternFunction(defStore, defId)) {
+      return false;
+    }
+
+    return !CodegenC::hasRaw(externalSymbols, defId.raw());
+  }
+
   /// Whether the nominal behind `defId` carries `@implements(Drop)`, which is
   /// what makes its `__ignis_drop_state` byte meaningful.
   function hasDropTrait(
@@ -2499,11 +2527,17 @@ export namespace CodegenC {
     output: &mut String,
     unsupported: &mut u64,
     closures: &CodegenC::ClosureTables,
+    externalSymbols: &Vector<u32>,
     function_: &Lir::FunctionLir,
   ): void {
     let signature: String = CodegenC::functionSignature(defStore, typeStore, symbols, closures, function_);
 
     let mut headerRef: &mut String = output;
+
+    if (CodegenC::hasInternalLinkage(defStore, function_.defId, externalSymbols)) {
+      headerRef.pushStr("static ");
+    }
+
     headerRef.pushStr(signature.toStr());
     headerRef.pushStr(" {\n");
 
@@ -3143,11 +3177,16 @@ export namespace CodegenC {
   /// The whole translation unit: the runtime header, one forward declaration
   /// and one definition per nominal type, a prototype per function, then the
   /// bodies.
+  ///
+  /// `externalSymbols` holds the raw definition ids another translation unit
+  /// references by name, which today is the `@test` functions the harness unit
+  /// dispatches to. Everything else the unit defines stays `static`.
   function emitProgram(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
     program: &Lir::LirProgram,
+    externalSymbols: &Vector<u32>,
   ): CodegenC::EmitOutput {
     let mut source: String = String::create("");
     let mut unsupported: u64 = 0;
@@ -3208,9 +3247,13 @@ export namespace CodegenC {
         let signature: String = CodegenC::functionSignature(defStore, typeStore, symbols, closures, function_);
 
         // C treats `extern` on a declaration as a no-op, but it records which
-        // side owns the definition.
+        // side owns the definition. A declaration and its definition have to
+        // agree on the storage class, so the prototype repeats the `static`
+        // the body carries.
         if (CodegenC::isExternFunction(defStore, function_.defId)) {
           source.pushStr("extern ");
+        } else if (CodegenC::hasInternalLinkage(defStore, function_.defId, externalSymbols)) {
+          source.pushStr("static ");
         }
 
         let line: String = `${signature.toStr()};\n`;
@@ -3236,7 +3279,16 @@ export namespace CodegenC {
         continue;
       }
 
-      CodegenC::emitFunction(defStore, typeStore, symbols, &mut source, &mut unsupported, closures, function_);
+      CodegenC::emitFunction(
+        defStore,
+        typeStore,
+        symbols,
+        &mut source,
+        &mut unsupported,
+        closures,
+        externalSymbols,
+        function_,
+      );
       functions += 1;
 
       bodyIndex += 1;

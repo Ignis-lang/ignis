@@ -595,11 +595,26 @@ function compileDiscovered(
     lirResult.program.entryPoint = Option::NONE;
   }
 
+  // Every definition the program unit holds is private to it, except the test
+  // functions the harness unit dispatches to by symbol.
+  let mut externalSymbols: Vector<u32> = Vector::new<u32>();
+  let mut externalIndex: u64 = 0;
+
+  while (externalIndex < tests.length()) {
+    let Option::SOME(testCase) = tests.get(externalIndex) else {
+      break;
+    };
+
+    externalSymbols.push(testCase.defIdRaw);
+    externalIndex += 1;
+  }
+
   let emitResult: CodegenC::EmitOutput = CodegenC::emitProgram(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
     &lirResult.program,
+    &externalSymbols,
   );
 
   Io::println(
