@@ -53,6 +53,10 @@ export namespace Analyzer {
       /// `Outer::Inner::Name` for a nested declaration, the bare name for a
       /// top-level one. Parallel to `syms`.
       public qualifiedNames: Vector<String>;
+      /// Whether other modules may bind the declaration: it sits under an
+      /// `export` at the module root or inside an `extern` block. Parallel to
+      /// `syms`.
+      public exported: Vector<boolean>;
     }
 
     /// Whether the overlay already binds `name`, readable through a mutable
@@ -226,6 +230,7 @@ export namespace Analyzer {
         defs: Vector::new<Analyzer::DefinitionId>(),
         spans: Vector::new<SourceSpan>(),
         qualifiedNames: Vector::new<String>(),
+        exported: Vector::new<boolean>(),
       };
     }
 
@@ -372,6 +377,7 @@ export namespace Analyzer {
       def: Analyzer::DefinitionId,
       span: SourceSpan,
       qualifiedName: String,
+      exported: boolean,
     ): void {
       // Same bare name under different written paths must coexist —
       // `__fcntl::fcntl` and `LibC::File::fcntl` are distinct declarations.
@@ -411,6 +417,19 @@ export namespace Analyzer {
       directRef.defs.push(def);
       directRef.spans.push(span);
       directRef.qualifiedNames.push(qualifiedName);
+      directRef.exported.push(exported);
+    }
+
+    /// Whether the entry at `index` may be bound from another module.
+    function directIndexEntryIsExported(
+      direct: &Analyzer::Imports::DirectDeclarationIndex,
+      index: u64,
+    ): boolean {
+      let Option::SOME(exported) = direct.exported.get(index) else {
+        return false;
+      };
+
+      return *exported;
     }
 
     function appendImportMissingDiagnostic(

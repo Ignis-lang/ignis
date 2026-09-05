@@ -288,12 +288,17 @@ export namespace Analyzer {
           continue;
         };
 
+        if (!Analyzer::Imports::directIndexEntryIsExported(targetDirect, declIndex)) {
+          declIndex += 1;
+          continue;
+        }
+
         let mut qualifiedName: String = String::create("");
         if (let Option::SOME(stored) = targetDirect.qualifiedNames.get(declIndex)) {
           qualifiedName = stored.clone();
         }
 
-        Analyzer::Imports::appendDirectIndexEntryIfMissing(direct, *name, *defId, *span, qualifiedName);
+        Analyzer::Imports::appendDirectIndexEntryIfMissing(direct, *name, *defId, *span, qualifiedName, true);
         declIndex += 1;
       }
 
@@ -411,7 +416,7 @@ export namespace Analyzer {
             continue;
           };
 
-          Analyzer::Imports::appendDirectIndexEntryIfMissing(direct, *sym, *defId, *span, qualifiedName.clone());
+          Analyzer::Imports::appendDirectIndexEntryIfMissing(direct, *sym, *defId, *span, qualifiedName.clone(), true);
           declIndex += 1;
         }
 
@@ -497,6 +502,11 @@ export namespace Analyzer {
       };
 
       if (Analyzer::Imports::directIndexSpan(currentDirect, *memberSym).isSome()) {
+        index += 1;
+        continue;
+      }
+
+      if (!Analyzer::Imports::directIndexEntryIsExported(targetDirect, index)) {
         index += 1;
         continue;
       }
@@ -807,6 +817,45 @@ export namespace Analyzer {
     return false;
   }
 
+  /// Whether `rawId` may be bound from another module: it is the declaration
+  /// an `export` at the module root publishes (or sits inside one), or it
+  /// belongs to an `extern` block. A bare root item, and anything nested in a
+  /// non-exported namespace, stays private to its module the way the host
+  /// keeps it.
+  function rootItemIsExportedRaw(module: &Ast::Module, rawId: u32): boolean {
+    let mut index: u64 = 0;
+
+    while (index < module.roots.length()) {
+      let Option::SOME(rootId) = module.roots.get(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(item) = module.items.get(*rootId) else {
+        index += 1;
+        continue;
+      };
+
+      let publishes: boolean = match (item) {
+        Ast::Item::Node::Export(_) -> true,
+        Ast::Item::Node::Extern(_) -> true,
+        _ -> false,
+      };
+
+      if (!publishes) {
+        index += 1;
+        continue;
+      }
+
+      if (rootId.raw() == rawId || Analyzer::itemContainsDeclarationRaw(module, *rootId, rawId, 0)) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
   /// Whether `rawId` is declared inside `itemId`, following namespace and
   /// export nesting. `depth` guards against a malformed tree pointing at
   /// itself; the corpus nests three deep at most.
@@ -1057,6 +1106,7 @@ export namespace Analyzer {
         *defId,
         Analyzer::itemSpanOrEmpty(module, *rawId),
         Analyzer::qualifiedNameForItemRaw(module, *rawId),
+        Analyzer::rootItemIsExportedRaw(module, *rawId),
       );
       index += 1;
     }
