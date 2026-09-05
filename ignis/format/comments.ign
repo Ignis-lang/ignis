@@ -1,0 +1,146 @@
+import String from "std::string";
+import Vector from "std::vector";
+
+import Punctuation, Token, TokenKind, TokenStream from "@compiler::syntax";
+
+@implements(Eq)
+export enum CommentPlacement {
+  LEADING,
+  TRAILING,
+  DETACHED,
+
+  public equals(&self, other: &CommentPlacement): boolean {
+    return match (self) {
+      CommentPlacement::LEADING -> *other == CommentPlacement::LEADING,
+      CommentPlacement::TRAILING -> *other == CommentPlacement::TRAILING,
+      CommentPlacement::DETACHED -> *other == CommentPlacement::DETACHED,
+    };
+  }
+}
+
+export record CommentTrivia {
+  public raw: String;
+  public placement: CommentPlacement;
+}
+
+export record CommentBlock {
+  public lines: Vector<String>;
+  public placement: CommentPlacement;
+
+  public flatten(&self): Vector<CommentTrivia> {
+    let mut result: Vector<CommentTrivia> = Vector::new<CommentTrivia>();
+    let mut index: u64 = 0;
+
+    while (index < self.lines.length()) {
+      let Option::SOME(line) = self.lines.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      result.push(CommentTrivia {
+        raw: line.clone(),
+        placement: self.placement,
+      });
+      index += 1;
+    }
+
+    return result;
+  }
+}
+
+export function isCommentTrivia(token: &Token): boolean {
+  let kind: TokenKind = token.kindValue();
+  return kind == TokenKind::LINE_COMMENT || kind == TokenKind::BLOCK_COMMENT || kind == TokenKind::OUTER_DOC_COMMENT || kind == TokenKind::INNER_DOC_COMMENT;
+}
+
+/// Counts newline bytes in `source[0..byteIndex]` to derive a zero-based line number.
+function lineNumber(source: &String, byteIndex: u64): u64 {
+  let mut clampedIndex: u64 = source.length();
+
+  if (byteIndex < clampedIndex) {
+    clampedIndex = byteIndex;
+  }
+  let mut count: u64 = 0;
+  let mut cursor: u64 = 0;
+
+  while (cursor < clampedIndex) {
+    if (let Option::SOME(byte) = source.byteAt(cursor) && byte == '\n' as u8) {
+      count += 1;
+    }
+
+    cursor += 1;
+  }
+
+  return count;
+}
+
+/// Classifies where a comment token sits relative to its neighbors: trailing
+/// the previous token on the same line, leading the next item, or detached by
+/// a blank line from what follows.
+export function classifyCommentPlacement(
+  source: &String,
+  tokens: &TokenStream,
+  commentIndex: u64,
+  startIndex: u64,
+  endIndex: u64,
+): CommentPlacement {
+  let Option::SOME(comment) = tokens.get(commentIndex) else {
+    @panic("classifyCommentPlacement: comment index out of range");
+  };
+
+  let commentLine: u64 = lineNumber(source, comment.spanStart());
+
+  let mut previous: Option<&Token> = Option::NONE;
+  let mut previousIndex: u64 = commentIndex;
+
+  while (previousIndex > startIndex) {
+    previousIndex -= 1;
+
+    let Option::SOME(candidate) = tokens.get(previousIndex) else {
+      continue;
+    };
+
+    if (!isCommentTrivia(candidate)) {
+      previous = Option::SOME(candidate);
+      break;
+    }
+  }
+
+  if (let Option::SOME(previousToken) = previous) {
+    let previousLine: u64 = lineNumber(source, previousToken.spanEnd());
+    let isLeftBrace: boolean = previousToken.kindValue() == TokenKind::PUNCTUATION && previousToken.punctuationValue() == Punctuation::LEFT_BRACE;
+
+    if (previousLine == commentLine && !isLeftBrace) {
+      return CommentPlacement::TRAILING;
+    }
+  }
+
+  let mut next: Option<&Token> = Option::NONE;
+  let mut nextIndex: u64 = commentIndex + 1;
+
+  while (nextIndex < endIndex) {
+    let Option::SOME(candidate) = tokens.get(nextIndex) else {
+      nextIndex += 1;
+      continue;
+    };
+
+    if (!isCommentTrivia(candidate)) {
+      next = Option::SOME(candidate);
+      break;
+    }
+
+    nextIndex += 1;
+  }
+
+  if (let Option::SOME(nextToken) = next) {
+    let nextLine: u64 = lineNumber(source, nextToken.spanStart());
+
+    if (commentLine + 1 >= nextLine) {
+      return CommentPlacement::LEADING;
+    }
+
+    return CommentPlacement::DETACHED;
+  }
+
+  return CommentPlacement::DETACHED;
+}

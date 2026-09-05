@@ -1,0 +1,99 @@
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import CommentPlacement, CommentTrivia from "./comments";
+import Format from "./model";
+
+function buildFile(source: str): Format::FormatFile {
+  let sourceText: String = String::create(source);
+
+  let Result::OK(file) = Format::FormatFile::fromSource(&sourceText) else {
+    Test::fail();
+    return Format::FormatFile { items: Vector::new<Format::FormatItem>() };
+  };
+
+  return file;
+}
+
+@test
+function modelNestsDirectivesInsideBranchRegions(): void {
+  let file: Format::FormatFile = buildFile("@if(feature) {\n    @if(other) {\n        function nested(): void {}\n    }\n}\n");
+
+  let Option::SOME(firstItem) = file.items.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  let Format::FormatItem::Directive(outer) = firstItem else {
+    Test::fail();
+    return;
+  };
+
+  let Option::SOME(innerItem) = outer.thenItems.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  let Format::FormatItem::Directive(_) = innerItem else {
+    Test::fail();
+    return;
+  };
+}
+
+@test
+function modelCollectsCommentPlacementsRecursively(): void {
+  let file: Format::FormatFile = buildFile("@if(flag) {\n    /// docs\n    function main(): void {}\n}\n");
+  let comments: Vector<CommentTrivia> = file.comments();
+
+  Test::assertEq<u64>(comments.length(), 1);
+
+  let Option::SOME(comment) = comments.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(comment.placement == CommentPlacement::LEADING);
+}
+
+@test
+function modelKeepsTopLevelLeadingCommentsOnOwnedCodeRegions(): void {
+  let file: Format::FormatFile = buildFile("/// docs\nfunction main(): void {}\n");
+
+  let Option::SOME(firstItem) = file.items.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  let Format::FormatItem::Code(region) = firstItem else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(region.leading.length(), 1);
+  Test::assertEq<u64>(region.trailing.length(), 0);
+}
+
+@test
+function modelAttachesTrailingCommentsToThePrecedingCodeRegion(): void {
+  let file: Format::FormatFile = buildFile("function main(): void {} // trailing\n");
+
+  let Option::SOME(firstItem) = file.items.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  let Format::FormatItem::Code(region) = firstItem else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(region.trailing.length(), 1);
+
+  let Option::SOME(trailingComment) = region.trailing.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assert(trailingComment.placement == CommentPlacement::TRAILING);
+}

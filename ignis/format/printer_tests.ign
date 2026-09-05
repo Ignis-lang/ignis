@@ -1,0 +1,112 @@
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import CommentBlock, CommentPlacement from "./comments";
+import FormatterConfig from "./config";
+import Format from "./model";
+import _ from "./printer";
+
+function codeItem(raw: str): Format::FormatItem {
+  return Format::FormatItem::Code(Format::CodeRegion {
+    raw: String::create(raw),
+    leading: Vector::new<CommentBlock>(),
+    trailing: Vector::new<CommentBlock>(),
+    leadingAfterAttrPrefix: false,
+  });
+}
+
+function fileOf(items: Vector<Format::FormatItem>): Format::FormatFile {
+  return Format::FormatFile { items: items };
+}
+
+function printOrFail(file: &Format::FormatFile): String {
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Result::OK(output) = Format::printFile(file, &config) else {
+    Test::fail();
+    return String::new();
+  };
+
+  return output;
+}
+
+@test
+function printerInsertsBlankLineAfterImportGroup(): void {
+  let mut items: Vector<Format::FormatItem> = Vector::new<Format::FormatItem>();
+  items.push(codeItem("import Foo from \"std::foo\";"));
+  items.push(codeItem("import Bar from \"std::bar\";"));
+  items.push(codeItem("function main(): void {\n  return;\n}"));
+
+  let file: Format::FormatFile = fileOf(items);
+  let output: String = printOrFail(&file);
+
+  Test::assertEq<str>(
+    output.toStr(),
+    "import Foo from \"std::foo\";\nimport Bar from \"std::bar\";\n\nfunction main(): void {\n  return;\n}\n"
+  );
+}
+
+@test
+function printerSeparatesConsecutiveComplexCodeItemsWithABlankLine(): void {
+  let mut items: Vector<Format::FormatItem> = Vector::new<Format::FormatItem>();
+  items.push(codeItem("function first(): void {\n  return;\n}"));
+  items.push(codeItem("function second(): void {\n  return;\n}"));
+
+  let file: Format::FormatFile = fileOf(items);
+  let output: String = printOrFail(&file);
+
+  Test::assertEq<str>(
+    output.toStr(),
+    "function first(): void {\n  return;\n}\n\nfunction second(): void {\n  return;\n}\n"
+  );
+}
+
+@test
+function printerAttachesATrailingSingleLineCommentOnTheSameLine(): void {
+  let mut trailing: Vector<CommentBlock> = Vector::new<CommentBlock>();
+  let mut lines: Vector<String> = Vector::new<String>();
+  lines.push(String::create("// trailing"));
+  trailing.push(CommentBlock { lines: lines, placement: CommentPlacement::TRAILING });
+
+  let mut items: Vector<Format::FormatItem> = Vector::new<Format::FormatItem>();
+  items.push(Format::FormatItem::Code(Format::CodeRegion {
+    raw: String::create("const X: i32 = 1;"),
+    leading: Vector::new<CommentBlock>(),
+    trailing: trailing,
+    leadingAfterAttrPrefix: false,
+  }));
+
+  let file: Format::FormatFile = fileOf(items);
+  let output: String = printOrFail(&file);
+
+  Test::assertEq<str>(output.toStr(), "const X: i32 = 1; // trailing\n");
+}
+
+@test
+function printerRendersABracedDirectiveBlockWithAnElseBranch(): void {
+  let mut thenItems: Vector<Format::FormatItem> = Vector::new<Format::FormatItem>();
+  thenItems.push(codeItem("function withFeature(): void {\n  return;\n}"));
+
+  let mut elseItems: Vector<Format::FormatItem> = Vector::new<Format::FormatItem>();
+  elseItems.push(codeItem("function withoutFeature(): void {\n  return;\n}"));
+
+  let mut items: Vector<Format::FormatItem> = Vector::new<Format::FormatItem>();
+  items.push(Format::FormatItem::Directive(Format::DirectiveBlock {
+    leading: Vector::new<CommentBlock>(),
+    header: String::create("@if(feature)"),
+    thenItems: thenItems,
+    elseHeader: Option::SOME(String::create("@else")),
+    elseItems: elseItems,
+    trailing: Vector::new<CommentBlock>(),
+    braced: true,
+  }));
+
+  let file: Format::FormatFile = fileOf(items);
+  let output: String = printOrFail(&file);
+
+  Test::assertEq<str>(
+    output.toStr(),
+    "@if(feature) {\n  function withFeature(): void {\n    return;\n  }\n}\n@else {\n  function withoutFeature(): void {\n    return;\n  }\n}\n"
+  );
+}

@@ -1,0 +1,155 @@
+import String from "std::string";
+import Test from "std::test";
+
+import Ast from "@compiler::ast";
+import DiagnosticBag, SourceFile from "@compiler::diagnostics";
+import Parser from "@compiler::parser";
+
+import FormatterConfig from "./config";
+import Format from "./layout_statements";
+
+/// Parses `const __probe__ = <expr>;`, pulls out the parsed value expression,
+/// and renders it back through `Format::formatExpressionNode`. This isolates
+/// expression layout without needing the item layer above it.
+///
+/// The renderer lives in `layout_statements.ign`: expression and statement
+/// layout are mutually recursive, and Ignis rejects module import cycles.
+function formatExpr(expr: str): String {
+  let mut sourceText: String = String::create("const __probe__: i32 = ");
+  sourceText.pushStr(expr);
+  sourceText.pushStr(";");
+
+  let file: SourceFile = SourceFile::create("expr_probe.ign", sourceText.toStr());
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+  Parser::parseInto(&file, &mut module, &mut diagnostics);
+
+  if (diagnostics.length() > 0) {
+    Test::fail();
+    return String::new();
+  }
+
+  let Option::SOME(rootId) = module.roots.get(0) else {
+    Test::fail();
+    return String::new();
+  };
+
+  let Option::SOME(node) = module.items.get(*rootId) else {
+    Test::fail();
+    return String::new();
+  };
+
+  let Ast::Item::Node::Constant(constant) = node else {
+    Test::fail();
+    return String::new();
+  };
+
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Result::OK(output) = Format::formatExpressionNode(&module, constant.value, 0, &sourceText, &config, 0) else {
+    Test::fail();
+    return String::new();
+  };
+
+  return output;
+}
+
+@test
+function layoutExpressionsFormatsALiteral(): void {
+  Test::assertEq<str>(formatExpr("42").toStr(), "42");
+}
+
+@test
+function layoutExpressionsAddsSpacesAroundABinaryOperator(): void {
+  Test::assertEq<str>(formatExpr("1 + 2").toStr(), "1 + 2");
+}
+
+@test
+function layoutExpressionsRespectsOperatorPrecedenceWithoutExtraParens(): void {
+  Test::assertEq<str>(formatExpr("1 + 2 * 3").toStr(), "1 + 2 * 3");
+}
+
+@test
+function layoutExpressionsKeepsExplicitParensWhenTheyChangePrecedence(): void {
+  Test::assertEq<str>(formatExpr("(1 + 2) * 3").toStr(), "(1 + 2) * 3");
+}
+
+@test
+function layoutExpressionsParenthesizesARightAssociatedEqualPrecedenceBinaryOperator(): void {
+  Test::assertEq<str>(formatExpr("1 - (2 - 3)").toStr(), "1 - (2 - 3)");
+}
+
+@test
+function layoutExpressionsFormatsAFunctionCallWithSpacedArguments(): void {
+  Test::assertEq<str>(formatExpr("foo(1, 2)").toStr(), "foo(1, 2)");
+}
+
+@test
+function layoutExpressionsFormatsMemberAccess(): void {
+  Test::assertEq<str>(formatExpr("foo.bar").toStr(), "foo.bar");
+}
+
+@test
+function layoutExpressionsFormatsIndexAccess(): void {
+  Test::assertEq<str>(formatExpr("foo[0]").toStr(), "foo[0]");
+}
+
+@test
+function layoutExpressionsFormatsACast(): void {
+  Test::assertEq<str>(formatExpr("x as i32").toStr(), "x as i32");
+}
+
+@test
+function layoutExpressionsFormatsAReference(): void {
+  Test::assertEq<str>(formatExpr("&x").toStr(), "&x");
+}
+
+@test
+function layoutExpressionsFormatsAMutableReference(): void {
+  Test::assertEq<str>(formatExpr("&mut x").toStr(), "&mut x");
+}
+
+@test
+function layoutExpressionsFormatsUnaryNegation(): void {
+  Test::assertEq<str>(formatExpr("-x").toStr(), "-x");
+}
+
+@test
+function layoutExpressionsFormatsAnAssignment(): void {
+  Test::assertEq<str>(formatExpr("x = 1").toStr(), "x = 1");
+}
+
+@test
+function layoutExpressionsFallsBackToVerbatimForAMultilineCall(): void {
+  Test::assertEq<str>(formatExpr("foo(\n  1,\n  2,\n)").toStr(), "foo(\n  1,\n  2,\n)");
+}
+
+@test
+function layoutExpressionsFormatsABuiltinCallWithoutTypeArguments(): void {
+  Test::assertEq<str>(formatExpr("@panic(\"boom\")").toStr(), "@panic(\"boom\")");
+}
+
+@test
+function layoutExpressionsFormatsABuiltinCallWithTypeArguments(): void {
+  Test::assertEq<str>(formatExpr("@sizeOf<i32>()").toStr(), "@sizeOf<i32>()");
+}
+
+@test
+function layoutExpressionsFormatsAMoveCaptureOverride(): void {
+  Test::assertEq<str>(formatExpr("@move x").toStr(), "@move x");
+}
+
+@test
+function layoutExpressionsFormatsARefCaptureOverride(): void {
+  Test::assertEq<str>(formatExpr("@ref x").toStr(), "@ref x");
+}
+
+@test
+function layoutExpressionsFormatsARefMutCaptureOverride(): void {
+  Test::assertEq<str>(formatExpr("@refMut x").toStr(), "@refMut x");
+}
+
+@test
+function layoutExpressionsFormatsAPipePlaceholder(): void {
+  Test::assertEq<str>(formatExpr("_").toStr(), "_");
+}

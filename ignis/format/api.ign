@@ -1,0 +1,608 @@
+import Fs from "std::fs";
+import Path from "std::path";
+import String from "std::string";
+import Vector from "std::vector";
+
+import FormatterConfig from "./config";
+import FormatError from "./error";
+import _ from "./layout_items";
+import _ from "./model";
+import _ from "./printer";
+import _ from "./safety";
+
+/// `String::lines()` appends a spurious trailing empty entry when the text ends
+/// with '\n', unlike Rust's `str::lines()` (repro
+/// "string-lines-trailing-newline").
+function apiLines(text: &String): Vector<String> {
+  let mut lines: Vector<String> = text.lines();
+
+  if (text.length() > 0 && lines.length() > 0) {
+    let Option::SOME(lastByte) = text.byteAt(text.length() - 1) else {
+      return lines;
+    };
+
+    if (lastByte == '\n' as u8) {
+      lines.pop();
+    }
+  }
+
+  return lines;
+}
+
+function maxU64(left: u64, right: u64): u64 {
+  if (left > right) {
+    return left;
+  }
+
+  return right;
+}
+
+function minU64(left: u64, right: u64): u64 {
+  if (left < right) {
+    return left;
+  }
+
+  return right;
+}
+
+function saturatingSub(value: u64, amount: u64): u64 {
+  if (value < amount) {
+    return 0;
+  }
+
+  return value - amount;
+}
+
+export namespace Format {
+  /// What a single formatting run was asked to do. `check` keeps the file on
+  /// disk untouched, which is what both `--check` and `--emit diff` need.
+  record FormatOptions {
+    public check: boolean;
+    public config: FormatterConfig;
+
+    public static withConfig(config: &FormatterConfig): Format::FormatOptions {
+      return Format::FormatOptions {
+        check: false,
+        config: FormatterConfig {
+          indentWidth: config.indentWidth,
+          lineWidth: config.lineWidth,
+          useTabs: config.useTabs,
+          sortImports: config.sortImports,
+        },
+      };
+    }
+  }
+
+  record FormatOutcome {
+    public changed: boolean;
+    public formatted: String;
+  }
+
+  /// Formats `source` and refuses the result unless it is safe: same tokens,
+  /// same comment ownership, same directives, and stable under a second pass.
+  function formatSource(source: &String, config: &FormatterConfig): Result<String, FormatError> {
+    let formatted: String = Format::formatSourceUnchecked(source, config)!;
+
+    Format::validateFormattedOutput(source, &formatted, config.sortImports)!;
+
+    let reformatted: String = Format::formatSourceUnchecked(&formatted, config)!;
+
+    if (!reformatted.equals(&formatted)) {
+      return Result::ERROR(FormatError::safety("formatted output is not idempotent on a second formatter pass"));
+    }
+
+    return Result::OK(formatted);
+  }
+
+  /// The layout pipeline on its own: model, layout, print. Skips the safety
+  /// checks, which is what the idempotence check itself needs.
+  function formatSourceUnchecked(
+    source: &String,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let file: Format::FormatFile = Format::FormatFile::fromSource(source)!;
+    let laidOut: Format::FormatFile = Format::layoutFile(&file, config)!;
+    return Format::printFile(&laidOut, config);
+  }
+
+  /// True when formatting would rewrite `source`, which is the `--check`
+  /// verdict for one file.
+  function sourceNeedsFormatting(
+    source: &String,
+    config: &FormatterConfig
+  ): Result<boolean, FormatError> {
+    let formatted: String = Format::formatSource(source, config)!;
+    return Result::OK(!formatted.equals(source));
+  }
+
+  /// Formats the file at `path`, rewriting it unless the run is read-only.
+  function formatFile(
+    path: &Path::PathBuf,
+    options: &Format::FormatOptions
+  ): Result<Format::FormatOutcome, FormatError> {
+    let Result::OK(source) = Fs::readToString(path) else {
+      return Result::ERROR(FormatError::io("could not read file"));
+    };
+
+    let formatted: String = Format::formatSource(&source, &options.config)!;
+    let changed: boolean = !formatted.equals(&source);
+
+    if (changed && !options.check) {
+      let Result::OK(_) = Fs::writeString(path, &formatted) else {
+        return Result::ERROR(FormatError::io("could not write file"));
+      };
+    }
+
+    return Result::OK(Format::FormatOutcome { changed: changed, formatted: formatted });
+  }
+
+  /// Renders a unified diff between two texts, with three lines of context
+  /// around each run of changed lines. Line-aligned rather than
+  /// longest-common-subsequence based, matching the host CLI.
+  function unifiedDiff(path: &String, oldText: &String, newText: &String): String {
+    let oldLines: Vector<String> = apiLines(oldText);
+    let newLines: Vector<String> = apiLines(newText);
+
+    let mut output: String = String::create("--- ");
+    output.push(path);
+    output.pushStr("\n+++ ");
+    output.push(path);
+    output.pushChar('\n');
+
+    let maxLines: u64 = maxU64(oldLines.length(), newLines.length());
+
+    let mut changeStarts: Vector<u64> = Vector::new<u64>();
+    let mut changeEnds: Vector<u64> = Vector::new<u64>();
+
+    let mut inChange: boolean = false;
+    let mut changeStart: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < maxLines) {
+      let mut linesAreEqual: boolean = false;
+
+      if (index < oldLines.length() && index < newLines.length()) {
+        if (let Option::SOME(oldLine) = oldLines.get(index)) {
+          if (let Option::SOME(newLine) = newLines.get(index)) {
+            linesAreEqual = oldLine.equals(newLine);
+          }
+        }
+      }
+
+      if (linesAreEqual) {
+        if (inChange) {
+          changeStarts.push(changeStart);
+          changeEnds.push(index);
+          inChange = false;
+        }
+      } else {
+        if (!inChange) {
+          changeStart = index;
+          inChange = true;
+        }
+      }
+
+      index += 1;
+    }
+
+    if (inChange) {
+      changeStarts.push(changeStart);
+      changeEnds.push(maxLines);
+    }
+
+    let mut hunkIndex: u64 = 0;
+
+    while (hunkIndex < changeStarts.length()) {
+      let Option::SOME(start) = changeStarts.get(hunkIndex) else {
+        hunkIndex += 1;
+        continue;
+      };
+
+      let Option::SOME(end) = changeEnds.get(hunkIndex) else {
+        hunkIndex += 1;
+        continue;
+      };
+
+      let contextBefore: u64 = saturatingSub(*start, 3);
+      let contextAfter: u64 = minU64(*end + 3, maxLines);
+      let hunkLength: u64 = contextAfter - contextBefore;
+
+      let headerStartValue: u64 = contextBefore + 1;
+      let headerStart: String = headerStartValue.toString();
+      let headerLength: String = hunkLength.toString();
+
+      output.pushStr("@@ -");
+      output.push(&headerStart);
+      output.pushStr(",");
+      output.push(&headerLength);
+      output.pushStr(" +");
+      output.push(&headerStart);
+      output.pushStr(",");
+      output.push(&headerLength);
+      output.pushStr(" @@\n");
+
+      let mut lineIndex: u64 = contextBefore;
+
+      while (lineIndex < contextAfter) {
+        let oldLine: Option<&String> = oldLines.get(lineIndex);
+        let newLine: Option<&String> = newLines.get(lineIndex);
+
+        if (lineIndex >= *start && lineIndex < *end) {
+          if (let Option::SOME(line) = oldLine) {
+            output.pushStr("-");
+            output.push(line);
+            output.pushChar('\n');
+          }
+
+          if (let Option::SOME(line) = newLine) {
+            output.pushStr("+");
+            output.push(line);
+            output.pushChar('\n');
+          }
+        } else {
+          if (let Option::SOME(line) = oldLine) {
+            output.pushStr(" ");
+            output.push(line);
+            output.pushChar('\n');
+          } else if (let Option::SOME(line) = newLine) {
+            output.pushStr(" ");
+            output.push(line);
+            output.pushChar('\n');
+          }
+        }
+
+        lineIndex += 1;
+      }
+
+      hunkIndex += 1;
+    }
+
+    return output;
+  }
+
+  /// One `{"path": ..., "text": ...}` record of the `--stdin-json` protocol.
+  record StdinRequest {
+    public path: String;
+    public text: String;
+  }
+
+  /// One response line of the `--stdin-json` protocol. `formatted` is omitted
+  /// in diff mode, `diff` outside it, and `error` whenever the run succeeded.
+  record StdinResponse {
+    public path: String;
+    public hasFormatted: boolean;
+    public formatted: String;
+    public changed: boolean;
+    public hasDiff: boolean;
+    public diff: String;
+    public hasError: boolean;
+    public error: String;
+  }
+
+  /// Reads one NDJSON request line. Only the two string fields the protocol
+  /// defines are recognised; anything else in the object is skipped.
+  function parseStdinRequest(line: &String): Result<Format::StdinRequest, FormatError> {
+    let mut path: Option<String> = Option::NONE;
+    let mut text: Option<String> = Option::NONE;
+    let mut cursor: u64 = 0;
+
+    while (cursor < line.length()) {
+      let Option::SOME(byte) = line.byteAt(cursor) else {
+        break;
+      };
+
+      if (byte != '"' as u8) {
+        cursor += 1;
+        continue;
+      }
+
+      let Option::SOME(key) = Format::readJsonString(line, cursor) else {
+        return Result::ERROR(FormatError::model("failed to parse NDJSON record: unterminated key"));
+      };
+
+      cursor = key.nextIndex;
+
+      while (cursor < line.length()) {
+        let Option::SOME(candidate) = line.byteAt(cursor) else {
+          break;
+        };
+
+        if (candidate == ':' as u8) {
+          cursor += 1;
+          break;
+        }
+
+        if (candidate == ' ' as u8 || candidate == '\t' as u8) {
+          cursor += 1;
+          continue;
+        }
+
+        break;
+      }
+
+      while (cursor < line.length()) {
+        let Option::SOME(candidate) = line.byteAt(cursor) else {
+          break;
+        };
+
+        if (candidate == ' ' as u8 || candidate == '\t' as u8) {
+          cursor += 1;
+          continue;
+        }
+
+        break;
+      }
+
+      let Option::SOME(nextByte) = line.byteAt(cursor) else {
+        break;
+      };
+
+      if (nextByte != '"' as u8) {
+        continue;
+      }
+
+      let Option::SOME(value) = Format::readJsonString(line, cursor) else {
+        return Result::ERROR(FormatError::model("failed to parse NDJSON record: unterminated value"));
+      };
+
+      cursor = value.nextIndex;
+
+      if (key.value.equals("path")) {
+        path = Option::SOME(value.value.clone());
+      } else if (key.value.equals("text")) {
+        text = Option::SOME(value.value.clone());
+      }
+    }
+
+    let Option::SOME(pathValue) = path else {
+      return Result::ERROR(FormatError::model("failed to parse NDJSON record: missing 'path'"));
+    };
+
+    let Option::SOME(textValue) = text else {
+      return Result::ERROR(FormatError::model("failed to parse NDJSON record: missing 'text'"));
+    };
+
+    return Result::OK(Format::StdinRequest { path: pathValue, text: textValue });
+  }
+
+  record JsonStringRead {
+    public value: String;
+    public nextIndex: u64;
+  }
+
+  /// Decodes the JSON string starting at the `"` on `startIndex`.
+  function readJsonString(line: &String, startIndex: u64): Option<Format::JsonStringRead> {
+    let Option::SOME(openQuote) = line.byteAt(startIndex) else {
+      return Option::NONE;
+    };
+
+    if (openQuote != '"' as u8) {
+      return Option::NONE;
+    }
+
+    let mut value: String = String::new();
+    let mut cursor: u64 = startIndex + 1;
+
+    while (cursor < line.length()) {
+      let Option::SOME(byte) = line.byteAt(cursor) else {
+        return Option::NONE;
+      };
+
+      if (byte == '"' as u8) {
+        return Option::SOME(Format::JsonStringRead { value: value, nextIndex: cursor + 1 });
+      }
+
+      if (byte != '\\' as u8) {
+        value.pushByte(byte);
+        cursor += 1;
+        continue;
+      }
+
+      let Option::SOME(escaped) = line.byteAt(cursor + 1) else {
+        return Option::NONE;
+      };
+
+      if (escaped == 'n' as u8) {
+        value.pushByte('\n' as u8);
+      } else if (escaped == 't' as u8) {
+        value.pushByte('\t' as u8);
+      } else if (escaped == 'r' as u8) {
+        value.pushByte('\r' as u8);
+      } else if (escaped == 'b' as u8) {
+        value.pushByte(8);
+      } else if (escaped == 'f' as u8) {
+        value.pushByte(12);
+      } else if (escaped == 'u' as u8) {
+        let Option::SOME(decoded) = Format::readJsonUnicodeEscape(line, cursor + 2) else {
+          return Option::NONE;
+        };
+
+        value.pushChar(decoded);
+        cursor += 6;
+        continue;
+      } else {
+        value.pushByte(escaped);
+      }
+
+      cursor += 2;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Decodes the four hex digits of a `\uXXXX` escape. Surrogate pairs are not
+  /// recombined: the protocol's producer emits plain UTF-8 for anything above
+  /// the basic plane.
+  function readJsonUnicodeEscape(line: &String, startIndex: u64): Option<char> {
+    let mut value: u32 = 0;
+    let mut index: u64 = 0;
+
+    while (index < 4) {
+      let Option::SOME(byte) = line.byteAt(startIndex + index) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(digit) = Format::hexDigitValue(byte) else {
+        return Option::NONE;
+      };
+
+      value = value * 16 + digit;
+      index += 1;
+    }
+
+    return Option::SOME(value as char);
+  }
+
+  function hexDigitValue(byte: u8): Option<u32> {
+    if (byte >= '0' as u8 && byte <= '9' as u8) {
+      return Option::SOME((byte - ('0' as u8)) as u32);
+    }
+
+    if (byte >= 'a' as u8 && byte <= 'f' as u8) {
+      return Option::SOME((byte - ('a' as u8)) as u32 + 10);
+    }
+
+    if (byte >= 'A' as u8 && byte <= 'F' as u8) {
+      return Option::SOME((byte - ('A' as u8)) as u32 + 10);
+    }
+
+    return Option::NONE;
+  }
+
+  function escapeJsonString(value: &String, output: &mut String): void {
+    let mut outputRef: &mut String = output;
+    outputRef.pushChar('"');
+
+    let mut index: u64 = 0;
+
+    while (index < value.length()) {
+      let Option::SOME(byte) = value.byteAt(index) else {
+        break;
+      };
+
+      if (byte == '"' as u8) {
+        outputRef.pushStr("\\\"");
+      } else if (byte == '\\' as u8) {
+        outputRef.pushStr("\\\\");
+      } else if (byte == '\n' as u8) {
+        outputRef.pushStr("\\n");
+      } else if (byte == '\r' as u8) {
+        outputRef.pushStr("\\r");
+      } else if (byte == '\t' as u8) {
+        outputRef.pushStr("\\t");
+      } else if (byte == 8) {
+        outputRef.pushStr("\\b");
+      } else if (byte == 12) {
+        outputRef.pushStr("\\f");
+      } else if (byte < 32) {
+        outputRef.pushStr("\\u00");
+        outputRef.pushByte(Format::hexDigitByte(byte / 16));
+        outputRef.pushByte(Format::hexDigitByte(byte % 16));
+      } else {
+        outputRef.pushByte(byte);
+      }
+
+      index += 1;
+    }
+
+    outputRef.pushChar('"');
+  }
+
+  function hexDigitByte(value: u8): u8 {
+    if (value < 10) {
+      return ('0' as u8) + value;
+    }
+
+    return ('a' as u8) + (value - 10);
+  }
+
+  /// Serializes one NDJSON response line, omitting the fields the host omits
+  /// when they carry no value.
+  function renderStdinResponse(response: &Format::StdinResponse): String {
+    let mut output: String = String::create("{");
+
+    output.pushStr("\"path\":");
+    Format::escapeJsonString(&response.path, &mut output);
+
+    if (response.hasFormatted) {
+      output.pushStr(",\"formatted\":");
+      Format::escapeJsonString(&response.formatted, &mut output);
+    }
+
+    output.pushStr(",\"changed\":");
+
+    if (response.changed) {
+      output.pushStr("true");
+    } else {
+      output.pushStr("false");
+    }
+
+    if (response.hasDiff) {
+      output.pushStr(",\"diff\":");
+      Format::escapeJsonString(&response.diff, &mut output);
+    }
+
+    if (response.hasError) {
+      output.pushStr(",\"error\":");
+      Format::escapeJsonString(&response.error, &mut output);
+    }
+
+    output.pushStr("}");
+    return output;
+  }
+
+  /// Formats one NDJSON request into the response the protocol expects. In
+  /// diff mode the formatted text is replaced by a unified diff.
+  function processStdinRequest(
+    request: &Format::StdinRequest,
+    config: &FormatterConfig,
+    emitDiff: boolean
+  ): Format::StdinResponse {
+    let Result::OK(formatted) = Format::formatSource(&request.text, config) else {
+      let Result::ERROR(error) = Format::formatSource(&request.text, config) else {
+        return Format::StdinResponse {
+          path: request.path.clone(),
+          hasFormatted: false,
+          formatted: String::new(),
+          changed: false,
+          hasDiff: false,
+          diff: String::new(),
+          hasError: true,
+          error: String::create("formatter failed"),
+        };
+      };
+
+      return Format::StdinResponse {
+        path: request.path.clone(),
+        hasFormatted: false,
+        formatted: String::new(),
+        changed: false,
+        hasDiff: false,
+        diff: String::new(),
+        hasError: true,
+        error: error.describe(),
+      };
+    };
+
+    let changed: boolean = !formatted.equals(&request.text);
+
+    let mut diff: String = String::new();
+    let mut hasDiff: boolean = false;
+
+    if (emitDiff && changed) {
+      diff = Format::unifiedDiff(&request.path, &request.text, &formatted);
+      hasDiff = true;
+    }
+
+    return Format::StdinResponse {
+      path: request.path.clone(),
+      hasFormatted: !emitDiff,
+      formatted: formatted,
+      changed: changed,
+      hasDiff: hasDiff,
+      diff: diff,
+      hasError: false,
+      error: String::new(),
+    };
+  }
+}

@@ -1,0 +1,818 @@
+import String from "std::string";
+import Vector from "std::vector";
+
+import SourceFile from "@compiler::diagnostics";
+import LexResult, Lexer from "@compiler::lexer";
+import TokenKind from "@compiler::syntax";
+
+import CommentPlacement, classifyCommentPlacement, isCommentTrivia from "./comments";
+import FormatError from "./error";
+import _ from "./model";
+
+/// `String::lines()` appends a spurious trailing empty entry when the text ends
+/// with '\n', unlike Rust's `str::lines()` (repro
+/// "string-lines-trailing-newline").
+function safetyLines(text: &String): Vector<String> {
+  let mut lines: Vector<String> = text.lines();
+
+  if (text.length() > 0 && lines.length() > 0) {
+    let Option::SOME(lastByte) = text.byteAt(text.length() - 1) else {
+      return lines;
+    };
+
+    if (lastByte == '\n' as u8) {
+      lines.pop();
+    }
+  }
+
+  return lines;
+}
+
+function isSafetyWhitespaceByte(byte: u8): boolean {
+  return byte == ' ' as u8 || byte == '\t' as u8 || byte == '\n' as u8 || byte == '\r' as u8;
+}
+
+function trimEndSafety(text: &String): String {
+  let mut end: u64 = text.length();
+
+  while (end > 0) {
+    let Option::SOME(byte) = text.byteAt(end - 1) else {
+      break;
+    };
+
+    if (!isSafetyWhitespaceByte(byte)) {
+      break;
+    }
+
+    end -= 1;
+  }
+
+  return text.substringBytes(0, end);
+}
+
+function lexOrFail(label: str, source: &String): Result<LexResult, FormatError> {
+  let file: SourceFile = SourceFile::create(label, source.toStr());
+  let lexResult: LexResult = Lexer::lex(&file);
+
+  if (lexResult.diagnostics.length() > 0) {
+    let mut messages: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < lexResult.diagnostics.length()) {
+      let Option::SOME(diagnostic) = lexResult.diagnostics.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      messages.push(String::create(diagnostic.messageText()));
+      index += 1;
+    }
+
+    return Result::ERROR(FormatError::lex(messages));
+  }
+
+  return Result::OK(lexResult);
+}
+
+export namespace Format {
+  /// One token reduced to what the safety check compares: its kind and the
+  /// exact text the source wrote for it.
+  record TokenShape {
+    public kind: TokenKind;
+    public text: String;
+  }
+
+  /// A comment together with the tokens that surround it, which is what pins
+  /// its ownership. Moving a comment past a token changes this shape even when
+  /// the token stream itself is unchanged.
+  record CommentShape {
+    public raw: String;
+    public placement: CommentPlacement;
+    public hasPrevious: boolean;
+    public previousText: String;
+    public hasNext: boolean;
+    public nextText: String;
+  }
+
+  record FileShape {
+    public tokens: Vector<Format::TokenShape>;
+    public comments: Vector<Format::CommentShape>;
+    public directives: Vector<String>;
+  }
+
+  /// Rejects a formatting that changed the program rather than its layout.
+  ///
+  /// The formatted text must lex cleanly, carry no trailing whitespace, end
+  /// with a newline, and reduce to the same token stream, comment ownership and
+  /// directive structure as the source it came from.
+  function validateFormattedOutput(
+    source: &String,
+    formatted: &String,
+    sortImports: boolean
+  ): Result<void, FormatError> {
+    Format::validateParseBack(formatted)!;
+    Format::validateNoTrailingWhitespace(formatted)!;
+    Format::validateFinalNewline(formatted)!;
+
+    let sourceFile: Format::FormatFile = Format::FormatFile::fromSource(source)!;
+    let formattedFile: Format::FormatFile = Format::FormatFile::fromSource(formatted)!;
+
+    let sourceShape: Format::FileShape = Format::fileShape(source, &sourceFile)!;
+    let formattedShape: Format::FileShape = Format::fileShape(formatted, &formattedFile)!;
+
+    let sourceCommas: Vector<Format::TokenShape> = Format::normalizeOptionalTrailingCommas(&sourceShape.tokens);
+    let formattedCommas: Vector<Format::TokenShape> = Format::normalizeOptionalTrailingCommas(&formattedShape.tokens);
+    let sourceTokens: Vector<Format::TokenShape> = Format::normalizeModuleItemGroups(&sourceCommas);
+    let formattedTokens: Vector<Format::TokenShape> = Format::normalizeModuleItemGroups(&formattedCommas);
+
+    let mut tokensMatch: boolean = false;
+
+    if (sortImports) {
+      let sourceTexts: Vector<String> = Format::tokenTexts(&sourceTokens);
+      let formattedTexts: Vector<String> = Format::tokenTexts(&formattedTokens);
+      let sourceKeys: Vector<String> = Format::sortedStrings(&sourceTexts);
+      let formattedKeys: Vector<String> = Format::sortedStrings(&formattedTexts);
+      tokensMatch = Format::stringVectorsEqual(&sourceKeys, &formattedKeys);
+    } else {
+      tokensMatch = Format::tokenShapesEqual(&sourceTokens, &formattedTokens);
+    }
+
+    if (!tokensMatch) {
+      return Result::ERROR(FormatError::safety("formatted output changed token shape or preserved trivia structure"));
+    }
+
+    if (!Format::commentShapesEqual(&sourceShape.comments, &formattedShape.comments)) {
+      return Result::ERROR(FormatError::safety("formatted output changed comment ownership or preserved trivia structure"));
+    }
+
+    if (!Format::stringVectorsEqual(&sourceShape.directives, &formattedShape.directives)) {
+      return Result::ERROR(FormatError::safety("formatted output changed directive structure"));
+    }
+
+    return Result::OK(());
+  }
+
+  /// Verifies the formatted output still lexes cleanly.
+  function validateParseBack(formatted: &String): Result<void, FormatError> {
+    let file: SourceFile = SourceFile::create("formatter_parseback.ign", formatted.toStr());
+    let lexResult: LexResult = Lexer::lex(&file);
+
+    if (lexResult.diagnostics.length() == 0) {
+      return Result::OK(());
+    }
+
+    let mut message: String = String::create("parse-back validation failed: formatted output does not lex cleanly: ");
+    let mut index: u64 = 0;
+
+    while (index < lexResult.diagnostics.length()) {
+      let Option::SOME(diagnostic) = lexResult.diagnostics.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        message.pushStr("; ");
+      }
+
+      message.pushStr(diagnostic.messageText());
+      index += 1;
+    }
+
+    return Result::ERROR(FormatError::Safety(message));
+  }
+
+  function validateNoTrailingWhitespace(formatted: &String): Result<void, FormatError> {
+    let lines: Vector<String> = safetyLines(formatted);
+    let mut index: u64 = 0;
+
+    while (index < lines.length()) {
+      let Option::SOME(line) = lines.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let trimmed: String = trimEndSafety(line);
+
+      if (trimmed.length() != line.length()) {
+        let lineNumberValue: u64 = index + 1;
+        let lineNumber: String = lineNumberValue.toString();
+        let mut message: String = String::create("trailing whitespace on line ");
+        message.push(&lineNumber);
+        return Result::ERROR(FormatError::Safety(message));
+      }
+
+      index += 1;
+    }
+
+    return Result::OK(());
+  }
+
+  function validateFinalNewline(formatted: &String): Result<void, FormatError> {
+    if (formatted.length() == 0) {
+      return Result::OK(());
+    }
+
+    let Option::SOME(lastByte) = formatted.byteAt(formatted.length() - 1) else {
+      return Result::OK(());
+    };
+
+    if (lastByte != '\n' as u8) {
+      return Result::ERROR(FormatError::safety("formatted output is missing a final newline"));
+    }
+
+    return Result::OK(());
+  }
+
+  /// Selection sort over a copy: `Vector::sort` needs a comparison closure,
+  /// and this runs only for `sort_imports`, on the small token-text list.
+  function sortedStrings(items: &Vector<String>): Vector<String> {
+    let mut remaining: Vector<String> = Vector::new<String>();
+    Format::appendStrings(&mut remaining, items);
+
+    let mut sorted: Vector<String> = Vector::new<String>();
+
+    while (remaining.length() > 0) {
+      let mut smallestIndex: u64 = 0;
+      let mut scan: u64 = 1;
+
+      while (scan < remaining.length()) {
+        let Option::SOME(candidate) = remaining.get(scan) else {
+          scan += 1;
+          continue;
+        };
+
+        let Option::SOME(smallest) = remaining.get(smallestIndex) else {
+          scan += 1;
+          continue;
+        };
+
+        if (candidate.compare(smallest) < 0) {
+          smallestIndex = scan;
+        }
+
+        scan += 1;
+      }
+
+      let Option::SOME(smallest) = remaining.get(smallestIndex) else {
+        break;
+      };
+
+      sorted.push(smallest.clone());
+
+      let mut rebuilt: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < remaining.length()) {
+        let Option::SOME(item) = remaining.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index != smallestIndex) {
+          rebuilt.push(item.clone());
+        }
+
+        index += 1;
+      }
+
+      remaining = rebuilt;
+    }
+
+    return sorted;
+  }
+
+  function tokenTexts(tokens: &Vector<Format::TokenShape>): Vector<String> {
+    let mut texts: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < tokens.length()) {
+      let Option::SOME(token) = tokens.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      texts.push(token.text.clone());
+      index += 1;
+    }
+
+    return texts;
+  }
+
+  function stringVectorsEqual(left: &Vector<String>, right: &Vector<String>): boolean {
+    if (left.length() != right.length()) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < left.length()) {
+      let Option::SOME(leftValue) = left.get(index) else {
+        return false;
+      };
+
+      let Option::SOME(rightValue) = right.get(index) else {
+        return false;
+      };
+
+      if (!leftValue.equals(rightValue)) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  function tokenShapesEqual(
+    left: &Vector<Format::TokenShape>,
+    right: &Vector<Format::TokenShape>
+  ): boolean {
+    if (left.length() != right.length()) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < left.length()) {
+      let Option::SOME(leftValue) = left.get(index) else {
+        return false;
+      };
+
+      let Option::SOME(rightValue) = right.get(index) else {
+        return false;
+      };
+
+      if (leftValue.kind != rightValue.kind || !leftValue.text.equals(&rightValue.text)) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  function commentShapesEqual(
+    left: &Vector<Format::CommentShape>,
+    right: &Vector<Format::CommentShape>
+  ): boolean {
+    if (left.length() != right.length()) {
+      return false;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < left.length()) {
+      let Option::SOME(leftValue) = left.get(index) else {
+        return false;
+      };
+
+      let Option::SOME(rightValue) = right.get(index) else {
+        return false;
+      };
+
+      if (!leftValue.raw.equals(&rightValue.raw)) {
+        return false;
+      }
+
+      if (leftValue.placement != rightValue.placement) {
+        return false;
+      }
+
+      if (leftValue.hasPrevious != rightValue.hasPrevious || !leftValue.previousText.equals(&rightValue.previousText)) {
+        return false;
+      }
+
+      if (leftValue.hasNext != rightValue.hasNext || !leftValue.nextText.equals(&rightValue.nextText)) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  function fileShape(
+    source: &String,
+    file: &Format::FormatFile
+  ): Result<Format::FileShape, FormatError> {
+    let comments: Vector<Format::CommentShape> = Format::commentShape(source)!;
+    let mut tokens: Vector<Format::TokenShape> = Vector::new<Format::TokenShape>();
+    let mut directives: Vector<String> = Vector::new<String>();
+
+    Format::collectShape(&file.items, &mut tokens, &mut directives)!;
+
+    return Result::OK(Format::FileShape {
+      tokens: tokens,
+      comments: comments,
+      directives: directives,
+    });
+  }
+
+  function collectShape(
+    items: &Vector<Format::FormatItem>,
+    tokens: &mut Vector<Format::TokenShape>,
+    directives: &mut Vector<String>
+  ): Result<void, FormatError> {
+    let tokensRef: &mut Vector<Format::TokenShape> = tokens;
+    let mut directivesRef: &mut Vector<String> = directives;
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(item) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Format::FormatItem::Code(region) = item) {
+        let regionTokens: Vector<Format::TokenShape> = Format::tokenShape(&region.raw)!;
+        Format::appendTokenShapes(tokensRef, &regionTokens);
+        index += 1;
+        continue;
+      }
+
+      if (let Format::FormatItem::Directive(directive) = item) {
+        directivesRef.push(directive.header.clone());
+
+        if (let Option::SOME(elseHeader) = &directive.elseHeader) {
+          directivesRef.push(elseHeader.clone());
+        }
+
+        Format::collectShape(&directive.thenItems, tokensRef, directivesRef)!;
+        Format::collectShape(&directive.elseItems, tokensRef, directivesRef)!;
+      }
+
+      index += 1;
+    }
+
+    return Result::OK(());
+  }
+
+  function appendTokenShapes(
+    output: &mut Vector<Format::TokenShape>,
+    tokens: &Vector<Format::TokenShape>
+  ): void {
+    let mut outputRef: &mut Vector<Format::TokenShape> = output;
+    let mut index: u64 = 0;
+
+    while (index < tokens.length()) {
+      let Option::SOME(token) = tokens.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      outputRef.push(Format::TokenShape { kind: token.kind, text: token.text.clone() });
+      index += 1;
+    }
+  }
+
+  function commentShape(source: &String): Result<Vector<Format::CommentShape>, FormatError> {
+    let lexResult: LexResult = lexOrFail("formatter_comments.ign", source)!;
+    let tokenCount: u64 = lexResult.tokens.length();
+
+    let mut eofIndex: u64 = 0;
+
+    if (tokenCount > 0) {
+      eofIndex = tokenCount - 1;
+    }
+
+    let mut comments: Vector<Format::CommentShape> = Vector::new<Format::CommentShape>();
+    let mut index: u64 = 0;
+
+    while (index < tokenCount) {
+      let Option::SOME(token) = lexResult.tokens.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (!isCommentTrivia(token)) {
+        index += 1;
+        continue;
+      }
+
+      let rawLexeme: String = token.lexemeString();
+      let placement: CommentPlacement = classifyCommentPlacement(source, &lexResult.tokens, index, 0, eofIndex);
+
+      let mut hasPrevious: boolean = false;
+      let mut previousText: String = String::new();
+      let mut scan: u64 = index;
+
+      while (scan > 0) {
+        scan -= 1;
+
+        let Option::SOME(candidate) = lexResult.tokens.get(scan) else {
+          continue;
+        };
+
+        if (isCommentTrivia(candidate) || candidate.kindValue() == TokenKind::EOF) {
+          continue;
+        }
+
+        hasPrevious = true;
+        previousText = candidate.lexemeString();
+        break;
+      }
+
+      let mut hasNext: boolean = false;
+      let mut nextText: String = String::new();
+      let mut forward: u64 = index + 1;
+
+      while (forward < tokenCount) {
+        let Option::SOME(candidate) = lexResult.tokens.get(forward) else {
+          forward += 1;
+          continue;
+        };
+
+        if (isCommentTrivia(candidate) || candidate.kindValue() == TokenKind::EOF) {
+          forward += 1;
+          continue;
+        }
+
+        hasNext = true;
+        nextText = candidate.lexemeString();
+        break;
+      }
+
+      comments.push(Format::CommentShape {
+        raw: trimEndSafety(&rawLexeme),
+        placement: placement,
+        hasPrevious: hasPrevious,
+        previousText: previousText,
+        hasNext: hasNext,
+        nextText: nextText,
+      });
+
+      index += 1;
+    }
+
+    return Result::OK(comments);
+  }
+
+  function tokenShape(source: &String): Result<Vector<Format::TokenShape>, FormatError> {
+    let lexResult: LexResult = lexOrFail("formatter_safety.ign", source)!;
+
+    let mut normalized: Vector<Format::TokenShape> = Vector::new<Format::TokenShape>();
+    let mut index: u64 = 0;
+
+    while (index < lexResult.tokens.length()) {
+      let Option::SOME(token) = lexResult.tokens.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (isCommentTrivia(token) || token.kindValue() == TokenKind::EOF) {
+        index += 1;
+        continue;
+      }
+
+      let raw: String = token.lexemeString();
+
+      // A literal the lexer swallowed a sign into is split back apart, so
+      // `a -1` and `a - 1` reduce to the same shape.
+      if (token.kindValue() == TokenKind::LITERAL && raw.length() > 1 && Format::normalizedEndsExpression(&normalized)) {
+        let Option::SOME(signByte) = raw.byteAt(0) else {
+          index += 1;
+          continue;
+        };
+
+        if (signByte == '+' as u8 || signByte == '-' as u8) {
+          let signText: String = raw.substringBytes(0, 1);
+          normalized.push(Format::TokenShape { kind: TokenKind::PUNCTUATION, text: signText });
+          normalized.push(Format::TokenShape {
+            kind: TokenKind::LITERAL,
+            text: raw.substringBytes(1, raw.length()),
+          });
+          index += 1;
+          continue;
+        }
+      }
+
+      normalized.push(Format::TokenShape { kind: token.kindValue(), text: raw });
+      index += 1;
+    }
+
+    return Result::OK(normalized);
+  }
+
+  function normalizedEndsExpression(tokens: &Vector<Format::TokenShape>): boolean {
+    if (tokens.length() == 0) {
+      return false;
+    }
+
+    let Option::SOME(last) = tokens.get(tokens.length() - 1) else {
+      return false;
+    };
+
+    if (last.kind == TokenKind::IDENTIFIER || last.kind == TokenKind::LITERAL) {
+      return true;
+    }
+
+    if (last.kind != TokenKind::PUNCTUATION) {
+      return false;
+    }
+
+    return last.text.equals(")") || last.text.equals("]") || last.text.equals("}");
+  }
+
+  /// Drops the comma before a closing delimiter, so a trailing comma the
+  /// formatter adds or removes is not a change of shape.
+  function normalizeOptionalTrailingCommas(
+    tokens: &Vector<Format::TokenShape>
+  ): Vector<Format::TokenShape> {
+    let mut normalized: Vector<Format::TokenShape> = Vector::new<Format::TokenShape>();
+    let mut index: u64 = 0;
+
+    while (index < tokens.length()) {
+      let Option::SOME(token) = tokens.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut skip: boolean = false;
+
+      if (token.kind == TokenKind::PUNCTUATION && token.text.equals(",")) {
+        if (let Option::SOME(next) = tokens.get(index + 1)) {
+          if (next.text.equals(")") || next.text.equals("}") || next.text.equals("from")) {
+            skip = true;
+          }
+        }
+      }
+
+      if (!skip) {
+        normalized.push(Format::TokenShape { kind: token.kind, text: token.text.clone() });
+      }
+
+      index += 1;
+    }
+
+    return normalized;
+  }
+
+  /// One parsed `import ... from "...";` (or `export`) statement, reduced to
+  /// the pieces the grouping normalization compares.
+  record ModuleItemStatement {
+    public keywordText: String;
+    public keywordKind: TokenKind;
+    public items: Vector<String>;
+    public fromPath: String;
+    public endIndex: u64;
+  }
+
+  /// Rewrites every run of same-source module-item statements into one
+  /// canonical statement, so grouping consecutive imports is not a change of
+  /// shape.
+  function normalizeModuleItemGroups(
+    tokens: &Vector<Format::TokenShape>
+  ): Vector<Format::TokenShape> {
+    let mut normalized: Vector<Format::TokenShape> = Vector::new<Format::TokenShape>();
+    let mut index: u64 = 0;
+
+    while (index < tokens.length()) {
+      let Option::SOME(first) = Format::parseModuleItemStatement(tokens, index) else {
+        let Option::SOME(token) = tokens.get(index) else {
+          break;
+        };
+
+        normalized.push(Format::TokenShape { kind: token.kind, text: token.text.clone() });
+        index += 1;
+        continue;
+      };
+
+      let mut groupedItems: Vector<String> = Vector::new<String>();
+      Format::appendStrings(&mut groupedItems, &first.items);
+      let mut nextIndex: u64 = first.endIndex;
+
+      while (true) {
+        let Option::SOME(next) = Format::parseModuleItemStatement(tokens, nextIndex) else {
+          break;
+        };
+
+        if (!next.keywordText.equals(&first.keywordText) || !next.fromPath.equals(&first.fromPath)) {
+          break;
+        }
+
+        Format::appendStrings(&mut groupedItems, &next.items);
+        nextIndex = next.endIndex;
+      }
+
+      normalized.push(Format::TokenShape { kind: first.keywordKind, text: first.keywordText.clone() });
+
+      let mut itemIndex: u64 = 0;
+
+      while (itemIndex < groupedItems.length()) {
+        let Option::SOME(item) = groupedItems.get(itemIndex) else {
+          itemIndex += 1;
+          continue;
+        };
+
+        if (itemIndex > 0) {
+          normalized.push(Format::TokenShape { kind: TokenKind::PUNCTUATION, text: String::create(",") });
+        }
+
+        normalized.push(Format::TokenShape { kind: TokenKind::IDENTIFIER, text: item.clone() });
+        itemIndex += 1;
+      }
+
+      normalized.push(Format::TokenShape { kind: TokenKind::KEYWORD, text: String::create("from") });
+      normalized.push(Format::TokenShape { kind: TokenKind::LITERAL, text: first.fromPath.clone() });
+      normalized.push(Format::TokenShape { kind: TokenKind::PUNCTUATION, text: String::create(";") });
+
+      index = nextIndex;
+    }
+
+    return normalized;
+  }
+
+  function appendStrings(output: &mut Vector<String>, items: &Vector<String>): void {
+    let mut outputRef: &mut Vector<String> = output;
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(item) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      outputRef.push(item.clone());
+      index += 1;
+    }
+  }
+
+  function parseModuleItemStatement(
+    tokens: &Vector<Format::TokenShape>,
+    start: u64
+  ): Option<Format::ModuleItemStatement> {
+    let Option::SOME(keyword) = tokens.get(start) else {
+      return Option::NONE;
+    };
+
+    if (keyword.kind != TokenKind::KEYWORD) {
+      return Option::NONE;
+    }
+
+    if (!keyword.text.equals("import") && !keyword.text.equals("export")) {
+      return Option::NONE;
+    }
+
+    let mut items: Vector<String> = Vector::new<String>();
+    let mut currentItem: String = String::new();
+    let mut cursor: u64 = start + 1;
+    let mut sawFrom: boolean = false;
+
+    while (cursor < tokens.length()) {
+      let Option::SOME(token) = tokens.get(cursor) else {
+        break;
+      };
+
+      if (token.kind == TokenKind::KEYWORD && token.text.equals("from")) {
+        sawFrom = true;
+        break;
+      }
+
+      if (token.kind == TokenKind::PUNCTUATION && token.text.equals(",")) {
+        if (currentItem.length() > 0) {
+          items.push(currentItem.clone());
+          currentItem = String::new();
+        }
+      } else {
+        currentItem.push(&token.text);
+      }
+
+      cursor += 1;
+    }
+
+    if (currentItem.length() > 0) {
+      items.push(currentItem.clone());
+    }
+
+    if (items.length() == 0 || !sawFrom) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(fromToken) = tokens.get(cursor + 1) else {
+      return Option::NONE;
+    };
+
+    if (fromToken.kind != TokenKind::LITERAL) {
+      return Option::NONE;
+    }
+
+    let Option::SOME(semicolon) = tokens.get(cursor + 2) else {
+      return Option::NONE;
+    };
+
+    if (semicolon.kind != TokenKind::PUNCTUATION || !semicolon.text.equals(";")) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(Format::ModuleItemStatement {
+      keywordText: keyword.text.clone(),
+      keywordKind: keyword.kind,
+      items: items,
+      fromPath: fromToken.text.clone(),
+      endIndex: cursor + 3,
+    });
+  }
+}

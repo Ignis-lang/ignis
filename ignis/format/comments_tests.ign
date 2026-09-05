@@ -1,0 +1,55 @@
+import String from "std::string";
+import Test from "std::test";
+
+import SourceFile from "@compiler::diagnostics";
+import LexResult, Lexer from "@compiler::lexer";
+import TokenKind, TokenStream from "@compiler::syntax";
+
+import CommentPlacement, classifyCommentPlacement from "./comments";
+
+function lexText(path: str, sourceText: str): LexResult {
+  let source: SourceFile = SourceFile::create(path, sourceText);
+  return Lexer::lex(&source);
+}
+
+function findCommentIndex(tokens: &TokenStream, needle: str): u64 {
+  let needleText: String = String::create(needle);
+  let mut index: u64 = 0;
+
+  while (index < tokens.length()) {
+    let Option::SOME(token) = tokens.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (token.kindValue() == TokenKind::LINE_COMMENT) {
+      let lexeme: str = token.lexemeTextLossy();
+      let needleView: str = needleText.toStr();
+
+      if (@eq<str>(&lexeme, &needleView)) {
+        return index;
+      }
+    }
+
+    index += 1;
+  }
+
+  @panic("comment not found in token stream");
+}
+
+@test
+function commentsClassifiesDetachedAndTrailingCommentsByLinePosition(): void {
+  let sourceText: str = "// detached\n\nfunction main(): void {} // trailing\n";
+  let result: LexResult = lexText("comments.ign", sourceText);
+  let source: String = String::create(sourceText);
+  let lastIndex: u64 = result.tokens.length() - 1;
+
+  let detachedIndex: u64 = findCommentIndex(&result.tokens, "// detached");
+  let trailingIndex: u64 = findCommentIndex(&result.tokens, "// trailing");
+
+  let detached: CommentPlacement = classifyCommentPlacement(&source, &result.tokens, detachedIndex, 0, lastIndex);
+  let trailing: CommentPlacement = classifyCommentPlacement(&source, &result.tokens, trailingIndex, 0, lastIndex);
+
+  Test::assertEq<CommentPlacement>(detached, CommentPlacement::DETACHED);
+  Test::assertEq<CommentPlacement>(trailing, CommentPlacement::TRAILING);
+}

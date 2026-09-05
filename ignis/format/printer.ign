@@ -1,0 +1,499 @@
+import String from "std::string";
+import Vector from "std::vector";
+
+import CommentBlock, CommentPlacement from "./comments";
+import FormatterConfig from "./config";
+import FormatError from "./error";
+import _ from "./model";
+
+function stringEndsWithByte(text: &String, byte: u8): boolean {
+  if (text.length() == 0) {
+    return false;
+  }
+
+  let Option::SOME(last) = text.byteAt(text.length() - 1) else {
+    return false;
+  };
+
+  return last == byte;
+}
+
+function stringEndsWithStr(text: &String, suffix: str): boolean {
+  let suffixText: String = String::create(suffix);
+
+  if (text.length() < suffixText.length()) {
+    return false;
+  }
+
+  let tail: String = text.substringBytes(text.length() - suffixText.length(), text.length());
+  let tailView: str = tail.toStr();
+  let suffixView: str = suffixText.toStr();
+
+  return @eq<str>(&tailView, &suffixView);
+}
+
+function isAsciiWhitespaceByte(byte: u8): boolean {
+  return byte == ' ' as u8 || byte == '\t' as u8 || byte == '\n' as u8 || byte == '\r' as u8;
+}
+
+function trimStartAscii(text: &String): String {
+  let mut start: u64 = 0;
+
+  while (start < text.length()) {
+    let Option::SOME(byte) = text.byteAt(start) else {
+      break;
+    };
+
+    if (!isAsciiWhitespaceByte(byte)) {
+      break;
+    }
+
+    start += 1;
+  }
+
+  return text.substringBytes(start, text.length());
+}
+
+function containsNewlineByte(text: &String): boolean {
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    let Option::SOME(byte) = text.byteAt(index) else {
+      break;
+    };
+
+    if (byte == '\n' as u8) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+/// `String::lines()` appends a spurious trailing empty entry when the string
+/// ends with '\n', unlike Rust's `str::lines()`; see model.ign's
+/// `rustStyleLines` for the same workaround (repro
+/// "string-lines-trailing-newline").
+function rustStyleLines(text: &String): Vector<String> {
+  let mut lines: Vector<String> = text.lines();
+
+  if (text.length() > 0 && lines.length() > 0) {
+    let Option::SOME(lastByte) = text.byteAt(text.length() - 1) else {
+      return lines;
+    };
+
+    if (lastByte == '\n' as u8) {
+      lines.pop();
+    }
+  }
+
+  return lines;
+}
+
+export namespace Format {
+  function printFile(
+    file: &Format::FormatFile,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let mut output: String = String::new();
+    Format::renderItems(&mut output, &file.items, 0, false, config)!;
+
+    if (!stringEndsWithByte(&output, '\n' as u8)) {
+      output.pushChar('\n');
+    }
+
+    return Result::OK(output);
+  }
+
+  function renderItems(
+    output: &mut String,
+    items: &Vector<Format::FormatItem>,
+    indentLevel: u64,
+    inDirectiveBranch: boolean,
+    config: &FormatterConfig,
+  ): Result<void, FormatError> {
+    let mut outputRef: &mut String = output;
+    let mut previousWasImport: boolean = false;
+    let mut previousIsComplex: boolean = false;
+    let mut previousWasDetachedComment: boolean = false;
+
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(item) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Format::FormatItem::Code(region) = item) {
+        let trimmedRaw: String = trimStartAscii(&region.raw);
+        let importPrefix: String = String::create("import ");
+        let exportPrefix: String = String::create("export ");
+        let fromMarker: String = String::create(" from \"");
+
+        let mut isImport: boolean = trimmedRaw.startsWith(importPrefix.toStr());
+
+        if (!isImport && trimmedRaw.startsWith(exportPrefix.toStr())) {
+          isImport = region.raw.contains(&fromMarker);
+        }
+
+        // A code item is "complex" (block-level declaration) if its trimmed content
+        // spans multiple lines. Raw includes preceding whitespace so we trim first.
+        let trimmedForComplexity: String = region.raw.trimAsciiWhitespace();
+        let isComplex: boolean = containsNewlineByte(&trimmedForComplexity);
+
+        Format::writeItemSeparator(
+          outputRef,
+          previousWasImport,
+          previousWasDetachedComment,
+          isImport,
+          index > 0 && (isComplex || previousIsComplex),
+          inDirectiveBranch,
+        );
+
+        previousIsComplex = isComplex;
+
+        if (outputRef.length() > 0 && !stringEndsWithByte(&*outputRef, '\n' as u8)) {
+          outputRef.pushChar('\n');
+        }
+
+        let formatted: String = Format::indentBlock(&trimmedForComplexity, indentLevel, config);
+
+        if (formatted.length() == 0) {
+          index += 1;
+          continue;
+        }
+
+        // When leading doc comments appeared after attribute annotations in the
+        // source (e.g. `@implements(Drop)\n/// doc\nexport record Foo`), emit
+        // the attribute lines first so the comment's token neighbors stay
+        // identical between source and formatted output.
+        let mut attrPrefixLen: u64 = 0;
+
+        if (region.leadingAfterAttrPrefix) {
+          attrPrefixLen = Format::leadingAttributePrefixLen(&formatted);
+        }
+
+        if (attrPrefixLen > 0) {
+          let attrPart: String = formatted.substringBytes(0, attrPrefixLen);
+          outputRef.push(&attrPart);
+
+          let mut leadingIndex: u64 = 0;
+
+          while (leadingIndex < region.leading.length()) {
+            let Option::SOME(comment) = region.leading.get(leadingIndex) else {
+              leadingIndex += 1;
+              continue;
+            };
+
+            Format::writeCommentBlock(outputRef, comment, indentLevel, false, false, config);
+            leadingIndex += 1;
+          }
+
+          let restPart: String = formatted.substringBytes(attrPrefixLen, formatted.length());
+          outputRef.push(&restPart);
+        } else {
+          let mut leadingIndex: u64 = 0;
+
+          while (leadingIndex < region.leading.length()) {
+            let Option::SOME(comment) = region.leading.get(leadingIndex) else {
+              leadingIndex += 1;
+              continue;
+            };
+
+            Format::writeCommentBlock(outputRef, comment, indentLevel, false, index > 0, config);
+            leadingIndex += 1;
+          }
+
+          outputRef.push(&formatted);
+        }
+
+        let mut trailingIndex: u64 = 0;
+
+        while (trailingIndex < region.trailing.length()) {
+          let Option::SOME(comment) = region.trailing.get(trailingIndex) else {
+            trailingIndex += 1;
+            continue;
+          };
+
+          Format::writeCommentBlock(outputRef, comment, indentLevel, true, false, config);
+          trailingIndex += 1;
+        }
+
+        if (!stringEndsWithByte(&formatted, '\n' as u8)) {
+          outputRef.pushChar('\n');
+        }
+
+        previousWasImport = isImport;
+        previousWasDetachedComment = false;
+        index += 1;
+        continue;
+      }
+
+      if (let Format::FormatItem::DetachedComment(comment) = item) {
+        Format::writeCommentBlock(outputRef, &comment, indentLevel, false, index > 0, config);
+        previousWasImport = false;
+        previousIsComplex = false;
+        previousWasDetachedComment = true;
+        index += 1;
+        continue;
+      }
+
+      if (let Format::FormatItem::Directive(block) = item) {
+        // Directives are always block-level (multi-line).
+        Format::writeItemSeparator(outputRef, previousWasImport, previousWasDetachedComment, false, index > 0, inDirectiveBranch);
+
+        if (outputRef.length() > 0 && !stringEndsWithByte(&*outputRef, '\n' as u8)) {
+          outputRef.pushChar('\n');
+        }
+
+        let mut leadingIndex: u64 = 0;
+
+        while (leadingIndex < block.leading.length()) {
+          let Option::SOME(comment) = block.leading.get(leadingIndex) else {
+            leadingIndex += 1;
+            continue;
+          };
+
+          Format::writeCommentBlock(outputRef, comment, indentLevel, false, index > 0, config);
+          leadingIndex += 1;
+        }
+
+        Format::renderDirectiveBlock(outputRef, &block, indentLevel, config)!;
+
+        let mut trailingIndex: u64 = 0;
+
+        while (trailingIndex < block.trailing.length()) {
+          let Option::SOME(comment) = block.trailing.get(trailingIndex) else {
+            trailingIndex += 1;
+            continue;
+          };
+
+          Format::writeCommentBlock(outputRef, comment, indentLevel, true, false, config);
+          trailingIndex += 1;
+        }
+
+        previousWasImport = false;
+        previousIsComplex = true;
+        previousWasDetachedComment = false;
+        index += 1;
+        continue;
+      }
+
+      index += 1;
+    }
+
+    return Result::OK(());
+  }
+
+  function writeItemSeparator(
+    output: &mut String,
+    previousWasImport: boolean,
+    previousWasDetachedComment: boolean,
+    currentIsImport: boolean,
+    hasPreviousItem: boolean,
+    inDirectiveBranch: boolean,
+  ): void {
+    let mut outputRef: &mut String = output;
+
+    if (previousWasDetachedComment) {
+      if (!stringEndsWithStr(&*outputRef, "\n\n")) {
+        outputRef.pushChar('\n');
+      }
+
+      return;
+    }
+
+    if (previousWasImport && !currentIsImport) {
+      if (outputRef.length() > 0 && !stringEndsWithByte(&*outputRef, '\n' as u8)) {
+        outputRef.pushChar('\n');
+      }
+
+      if (!stringEndsWithStr(&*outputRef, "\n\n")) {
+        outputRef.pushChar('\n');
+      }
+
+      return;
+    }
+
+    if (hasPreviousItem && !stringEndsWithStr(&*outputRef, "\n\n") && !inDirectiveBranch) {
+      outputRef.pushChar('\n');
+    }
+  }
+
+  function renderDirectiveBlock(
+    output: &mut String,
+    block: &Format::DirectiveBlock,
+    indentLevel: u64,
+    config: &FormatterConfig,
+  ): Result<void, FormatError> {
+    let mut outputRef: &mut String = output;
+    let headerText: String = block.header.trimAsciiWhitespace();
+
+    if (!block.braced) {
+      let prefix: String = config.indentString(indentLevel);
+      outputRef.push(&prefix);
+      outputRef.push(&headerText);
+      outputRef.pushChar('\n');
+      Format::renderItems(outputRef, &block.thenItems, indentLevel, true, config)!;
+
+      if (!stringEndsWithByte(&*outputRef, '\n' as u8)) {
+        outputRef.pushChar('\n');
+      }
+
+      return Result::OK(());
+    }
+
+    let prefix: String = config.indentString(indentLevel);
+    outputRef.push(&prefix);
+    outputRef.push(&headerText);
+    outputRef.pushStr(" {\n");
+
+    Format::renderItems(outputRef, &block.thenItems, indentLevel + 1, true, config)!;
+
+    if (!stringEndsWithByte(&*outputRef, '\n' as u8)) {
+      outputRef.pushChar('\n');
+    }
+
+    outputRef.push(&prefix);
+    outputRef.pushStr("}\n");
+
+    if (let Option::SOME(elseHeader) = &block.elseHeader) {
+      let elseHeaderText: String = elseHeader.trimAsciiWhitespace();
+      outputRef.push(&prefix);
+      outputRef.push(&elseHeaderText);
+      outputRef.pushStr(" {\n");
+
+      Format::renderItems(outputRef, &block.elseItems, indentLevel + 1, true, config)!;
+
+      if (!stringEndsWithByte(&*outputRef, '\n' as u8)) {
+        outputRef.pushChar('\n');
+      }
+
+      outputRef.push(&prefix);
+      outputRef.pushStr("}\n");
+    }
+
+    return Result::OK(());
+  }
+
+  function indentBlock(code: &String, indentLevel: u64, config: &FormatterConfig): String {
+    if (indentLevel == 0) {
+      return code.clone();
+    }
+
+    let lines: Vector<String> = rustStyleLines(code);
+    let prefix: String = config.indentString(indentLevel);
+
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < lines.length()) {
+      let Option::SOME(line) = lines.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        result.pushChar('\n');
+      }
+
+      if (line.length() > 0) {
+        result.push(&prefix);
+        result.push(line);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function isFormatterDirective(line: &String): boolean {
+    return line.startsWith("@if(") || line.startsWith("@else") || line.startsWith("@ifelse(") || line.startsWith("@configFlag(");
+  }
+
+  /// Returns the byte length of the leading `@attribute` lines in `code`.
+  ///
+  /// When a doc comment appears after attributes in the source (e.g.
+  /// `@implements(Drop)\n/// doc\nexport record Foo`), the printer must output
+  /// the attribute lines before the doc comments so the comment's token
+  /// neighbors stay identical between source and formatted output.
+  function leadingAttributePrefixLen(code: &String): u64 {
+    let lines: Vector<String> = rustStyleLines(code);
+    let mut len: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < lines.length()) {
+      let Option::SOME(line) = lines.get(index) else {
+        break;
+      };
+
+      let trimmed: String = line.trimAsciiWhitespace();
+
+      if (trimmed.startsWith("@") && !Format::isFormatterDirective(&trimmed)) {
+        len += line.length() + 1;
+      } else {
+        break;
+      }
+
+      index += 1;
+    }
+
+    if (len > code.length()) {
+      return code.length();
+    }
+
+    return len;
+  }
+
+  function writeCommentBlock(
+    output: &mut String,
+    comment: &CommentBlock,
+    indentLevel: u64,
+    trailing: boolean,
+    allowLeadingGap: boolean,
+    config: &FormatterConfig,
+  ): void {
+    let mut outputRef: &mut String = output;
+
+    if (trailing && comment.lines.length() == 1) {
+      let Option::SOME(onlyLine) = comment.lines.get(0) else {
+        return;
+      };
+
+      outputRef.pushChar(' ');
+      let trimmedLine: String = onlyLine.trimAsciiWhitespace();
+      outputRef.push(&trimmedLine);
+      return;
+    }
+
+    if (outputRef.length() > 0 && !stringEndsWithByte(&*outputRef, '\n' as u8)) {
+      outputRef.pushChar('\n');
+    }
+
+    let isLeadingOrDetached: boolean = comment.placement == CommentPlacement::LEADING || comment.placement == CommentPlacement::DETACHED;
+
+    if (allowLeadingGap && outputRef.length() > 0 && isLeadingOrDetached && !stringEndsWithStr(&*outputRef, "\n\n")) {
+      outputRef.pushChar('\n');
+    }
+
+    let prefix: String = config.indentString(indentLevel);
+    let mut index: u64 = 0;
+
+    while (index < comment.lines.length()) {
+      let Option::SOME(line) = comment.lines.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      outputRef.push(&prefix);
+      let trimmedLine: String = line.trimAsciiWhitespace();
+      outputRef.push(&trimmedLine);
+      outputRef.pushChar('\n');
+      index += 1;
+    }
+  }
+}

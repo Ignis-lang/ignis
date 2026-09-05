@@ -1,0 +1,91 @@
+import Path from "std::path";
+import String from "std::string";
+
+import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnostics";
+
+function formatConfigSpan(path: &Path::PathBuf): SourceSpan {
+  let pathText: String = path.toString();
+  return SourceSpan::new(pathText.toStr(), 0, 0);
+}
+
+function singleDiagnostic(diagnostic: Diagnostic): DiagnosticBag {
+  let mut bag: DiagnosticBag = DiagnosticBag::init();
+  bag.push(diagnostic);
+  return bag;
+}
+
+export namespace FormatConfigDiagnosticCode {
+  const IO: str = "F1001";
+  const PARSE: str = "F1002";
+  const UNKNOWN_KEY: str = "F1003";
+  const INVALID_VALUE: str = "F1004";
+}
+
+export namespace FormatConfigDiagnostics {
+  function io(path: &Path::PathBuf, message: &String): DiagnosticBag {
+    let pathText: String = path.toString();
+
+    let mut text: String = String::create("failed to read formatter config '");
+    text.push(&pathText);
+    text.pushStr("': ");
+    text.push(message);
+
+    return singleDiagnostic(Diagnostic::new(
+      Severity::ERROR,
+      FormatConfigDiagnosticCode::IO,
+      text.toStr(),
+      formatConfigSpan(path),
+    ));
+  }
+
+  function parse(path: &Path::PathBuf, message: &String): DiagnosticBag {
+    let pathText: String = path.toString();
+
+    let mut text: String = String::create("failed to parse formatter config '");
+    text.push(&pathText);
+    text.pushStr("': ");
+    text.push(message);
+
+    return singleDiagnostic(Diagnostic::new(
+      Severity::ERROR,
+      FormatConfigDiagnosticCode::PARSE,
+      text.toStr(),
+      formatConfigSpan(path),
+    ));
+  }
+
+  function unknownKey(path: &Path::PathBuf, key: &String): DiagnosticBag {
+    let pathText: String = path.toString();
+
+    let mut text: String = String::create("formatter config '");
+    text.push(&pathText);
+    text.pushStr("' contains unsupported key '");
+    text.push(key);
+    text.pushStr("'");
+
+    return singleDiagnostic(Diagnostic::new(
+      Severity::ERROR,
+      FormatConfigDiagnosticCode::UNKNOWN_KEY,
+      text.toStr(),
+      formatConfigSpan(path),
+    ));
+  }
+
+  function invalidValue(path: &Path::PathBuf, key: str, message: &String): DiagnosticBag {
+    let pathText: String = path.toString();
+
+    let mut text: String = String::create("formatter config '");
+    text.push(&pathText);
+    text.pushStr("' has invalid '");
+    text.pushStr(key);
+    text.pushStr("': ");
+    text.push(message);
+
+    return singleDiagnostic(Diagnostic::new(
+      Severity::ERROR,
+      FormatConfigDiagnosticCode::INVALID_VALUE,
+      text.toStr(),
+      formatConfigSpan(path),
+    ));
+  }
+}

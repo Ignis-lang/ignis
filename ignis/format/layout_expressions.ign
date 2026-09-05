@@ -1,0 +1,569 @@
+import String from "std::string";
+import Vector from "std::vector";
+
+import Ast from "@compiler::ast";
+import SourceSpan from "@compiler::diagnostics";
+
+import _ from "./layout_types";
+
+export namespace Format {
+  /// Expression and statement layout are mutually recursive (a lambda body or
+  /// a `match` arm holds statements, and every statement holds expressions),
+  /// so the recursive renderer lives in `layout_statements.ign` alone: Ignis
+  /// rejects a module import cycle outright. This file keeps the leaf pieces
+  /// both layers need — precedence tables, operator spellings, source slicing
+  /// and parameter rendering.
+  function expressionContainsNewline(text: &String): boolean {
+    let mut index: u64 = 0;
+
+    while (index < text.length()) {
+      let Option::SOME(byte) = text.byteAt(index) else {
+        break;
+      };
+
+      if (byte == '\n' as u8) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function isLayoutWhitespaceByte(byte: u8): boolean {
+    return byte == ' ' as u8 || byte == '\t' as u8 || byte == '\n' as u8 || byte == '\r' as u8;
+  }
+
+  function endsWithByte(text: &String, byte: u8): boolean {
+    if (text.length() == 0) {
+      return false;
+    }
+
+    let Option::SOME(last) = text.byteAt(text.length() - 1) else {
+      return false;
+    };
+
+    return last == byte;
+  }
+
+  function endsWithText(text: &String, suffix: str): boolean {
+    let suffixText: String = String::create(suffix);
+
+    if (text.length() < suffixText.length()) {
+      return false;
+    }
+
+    let tail: String = text.substringBytes(text.length() - suffixText.length(), text.length());
+    let tailView: str = tail.toStr();
+    let suffixView: str = suffixText.toStr();
+
+    return @eq<str>(&tailView, &suffixView);
+  }
+
+  function trimTrailingWhitespace(text: &String): String {
+    let mut end: u64 = text.length();
+
+    while (end > 0) {
+      let Option::SOME(byte) = text.byteAt(end - 1) else {
+        break;
+      };
+
+      if (!Format::isLayoutWhitespaceByte(byte)) {
+        break;
+      }
+
+      end -= 1;
+    }
+
+    return text.substringBytes(0, end);
+  }
+
+  function trimLeadingWhitespace(text: &String): String {
+    let mut start: u64 = 0;
+
+    while (start < text.length()) {
+      let Option::SOME(byte) = text.byteAt(start) else {
+        break;
+      };
+
+      if (!Format::isLayoutWhitespaceByte(byte)) {
+        break;
+      }
+
+      start += 1;
+    }
+
+    return text.substringBytes(start, text.length());
+  }
+
+  /// Collapses every run of whitespace into a single space and trims the ends,
+  /// mirroring the host's `collapse_spaces`.
+  function collapseWhitespace(text: &String): String {
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+    let mut previousWasSpace: boolean = true;
+
+    while (index < text.length()) {
+      let Option::SOME(byte) = text.byteAt(index) else {
+        break;
+      };
+
+      if (Format::isLayoutWhitespaceByte(byte)) {
+        if (!previousWasSpace) {
+          result.pushChar(' ');
+        }
+
+        previousWasSpace = true;
+      } else {
+        result.pushByte(byte);
+        previousWasSpace = false;
+      }
+
+      index += 1;
+    }
+
+    return result.trimAsciiWhitespace();
+  }
+
+  function sliceSource(source: &String, start: u64, end: u64): String {
+    let mut clampedStart: u64 = start;
+    let mut clampedEnd: u64 = end;
+
+    if (clampedStart > source.length()) {
+      clampedStart = source.length();
+    }
+
+    if (clampedEnd > source.length()) {
+      clampedEnd = source.length();
+    }
+
+    if (clampedStart > clampedEnd) {
+      return String::new();
+    }
+
+    return source.substringBytes(clampedStart, clampedEnd);
+  }
+
+  function sliceSpanText(source: &String, span: &SourceSpan): String {
+    return Format::sliceSource(source, span.start, span.end);
+  }
+
+  /// Byte offset of the start of the line containing `byteIndex`.
+  function lineStartOffset(source: &String, byteIndex: u64): u64 {
+    let mut clamped: u64 = byteIndex;
+
+    if (clamped > source.length()) {
+      clamped = source.length();
+    }
+
+    let mut cursor: u64 = clamped;
+
+    while (cursor > 0) {
+      let Option::SOME(byte) = source.byteAt(cursor - 1) else {
+        break;
+      };
+
+      if (byte == '\n' as u8) {
+        return cursor;
+      }
+
+      cursor -= 1;
+    }
+
+    return 0;
+  }
+
+  /// Byte offset of the newline that ends the line containing `byteIndex`, or
+  /// the end of `source` when the last line has no terminator.
+  function lineEndOffset(source: &String, byteIndex: u64): u64 {
+    let mut cursor: u64 = byteIndex;
+
+    if (cursor > source.length()) {
+      cursor = source.length();
+    }
+
+    while (cursor < source.length()) {
+      let Option::SOME(byte) = source.byteAt(cursor) else {
+        break;
+      };
+
+      if (byte == '\n' as u8) {
+        return cursor;
+      }
+
+      cursor += 1;
+    }
+
+    return source.length();
+  }
+
+  /// True when the byte range `[start, end)` of `source` contains a comma.
+  /// Used to detect an original single-line call's trailing comma before its
+  /// closing paren, mirroring the host's own text-based check for the same
+  /// thing (it does not derive this from the AST either).
+  function rangeContainsComma(source: &String, start: u64, end: u64): boolean {
+    let slice: String = Format::sliceSource(source, start, end);
+    let mut cursor: u64 = 0;
+
+    while (cursor < slice.length()) {
+      let Option::SOME(byte) = slice.byteAt(cursor) else {
+        break;
+      };
+
+      if (byte == ',' as u8) {
+        return true;
+      }
+
+      cursor += 1;
+    }
+
+    return false;
+  }
+
+  function binaryPrecedence(operator: Ast::Expression::BinaryOperator): u8 {
+    if (operator == Ast::Expression::BinaryOperator::Or) {
+      return 2;
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::And) {
+      return 3;
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::Equal || operator == Ast::Expression::BinaryOperator::NotEqual) {
+      return 4;
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::LessThan || operator == Ast::Expression::BinaryOperator::LessThanOrEqual || operator == Ast::Expression::BinaryOperator::GreaterThan || operator == Ast::Expression::BinaryOperator::GreaterThanOrEqual) {
+      return 5;
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::BitOr) {
+      return 6;
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::BitXor) {
+      return 7;
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::BitAnd) {
+      return 8;
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::ShiftLeft || operator == Ast::Expression::BinaryOperator::ShiftRight) {
+      return 9;
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::Add || operator == Ast::Expression::BinaryOperator::Subtract) {
+      return 10;
+    }
+
+    return 11;
+  }
+
+  function binaryOperatorText(operator: Ast::Expression::BinaryOperator): str {
+    if (operator == Ast::Expression::BinaryOperator::Add) {
+      return "+";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::And) {
+      return "&&";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::BitAnd) {
+      return "&";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::BitOr) {
+      return "|";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::BitXor) {
+      return "^";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::Divide) {
+      return "/";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::Equal) {
+      return "==";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::GreaterThan) {
+      return ">";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::GreaterThanOrEqual) {
+      return ">=";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::LessThan) {
+      return "<";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::LessThanOrEqual) {
+      return "<=";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::Modulo) {
+      return "%";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::Multiply) {
+      return "*";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::NotEqual) {
+      return "!=";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::Or) {
+      return "||";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::ShiftLeft) {
+      return "<<";
+    }
+
+    if (operator == Ast::Expression::BinaryOperator::ShiftRight) {
+      return ">>";
+    }
+
+    return "-";
+  }
+
+  function assignmentOperatorText(operator: Ast::Expression::AssignmentOperator): str {
+    if (operator == Ast::Expression::AssignmentOperator::Assign) {
+      return "=";
+    }
+
+    if (operator == Ast::Expression::AssignmentOperator::AddAssign) {
+      return "+=";
+    }
+
+    if (operator == Ast::Expression::AssignmentOperator::SubtractAssign) {
+      return "-=";
+    }
+
+    if (operator == Ast::Expression::AssignmentOperator::MultiplyAssign) {
+      return "*=";
+    }
+
+    if (operator == Ast::Expression::AssignmentOperator::DivideAssign) {
+      return "/=";
+    }
+
+    if (operator == Ast::Expression::AssignmentOperator::ModuloAssign) {
+      return "%=";
+    }
+
+    if (operator == Ast::Expression::AssignmentOperator::ShiftLeftAssign) {
+      return "<<=";
+    }
+
+    if (operator == Ast::Expression::AssignmentOperator::ShiftRightAssign) {
+      return ">>=";
+    }
+
+    if (operator == Ast::Expression::AssignmentOperator::BitAndAssign) {
+      return "&=";
+    }
+
+    if (operator == Ast::Expression::AssignmentOperator::BitOrAssign) {
+      return "|=";
+    }
+
+    if (operator == Ast::Expression::AssignmentOperator::BitXorAssign) {
+      return "^=";
+    }
+
+    if (operator == Ast::Expression::AssignmentOperator::AndAssign) {
+      return "&&=";
+    }
+
+    return "||=";
+  }
+
+  function unaryOperatorText(operator: Ast::Expression::UnaryOperator): str {
+    if (operator == Ast::Expression::UnaryOperator::Not) {
+      return "!";
+    }
+
+    if (operator == Ast::Expression::UnaryOperator::Negate) {
+      return "-";
+    }
+
+    if (operator == Ast::Expression::UnaryOperator::Increment) {
+      return "++";
+    }
+
+    if (operator == Ast::Expression::UnaryOperator::Decrement) {
+      return "--";
+    }
+
+    return "~";
+  }
+
+  /// Precedence the host assigns each expression kind for parenthesization
+  /// decisions. Kinds the host does not special-case use `u8` max (`_ =>
+  /// u8::MAX`), which is what the final `return 255` stands for here.
+  function expressionPrecedence(node: &Ast::Expression::Node): u8 {
+    if (let Ast::Expression::Node::Assignment(_) = node) {
+      return 1;
+    }
+
+    if (let Ast::Expression::Node::Ternary(_) = node) {
+      return 1;
+    }
+
+    if (let Ast::Expression::Node::Binary(binaryExpr) = node) {
+      return Format::binaryPrecedence(binaryExpr.operator);
+    }
+
+    if (let Ast::Expression::Node::Grouped(_) = node) {
+      return 255;
+    }
+
+    if (let Ast::Expression::Node::Call(_) = node) {
+      return 12;
+    }
+
+    if (let Ast::Expression::Node::MemberAccess(_) = node) {
+      return 12;
+    }
+
+    if (let Ast::Expression::Node::VectorAccess(_) = node) {
+      return 12;
+    }
+
+    if (let Ast::Expression::Node::Cast(_) = node) {
+      return 10;
+    }
+
+    if (let Ast::Expression::Node::Unary(_) = node) {
+      return 11;
+    }
+
+    if (let Ast::Expression::Node::Reference(_) = node) {
+      return 11;
+    }
+
+    if (let Ast::Expression::Node::Dereference(_) = node) {
+      return 11;
+    }
+
+    if (let Ast::Expression::Node::PostfixIncrement(_) = node) {
+      return 12;
+    }
+
+    if (let Ast::Expression::Node::PostfixDecrement(_) = node) {
+      return 12;
+    }
+
+    if (let Ast::Expression::Node::Try(_) = node) {
+      return 12;
+    }
+
+    if (let Ast::Expression::Node::Lambda(_) = node) {
+      return 0;
+    }
+
+    if (let Ast::Expression::Node::Match(_) = node) {
+      return 0;
+    }
+
+    return 255;
+  }
+
+  /// Renders one callable parameter: its attribute prefix, its name and its
+  /// type annotation. Record fields and lambda parameters are `Binding`
+  /// patterns too, so this is shared by every callable-shaped renderer.
+  function formatParameterPattern(
+    module: &Ast::Module,
+    patternId: Ast::PatternId,
+    source: &String
+  ): String {
+    let Option::SOME(node) = module.patterns.get(patternId) else {
+      return String::new();
+    };
+
+    let Ast::Pattern::Node::Binding(binding) = node else {
+      let span: SourceSpan = Format::patternSpanOf(node);
+      return Format::sliceSpanText(source, &span).trimAsciiWhitespace();
+    };
+
+    // The parser stores a method receiver as a binding named `self` annotated
+    // with `&Self`/`&mut Self`, which must print back as the `&self` shorthand
+    // the source wrote.
+    if (binding.name.equals("self")) {
+      if (let Option::SOME(annotation) = binding.annotation) {
+        if (let Option::SOME(annotationNode) = module.types.get(annotation)) {
+          if (let Ast::Type::Node::Reference(reference) = annotationNode) {
+            if (reference.mutable) {
+              return String::create("&mut self");
+            }
+
+            return String::create("&self");
+          }
+        }
+      }
+
+      return String::create("self");
+    }
+
+    let mut result: String = String::new();
+    let mut attributeIndex: u64 = 0;
+
+    while (attributeIndex < binding.metadata.attributes.length()) {
+      let Option::SOME(attribute) = binding.metadata.attributes.get(attributeIndex) else {
+        attributeIndex += 1;
+        continue;
+      };
+
+      result.pushStr("@");
+      result.push(&attribute.name);
+
+      if (attribute.arguments.length() > 0) {
+        let argumentsText: String = Format::joinSegments(&attribute.arguments, ", ");
+        result.pushStr("(");
+        result.push(&argumentsText);
+        result.pushStr(")");
+      }
+
+      result.pushStr(" ");
+      attributeIndex += 1;
+    }
+
+    result.push(&binding.name);
+
+    if (let Option::SOME(annotation) = binding.annotation) {
+      let annotationText: String = Format::formatType(module, annotation, source);
+      result.pushStr(": ");
+      result.push(&annotationText);
+    }
+
+    return result;
+  }
+
+  function formatParameterList(
+    module: &Ast::Module,
+    parameters: &Vector<Ast::PatternId>,
+    source: &String
+  ): Vector<String> {
+    let mut result: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < parameters.length()) {
+      let Option::SOME(patternId) = parameters.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      result.push(Format::formatParameterPattern(module, *patternId, source));
+      index += 1;
+    }
+
+    return result;
+  }
+}

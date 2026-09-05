@@ -942,6 +942,30 @@ export record TomlTable {
     self.pushEntry(TomlTableEntry::create(key, value, keySpan));
   }
 
+  /// Returns the number of stored entries.
+  public length(&self): u64 {
+    return self.length;
+  }
+
+  /// Returns a cloned entry at `index` when it exists.
+  ///
+  /// # Returns
+  ///
+  /// `Option::SOME(entry)` for in-bounds indices, otherwise `Option::NONE`.
+  public entryAt(&self, index: u64): Option<TomlTableEntry> {
+    if (index >= self.length) {
+      return Option::NONE;
+    }
+
+    let entry: *mut TomlTableEntry = self.entries + index;
+
+    return Option::SOME(TomlTableEntry {
+      key: (*entry).key,
+      value: (*entry).value.clone(),
+      keySpan: (*entry).keySpan,
+    });
+  }
+
   /// Looks up a table value by key.
   ///
   /// # Returns
@@ -1147,6 +1171,11 @@ export record TomlDocument {
       root: root,
       span: span,
     };
+  }
+
+  /// Returns the document's root table.
+  public root(&self): TomlTable {
+    return self.root;
   }
 
   /// Resolves a borrowed dotted path into a TOML value.

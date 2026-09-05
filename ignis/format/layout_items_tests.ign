@@ -1,0 +1,170 @@
+import String from "std::string";
+import Test from "std::test";
+
+import Format from "./layout_items";
+import FormatterConfig from "./config";
+
+function layoutOrFail(source: str): String {
+  let sourceText: String = String::create(source);
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Result::OK(output) = Format::layoutCodeChunk(&sourceText, &config) else {
+    Test::fail();
+    return String::new();
+  };
+
+  return output;
+}
+
+@test
+function layoutItemsFormatsASingleImport(): void {
+  let output: String = layoutOrFail("import   Foo   from   \"std::foo\";");
+  Test::assertEq<str>(output.toStr(), "import Foo from \"std::foo\";");
+}
+
+@test
+function layoutItemsGroupsConsecutiveImportsFromTheSameModule(): void {
+  let output: String = layoutOrFail("import Foo from \"std::foo\";\nimport Bar from \"std::foo\";");
+  Test::assertEq<str>(output.toStr(), "import Foo, Bar from \"std::foo\";");
+}
+
+@test
+function layoutItemsDoesNotGroupImportsSeparatedByABlankLine(): void {
+  let output: String = layoutOrFail("import Foo from \"std::foo\";\n\nimport Bar from \"std::foo\";");
+  Test::assertEq<str>(output.toStr(), "import Foo from \"std::foo\";\n\nimport Bar from \"std::foo\";");
+}
+
+@test
+function layoutItemsDoesNotGroupDiscardImports(): void {
+  let output: String = layoutOrFail("import _ from \"std::foo\";\nimport Bar from \"std::foo\";");
+  Test::assertEq<str>(output.toStr(), "import _ from \"std::foo\";\nimport Bar from \"std::foo\";");
+}
+
+@test
+function layoutItemsWrapsAnImportListThatExceedsTheLineWidth(): void {
+  let mut config: FormatterConfig = FormatterConfig::default();
+  config.lineWidth = 40;
+
+  let sourceText: String = String::create("import FirstBinding, SecondBinding, ThirdBinding from \"std::somewhere\";");
+  let Result::OK(output) = Format::layoutCodeChunk(&sourceText, &config) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    output.toStr(),
+    "import\n  FirstBinding,\n  SecondBinding,\n  ThirdBinding,\nfrom \"std::somewhere\";"
+  );
+}
+
+@test
+function layoutItemsFormatsAFunctionSignatureAndReformatsItsBody(): void {
+  // `renderBodyPlaceholder` is now only the fallback for a body containing a
+  // comment (see `Format::blockContainsComment`); a comment-free body goes
+  // through real statement layout, same as the host.
+  let output: String = layoutOrFail("function   main ( ) : void {return;}");
+  Test::assertEq<str>(output.toStr(), "function main(): void {\n  return;\n}");
+}
+
+@test
+function layoutItemsFormatsATypedParameterList(): void {
+  let output: String = layoutOrFail("function add(a:i32,b:i32):i32{return a+b;}");
+  Test::assertEq<str>(output.toStr(), "function add(a: i32, b: i32): i32 {\n  return a + b;\n}");
+}
+
+@test
+function layoutItemsKeepsAVerbatimBodyWhenItContainsAComment(): void {
+  let output: String = layoutOrFail("function main(): void {\n  // keep me\n  return;\n}");
+  Test::assertEq<str>(output.toStr(), "function main(): void {\n  // keep me\n  return;\n}");
+}
+
+@test
+function layoutItemsFormatsAConstant(): void {
+  let output: String = layoutOrFail("const   X : i32 = 1 ;");
+  Test::assertEq<str>(output.toStr(), "const X: i32 = 1;");
+}
+
+@test
+function layoutItemsFormatsAConstantWithARealExpressionValue(): void {
+  // `renderExpressionPlaceholder` is now the fallback only for a value whose
+  // span contains a comment (see `Format::formatConstantValue`); this exercises
+  // the real `layout_expressions.ign` path (spacing around `+`).
+  let output: String = layoutOrFail("const X: i32 = 1  +  2;");
+  Test::assertEq<str>(output.toStr(), "const X: i32 = 1 + 2;");
+}
+
+@test
+function layoutItemsFormatsATypeAlias(): void {
+  let output: String = layoutOrFail("type   Alias = i32 ;");
+  Test::assertEq<str>(output.toStr(), "type Alias = i32;");
+}
+
+@test
+function layoutItemsPreservesABlankLineBetweenTopLevelItems(): void {
+  let output: String = layoutOrFail("const X: i32 = 1;\n\nconst Y: i32 = 2;");
+  Test::assertEq<str>(output.toStr(), "const X: i32 = 1;\n\nconst Y: i32 = 2;");
+}
+
+@test
+function layoutItemsCollapsesMultipleBlankLinesBetweenTopLevelItems(): void {
+  let output: String = layoutOrFail("const X: i32 = 1;\n\n\n\nconst Y: i32 = 2;");
+  Test::assertEq<str>(output.toStr(), "const X: i32 = 1;\n\nconst Y: i32 = 2;");
+}
+
+@test
+function layoutItemsFormatsARecordWithFieldsAndMethods(): void {
+  let output: String = layoutOrFail(
+    "record Foo {\n  public x: i32;\n  private y: str;\n\n  public get(&self): i32 { return self.x; }\n}"
+  );
+
+  Test::assertEq<str>(
+    output.toStr(),
+    "record Foo {\n  public x: i32;\n  private y: str;\n\n  public get(&self): i32 {\n    return self.x;\n  }\n}"
+  );
+}
+
+@test
+function layoutItemsFormatsAnEnumWithAPayloadVariantAndAMethod(): void {
+  let output: String = layoutOrFail(
+    "enum Color {\n  RED,\n  Payload(i32, str),\n\n  public name(&self): str { return \"x\"; }\n}"
+  );
+
+  Test::assertEq<str>(
+    output.toStr(),
+    "enum Color {\n  RED,\n  Payload(i32, str),\n\n  public name(&self): str {\n    return \"x\";\n  }\n}"
+  );
+}
+
+@test
+function layoutItemsFormatsANamespaceWithNestedItems(): void {
+  let output: String = layoutOrFail("namespace Foo::Bar {\n  function baz(): i32 { return 1; }\n}");
+  Test::assertEq<str>(output.toStr(), "namespace Foo::Bar {\n  function baz(): i32 {\n    return 1;\n  }\n}");
+}
+
+@test
+function layoutItemsFormatsATraitWithARequiredAndADefaultMethod(): void {
+  let output: String = layoutOrFail("trait Shape {\n  area(&self): i32;\n  name(&self): str { return \"s\"; }\n}");
+
+  Test::assertEq<str>(
+    output.toStr(),
+    "trait Shape {\n  area(&self): i32;\n\n  name(&self): str {\n    return \"s\";\n  }\n}"
+  );
+}
+
+@test
+function layoutItemsFormatsAnExternBlockOfSignatures(): void {
+  let output: String = layoutOrFail("extern C {\n  function puts(s: str): i32;\n  const ERR: i32;\n}");
+  Test::assertEq<str>(output.toStr(), "extern C {\n  function puts(s: str): i32;\n  const ERR: i32;\n}");
+}
+
+@test
+function layoutItemsFormatsAnExportedRecordDeclaration(): void {
+  let output: String = layoutOrFail("export record Foo {\n  public x: i32;\n}");
+  Test::assertEq<str>(output.toStr(), "export record Foo {\n  public x: i32;\n}");
+}
+
+@test
+function layoutItemsFormatsAnEmptyNamespaceInline(): void {
+  let output: String = layoutOrFail("namespace Foo {\n}");
+  Test::assertEq<str>(output.toStr(), "namespace Foo {}");
+}

@@ -1,0 +1,2081 @@
+import String from "std::string";
+import Vector from "std::vector";
+
+import Ast from "@compiler::ast";
+import SourceSpan from "@compiler::diagnostics";
+
+import CommentBlock, CommentPlacement from "./comments";
+import FormatterConfig from "./config";
+import FormatError from "./error";
+import _ from "./layout_expressions";
+import _ from "./layout_types";
+import _ from "./model";
+
+export namespace Format {
+  /// A half-open byte range inside the chunk source.
+  record SourceRange {
+    public start: u64;
+    public end: u64;
+  }
+
+  /// One link of a flattened `a |> b |> c` chain. `isCall` marks the segments
+  /// that follow a `|>`, which is what tells the chain's head from its steps.
+  record PipeStep {
+    public id: Ast::ExpressionId;
+    public isCall: boolean;
+  }
+
+  /// Expression and statement layout live together because they are mutually
+  /// recursive: a lambda body and a `match` arm carry statements, and every
+  /// statement carries expressions. Ignis rejects module import cycles, so the
+  /// two halves of the host's `AstChunkFormatter` that call each other cannot
+  /// be split across two files. `layout_expressions.ign` keeps the leaf pieces
+  /// (precedence, operator spellings, slicing, parameters) both halves use.
+  function firstIndexOfByte(text: &String, byte: u8, startByte: u64): Option<u64> {
+    let mut cursor: u64 = startByte;
+
+    while (cursor < text.length()) {
+      let Option::SOME(candidate) = text.byteAt(cursor) else {
+        return Option::NONE;
+      };
+
+      if (candidate == byte) {
+        return Option::SOME(cursor);
+      }
+
+      cursor += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function lastIndexOfByte(text: &String, byte: u8): Option<u64> {
+    let mut cursor: u64 = text.length();
+
+    while (cursor > 0) {
+      let Option::SOME(candidate) = text.byteAt(cursor - 1) else {
+        return Option::NONE;
+      };
+
+      if (candidate == byte) {
+        return Option::SOME(cursor - 1);
+      }
+
+      cursor -= 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function firstIndexOfPair(text: &String, first: u8, second: u8): Option<u64> {
+    if (text.length() < 2) {
+      return Option::NONE;
+    }
+
+    let mut cursor: u64 = 0;
+
+    while (cursor + 1 < text.length()) {
+      let Option::SOME(left) = text.byteAt(cursor) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(right) = text.byteAt(cursor + 1) else {
+        return Option::NONE;
+      };
+
+      if (left == first && right == second) {
+        return Option::SOME(cursor);
+      }
+
+      cursor += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Byte range of a braced body's interior, excluding the braces themselves.
+  /// `NONE` when the span carries no `{`/`}` pair, which the caller treats as
+  /// "lay the body out without consulting the original text".
+  function bracedBodyBounds(source: &String, span: &SourceSpan): Option<Format::SourceRange> {
+    let raw: String = Format::sliceSpanText(source, span);
+
+    let Option::SOME(openIndex) = Format::firstIndexOfByte(&raw, '{' as u8, 0) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(closeIndex) = Format::lastIndexOfByte(&raw, '}' as u8) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(Format::SourceRange {
+      start: span.start + openIndex + 1,
+      end: span.start + closeIndex,
+    });
+  }
+
+  function bracedBodyIsEmpty(source: &String, range: &Format::SourceRange): boolean {
+    let slice: String = Format::sliceSource(source, range.start, range.end);
+    return slice.trimAsciiWhitespace().length() == 0;
+  }
+
+  /// True when the leading whitespace of `[start, end)` holds a blank line.
+  /// A variant or statement span may stop before its `,`/`;`, so those two
+  /// characters are skipped before the whitespace run is measured.
+  function whitespaceGapHasIntentionalBlankLine(source: &String, start: u64, end: u64): boolean {
+    if (start >= end) {
+      return false;
+    }
+
+    let mut cursor: u64 = start;
+
+    while (cursor < end) {
+      let Option::SOME(byte) = source.byteAt(cursor) else {
+        break;
+      };
+
+      if (byte == ',' as u8 || byte == ';' as u8) {
+        cursor += 1;
+      } else {
+        break;
+      }
+    }
+
+    let mut newlineCount: u64 = 0;
+
+    while (cursor < end) {
+      let Option::SOME(byte) = source.byteAt(cursor) else {
+        break;
+      };
+
+      if (!Format::isLayoutWhitespaceByte(byte)) {
+        break;
+      }
+
+      if (byte == '\n' as u8) {
+        newlineCount += 1;
+      }
+
+      cursor += 1;
+    }
+
+    return newlineCount >= 2;
+  }
+
+  function preserveSingleBlankLineForWhitespaceGap(
+    output: &mut String,
+    source: &String,
+    start: u64,
+    end: u64
+  ): void {
+    let mut outputRef: &mut String = output;
+
+    if (!Format::whitespaceGapHasIntentionalBlankLine(source, start, end)) {
+      return;
+    }
+
+    if (Format::endsWithByte(&*outputRef, '\n' as u8)) {
+      outputRef.pushChar('\n');
+    } else {
+      outputRef.pushStr("\n\n");
+    }
+  }
+
+  /// True when the gap's trailing whitespace holds a blank line, which is what
+  /// keeps a detached comment detached instead of promoting it to a leading
+  /// comment of whatever follows.
+  function commentGapPreservesDetachedSpacing(source: &String, start: u64, end: u64): boolean {
+    if (start >= end) {
+      return false;
+    }
+
+    let mut cursor: u64 = end;
+    let mut newlineCount: u64 = 0;
+
+    while (cursor > start) {
+      let Option::SOME(byte) = source.byteAt(cursor - 1) else {
+        return false;
+      };
+
+      if (!Format::isLayoutWhitespaceByte(byte)) {
+        return newlineCount >= 2;
+      }
+
+      if (byte == '\n' as u8) {
+        newlineCount += 1;
+      }
+
+      cursor -= 1;
+    }
+
+    return false;
+  }
+
+  function gapStartsWithSameLineComment(source: &String, start: u64, end: u64): boolean {
+    if (start >= end) {
+      return false;
+    }
+
+    let gap: String = Format::sliceSource(source, start, end);
+
+    let mut commentStart: Option<u64> = Format::firstIndexOfPair(&gap, '/' as u8, '/' as u8);
+
+    if (let Option::NONE = commentStart) {
+      commentStart = Format::firstIndexOfPair(&gap, '/' as u8, '*' as u8);
+    }
+
+    let Option::SOME(commentIndex) = commentStart else {
+      return false;
+    };
+
+    let head: String = gap.substringBytes(0, commentIndex);
+    return !Format::expressionContainsNewline(&head);
+  }
+
+  /// True for gap text that carries no syntax of its own — the punctuation a
+  /// span left behind rather than real code.
+  function gapCodeIsIgnorable(code: &String): boolean {
+    let trimmed: String = code.trimAsciiWhitespace();
+    let mut index: u64 = 0;
+
+    while (index < trimmed.length()) {
+      let Option::SOME(byte) = trimmed.byteAt(index) else {
+        return false;
+      };
+
+      if (byte != ';' as u8 && byte != ',' as u8) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  /// Re-runs the formatter model over a gap between two laid-out nodes so the
+  /// comments living there keep their placement. The host does the same thing
+  /// (`comment_blocks_in_slice`) rather than tracking comments in the AST.
+  function commentBlocksInSlice(
+    source: &String,
+    start: u64,
+    end: u64
+  ): Result<Vector<CommentBlock>, FormatError> {
+    let mut blocks: Vector<CommentBlock> = Vector::new<CommentBlock>();
+
+    if (start >= end) {
+      return Result::OK(blocks);
+    }
+
+    let slice: String = Format::sliceSource(source, start, end);
+
+    if (slice.trimAsciiWhitespace().length() == 0) {
+      return Result::OK(blocks);
+    }
+
+    let file: Format::FormatFile = Format::FormatFile::fromSource(&slice)!;
+    let mut index: u64 = 0;
+
+    while (index < file.items.length()) {
+      let Option::SOME(item) = file.items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Format::FormatItem::DetachedComment(comment) = item) {
+        blocks.push(Format::cloneCommentBlockForLayout(&comment));
+        index += 1;
+        continue;
+      }
+
+      if (let Format::FormatItem::Code(region) = item) {
+        Format::appendCommentBlocks(&mut blocks, &region.leading);
+        Format::appendCommentBlocks(&mut blocks, &region.trailing);
+
+        let trimmedRaw: String = region.raw.trimAsciiWhitespace();
+
+        if (trimmedRaw.length() > 0 && !Format::gapCodeIsIgnorable(&trimmedRaw)) {
+          return Result::ERROR(FormatError::unsupported("comment ownership gap contains non-comment syntax"));
+        }
+
+        index += 1;
+        continue;
+      }
+
+      return Result::ERROR(FormatError::unsupported("comment ownership gap contains non-comment syntax"));
+    }
+
+    return Result::OK(blocks);
+  }
+
+  function cloneCommentBlockForLayout(block: &CommentBlock): CommentBlock {
+    let mut lines: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < block.lines.length()) {
+      let Option::SOME(line) = block.lines.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      lines.push(line.clone());
+      index += 1;
+    }
+
+    return CommentBlock { lines: lines, placement: block.placement };
+  }
+
+  function appendCommentBlocks(
+    output: &mut Vector<CommentBlock>,
+    blocks: &Vector<CommentBlock>
+  ): void {
+    let mut outputRef: &mut Vector<CommentBlock> = output;
+    let mut index: u64 = 0;
+
+    while (index < blocks.length()) {
+      let Option::SOME(block) = blocks.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      outputRef.push(Format::cloneCommentBlockForLayout(block));
+      index += 1;
+    }
+  }
+
+  function pushCommentBlocks(
+    output: &mut String,
+    blocks: &Vector<CommentBlock>,
+    config: &FormatterConfig,
+    indentLevel: u64,
+    trailing: boolean
+  ): void {
+    let mut outputRef: &mut String = output;
+    let prefix: String = config.indentString(indentLevel);
+    let mut index: u64 = 0;
+
+    while (index < blocks.length()) {
+      let Option::SOME(block) = blocks.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (trailing && index == 0 && block.lines.length() == 1) {
+        let Option::SOME(onlyLine) = block.lines.get(0) else {
+          index += 1;
+          continue;
+        };
+
+        outputRef.pushChar(' ');
+        let trimmedLine: String = onlyLine.trimAsciiWhitespace();
+        outputRef.push(&trimmedLine);
+        index += 1;
+        continue;
+      }
+
+      if (!Format::endsWithByte(&*outputRef, '\n' as u8)) {
+        outputRef.pushChar('\n');
+      }
+
+      let isLeadingOrDetached: boolean = block.placement == CommentPlacement::LEADING || block.placement == CommentPlacement::DETACHED;
+
+      if (index > 0 && isLeadingOrDetached && !Format::endsWithText(&*outputRef, "\n\n")) {
+        outputRef.pushChar('\n');
+      }
+
+      let mut lineIndex: u64 = 0;
+
+      while (lineIndex < block.lines.length()) {
+        let Option::SOME(line) = block.lines.get(lineIndex) else {
+          lineIndex += 1;
+          continue;
+        };
+
+        outputRef.push(&prefix);
+        let trimmedLine: String = line.trimAsciiWhitespace();
+        outputRef.push(&trimmedLine);
+        outputRef.pushChar('\n');
+        lineIndex += 1;
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Emits the comments sitting between two laid-out nodes.
+  ///
+  /// A detached comment at the tail of the gap is promoted to a leading
+  /// comment unless the source kept a blank line after it; without that,
+  /// re-reading the output would hand the comment to a different owner and
+  /// trip the safety check.
+  function renderCommentGap(
+    output: &mut String,
+    source: &String,
+    start: u64,
+    end: u64,
+    config: &FormatterConfig,
+    indentLevel: u64,
+    separateFromPrevious: boolean
+  ): Result<void, FormatError> {
+    let mut outputRef: &mut String = output;
+    let blocks: Vector<CommentBlock> = Format::commentBlocksInSlice(source, start, end)!;
+
+    if (blocks.length() == 0) {
+      return Result::OK(());
+    }
+
+    let mut adjusted: Vector<CommentBlock> = Vector::new<CommentBlock>();
+    let lastIndex: u64 = blocks.length() - 1;
+    let preservesDetached: boolean = Format::commentGapPreservesDetachedSpacing(source, start, end);
+    let mut index: u64 = 0;
+
+    while (index < blocks.length()) {
+      let Option::SOME(block) = blocks.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut placement: CommentPlacement = block.placement;
+
+      if (index == lastIndex && placement == CommentPlacement::DETACHED && !preservesDetached) {
+        placement = CommentPlacement::LEADING;
+      }
+
+      adjusted.push(CommentBlock {
+        lines: Format::cloneCommentBlockForLayout(block).lines,
+        placement: placement,
+      });
+
+      index += 1;
+    }
+
+    let mut lastBlockIsDetached: boolean = false;
+
+    if (let Option::SOME(lastBlock) = adjusted.get(adjusted.length() - 1)) {
+      lastBlockIsDetached = lastBlock.placement == CommentPlacement::DETACHED;
+    }
+
+    if (separateFromPrevious && !Format::endsWithText(&*outputRef, "\n\n")) {
+      outputRef.pushChar('\n');
+    }
+
+    Format::pushCommentBlocks(outputRef, &adjusted, config, indentLevel, false);
+
+    if (lastBlockIsDetached && !Format::endsWithText(&*outputRef, "\n\n")) {
+      outputRef.pushChar('\n');
+    }
+
+    return Result::OK(());
+  }
+
+  function renderRegionTail(
+    output: &mut String,
+    source: &String,
+    start: u64,
+    end: u64,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<void, FormatError> {
+    let mut outputRef: &mut String = output;
+    let blocks: Vector<CommentBlock> = Format::commentBlocksInSlice(source, start, end)!;
+
+    if (blocks.length() > 0) {
+      Format::pushCommentBlocks(outputRef, &blocks, config, indentLevel, false);
+    }
+
+    return Result::OK(());
+  }
+
+  function joinFormattedExpressions(
+    module: &Ast::Module,
+    ids: &Vector<Ast::ExpressionId>,
+    source: &String,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      let Option::SOME(expressionId) = ids.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        result.pushStr(", ");
+      }
+
+      let formatted: String = Format::formatExpressionNode(module, *expressionId, 0, source, config, 0)!;
+      result.push(&formatted);
+      index += 1;
+    }
+
+    return Result::OK(result);
+  }
+
+  function formatBinaryChild(
+    module: &Ast::Module,
+    expressionId: Ast::ExpressionId,
+    parentPrecedence: u8,
+    isRightChild: boolean,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(node) = module.expressions.get(expressionId) else {
+      return Result::OK(String::new());
+    };
+
+    let childPrecedence: u8 = Format::expressionPrecedence(node);
+    let formatted: String = Format::formatExpression(module, node, parentPrecedence, source, config, indentLevel)!;
+
+    let mut isBinaryChild: boolean = false;
+
+    if (let Ast::Expression::Node::Binary(_) = node) {
+      isBinaryChild = true;
+    }
+
+    if (childPrecedence < parentPrecedence || (isRightChild && childPrecedence == parentPrecedence && isBinaryChild)) {
+      let mut wrapped: String = String::create("(");
+      wrapped.push(&formatted);
+      wrapped.pushStr(")");
+      return Result::OK(wrapped);
+    }
+
+    return Result::OK(formatted);
+  }
+
+  function formatExpressionNode(
+    module: &Ast::Module,
+    expressionId: Ast::ExpressionId,
+    parentPrecedence: u8,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(node) = module.expressions.get(expressionId) else {
+      return Result::OK(String::new());
+    };
+
+    return Format::formatExpression(module, node, parentPrecedence, source, config, indentLevel);
+  }
+
+  function wrapWhenBelowParent(text: String, parentPrecedence: u8, threshold: u8): String {
+    if (parentPrecedence > threshold) {
+      let mut wrapped: String = String::create("(");
+      wrapped.push(&text);
+      wrapped.pushStr(")");
+      return wrapped;
+    }
+
+    return text;
+  }
+
+  /// Renders an `Ast::Expression::Node`.
+  ///
+  /// `Call`, `RecordInit` and `Match` fall back to a verbatim slice of their
+  /// own span when the source wrote them across several lines: re-indenting
+  /// them would need an absolute column this renderer does not carry. That is
+  /// the host's `is_multiline_source` rule, kept identical so both formatters
+  /// agree on the same fixed point.
+  function formatExpression(
+    module: &Ast::Module,
+    node: &Ast::Expression::Node,
+    parentPrecedence: u8,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    if (let Option::SOME(templateText) = Format::templateSlice(module, node, source)) {
+      return Result::OK(templateText);
+    }
+
+    if (let Ast::Expression::Node::Variable(variable) = node) {
+      return Result::OK(Format::sliceSpanText(source, &variable.span).trimAsciiWhitespace());
+    }
+
+    if (let Ast::Expression::Node::Path(path) = node) {
+      return Result::OK(Format::sliceSpanText(source, &path.span).trimAsciiWhitespace());
+    }
+
+    if (let Ast::Expression::Node::Literal(literal) = node) {
+      return Result::OK(Format::sliceSpanText(source, &literal.span).trimAsciiWhitespace());
+    }
+
+    if (let Ast::Expression::Node::Unit(_) = node) {
+      return Result::OK(String::create("()"));
+    }
+
+    if (let Ast::Expression::Node::Grouped(grouped) = node) {
+      let inner: String = Format::formatExpressionNode(module, grouped.expression, 0, source, config, 0)!;
+      let mut result: String = String::create("(");
+      result.push(&inner);
+      result.pushStr(")");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::Tuple(tuple) = node) {
+      let inner: String = Format::joinFormattedExpressions(module, &tuple.elements, source, config)!;
+      let mut result: String = String::create("(");
+      result.push(&inner);
+      result.pushStr(")");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::Unary(unary) = node) {
+      let operand: String = Format::formatExpressionNode(module, unary.operand, 9, source, config, 0)!;
+      let mut result: String = String::create(Format::unaryOperatorText(unary.operator));
+      result.push(&operand);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::Binary(binaryExpr) = node) {
+      let precedence: u8 = Format::binaryPrecedence(binaryExpr.operator);
+      let left: String = Format::formatBinaryChild(module, binaryExpr.left, precedence, false, source, config, indentLevel)!;
+      let right: String = Format::formatBinaryChild(module, binaryExpr.right, precedence, true, source, config, indentLevel)!;
+
+      let mut formatted: String = left;
+      formatted.pushChar(' ');
+      formatted.pushStr(Format::binaryOperatorText(binaryExpr.operator));
+      formatted.pushChar(' ');
+      formatted.push(&right);
+
+      if (precedence < parentPrecedence) {
+        let mut wrapped: String = String::create("(");
+        wrapped.push(&formatted);
+        wrapped.pushStr(")");
+        return Result::OK(wrapped);
+      }
+
+      return Result::OK(formatted);
+    }
+
+    if (let Ast::Expression::Node::Assignment(assignment) = node) {
+      // A `match` on the right of an assignment stays unparenthesized, so it
+      // is offered precedence 0 rather than the assignment's own 1.
+      let mut valuePrecedence: u8 = 1;
+
+      if (let Option::SOME(valueNode) = module.expressions.get(assignment.value)) {
+        if (let Ast::Expression::Node::Match(_) = valueNode) {
+          valuePrecedence = 0;
+        }
+      }
+
+      let target: String = Format::formatExpressionNode(module, assignment.target, 1, source, config, 0)!;
+      let value: String = Format::formatExpressionNode(module, assignment.value, valuePrecedence, source, config, 0)!;
+
+      let mut formatted: String = target;
+      formatted.pushChar(' ');
+      formatted.pushStr(Format::assignmentOperatorText(assignment.operator));
+      formatted.pushChar(' ');
+      formatted.push(&value);
+
+      return Result::OK(Format::wrapWhenBelowParent(formatted, parentPrecedence, 1));
+    }
+
+    if (let Ast::Expression::Node::Ternary(ternary) = node) {
+      let condition: String = Format::formatExpressionNode(module, ternary.condition, 0, source, config, 0)!;
+      let thenText: String = Format::formatExpressionNode(module, ternary.thenBranch, 0, source, config, 0)!;
+      let elseText: String = Format::formatExpressionNode(module, ternary.elseBranch, 0, source, config, 0)!;
+
+      let mut formatted: String = condition;
+      formatted.pushStr(" ? ");
+      formatted.push(&thenText);
+      formatted.pushStr(" : ");
+      formatted.push(&elseText);
+
+      return Result::OK(Format::wrapWhenBelowParent(formatted, parentPrecedence, 1));
+    }
+
+    if (let Ast::Expression::Node::Call(call) = node) {
+      return Format::formatCallExpression(module, &call, source, config);
+    }
+
+    if (let Ast::Expression::Node::Match(matchExpression) = node) {
+      return Format::formatMatchExpression(module, &matchExpression, parentPrecedence, source, config, indentLevel);
+    }
+
+    if (let Ast::Expression::Node::Cast(cast) = node) {
+      let inner: String = Format::formatExpressionNode(module, cast.expression, 11, source, config, 0)!;
+      let targetTypeText: String = Format::formatType(module, cast.targetType, source);
+
+      let mut formatted: String = inner;
+      formatted.pushStr(" as ");
+      formatted.push(&targetTypeText);
+
+      return Result::OK(Format::wrapWhenBelowParent(formatted, parentPrecedence, 10));
+    }
+
+    if (let Ast::Expression::Node::Reference(reference) = node) {
+      let inner: String = Format::formatExpressionNode(module, reference.target, 11, source, config, 0)!;
+      let mut result: String = String::new();
+
+      if (reference.mutable) {
+        result.pushStr("&mut ");
+      } else {
+        result.pushStr("&");
+      }
+
+      result.push(&inner);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::Dereference(dereference) = node) {
+      let inner: String = Format::formatExpressionNode(module, dereference.operand, 11, source, config, 0)!;
+      let mut result: String = String::create("*");
+      result.push(&inner);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::MemberAccess(access) = node) {
+      let objectText: String = Format::formatExpressionNode(module, access.object, 10, source, config, 0)!;
+      let mut result: String = objectText;
+
+      if (access.operator == Ast::Expression::AccessOperator::DoubleColon) {
+        result.pushStr("::");
+      } else {
+        result.pushStr(".");
+      }
+
+      result.push(&access.member);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::Vector(vectorLiteral) = node) {
+      let inner: String = Format::joinFormattedExpressions(module, &vectorLiteral.elements, source, config)!;
+      let mut result: String = String::create("[");
+      result.push(&inner);
+      result.pushStr("]");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::VectorAccess(access) = node) {
+      let vectorText: String = Format::formatExpressionNode(module, access.vector, 12, source, config, 0)!;
+      let indexText: String = Format::formatExpressionNode(module, access.index, 0, source, config, 0)!;
+
+      let mut result: String = vectorText;
+      result.pushStr("[");
+      result.push(&indexText);
+      result.pushStr("]");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::RecordInit(recordInit) = node) {
+      let sourceText: String = Format::sliceSpanText(source, &recordInit.span).trimAsciiWhitespace();
+
+      if (Format::expressionContainsNewline(&sourceText)) {
+        return Result::OK(sourceText);
+      }
+
+      return Format::formatRecordInitInline(module, &recordInit, source, config);
+    }
+
+    if (let Ast::Expression::Node::BuiltinCall(builtinCall) = node) {
+      let mut formatted: String = String::create("@");
+      formatted.push(&builtinCall.name);
+
+      if (builtinCall.typeArguments.length() > 0) {
+        let typeArgs: String = Format::joinFormattedTypes(module, &builtinCall.typeArguments, source);
+        formatted.pushStr("<");
+        formatted.push(&typeArgs);
+        formatted.pushStr(">");
+      }
+
+      let argumentsText: String = Format::joinFormattedExpressions(module, &builtinCall.arguments, source, config)!;
+      formatted.pushStr("(");
+      formatted.push(&argumentsText);
+      formatted.pushStr(")");
+      return Result::OK(formatted);
+    }
+
+    if (let Ast::Expression::Node::Lambda(lambda) = node) {
+      return Format::formatLambdaExpression(module, &lambda, parentPrecedence, source, config, indentLevel);
+    }
+
+    if (let Ast::Expression::Node::PostfixIncrement(postfix) = node) {
+      let operandText: String = Format::formatExpressionNode(module, postfix.operand, 12, source, config, 0)!;
+      let mut result: String = operandText;
+      result.pushStr("++");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::PostfixDecrement(postfix) = node) {
+      let operandText: String = Format::formatExpressionNode(module, postfix.operand, 12, source, config, 0)!;
+      let mut result: String = operandText;
+      result.pushStr("--");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::Try(tryExpr) = node) {
+      let innerText: String = Format::formatExpressionNode(module, tryExpr.expression, 12, source, config, 0)!;
+      let mut result: String = innerText;
+      result.pushStr("!");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::LetCondition(letCondition) = node) {
+      let patternText: String = Format::formatPattern(module, letCondition.pattern, source);
+      let valueText: String = Format::formatExpressionNode(module, letCondition.value, 0, source, config, 0)!;
+
+      let mut result: String = String::create("let ");
+      result.push(&patternText);
+      result.pushStr(" = ");
+      result.push(&valueText);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::Pipe(pipe) = node) {
+      let steps: Vector<Format::PipeStep> = Format::flattenPipeChain(module, pipe.left, pipe.right);
+      return Format::formatPipeChain(module, &steps, source, config, indentLevel);
+    }
+
+    if (let Ast::Expression::Node::PipePlaceholder(_) = node) {
+      return Result::OK(String::create("_"));
+    }
+
+    if (let Ast::Expression::Node::CaptureOverride(captureOverride) = node) {
+      let inner: String = Format::formatExpressionNode(module, captureOverride.expression, 11, source, config, 0)!;
+      let mut result: String = String::new();
+
+      if (captureOverride.kind == Ast::Expression::CaptureOverrideKind::Move) {
+        result.pushStr("@move ");
+      } else if (captureOverride.kind == Ast::Expression::CaptureOverrideKind::Ref) {
+        result.pushStr("@ref ");
+      } else {
+        result.pushStr("@refMut ");
+      }
+
+      result.push(&inner);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Expression::Node::Block(blockExpression) = node) {
+      return Format::formatBlockBody(
+        module,
+        &blockExpression.statements,
+        blockExpression.tail,
+        &blockExpression.span,
+        source,
+        config,
+        indentLevel,
+      );
+    }
+
+    if (let Ast::Expression::Node::If(ifExpression) = node) {
+      let conditionText: String = Format::formatExpressionNode(module, ifExpression.condition, 0, source, config, 0)!;
+      let thenText: String = Format::formatBlockLikeStatement(module, ifExpression.thenBranch, source, config, indentLevel)!;
+
+      let mut result: String = String::create("if (");
+      result.push(&conditionText);
+      result.pushStr(") ");
+      result.push(&thenText);
+
+      if (let Option::SOME(elseBranchId) = ifExpression.elseBranch) {
+        let elseText: String = Format::formatBlockLikeStatement(module, elseBranchId, source, config, indentLevel)!;
+        result.pushStr(" else ");
+        result.push(&elseText);
+      }
+
+      return Result::OK(result);
+    }
+
+    let span: SourceSpan = Ast::Serializer::expressionSpan(node);
+    return Result::OK(Format::sliceSpanText(source, &span).trimAsciiWhitespace());
+  }
+
+  /// The byte the leftmost leaf of `node` starts at.
+  ///
+  /// A template literal is desugared by the parser into
+  /// `String::create(head).concat(..)`, and only that leftmost leaf keeps the
+  /// opening backtick, so this is how a template is recognised again.
+  function leftmostSpanStart(module: &Ast::Module, node: &Ast::Expression::Node): u64 {
+    if (let Ast::Expression::Node::Call(call) = node) {
+      return Format::leftmostSpanStartOf(module, call.callee);
+    }
+
+    if (let Ast::Expression::Node::MemberAccess(access) = node) {
+      return Format::leftmostSpanStartOf(module, access.object);
+    }
+
+    return Ast::Serializer::expressionSpan(node).start;
+  }
+
+  function leftmostSpanStartOf(module: &Ast::Module, expressionId: Ast::ExpressionId): u64 {
+    let Option::SOME(node) = module.expressions.get(expressionId) else {
+      return 0;
+    };
+
+    return Format::leftmostSpanStart(module, node);
+  }
+
+  /// The byte just past the closing backtick of the template literal opening at
+  /// `start`, skipping escapes, nested strings and nested templates inside its
+  /// `${ ... }` interpolations.
+  function templateEndOffset(source: &String, start: u64): Option<u64> {
+    let Option::SOME(openBacktick) = source.byteAt(start) else {
+      return Option::NONE;
+    };
+
+    if (openBacktick != '`' as u8) {
+      return Option::NONE;
+    }
+
+    let mut cursor: u64 = start + 1;
+    let mut interpolationDepth: u64 = 0;
+
+    while (cursor < source.length()) {
+      let Option::SOME(byte) = source.byteAt(cursor) else {
+        return Option::NONE;
+      };
+
+      if (byte == '\\' as u8) {
+        cursor += 2;
+        continue;
+      }
+
+      if (interpolationDepth == 0) {
+        if (byte == '`' as u8) {
+          return Option::SOME(cursor + 1);
+        }
+
+        if (byte == '$' as u8) {
+          if (let Option::SOME(next) = source.byteAt(cursor + 1)) {
+            if (next == '{' as u8) {
+              interpolationDepth = 1;
+              cursor += 2;
+              continue;
+            }
+          }
+        }
+
+        cursor += 1;
+        continue;
+      }
+
+      if (byte == '{' as u8) {
+        interpolationDepth += 1;
+        cursor += 1;
+        continue;
+      }
+
+      if (byte == '}' as u8) {
+        interpolationDepth -= 1;
+        cursor += 1;
+        continue;
+      }
+
+      if (byte == '"' as u8 || byte == '\'' as u8) {
+        let Option::SOME(afterQuote) = Format::quotedLiteralEndOffset(source, cursor, byte) else {
+          return Option::NONE;
+        };
+
+        cursor = afterQuote;
+        continue;
+      }
+
+      if (byte == '`' as u8) {
+        let Option::SOME(nestedEnd) = Format::templateEndOffset(source, cursor) else {
+          return Option::NONE;
+        };
+
+        cursor = nestedEnd;
+        continue;
+      }
+
+      cursor += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function quotedLiteralEndOffset(source: &String, start: u64, quote: u8): Option<u64> {
+    let mut cursor: u64 = start + 1;
+
+    while (cursor < source.length()) {
+      let Option::SOME(byte) = source.byteAt(cursor) else {
+        return Option::NONE;
+      };
+
+      if (byte == '\\' as u8) {
+        cursor += 2;
+        continue;
+      }
+
+      if (byte == quote) {
+        return Option::SOME(cursor + 1);
+      }
+
+      cursor += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// True when `[start, end)` holds a `//` or `/*` comment, skipping the
+  /// string, character and template literals a `/` could hide inside.
+  ///
+  /// The selfhost AST keeps no span on a record-initializer field, so a
+  /// multiline initializer carrying a comment cannot be rebuilt without losing
+  /// it; this is what tells the renderer to keep the source text instead.
+  function regionContainsCommentText(source: &String, start: u64, end: u64): boolean {
+    let mut cursor: u64 = start;
+
+    while (cursor + 1 < end) {
+      let Option::SOME(byte) = source.byteAt(cursor) else {
+        return false;
+      };
+
+      if (byte == '"' as u8 || byte == '\'' as u8) {
+        let Option::SOME(afterQuote) = Format::quotedLiteralEndOffset(source, cursor, byte) else {
+          return false;
+        };
+
+        cursor = afterQuote;
+        continue;
+      }
+
+      if (byte == '`' as u8) {
+        let Option::SOME(afterTemplate) = Format::templateEndOffset(source, cursor) else {
+          return false;
+        };
+
+        cursor = afterTemplate;
+        continue;
+      }
+
+      if (byte == '/' as u8) {
+        let Option::SOME(next) = source.byteAt(cursor + 1) else {
+          return false;
+        };
+
+        if (next == '/' as u8 || next == '*' as u8) {
+          return true;
+        }
+      }
+
+      cursor += 1;
+    }
+
+    return false;
+  }
+
+  /// The verbatim text of the template literal `node` was desugared from, when
+  /// `node` is exactly that template. The selfhost AST keeps no template node
+  /// of its own, so the source text is the only faithful rendering.
+  function templateSlice(
+    module: &Ast::Module,
+    node: &Ast::Expression::Node,
+    source: &String
+  ): Option<String> {
+    let start: u64 = Format::leftmostSpanStart(module, node);
+
+    let Option::SOME(templateEnd) = Format::templateEndOffset(source, start) else {
+      return Option::NONE;
+    };
+
+    // A template whose last piece is an interpolation leaves the desugared
+    // root ending at that slot rather than at the closing backtick, so the
+    // node only has to fall inside the template, not finish it.
+    if (Ast::Serializer::expressionSpan(node).end > templateEnd) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(Format::sliceSource(source, start, templateEnd));
+  }
+
+  function formatCallExpression(
+    module: &Ast::Module,
+    call: &Ast::Expression::Call,
+    source: &String,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let sourceText: String = Format::sliceSpanText(source, &call.span).trimAsciiWhitespace();
+
+    if (Format::expressionContainsNewline(&sourceText)) {
+      return Result::OK(sourceText);
+    }
+
+    let mut formatted: String = Format::formatExpressionNode(module, call.callee, 10, source, config, 0)!;
+
+    if (call.typeArguments.length() > 0) {
+      let typeArgs: String = Format::joinFormattedTypes(module, &call.typeArguments, source);
+      formatted.pushStr("<");
+      formatted.push(&typeArgs);
+      formatted.pushStr(">");
+    }
+
+    let argumentsText: String = Format::joinFormattedExpressions(module, &call.arguments, source, config)!;
+    let mut trailing: str = "";
+
+    if (call.arguments.length() > 0) {
+      let Option::SOME(lastArgumentId) = call.arguments.get(call.arguments.length() - 1) else {
+        return Result::OK(formatted);
+      };
+
+      let Option::SOME(lastArgumentNode) = module.expressions.get(*lastArgumentId) else {
+        return Result::OK(formatted);
+      };
+
+      let lastArgumentSpan: SourceSpan = Ast::Serializer::expressionSpan(lastArgumentNode);
+
+      if (Format::rangeContainsComma(source, lastArgumentSpan.end, call.span.end)) {
+        trailing = ",";
+      }
+    }
+
+    formatted.pushStr("(");
+    formatted.push(&argumentsText);
+    formatted.pushStr(trailing);
+    formatted.pushStr(")");
+
+    return Result::OK(formatted);
+  }
+
+  function formatMatchExpression(
+    module: &Ast::Module,
+    matchExpression: &Ast::Expression::Match,
+    parentPrecedence: u8,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let sourceText: String = Format::sliceSpanText(source, &matchExpression.span).trimAsciiWhitespace();
+
+    if (Format::expressionContainsNewline(&sourceText)) {
+      return Result::OK(Format::wrapWhenBelowParent(sourceText, parentPrecedence, 0));
+    }
+
+    let mut arms: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < matchExpression.arms.length()) {
+      let Option::SOME(arm) = matchExpression.arms.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        arms.pushStr(", ");
+      }
+
+      let patternText: String = Format::formatPattern(module, arm.pattern, source);
+      arms.push(&patternText);
+
+      if (let Option::SOME(guard) = arm.guard) {
+        let guardText: String = Format::formatExpressionNode(module, guard, 0, source, config, 0)!;
+        arms.pushStr(" if ");
+        arms.push(&guardText);
+      }
+
+      arms.pushStr(" -> ");
+
+      // A block-bodied arm closes its brace at column zero on the host, which
+      // renders arm bodies at indent level 0 regardless of the match's own.
+      let bodyText: String = Format::formatMatchArmBody(module, arm.body, source, config, indentLevel)!;
+      arms.push(&bodyText);
+
+      index += 1;
+    }
+
+    let scrutineeText: String = Format::formatExpressionNode(module, matchExpression.scrutinee, 0, source, config, 0)!;
+
+    let mut formatted: String = String::create("match (");
+    formatted.push(&scrutineeText);
+    formatted.pushStr(") { ");
+    formatted.push(&arms);
+    formatted.pushStr(" }");
+
+    return Result::OK(Format::wrapWhenBelowParent(formatted, parentPrecedence, 0));
+  }
+
+  function formatMatchArmBody(
+    module: &Ast::Module,
+    bodyId: Ast::ExpressionId,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(bodyNode) = module.expressions.get(bodyId) else {
+      return Result::OK(String::new());
+    };
+
+    if (let Ast::Expression::Node::Block(blockExpression) = bodyNode) {
+      return Format::formatBlockBody(
+        module,
+        &blockExpression.statements,
+        blockExpression.tail,
+        &blockExpression.span,
+        source,
+        config,
+        0,
+      );
+    }
+
+    return Format::formatExpression(module, bodyNode, 0, source, config, indentLevel);
+  }
+
+  function formatLambdaExpression(
+    module: &Ast::Module,
+    lambda: &Ast::Expression::Lambda,
+    parentPrecedence: u8,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let parameters: Vector<String> = Format::formatParameterList(module, &lambda.parameters, source);
+    let parametersText: String = Format::joinSegments(&parameters, ", ");
+
+    let mut returnTypeText: String = String::create("void");
+
+    if (let Option::SOME(returnType) = lambda.returnType) {
+      returnTypeText = Format::formatType(module, returnType, source);
+    }
+
+    let mut formatted: String = String::create("(");
+    formatted.push(&parametersText);
+    formatted.pushStr("): ");
+    formatted.push(&returnTypeText);
+    formatted.pushStr(" -> ");
+
+    let bodyText: String = Format::formatLambdaBody(module, lambda.body, source, config, indentLevel)!;
+    formatted.push(&bodyText);
+
+    return Result::OK(Format::wrapWhenBelowParent(formatted, parentPrecedence, 0));
+  }
+
+  /// A lambda written `(...) -> expr` is stored as a synthetic block holding
+  /// only a tail expression, whose span starts at the `)` rather than at a
+  /// `{`. That is what tells it from a real `{ ... }` body here.
+  function formatLambdaBody(
+    module: &Ast::Module,
+    bodyId: Ast::StatementId,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(bodyNode) = module.statements.get(bodyId) else {
+      return Result::OK(String::new());
+    };
+
+    let Ast::Statement::Node::Block(block) = bodyNode else {
+      return Format::formatStatement(module, bodyNode, source, config, indentLevel);
+    };
+
+    let mut startsWithBrace: boolean = false;
+
+    if (let Option::SOME(firstByte) = source.byteAt(block.span.start)) {
+      startsWithBrace = firstByte == '{' as u8;
+    }
+
+    if (!startsWithBrace) {
+      if (let Option::SOME(tailId) = block.tail) {
+        return Format::formatExpressionNode(module, tailId, 0, source, config, indentLevel);
+      }
+    }
+
+    return Format::formatBlockBody(module, &block.statements, block.tail, &block.span, source, config, indentLevel);
+  }
+
+  function flattenPipeChain(
+    module: &Ast::Module,
+    leftId: Ast::ExpressionId,
+    rightId: Ast::ExpressionId
+  ): Vector<Format::PipeStep> {
+    let mut steps: Vector<Format::PipeStep> = Vector::new<Format::PipeStep>();
+    Format::collectPipeSteps(module, leftId, &mut steps);
+
+    let Option::SOME(rightNode) = module.expressions.get(rightId) else {
+      steps.push(Format::PipeStep { id: rightId, isCall: true });
+      return steps;
+    };
+
+    if (let Ast::Expression::Node::Pipe(innerPipe) = rightNode) {
+      Format::collectPipeSteps(module, innerPipe.left, &mut steps);
+      steps.push(Format::PipeStep { id: innerPipe.right, isCall: true });
+      return steps;
+    }
+
+    steps.push(Format::PipeStep { id: rightId, isCall: true });
+    return steps;
+  }
+
+  function collectPipeSteps(
+    module: &Ast::Module,
+    expressionId: Ast::ExpressionId,
+    steps: &mut Vector<Format::PipeStep>
+  ): void {
+    let mut stepsRef: &mut Vector<Format::PipeStep> = steps;
+
+    let Option::SOME(node) = module.expressions.get(expressionId) else {
+      stepsRef.push(Format::PipeStep { id: expressionId, isCall: false });
+      return;
+    };
+
+    if (let Ast::Expression::Node::Pipe(pipe) = node) {
+      Format::collectPipeSteps(module, pipe.left, stepsRef);
+      stepsRef.push(Format::PipeStep { id: pipe.right, isCall: true });
+      return;
+    }
+
+    stepsRef.push(Format::PipeStep { id: expressionId, isCall: false });
+  }
+
+  function formatPipeChain(
+    module: &Ast::Module,
+    steps: &Vector<Format::PipeStep>,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    if (steps.length() == 0) {
+      return Result::OK(String::new());
+    }
+
+    let pipeCount: u64 = steps.length() - 1;
+
+    let Option::SOME(firstStep) = steps.get(0) else {
+      return Result::OK(String::new());
+    };
+
+    let head: String = Format::formatExpressionNode(module, firstStep.id, 0, source, config, 0)!;
+
+    if (pipeCount < 2) {
+      if (let Option::SOME(secondStep) = steps.get(1)) {
+        let right: String = Format::formatExpressionNode(module, secondStep.id, 0, source, config, 0)!;
+
+        let mut inlineText: String = head.clone();
+        inlineText.pushStr(" |> ");
+        inlineText.push(&right);
+
+        if (inlineText.length() <= config.lineWidth) {
+          return Result::OK(inlineText);
+        }
+      }
+
+      return Result::OK(head);
+    }
+
+    let stepIndent: String = config.indentString(indentLevel + 1);
+    let mut formatted: String = head;
+    let mut index: u64 = 1;
+
+    while (index < steps.length()) {
+      let Option::SOME(step) = steps.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (step.isCall) {
+        let stepText: String = Format::formatExpressionNode(module, step.id, 0, source, config, 0)!;
+        formatted.pushChar('\n');
+        formatted.push(&stepIndent);
+        formatted.pushStr("|> ");
+        formatted.push(&stepText);
+      }
+
+      index += 1;
+    }
+
+    return Result::OK(formatted);
+  }
+
+  function formatRecordInitPath(
+    module: &Ast::Module,
+    recordInit: &Ast::Expression::RecordInit,
+    source: &String,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let mut path: String = Format::formatExpressionNode(module, recordInit.path, 0, source, config, 0)!;
+
+    if (recordInit.typeArguments.length() > 0) {
+      let typeArgs: String = Format::joinFormattedTypes(module, &recordInit.typeArguments, source);
+      path.pushStr("<");
+      path.push(&typeArgs);
+      path.pushStr(">");
+    }
+
+    return Result::OK(path);
+  }
+
+  /// Renders `Path { a: 1, b: 2 }`. An initializer with no fields keeps the
+  /// host's `Path {  }` spelling — the host joins an empty field list between
+  /// the same two padding spaces, and the corpus is a fixed point of that.
+  function formatRecordInitInline(
+    module: &Ast::Module,
+    recordInit: &Ast::Expression::RecordInit,
+    source: &String,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let path: String = Format::formatRecordInitPath(module, recordInit, source, config)!;
+
+    let mut fields: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < recordInit.fields.length()) {
+      let Option::SOME(field) = recordInit.fields.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        fields.pushStr(", ");
+      }
+
+      let valueText: String = Format::formatExpressionNode(module, field.value, 0, source, config, 0)!;
+      fields.push(&field.name);
+      fields.pushStr(": ");
+      fields.push(&valueText);
+      index += 1;
+    }
+
+    let mut result: String = path;
+    result.pushStr(" { ");
+    result.push(&fields);
+    result.pushStr(" }");
+    return Result::OK(result);
+  }
+
+  /// Renders an initializer that a `return`/`let`/`const` may spread over
+  /// several lines. Falls back to the inline form when the source wrote it on
+  /// one line and it still fits.
+  function formatRecordInitMultiline(
+    module: &Ast::Module,
+    recordInit: &Ast::Expression::RecordInit,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    if (Format::regionContainsCommentText(source, recordInit.span.start, recordInit.span.end)) {
+      return Result::OK(Format::sliceSpanText(source, &recordInit.span).trimAsciiWhitespace());
+    }
+
+    let path: String = Format::formatRecordInitPath(module, recordInit, source, config)!;
+
+    let mut fieldTexts: Vector<String> = Vector::new<String>();
+    let mut index: u64 = 0;
+
+    while (index < recordInit.fields.length()) {
+      let Option::SOME(field) = recordInit.fields.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let mut fieldText: String = field.name.clone();
+      fieldText.pushStr(": ");
+
+      let Option::SOME(valueNode) = module.expressions.get(field.value) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Ast::Expression::Node::RecordInit(nested) = valueNode) {
+        let nestedText: String = Format::formatRecordInitMultiline(module, &nested, source, config, indentLevel + 1)!;
+        fieldText.push(&nestedText);
+      } else {
+        let valueText: String = Format::formatExpressionNode(module, field.value, 0, source, config, 0)!;
+        fieldText.push(&valueText);
+      }
+
+      fieldTexts.push(fieldText);
+      index += 1;
+    }
+
+    let joined: String = Format::joinSegments(&fieldTexts, ", ");
+    let mut inlineText: String = path.clone();
+    inlineText.pushStr(" { ");
+    inlineText.push(&joined);
+    inlineText.pushStr(" }");
+
+    let rawSource: String = Format::sliceSpanText(source, &recordInit.span);
+    let sourceIsInline: boolean = !Format::expressionContainsNewline(&rawSource);
+    let returnKeywordColumns: u64 = 7;
+
+    if (sourceIsInline && config.indentColumns(indentLevel) + returnKeywordColumns + inlineText.length() <= config.lineWidth) {
+      return Result::OK(inlineText);
+    }
+
+    let fieldIndent: String = config.indentString(indentLevel + 1);
+    let closingIndent: String = config.indentString(indentLevel);
+
+    let mut formatted: String = path;
+    formatted.pushStr(" {\n");
+
+    let mut fieldIndex: u64 = 0;
+
+    while (fieldIndex < fieldTexts.length()) {
+      let Option::SOME(fieldText) = fieldTexts.get(fieldIndex) else {
+        fieldIndex += 1;
+        continue;
+      };
+
+      formatted.push(&fieldIndent);
+      formatted.push(fieldText);
+      formatted.pushStr(",\n");
+      fieldIndex += 1;
+    }
+
+    formatted.push(&closingIndent);
+    formatted.pushStr("}");
+    return Result::OK(formatted);
+  }
+
+  /// Renders the value of a `return`/`let`/`const`, which is the one place the
+  /// host lets a record initializer spread over several lines.
+  function formatInitializerValue(
+    module: &Ast::Module,
+    expressionId: Ast::ExpressionId,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(node) = module.expressions.get(expressionId) else {
+      return Result::OK(String::new());
+    };
+
+    if (let Ast::Expression::Node::RecordInit(recordInit) = node) {
+      return Format::formatRecordInitMultiline(module, &recordInit, source, config, indentLevel);
+    }
+
+    return Format::formatExpression(module, node, 0, source, config, indentLevel);
+  }
+
+  function formatStatementNode(
+    module: &Ast::Module,
+    statementId: Ast::StatementId,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(node) = module.statements.get(statementId) else {
+      return Result::ERROR(FormatError::model("statement is missing from the module"));
+    };
+
+    return Format::formatStatement(module, node, source, config, indentLevel);
+  }
+
+  function formatStatement(
+    module: &Ast::Module,
+    node: &Ast::Statement::Node,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let indentText: String = config.indentString(indentLevel);
+
+    if (let Ast::Statement::Node::Expression(expressionStatement) = node) {
+      let expressionText: String = Format::formatExpressionNode(module, expressionStatement.expression, 0, source, config, indentLevel)!;
+      let mut result: String = indentText;
+      result.push(&expressionText);
+      result.pushStr(";");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Return(returnStatement) = node) {
+      let mut result: String = indentText;
+      result.pushStr("return");
+
+      if (let Option::SOME(value) = returnStatement.value) {
+        let valueText: String = Format::formatInitializerValue(module, value, source, config, indentLevel)!;
+        result.pushStr(" ");
+        result.push(&valueText);
+      }
+
+      result.pushStr(";");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Break(breakStatement) = node) {
+      let mut result: String = indentText;
+      result.pushStr("break");
+
+      if (let Option::SOME(value) = breakStatement.value) {
+        let valueText: String = Format::formatExpressionNode(module, value, 0, source, config, indentLevel)!;
+        result.pushStr(" ");
+        result.push(&valueText);
+      }
+
+      result.pushStr(";");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Continue(_) = node) {
+      let mut result: String = indentText;
+      result.pushStr("continue;");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Defer(deferStatement) = node) {
+      let innerText: String = Format::formatStatementNode(module, deferStatement.statement, source, config, 0)!;
+      let trimmedInnerText: String = innerText.trimAsciiWhitespace();
+      let mut result: String = indentText;
+      result.pushStr("defer ");
+      result.push(&trimmedInnerText);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Let(letStatement) = node) {
+      return Format::formatBindingStatement(
+        module,
+        Format::bindingKeywordOf(source, &letStatement.span),
+        false,
+        letStatement.pattern,
+        letStatement.annotation,
+        letStatement.value,
+        source,
+        config,
+        indentLevel,
+      );
+    }
+
+    if (let Ast::Statement::Node::Variable(variableStatement) = node) {
+      return Format::formatBindingStatement(
+        module,
+        Format::bindingKeywordOf(source, &variableStatement.span),
+        variableStatement.mutable,
+        variableStatement.pattern,
+        variableStatement.annotation,
+        variableStatement.value,
+        source,
+        config,
+        indentLevel,
+      );
+    }
+
+    if (let Ast::Statement::Node::LetElse(letElseStatement) = node) {
+      let mut result: String = indentText;
+      result.pushStr("let ");
+
+      if (letElseStatement.mutable) {
+        result.pushStr("mut ");
+      }
+
+      let patternText: String = Format::formatPattern(module, letElseStatement.pattern, source);
+      result.push(&patternText);
+
+      let mut elseAnnotation: Option<Ast::TypeId> = letElseStatement.annotation;
+
+      if (let Option::NONE = elseAnnotation) {
+        elseAnnotation = Format::patternBindingAnnotation(module, letElseStatement.pattern);
+      }
+
+      if (let Option::SOME(annotation) = elseAnnotation) {
+        let annotationText: String = Format::formatType(module, annotation, source);
+        result.pushStr(": ");
+        result.push(&annotationText);
+      }
+
+      let valueText: String = Format::formatExpressionNode(module, letElseStatement.value, 0, source, config, indentLevel)!;
+      result.pushStr(" = ");
+      result.push(&valueText);
+
+      let elseText: String = Format::formatBlockLikeStatement(module, letElseStatement.elseBranch, source, config, indentLevel)!;
+      result.pushStr(" else ");
+      result.push(&elseText);
+      result.pushStr(";");
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::If(ifStatement) = node) {
+      let conditionText: String = Format::formatExpressionNode(module, ifStatement.condition, 0, source, config, 0)!;
+      let thenText: String = Format::formatBlockLikeStatement(module, ifStatement.thenBranch, source, config, indentLevel)!;
+
+      let mut result: String = indentText;
+      result.pushStr("if (");
+      result.push(&conditionText);
+      result.pushStr(") ");
+      result.push(&thenText);
+
+      if (let Option::SOME(elseBranchId) = ifStatement.elseBranch) {
+        let Option::SOME(elseNode) = module.statements.get(elseBranchId) else {
+          return Result::OK(result);
+        };
+
+        result.pushStr(" else ");
+
+        if (let Ast::Statement::Node::If(_) = elseNode) {
+          let elseIfText: String = Format::formatStatement(module, elseNode, source, config, indentLevel)!;
+          let trimmedElseIfText: String = Format::trimLeadingWhitespace(&elseIfText);
+          result.push(&trimmedElseIfText);
+        } else {
+          let elseText: String = Format::formatBlockLikeStatement(module, elseBranchId, source, config, indentLevel)!;
+          result.push(&elseText);
+        }
+      }
+
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::While(whileStatement) = node) {
+      let conditionText: String = Format::formatExpressionNode(module, whileStatement.condition, 0, source, config, 0)!;
+      let bodyText: String = Format::formatBlockLikeStatement(module, whileStatement.body, source, config, indentLevel)!;
+
+      let mut result: String = indentText;
+      result.pushStr("while (");
+      result.push(&conditionText);
+      result.pushStr(") ");
+      result.push(&bodyText);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::For(forStatement) = node) {
+      return Format::formatForStatement(module, &forStatement, source, config, indentLevel);
+    }
+
+    if (let Ast::Statement::Node::ForOf(forOfStatement) = node) {
+      let bindingText: String = Format::formatParameterPattern(module, forOfStatement.pattern, source);
+      let iterableText: String = Format::formatExpressionNode(module, forOfStatement.iterable, 0, source, config, 0)!;
+      let bodyText: String = Format::formatBlockLikeStatement(module, forOfStatement.body, source, config, indentLevel)!;
+
+      let mut result: String = indentText;
+      result.pushStr("for (let ");
+      result.push(&bindingText);
+      result.pushStr(" of ");
+      result.push(&iterableText);
+      result.pushStr(") ");
+      result.push(&bodyText);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Block(block) = node) {
+      let blockText: String = Format::formatBlockBody(module, &block.statements, block.tail, &block.span, source, config, indentLevel)!;
+      let mut result: String = indentText;
+      result.push(&blockText);
+      return Result::OK(result);
+    }
+
+    if (let Ast::Statement::Node::Comment(commentStatement) = node) {
+      let mut result: String = indentText;
+      let commentText: String = commentStatement.text.trimAsciiWhitespace();
+      result.push(&commentText);
+      return Result::OK(result);
+    }
+
+    // A nested `Item` statement is only ever built by hand (the parser never
+    // emits one), so it keeps a verbatim slice rather than reaching up into
+    // `layout_items.ign`, which imports this file.
+    let span: SourceSpan = Ast::Serializer::statementSpan(node);
+    let mut result: String = indentText;
+    let verbatim: String = Format::sliceSpanText(source, &span).trimAsciiWhitespace();
+    result.push(&verbatim);
+    return Result::OK(result);
+  }
+
+  /// The type annotation a binding pattern carries.
+  ///
+  /// A `let` inside a block expression parses its `: Type` into the pattern,
+  /// while a statement-level `let` keeps it on the statement, so both places
+  /// have to be consulted.
+  function patternBindingAnnotation(
+    module: &Ast::Module,
+    patternId: Ast::PatternId
+  ): Option<Ast::TypeId> {
+    let Option::SOME(node) = module.patterns.get(patternId) else {
+      return Option::NONE;
+    };
+
+    let Ast::Pattern::Node::Binding(binding) = node else {
+      return Option::NONE;
+    };
+
+    return binding.annotation;
+  }
+
+  /// The keyword a local binding was declared with. A local `const` reaches
+  /// the AST as a plain `Let`, so the source text is what tells the two apart.
+  function bindingKeywordOf(source: &String, span: &SourceSpan): str {
+    let head: String = Format::sliceSource(source, span.start, span.start + 5);
+
+    if (head.equals("const")) {
+      return "const ";
+    }
+
+    return "let ";
+  }
+
+  function formatBindingStatement(
+    module: &Ast::Module,
+    keyword: str,
+    mutable: boolean,
+    patternId: Ast::PatternId,
+    annotation: Option<Ast::TypeId>,
+    value: Option<Ast::ExpressionId>,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let mut result: String = config.indentString(indentLevel);
+    result.pushStr(keyword);
+
+    if (mutable) {
+      result.pushStr("mut ");
+    }
+
+    let patternText: String = Format::formatPattern(module, patternId, source);
+    result.push(&patternText);
+
+    let mut effectiveAnnotation: Option<Ast::TypeId> = annotation;
+
+    if (let Option::NONE = effectiveAnnotation) {
+      effectiveAnnotation = Format::patternBindingAnnotation(module, patternId);
+    }
+
+    if (let Option::SOME(annotationId) = effectiveAnnotation) {
+      let annotationText: String = Format::formatType(module, annotationId, source);
+      result.pushStr(": ");
+      result.push(&annotationText);
+    }
+
+    if (let Option::SOME(valueId) = value) {
+      let valueText: String = Format::formatInitializerValue(module, valueId, source, config, indentLevel)!;
+      result.pushStr(" = ");
+      result.push(&valueText);
+    }
+
+    result.pushStr(";");
+    return Result::OK(result);
+  }
+
+  /// The selfhost parser only accepts `for (let name = init; cond; update)`,
+  /// so the initializer is rebuilt from its binding rather than routed through
+  /// `formatStatement`, which would print the synthesized `mut` the parser
+  /// stores on it.
+  function formatForStatement(
+    module: &Ast::Module,
+    forStatement: &Ast::Statement::For,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let mut header: String = String::new();
+
+    if (let Option::SOME(initializerId) = forStatement.initializer) {
+      let Option::SOME(initializerNode) = module.statements.get(initializerId) else {
+        return Result::ERROR(FormatError::model("for initializer is missing from the module"));
+      };
+
+      if (let Ast::Statement::Node::Variable(initializer) = initializerNode) {
+        header.pushStr("let ");
+        let bindingText: String = Format::formatParameterPattern(module, initializer.pattern, source);
+        header.push(&bindingText);
+
+        if (let Option::SOME(initialValue) = initializer.value) {
+          let valueText: String = Format::formatExpressionNode(module, initialValue, 0, source, config, 0)!;
+          header.pushStr(" = ");
+          header.push(&valueText);
+        }
+      } else {
+        let initializerText: String = Format::formatStatement(module, initializerNode, source, config, 0)!;
+        let trimmed: String = initializerText.trimAsciiWhitespace();
+        let withoutSemicolon: String = Format::trimTrailingSemicolon(&trimmed);
+        header.push(&withoutSemicolon);
+      }
+    }
+
+    header.pushStr("; ");
+
+    if (let Option::SOME(conditionId) = forStatement.condition) {
+      let conditionText: String = Format::formatExpressionNode(module, conditionId, 0, source, config, 0)!;
+      header.push(&conditionText);
+    }
+
+    header.pushStr("; ");
+
+    if (let Option::SOME(updateId) = forStatement.update) {
+      let updateText: String = Format::formatExpressionNode(module, updateId, 0, source, config, 0)!;
+      header.push(&updateText);
+    }
+
+    let bodyText: String = Format::formatBlockLikeStatement(module, forStatement.body, source, config, indentLevel)!;
+
+    let mut result: String = config.indentString(indentLevel);
+    result.pushStr("for (");
+    result.push(&header);
+    result.pushStr(") ");
+    result.push(&bodyText);
+    return Result::OK(result);
+  }
+
+  function trimTrailingSemicolon(text: &String): String {
+    let mut end: u64 = text.length();
+
+    while (end > 0) {
+      let Option::SOME(byte) = text.byteAt(end - 1) else {
+        break;
+      };
+
+      if (byte != ';' as u8) {
+        break;
+      }
+
+      end -= 1;
+    }
+
+    let trimmed: String = text.substringBytes(0, end);
+    return trimmed.trimAsciiWhitespace();
+  }
+
+  /// Renders a statement the grammar requires to be a `{ ... }` block (an `if`
+  /// branch or a loop body), staying defensive about anything else the parser
+  /// might hand back.
+  function formatBlockLikeStatement(
+    module: &Ast::Module,
+    statementId: Ast::StatementId,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(node) = module.statements.get(statementId) else {
+      return Result::ERROR(FormatError::model("block statement is missing from the module"));
+    };
+
+    if (let Ast::Statement::Node::Block(block) = node) {
+      return Format::formatBlockBody(module, &block.statements, block.tail, &block.span, source, config, indentLevel);
+    }
+
+    return Format::formatStatement(module, node, source, config, indentLevel);
+  }
+
+  function formatBlockStatement(
+    module: &Ast::Module,
+    block: &Ast::Statement::Block,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    return Format::formatBlockBody(module, &block.statements, block.tail, &block.span, source, config, indentLevel);
+  }
+
+  /// Lays out a braced body: its statements at `indentLevel + 1`, the blank
+  /// lines the source asked for, the comments living between them, and the
+  /// closing brace back at `indentLevel`.
+  function formatBlockBody(
+    module: &Ast::Module,
+    statements: &Vector<Ast::StatementId>,
+    tail: Option<Ast::ExpressionId>,
+    span: &SourceSpan,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let mut result: String = String::create("{\n");
+
+    let Option::SOME(bodyRange) = Format::bracedBodyBounds(source, span) else {
+      Format::appendBlockStatementsWithoutSource(module, statements, tail, source, config, indentLevel, &mut result)!;
+      let closingIndent: String = config.indentString(indentLevel);
+      result.push(&closingIndent);
+      result.pushStr("}");
+      return Result::OK(result);
+    };
+
+    let mut cursor: u64 = bodyRange.start;
+    let mut wroteStatement: boolean = false;
+    let mut index: u64 = 0;
+
+    while (index < statements.length()) {
+      let Option::SOME(statementId) = statements.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(statementNode) = module.statements.get(*statementId) else {
+        index += 1;
+        continue;
+      };
+
+      let statementSpan: SourceSpan = Ast::Serializer::statementSpan(statementNode);
+
+      if (wroteStatement) {
+        Format::preserveSingleBlankLineForWhitespaceGap(&mut result, source, cursor, statementSpan.start);
+      }
+
+      Format::renderCommentGap(&mut result, source, cursor, statementSpan.start, config, indentLevel + 1, wroteStatement)!;
+
+      let statementText: String = Format::formatStatement(module, statementNode, source, config, indentLevel + 1)!;
+      result.push(&statementText);
+
+      let lineEnd: u64 = Format::lineEndOffset(source, statementSpan.end);
+
+      if (Format::gapStartsWithSameLineComment(source, statementSpan.end, lineEnd)) {
+        let trailingBlocks: Vector<CommentBlock> = Format::commentBlocksInSlice(source, statementSpan.end, lineEnd)!;
+        Format::pushCommentBlocks(&mut result, &trailingBlocks, config, indentLevel + 1, true);
+      }
+
+      // The gap to the next statement starts at the newline boundary so a
+      // blank line is still seen even when a statement span stops before `;`.
+      cursor = lineEnd;
+
+      result.pushChar('\n');
+      wroteStatement = true;
+      index += 1;
+    }
+
+    if (let Option::SOME(tailId) = tail) {
+      let Option::SOME(tailNode) = module.expressions.get(tailId) else {
+        return Result::ERROR(FormatError::model("block tail expression is missing from the module"));
+      };
+
+      let tailSpan: SourceSpan = Ast::Serializer::expressionSpan(tailNode);
+
+      if (wroteStatement) {
+        Format::preserveSingleBlankLineForWhitespaceGap(&mut result, source, cursor, tailSpan.start);
+      }
+
+      Format::renderCommentGap(&mut result, source, cursor, tailSpan.start, config, indentLevel + 1, wroteStatement)!;
+
+      let tailIndent: String = config.indentString(indentLevel + 1);
+      let tailText: String = Format::formatExpression(module, tailNode, 0, source, config, indentLevel + 1)!;
+      result.push(&tailIndent);
+      result.push(&tailText);
+      result.pushChar('\n');
+
+      cursor = Format::lineEndOffset(source, tailSpan.end);
+      wroteStatement = true;
+    }
+
+    if (wroteStatement) {
+      Format::preserveSingleBlankLineForWhitespaceGap(&mut result, source, cursor, bodyRange.end);
+    }
+
+    Format::renderCommentGap(&mut result, source, cursor, bodyRange.end, config, indentLevel + 1, wroteStatement)!;
+
+    let closingIndent: String = config.indentString(indentLevel);
+    result.push(&closingIndent);
+    result.pushStr("}");
+
+    return Result::OK(result);
+  }
+
+  function appendBlockStatementsWithoutSource(
+    module: &Ast::Module,
+    statements: &Vector<Ast::StatementId>,
+    tail: Option<Ast::ExpressionId>,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64,
+    output: &mut String
+  ): Result<void, FormatError> {
+    let mut outputRef: &mut String = output;
+    let mut index: u64 = 0;
+
+    while (index < statements.length()) {
+      let Option::SOME(statementId) = statements.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let statementText: String = Format::formatStatementNode(module, *statementId, source, config, indentLevel + 1)!;
+      outputRef.push(&statementText);
+      outputRef.pushChar('\n');
+      index += 1;
+    }
+
+    if (let Option::SOME(tailId) = tail) {
+      let tailIndent: String = config.indentString(indentLevel + 1);
+      let tailText: String = Format::formatExpressionNode(module, tailId, 0, source, config, indentLevel + 1)!;
+      outputRef.push(&tailIndent);
+      outputRef.push(&tailText);
+      outputRef.pushChar('\n');
+    }
+
+    return Result::OK(());
+  }
+}

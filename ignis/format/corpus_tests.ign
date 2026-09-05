@@ -1,0 +1,254 @@
+import Fs from "std::fs";
+import Io from "std::io";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import Format from "./api";
+import FormatterConfig from "./config";
+
+/// `String::lines()` appends a spurious trailing empty entry when the text ends
+/// with '\n', unlike Rust's `str::lines()` (repro
+/// "string-lines-trailing-newline").
+function corpusLines(text: &String): Vector<String> {
+  let mut lines: Vector<String> = text.lines();
+
+  if (text.length() > 0 && lines.length() > 0) {
+    let Option::SOME(lastByte) = text.byteAt(text.length() - 1) else {
+      return lines;
+    };
+
+    if (lastByte == '\n' as u8) {
+      lines.pop();
+    }
+  }
+
+  return lines;
+}
+
+function isIgnFile(path: &String): boolean {
+  if (path.length() < 4) {
+    return false;
+  }
+
+  let suffix: String = path.substringBytes(path.length() - 4, path.length());
+  return suffix.equals(".ign");
+}
+
+function collectIgnFiles(rootPath: str): Vector<String> {
+  let mut files: Vector<String> = Vector::new<String>();
+
+  if (!Fs::exists(rootPath)) {
+    return files;
+  }
+
+  let Result::OK(walked) = Fs::walk(rootPath) else {
+    return files;
+  };
+
+  let mut index: u64 = 0;
+
+  while (index < walked.length()) {
+    let Option::SOME(path) = walked.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (isIgnFile(path)) {
+      files.push(path.clone());
+    }
+
+    index += 1;
+  }
+
+  return files;
+}
+
+/// The roots whose files are already a fixed point of the host formatter, so
+/// the selfhost formatter must return them byte for byte.
+function fixedPointRoots(): Vector<String> {
+  let mut roots: Vector<String> = Vector::new<String>();
+  roots.push(String::create("ignis"));
+  roots.push(String::create("std"));
+  return roots;
+}
+
+/// The roots holding fixtures the host formatter itself rewrites or rejects
+/// (deliberately malformed parser inputs, unformatted analyzer cases). They are
+/// checked for a clean, stable run rather than for byte equality.
+function toleratedRoots(): Vector<String> {
+  let mut roots: Vector<String> = Vector::new<String>();
+  roots.push(String::create("test_cases"));
+  roots.push(String::create("example"));
+  return roots;
+}
+
+function firstDifferingLine(left: &String, right: &String): u64 {
+  let leftLines: Vector<String> = corpusLines(left);
+  let rightLines: Vector<String> = corpusLines(right);
+  let mut index: u64 = 0;
+
+  while (index < leftLines.length() && index < rightLines.length()) {
+    let Option::SOME(leftLine) = leftLines.get(index) else {
+      return index + 1;
+    };
+
+    let Option::SOME(rightLine) = rightLines.get(index) else {
+      return index + 1;
+    };
+
+    if (!leftLine.equals(rightLine)) {
+      return index + 1;
+    }
+
+    index += 1;
+  }
+
+  if (leftLines.length() != rightLines.length()) {
+    return index + 1;
+  }
+
+  return 0;
+}
+
+function reportDifference(
+  report: &mut String,
+  path: &String,
+  source: &String,
+  formatted: &String
+): void {
+  let mut reportRef: &mut String = report;
+  let lineNumber: u64 = firstDifferingLine(source, formatted);
+  let lineText: String = lineNumber.toString();
+
+  let mut message: String = String::create("formatter corpus difference: ");
+  message.push(path);
+  message.pushStr(" at line ");
+  message.push(&lineText);
+  message.pushStr("\n  input:  ");
+
+  let sourceLines: Vector<String> = corpusLines(source);
+  let formattedLines: Vector<String> = corpusLines(formatted);
+
+  if (lineNumber > 0) {
+    if (let Option::SOME(sourceLine) = sourceLines.get(lineNumber - 1)) {
+      message.push(sourceLine);
+    }
+
+    message.pushStr("\n  output: ");
+
+    if (let Option::SOME(formattedLine) = formattedLines.get(lineNumber - 1)) {
+      message.push(formattedLine);
+    }
+  }
+
+  reportRef.push(&message);
+  reportRef.pushChar('\n');
+}
+
+function reportError(report: &mut String, path: &String, detail: &String): void {
+  let mut reportRef: &mut String = report;
+  let mut message: String = String::create("formatter corpus error: ");
+  message.push(path);
+  message.pushStr(": ");
+  message.push(detail);
+  reportRef.push(&message);
+  reportRef.pushChar('\n');
+}
+
+/// Formats every `.ign` file under `roots`, returning how many failed.
+///
+/// `requireFixedPoint` asks for byte equality with the input; otherwise the
+/// file only has to format without an error (`Format::formatSource` already
+/// rejects an unstable second pass on its own).
+function runCorpus(roots: &Vector<String>, requireFixedPoint: boolean, report: &mut String): u64 {
+  let mut reportRef: &mut String = report;
+  let config: FormatterConfig = FormatterConfig::default();
+  let mut failures: u64 = 0;
+  let mut rootIndex: u64 = 0;
+
+  while (rootIndex < roots.length()) {
+    let Option::SOME(root) = roots.get(rootIndex) else {
+      rootIndex += 1;
+      continue;
+    };
+
+    let files: Vector<String> = collectIgnFiles(root.toStr());
+    let mut fileIndex: u64 = 0;
+
+    while (fileIndex < files.length()) {
+      let Option::SOME(path) = files.get(fileIndex) else {
+        fileIndex += 1;
+        continue;
+      };
+
+      let Result::OK(source) = Fs::readToString(path.toStr()) else {
+        let detail: String = String::create("could not read file");
+        reportError(reportRef, path, &detail);
+        failures += 1;
+        fileIndex += 1;
+        continue;
+      };
+
+      let Result::OK(formatted) = Format::formatSource(&source, &config) else {
+        let Result::ERROR(error) = Format::formatSource(&source, &config) else {
+          fileIndex += 1;
+          continue;
+        };
+
+        let detail: String = error.describe();
+        reportError(reportRef, path, &detail);
+
+        if (requireFixedPoint) {
+          failures += 1;
+        }
+
+        fileIndex += 1;
+        continue;
+      };
+
+      if (requireFixedPoint && !formatted.equals(&source)) {
+        reportDifference(reportRef, path, &source, &formatted);
+        failures += 1;
+      }
+
+      fileIndex += 1;
+    }
+
+    rootIndex += 1;
+  }
+
+  return failures;
+}
+
+@test
+function corpusFormatsTheHostFormattedTreeWithoutChangingIt(): void {
+  let mut report: String = String::new();
+
+  let fixedPoint: Vector<String> = fixedPointRoots();
+  let failures: u64 = runCorpus(&fixedPoint, true, &mut report);
+
+  // `test_cases/` and `example/` hold fixtures the host formatter itself
+  // rewrites or rejects, so they are run for a clean, stable pass and their
+  // findings are recorded rather than asserted.
+  let tolerated: Vector<String> = toleratedRoots();
+  let _toleratedFindings: u64 = runCorpus(&tolerated, false, &mut report);
+
+  if (report.length() > 0) {
+    if (let Result::ERROR(_) = Fs::writeString("build/format-corpus.txt", &report)) {
+      let writeFailure: String = String::create("formatter corpus: could not write build/format-corpus.txt");
+      Io::eprintln(writeFailure);
+    }
+
+    Io::eprintln(report.clone());
+  }
+
+  if (failures > 0) {
+    let count: String = failures.toString();
+    let mut message: String = String::create("formatter corpus: ");
+    message.push(&count);
+    message.pushStr(" file(s) differ from their host-formatted input");
+    Io::eprintln(message);
+    Test::fail();
+  }
+}

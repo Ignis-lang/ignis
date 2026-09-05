@@ -1,0 +1,2343 @@
+import String from "std::string";
+import Vector from "std::vector";
+
+import Ast from "@compiler::ast";
+import DiagnosticBag, SourceFile, SourceSpan from "@compiler::diagnostics";
+import LexResult, Lexer from "@compiler::lexer";
+import Parser from "@compiler::parser";
+import Keyword, Punctuation, Token, TokenKind, TokenStream from "@compiler::syntax";
+
+import CommentBlock, CommentPlacement from "./comments";
+import FormatterConfig from "./config";
+import _ from "./doc";
+import FormatError from "./error";
+import _ from "./layout_expressions";
+import _ from "./layout_statements";
+import _ from "./layout_types";
+import _ from "./model";
+
+function layoutStrEquals(left: str, right: str): boolean {
+  return @eq<str>(&left, &right);
+}
+
+export namespace Format {
+  /// The comments found in the gap in front of a member, split by who owns
+  /// them. A trailing comment belongs to the member *before* the gap, so it is
+  /// carried here and handed back one index later rather than written into an
+  /// already-built segment.
+  record OwnedGapComments {
+    public leading: Vector<CommentBlock>;
+    public trailingForPrevious: Vector<CommentBlock>;
+  }
+
+  /// One member of a record or enum body, kept with its source span. The
+  /// selfhost AST stores fields (or variants) and methods in two vectors,
+  /// where the host keeps a single ordered list, so the written order has to
+  /// be recovered before laying the body out.
+  record BodyMember {
+    public isMethod: boolean;
+    public index: u64;
+    public span: SourceSpan;
+  }
+
+  /// Formats one `@name(arg1, arg2)` attribute, each on its own line at
+  /// `indentLevel`. Attribute arguments are already plain strings on the
+  /// selfhost AST (`Ast::Attribute::arguments: Vector<String>`), unlike the
+  /// host, which slices them from source; both land on the same text.
+  function formatAttributes(
+    attributes: &Vector<Ast::Attribute>,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let prefix: String = config.indentString(indentLevel);
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < attributes.length()) {
+      let Option::SOME(attribute) = attributes.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      result.push(&prefix);
+      result.pushStr("@");
+      result.push(&attribute.name);
+
+      if (attribute.arguments.length() > 0) {
+        let argsText: String = Format::joinSegments(&attribute.arguments, ", ");
+        result.pushStr("(");
+        result.push(&argsText);
+        result.pushStr(")");
+      }
+
+      result.pushChar('\n');
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// `@inline`/`@inline(always)`/`@inline(never)` are `Ast::Modifier` values on
+  /// the selfhost (unlike the host, which keeps them as attributes), so they
+  /// render as their own attribute lines here to match the host's output.
+  ///
+  /// `Meta`/`Declare` are not rendered: their exact source syntax is not yet
+  /// confirmed against a host fixture, and guessing risks corrupting output.
+  function formatModifierAttributeLines(
+    modifiers: &Vector<Ast::Modifier>,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let prefix: String = config.indentString(indentLevel);
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < modifiers.length()) {
+      let Option::SOME(modifier) = modifiers.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (*modifier == Ast::Modifier::Inline) {
+        result.push(&prefix);
+        result.pushStr("@inline\n");
+      } else if (*modifier == Ast::Modifier::InlineAlways) {
+        result.push(&prefix);
+        result.pushStr("@inline(always)\n");
+      } else if (*modifier == Ast::Modifier::InlineNever) {
+        result.push(&prefix);
+        result.pushStr("@inline(never)\n");
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function formatModifierKeywords(modifiers: &Vector<Ast::Modifier>): String {
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < modifiers.length()) {
+      let Option::SOME(modifier) = modifiers.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (*modifier == Ast::Modifier::Public) {
+        result.pushStr("public ");
+      } else if (*modifier == Ast::Modifier::Private) {
+        result.pushStr("private ");
+      } else if (*modifier == Ast::Modifier::Static) {
+        result.pushStr("static ");
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  function formatDeclarationPrefix(
+    metadata: &Ast::Metadata,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let mut result: String = Format::formatAttributes(&metadata.attributes, config, indentLevel);
+    let modifierLines: String = Format::formatModifierAttributeLines(&metadata.modifiers, config, indentLevel);
+    result.push(&modifierLines);
+    return result;
+  }
+
+  function nodeSpanOf(node: &Ast::Item::Node): SourceSpan {
+    if (let Ast::Item::Node::Function(functionItem) = node) {
+      return functionItem.span;
+    }
+
+    if (let Ast::Item::Node::Record(recordItem) = node) {
+      return recordItem.span;
+    }
+
+    if (let Ast::Item::Node::Enum(enumItem) = node) {
+      return enumItem.span;
+    }
+
+    if (let Ast::Item::Node::Namespace(namespaceItem) = node) {
+      return namespaceItem.span;
+    }
+
+    if (let Ast::Item::Node::Import(importItem) = node) {
+      return importItem.span;
+    }
+
+    if (let Ast::Item::Node::Extern(externItem) = node) {
+      return externItem.span;
+    }
+
+    if (let Ast::Item::Node::Constant(constant) = node) {
+      return constant.span;
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      return exportItem.span;
+    }
+
+    if (let Ast::Item::Node::TypeAlias(typeAlias) = node) {
+      return typeAlias.span;
+    }
+
+    if (let Ast::Item::Node::Trait(traitItem) = node) {
+      return traitItem.span;
+    }
+
+    return SourceSpan::new("", 0, 0);
+  }
+
+  function itemMetadataOf(node: &Ast::Item::Node): Ast::Metadata {
+    if (let Ast::Item::Node::Function(functionItem) = node) {
+      return Ast::copyMetadata(&functionItem.metadata);
+    }
+
+    if (let Ast::Item::Node::Record(recordItem) = node) {
+      return Ast::copyMetadata(&recordItem.metadata);
+    }
+
+    if (let Ast::Item::Node::Enum(enumItem) = node) {
+      return Ast::copyMetadata(&enumItem.metadata);
+    }
+
+    if (let Ast::Item::Node::Namespace(namespaceItem) = node) {
+      return Ast::copyMetadata(&namespaceItem.metadata);
+    }
+
+    if (let Ast::Item::Node::Import(importItem) = node) {
+      return Ast::copyMetadata(&importItem.metadata);
+    }
+
+    if (let Ast::Item::Node::Extern(externItem) = node) {
+      return Ast::copyMetadata(&externItem.metadata);
+    }
+
+    if (let Ast::Item::Node::Constant(constant) = node) {
+      return Ast::copyMetadata(&constant.metadata);
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      return Ast::copyMetadata(&exportItem.metadata);
+    }
+
+    if (let Ast::Item::Node::TypeAlias(typeAlias) = node) {
+      return Ast::copyMetadata(&typeAlias.metadata);
+    }
+
+    if (let Ast::Item::Node::Trait(traitItem) = node) {
+      return Ast::copyMetadata(&traitItem.metadata);
+    }
+
+    return Ast::emptyMetadata();
+  }
+
+  function itemSpan(module: &Ast::Module, itemId: Ast::ItemId): SourceSpan {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return SourceSpan::new("", 0, 0);
+    };
+
+    return Format::nodeSpanOf(node);
+  }
+
+  /// The true end byte of an item, including a function's body. A function
+  /// item's own span already covers its body, but the explicit check keeps
+  /// this correct if that ever changes.
+  function itemTrueEnd(module: &Ast::Module, itemId: Ast::ItemId): u64 {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return 0;
+    };
+
+    if (let Ast::Item::Node::Function(functionItem) = node) {
+      let signatureEnd: u64 = functionItem.span.end;
+
+      let Option::SOME(bodyNode) = module.statements.get(functionItem.body) else {
+        return signatureEnd;
+      };
+
+      if (let Ast::Statement::Node::Block(block) = bodyNode) {
+        if (block.span.end > signatureEnd) {
+          return block.span.end;
+        }
+      }
+
+      return signatureEnd;
+    }
+
+    return Format::nodeSpanOf(node).end;
+  }
+
+  /// The byte an item's declaration really starts at: the first of its leading
+  /// attribute annotations, which are stored apart from the declaration span.
+  function itemEffectiveStart(module: &Ast::Module, itemId: Ast::ItemId): u64 {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return 0;
+    };
+
+    let mut start: u64 = Format::nodeSpanOf(node).start;
+    let metadata: Ast::Metadata = Format::itemMetadataOf(node);
+    let mut index: u64 = 0;
+
+    while (index < metadata.attributes.length()) {
+      let Option::SOME(attribute) = metadata.attributes.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (attribute.span.start < start) {
+        start = attribute.span.start;
+      }
+
+      index += 1;
+    }
+
+    return start;
+  }
+
+  function itemOwnedSpan(module: &Ast::Module, itemId: Ast::ItemId): SourceSpan {
+    return SourceSpan::new("", Format::itemEffectiveStart(module, itemId), Format::itemTrueEnd(module, itemId));
+  }
+
+  function isImportNode(module: &Ast::Module, itemId: Ast::ItemId): boolean {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return false;
+    };
+
+    if (let Ast::Item::Node::Import(_) = node) {
+      return true;
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      if (let Option::SOME(_) = exportItem.source) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function isDiscardImportNode(module: &Ast::Module, itemId: Ast::ItemId): boolean {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return false;
+    };
+
+    let Ast::Item::Node::Import(importItem) = node else {
+      return false;
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < importItem.items.length()) {
+      let Option::SOME(binding) = importItem.items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (binding.kind == Ast::ImportBindingKind::Discard) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function moduleItemNames(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    source: &String
+  ): Vector<String> {
+    let mut names: Vector<String> = Vector::new<String>();
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return names;
+    };
+
+    let mut bindings: Option<&Vector<Ast::ImportBinding>> = Option::NONE;
+
+    if (let Ast::Item::Node::Import(importItem) = node) {
+      bindings = Option::SOME(&importItem.items);
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      bindings = Option::SOME(&exportItem.items);
+    }
+
+    let Option::SOME(bindingList) = bindings else {
+      return names;
+    };
+
+    let mut index: u64 = 0;
+
+    while (index < bindingList.length()) {
+      let Option::SOME(binding) = bindingList.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let text: String = Format::sliceSpanText(source, &binding.span).trimAsciiWhitespace();
+      names.push(text);
+      index += 1;
+    }
+
+    return names;
+  }
+
+  function groupableModuleItemKeyword(module: &Ast::Module, itemId: Ast::ItemId): Option<String> {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return Option::NONE;
+    };
+
+    if (let Ast::Item::Node::Import(_) = node) {
+      if (Format::isDiscardImportNode(module, itemId)) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(String::create("import"));
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      if (let Option::SOME(_) = exportItem.source) {
+        return Option::SOME(String::create("export"));
+      }
+    }
+
+    return Option::NONE;
+  }
+
+  function groupableModuleItemFrom(module: &Ast::Module, itemId: Ast::ItemId): String {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return String::new();
+    };
+
+    if (let Ast::Item::Node::Import(importItem) = node) {
+      return importItem.source.clone();
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      if (let Option::SOME(fromPath) = &exportItem.source) {
+        return fromPath.clone();
+      }
+    }
+
+    return String::new();
+  }
+
+  function moduleItemSignatureMatches(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    keyword: &String,
+    fromPath: &String
+  ): boolean {
+    let Option::SOME(candidateKeyword) = Format::groupableModuleItemKeyword(module, itemId) else {
+      return false;
+    };
+
+    let candidateFrom: String = Format::groupableModuleItemFrom(module, itemId);
+    let keywordView: str = keyword.toStr();
+    let candidateKeywordView: str = candidateKeyword.toStr();
+    let fromView: str = fromPath.toStr();
+    let candidateFromView: str = candidateFrom.toStr();
+
+    return @eq<str>(&keywordView, &candidateKeywordView) && @eq<str>(&fromView, &candidateFromView);
+  }
+
+  /// `String::lines()` appends a spurious trailing empty entry when the text
+  /// ends with '\n', unlike Rust's `str::lines()` (repro
+  /// "string-lines-trailing-newline").
+  function splitLines(text: &String): Vector<String> {
+    let mut lines: Vector<String> = text.lines();
+
+    if (text.length() > 0 && lines.length() > 0) {
+      let Option::SOME(lastByte) = text.byteAt(text.length() - 1) else {
+        return lines;
+      };
+
+      if (lastByte == '\n' as u8) {
+        lines.pop();
+      }
+    }
+
+    return lines;
+  }
+
+  /// True when any line of `[start, end)` opens with `@`. The host refuses to
+  /// take comment ownership across such a gap, because the attribute belongs
+  /// to the declaration that follows rather than to the gap.
+  function gapContainsDirectiveSyntax(source: &String, start: u64, end: u64): boolean {
+    if (start >= end) {
+      return false;
+    }
+
+    let gap: String = Format::sliceSource(source, start, end);
+    let lines: Vector<String> = Format::splitLines(&gap);
+    let mut index: u64 = 0;
+
+    while (index < lines.length()) {
+      let Option::SOME(line) = lines.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let trimmed: String = Format::trimLeadingWhitespace(line);
+
+      if (trimmed.startsWith("@")) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// True when `[start, end)` holds a conditional-compilation directive, which
+  /// `model.ign` owns; a body carrying one keeps its verbatim text.
+  function regionContainsRawDirective(source: &String, start: u64, end: u64): boolean {
+    if (start >= end) {
+      return false;
+    }
+
+    let region: String = Format::sliceSource(source, start, end);
+    let lines: Vector<String> = Format::splitLines(&region);
+    let mut index: u64 = 0;
+
+    while (index < lines.length()) {
+      let Option::SOME(line) = lines.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let trimmed: String = Format::trimLeadingWhitespace(line);
+
+      if (trimmed.startsWith("@configFlag(") || trimmed.startsWith("@if(") || trimmed.startsWith("@ifelse(") || trimmed.startsWith("@else")) {
+        return true;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// Walks back from an item over the `@configFlag(...)` annotation lines (and
+  /// the comments between them) that belong to it, so the whole segment can be
+  /// re-emitted verbatim instead of losing the annotation.
+  function directivePrefixedItemStart(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    source: &String,
+    lowerBound: u64
+  ): u64 {
+    let itemStart: u64 = Format::itemEffectiveStart(module, itemId);
+    let mut currentLineStart: u64 = Format::lineStartOffset(source, itemStart);
+    let mut candidate: u64 = currentLineStart;
+    let mut sawDirective: boolean = false;
+
+    while (currentLineStart > lowerBound) {
+      let previousLineEnd: u64 = currentLineStart - 1;
+      let previousLineStart: u64 = Format::lineStartOffset(source, previousLineEnd);
+      let previousLine: String = Format::sliceSource(source, previousLineStart, previousLineEnd);
+      let trimmed: String = previousLine.trimAsciiWhitespace();
+
+      if (trimmed.length() == 0) {
+        break;
+      }
+
+      if (trimmed.startsWith("@")) {
+        sawDirective = true;
+        candidate = previousLineStart;
+        currentLineStart = previousLineStart;
+        continue;
+      }
+
+      if (sawDirective && (trimmed.startsWith("//") || trimmed.startsWith("/*"))) {
+        candidate = previousLineStart;
+        currentLineStart = previousLineStart;
+        continue;
+      }
+
+      break;
+    }
+
+    if (sawDirective) {
+      return candidate;
+    }
+
+    return itemStart;
+  }
+
+  /// Splits the comments in the gaps between consecutive members so each one
+  /// can be re-emitted with the member that owns it.
+  function ownedGapComments(
+    source: &String,
+    spans: &Vector<SourceSpan>,
+    firstItemRegionStart: u64
+  ): Result<Vector<Format::OwnedGapComments>, FormatError> {
+    let mut segments: Vector<Format::OwnedGapComments> = Vector::new<Format::OwnedGapComments>();
+
+    if (spans.length() == 0) {
+      return Result::OK(segments);
+    }
+
+    let mut cursor: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < spans.length()) {
+      let Option::SOME(span) = spans.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let spanStart: u64 = Format::lineStartOffset(source, span.start);
+      let mut gapStart: u64 = cursor;
+
+      if (index == 0) {
+        gapStart = firstItemRegionStart;
+
+        if (spanStart < gapStart) {
+          gapStart = spanStart;
+        }
+      }
+
+      if (Format::gapContainsDirectiveSyntax(source, gapStart, spanStart)) {
+        segments.push(Format::OwnedGapComments {
+          leading: Vector::new<CommentBlock>(),
+          trailingForPrevious: Vector::new<CommentBlock>(),
+        });
+
+        cursor = span.end;
+        index += 1;
+        continue;
+      }
+
+      let forceFirstTrailing: boolean = index > 0 && Format::gapStartsWithSameLineComment(source, cursor, spanStart);
+      let blocks: Vector<CommentBlock> = Format::commentBlocksInSlice(source, gapStart, spanStart)!;
+      let preservesDetached: boolean = Format::commentGapPreservesDetachedSpacing(source, gapStart, spanStart);
+
+      let mut leading: Vector<CommentBlock> = Vector::new<CommentBlock>();
+      let mut trailingForPrevious: Vector<CommentBlock> = Vector::new<CommentBlock>();
+      let mut blockIndex: u64 = 0;
+
+      while (blockIndex < blocks.length()) {
+        let Option::SOME(block) = blocks.get(blockIndex) else {
+          blockIndex += 1;
+          continue;
+        };
+
+        let mut placement: CommentPlacement = block.placement;
+
+        if (blockIndex + 1 == blocks.length() && placement == CommentPlacement::DETACHED && !preservesDetached) {
+          placement = CommentPlacement::LEADING;
+        }
+
+        if (blockIndex == 0 && forceFirstTrailing) {
+          placement = CommentPlacement::TRAILING;
+        }
+
+        let owned: CommentBlock = CommentBlock {
+          lines: Format::cloneCommentBlockForLayout(block).lines,
+          placement: placement,
+        };
+
+        if (placement == CommentPlacement::TRAILING) {
+          if (index == 0) {
+            return Result::ERROR(FormatError::unsupported("first formatter item cannot start with trailing trivia"));
+          }
+
+          trailingForPrevious.push(owned);
+        } else {
+          leading.push(owned);
+        }
+
+        blockIndex += 1;
+      }
+
+      segments.push(Format::OwnedGapComments {
+        leading: leading,
+        trailingForPrevious: trailingForPrevious,
+      });
+
+      cursor = span.end;
+      index += 1;
+    }
+
+    return Result::OK(segments);
+  }
+
+  function gapCommentsLeadingAt(
+    segments: &Vector<Format::OwnedGapComments>,
+    index: u64
+  ): Vector<CommentBlock> {
+    let mut copied: Vector<CommentBlock> = Vector::new<CommentBlock>();
+
+    let Option::SOME(segment) = segments.get(index) else {
+      return copied;
+    };
+
+    Format::appendCommentBlocks(&mut copied, &segment.leading);
+    return copied;
+  }
+
+  function gapCommentsTrailingAt(
+    segments: &Vector<Format::OwnedGapComments>,
+    index: u64
+  ): Vector<CommentBlock> {
+    let mut copied: Vector<CommentBlock> = Vector::new<CommentBlock>();
+
+    let Option::SOME(segment) = segments.get(index + 1) else {
+      return copied;
+    };
+
+    Format::appendCommentBlocks(&mut copied, &segment.trailingForPrevious);
+    return copied;
+  }
+
+  function renderOwnedSegment(
+    leading: &Vector<CommentBlock>,
+    body: &String,
+    trailing: &Vector<CommentBlock>,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let mut rendered: String = String::new();
+    Format::pushCommentBlocks(&mut rendered, leading, config, indentLevel, false);
+
+    if (leading.length() > 0) {
+      if (let Option::SOME(lastBlock) = leading.get(leading.length() - 1)) {
+        if (lastBlock.placement == CommentPlacement::DETACHED && !Format::endsWithText(&rendered, "\n\n")) {
+          rendered.pushChar('\n');
+        }
+      }
+    }
+
+    rendered.push(body);
+
+    if (trailing.length() > 0) {
+      Format::pushCommentBlocks(&mut rendered, trailing, config, indentLevel, true);
+    }
+
+    return Format::trimLeadingNewlines(&rendered);
+  }
+
+  function trimLeadingNewlines(text: &String): String {
+    let mut start: u64 = 0;
+
+    while (start < text.length()) {
+      let Option::SOME(byte) = text.byteAt(start) else {
+        break;
+      };
+
+      if (byte != '\n' as u8) {
+        break;
+      }
+
+      start += 1;
+    }
+
+    return text.substringBytes(start, text.length());
+  }
+
+  function formatModuleItemList(
+    keyword: str,
+    items: &Vector<String>,
+    fromPath: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let indentText: String = config.indentString(indentLevel);
+    let joined: String = Format::joinSegments(items, ", ");
+
+    let mut flat: String = String::create(keyword);
+    flat.pushStr(" ");
+    flat.push(&joined);
+    flat.pushStr(" from \"");
+    flat.push(fromPath);
+    flat.pushStr("\";");
+
+    if (config.indentColumns(indentLevel) + flat.length() <= config.lineWidth) {
+      let mut result: String = indentText;
+      result.push(&flat);
+      return result;
+    }
+
+    let itemIndent: String = config.indentString(indentLevel + 1);
+
+    let mut result: String = indentText.clone();
+    result.pushStr(keyword);
+    result.pushChar('\n');
+
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(item) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      result.push(&itemIndent);
+      result.push(item);
+      result.pushStr(",\n");
+      index += 1;
+    }
+
+    result.push(&indentText);
+    result.pushStr("from \"");
+    result.push(fromPath);
+    result.pushStr("\";");
+
+    return result;
+  }
+
+  function formatImportItem(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    importItem: &Ast::Item::Import,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let names: Vector<String> = Format::moduleItemNames(module, itemId, source);
+    return Format::formatModuleItemList("import", &names, &importItem.source, config, indentLevel);
+  }
+
+  function formatExportItem(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    exportItem: &Ast::Item::Export,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    if (let Option::SOME(fromPath) = &exportItem.source) {
+      let names: Vector<String> = Format::moduleItemNames(module, itemId, source);
+      return Result::OK(Format::formatModuleItemList("export", &names, &fromPath, config, indentLevel));
+    }
+
+    if (let Option::SOME(declarationId) = exportItem.declaration) {
+      let inner: String = Format::formatItemNode(module, declarationId, source, config, indentLevel)!;
+      return Result::OK(Format::insertExportKeyword(&inner, config, indentLevel));
+    }
+
+    let names: Vector<String> = Format::moduleItemNames(module, itemId, source);
+    let joined: String = Format::joinSegments(&names, ", ");
+
+    let mut result: String = config.indentString(indentLevel);
+    result.pushStr("export ");
+    result.push(&joined);
+    result.pushStr(";");
+    return Result::OK(result);
+  }
+
+  /// Puts `export ` in front of a rendered declaration, after any attribute
+  /// lines it already emitted so the annotation keeps its place.
+  function insertExportKeyword(
+    formatted: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let indentText: String = config.indentString(indentLevel);
+
+    let mut attributePrefix: String = indentText.clone();
+    attributePrefix.pushStr("@");
+
+    let mut insertAt: u64 = 0;
+
+    while (insertAt < formatted.length()) {
+      let rest: String = formatted.substringBytes(insertAt, formatted.length());
+
+      if (!rest.startsWith(attributePrefix.toStr())) {
+        break;
+      }
+
+      let lineEnd: u64 = Format::lineEndOffset(formatted, insertAt);
+
+      if (lineEnd >= formatted.length()) {
+        insertAt = formatted.length();
+        break;
+      }
+
+      insertAt = lineEnd + 1;
+    }
+
+    let mut declaration: String = formatted.substringBytes(insertAt, formatted.length());
+
+    if (indentText.length() > 0 && declaration.startsWith(indentText.toStr())) {
+      declaration = declaration.substringBytes(indentText.length(), declaration.length());
+    }
+
+    let mut exported: String = formatted.substringBytes(0, insertAt);
+    exported.push(&indentText);
+    exported.pushStr("export ");
+    exported.push(&declaration);
+    return exported;
+  }
+
+  function formatConstant(
+    module: &Ast::Module,
+    constant: &Ast::Item::Constant,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let prefix: String = Format::formatDeclarationPrefix(&constant.metadata, config, indentLevel);
+    let modifierKeywords: String = Format::formatModifierKeywords(&constant.metadata.modifiers);
+
+    let mut result: String = prefix;
+    let indentText: String = config.indentString(indentLevel);
+    result.push(&indentText);
+    result.push(&modifierKeywords);
+    result.pushStr("const ");
+    result.push(&constant.name);
+
+    if (let Option::SOME(annotation) = constant.annotation) {
+      let annotationText: String = Format::formatType(module, annotation, source);
+      result.pushStr(": ");
+      result.push(&annotationText);
+    }
+
+    let valueText: String = Format::formatInitializerValue(module, constant.value, source, config, indentLevel)!;
+    result.pushStr(" = ");
+    result.push(&valueText);
+    result.pushStr(";");
+
+    return Result::OK(result);
+  }
+
+  /// An extern constant declares a signature only; the parser stands a zero
+  /// literal in for the missing initializer, which must not be printed back.
+  function formatExternConstant(
+    module: &Ast::Module,
+    constant: &Ast::Item::Constant,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let prefix: String = Format::formatDeclarationPrefix(&constant.metadata, config, indentLevel);
+    let modifierKeywords: String = Format::formatModifierKeywords(&constant.metadata.modifiers);
+
+    let mut result: String = prefix;
+    let indentText: String = config.indentString(indentLevel);
+    result.push(&indentText);
+    result.push(&modifierKeywords);
+    result.pushStr("const ");
+    result.push(&constant.name);
+
+    if (let Option::SOME(annotation) = constant.annotation) {
+      let annotationText: String = Format::formatType(module, annotation, source);
+      result.pushStr(": ");
+      result.push(&annotationText);
+    }
+
+    result.pushStr(";");
+    return result;
+  }
+
+  function formatTypeAlias(
+    module: &Ast::Module,
+    typeAlias: &Ast::Item::TypeAlias,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let prefix: String = Format::formatDeclarationPrefix(&typeAlias.metadata, config, indentLevel);
+    let modifierKeywords: String = Format::formatModifierKeywords(&typeAlias.metadata.modifiers);
+
+    let mut result: String = prefix;
+    let indentText: String = config.indentString(indentLevel);
+    result.push(&indentText);
+    result.push(&modifierKeywords);
+    result.pushStr("type ");
+    result.push(&typeAlias.name);
+
+    if (typeAlias.genericParameters.length() > 0) {
+      let genericParamsText: String = Format::formatGenericParamsAngleBracketed(&typeAlias.genericParameters, source);
+      result.push(&genericParamsText);
+    }
+
+    result.pushStr(" = ");
+    let valueTypeText: String = Format::formatType(module, typeAlias.value, source);
+    result.push(&valueTypeText);
+    result.pushStr(";");
+
+    return result;
+  }
+
+  function formatGenericParamsAngleBracketed(
+    params: &Vector<Ast::GenericParam>,
+    source: &String
+  ): String {
+    let mut result: String = String::create("<");
+    let mut index: u64 = 0;
+
+    while (index < params.length()) {
+      let Option::SOME(param) = params.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        result.pushStr(", ");
+      }
+
+      let sliced: String = Format::sliceSpanText(source, &param.span);
+      let collapsed: String = Format::collapseWhitespace(&sliced);
+      result.push(&collapsed);
+      index += 1;
+    }
+
+    result.pushStr(">");
+    return result;
+  }
+
+  function hasTrailingCommaInSpan(source: &String, span: &SourceSpan): boolean {
+    let sliced: String = Format::sliceSpanText(source, span);
+    let Option::SOME(openIndex) = sliced.indexOfCharFrom('(', 0) else {
+      return false;
+    };
+
+    let mut depth: u64 = 0;
+    let mut closeIndex: Option<u64> = Option::NONE;
+    let mut cursor: u64 = openIndex;
+
+    while (cursor < sliced.length()) {
+      let Option::SOME(byte) = sliced.byteAt(cursor) else {
+        break;
+      };
+
+      if (byte == '(' as u8) {
+        depth += 1;
+      } else if (byte == ')' as u8) {
+        if (depth > 0) {
+          depth -= 1;
+        }
+
+        if (depth == 0) {
+          closeIndex = Option::SOME(cursor);
+          break;
+        }
+      }
+
+      cursor += 1;
+    }
+
+    let Option::SOME(closeIndexValue) = closeIndex else {
+      return false;
+    };
+
+    if (closeIndexValue <= openIndex + 1) {
+      return false;
+    }
+
+    let inner: String = sliced.substringBytes(openIndex + 1, closeIndexValue);
+    let trimmedInner: String = inner.trimAsciiWhitespace();
+
+    return Format::endsWithByte(&trimmedInner, ',' as u8);
+  }
+
+  /// True when a function item carries a written body. A trait signature and
+  /// an extern declaration both get a synthetic empty block whose span is the
+  /// `;` that ended them, so the opening brace is what tells them apart.
+  function functionHasWrittenBody(
+    module: &Ast::Module,
+    functionItem: &Ast::Item::Function,
+    source: &String
+  ): boolean {
+    let Option::SOME(bodyNode) = module.statements.get(functionItem.body) else {
+      return false;
+    };
+
+    let Ast::Statement::Node::Block(block) = bodyNode else {
+      return true;
+    };
+
+    let Option::SOME(firstByte) = source.byteAt(block.span.start) else {
+      return false;
+    };
+
+    return firstByte == '{' as u8;
+  }
+
+  /// Lays out a callable signature (its parameters and return type) with the
+  /// inline-or-multiline doc, then appends its body block or a `;`.
+  function formatSignatureBody(
+    module: &Ast::Module,
+    header: &String,
+    parameters: &Vector<String>,
+    hasTrailingComma: boolean,
+    returnType: Option<Ast::TypeId>,
+    body: Option<Ast::StatementId>,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let mut returnTypeText: String = String::create("void");
+
+    if (let Option::SOME(returnTypeId) = returnType) {
+      returnTypeText = Format::formatType(module, returnTypeId, source);
+    }
+
+    // Columns reserved for what is appended on the signature's first line:
+    // ` {` when a body follows, `;` for a bodiless declaration.
+    let mut reservedTrailing: u64 = 1;
+
+    if (let Option::SOME(_) = body) {
+      reservedTrailing = 2;
+    }
+
+    let mut prefix: String = header.clone();
+    prefix.pushStr("(");
+
+    let mut suffix: String = String::create("): ");
+    suffix.push(&returnTypeText);
+
+    let signatureDoc: Format::Doc = Format::formatInlineOrMultiline(
+      prefix.toStr(),
+      parameters,
+      suffix.toStr(),
+      0,
+      config,
+      hasTrailingComma,
+      reservedTrailing,
+    );
+
+    let mut result: String = Format::renderDoc(&signatureDoc, config, indentLevel);
+
+    let Option::SOME(bodyId) = body else {
+      result.pushStr(";");
+      return Result::OK(result);
+    };
+
+    let bodyText: String = Format::formatBlockLikeStatement(module, bodyId, source, config, indentLevel)!;
+    result.pushStr(" ");
+    result.push(&bodyText);
+    return Result::OK(result);
+  }
+
+  /// Emits the comments written between a declaration's last attribute and the
+  /// declaration itself. They sit inside the declaration's own region, so no
+  /// gap between siblings can own them.
+  function renderCommentGapAfterAttributes(
+    output: &mut String,
+    source: &String,
+    attributes: &Vector<Ast::Attribute>,
+    declarationStart: u64,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<void, FormatError> {
+    let outputRef: &mut String = output;
+
+    if (attributes.length() == 0) {
+      return Result::OK(());
+    }
+
+    let Option::SOME(lastAttribute) = attributes.get(attributes.length() - 1) else {
+      return Result::OK(());
+    };
+
+    // An attribute's span stops at its first argument rather than at its
+    // closing paren, so the gap starts at the end of the attribute's line.
+    let gapStart: u64 = Format::lineEndOffset(source, lastAttribute.span.end);
+    let gapEnd: u64 = Format::lineStartOffset(source, declarationStart);
+
+    if (gapEnd <= gapStart) {
+      return Result::OK(());
+    }
+
+    return Format::renderCommentGap(outputRef, source, gapStart, gapEnd, config, indentLevel, false);
+  }
+
+  function formatFunction(
+    module: &Ast::Module,
+    functionItem: &Ast::Item::Function,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let mut prefix: String = Format::formatDeclarationPrefix(&functionItem.metadata, config, indentLevel);
+    Format::renderCommentGapAfterAttributes(
+      &mut prefix,
+      source,
+      &functionItem.metadata.attributes,
+      functionItem.span.start,
+      config,
+      indentLevel,
+    )!;
+
+    let modifierKeywords: String = Format::formatModifierKeywords(&functionItem.metadata.modifiers);
+
+    let mut header: String = config.indentString(indentLevel);
+    header.push(&modifierKeywords);
+    header.pushStr("function ");
+    header.push(&functionItem.name);
+
+    if (functionItem.genericParameters.length() > 0) {
+      let genericParamsText: String = Format::formatGenericParamsAngleBracketed(&functionItem.genericParameters, source);
+      header.push(&genericParamsText);
+    }
+
+    let parameters: Vector<String> = Format::formatParameterList(module, &functionItem.parameters, source);
+    let hasTrailingComma: boolean = Format::hasTrailingCommaInSpan(source, &functionItem.span);
+
+    let mut body: Option<Ast::StatementId> = Option::NONE;
+
+    if (Format::functionHasWrittenBody(module, functionItem, source)) {
+      body = Option::SOME(functionItem.body);
+    }
+
+    let signature: String = Format::formatSignatureBody(
+      module,
+      &header,
+      &parameters,
+      hasTrailingComma,
+      functionItem.returnType,
+      body,
+      source,
+      config,
+      indentLevel,
+    )!;
+
+    let mut result: String = prefix;
+    result.push(&signature);
+    return Result::OK(result);
+  }
+
+  /// A record, enum or trait method: no `function` keyword, and its visibility
+  /// and `static` render in front of the name.
+  function formatMethod(
+    module: &Ast::Module,
+    methodItem: &Ast::Item::Function,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let prefix: String = Format::formatDeclarationPrefix(&methodItem.metadata, config, indentLevel);
+    let modifierKeywords: String = Format::formatModifierKeywords(&methodItem.metadata.modifiers);
+
+    let mut header: String = config.indentString(indentLevel);
+    header.push(&modifierKeywords);
+    header.push(&methodItem.name);
+
+    if (methodItem.genericParameters.length() > 0) {
+      let genericParamsText: String = Format::formatGenericParamsAngleBracketed(&methodItem.genericParameters, source);
+      header.push(&genericParamsText);
+    }
+
+    let parameters: Vector<String> = Format::formatParameterList(module, &methodItem.parameters, source);
+    let hasTrailingComma: boolean = Format::hasTrailingCommaInSpan(source, &methodItem.span);
+
+    let mut body: Option<Ast::StatementId> = Option::NONE;
+
+    if (Format::functionHasWrittenBody(module, methodItem, source)) {
+      body = Option::SOME(methodItem.body);
+    }
+
+    let signature: String = Format::formatSignatureBody(
+      module,
+      &header,
+      &parameters,
+      hasTrailingComma,
+      methodItem.returnType,
+      body,
+      source,
+      config,
+      indentLevel,
+    )!;
+
+    let mut result: String = prefix;
+    result.push(&signature);
+    return Result::OK(result);
+  }
+
+  /// A record field, or an enum's static field: both are `Binding` patterns
+  /// carrying their visibility, their type and an optional initializer.
+  function formatFieldBinding(
+    module: &Ast::Module,
+    patternId: Ast::PatternId,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(node) = module.patterns.get(patternId) else {
+      return Result::ERROR(FormatError::model("record field is missing from the module"));
+    };
+
+    let Ast::Pattern::Node::Binding(binding) = node else {
+      let span: SourceSpan = Format::patternSpanOf(node);
+      let mut fallback: String = config.indentString(indentLevel);
+      let verbatim: String = Format::sliceSpanText(source, &span).trimAsciiWhitespace();
+      fallback.push(&verbatim);
+      return Result::OK(fallback);
+    };
+
+    let prefix: String = Format::formatDeclarationPrefix(&binding.metadata, config, indentLevel);
+    let modifierKeywords: String = Format::formatModifierKeywords(&binding.metadata.modifiers);
+
+    let mut result: String = prefix;
+    let indentText: String = config.indentString(indentLevel);
+    result.push(&indentText);
+    result.push(&modifierKeywords);
+    result.push(&binding.name);
+
+    if (let Option::SOME(annotation) = binding.annotation) {
+      let annotationText: String = Format::formatType(module, annotation, source);
+      result.pushStr(": ");
+      result.push(&annotationText);
+    }
+
+    if (let Option::SOME(initializer) = binding.initializer) {
+      let valueText: String = Format::formatInitializerValue(module, initializer, source, config, indentLevel)!;
+      result.pushStr(" = ");
+      result.push(&valueText);
+    }
+
+    result.pushStr(";");
+    return Result::OK(result);
+  }
+
+  /// An enum variant: its name, the payload types it destructures, and the
+  /// comma that separates it from the next one.
+  function formatEnumVariant(
+    module: &Ast::Module,
+    path: &Ast::Pattern::Path,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): String {
+    let mut result: String = config.indentString(indentLevel);
+    let nameText: String = Format::joinSegments(&path.segments, "::");
+    result.push(&nameText);
+
+    if (path.arguments.length() > 0) {
+      let mut payload: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < path.arguments.length()) {
+        let Option::SOME(argumentId) = path.arguments.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(argumentNode) = module.patterns.get(*argumentId) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Ast::Pattern::Node::Binding(argumentBinding) = argumentNode) {
+          if (let Option::SOME(annotation) = argumentBinding.annotation) {
+            payload.push(Format::formatType(module, annotation, source));
+          }
+        }
+
+        index += 1;
+      }
+
+      let payloadDoc: Format::Doc = Format::formatInlineOrMultiline(
+        "(",
+        &payload,
+        ")",
+        config.indentColumns(indentLevel),
+        config,
+        false,
+        0,
+      );
+
+      let payloadText: String = Format::renderDoc(&payloadDoc, config, indentLevel);
+      result.push(&payloadText);
+    }
+
+    result.pushStr(",");
+    return result;
+  }
+
+  /// Merges a body's patterns and methods back into the order they were
+  /// written. Each vector is already in source order, so one merge pass on the
+  /// span start is enough.
+  function orderedBodyMembers(
+    module: &Ast::Module,
+    patterns: &Vector<Ast::PatternId>,
+    methods: &Vector<Ast::ItemId>
+  ): Vector<Format::BodyMember> {
+    let mut members: Vector<Format::BodyMember> = Vector::new<Format::BodyMember>();
+    let mut patternIndex: u64 = 0;
+    let mut methodIndex: u64 = 0;
+
+    while (patternIndex < patterns.length() || methodIndex < methods.length()) {
+      let mut patternStart: u64 = 0;
+      let mut hasPattern: boolean = false;
+
+      if (patternIndex < patterns.length()) {
+        if (let Option::SOME(patternId) = patterns.get(patternIndex)) {
+          if (let Option::SOME(patternNode) = module.patterns.get(*patternId)) {
+            patternStart = Format::patternSpanOf(patternNode).start;
+            hasPattern = true;
+          }
+        }
+      }
+
+      let mut methodStart: u64 = 0;
+      let mut hasMethod: boolean = false;
+
+      if (methodIndex < methods.length()) {
+        if (let Option::SOME(methodId) = methods.get(methodIndex)) {
+          methodStart = Format::itemSpan(module, *methodId).start;
+          hasMethod = true;
+        }
+      }
+
+      if (!hasPattern && !hasMethod) {
+        break;
+      }
+
+      let mut takePattern: boolean = hasPattern;
+
+      if (hasPattern && hasMethod && methodStart < patternStart) {
+        takePattern = false;
+      }
+
+      if (takePattern) {
+        let Option::SOME(patternId) = patterns.get(patternIndex) else {
+          break;
+        };
+
+        let Option::SOME(patternNode) = module.patterns.get(*patternId) else {
+          break;
+        };
+
+        members.push(Format::BodyMember {
+          isMethod: false,
+          index: patternIndex,
+          span: Format::patternSpanOf(patternNode),
+        });
+
+        patternIndex += 1;
+        continue;
+      }
+
+      let Option::SOME(methodId) = methods.get(methodIndex) else {
+        break;
+      };
+
+      members.push(Format::BodyMember {
+        isMethod: true,
+        index: methodIndex,
+        span: Format::itemSpan(module, *methodId),
+      });
+
+      methodIndex += 1;
+    }
+
+    return members;
+  }
+
+  function bodyMemberSpans(members: &Vector<Format::BodyMember>): Vector<SourceSpan> {
+    let mut spans: Vector<SourceSpan> = Vector::new<SourceSpan>();
+    let mut index: u64 = 0;
+
+    while (index < members.length()) {
+      let Option::SOME(member) = members.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      spans.push(member.span);
+      index += 1;
+    }
+
+    return spans;
+  }
+
+  function formatBodyMember(
+    module: &Ast::Module,
+    member: &Format::BodyMember,
+    patterns: &Vector<Ast::PatternId>,
+    methods: &Vector<Ast::ItemId>,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64,
+    variantsArePaths: boolean
+  ): Result<String, FormatError> {
+    if (member.isMethod) {
+      let Option::SOME(methodId) = methods.get(member.index) else {
+        return Result::ERROR(FormatError::model("body member is missing from the module"));
+      };
+
+      let Option::SOME(methodNode) = module.items.get(*methodId) else {
+        return Result::ERROR(FormatError::model("body member is missing from the module"));
+      };
+
+      let Ast::Item::Node::Function(methodItem) = methodNode else {
+        return Result::ERROR(FormatError::model("body member is not a method"));
+      };
+
+      return Format::formatMethod(module, &methodItem, source, config, indentLevel);
+    }
+
+    let Option::SOME(patternId) = patterns.get(member.index) else {
+      return Result::ERROR(FormatError::model("body member is missing from the module"));
+    };
+
+    if (variantsArePaths) {
+      let Option::SOME(patternNode) = module.patterns.get(*patternId) else {
+        return Result::ERROR(FormatError::model("enum variant is missing from the module"));
+      };
+
+      if (let Ast::Pattern::Node::Path(path) = patternNode) {
+        return Result::OK(Format::formatEnumVariant(module, &path, source, config, indentLevel));
+      }
+    }
+
+    return Format::formatFieldBinding(module, *patternId, source, config, indentLevel);
+  }
+
+  function formatRecord(
+    module: &Ast::Module,
+    recordItem: &Ast::Item::Record,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let mut result: String = Format::formatDeclarationPrefix(&recordItem.metadata, config, indentLevel);
+    Format::renderCommentGapAfterAttributes(
+      &mut result,
+      source,
+      &recordItem.metadata.attributes,
+      recordItem.span.start,
+      config,
+      indentLevel,
+    )!;
+
+    let modifierKeywords: String = Format::formatModifierKeywords(&recordItem.metadata.modifiers);
+
+    let indentText: String = config.indentString(indentLevel);
+    result.push(&indentText);
+    result.push(&modifierKeywords);
+    result.pushStr("record ");
+    result.push(&recordItem.name);
+
+    if (recordItem.genericParameters.length() > 0) {
+      let genericParamsText: String = Format::formatGenericParamsAngleBracketed(&recordItem.genericParameters, source);
+      result.push(&genericParamsText);
+    }
+
+    let Option::SOME(bodyRange) = Format::bracedBodyBounds(source, &recordItem.span) else {
+      result.pushStr(" {}");
+      return Result::OK(result);
+    };
+
+    if (Format::bracedBodyIsEmpty(source, &bodyRange)) {
+      result.pushStr(" {}");
+      return Result::OK(result);
+    }
+
+    result.pushStr(" {\n");
+
+    let members: Vector<Format::BodyMember> = Format::orderedBodyMembers(module, &recordItem.fields, &recordItem.methods);
+    let spans: Vector<SourceSpan> = Format::bodyMemberSpans(&members);
+    let segments: Vector<Format::OwnedGapComments> = Format::ownedGapComments(source, &spans, bodyRange.start)!;
+
+    let mut cursor: u64 = bodyRange.start;
+    let mut wroteAny: boolean = false;
+    let mut index: u64 = 0;
+
+    while (index < members.length()) {
+      let Option::SOME(member) = members.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (wroteAny) {
+        Format::preserveSingleBlankLineForWhitespaceGap(&mut result, source, cursor, member.span.start);
+
+        // Methods are separated by a blank line; fields are not.
+        if (member.isMethod && !Format::endsWithText(&result, "\n\n")) {
+          result.pushChar('\n');
+        }
+      }
+
+      let memberText: String = Format::formatBodyMember(
+        module,
+        member,
+        &recordItem.fields,
+        &recordItem.methods,
+        source,
+        config,
+        indentLevel + 1,
+        false,
+      )!;
+
+      let leading: Vector<CommentBlock> = Format::gapCommentsLeadingAt(&segments, index);
+      let trailing: Vector<CommentBlock> = Format::gapCommentsTrailingAt(&segments, index);
+      let rendered: String = Format::renderOwnedSegment(&leading, &memberText, &trailing, config, indentLevel + 1);
+
+      result.push(&rendered);
+      result.pushChar('\n');
+
+      wroteAny = true;
+      cursor = member.span.end;
+      index += 1;
+    }
+
+    Format::renderRegionTail(&mut result, source, cursor, bodyRange.end, config, indentLevel + 1)!;
+
+    let closingIndent: String = config.indentString(indentLevel);
+    result.push(&closingIndent);
+    result.pushStr("}");
+    return Result::OK(result);
+  }
+
+  function formatEnum(
+    module: &Ast::Module,
+    enumItem: &Ast::Item::Enum,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let mut result: String = Format::formatDeclarationPrefix(&enumItem.metadata, config, indentLevel);
+    let modifierKeywords: String = Format::formatModifierKeywords(&enumItem.metadata.modifiers);
+
+    let indentText: String = config.indentString(indentLevel);
+    result.push(&indentText);
+    result.push(&modifierKeywords);
+    result.pushStr("enum ");
+    result.push(&enumItem.name);
+
+    if (enumItem.genericParameters.length() > 0) {
+      let genericParamsText: String = Format::formatGenericParamsAngleBracketed(&enumItem.genericParameters, source);
+      result.push(&genericParamsText);
+    }
+
+    let Option::SOME(bodyRange) = Format::bracedBodyBounds(source, &enumItem.span) else {
+      result.pushStr(" {}");
+      return Result::OK(result);
+    };
+
+    if (Format::bracedBodyIsEmpty(source, &bodyRange)) {
+      result.pushStr(" {}");
+      return Result::OK(result);
+    }
+
+    result.pushStr(" {\n");
+
+    let members: Vector<Format::BodyMember> = Format::orderedBodyMembers(module, &enumItem.variants, &enumItem.methods);
+    let spans: Vector<SourceSpan> = Format::bodyMemberSpans(&members);
+    let segments: Vector<Format::OwnedGapComments> = Format::ownedGapComments(source, &spans, bodyRange.start)!;
+
+    let mut cursor: u64 = bodyRange.start;
+    let mut index: u64 = 0;
+
+    while (index < members.length()) {
+      let Option::SOME(member) = members.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (index > 0) {
+        Format::preserveSingleBlankLineForWhitespaceGap(&mut result, source, cursor, member.span.start);
+      }
+
+      let memberText: String = Format::formatBodyMember(
+        module,
+        member,
+        &enumItem.variants,
+        &enumItem.methods,
+        source,
+        config,
+        indentLevel + 1,
+        true,
+      )!;
+
+      let leading: Vector<CommentBlock> = Format::gapCommentsLeadingAt(&segments, index);
+      let trailing: Vector<CommentBlock> = Format::gapCommentsTrailingAt(&segments, index);
+      let rendered: String = Format::renderOwnedSegment(&leading, &memberText, &trailing, config, indentLevel + 1);
+
+      result.push(&rendered);
+      result.pushChar('\n');
+
+      cursor = member.span.end;
+      index += 1;
+    }
+
+    Format::renderRegionTail(&mut result, source, cursor, bodyRange.end, config, indentLevel + 1)!;
+
+    let closingIndent: String = config.indentString(indentLevel);
+    result.push(&closingIndent);
+    result.pushStr("}");
+    return Result::OK(result);
+  }
+
+  /// A trait member carrying a default body is stored twice: once as a
+  /// signature twin in `methods` and once with its body in `defaultMethods`,
+  /// both under the same span. The span is what pairs them back up.
+  function traitDefaultForSpan(
+    module: &Ast::Module,
+    traitItem: &Ast::Item::Trait,
+    span: &SourceSpan
+  ): Option<Ast::ItemId> {
+    let mut index: u64 = 0;
+
+    while (index < traitItem.defaultMethods.length()) {
+      let Option::SOME(defaultId) = traitItem.defaultMethods.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let defaultSpan: SourceSpan = Format::itemSpan(module, *defaultId);
+
+      if (defaultSpan.start == span.start && defaultSpan.end == span.end) {
+        return Option::SOME(*defaultId);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function formatTrait(
+    module: &Ast::Module,
+    traitItem: &Ast::Item::Trait,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let mut result: String = Format::formatDeclarationPrefix(&traitItem.metadata, config, indentLevel);
+    let modifierKeywords: String = Format::formatModifierKeywords(&traitItem.metadata.modifiers);
+
+    let indentText: String = config.indentString(indentLevel);
+    result.push(&indentText);
+    result.push(&modifierKeywords);
+    result.pushStr("trait ");
+    result.push(&traitItem.name);
+
+    if (traitItem.genericParameters.length() > 0) {
+      let genericParamsText: String = Format::formatGenericParamsAngleBracketed(&traitItem.genericParameters, source);
+      result.push(&genericParamsText);
+    }
+
+    let Option::SOME(bodyRange) = Format::bracedBodyBounds(source, &traitItem.span) else {
+      result.pushStr(" {}");
+      return Result::OK(result);
+    };
+
+    if (Format::bracedBodyIsEmpty(source, &bodyRange)) {
+      result.pushStr(" {}");
+      return Result::OK(result);
+    }
+
+    result.pushStr(" {\n");
+
+    let mut spans: Vector<SourceSpan> = Vector::new<SourceSpan>();
+    let mut index: u64 = 0;
+
+    while (index < traitItem.methods.length()) {
+      let Option::SOME(methodId) = traitItem.methods.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      spans.push(Format::itemSpan(module, *methodId));
+      index += 1;
+    }
+
+    let segments: Vector<Format::OwnedGapComments> = Format::ownedGapComments(source, &spans, bodyRange.start)!;
+
+    let mut cursor: u64 = bodyRange.start;
+    index = 0;
+
+    while (index < traitItem.methods.length()) {
+      let Option::SOME(methodId) = traitItem.methods.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let methodSpan: SourceSpan = Format::itemSpan(module, *methodId);
+
+      if (index > 0) {
+        Format::preserveSingleBlankLineForWhitespaceGap(&mut result, source, cursor, methodSpan.start);
+
+        if (!Format::endsWithText(&result, "\n\n")) {
+          result.pushChar('\n');
+        }
+      }
+
+      let mut renderedId: Ast::ItemId = *methodId;
+
+      if (let Option::SOME(defaultId) = Format::traitDefaultForSpan(module, traitItem, &methodSpan)) {
+        renderedId = defaultId;
+      }
+
+      let Option::SOME(methodNode) = module.items.get(renderedId) else {
+        return Result::ERROR(FormatError::model("trait method is missing from the module"));
+      };
+
+      let Ast::Item::Node::Function(methodItem) = methodNode else {
+        return Result::ERROR(FormatError::model("trait member is not a method"));
+      };
+
+      let memberText: String = Format::formatMethod(module, &methodItem, source, config, indentLevel + 1)!;
+      let leading: Vector<CommentBlock> = Format::gapCommentsLeadingAt(&segments, index);
+      let trailing: Vector<CommentBlock> = Format::gapCommentsTrailingAt(&segments, index);
+      let rendered: String = Format::renderOwnedSegment(&leading, &memberText, &trailing, config, indentLevel + 1);
+
+      result.push(&rendered);
+      result.pushChar('\n');
+
+      cursor = methodSpan.end;
+      index += 1;
+    }
+
+    Format::renderRegionTail(&mut result, source, cursor, bodyRange.end, config, indentLevel + 1)!;
+
+    let closingIndent: String = config.indentString(indentLevel);
+    result.push(&closingIndent);
+    result.pushStr("}");
+    return Result::OK(result);
+  }
+
+  function formatNamespace(
+    module: &Ast::Module,
+    namespaceItem: &Ast::Item::Namespace,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(bodyRange) = Format::bracedBodyBounds(source, &namespaceItem.span) else {
+      return Result::ERROR(FormatError::unsupported("expected braced body in formatter span"));
+    };
+
+    if (Format::regionContainsRawDirective(source, bodyRange.start, bodyRange.end)) {
+      return Result::OK(Format::sliceSpanText(source, &namespaceItem.span).trimAsciiWhitespace());
+    }
+
+    let mut result: String = Format::formatDeclarationPrefix(&namespaceItem.metadata, config, indentLevel);
+    let modifierKeywords: String = Format::formatModifierKeywords(&namespaceItem.metadata.modifiers);
+
+    let indentText: String = config.indentString(indentLevel);
+    result.push(&indentText);
+    result.push(&modifierKeywords);
+    result.pushStr("namespace ");
+    result.push(&namespaceItem.name);
+
+    if (Format::bracedBodyIsEmpty(source, &bodyRange)) {
+      result.pushStr(" {}");
+      return Result::OK(result);
+    }
+
+    result.pushStr(" {\n");
+    Format::appendNestedItems(module, &namespaceItem.items, source, config, indentLevel, &bodyRange, false, &mut result)!;
+
+    let closingIndent: String = config.indentString(indentLevel);
+    result.push(&closingIndent);
+    result.pushStr("}");
+    return Result::OK(result);
+  }
+
+  function formatExtern(
+    module: &Ast::Module,
+    externItem: &Ast::Item::Extern,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(bodyRange) = Format::bracedBodyBounds(source, &externItem.span) else {
+      return Result::ERROR(FormatError::unsupported("expected braced body in formatter span"));
+    };
+
+    let prefix: String = Format::formatDeclarationPrefix(&externItem.metadata, config, indentLevel);
+
+    if (Format::regionContainsRawDirective(source, bodyRange.start, bodyRange.end)) {
+      let mut verbatim: String = prefix;
+      let raw: String = Format::sliceSpanText(source, &externItem.span).trimAsciiWhitespace();
+      verbatim.push(&raw);
+      return Result::OK(verbatim);
+    }
+
+    let mut result: String = prefix;
+    let indentText: String = config.indentString(indentLevel);
+    result.push(&indentText);
+    result.pushStr("extern ");
+    result.push(&externItem.name);
+
+    if (Format::bracedBodyIsEmpty(source, &bodyRange)) {
+      result.pushStr(" {}");
+      return Result::OK(result);
+    }
+
+    result.pushStr(" {\n");
+    Format::appendNestedItems(module, &externItem.items, source, config, indentLevel, &bodyRange, true, &mut result)!;
+
+    let closingIndent: String = config.indentString(indentLevel);
+    result.push(&closingIndent);
+    result.pushStr("}");
+    return Result::OK(result);
+  }
+
+  /// Lays out the items of a `namespace` or `extern` body, keeping the blank
+  /// lines, the comments and the `@configFlag`-prefixed segments the source
+  /// wrote between them.
+  function appendNestedItems(
+    module: &Ast::Module,
+    items: &Vector<Ast::ItemId>,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64,
+    bodyRange: &Format::SourceRange,
+    signaturesOnly: boolean,
+    output: &mut String
+  ): Result<void, FormatError> {
+    let mut outputRef: &mut String = output;
+
+    let mut spans: Vector<SourceSpan> = Vector::new<SourceSpan>();
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(itemId) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      spans.push(Format::itemOwnedSpan(module, *itemId));
+      index += 1;
+    }
+
+    let segments: Vector<Format::OwnedGapComments> = Format::ownedGapComments(source, &spans, bodyRange.start)!;
+
+    let mut cursor: u64 = bodyRange.start;
+    let mut wroteAny: boolean = false;
+    index = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(itemId) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let itemStart: u64 = Format::itemEffectiveStart(module, *itemId);
+      let itemEnd: u64 = Format::itemTrueEnd(module, *itemId);
+      let directiveSegmentStart: u64 = Format::directivePrefixedItemStart(module, *itemId, source, cursor);
+
+      if (wroteAny) {
+        Format::preserveSingleBlankLineForWhitespaceGap(outputRef, source, cursor, directiveSegmentStart);
+      }
+
+      if (directiveSegmentStart < itemStart) {
+        let verbatim: String = Format::sliceSource(source, directiveSegmentStart, itemEnd);
+        let trimmed: String = Format::trimTrailingWhitespace(&verbatim);
+        outputRef.push(&trimmed);
+      } else {
+        let mut itemText: String = String::new();
+
+        if (signaturesOnly) {
+          itemText = Format::formatExternMember(module, *itemId, source, config, indentLevel + 1)!;
+        } else {
+          itemText = Format::formatItemNode(module, *itemId, source, config, indentLevel + 1)!;
+        }
+
+        let leading: Vector<CommentBlock> = Format::gapCommentsLeadingAt(&segments, index);
+        let trailing: Vector<CommentBlock> = Format::gapCommentsTrailingAt(&segments, index);
+        let rendered: String = Format::renderOwnedSegment(&leading, &itemText, &trailing, config, indentLevel + 1);
+        outputRef.push(&rendered);
+      }
+
+      outputRef.pushChar('\n');
+      cursor = itemEnd;
+      wroteAny = true;
+      index += 1;
+    }
+
+    Format::renderRegionTail(outputRef, source, cursor, bodyRange.end, config, indentLevel + 1)!;
+    return Result::OK(());
+  }
+
+  /// An extern member declares a signature only, so its constant keeps no
+  /// initializer.
+  function formatExternMember(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return Result::ERROR(FormatError::model("extern member is missing from the module"));
+    };
+
+    if (let Ast::Item::Node::Constant(constant) = node) {
+      return Result::OK(Format::formatExternConstant(module, &constant, source, config, indentLevel));
+    }
+
+    return Format::formatItemNode(module, itemId, source, config, indentLevel);
+  }
+
+  function formatItemNode(
+    module: &Ast::Module,
+    itemId: Ast::ItemId,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<String, FormatError> {
+    let Option::SOME(node) = module.items.get(itemId) else {
+      return Result::ERROR(FormatError::model("item is missing from the module"));
+    };
+
+    if (let Ast::Item::Node::Import(importItem) = node) {
+      return Result::OK(Format::formatImportItem(module, itemId, &importItem, source, config, indentLevel));
+    }
+
+    if (let Ast::Item::Node::Export(exportItem) = node) {
+      return Format::formatExportItem(module, itemId, &exportItem, source, config, indentLevel);
+    }
+
+    if (let Ast::Item::Node::Constant(constant) = node) {
+      return Format::formatConstant(module, &constant, source, config, indentLevel);
+    }
+
+    if (let Ast::Item::Node::TypeAlias(typeAlias) = node) {
+      return Result::OK(Format::formatTypeAlias(module, &typeAlias, source, config, indentLevel));
+    }
+
+    if (let Ast::Item::Node::Function(functionItem) = node) {
+      return Format::formatFunction(module, &functionItem, source, config, indentLevel);
+    }
+
+    if (let Ast::Item::Node::Record(recordItem) = node) {
+      return Format::formatRecord(module, &recordItem, source, config, indentLevel);
+    }
+
+    if (let Ast::Item::Node::Enum(enumItem) = node) {
+      return Format::formatEnum(module, &enumItem, source, config, indentLevel);
+    }
+
+    if (let Ast::Item::Node::Trait(traitItem) = node) {
+      return Format::formatTrait(module, &traitItem, source, config, indentLevel);
+    }
+
+    if (let Ast::Item::Node::Namespace(namespaceItem) = node) {
+      return Format::formatNamespace(module, &namespaceItem, source, config, indentLevel);
+    }
+
+    if (let Ast::Item::Node::Extern(externItem) = node) {
+      return Format::formatExtern(module, &externItem, source, config, indentLevel);
+    }
+
+    return Result::ERROR(FormatError::model("unsupported item kind"));
+  }
+
+  record GroupedItemResult {
+    public text: String;
+    public consumed: u64;
+  }
+
+  function formatGroupedModuleItemNodes(
+    module: &Ast::Module,
+    roots: &Vector<Ast::ItemId>,
+    startIndex: u64,
+    source: &String,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<Format::GroupedItemResult, FormatError> {
+    let Option::SOME(firstId) = roots.get(startIndex) else {
+      return Result::ERROR(FormatError::model("grouped item lookup is out of range"));
+    };
+
+    let Option::SOME(keyword) = Format::groupableModuleItemKeyword(module, *firstId) else {
+      let text: String = Format::formatItemNode(module, *firstId, source, config, indentLevel)!;
+      return Result::OK(Format::GroupedItemResult { text: text, consumed: 1 });
+    };
+
+    let fromPath: String = Format::groupableModuleItemFrom(module, *firstId);
+    let mut names: Vector<String> = Format::moduleItemNames(module, *firstId, source);
+    let mut consumed: u64 = 1;
+
+    while (startIndex + consumed < roots.length()) {
+      let Option::SOME(previousId) = roots.get(startIndex + consumed - 1) else {
+        break;
+      };
+
+      let Option::SOME(nextId) = roots.get(startIndex + consumed) else {
+        break;
+      };
+
+      let previousEnd: u64 = Format::itemTrueEnd(module, *previousId);
+      let nextSpan: SourceSpan = Format::itemSpan(module, *nextId);
+
+      if (Format::whitespaceGapHasIntentionalBlankLine(source, previousEnd, nextSpan.start)) {
+        break;
+      }
+
+      if (!Format::moduleItemSignatureMatches(module, *nextId, &keyword, &fromPath)) {
+        break;
+      }
+
+      let nextNames: Vector<String> = Format::moduleItemNames(module, *nextId, source);
+      let mut nameIndex: u64 = 0;
+
+      while (nameIndex < nextNames.length()) {
+        let Option::SOME(name) = nextNames.get(nameIndex) else {
+          nameIndex += 1;
+          continue;
+        };
+
+        names.push(name.clone());
+        nameIndex += 1;
+      }
+
+      consumed += 1;
+    }
+
+    if (consumed == 1) {
+      let text: String = Format::formatItemNode(module, *firstId, source, config, indentLevel)!;
+      return Result::OK(Format::GroupedItemResult { text: text, consumed: 1 });
+    }
+
+    let keywordStr: str = keyword.toStr();
+    let text: String = Format::formatModuleItemList(keywordStr, &names, &fromPath, config, indentLevel);
+
+    return Result::OK(Format::GroupedItemResult { text: text, consumed: consumed });
+  }
+
+  function formatProgramPreservingOrder(
+    module: &Ast::Module,
+    source: &String,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let mut formatted: String = String::new();
+    let mut previousWasImport: boolean = false;
+    let mut previousEnd: Option<u64> = Option::NONE;
+    let mut index: u64 = 0;
+
+    while (index < module.roots.length()) {
+      let Option::SOME(rootId) = module.roots.get(index) else {
+        break;
+      };
+
+      let grouped: Format::GroupedItemResult = Format::formatGroupedModuleItemNodes(module, &module.roots, index, source, config, 0)!;
+      let currentIsImport: boolean = Format::isImportNode(module, *rootId);
+      let span: SourceSpan = Format::itemSpan(module, *rootId);
+
+      if (index > 0) {
+        if (let Option::SOME(previousEndByte) = previousEnd) {
+          Format::preserveSingleBlankLineForWhitespaceGap(&mut formatted, source, previousEndByte, span.start);
+        }
+
+        if (!Format::endsWithByte(&formatted, '\n' as u8)) {
+          formatted.pushChar('\n');
+        }
+
+        if (previousWasImport && !currentIsImport && !Format::endsWithText(&formatted, "\n\n")) {
+          formatted.pushChar('\n');
+        }
+      }
+
+      formatted.push(&grouped.text);
+      previousWasImport = currentIsImport;
+
+      let Option::SOME(lastConsumedId) = module.roots.get(index + grouped.consumed - 1) else {
+        break;
+      };
+
+      previousEnd = Option::SOME(Format::itemTrueEnd(module, *lastConsumedId));
+      index += grouped.consumed;
+    }
+
+    return Result::OK(formatted);
+  }
+
+  /// A chunk reaching layout must no longer carry a top-level
+  /// conditional-compilation directive: `model.ign` owns those and peels them
+  /// into their own `Format::DirectiveBlock`.
+  ///
+  /// A directive nested inside a `namespace` or `extern` body is a different
+  /// matter — the model never splits below brace depth zero, and the body
+  /// renderer keeps that region verbatim instead.
+  function guardAgainstRawDirectiveTokens(tokenStream: &TokenStream): Result<void, FormatError> {
+    let mut index: u64 = 0;
+    let mut braceDepth: u64 = 0;
+
+    while (index < tokenStream.length()) {
+      let Option::SOME(token) = tokenStream.get(index) else {
+        break;
+      };
+
+      if (token.kindValue() == TokenKind::PUNCTUATION) {
+        let punctuation: Punctuation = token.punctuationValue();
+
+        if (punctuation == Punctuation::LEFT_BRACE) {
+          braceDepth += 1;
+        } else if (punctuation == Punctuation::RIGHT_BRACE && braceDepth > 0) {
+          braceDepth -= 1;
+        }
+      }
+
+      let Option::SOME(next) = tokenStream.get(index + 1) else {
+        break;
+      };
+
+      let isAt: boolean = braceDepth == 0 && token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::AT;
+
+      if (isAt) {
+        let isIfOrElse: boolean = next.kindValue() == TokenKind::KEYWORD && (next.keywordValue() == Keyword::IF || next.keywordValue() == Keyword::ELSE);
+
+        let mut isNamedDirective: boolean = false;
+
+        if (next.kindValue() == TokenKind::IDENTIFIER) {
+          let lexeme: str = next.lexemeTextLossy();
+          isNamedDirective = layoutStrEquals(lexeme, "ifelse") || layoutStrEquals(lexeme, "configFlag");
+        }
+
+        if (isIfOrElse || isNamedDirective) {
+          return Result::ERROR(FormatError::model("formatter chunks must not contain raw @if/@else/@ifelse/@configFlag directives"));
+        }
+      }
+
+      index += 1;
+    }
+
+    return Result::OK(());
+  }
+
+  function layoutProgramChunk(
+    source: &String,
+    config: &FormatterConfig
+  ): Result<String, FormatError> {
+    let file: SourceFile = SourceFile::create("formatter_chunk.ign", source.toStr());
+    let mut lexResult: LexResult = Lexer::lex(&file);
+
+    if (lexResult.diagnostics.length() > 0) {
+      let mut messages: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < lexResult.diagnostics.length()) {
+        let Option::SOME(diagnostic) = lexResult.diagnostics.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        messages.push(String::create(diagnostic.messageText()));
+        index += 1;
+      }
+
+      return Result::ERROR(FormatError::lex(messages));
+    }
+
+    Format::guardAgainstRawDirectiveTokens(&lexResult.tokens)!;
+
+    let mut module: Ast::Module = Ast::Module::init();
+    let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+    Parser::parseInto(&file, &mut module, &mut diagnostics);
+
+    if (diagnostics.length() > 0) {
+      let mut messages: Vector<String> = Vector::new<String>();
+      let mut index: u64 = 0;
+
+      while (index < diagnostics.length()) {
+        let Option::SOME(diagnostic) = diagnostics.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        messages.push(String::create(diagnostic.messageText()));
+        index += 1;
+      }
+
+      return Result::ERROR(FormatError::parseFailure(messages));
+    }
+
+    return Format::formatProgramPreservingOrder(&module, source, config);
+  }
+
+  function layoutCodeChunk(raw: &String, config: &FormatterConfig): Result<String, FormatError> {
+    let trimmed: String = raw.trimAsciiWhitespace();
+
+    if (trimmed.length() == 0) {
+      return Result::OK(String::new());
+    }
+
+    return Format::layoutProgramChunk(&trimmed, config);
+  }
+
+  function layoutItems(
+    items: &Vector<Format::FormatItem>,
+    config: &FormatterConfig
+  ): Result<Vector<Format::FormatItem>, FormatError> {
+    let mut formatted: Vector<Format::FormatItem> = Vector::new<Format::FormatItem>();
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(item) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (let Format::FormatItem::Code(region) = item) {
+        let laidOutRaw: String = Format::layoutCodeChunk(&region.raw, config)!;
+
+        formatted.push(Format::FormatItem::Code(Format::CodeRegion {
+          raw: laidOutRaw,
+          leading: cloneCommentBlockVectorForLayout(&region.leading),
+          trailing: cloneCommentBlockVectorForLayout(&region.trailing),
+          leadingAfterAttrPrefix: region.leadingAfterAttrPrefix,
+        }));
+
+        index += 1;
+        continue;
+      }
+
+      if (let Format::FormatItem::DetachedComment(comment) = item) {
+        formatted.push(Format::FormatItem::DetachedComment(Format::cloneCommentBlockForLayout(&comment)));
+        index += 1;
+        continue;
+      }
+
+      if (let Format::FormatItem::Directive(block) = item) {
+        let thenItems: Vector<Format::FormatItem> = Format::layoutItems(&block.thenItems, config)!;
+        let elseItems: Vector<Format::FormatItem> = Format::layoutItems(&block.elseItems, config)!;
+
+        formatted.push(Format::FormatItem::Directive(Format::DirectiveBlock {
+          leading: cloneCommentBlockVectorForLayout(&block.leading),
+          header: block.header.clone(),
+          thenItems: thenItems,
+          elseHeader: cloneOptionalStringForLayout(&block.elseHeader),
+          elseItems: elseItems,
+          trailing: cloneCommentBlockVectorForLayout(&block.trailing),
+          braced: block.braced,
+        }));
+
+        index += 1;
+        continue;
+      }
+
+      index += 1;
+    }
+
+    return Result::OK(formatted);
+  }
+
+  function layoutFile(
+    file: &Format::FormatFile,
+    config: &FormatterConfig
+  ): Result<Format::FormatFile, FormatError> {
+    let items: Vector<Format::FormatItem> = Format::layoutItems(&file.items, config)!;
+    return Result::OK(Format::FormatFile { items: items });
+  }
+}
+
+function cloneCommentBlockVectorForLayout(items: &Vector<CommentBlock>): Vector<CommentBlock> {
+  let mut result: Vector<CommentBlock> = Vector::new<CommentBlock>();
+  Format::appendCommentBlocks(&mut result, items);
+  return result;
+}
+
+function cloneOptionalStringForLayout(value: &Option<String>): Option<String> {
+  return match (value) {
+    Option::SOME(text) -> Option::SOME(text.clone()),
+    Option::NONE -> Option::NONE,
+  };
+}

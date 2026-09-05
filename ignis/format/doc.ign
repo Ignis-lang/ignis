@@ -1,0 +1,169 @@
+import String from "std::string";
+import Vector from "std::vector";
+
+import FormatterConfig from "./config";
+
+function joinWithCommaSpace(items: &Vector<String>): String {
+  let mut result: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < items.length()) {
+    let Option::SOME(item) = items.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (index > 0) {
+      result.pushStr(", ");
+    }
+
+    result.push(item);
+    index += 1;
+  }
+
+  return result;
+}
+
+export namespace Format {
+  /// A small pretty-printing IR: text runs, forced line breaks, one level of
+  /// indentation around a nested doc, and a flat sequence of docs.
+  ///
+  /// `Indent` and `List` recurse through `Vector` (heap-indirect) rather than
+  /// a boxed single child, since Ignis enum payloads are stored inline and a
+  /// direct `Doc` field would make the type infinitely sized. `Indent` always
+  /// holds exactly one element; the vector is only indirection, not a list.
+  enum Doc {
+    Text(String),
+    Line,
+    Indent(Vector<Format::Doc>),
+    List(Vector<Format::Doc>),
+
+    public static text(value: str): Format::Doc {
+      return Format::Doc::Text(String::create(value));
+    }
+
+    public static textOwned(value: String): Format::Doc {
+      return Format::Doc::Text(value);
+    }
+
+    public static line(): Format::Doc {
+      return Format::Doc::Line;
+    }
+
+    public static indent(child: Format::Doc): Format::Doc {
+      let mut wrapped: Vector<Format::Doc> = Vector::new<Format::Doc>();
+      wrapped.push(child);
+      return Format::Doc::Indent(wrapped);
+    }
+
+    public static list(items: Vector<Format::Doc>): Format::Doc {
+      return Format::Doc::List(items);
+    }
+  }
+
+  function renderDocInto(
+    doc: &Format::Doc,
+    config: &FormatterConfig,
+    indentLevel: u64,
+    output: &mut String
+  ): void {
+    let mut outputRef: &mut String = output;
+
+    match (doc) {
+      Format::Doc::Text(text) -> outputRef.push(&text),
+      Format::Doc::Line -> {
+        outputRef.pushChar('\n');
+        let indentText: String = config.indentString(indentLevel);
+        outputRef.push(&indentText);
+      },
+      Format::Doc::Indent(children) -> {
+        let mut index: u64 = 0;
+
+        while (index < children.length()) {
+          if (let Option::SOME(child) = children.get(index)) {
+            renderDocInto(child, config, indentLevel + 1, outputRef);
+          }
+
+          index += 1;
+        }
+      },
+      Format::Doc::List(items) -> {
+        let mut index: u64 = 0;
+
+        while (index < items.length()) {
+          if (let Option::SOME(item) = items.get(index)) {
+            renderDocInto(item, config, indentLevel, outputRef);
+          }
+
+          index += 1;
+        }
+      },
+    };
+  }
+
+  function renderDoc(doc: &Format::Doc, config: &FormatterConfig, baseIndent: u64): String {
+    let mut output: String = String::new();
+    renderDocInto(doc, config, baseIndent, &mut output);
+    return output;
+  }
+
+  /// Builds a single-line `prefix + items.join(", ") + suffix` doc when it
+  /// fits within `config.lineWidth`, accounting for `leadingOffset` (the
+  /// column `prefix` starts at) and `reservedTrailing` (columns reserved for
+  /// content appended on the same line after `suffix`, such as ` {` or `;`).
+  ///
+  /// Otherwise builds a multiline doc: each item on its own line, indented one
+  /// level deeper, with `suffix` back at the declaration's indent level.
+  /// Callers must render the result with `baseIndent = indentLevel` so that
+  /// `Doc::line()` at the top level produces the right indentation for the
+  /// closing `suffix`.
+  function formatInlineOrMultiline(
+    prefix: str,
+    items: &Vector<String>,
+    suffix: str,
+    leadingOffset: u64,
+    config: &FormatterConfig,
+    multilineTrailingComma: boolean,
+    reservedTrailing: u64,
+  ): Format::Doc {
+    let joined: String = joinWithCommaSpace(items);
+
+    let mut flat: String = String::create(prefix);
+    flat.push(&joined);
+    flat.pushStr(suffix);
+
+    if (leadingOffset + flat.length() + reservedTrailing <= config.lineWidth) {
+      return Format::Doc::textOwned(flat);
+    }
+
+    let mut paramDocs: Vector<Format::Doc> = Vector::new<Format::Doc>();
+    let mut index: u64 = 0;
+
+    while (index < items.length()) {
+      let Option::SOME(item) = items.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      paramDocs.push(Format::Doc::line());
+
+      if (index + 1 < items.length() || multilineTrailingComma) {
+        let mut withComma: String = item.clone();
+        withComma.pushStr(",");
+        paramDocs.push(Format::Doc::textOwned(withComma));
+      } else {
+        paramDocs.push(Format::Doc::textOwned(item.clone()));
+      }
+
+      index += 1;
+    }
+
+    let mut resultItems: Vector<Format::Doc> = Vector::new<Format::Doc>();
+    resultItems.push(Format::Doc::text(prefix));
+    resultItems.push(Format::Doc::indent(Format::Doc::list(paramDocs)));
+    resultItems.push(Format::Doc::line());
+    resultItems.push(Format::Doc::text(suffix));
+
+    return Format::Doc::list(resultItems);
+  }
+}

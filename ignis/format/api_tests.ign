@@ -1,0 +1,215 @@
+import String from "std::string";
+import Test from "std::test";
+
+import Format from "./api";
+import FormatterConfig from "./config";
+
+function formatOrFail(source: str): String {
+  let sourceText: String = String::create(source);
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Result::OK(output) = Format::formatSource(&sourceText, &config) else {
+    Test::fail();
+    return String::new();
+  };
+
+  return output;
+}
+
+@test
+function apiFormatsASimpleFunctionEndToEnd(): void {
+  Test::assertEq<str>(
+    formatOrFail("function main(): void { return; }\n").toStr(),
+    "function main(): void {\n  return;\n}\n"
+  );
+}
+
+@test
+function apiIsIdempotentOnASecondPass(): void {
+  let first: String = formatOrFail("/// A point in 2D space\nrecord Point {\n    x: i32;\n    y: i32;\n}\n");
+  let second: String = formatOrFail(first.toStr());
+  Test::assertEq<str>(first.toStr(), second.toStr());
+}
+
+@test
+function apiTrimsTrailingWhitespaceFromACommentLine(): void {
+  Test::assertEq<str>(
+    formatOrFail("//! \n\nfunction main(): void { return; }\n").toStr(),
+    "//!\n\nfunction main(): void {\n  return;\n}\n"
+  );
+}
+
+@test
+function apiPreservesMutabilityOnAComplexLetElsePattern(): void {
+  let formatted: String = formatOrFail(
+    "function main(): void { let mut Option::SOME(active) = bag.getMut(index) else { @panic(\"missing\"); }; return; }\n"
+  );
+
+  let needle: String = String::create("let mut Option::SOME(active)");
+
+  if (!formatted.contains(&needle)) {
+    Test::fail();
+  }
+}
+
+@test
+function apiReportsWhetherASourceNeedsFormatting(): void {
+  let config: FormatterConfig = FormatterConfig::default();
+  let clean: String = String::create("function main(): void {\n  return;\n}\n");
+  let dirty: String = String::create("function main(): void { return; }\n");
+
+  let Result::OK(cleanVerdict) = Format::sourceNeedsFormatting(&clean, &config) else {
+    Test::fail();
+    return;
+  };
+
+  let Result::OK(dirtyVerdict) = Format::sourceNeedsFormatting(&dirty, &config) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(cleanVerdict, false);
+  Test::assertEq<boolean>(dirtyVerdict, true);
+}
+
+@test
+function apiHonoursAConfiguredIndentWidth(): void {
+  let sourceText: String = String::create("function main(): void { return; }\n");
+  let mut config: FormatterConfig = FormatterConfig::default();
+  config.indentWidth = 4;
+
+  let Result::OK(output) = Format::formatSource(&sourceText, &config) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(output.toStr(), "function main(): void {\n    return;\n}\n");
+}
+
+@test
+function apiHonoursAConfiguredLineWidth(): void {
+  let sourceText: String = String::create("import FirstBinding, SecondBinding, ThirdBinding from \"std::somewhere\";\n");
+  let mut config: FormatterConfig = FormatterConfig::default();
+  config.lineWidth = 40;
+
+  let Result::OK(output) = Format::formatSource(&sourceText, &config) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    output.toStr(),
+    "import\n  FirstBinding,\n  SecondBinding,\n  ThirdBinding,\nfrom \"std::somewhere\";\n"
+  );
+}
+
+@test
+function apiHonoursUseTabs(): void {
+  let sourceText: String = String::create("function main(): void { return; }\n");
+  let mut config: FormatterConfig = FormatterConfig::default();
+  config.useTabs = true;
+
+  let Result::OK(output) = Format::formatSource(&sourceText, &config) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(output.toStr(), "function main(): void {\n\treturn;\n}\n");
+}
+
+@test
+function apiRendersAUnifiedDiff(): void {
+  let path: String = String::create("main.ign");
+  let oldText: String = String::create("function main(): void { return; }\n");
+  let newText: String = String::create("function main(): void {\n  return;\n}\n");
+
+  let diff: String = Format::unifiedDiff(&path, &oldText, &newText);
+
+  Test::assertEq<str>(
+    diff.toStr(),
+    "--- main.ign\n+++ main.ign\n@@ -1,3 +1,3 @@\n-function main(): void { return; }\n+function main(): void {\n+  return;\n+}\n"
+  );
+}
+
+@test
+function apiRendersAnEmptyDiffForIdenticalText(): void {
+  let path: String = String::create("main.ign");
+  let text: String = String::create("function main(): void {\n  return;\n}\n");
+
+  Test::assertEq<str>(
+    Format::unifiedDiff(&path, &text, &text).toStr(),
+    "--- main.ign\n+++ main.ign\n"
+  );
+}
+
+@test
+function apiParsesAnNdjsonRequest(): void {
+  let line: String = String::create("{\"path\":\"a.ign\",\"text\":\"function main(): void { return; }\\n\"}");
+
+  let Result::OK(request) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(request.path.toStr(), "a.ign");
+  Test::assertEq<str>(request.text.toStr(), "function main(): void { return; }\n");
+}
+
+@test
+function apiRejectsAnNdjsonRequestMissingItsText(): void {
+  let line: String = String::create("{\"path\":\"a.ign\"}");
+
+  let Result::ERROR(_) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+}
+
+@test
+function apiRendersAnNdjsonResponseWithTheFormattedText(): void {
+  let line: String = String::create("{\"path\":\"a.ign\",\"text\":\"function main(): void { return; }\\n\"}");
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Result::OK(request) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  let response: Format::StdinResponse = Format::processStdinRequest(&request, &config, false);
+
+  Test::assertEq<str>(
+    Format::renderStdinResponse(&response).toStr(),
+    "{\"path\":\"a.ign\",\"formatted\":\"function main(): void {\\n  return;\\n}\\n\",\"changed\":true}"
+  );
+}
+
+@test
+function apiRendersAnNdjsonResponseWithADiffInDiffMode(): void {
+  let line: String = String::create("{\"path\":\"a.ign\",\"text\":\"function main(): void { return; }\\n\"}");
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Result::OK(request) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  let response: Format::StdinResponse = Format::processStdinRequest(&request, &config, true);
+
+  Test::assertEq<boolean>(response.hasFormatted, false);
+  Test::assertEq<boolean>(response.hasDiff, true);
+  Test::assertEq<boolean>(response.changed, true);
+}
+
+@test
+function apiReportsAFormatterErrorOnAnNdjsonResponse(): void {
+  let line: String = String::create("{\"path\":\"a.ign\",\"text\":\"function main(: void { }\\n\"}");
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Result::OK(request) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  let response: Format::StdinResponse = Format::processStdinRequest(&request, &config, false);
+  Test::assertEq<boolean>(response.hasError, true);
+}
