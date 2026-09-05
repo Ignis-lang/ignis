@@ -2172,6 +2172,77 @@ fn run_diagnostics_fixture(
   crate::fixture_tests::compare_snapshot(&case.snapshot_path(), &messages.join("\n"), context.update_snapshots)
 }
 
+/// Collects the front-end error and warning diagnostics a warnings fixture produces.
+///
+/// A warnings fixture only needs the front end, since mono/ownership/borrow
+/// checking never produce warnings: this mirrors the part of
+/// `fixture_error_diagnostics` that runs before those post-mono passes.
+fn fixture_warning_diagnostics(
+  config: &Arc<IgnisConfig>,
+  entry_path: &Path,
+) -> (Vec<String>, Vec<String>) {
+  let mut ctx = CompilationContext::new(config);
+  let root_id = ctx
+    .discover_modules_lsp(entry_path.to_string_lossy().as_ref(), config)
+    .ok();
+
+  let discovery_diagnostics = std::mem::take(&mut ctx.discovery_diagnostics);
+  let mut errors = error_diagnostic_messages(&discovery_diagnostics, false);
+  let mut warnings = warning_diagnostic_messages(&discovery_diagnostics);
+
+  let Some(root_id) = root_id else {
+    return (errors, warnings);
+  };
+
+  if config.std && config.auto_load_std {
+    ctx.discover_prelude_modules_for_all_lsp(config);
+  }
+
+  ctx.module_graph.root = Some(root_id);
+
+  if ctx.module_graph.detect_cycles().is_err() {
+    return (errors, warnings);
+  }
+
+  let order = ctx.module_graph.topological_sort();
+  let (output, _, _) = ctx.analyze_modules_collect_all(&order, config, false);
+
+  errors.extend(error_diagnostic_messages(&output.diagnostics, false));
+  warnings.extend(warning_diagnostic_messages(&output.diagnostics));
+
+  (errors, warnings)
+}
+
+/// Renders warning diagnostics the way `common::compile_warnings` rendered them.
+fn warning_diagnostic_messages(diagnostics: &[ignis_diagnostics::diagnostic_report::Diagnostic]) -> Vec<String> {
+  diagnostics
+    .iter()
+    .filter(|diagnostic| matches!(diagnostic.severity, ignis_diagnostics::diagnostic_report::Severity::Warning))
+    .map(|diagnostic| diagnostic.message.clone())
+    .collect()
+}
+
+fn run_warnings_fixture(
+  context: &FixtureRunContext,
+  case: &crate::fixture_tests::FixtureCase,
+) -> Result<(), String> {
+  let config = fixture_compile_config(context, case, None, false, false)?;
+  let (errors, warnings) = fixture_warning_diagnostics(&config, &case.path);
+
+  if !errors.is_empty() {
+    return Err(format!(
+      "expected the fixture to compile cleanly, but it reported errors:\n{}",
+      errors.join("\n")
+    ));
+  }
+
+  if warnings.is_empty() {
+    return Err("expected the fixture to report warnings, but it compiled without any".to_string());
+  }
+
+  crate::fixture_tests::compare_snapshot(&case.snapshot_path(), &warnings.join("\n"), context.update_snapshots)
+}
+
 fn run_program_fixture(
   context: &FixtureRunContext,
   case: &crate::fixture_tests::FixtureCase,
@@ -2232,6 +2303,7 @@ fn run_single_fixture(
   let outcome = match &case.mode {
     Err(error) => Err(error.clone()),
     Ok(crate::fixture_tests::FixtureMode::Diagnostics) => run_diagnostics_fixture(context, case),
+    Ok(crate::fixture_tests::FixtureMode::Warnings) => run_warnings_fixture(context, case),
     Ok(crate::fixture_tests::FixtureMode::Program { force_std, allow_leak }) => {
       run_program_fixture(context, case, *force_std, *allow_leak)
     },

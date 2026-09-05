@@ -36,6 +36,8 @@ pub(crate) enum FixtureMode {
   },
   /// Compile only and expect failure; the baseline holds the reported diagnostics.
   Diagnostics,
+  /// Compile only and expect success with warnings; the baseline holds the reported warnings.
+  Warnings,
 }
 
 /// One discovered fixture file and the mode its header selected.
@@ -150,6 +152,7 @@ pub(crate) fn parse_fixture_header(source: &str) -> Result<FixtureMode, String> 
   let mut force_std = false;
   let mut allow_leak = false;
   let mut diagnostics = false;
+  let mut warnings = false;
 
   for line in source.lines() {
     let trimmed = line.trim();
@@ -172,9 +175,14 @@ pub(crate) fn parse_fixture_header(source: &str) -> Result<FixtureMode, String> 
         "std" => force_std = true,
         "allow-leak" => allow_leak = true,
         "err" => diagnostics = true,
+        "warn" => warnings = true,
         unknown => return Err(format!("Unknown fixture header option '{}'", unknown)),
       }
     }
+  }
+
+  if diagnostics && warnings {
+    return Err("Fixture header option 'warn' cannot be combined with 'std', 'allow-leak' or 'err'".to_string());
   }
 
   if diagnostics {
@@ -183,6 +191,14 @@ pub(crate) fn parse_fixture_header(source: &str) -> Result<FixtureMode, String> 
     }
 
     return Ok(FixtureMode::Diagnostics);
+  }
+
+  if warnings {
+    if force_std || allow_leak {
+      return Err("Fixture header option 'warn' cannot be combined with 'std' or 'allow-leak'".to_string());
+    }
+
+    return Ok(FixtureMode::Warnings);
   }
 
   Ok(FixtureMode::Program { force_std, allow_leak })
@@ -487,6 +503,27 @@ mod tests {
     let mode = parse_fixture_header("// e2e: err\nfunction main(): i32 {}").expect("header");
 
     assert_eq!(mode, FixtureMode::Diagnostics);
+  }
+
+  #[test]
+  fn the_warn_option_selects_warnings_mode() {
+    let mode = parse_fixture_header("// e2e: warn\nfunction main(): void {}").expect("header");
+
+    assert_eq!(mode, FixtureMode::Warnings);
+  }
+
+  #[test]
+  fn the_warn_option_cannot_combine_with_std_or_allow_leak() {
+    let error = parse_fixture_header("// e2e: warn, std\nfunction main(): void {}").expect_err("conflict");
+
+    assert!(error.contains("warn"), "expected 'warn' in the error, got: {}", error);
+  }
+
+  #[test]
+  fn the_warn_option_cannot_combine_with_err() {
+    let error = parse_fixture_header("// e2e: warn, err\nfunction main(): i32 {}").expect_err("conflict");
+
+    assert!(error.contains("warn"), "expected 'warn' in the error, got: {}", error);
   }
 
   #[test]

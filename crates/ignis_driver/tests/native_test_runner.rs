@@ -1370,6 +1370,80 @@ fn fixture_err_mode_fails_when_the_program_compiles_cleanly() {
 }
 
 #[test]
+fn fixture_warn_mode_snapshots_the_reported_warnings() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/warn"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/warn/unused_variable.ign",
+    "// e2e: warn\nfunction main(): i32 {\n  let x: i32 = 5;\n  return 0;\n}\n",
+  );
+  let snapshot_path = fixture_snapshot_path(project.path(), "corpus/warn/unused_variable.ign");
+
+  let options = TestRunOptions {
+    update_snapshots: true,
+    ..TestRunOptions::default()
+  };
+
+  assert!(
+    run_project_tests_with_options(project.path(), &options).is_ok(),
+    "expected update mode to record the warnings baseline"
+  );
+
+  let baseline = fs::read_to_string(&snapshot_path).expect("read warnings snapshot");
+  assert!(
+    !baseline.trim().is_empty(),
+    "expected the warnings baseline to hold at least one warning"
+  );
+
+  assert!(
+    run_project_tests_with_options(project.path(), &fixture_options()).is_ok(),
+    "expected the recorded warnings to compare equal on a second run"
+  );
+}
+
+#[test]
+fn fixture_warn_mode_fails_when_the_program_reports_errors() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/warn"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/warn/undefined_name.ign",
+    "// e2e: warn\nfunction main(): i32 {\n  return missingValue;\n}\n",
+  );
+
+  let options = TestRunOptions {
+    update_snapshots: true,
+    ..TestRunOptions::default()
+  };
+  let result = run_project_tests_with_options(project.path(), &options);
+
+  assert!(result.is_err(), "expected a warn fixture that reports errors to fail");
+}
+
+#[test]
+fn fixture_warn_mode_fails_when_the_program_compiles_without_warnings() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/warn"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/warn/compiles_clean.ign",
+    "// e2e: warn\nfunction main(): i32 {\n  return 0;\n}\n",
+  );
+
+  let options = TestRunOptions {
+    update_snapshots: true,
+    ..TestRunOptions::default()
+  };
+  let result = run_project_tests_with_options(project.path(), &options);
+
+  assert!(
+    result.is_err(),
+    "expected a warn fixture that compiles without warnings to fail"
+  );
+}
+
+#[test]
 fn fixture_std_header_compiles_against_the_standard_library() {
   let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
 
