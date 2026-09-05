@@ -828,7 +828,7 @@ function importOverlayDiagnosesLocalDeclarationConflict(): void {
 
 @test
 function importOverlayDiscardBindingBringsModuleDeclarations(): void {
-  let first: Ast::Module = importsFunctionModule("Exported");
+  let first: Ast::Module = importsExportedFunctionModule("Exported");
   let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
   bindings.push(importsDiscardBinding());
   let second: Ast::Module = importsModuleWithImport("a.ign", bindings);
@@ -849,6 +849,25 @@ function importOverlayDiscardBindingBringsModuleDeclarations(): void {
     @panic("missing qualified name on discard-imported declaration");
   };
   Test::assertEq<str>(qualifiedName.toStr(), "Exported");
+}
+
+@test
+function importOverlayDiscardBindingSkipsPrivateDeclarations(): void {
+  let first: Ast::Module = importsFunctionModule("Hidden");
+  let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  bindings.push(importsDiscardBinding());
+  let second: Ast::Module = importsModuleWithImport("a.ign", bindings);
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoModules(first, second);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+
+  // A bare root declaration is private to its module, the way the host keeps
+  // it: `import _` brings only what the target exports, so two modules may
+  // each keep a helper under the same name without forming one overload set.
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 0);
+  Test::assertEq<u64>(importingRecord.output.diagnostics.length(), 0);
 }
 
 @test
