@@ -480,6 +480,16 @@ export namespace ParserShared {
       self.emitDiagnostic(span, DiagnosticCode::EXPECTED_TOKEN, "expected token", expected);
     }
 
+    /// Reports a token the reference compiler names in the message itself.
+    ///
+    /// Its `expect` renders the awaited `TokenType`, so the message is
+    /// `Expected <TokenTypeName>`; the caller's prose stays on the label,
+    /// where it adds context the reference compiler does not print.
+    public expectedToken(&mut self, span: SourceSpan, tokenName: str, label: str): void {
+      let message: String = `Expected ${tokenName}`;
+      self.emitDiagnostic(span, DiagnosticCode::EXPECTED_TOKEN, message.toStr(), label);
+    }
+
     public expectIdentifier(&mut self, label: str): Option<Token> {
       self.skipTrivia();
       let token: Token = self.current();
@@ -488,7 +498,7 @@ export namespace ParserShared {
         return Option::SOME(self.bump());
       }
 
-      self.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_IDENTIFIER, "expected identifier", label);
+      self.expectedToken(token.span, "Identifier", label);
       return Option::NONE;
     }
 
@@ -500,7 +510,7 @@ export namespace ParserShared {
         return Option::SOME(self.bump());
       }
 
-      self.expected(token.span, label);
+      self.expectedToken(token.span, keyword.diagnosticName(), label);
       return Option::NONE;
     }
 
@@ -512,7 +522,7 @@ export namespace ParserShared {
         return Option::SOME(self.bump());
       }
 
-      self.expected(token.span, label);
+      self.expectedToken(token.span, punctuation.diagnosticName(), label);
       return Option::NONE;
     }
 
@@ -525,7 +535,7 @@ export namespace ParserShared {
         return Option::SOME(token.clone());
       }
 
-      self.expected(span, "expected '>' to close generic arguments");
+      self.expectedToken(span, "Greater", "expected '>' to close generic arguments");
       return Option::NONE;
     }
   }

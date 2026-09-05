@@ -18,6 +18,11 @@ under the "equal or better" rule: every diagnostic line the host records must
 appear in the selfhost's output, while diagnostics the host does not emit are
 allowed. Cases are only compiled; the host helpers behind that corpus record
 analysis diagnostics and never run a binary.
+
+A host diagnostic the selfhost reports in different words is classed `wording`
+and fails the corpus. The report names both texts, because the native `err`
+fixtures compare rendered diagnostics verbatim: a message that only nearly
+matches makes a host-written baseline unusable against the selfhost.
 """
 
 import argparse
@@ -80,6 +85,7 @@ CLASS_PASS = "pass"
 CLASS_MISMATCH = "mismatch"
 CLASS_LEAK = "leak"
 CLASS_MISSING = "missing"
+CLASS_WORDING = "wording"
 CLASS_COMPILED = "compiled"
 CLASS_COMPILE_ERROR = "compile-error"
 CLASS_COMPILE_TIMEOUT = "compile-timeout"
@@ -98,6 +104,7 @@ CLASS_ORDER = {
   ),
   CORPUS_ERR: (
     CLASS_PASS,
+    CLASS_WORDING,
     CLASS_MISSING,
     CLASS_COMPILED,
     CLASS_COMPILE_TIMEOUT,
@@ -126,6 +133,7 @@ class CaseResult:
   compiler_tail: list[str] = field(default_factory=list)
   expected_lines: list[str] = field(default_factory=list)
   missing_lines: list[str] = field(default_factory=list)
+  wording_lines: list[tuple[str, str]] = field(default_factory=list)
   leak_report: str = ""
 
 
@@ -566,10 +574,14 @@ def missing_diagnostics(expected: str, output: str) -> tuple[list[str], list[str
   host records but the selfhost omits is reported through `missing_notes`,
   not here: the promotion rule asks for every host diagnostic to be present,
   and treats extra or richer output as an improvement rather than a failure.
+
+  A host message is looked for among the selfhost's diagnostic messages only.
+  Searching the whole output would let the source excerpt a rendered
+  diagnostic quotes stand in for the diagnostic itself, so a program the
+  selfhost rejects for an unrelated reason could pass on its own text.
   """
   expected_lines = [line for line in expected.split("\n") if line.strip()]
-  observed_lines = [normalize_diagnostic_line(line) for line in strip_ansi(output).splitlines()]
-  observed_lines = [line for line in observed_lines if line]
+  observed_lines = selfhost_diagnostic_messages(output)
 
   missing = []
 
@@ -601,6 +613,56 @@ def missing_notes(expected: str, output: str) -> list[str]:
       missing.append(line.strip())
 
   return missing
+
+
+DIAGNOSTIC_HEADER_PATTERN = re.compile(r"^\s*[A-Za-z]+\[([A-Za-z]?\d+)\]:\s*(.*)$")
+
+
+def selfhost_diagnostic_messages(output: str) -> list[str]:
+  """The message text of every diagnostic the selfhost printed.
+
+  Only the `Severity[CODE]: message` header carries a message. Everything else
+  in the rendered block — the source excerpt, the caret, the labels — repeats
+  the program's own text, so matching a host message against it would let a
+  case pass on the source line it quotes rather than on the diagnostic.
+  """
+  messages = []
+
+  for line in strip_ansi(output).splitlines():
+    match = DIAGNOSTIC_HEADER_PATTERN.match(line)
+
+    if match:
+      messages.append(re.sub(r"\s+", " ", match.group(2)).strip())
+
+  return messages
+
+
+def wording_drift(expected: str, output: str) -> list[tuple[str, str]]:
+  """Host messages the selfhost reports in different words.
+
+  A host message the selfhost prints verbatim is parity. One it neither prints
+  verbatim nor mentions at all is a missing diagnostic, reported separately.
+  What is left is the same condition told differently: the selfhost message
+  either contains the host's or is contained by it.
+  """
+  observed = selfhost_diagnostic_messages(output)
+  drift = []
+
+  for line in expected.split("\n"):
+    if not line.strip() or NOTE_LINE_PATTERN.match(line):
+      continue
+
+    wanted = normalize_diagnostic_line(line)
+
+    if wanted in observed:
+      continue
+
+    for message in observed:
+      if wanted in message or message in wanted:
+        drift.append((wanted, message))
+        break
+
+  return drift
 
 
 REPORTED_DIAGNOSTIC_PATTERN = re.compile(r"^\s*(?:[A-Za-z]+\[[A-Za-z]?\d+\]:|note:|help:)")
@@ -637,6 +699,24 @@ def run_err_case(case: Case, compiler: Path, std_path: Path, work_dir: Path) -> 
       compiler_tail=observed,
       expected_lines=expected_lines,
       missing_lines=missing,
+    )
+
+  drift = wording_drift(case.snapshot or "", compiler_output)
+
+  if drift:
+    host_text, self_text = drift[0]
+
+    return CaseResult(
+      case,
+      CLASS_WORDING,
+      "{} host diagnostic(s) worded differently: host `{}`, selfhost `{}`".format(
+        len(drift),
+        host_text,
+        self_text,
+      ),
+      compiler_tail=observed,
+      expected_lines=expected_lines,
+      wording_lines=drift,
     )
 
   if not missing:
@@ -733,6 +813,7 @@ def build_report(results: list[CaseResult], counts: dict[str, int], corpus: str)
   lines.extend(["", f"| total | {len(results)} |", ""])
 
   if corpus == CORPUS_ERR:
+    lines.extend(format_group_table("Reworded diagnostics by host message", group_diagnostics(results, CLASS_WORDING)))
     lines.extend(format_group_table("Missing diagnostics by host message", group_diagnostics(results, CLASS_MISSING)))
     lines.extend(format_group_table("Accepted programs by host message", group_diagnostics(results, CLASS_COMPILED)))
   else:
@@ -757,6 +838,11 @@ def build_report(results: list[CaseResult], counts: dict[str, int], corpus: str)
 
       if result.diff:
         lines.extend(["```diff", result.diff, "```", ""])
+
+      if result.wording_lines:
+        lines.extend(["| host | selfhost |", "| --- | --- |"])
+        lines.extend(f"| `{host_text}` | `{self_text}` |" for host_text, self_text in result.wording_lines)
+        lines.append("")
 
       if result.missing_lines:
         lines.append("Missing from the selfhost output:")

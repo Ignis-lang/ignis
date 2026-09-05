@@ -6147,6 +6147,10 @@ export namespace Analyzer {
         return Analyzer::Typecheck::checkBuiltinCast(state, defStore, typeStore, symbols, module, resolvedBodies, call);
       }
 
+      if (name.equals("compileError")) {
+        return Analyzer::Typecheck::checkBuiltinCompileError(state, typeStore, module, call);
+      }
+
       if (name.equals("dropGlue")) {
         return Analyzer::Typecheck::checkBuiltinDropGlue(state, defStore, typeStore, symbols, module, call);
       }
@@ -6550,6 +6554,39 @@ export namespace Analyzer {
         Analyzer::Typecheck::emitUnsupported(state, call.span, "`@panic` messages that are not string literals");
         return Option::NONE;
       }
+
+      let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+      return Option::SOME(typeStoreRef.intern(Analyzer::Type::NEVER));
+    }
+
+    /// `@compileError("...")`: one string-literal argument, whose text becomes
+    /// the reported error. The call itself never produces a value.
+    function checkBuiltinCompileError(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      typeStore: &mut Analyzer::TypeStore,
+      module: &Ast::Module,
+      call: &Ast::Expression::BuiltinCall,
+    ): Option<Analyzer::TypeId> {
+      if (call.typeArguments.length() != 0) {
+        Analyzer::Typecheck::emitGenericArityMismatch(state, call.span, call.name.toStr(), 0, call.typeArguments.length());
+        return Option::NONE;
+      }
+
+      if (call.arguments.length() != 1) {
+        Analyzer::Typecheck::emitBuiltinArgumentCountMismatch(state, call.span, call.name.toStr(), 1, call.arguments.length());
+        return Option::NONE;
+      }
+
+      let Option::SOME(messageExprId) = call.arguments.get(0) else {
+        return Option::NONE;
+      };
+
+      let Option::SOME(message) = Analyzer::Typecheck::stringLiteralText(module, *messageExprId) else {
+        Analyzer::Typecheck::emitBuiltinExpectedStringLiteral(state, call.span, call.name.toStr());
+        return Option::NONE;
+      };
+
+      Analyzer::Typecheck::emitCompileError(state, call.span, message.toStr());
 
       let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
       return Option::SOME(typeStoreRef.intern(Analyzer::Type::NEVER));
@@ -7922,6 +7959,24 @@ export namespace Analyzer {
     }
 
     /// Whether `exprId` is a string literal written in place.
+    /// The text of a string-literal expression, or `NONE` when the expression
+    /// is anything else.
+    function stringLiteralText(module: &Ast::Module, exprId: Ast::ExpressionId): Option<String> {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return Option::NONE;
+      };
+
+      let Ast::Expression::Node::Literal(literal) = expr else {
+        return Option::NONE;
+      };
+
+      let Ast::Expression::LiteralValue::String(text) = &literal.value else {
+        return Option::NONE;
+      };
+
+      return Option::SOME(text.clone());
+    }
+
     function isStringLiteralExpr(module: &Ast::Module, exprId: Ast::ExpressionId): boolean {
       let Option::SOME(expr) = module.expressions.get(exprId) else {
         return false;
