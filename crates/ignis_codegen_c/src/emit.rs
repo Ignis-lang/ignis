@@ -119,6 +119,17 @@ impl DefinitionIndex {
   }
 }
 
+/// Running newline count over the append-only output buffer.
+///
+/// A `#line` reset needs the current line of the generated file, and the buffer
+/// reaches tens of megabytes on a large program: rescanning it once per emitted
+/// function is quadratic in the size of the output.
+#[derive(Default)]
+struct OutputLineScan {
+  scanned_bytes: usize,
+  newlines: usize,
+}
+
 /// C code emitter for LIR programs.
 pub struct CEmitter<'a> {
   program: &'a LirProgram,
@@ -128,6 +139,7 @@ pub struct CEmitter<'a> {
   symbols: &'a SymbolTable,
   headers: &'a [CHeader],
   output: String,
+  output_line_scan: OutputLineScan,
   source_map: Option<&'a SourceMap>,
   current_fn_id: Option<DefinitionId>,
   /// Emit target for filtering definitions (None = emit all, legacy mode)
@@ -156,6 +168,7 @@ pub struct CEmitter<'a> {
   /// Lazily built lookup tables over `defs`, shared by every query that would
   /// otherwise scan the whole definition store.
   definition_index: OnceCell<DefinitionIndex>,
+  std_test_user_type_names: OnceCell<Vec<SymbolId>>,
 }
 
 impl<'a> CEmitter<'a> {
@@ -175,6 +188,7 @@ impl<'a> CEmitter<'a> {
       symbols,
       headers,
       output: String::new(),
+      output_line_scan: OutputLineScan::default(),
       source_map: None,
       current_fn_id: None,
       target: None,
@@ -186,6 +200,7 @@ impl<'a> CEmitter<'a> {
       closure_env_names: HashMap::new(),
       test_harness: None,
       definition_index: OnceCell::new(),
+      std_test_user_type_names: OnceCell::new(),
     }
   }
 
@@ -209,6 +224,7 @@ impl<'a> CEmitter<'a> {
       symbols,
       headers,
       output: String::new(),
+      output_line_scan: OutputLineScan::default(),
       source_map: None,
       current_fn_id: None,
       target: Some(target),
@@ -220,6 +236,7 @@ impl<'a> CEmitter<'a> {
       closure_env_names: HashMap::new(),
       test_harness: None,
       definition_index: OnceCell::new(),
+      std_test_user_type_names: OnceCell::new(),
     }
   }
 
@@ -245,6 +262,7 @@ impl<'a> CEmitter<'a> {
       symbols,
       headers,
       output: String::new(),
+      output_line_scan: OutputLineScan::default(),
       source_map: None,
       current_fn_id: None,
       target: Some(EmitTarget::UserModule(module_id)),
@@ -256,6 +274,7 @@ impl<'a> CEmitter<'a> {
       closure_env_names: HashMap::new(),
       test_harness: None,
       definition_index: OnceCell::new(),
+      std_test_user_type_names: OnceCell::new(),
     }
   }
 
@@ -280,6 +299,7 @@ impl<'a> CEmitter<'a> {
       symbols,
       headers,
       output: String::new(),
+      output_line_scan: OutputLineScan::default(),
       source_map: None,
       current_fn_id: None,
       target: Some(target),
@@ -291,6 +311,7 @@ impl<'a> CEmitter<'a> {
       closure_env_names: HashMap::new(),
       test_harness: None,
       definition_index: OnceCell::new(),
+      std_test_user_type_names: OnceCell::new(),
     }
   }
 
@@ -313,6 +334,7 @@ impl<'a> CEmitter<'a> {
       symbols,
       headers,
       output: String::new(),
+      output_line_scan: OutputLineScan::default(),
       source_map: None,
       current_fn_id: None,
       target: None,
@@ -324,6 +346,7 @@ impl<'a> CEmitter<'a> {
       closure_env_names: HashMap::new(),
       test_harness: Some(test_harness),
       definition_index: OnceCell::new(),
+      std_test_user_type_names: OnceCell::new(),
     }
   }
 
@@ -917,6 +940,23 @@ impl<'a> CEmitter<'a> {
     }
   }
 
+  /// Names of the records and enums declared by std's own `tests.ign` modules.
+  ///
+  /// The emitter asks about these once per definition it considers emitting, and
+  /// deriving them on each call rescanned the whole definition store and ran the
+  /// path-shaped module check for every nominal type in it.
+  fn std_test_user_type_names(&self) -> &[SymbolId] {
+    self.std_test_user_type_names.get_or_init(|| {
+      self
+        .defs
+        .iter()
+        .filter(|(_, candidate)| matches!(&candidate.kind, DefinitionKind::Record(_) | DefinitionKind::Enum(_)))
+        .filter(|(_, candidate)| self.is_std_test_local_user_type(candidate.owner_module))
+        .map(|(_, candidate)| candidate.name)
+        .collect()
+    })
+  }
+
   fn definition_mentions_std_test_user_type(
     &self,
     def_id: DefinitionId,
@@ -924,15 +964,9 @@ impl<'a> CEmitter<'a> {
     let raw_name = self.symbols.get(&self.defs.get(&def_id).name);
 
     self
-      .defs
+      .std_test_user_type_names()
       .iter()
-      .filter_map(|(candidate_id, candidate)| match &candidate.kind {
-        DefinitionKind::Record(_) | DefinitionKind::Enum(_) => Some((candidate_id, candidate)),
-        _ => None,
-      })
-      .filter(|(_, candidate)| self.is_std_test_local_user_type(candidate.owner_module))
-      .map(|(_, candidate)| self.symbols.get(&candidate.name))
-      .any(|candidate_name| raw_name.contains(candidate_name))
+      .any(|candidate_name| raw_name.contains(self.symbols.get(candidate_name)))
   }
 
   fn is_std_test_local_user_type(
@@ -2298,8 +2332,16 @@ impl<'a> CEmitter<'a> {
     write!(self.output, "{} {}({})", ret_ty, name, params_str).unwrap();
   }
 
-  fn current_output_line(&self) -> usize {
-    self.output.bytes().filter(|byte| *byte == b'\n').count() + 1
+  fn current_output_line(&mut self) -> usize {
+    let appended = self.output[self.output_line_scan.scanned_bytes..]
+      .bytes()
+      .filter(|byte| *byte == b'\n')
+      .count();
+
+    self.output_line_scan.newlines += appended;
+    self.output_line_scan.scanned_bytes = self.output.len();
+
+    self.output_line_scan.newlines + 1
   }
 
   fn format_line_filename(path: &std::path::Path) -> String {
