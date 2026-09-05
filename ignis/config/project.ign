@@ -874,7 +874,13 @@ export namespace Config {
   }
 
   function loadProjectFileSummary(configPath: &Path::PathBuf): String {
-    let startPath: Path::PathBuf = configPath.parent().unwrapOr(Path::PathBuf::new());
+    // `Option::unwrapOr` moves the payload out of `&self`; on an owning payload
+    // the selfhost's borrow checker rejects that (the host's monomorphizer keeps
+    // the binding typed as a parameter and misses it, IGN-200).
+    let startPath: Path::PathBuf = match (configPath.parent()) {
+      Option::SOME(parent) -> parent,
+      Option::NONE -> Path::PathBuf::new(),
+    };
     let Result::OK(project) = Config::loadProjectFile(configPath) else {
       Test::fail();
       return String::new();
