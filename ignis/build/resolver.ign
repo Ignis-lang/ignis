@@ -53,6 +53,7 @@ record ResolverProject {
   public aliases: Vector<ResolverAlias>;
   public flags: CompileFlags;
   public optLevel: u64;
+  public cflags: Vector<String>;
 }
 
 record AliasResolution {
@@ -77,6 +78,9 @@ export record DiscoveryResult {
   /// `[build] opt_level` from the project file, handed to the C toolchain as
   /// `-O<level>` so the level never depends on the host driver's own default.
   public optLevel: u64;
+  /// `[build] cflags` from the project file, forwarded verbatim to the C
+  /// toolchain after the profile flags so a project can override them.
+  public cflags: Vector<String>;
 
   public orderCount(&self): u64 {
     return self.order.length();
@@ -273,6 +277,22 @@ function resolverStringArray(value: &String): Vector<String> {
   return items;
 }
 
+function resolverCloneStrings(source: &Vector<String>): Vector<String> {
+  let mut result: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < source.length()) {
+    let Option::SOME(value) = source.get(index) else {
+      break;
+    };
+
+    result.push(value.clone());
+    index += 1;
+  }
+
+  return result;
+}
+
 function resolverPushMissingStrings(target: &mut Vector<String>, source: &Vector<String>): void {
   let mut targetRef: &mut Vector<String> = target;
   let mut index: u64 = 0;
@@ -377,6 +397,7 @@ function resolverLoadProject(
   let mut targetTriple: String = CompileFlags::defaultTargetTriple();
   let mut tomlDebug: boolean = false;
   let mut optLevel: u64 = 0;
+  let mut cflags: Vector<String> = Vector::new<String>();
   let mut defaultFeatures: Vector<String> = Vector::new<String>();
   let mut knownFeatures: Vector<String> = Vector::new<String>();
   let mut aliases: Vector<ResolverAlias> = Vector::new<ResolverAlias>();
@@ -440,6 +461,10 @@ function resolverLoadProject(
         optLevel = level;
       }
 
+      if (key.equals("cflags")) {
+        cflags = resolverStringArray(&valueText);
+      }
+
       if (key.equals("default_features")) {
         defaultFeatures = resolverStringArray(&valueText);
       }
@@ -489,6 +514,7 @@ function resolverLoadProject(
     aliases: aliases,
     flags: CompileFlags::create(&targetTriple, debug, &features, &knownFeatures),
     optLevel: optLevel,
+    cflags: cflags,
   });
 }
 
@@ -1119,6 +1145,7 @@ function resolverDiscoverProjectRoots(
     stdRoot: project.stdRoot.clone(),
     flags: project.flags.clone(),
     optLevel: project.optLevel,
+    cflags: resolverCloneStrings(&project.cflags),
   });
 }
 
@@ -1234,6 +1261,50 @@ function resolverReadsOptLevelFromProjectFile(): void {
   };
 
   Test::assertEq<u64>(discovery.optLevel, 2);
+}
+
+/// `[build] cflags` in the project's `ignis.toml` are the flags the C toolchain
+/// is invoked with on top of the profile's own.
+@test
+function resolverReadsCflagsFromProjectFile(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/build_profile");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<u64>(discovery.cflags.length(), 2);
+
+  let Option::SOME(first) = discovery.cflags.get(0) else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(second) = discovery.cflags.get(1) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(first.toStr(), "-Wall");
+  Test::assertEq<str>(second.toStr(), "-fno-omit-frame-pointer");
+}
+
+/// A project file without `[build] cflags` hands the toolchain nothing beyond
+/// the profile flags.
+@test
+function resolverDefaultsCflagsToEmptyWithoutProjectSetting(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/acyclic");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<u64>(discovery.cflags.length(), 0);
 }
 
 /// A project file without `[build] opt_level` resolves to level 0, which the

@@ -68,18 +68,31 @@ function toolchainErrorDiag(code: str, error: &ToolchainError): DiagnosticBag {
 ///
 /// Mirrors the Rust oracle `compile_to_object` in `crates/ignis_driver/src/link.rs`.
 export namespace CCompiler {
-  /// The optimization and debug flags a build profile asks the C toolchain for.
+  /// The optimization and debug flags a build profile asks the C toolchain for,
+  /// followed by the project's own `[build] cflags`.
   ///
   /// The level is always stated, including `-O0`. Leaving it out would hand the
   /// decision to the C driver's own default, which differs between toolchains, so
-  /// the same project would be built at levels an order of magnitude apart.
-  function profileFlags(optLevel: u64, debug: boolean): Vector<String> {
+  /// the same project would be built at levels an order of magnitude apart. The
+  /// project flags come last so a project can override what the profile asked for.
+  function profileFlags(optLevel: u64, debug: boolean, cflags: &Vector<String>): Vector<String> {
     let mut flags: Vector<String> = Vector::new<String>();
     let level: String = `-O${optLevel}`;
     flags.push(level);
 
     if (debug) {
       flags.push(String::create("-g"));
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < cflags.length()) {
+      let Option::SOME(flag) = cflags.get(index) else {
+        break;
+      };
+
+      flags.push(flag.clone());
+      index += 1;
     }
 
     return flags;
@@ -409,25 +422,57 @@ function cCompilerFlagsText(flags: &Vector<String>): String {
   return text;
 }
 
+function cCompilerNoCflags(): Vector<String> {
+  return Vector::new<String>();
+}
+
 @test
 function cCompilerProfileFlagsStateTheOptimizationLevel(): void {
-  let flags: Vector<String> = CCompiler::profileFlags(2, false);
+  let cflags: Vector<String> = cCompilerNoCflags();
+  let flags: Vector<String> = CCompiler::profileFlags(2, false, &cflags);
   let text: String = cCompilerFlagsText(&flags);
   Test::assertEq<str>(text.toStr(), "-O2");
 }
 
 @test
 function cCompilerProfileFlagsStateLevelZeroInsteadOfOmittingIt(): void {
-  let flags: Vector<String> = CCompiler::profileFlags(0, false);
+  let cflags: Vector<String> = cCompilerNoCflags();
+  let flags: Vector<String> = CCompiler::profileFlags(0, false, &cflags);
   let text: String = cCompilerFlagsText(&flags);
   Test::assertEq<str>(text.toStr(), "-O0");
 }
 
 @test
 function cCompilerProfileFlagsRequestDebugInfoOnlyWhenAsked(): void {
-  let flags: Vector<String> = CCompiler::profileFlags(2, true);
+  let cflags: Vector<String> = cCompilerNoCflags();
+  let flags: Vector<String> = CCompiler::profileFlags(2, true, &cflags);
   let text: String = cCompilerFlagsText(&flags);
   Test::assertEq<str>(text.toStr(), "-O2 -g");
+}
+
+/// A project's `[build] cflags` reach the C toolchain after the profile flags,
+/// which is what lets a project override the level the profile asked for.
+@test
+function cCompilerProfileFlagsAppendProjectCflags(): void {
+  let mut cflags: Vector<String> = Vector::new<String>();
+  cflags.push(String::create("-fsanitize=leak"));
+  cflags.push(String::create("-fno-omit-frame-pointer"));
+
+  let flags: Vector<String> = CCompiler::profileFlags(1, false, &cflags);
+  let text: String = cCompilerFlagsText(&flags);
+  Test::assertEq<str>(text.toStr(), "-O1 -fsanitize=leak -fno-omit-frame-pointer");
+}
+
+/// Project flags are appended after `-g`, so debug info and the project's own
+/// flags never trade places depending on which the profile asked for.
+@test
+function cCompilerProfileFlagsAppendProjectCflagsAfterDebugInfo(): void {
+  let mut cflags: Vector<String> = Vector::new<String>();
+  cflags.push(String::create("-Wall"));
+
+  let flags: Vector<String> = CCompiler::profileFlags(0, true, &cflags);
+  let text: String = cCompilerFlagsText(&flags);
+  Test::assertEq<str>(text.toStr(), "-O0 -g -Wall");
 }
 
 @test
