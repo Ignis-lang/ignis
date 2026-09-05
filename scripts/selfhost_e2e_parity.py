@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
 """Run a host end-to-end corpus through a selfhost-built compiler.
 
-`--corpus ok` (the default) materialises every `e2e_test`,
-`e2e_test_allow_leak` and `e2e_workspace_std_test` case in
-`crates/ignis_driver/tests/e2e_ok.rs` as a small Ignis project, compiles it with
-the given compiler binary and runs it. The observed exit code, stdout and stderr
-are formatted exactly like the host's `format_e2e_result` and compared with the
-recorded insta snapshot.
+`--corpus ok` (the default) materialises every `.ign` fixture under
+`test_cases/e2e/ok` as a small Ignis project, compiles it with the given
+compiler binary and runs it. The observed exit code, stdout and stderr are
+formatted exactly like the host's `format_e2e_result` and compared with the
+fixture's own `__snapshots__/<name>.snap` baseline.
 
-Cases the host compiles under LeakSanitizer are replayed the same way: the
-generated project asks for `-fsanitize=leak` through `[build] cflags` and the
-binary runs with leak checking on, so a selfhost whose output leaks memory is
-reported as `leak` instead of passing. `--no-leak-check` turns that off.
+A fixture's leading `// e2e: <option>` header lines select its mode, the same
+way `ignis test` reads them (see `crates/ignis_driver/src/fixture_tests.rs`):
+`std` forces the standard library on (irrelevant here, since every generated
+project already links std), `allow-leak` exempts the case from leak checking,
+`err` and `warn` route it to the error corpus below instead of a program run.
 
-`--corpus err` runs the error corpus (`crates/ignis_driver/tests/e2e_err.rs`)
-under the "equal or better" rule: every diagnostic line the host records must
-appear in the selfhost's output, while diagnostics the host does not emit are
-allowed. Cases are only compiled; the host helpers behind that corpus record
-analysis diagnostics and never run a binary.
+Cases run under LeakSanitizer are replayed the same way the host testsuite
+would: the generated project asks for `-fsanitize=leak` through
+`[build] cflags` and the binary runs with leak checking on, so a selfhost
+whose output leaks memory is reported as `leak` instead of passing.
+`--no-leak-check` turns that off.
+
+`--corpus err` runs every fixture under `test_cases/e2e/err` under the
+"equal or better" rule: every diagnostic line the fixture's baseline records
+must appear in the selfhost's output, while diagnostics the baseline does not
+emit are allowed. This covers both `// e2e: err` fixtures (the baseline holds
+error diagnostics) and `// e2e: warn` fixtures (the baseline holds warning
+diagnostics); cases are only compiled, never run.
 """
 
 import argparse
@@ -35,36 +42,23 @@ from pathlib import Path
 CORPUS_OK = "ok"
 CORPUS_ERR = "err"
 
-# `e2e_error_test` and `e2e_ownership_error_test` snapshot the error messages of
-# a program the host rejects; `e2e_warning_test` snapshots the warnings of a
-# program the host accepts. None of the three runs the produced binary.
+# A `// e2e: err` fixture's baseline holds error diagnostics; a `// e2e: warn`
+# fixture's baseline holds warning diagnostics. Neither runs the produced
+# binary.
 KIND_RUN = "run"
 KIND_ERROR = "error"
 KIND_WARNING = "warning"
 
-CASE_HELPERS = {
-  CORPUS_OK: {
-    "e2e_test": KIND_RUN,
-    "e2e_test_allow_leak": KIND_RUN,
-    "e2e_workspace_std_test": KIND_RUN,
-  },
-  CORPUS_ERR: {
-    "e2e_error_test": KIND_ERROR,
-    "e2e_ownership_error_test": KIND_ERROR,
-    "e2e_warning_test": KIND_WARNING,
-  },
+FIXTURE_DIR = {
+  CORPUS_OK: "test_cases/e2e/ok",
+  CORPUS_ERR: "test_cases/e2e/err",
 }
 
-CORPUS_FILE = {
-  CORPUS_OK: "crates/ignis_driver/tests/e2e_ok.rs",
-  CORPUS_ERR: "crates/ignis_driver/tests/e2e_err.rs",
-}
+FIXTURE_HEADER_MARKER = "// e2e:"
 
-SNAPSHOT_PREFIX = {CORPUS_OK: "e2e_ok__", CORPUS_ERR: "e2e_err__"}
-
-# `e2e_test_allow_leak` is the host's escape hatch for a case whose leak is
-# known and accepted; it compiles without the sanitizer, and so does the replay.
-LEAK_EXEMPT_HELPERS = {"e2e_test_allow_leak"}
+# The header option that exempts a fixture from leak checking, mirroring the
+# host's escape hatch for a case whose leak is known and accepted.
+LEAK_EXEMPT_HELPERS = {"allow-leak"}
 
 LEAK_CFLAGS = ("-fsanitize=leak", "-g", "-fno-omit-frame-pointer")
 LSAN_ENVIRONMENT = "detect_leaks=1:leak_check_at_exit=1"
@@ -129,167 +123,72 @@ class CaseResult:
   leak_report: str = ""
 
 
-class SourceScanner:
-  """Minimal scanner over the Rust corpus, sufficient for the call shapes used."""
+def parse_fixture_header(source: str) -> tuple[str, str]:
+  """Reads a fixture's mode from its leading `// e2e: <option>` comment lines.
 
-  def __init__(self, text: str):
-    self.text = text
-    self.position = 0
+  Mirrors `crates/ignis_driver/src/fixture_tests.rs::parse_fixture_header`:
+  scanning stops at the first line that is neither blank nor a comment.
+  Returns `(kind, helper)`, where `helper` is `"allow-leak"` for a program
+  fixture that opted out of leak checking, and `""` otherwise.
+  """
+  is_err = False
+  is_warn = False
+  allow_leak = False
 
-  def skip_trivia(self) -> None:
-    while self.position < len(self.text):
-      character = self.text[self.position]
+  for line in source.splitlines():
+    trimmed = line.strip()
 
-      if character.isspace():
-        self.position += 1
-        continue
+    if trimmed == "":
+      continue
 
-      if self.text.startswith("//", self.position):
-        end = self.text.find("\n", self.position)
-        self.position = len(self.text) if end == -1 else end + 1
-        continue
-
+    if not trimmed.startswith("//"):
       break
 
-  def read_plain_string(self) -> str | None:
-    if self.position >= len(self.text) or self.text[self.position] != '"':
-      return None
+    if not trimmed.startswith(FIXTURE_HEADER_MARKER):
+      continue
 
-    self.position += 1
-    characters = []
+    options = trimmed[len(FIXTURE_HEADER_MARKER):]
 
-    while self.position < len(self.text):
-      character = self.text[self.position]
+    for option in options.split(","):
+      option = option.strip()
 
-      if character == "\\":
-        characters.append(self.text[self.position:self.position + 2])
-        self.position += 2
-        continue
+      if option == "err":
+        is_err = True
+      elif option == "warn":
+        is_warn = True
+      elif option == "allow-leak":
+        allow_leak = True
 
-      if character == '"':
-        self.position += 1
-        return "".join(characters)
+  if is_err:
+    return KIND_ERROR, ""
 
-      characters.append(character)
-      self.position += 1
+  if is_warn:
+    return KIND_WARNING, ""
 
-    return None
-
-  def read_raw_string(self) -> str | None:
-    if self.position >= len(self.text) or self.text[self.position] != "r":
-      return None
-
-    cursor = self.position + 1
-    hashes = 0
-
-    while cursor < len(self.text) and self.text[cursor] == "#":
-      hashes += 1
-      cursor += 1
-
-    if cursor >= len(self.text) or self.text[cursor] != '"':
-      return None
-
-    terminator = '"' + "#" * hashes
-    end = self.text.find(terminator, cursor + 1)
-
-    if end == -1:
-      return None
-
-    value = self.text[cursor + 1:end]
-    self.position = end + len(terminator)
-
-    return value
+  return KIND_RUN, ("allow-leak" if allow_leak else "")
 
 
-def unescape_rust_string(value: str) -> str:
-  escapes = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\", '"': '"', "'": "'"}
-  characters = []
-  index = 0
-
-  while index < len(value):
-    character = value[index]
-
-    if character == "\\" and index + 1 < len(value):
-      following = value[index + 1]
-
-      if following in escapes:
-        characters.append(escapes[following])
-        index += 2
-        continue
-
-    characters.append(character)
-    index += 1
-
-  return "".join(characters)
-
-
-def extract_cases(
-  corpus_path: Path,
-  helpers: dict[str, str],
-) -> list[Case]:
-  text = corpus_path.read_text(encoding="utf-8")
-  pattern = re.compile(r"(?<![A-Za-z0-9_])(" + "|".join(helpers) + r")\s*\(")
+def extract_fixture_cases(corpus: str, repository_root: Path) -> list[Case]:
+  """Reads every `.ign` fixture under the corpus directory, source and header."""
+  fixture_dir = repository_root / FIXTURE_DIR[corpus]
   cases: list[Case] = []
 
-  for match in pattern.finditer(text):
-    helper = match.group(1)
-    kind = helpers[helper]
-    preceding = text.rfind("\n", 0, match.start())
-
-    # `fn e2e_test(` declares the helper instead of calling it.
-    if text[preceding + 1:match.start()].rstrip().endswith("fn"):
-      continue
-
-    scanner = SourceScanner(text)
-    scanner.position = match.end()
-    scanner.skip_trivia()
-
-    raw_name = scanner.read_plain_string()
-
-    if raw_name is None:
-      continue
-
-    name = unescape_rust_string(raw_name)
-
-    scanner.skip_trivia()
-
-    if scanner.position >= len(text) or text[scanner.position] != ",":
-      cases.append(Case(name, helper, None, kind, skip_reason="source not literal"))
-      continue
-
-    scanner.position += 1
-    scanner.skip_trivia()
-
-    source = scanner.read_raw_string()
-
-    if source is None:
-      source = scanner.read_plain_string()
-      source = unescape_rust_string(source) if source is not None else None
-
-    if source is None:
-      cases.append(Case(name, helper, None, kind, skip_reason="source not literal"))
-      continue
+  for fixture_path in sorted(fixture_dir.rglob("*.ign")):
+    name = fixture_path.relative_to(fixture_dir).with_suffix("").as_posix()
+    source = fixture_path.read_text(encoding="utf-8")
+    kind, helper = parse_fixture_header(source)
 
     cases.append(Case(name, helper, source, kind))
 
   return cases
 
 
-def read_snapshot_body(snapshot_path: Path) -> str | None:
+def read_fixture_snapshot(snapshot_path: Path) -> str | None:
+  """Reads a fixture baseline, which is the raw expected body with no header."""
   if not snapshot_path.is_file():
     return None
 
-  text = snapshot_path.read_text(encoding="utf-8")
-  lines = text.split("\n")
-
-  if not lines or lines[0].strip() != "---":
-    return None
-
-  for index in range(1, len(lines)):
-    if lines[index].strip() == "---":
-      return "\n".join(lines[index + 1:]).rstrip("\n")
-
-  return None
+  return snapshot_path.read_text(encoding="utf-8")
 
 
 def format_e2e_result(exit_code: int, stdout: str, stderr: str) -> str:
@@ -843,21 +742,20 @@ def main() -> int:
     print(f"error: std directory not found: {std_path}", file=sys.stderr)
     return 2
 
-  corpus_path = repository_root / CORPUS_FILE[corpus]
-  snapshots_dir = repository_root / "crates/ignis_driver/tests/snapshots"
-  cases = extract_cases(corpus_path, CASE_HELPERS[corpus])
+  corpus_dir = repository_root / FIXTURE_DIR[corpus]
+  cases = extract_fixture_cases(corpus, repository_root)
 
   if arguments.filter:
     cases = [case for case in cases if arguments.filter in case.name]
 
   for case in cases:
-    case.snapshot = read_snapshot_body(snapshots_dir / f"{SNAPSHOT_PREFIX[corpus]}{case.name}.snap")
+    case.snapshot = read_fixture_snapshot(corpus_dir / "__snapshots__" / f"{case.name}.snap")
 
   work_dir = Path(arguments.work_dir).resolve() if arguments.work_dir else repository_root / f"build/parity-{corpus}"
   work_dir.mkdir(parents=True, exist_ok=True)
 
   print(f"[parity] compiler: {compiler}")
-  print(f"[parity] corpus:   {corpus} ({corpus_path.relative_to(repository_root)})")
+  print(f"[parity] corpus:   {corpus} ({corpus_dir.relative_to(repository_root)})")
   print(f"[parity] cases:    {len(cases)} (jobs: {arguments.jobs})")
   print(f"[parity] leaks:    {'checked' if leak_check else 'not checked'}")
 

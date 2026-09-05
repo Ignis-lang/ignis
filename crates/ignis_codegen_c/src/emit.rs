@@ -407,6 +407,11 @@ impl<'a> CEmitter<'a> {
             } => needs_math = true,
             Instr::BitCast { .. } => needs_string = true,
             Instr::BuiltinEq { ty, .. } if matches!(self.types.get(ty), Type::Str) => needs_string = true,
+            Instr::Store { dest, .. }
+              if matches!(self.types.get(&func.locals.get(dest).ty), Type::FixedArray { .. }) =>
+            {
+              needs_string = true;
+            },
             _ => {},
           }
         }
