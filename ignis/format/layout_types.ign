@@ -25,6 +25,29 @@ function joinTypeSegments(segments: &Vector<String>): String {
   return result;
 }
 
+/// Shared by `layout_expressions.ign` (`LetCondition` fallback pattern text)
+/// and `layout_types.ign`'s own `formatPattern`; lives here rather than in
+/// `layout_statements.ign` so `formatPattern` can be shared without either
+/// direction importing the other.
+function sliceFormatSpan(source: &String, span: &SourceSpan): String {
+  let mut start: u64 = span.start;
+  let mut end: u64 = span.end;
+
+  if (start > source.length()) {
+    start = source.length();
+  }
+
+  if (end > source.length()) {
+    end = source.length();
+  }
+
+  if (start > end) {
+    return String::new();
+  }
+
+  return source.substringBytes(start, end);
+}
+
 export namespace Format {
   /// Renders an `Ast::Type::Node` back to source text. Mirrors the host's
   /// `AstChunkFormatter::format_type`, which is a plain recursive string
@@ -190,5 +213,99 @@ export namespace Format {
     }
 
     return SourceSpan::new("", 0, 0);
+  }
+
+  /// Moved from `layout_statements.ign` so `layout_expressions.ign` (which
+  /// `layout_statements.ign` already imports) can render `LetCondition`
+  /// patterns without creating an import cycle.
+  function formatPattern(module: &Ast::Module, patternId: Ast::PatternId, source: &String): String {
+    let Option::SOME(node) = module.patterns.get(patternId) else {
+      return String::new();
+    };
+
+    if (let Ast::Pattern::Node::Wildcard(_) = node) {
+      return String::create("_");
+    }
+
+    if (let Ast::Pattern::Node::Binding(binding) = node) {
+      return binding.name.clone();
+    }
+
+    if (let Ast::Pattern::Node::Tuple(tuple) = node) {
+      let mut result: String = String::create("(");
+      let mut index: u64 = 0;
+
+      while (index < tuple.elements.length()) {
+        let Option::SOME(elementId) = tuple.elements.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          result.pushStr(", ");
+        }
+
+        let elementText: String = Format::formatPattern(module, *elementId, source);
+        result.push(&elementText);
+        index += 1;
+      }
+
+      result.pushStr(")");
+      return result;
+    }
+
+    if (let Ast::Pattern::Node::Or(orPattern) = node) {
+      let mut result: String = String::new();
+      let mut index: u64 = 0;
+
+      while (index < orPattern.alternatives.length()) {
+        let Option::SOME(alternativeId) = orPattern.alternatives.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (index > 0) {
+          result.pushStr(" | ");
+        }
+
+        let alternativeText: String = Format::formatPattern(module, *alternativeId, source);
+        result.push(&alternativeText);
+        index += 1;
+      }
+
+      return result;
+    }
+
+    if (let Ast::Pattern::Node::Path(path) = node) {
+      let mut result: String = Format::joinSegments(&path.segments, "::");
+
+      if (path.arguments.length() > 0) {
+        let mut argsText: String = String::create("(");
+        let mut index: u64 = 0;
+
+        while (index < path.arguments.length()) {
+          let Option::SOME(argumentId) = path.arguments.get(index) else {
+            index += 1;
+            continue;
+          };
+
+          if (index > 0) {
+            argsText.pushStr(", ");
+          }
+
+          let argumentText: String = Format::formatPattern(module, *argumentId, source);
+          argsText.push(&argumentText);
+          index += 1;
+        }
+
+        argsText.pushStr(")");
+        result.push(&argsText);
+      }
+
+      return result;
+    }
+
+    let span: SourceSpan = Format::patternSpanOf(node);
+    return sliceFormatSpan(source, &span).trimAsciiWhitespace();
   }
 }

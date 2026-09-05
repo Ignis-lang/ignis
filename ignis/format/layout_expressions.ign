@@ -408,8 +408,7 @@ export namespace Format {
   }
 
   /// Renders an `Ast::Expression::Node`. Kinds without a dedicated case here
-  /// (`Match`, `Lambda`, `RecordInit` when it spans one line, `LetCondition`,
-  /// `Pipe`/`PipePlaceholder`, `CaptureOverride`, `BuiltinCall`, `Block`,
+  /// (`Match`, `Lambda`, `RecordInit` when it spans one line, `Pipe`, `Block`,
   /// `If`-expression, `VectorLiteral`) fall back to a verbatim slice of that
   /// expression's own span, the same graceful-degradation strategy the host
   /// itself uses for multiline calls/record-inits/matches (`is_multiline_source`).
@@ -661,6 +660,55 @@ export namespace Format {
       result.push(&inner);
       result.pushStr("]");
       return result;
+    }
+
+    if (let Ast::Expression::Node::LetCondition(letCondition) = node) {
+      let patternText: String = Format::formatPattern(module, letCondition.pattern, source);
+      let valueText: String = Format::formatExpressionNode(module, letCondition.value, 0, source);
+
+      let mut result: String = String::create("let ");
+      result.push(&patternText);
+      result.pushStr(" = ");
+      result.push(&valueText);
+      return result;
+    }
+
+    if (let Ast::Expression::Node::PipePlaceholder(_) = node) {
+      return String::create("_");
+    }
+
+    if (let Ast::Expression::Node::CaptureOverride(captureOverride) = node) {
+      let inner: String = Format::formatExpressionNode(module, captureOverride.expression, 11, source);
+      let mut result: String = String::new();
+
+      if (captureOverride.kind == Ast::Expression::CaptureOverrideKind::Move) {
+        result.pushStr("@move ");
+      } else if (captureOverride.kind == Ast::Expression::CaptureOverrideKind::Ref) {
+        result.pushStr("@ref ");
+      } else {
+        result.pushStr("@refMut ");
+      }
+
+      result.push(&inner);
+      return result;
+    }
+
+    if (let Ast::Expression::Node::BuiltinCall(builtinCall) = node) {
+      let mut formatted: String = String::create("@");
+      formatted.push(&builtinCall.name);
+
+      if (builtinCall.typeArguments.length() > 0) {
+        let typeArgs: String = Format::joinFormattedTypes(module, &builtinCall.typeArguments, source);
+        formatted.pushStr("<");
+        formatted.push(&typeArgs);
+        formatted.pushStr(">");
+      }
+
+      let argumentsText: String = Format::joinFormattedExpressions(module, &builtinCall.arguments, source);
+      formatted.pushStr("(");
+      formatted.push(&argumentsText);
+      formatted.pushStr(")");
+      return formatted;
     }
 
     let span: SourceSpan = Ast::Serializer::expressionSpan(node);
