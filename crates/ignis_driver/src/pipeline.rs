@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use colored::*;
 use ignis_ast::display::format_ast_nodes;
@@ -1805,11 +1805,461 @@ fn build_test_harness_plan(
   }
 }
 
+/// Optional behaviour switches for a native test run.
+#[derive(Debug, Clone, Default)]
+pub struct TestRunOptions {
+  /// Substring filter applied to fully qualified plan entry names.
+  pub filter: Option<String>,
+
+  /// Create or replace the selected snapshots instead of failing on a mismatch.
+  pub update_snapshots: bool,
+
+  /// Fixture directories added to the ones the project declares.
+  pub fixture_dirs: Vec<PathBuf>,
+
+  /// `(k, n)` shard selection: run only the entries whose zero-based position
+  /// in the full plan is congruent to `k - 1` modulo `n`.
+  pub partition: Option<(usize, usize)>,
+
+  /// Wall-clock budget for a single test process.
+  pub timeout: Option<Duration>,
+}
+
+/// Environment variable consulted when no explicit `--test-timeout` was given.
+const TEST_TIMEOUT_ENV: &str = "IGNIS_TEST_TIMEOUT";
+
+/// Wall-clock budget applied to a test process when nothing else selects one.
+const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Parses a `k/n` shard selector.
+pub fn parse_partition_spec(raw: &str) -> Result<(usize, usize), String> {
+  let invalid = || format!("Invalid partition '{}': expected the form k/n, for example 1/4", raw);
+
+  let (index, count) = raw.split_once('/').ok_or_else(invalid)?;
+  let index: usize = index.trim().parse().map_err(|_| invalid())?;
+  let count: usize = count.trim().parse().map_err(|_| invalid())?;
+
+  if count == 0 || index == 0 || index > count {
+    return Err(format!("Invalid partition '{}': expected 1 <= k <= n with n >= 1", raw));
+  }
+
+  Ok((index, count))
+}
+
+impl TestRunOptions {
+  /// Options for the historical `filter` plus `update_snapshots` entry points.
+  pub fn new(
+    filter: Option<&str>,
+    update_snapshots: bool,
+  ) -> Self {
+    Self {
+      filter: filter.map(str::to_string),
+      update_snapshots,
+      ..Self::default()
+    }
+  }
+
+  fn resolved_timeout(&self) -> Duration {
+    if let Some(timeout) = self.timeout {
+      return timeout;
+    }
+
+    std::env::var(TEST_TIMEOUT_ENV)
+      .ok()
+      .and_then(|raw| raw.trim().parse::<u64>().ok())
+      .filter(|seconds| *seconds > 0)
+      .map(Duration::from_secs)
+      .unwrap_or(DEFAULT_TEST_TIMEOUT)
+  }
+
+  fn validate(&self) -> Result<(), String> {
+    let Some((index, count)) = self.partition else {
+      return Ok(());
+    };
+
+    if count == 0 || index == 0 || index > count {
+      return Err(format!(
+        "Invalid partition '{}/{}': expected 1 <= k <= n with n >= 1",
+        index, count
+      ));
+    }
+
+    Ok(())
+  }
+}
+
+/// Everything a single test run will execute, in report order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TestPlan {
+  harness: crate::backend::TestHarnessPlan,
+  fixtures: Vec<crate::fixture_tests::FixtureCase>,
+}
+
+impl TestPlan {
+  fn is_empty(&self) -> bool {
+    self.harness.tests.is_empty() && self.fixtures.is_empty()
+  }
+
+  fn entry_names(&self) -> Vec<&str> {
+    let mut names: Vec<&str> = self.harness.tests.iter().map(|test| test.fq_name.as_str()).collect();
+    names.extend(self.fixtures.iter().map(|fixture| fixture.name.as_str()));
+    names
+  }
+}
+
+/// Builds the full plan: discovered `@test` functions first, fixtures after.
+fn build_test_plan(
+  discovered_tests: Vec<crate::backend::TestCase>,
+  fixture_dirs: &[PathBuf],
+  options: &TestRunOptions,
+) -> TestPlan {
+  let filter = options.filter.as_deref();
+  let harness = build_test_harness_plan(discovered_tests, filter);
+
+  let mut fixtures = crate::fixture_tests::discover_fixture_cases(fixture_dirs);
+
+  if let Some(filter) = filter {
+    fixtures.retain(|fixture| fixture.name.contains(filter));
+  }
+
+  apply_partition(TestPlan { harness, fixtures }, options.partition)
+}
+
+/// Keeps only the entries this shard owns, counting across the whole plan.
+///
+/// The plan is built in full first, so every shard agrees on which entry sits
+/// at which index no matter how many of them a shard ends up running.
+fn apply_partition(
+  plan: TestPlan,
+  partition: Option<(usize, usize)>,
+) -> TestPlan {
+  let Some((index, count)) = partition else {
+    return plan;
+  };
+
+  let mut position = 0;
+  let owns_next_entry = move |position: &mut usize| {
+    let owned = *position % count == index - 1;
+    *position += 1;
+    owned
+  };
+
+  let tests = plan
+    .harness
+    .tests
+    .into_iter()
+    .filter(|_| owns_next_entry(&mut position))
+    .collect();
+  let fixtures = plan
+    .fixtures
+    .into_iter()
+    .filter(|_| owns_next_entry(&mut position))
+    .collect();
+
+  TestPlan {
+    harness: crate::backend::TestHarnessPlan { tests },
+    fixtures,
+  }
+}
+
+/// Failure text for a test process the runner had to kill.
+fn format_timeout_failure(timeout: Duration) -> String {
+  if timeout.subsec_nanos() == 0 {
+    return format!("timed out after {}s", timeout.as_secs());
+  }
+
+  format!("timed out after {}s", timeout.as_secs_f64())
+}
+
+/// Compile-and-run context shared by every fixture in one run.
+struct FixtureRunContext {
+  project: crate::project::Project,
+  update_snapshots: bool,
+  timeout: Duration,
+}
+
+/// LSan reports detected leaks by overwriting the process exit code with 23.
+const LEAK_EXIT_CODE: i32 = 23;
+
+/// C flags that make a fixture binary leak-checkable.
+fn leak_check_cflags() -> Vec<String> {
+  vec![
+    "-fsanitize=leak".to_string(),
+    "-g".to_string(),
+    "-fno-omit-frame-pointer".to_string(),
+  ]
+}
+
+/// Directory a fixture compiles and runs in, isolated from every other fixture.
+fn fixture_work_dir(
+  context: &FixtureRunContext,
+  case: &crate::fixture_tests::FixtureCase,
+) -> PathBuf {
+  context
+    .project
+    .out_dir
+    .join("fixtures")
+    .join(sanitize_dump_name(&case.name))
+}
+
+/// Builds the compiler configuration a fixture is compiled with.
+///
+/// Fixtures follow the project's own standard library and C profile, so a
+/// fixture observes what a project build observes rather than a private
+/// toolchain. `bin_path` is `None` for the compile-only diagnostics mode.
+fn fixture_compile_config(
+  context: &FixtureRunContext,
+  case: &crate::fixture_tests::FixtureCase,
+  bin_path: Option<&Path>,
+  force_std: bool,
+  allow_leak: bool,
+) -> Result<Arc<IgnisConfig>, String> {
+  let project = &context.project;
+
+  if force_std && project.std_path.is_none() {
+    return Err("fixture requires the standard library but the project has std disabled".to_string());
+  }
+
+  let mut config = IgnisConfig::new_basic(false, Vec::new(), true, 0);
+
+  if let Some(std_path) = &project.std_path {
+    config.std_path = std_path.to_string_lossy().to_string();
+    config.manifest = load_manifest(std_path);
+  }
+
+  if let Some(target_triple) = &project.target_triple {
+    config.target_triple = target_triple.clone();
+  }
+
+  config.std = project.std_path.is_some();
+  config.auto_load_std = project.std_path.is_some();
+  config.build_debug = project.debug;
+  config.opt_level = project.opt_level;
+  config.c_compiler = project.cc.clone();
+  config.aliases = project.aliases.clone();
+  config.cflags = project.cflags.clone();
+
+  if !allow_leak && bin_path.is_some() {
+    config.cflags.extend(leak_check_cflags());
+  }
+
+  config.build = bin_path.is_some();
+  config.build_config = Some(IgnisBuildConfig::new(
+    Some(case.path.to_string_lossy().to_string()),
+    project.target,
+    false,
+    project.opt_level > 0,
+    project.out_dir.to_string_lossy().to_string(),
+    Vec::new(),
+    None,
+    None,
+    None,
+    None,
+    bin_path.map(|path| path.to_string_lossy().to_string()),
+    false,
+    bin_path.is_some(),
+    false,
+    bin_path.is_none(),
+    false,
+  ));
+
+  Ok(Arc::new(config))
+}
+
+/// Collects the error diagnostics a fixture produces, without printing them.
+///
+/// Discovery runs in the collecting mode so a fixture that fails to lex or
+/// parse still reports its diagnostics instead of aborting the run. Ownership
+/// and borrow errors only surface after monomorphization, so they are gathered
+/// in a second step, and only when the front end itself is clean.
+fn fixture_error_diagnostics(
+  config: &Arc<IgnisConfig>,
+  entry_path: &Path,
+) -> Vec<String> {
+  let mut ctx = CompilationContext::new(config);
+  let root_id = ctx
+    .discover_modules_lsp(entry_path.to_string_lossy().as_ref(), config)
+    .ok();
+
+  let discovery_diagnostics = std::mem::take(&mut ctx.discovery_diagnostics);
+  let mut messages = error_diagnostic_messages(&discovery_diagnostics, false);
+
+  let Some(root_id) = root_id else {
+    return messages;
+  };
+
+  if config.std && config.auto_load_std {
+    ctx.discover_prelude_modules_for_all_lsp(config);
+  }
+
+  ctx.module_graph.root = Some(root_id);
+
+  if ctx.module_graph.detect_cycles().is_err() {
+    return messages;
+  }
+
+  let order = ctx.module_graph.topological_sort();
+  let (output, _, _) = ctx.analyze_modules_collect_all(&order, config, false);
+
+  messages.extend(error_diagnostic_messages(&output.diagnostics, false));
+
+  if !messages.is_empty() {
+    return messages;
+  }
+
+  let mut types = output.types.clone();
+  let mono_roots = {
+    let symbols = output.symbols.borrow();
+    collect_mono_roots(&output.defs, &symbols)
+  };
+  let mono_output = ignis_analyzer::mono::Monomorphizer::new(
+    &output.hir,
+    &output.defs,
+    &output.namespaces,
+    &mut types,
+    output.symbols.clone(),
+  )
+  .run(&mono_roots);
+
+  let symbols = output.symbols.borrow();
+  let ownership_checker =
+    ignis_analyzer::HirOwnershipChecker::new(&mono_output.hir, &types, &mono_output.defs, &symbols);
+  let (_, ownership_diagnostics) = ownership_checker.check();
+
+  let borrow_checker = ignis_analyzer::HirBorrowChecker::new(&mono_output.hir, &types, &mono_output.defs, &symbols);
+  let borrow_diagnostics = borrow_checker.check();
+
+  messages.extend(error_diagnostic_messages(&ownership_diagnostics, true));
+  messages.extend(error_diagnostic_messages(&borrow_diagnostics, true));
+
+  messages
+}
+
+/// Renders error diagnostics the way the Rust e2e helpers rendered them.
+///
+/// Front-end cases record the bare message; ownership and borrow cases also
+/// carry their notes, because that is what their baselines hold.
+fn error_diagnostic_messages(
+  diagnostics: &[ignis_diagnostics::diagnostic_report::Diagnostic],
+  include_notes: bool,
+) -> Vec<String> {
+  diagnostics
+    .iter()
+    .filter(|diagnostic| matches!(diagnostic.severity, ignis_diagnostics::diagnostic_report::Severity::Error))
+    .map(|diagnostic| {
+      if !include_notes || diagnostic.notes.is_empty() {
+        return diagnostic.message.clone();
+      }
+
+      let mut parts = vec![diagnostic.message.clone()];
+      parts.extend(diagnostic.notes.iter().map(|note| format!("  note: {}", note)));
+      parts.join("\n")
+    })
+    .collect()
+}
+
+fn run_diagnostics_fixture(
+  context: &FixtureRunContext,
+  case: &crate::fixture_tests::FixtureCase,
+) -> Result<(), String> {
+  let config = fixture_compile_config(context, case, None, false, false)?;
+  let messages = fixture_error_diagnostics(&config, &case.path);
+
+  if messages.is_empty() {
+    return Err("expected the fixture to fail compilation, but it compiled cleanly".to_string());
+  }
+
+  crate::fixture_tests::compare_snapshot(&case.snapshot_path(), &messages.join("\n"), context.update_snapshots)
+}
+
+fn run_program_fixture(
+  context: &FixtureRunContext,
+  case: &crate::fixture_tests::FixtureCase,
+  force_std: bool,
+  allow_leak: bool,
+) -> Result<(), String> {
+  let work_dir = fixture_work_dir(context, case);
+  let _ = std::fs::remove_dir_all(&work_dir);
+  std::fs::create_dir_all(&work_dir)
+    .map_err(|error| format!("Failed to create fixture directory '{}': {}", work_dir.display(), error))?;
+
+  let stem = case.path.file_stem().unwrap_or_default();
+  let bin_path = work_dir.join(stem);
+  let config = fixture_compile_config(context, case, Some(&bin_path), force_std, allow_leak)?;
+
+  if compile_project(config.clone(), case.path.to_string_lossy().as_ref()).is_err() {
+    let messages = fixture_error_diagnostics(&config, &case.path);
+
+    if messages.is_empty() {
+      return Err("compilation failed".to_string());
+    }
+
+    return Err(format!("compilation failed\n{}", messages.join("\n")));
+  }
+
+  let mut command = Command::new(&bin_path);
+  command.env(
+    "LSAN_OPTIONS",
+    if allow_leak {
+      "detect_leaks=0"
+    } else {
+      "detect_leaks=1:leak_check_at_exit=1:use_stacks=0"
+    },
+  );
+
+  let outcome = crate::process::run_with_timeout(&mut command, context.timeout)
+    .map_err(|error| format!("Failed to run fixture '{}': {}", case.name, error))?;
+
+  if outcome.timed_out {
+    return Err(format_timeout_failure(context.timeout));
+  }
+
+  let (program_stderr, leak_report) = crate::fixture_tests::split_leak_report(&outcome.stderr);
+
+  if !allow_leak && outcome.exit_code == LEAK_EXIT_CODE {
+    return Err(format!("LeakSanitizer detected a memory leak\n{}", leak_report));
+  }
+
+  let body = crate::fixture_tests::format_program_snapshot(outcome.exit_code, &outcome.stdout, &program_stderr);
+
+  crate::fixture_tests::compare_snapshot(&case.snapshot_path(), &body, context.update_snapshots)
+}
+
+fn run_single_fixture(
+  context: &FixtureRunContext,
+  case: &crate::fixture_tests::FixtureCase,
+) -> TestExecutionResult {
+  let outcome = match &case.mode {
+    Err(error) => Err(error.clone()),
+    Ok(crate::fixture_tests::FixtureMode::Diagnostics) => run_diagnostics_fixture(context, case),
+    Ok(crate::fixture_tests::FixtureMode::Program { force_std, allow_leak }) => {
+      run_program_fixture(context, case, *force_std, *allow_leak)
+    },
+  };
+
+  match outcome {
+    Ok(()) => TestExecutionResult {
+      fq_name: case.name.clone(),
+      success: true,
+      exit_code: 0,
+      stdout: String::new(),
+      stderr: String::new(),
+    },
+    Err(error) => TestExecutionResult {
+      fq_name: case.name.clone(),
+      success: false,
+      exit_code: 1,
+      stdout: String::new(),
+      stderr: error,
+    },
+  }
+}
+
 #[cfg(test)]
 fn plan_project_tests_for_snapshot(
   project_root: &Path,
-  filter: Option<&str>,
-) -> Result<crate::backend::TestHarnessPlan, ()> {
+  options: &TestRunOptions,
+) -> Result<TestPlan, ()> {
   let (config, project) = build_test_driver_config(project_root)?;
   let mut ctx = CompilationContext::new(&config);
   let root_id = discover_project_test_modules(&mut ctx, &project.entry, &project.source_dir, &config)?;
@@ -1830,7 +2280,33 @@ fn plan_project_tests_for_snapshot(
     discover_test_cases(&output.defs, &output.namespaces, &symbols, &module_paths, &project.source_dir)
   };
 
-  Ok(build_test_harness_plan(discovered_tests, filter))
+  Ok(build_test_plan(
+    discovered_tests,
+    &resolve_fixture_dirs(&project, options),
+    options,
+  ))
+}
+
+/// Fixture directories for a run: what the project declares, then CLI additions.
+fn resolve_fixture_dirs(
+  project: &crate::project::Project,
+  options: &TestRunOptions,
+) -> Vec<PathBuf> {
+  let mut fixture_dirs = project.test_fixture_dirs.clone();
+
+  for fixture_dir in &options.fixture_dirs {
+    let resolved = if fixture_dir.is_absolute() {
+      fixture_dir.clone()
+    } else {
+      project.root.join(fixture_dir)
+    };
+
+    if !fixture_dirs.contains(&resolved) {
+      fixture_dirs.push(resolved);
+    }
+  }
+
+  fixture_dirs
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1894,24 +2370,33 @@ fn run_single_test(
   binary_path: &Path,
   test: &crate::backend::TestCase,
   update_snapshots: bool,
+  timeout: Duration,
 ) -> Result<TestExecutionResult, String> {
   let snapshot_dir = snapshot_dir_for_test(test)?;
 
-  let output = Command::new(binary_path)
+  let mut command = Command::new(binary_path);
+  command
     .arg("--ignis-test")
     .arg(&test.fq_name)
     .env("IGNIS_TEST_NAME", &test.fq_name)
     .env("IGNIS_TEST_SNAPSHOT_DIR", &snapshot_dir)
-    .env("IGNIS_TEST_UPDATE_SNAPSHOTS", if update_snapshots { "1" } else { "0" })
-    .output()
+    .env("IGNIS_TEST_UPDATE_SNAPSHOTS", if update_snapshots { "1" } else { "0" });
+
+  let outcome = crate::process::run_with_timeout(&mut command, timeout)
     .map_err(|error| format!("Failed to run test '{}': {}", test.fq_name, error))?;
+
+  let stderr = if outcome.timed_out {
+    format_timeout_failure(timeout)
+  } else {
+    outcome.stderr
+  };
 
   Ok(TestExecutionResult {
     fq_name: test.fq_name.clone(),
-    success: output.status.success(),
-    exit_code: output.status.code().unwrap_or(1),
-    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    success: outcome.success,
+    exit_code: outcome.exit_code,
+    stdout: outcome.stdout,
+    stderr,
   })
 }
 
@@ -1947,6 +2432,7 @@ fn execute_test_harness_binary(
   binary_path: &Path,
   plan: &crate::backend::TestHarnessPlan,
   update_snapshots: bool,
+  timeout: Duration,
 ) -> Result<Vec<TestExecutionResult>, String> {
   if update_snapshots {
     prepare_snapshot_directories(plan)?;
@@ -1954,17 +2440,56 @@ fn execute_test_harness_binary(
 
   let jobs = crate::jobs::job_limit();
 
-  crate::jobs::map_parallel(&plan.tests, jobs, |test| run_single_test(binary_path, test, update_snapshots))
-    .into_iter()
-    .collect()
+  crate::jobs::map_parallel(&plan.tests, jobs, |test| {
+    run_single_test(binary_path, test, update_snapshots, timeout)
+  })
+  .into_iter()
+  .collect()
+}
+
+/// One entry of the run, whatever kind of work it stands for.
+enum PlanEntry<'a> {
+  HarnessTest(&'a crate::backend::TestCase),
+  Fixture(&'a crate::fixture_tests::FixtureCase),
+}
+
+/// Runs every selected entry through the shared worker pool, in plan order.
+///
+/// `@test` functions run as one invocation of the harness binary each, while a
+/// fixture compiles and runs its own program, but both are ordinary entries of
+/// the same report.
+fn execute_test_plan(
+  binary_path: &Path,
+  plan: &TestPlan,
+  fixture_context: &FixtureRunContext,
+  update_snapshots: bool,
+  timeout: Duration,
+) -> Result<Vec<TestExecutionResult>, String> {
+  if update_snapshots {
+    prepare_snapshot_directories(&plan.harness)?;
+    crate::fixture_tests::prepare_fixture_snapshot_directories(&plan.fixtures)?;
+  }
+
+  let mut entries: Vec<PlanEntry<'_>> = plan.harness.tests.iter().map(PlanEntry::HarnessTest).collect();
+  entries.extend(plan.fixtures.iter().map(PlanEntry::Fixture));
+
+  let jobs = crate::jobs::job_limit();
+
+  crate::jobs::map_parallel(&entries, jobs, |entry| match entry {
+    PlanEntry::HarnessTest(test) => run_single_test(binary_path, test, update_snapshots, timeout),
+    PlanEntry::Fixture(case) => Ok(run_single_fixture(fixture_context, case)),
+  })
+  .into_iter()
+  .collect()
 }
 
 #[cfg(test)]
-fn format_test_plan_snapshot(plan: &crate::backend::TestHarnessPlan) -> String {
-  let mut lines = vec![format!("selected: {}", plan.tests.len())];
+fn format_test_plan_snapshot(plan: &TestPlan) -> String {
+  let names = plan.entry_names();
+  let mut lines = vec![format!("selected: {}", names.len())];
 
-  for test in &plan.tests {
-    lines.push(format!("- {}", test.fq_name));
+  for name in names {
+    lines.push(format!("- {}", name));
   }
 
   lines.join("\n")
@@ -2049,10 +2574,36 @@ pub fn run_project_tests(
   filter: Option<&str>,
   update_snapshots: bool,
 ) -> Result<(), ()> {
+  run_project_tests_with_options(project_root, &TestRunOptions::new(filter, update_snapshots))
+}
+
+/// Describes the entry a test run targets, naming the shard when one is selected.
+fn test_run_header(
+  entry_path: &Path,
+  partition: Option<(usize, usize)>,
+) -> String {
+  match partition {
+    Some((index, count)) => format!("{} (partition {}/{})", entry_path.display(), index, count),
+    None => entry_path.display().to_string(),
+  }
+}
+
+pub fn run_project_tests_with_options(
+  project_root: &Path,
+  options: &TestRunOptions,
+) -> Result<(), ()> {
   let start = Instant::now();
+
+  if let Err(error) = options.validate() {
+    eprintln!("{} {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  let update_snapshots = options.update_snapshots;
+  let timeout = options.resolved_timeout();
   let (config, project) = build_test_driver_config(project_root)?;
 
-  cmd_header!(&config, "Testing", project.entry.display());
+  cmd_header!(&config, "Testing", test_run_header(&project.entry, options.partition));
   section!(&config, "Scanning & parsing");
 
   let mut ctx = CompilationContext::new(&config);
@@ -2082,18 +2633,24 @@ pub fn run_project_tests(
     let symbols = output.symbols.borrow();
     discover_test_cases(&output.defs, &output.namespaces, &symbols, &module_paths, &project.source_dir)
   };
-  let plan = build_test_harness_plan(discovered_tests, filter);
+  let plan = build_test_plan(discovered_tests, &resolve_fixture_dirs(&project, options), options);
 
   section!(&config, "Planning");
-  if plan.tests.is_empty() {
+  if plan.is_empty() {
     section_item!(&config, "No tests selected");
     cmd_ok!(&config, "No tests selected", start.elapsed());
     return Ok(());
   }
 
-  for test in &plan.tests {
-    section_item!(&config, "{}", test.fq_name);
+  for name in plan.entry_names() {
+    section_item!(&config, "{}", name);
   }
+
+  let fixture_context = FixtureRunContext {
+    project: project.clone(),
+    update_snapshots,
+    timeout,
+  };
 
   section!(&config, "Codegen & linking");
 
@@ -2407,7 +2964,7 @@ pub fn run_project_tests(
       symbols: &sym_table,
       headers: &link_plan.headers,
       module_paths: &module_paths,
-      plan: &plan,
+      plan: &plan.harness,
     }),
   ) {
     Ok(contents) => contents,
@@ -2484,7 +3041,7 @@ pub fn run_project_tests(
   section!(&config, "Running");
 
   let run_started = Instant::now();
-  let results = match execute_test_harness_binary(&bin_path, &plan, update_snapshots) {
+  let results = match execute_test_plan(&bin_path, &plan, &fixture_context, update_snapshots, timeout) {
     Ok(results) => results,
     Err(error) => {
       cmd_fail!(&config, "Test setup failed", start.elapsed());
@@ -2542,11 +3099,30 @@ pub fn run_single_file_tests(
   update_snapshots: bool,
   std_path_override: Option<&Path>,
 ) -> Result<(), ()> {
+  run_single_file_tests_with_options(file_path, &TestRunOptions::new(filter, update_snapshots), std_path_override)
+}
+
+/// Single-file test runs never carry fixtures: a fixture is compiled with the
+/// project's standard library and C profile, which a bare file does not have.
+pub fn run_single_file_tests_with_options(
+  file_path: &Path,
+  options: &TestRunOptions,
+  std_path_override: Option<&Path>,
+) -> Result<(), ()> {
   let start = Instant::now();
+
+  if let Err(error) = options.validate() {
+    eprintln!("{} {}", "Error:".red().bold(), error);
+    return Err(());
+  }
+
+  let filter = options.filter.as_deref();
+  let update_snapshots = options.update_snapshots;
+  let timeout = options.resolved_timeout();
   let input = build_single_file_test_driver_input(file_path, std_path_override)?;
   let config = input.config.clone();
 
-  cmd_header!(&config, "Testing", input.entry_path.display());
+  cmd_header!(&config, "Testing", test_run_header(&input.entry_path, options.partition));
   section!(&config, "Scanning & parsing");
 
   let mut ctx = CompilationContext::new(&config);
@@ -2574,7 +3150,14 @@ pub fn run_single_file_tests(
     let symbols = output.symbols.borrow();
     discover_test_cases(&output.defs, &output.namespaces, &symbols, &module_paths, &input.source_dir)
   };
-  let plan = build_test_harness_plan(discovered_tests, filter);
+  let plan = apply_partition(
+    TestPlan {
+      harness: build_test_harness_plan(discovered_tests, filter),
+      fixtures: Vec::new(),
+    },
+    options.partition,
+  )
+  .harness;
 
   section!(&config, "Planning");
   if plan.tests.is_empty() {
@@ -2940,7 +3523,7 @@ pub fn run_single_file_tests(
 
   section!(&config, "Running");
 
-  let results = match execute_test_harness_binary(&input.bin_path, &plan, update_snapshots) {
+  let results = match execute_test_harness_binary(&input.bin_path, &plan, update_snapshots, timeout) {
     Ok(results) => results,
     Err(error) => {
       cmd_fail!(&config, "Test setup failed", start.elapsed());
@@ -2997,6 +3580,7 @@ pub fn run_std_tests(
   output_dir: Option<&Path>,
 ) -> Result<(), ()> {
   let start = Instant::now();
+  let timeout = TestRunOptions::default().resolved_timeout();
   let input = build_std_test_driver_input(std_root, output_dir)?;
   let config = input.config.clone();
 
@@ -3434,7 +4018,7 @@ pub fn run_std_tests(
 
   section!(&config, "Running");
 
-  let results = match execute_test_harness_binary(&input.bin_path, &plan, update_snapshots) {
+  let results = match execute_test_harness_binary(&input.bin_path, &plan, update_snapshots, timeout) {
     Ok(results) => results,
     Err(error) => {
       cmd_fail!(&config, "Test setup failed", start.elapsed());
@@ -4472,6 +5056,7 @@ mod tests {
   use std::fs;
   use std::collections::HashMap;
   use std::path::{Path, PathBuf};
+  use std::time::Duration;
 
   use insta::assert_snapshot;
   use tempfile::TempDir;
@@ -4487,7 +5072,8 @@ mod tests {
   use super::{
     build_test_harness_plan, discover_project_test_sources, discover_std_test_companions, discover_test_cases,
     execute_test_harness_binary, format_test_plan_snapshot, format_failed_test_details, format_test_summary_snapshot,
-    is_project_test_file_name, plan_project_tests_for_snapshot, validate_std_test_layout,
+    is_project_test_file_name, plan_project_tests_for_snapshot, validate_std_test_layout, apply_partition,
+    parse_partition_spec, TestPlan, TestRunOptions,
   };
   use crate::backend::{TestCase, TestHarnessPlan};
 
@@ -4604,7 +5190,98 @@ mod tests {
       Some("adds"),
     );
 
+    let plan = TestPlan {
+      harness: plan,
+      fixtures: Vec::new(),
+    };
+
     assert_snapshot!("native_test_runner_plan_snapshot", format_test_plan_snapshot(&plan));
+  }
+
+  fn plan_with_entry_names(names: &[&str]) -> TestPlan {
+    TestPlan {
+      harness: TestHarnessPlan {
+        tests: names
+          .iter()
+          .enumerate()
+          .map(|(index, name)| TestCase {
+            def_id: ignis_type::definition::DefinitionId::new(index as u32),
+            fq_name: (*name).to_string(),
+            source_path: PathBuf::from("/tmp/project/src/math.ign"),
+          })
+          .collect(),
+      },
+      fixtures: Vec::new(),
+    }
+  }
+
+  #[test]
+  fn a_partition_keeps_only_the_entries_it_owns_in_plan_order() {
+    let plan = plan_with_entry_names(&["a", "b", "c", "d", "e"]);
+
+    assert_eq!(apply_partition(plan.clone(), Some((1, 3))).entry_names(), vec!["a", "d"]);
+    assert_eq!(apply_partition(plan.clone(), Some((2, 3))).entry_names(), vec!["b", "e"]);
+    assert_eq!(apply_partition(plan, Some((3, 3))).entry_names(), vec!["c"]);
+  }
+
+  #[test]
+  fn partitions_together_cover_every_entry_exactly_once() {
+    let plan = plan_with_entry_names(&["a", "b", "c", "d", "e", "f", "g"]);
+
+    let mut covered: Vec<String> = Vec::new();
+    for index in 1..=4 {
+      covered.extend(
+        apply_partition(plan.clone(), Some((index, 4)))
+          .entry_names()
+          .iter()
+          .map(|name| (*name).to_string()),
+      );
+    }
+    covered.sort();
+
+    assert_eq!(covered, vec!["a", "b", "c", "d", "e", "f", "g"]);
+  }
+
+  #[test]
+  fn no_partition_leaves_the_plan_untouched() {
+    let plan = plan_with_entry_names(&["a", "b", "c"]);
+
+    assert_eq!(apply_partition(plan.clone(), None), plan);
+  }
+
+  #[test]
+  fn partition_specs_are_parsed_and_validated() {
+    assert_eq!(parse_partition_spec("2/5"), Ok((2, 5)));
+    assert!(parse_partition_spec("0/5").is_err());
+    assert!(parse_partition_spec("6/5").is_err());
+    assert!(parse_partition_spec("2/0").is_err());
+    assert!(parse_partition_spec("two/5").is_err());
+    assert!(parse_partition_spec("2").is_err());
+  }
+
+  #[test]
+  fn the_test_timeout_falls_back_to_the_environment_then_the_default() {
+    let explicit = TestRunOptions {
+      timeout: Some(Duration::from_secs(7)),
+      ..TestRunOptions::default()
+    };
+
+    assert_eq!(explicit.resolved_timeout(), Duration::from_secs(7));
+
+    if std::env::var(super::TEST_TIMEOUT_ENV).is_err() {
+      assert_eq!(TestRunOptions::default().resolved_timeout(), super::DEFAULT_TEST_TIMEOUT);
+    }
+  }
+
+  #[test]
+  fn the_run_header_names_the_partition_only_when_one_is_selected() {
+    let entry = Path::new("/tmp/project/src/main.ign");
+
+    assert_eq!(super::test_run_header(entry, None), "/tmp/project/src/main.ign");
+    assert_eq!(
+      super::test_run_header(entry, Some((2, 4))),
+      "/tmp/project/src/main.ign (partition 2/4)"
+    );
   }
 
   #[test]
@@ -4622,11 +5299,12 @@ function middle(): void {}
 "#,
     );
 
-    let first = plan_project_tests_for_snapshot(project.path(), None).expect("first test plan");
-    let second = plan_project_tests_for_snapshot(project.path(), None).expect("second test plan");
+    let options = TestRunOptions::default();
+    let first = plan_project_tests_for_snapshot(project.path(), &options).expect("first test plan");
+    let second = plan_project_tests_for_snapshot(project.path(), &options).expect("second test plan");
 
-    let first_names: Vec<&str> = first.tests.iter().map(|test| test.fq_name.as_str()).collect();
-    let second_names: Vec<&str> = second.tests.iter().map(|test| test.fq_name.as_str()).collect();
+    let first_names = first.entry_names();
+    let second_names = second.entry_names();
 
     assert_eq!(first_names, vec!["main::alpha", "main::middle", "main::zebra"]);
     assert_eq!(first_names, second_names);
@@ -4710,8 +5388,8 @@ function main(): i32 {
     )
     .expect("write recursive tests");
 
-    let plan = plan_project_tests_for_snapshot(project.path(), None).expect("project test plan");
-    let names: Vec<&str> = plan.tests.iter().map(|test| test.fq_name.as_str()).collect();
+    let plan = plan_project_tests_for_snapshot(project.path(), &TestRunOptions::default()).expect("project test plan");
+    let names = plan.entry_names();
 
     assert_eq!(
       names,
@@ -4875,6 +5553,7 @@ function main(): i32 {
         ],
       },
       false,
+      Duration::from_secs(60),
     )
     .expect("execute harness binary");
 
@@ -4922,6 +5601,7 @@ function main(): i32 {
         }],
       },
       true,
+      Duration::from_secs(60),
     )
     .expect("execute harness binary");
 
