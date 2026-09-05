@@ -324,7 +324,10 @@ export namespace Format {
     return CommentBlock { lines: lines, placement: block.placement };
   }
 
-  function appendCommentBlocks(output: &mut Vector<CommentBlock>, blocks: &Vector<CommentBlock>): void {
+  function appendCommentBlocks(
+    output: &mut Vector<CommentBlock>,
+    blocks: &Vector<CommentBlock>
+  ): void {
     let mut outputRef: &mut Vector<CommentBlock> = output;
     let mut index: u64 = 0;
 
@@ -582,6 +585,10 @@ export namespace Format {
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<String, FormatError> {
+    if (let Option::SOME(templateText) = Format::templateSlice(module, node, source)) {
+      return Result::OK(templateText);
+    }
+
     if (let Ast::Expression::Node::Variable(variable) = node) {
       return Result::OK(Format::sliceSpanText(source, &variable.span).trimAsciiWhitespace());
     }
@@ -873,6 +880,206 @@ export namespace Format {
 
     let span: SourceSpan = Ast::Serializer::expressionSpan(node);
     return Result::OK(Format::sliceSpanText(source, &span).trimAsciiWhitespace());
+  }
+
+  /// The byte the leftmost leaf of `node` starts at.
+  ///
+  /// A template literal is desugared by the parser into
+  /// `String::create(head).concat(..)`, and only that leftmost leaf keeps the
+  /// opening backtick, so this is how a template is recognised again.
+  function leftmostSpanStart(module: &Ast::Module, node: &Ast::Expression::Node): u64 {
+    if (let Ast::Expression::Node::Call(call) = node) {
+      return Format::leftmostSpanStartOf(module, call.callee);
+    }
+
+    if (let Ast::Expression::Node::MemberAccess(access) = node) {
+      return Format::leftmostSpanStartOf(module, access.object);
+    }
+
+    return Ast::Serializer::expressionSpan(node).start;
+  }
+
+  function leftmostSpanStartOf(module: &Ast::Module, expressionId: Ast::ExpressionId): u64 {
+    let Option::SOME(node) = module.expressions.get(expressionId) else {
+      return 0;
+    };
+
+    return Format::leftmostSpanStart(module, node);
+  }
+
+  /// The byte just past the closing backtick of the template literal opening at
+  /// `start`, skipping escapes, nested strings and nested templates inside its
+  /// `${ ... }` interpolations.
+  function templateEndOffset(source: &String, start: u64): Option<u64> {
+    let Option::SOME(openBacktick) = source.byteAt(start) else {
+      return Option::NONE;
+    };
+
+    if (openBacktick != '`' as u8) {
+      return Option::NONE;
+    }
+
+    let mut cursor: u64 = start + 1;
+    let mut interpolationDepth: u64 = 0;
+
+    while (cursor < source.length()) {
+      let Option::SOME(byte) = source.byteAt(cursor) else {
+        return Option::NONE;
+      };
+
+      if (byte == '\\' as u8) {
+        cursor += 2;
+        continue;
+      }
+
+      if (interpolationDepth == 0) {
+        if (byte == '`' as u8) {
+          return Option::SOME(cursor + 1);
+        }
+
+        if (byte == '$' as u8) {
+          if (let Option::SOME(next) = source.byteAt(cursor + 1)) {
+            if (next == '{' as u8) {
+              interpolationDepth = 1;
+              cursor += 2;
+              continue;
+            }
+          }
+        }
+
+        cursor += 1;
+        continue;
+      }
+
+      if (byte == '{' as u8) {
+        interpolationDepth += 1;
+        cursor += 1;
+        continue;
+      }
+
+      if (byte == '}' as u8) {
+        interpolationDepth -= 1;
+        cursor += 1;
+        continue;
+      }
+
+      if (byte == '"' as u8 || byte == '\'' as u8) {
+        let Option::SOME(afterQuote) = Format::quotedLiteralEndOffset(source, cursor, byte) else {
+          return Option::NONE;
+        };
+
+        cursor = afterQuote;
+        continue;
+      }
+
+      if (byte == '`' as u8) {
+        let Option::SOME(nestedEnd) = Format::templateEndOffset(source, cursor) else {
+          return Option::NONE;
+        };
+
+        cursor = nestedEnd;
+        continue;
+      }
+
+      cursor += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function quotedLiteralEndOffset(source: &String, start: u64, quote: u8): Option<u64> {
+    let mut cursor: u64 = start + 1;
+
+    while (cursor < source.length()) {
+      let Option::SOME(byte) = source.byteAt(cursor) else {
+        return Option::NONE;
+      };
+
+      if (byte == '\\' as u8) {
+        cursor += 2;
+        continue;
+      }
+
+      if (byte == quote) {
+        return Option::SOME(cursor + 1);
+      }
+
+      cursor += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  /// True when `[start, end)` holds a `//` or `/*` comment, skipping the
+  /// string, character and template literals a `/` could hide inside.
+  ///
+  /// The selfhost AST keeps no span on a record-initializer field, so a
+  /// multiline initializer carrying a comment cannot be rebuilt without losing
+  /// it; this is what tells the renderer to keep the source text instead.
+  function regionContainsCommentText(source: &String, start: u64, end: u64): boolean {
+    let mut cursor: u64 = start;
+
+    while (cursor + 1 < end) {
+      let Option::SOME(byte) = source.byteAt(cursor) else {
+        return false;
+      };
+
+      if (byte == '"' as u8 || byte == '\'' as u8) {
+        let Option::SOME(afterQuote) = Format::quotedLiteralEndOffset(source, cursor, byte) else {
+          return false;
+        };
+
+        cursor = afterQuote;
+        continue;
+      }
+
+      if (byte == '`' as u8) {
+        let Option::SOME(afterTemplate) = Format::templateEndOffset(source, cursor) else {
+          return false;
+        };
+
+        cursor = afterTemplate;
+        continue;
+      }
+
+      if (byte == '/' as u8) {
+        let Option::SOME(next) = source.byteAt(cursor + 1) else {
+          return false;
+        };
+
+        if (next == '/' as u8 || next == '*' as u8) {
+          return true;
+        }
+      }
+
+      cursor += 1;
+    }
+
+    return false;
+  }
+
+  /// The verbatim text of the template literal `node` was desugared from, when
+  /// `node` is exactly that template. The selfhost AST keeps no template node
+  /// of its own, so the source text is the only faithful rendering.
+  function templateSlice(
+    module: &Ast::Module,
+    node: &Ast::Expression::Node,
+    source: &String
+  ): Option<String> {
+    let start: u64 = Format::leftmostSpanStart(module, node);
+
+    let Option::SOME(templateEnd) = Format::templateEndOffset(source, start) else {
+      return Option::NONE;
+    };
+
+    // A template whose last piece is an interpolation leaves the desugared
+    // root ending at that slot rather than at the closing backtick, so the
+    // node only has to fall inside the template, not finish it.
+    if (Ast::Serializer::expressionSpan(node).end > templateEnd) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(Format::sliceSource(source, start, templateEnd));
   }
 
   function formatCallExpression(
@@ -1237,6 +1444,10 @@ export namespace Format {
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<String, FormatError> {
+    if (Format::regionContainsCommentText(source, recordInit.span.start, recordInit.span.end)) {
+      return Result::OK(Format::sliceSpanText(source, &recordInit.span).trimAsciiWhitespace());
+    }
+
     let path: String = Format::formatRecordInitPath(module, recordInit, source, config)!;
 
     let mut fieldTexts: Vector<String> = Vector::new<String>();
@@ -1404,6 +1615,7 @@ export namespace Format {
     if (let Ast::Statement::Node::Let(letStatement) = node) {
       return Format::formatBindingStatement(
         module,
+        Format::bindingKeywordOf(source, &letStatement.span),
         false,
         letStatement.pattern,
         letStatement.annotation,
@@ -1417,6 +1629,7 @@ export namespace Format {
     if (let Ast::Statement::Node::Variable(variableStatement) = node) {
       return Format::formatBindingStatement(
         module,
+        Format::bindingKeywordOf(source, &variableStatement.span),
         variableStatement.mutable,
         variableStatement.pattern,
         variableStatement.annotation,
@@ -1438,7 +1651,13 @@ export namespace Format {
       let patternText: String = Format::formatPattern(module, letElseStatement.pattern, source);
       result.push(&patternText);
 
-      if (let Option::SOME(annotation) = letElseStatement.annotation) {
+      let mut elseAnnotation: Option<Ast::TypeId> = letElseStatement.annotation;
+
+      if (let Option::NONE = elseAnnotation) {
+        elseAnnotation = Format::patternBindingAnnotation(module, letElseStatement.pattern);
+      }
+
+      if (let Option::SOME(annotation) = elseAnnotation) {
         let annotationText: String = Format::formatType(module, annotation, source);
         result.pushStr(": ");
         result.push(&annotationText);
@@ -1540,8 +1759,41 @@ export namespace Format {
     return Result::OK(result);
   }
 
+  /// The type annotation a binding pattern carries.
+  ///
+  /// A `let` inside a block expression parses its `: Type` into the pattern,
+  /// while a statement-level `let` keeps it on the statement, so both places
+  /// have to be consulted.
+  function patternBindingAnnotation(
+    module: &Ast::Module,
+    patternId: Ast::PatternId
+  ): Option<Ast::TypeId> {
+    let Option::SOME(node) = module.patterns.get(patternId) else {
+      return Option::NONE;
+    };
+
+    let Ast::Pattern::Node::Binding(binding) = node else {
+      return Option::NONE;
+    };
+
+    return binding.annotation;
+  }
+
+  /// The keyword a local binding was declared with. A local `const` reaches
+  /// the AST as a plain `Let`, so the source text is what tells the two apart.
+  function bindingKeywordOf(source: &String, span: &SourceSpan): str {
+    let head: String = Format::sliceSource(source, span.start, span.start + 5);
+
+    if (head.equals("const")) {
+      return "const ";
+    }
+
+    return "let ";
+  }
+
   function formatBindingStatement(
     module: &Ast::Module,
+    keyword: str,
     mutable: boolean,
     patternId: Ast::PatternId,
     annotation: Option<Ast::TypeId>,
@@ -1551,7 +1803,7 @@ export namespace Format {
     indentLevel: u64
   ): Result<String, FormatError> {
     let mut result: String = config.indentString(indentLevel);
-    result.pushStr("let ");
+    result.pushStr(keyword);
 
     if (mutable) {
       result.pushStr("mut ");
@@ -1560,7 +1812,13 @@ export namespace Format {
     let patternText: String = Format::formatPattern(module, patternId, source);
     result.push(&patternText);
 
-    if (let Option::SOME(annotationId) = annotation) {
+    let mut effectiveAnnotation: Option<Ast::TypeId> = annotation;
+
+    if (let Option::NONE = effectiveAnnotation) {
+      effectiveAnnotation = Format::patternBindingAnnotation(module, patternId);
+    }
+
+    if (let Option::SOME(annotationId) = effectiveAnnotation) {
       let annotationText: String = Format::formatType(module, annotationId, source);
       result.pushStr(": ");
       result.push(&annotationText);

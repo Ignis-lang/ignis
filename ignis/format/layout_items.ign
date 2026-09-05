@@ -1120,6 +1120,39 @@ export namespace Format {
     return Result::OK(result);
   }
 
+  /// Emits the comments written between a declaration's last attribute and the
+  /// declaration itself. They sit inside the declaration's own region, so no
+  /// gap between siblings can own them.
+  function renderCommentGapAfterAttributes(
+    output: &mut String,
+    source: &String,
+    attributes: &Vector<Ast::Attribute>,
+    declarationStart: u64,
+    config: &FormatterConfig,
+    indentLevel: u64
+  ): Result<void, FormatError> {
+    let outputRef: &mut String = output;
+
+    if (attributes.length() == 0) {
+      return Result::OK(());
+    }
+
+    let Option::SOME(lastAttribute) = attributes.get(attributes.length() - 1) else {
+      return Result::OK(());
+    };
+
+    // An attribute's span stops at its first argument rather than at its
+    // closing paren, so the gap starts at the end of the attribute's line.
+    let gapStart: u64 = Format::lineEndOffset(source, lastAttribute.span.end);
+    let gapEnd: u64 = Format::lineStartOffset(source, declarationStart);
+
+    if (gapEnd <= gapStart) {
+      return Result::OK(());
+    }
+
+    return Format::renderCommentGap(outputRef, source, gapStart, gapEnd, config, indentLevel, false);
+  }
+
   function formatFunction(
     module: &Ast::Module,
     functionItem: &Ast::Item::Function,
@@ -1127,7 +1160,16 @@ export namespace Format {
     config: &FormatterConfig,
     indentLevel: u64
   ): Result<String, FormatError> {
-    let prefix: String = Format::formatDeclarationPrefix(&functionItem.metadata, config, indentLevel);
+    let mut prefix: String = Format::formatDeclarationPrefix(&functionItem.metadata, config, indentLevel);
+    Format::renderCommentGapAfterAttributes(
+      &mut prefix,
+      source,
+      &functionItem.metadata.attributes,
+      functionItem.span.start,
+      config,
+      indentLevel,
+    )!;
+
     let modifierKeywords: String = Format::formatModifierKeywords(&functionItem.metadata.modifiers);
 
     let mut header: String = config.indentString(indentLevel);
@@ -1462,6 +1504,15 @@ export namespace Format {
     indentLevel: u64
   ): Result<String, FormatError> {
     let mut result: String = Format::formatDeclarationPrefix(&recordItem.metadata, config, indentLevel);
+    Format::renderCommentGapAfterAttributes(
+      &mut result,
+      source,
+      &recordItem.metadata.attributes,
+      recordItem.span.start,
+      config,
+      indentLevel,
+    )!;
+
     let modifierKeywords: String = Format::formatModifierKeywords(&recordItem.metadata.modifiers);
 
     let indentText: String = config.indentString(indentLevel);
@@ -2099,19 +2150,37 @@ export namespace Format {
     return Result::OK(formatted);
   }
 
+  /// A chunk reaching layout must no longer carry a top-level
+  /// conditional-compilation directive: `model.ign` owns those and peels them
+  /// into their own `Format::DirectiveBlock`.
+  ///
+  /// A directive nested inside a `namespace` or `extern` body is a different
+  /// matter — the model never splits below brace depth zero, and the body
+  /// renderer keeps that region verbatim instead.
   function guardAgainstRawDirectiveTokens(tokenStream: &TokenStream): Result<void, FormatError> {
     let mut index: u64 = 0;
+    let mut braceDepth: u64 = 0;
 
     while (index < tokenStream.length()) {
       let Option::SOME(token) = tokenStream.get(index) else {
         break;
       };
 
+      if (token.kindValue() == TokenKind::PUNCTUATION) {
+        let punctuation: Punctuation = token.punctuationValue();
+
+        if (punctuation == Punctuation::LEFT_BRACE) {
+          braceDepth += 1;
+        } else if (punctuation == Punctuation::RIGHT_BRACE && braceDepth > 0) {
+          braceDepth -= 1;
+        }
+      }
+
       let Option::SOME(next) = tokenStream.get(index + 1) else {
         break;
       };
 
-      let isAt: boolean = token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::AT;
+      let isAt: boolean = braceDepth == 0 && token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::AT;
 
       if (isAt) {
         let isIfOrElse: boolean = next.kindValue() == TokenKind::KEYWORD && (next.keywordValue() == Keyword::IF || next.keywordValue() == Keyword::ELSE);
