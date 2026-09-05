@@ -167,7 +167,7 @@ impl<'a> HirOwnershipChecker<'a> {
           if m.is_static {
             (m.params.clone(), None)
           } else {
-            (m.params.clone(), Some(m.self_mutable))
+            (m.params.clone(), Some(m.self_mutable()))
           }
         },
         _ => continue,
@@ -909,6 +909,19 @@ impl<'a> HirOwnershipChecker<'a> {
             }
           } else {
             self.check_node(recv);
+
+            if self.method_consumes_receiver(method) {
+              self.reject_move_out_of_borrow(recv);
+
+              if let Some(recv_def) = self.get_moved_var(recv) {
+                let recv_ty = self.defs.type_of(&recv_def);
+                if self.types.needs_drop_with_defs(recv_ty, self.defs)
+                  && !self.types.is_copy_with_defs(recv_ty, self.defs)
+                {
+                  self.try_consume(recv_def, span.clone());
+                }
+              }
+            }
           }
         }
 
@@ -2268,6 +2281,17 @@ impl<'a> HirOwnershipChecker<'a> {
   /// Only owned values matter: a `Copy` field is read, not moved, and the borrow survives.
   /// A raw pointer dereference is deliberately excluded — auto-deref only synthesises
   /// `Dereference` for references, and moving through a raw pointer is a separate question.
+  /// Whether the callee takes its receiver by value, so the call moves it.
+  fn method_consumes_receiver(
+    &self,
+    method: DefinitionId,
+  ) -> bool {
+    match &self.defs.get(&method).kind {
+      DefinitionKind::Method(md) => md.self_by_value(),
+      _ => false,
+    }
+  }
+
   fn reject_move_out_of_borrow(
     &mut self,
     hir_id: HIRId,

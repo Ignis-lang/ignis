@@ -31,7 +31,7 @@ use ignis_hir::{BuiltinEqKind, HIR, HIRId, HIRKind, HIRMatchArm, HIRNode, HIRPat
 use ignis_type::definition::{
   ConstantDefinition, Definition, DefinitionId, DefinitionKind, DefinitionStore, EnumDefinition, EnumVariantDef,
   FieldDefinition, FunctionDefinition, MethodDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef,
-  SymbolEntry, VariableDefinition, VariantDefinition, Visibility,
+  SelfReceiver, SymbolEntry, VariableDefinition, VariantDefinition, Visibility,
 };
 use ignis_type::namespace::NamespaceStore;
 use ignis_type::symbol::SymbolTable;
@@ -1947,7 +1947,7 @@ impl<'a> Monomorphizer<'a> {
         params: new_params,
         return_type: new_ret,
         is_static: md.is_static,
-        self_mutable: md.self_mutable,
+        self_receiver: md.self_receiver,
         inline_mode: md.inline_mode,
         attrs: md.attrs.clone(),
       }),
@@ -2925,7 +2925,7 @@ impl<'a> Monomorphizer<'a> {
         _ => None,
       })?;
 
-    let signature_ok = !md.self_mutable
+    let signature_ok = md.self_receiver == SelfReceiver::Ref
       && md.params.len() == 2
       && self.eq_other_param_matches_type(other_type, expected_other, type_def_id)
       && self.types.types_equal(&md.return_type, &self.types.boolean());

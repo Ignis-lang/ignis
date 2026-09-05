@@ -3990,7 +3990,7 @@ fn format_method_signature(
       ret
     )
   } else {
-    let self_ref = if method_def.self_mutable { "&mut self" } else { "&self" };
+    let self_ref = method_def.self_receiver.spelling();
     let params_with_self = if params.is_empty() {
       self_ref.to_string()
     } else {

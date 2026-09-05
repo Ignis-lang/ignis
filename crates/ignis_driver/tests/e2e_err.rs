@@ -1555,3 +1555,69 @@ function main(): i32 {
 "#,
   );
 }
+
+#[test]
+fn e2e_err_consuming_self_through_reference() {
+  e2e_error_test(
+    "err_consuming_self_through_reference",
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+record Holder {
+    public payload: Payload;
+
+    intoPayload(self): Payload {
+        return self.payload;
+    }
+}
+
+function steal(holder: &Holder): Payload {
+    return holder.intoPayload();
+}
+
+function main(): i32 {
+    let holder: Holder = Holder { payload: Payload { value: 1 } };
+    return steal(&holder).value;
+}
+"#,
+  );
+}
+
+#[test]
+fn e2e_err_use_after_consuming_self() {
+  e2e_ownership_error_test(
+    "err_use_after_consuming_self",
+    r#"
+@implements(Drop)
+record Payload {
+    public value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+record Holder {
+    public payload: Payload;
+
+    intoPayload(self): Payload {
+        return self.payload;
+    }
+}
+
+function main(): i32 {
+    let holder: Holder = Holder { payload: Payload { value: 1 } };
+    let first: Payload = holder.intoPayload();
+    let second: Payload = holder.intoPayload();
+    return first.value + second.value;
+}
+"#,
+  );
+}

@@ -924,8 +924,8 @@ impl<'a> HirBorrowChecker<'a> {
       return;
     };
 
-    self.try_borrow(target_def, method_definition.self_mutable, span);
-    self.release_borrow(target_def, method_definition.self_mutable);
+    self.try_borrow(target_def, method_definition.self_mutable(), span);
+    self.release_borrow(target_def, method_definition.self_mutable());
   }
 
   /// Attempt to create a borrow on a variable. Emits a diagnostic on conflict.

@@ -13,7 +13,9 @@ use ignis_hir::{
   operation::{BinaryOperation, UnaryOperation},
   statement::LoopKind,
 };
-use ignis_type::definition::{Definition, DefinitionId, DefinitionKind, SymbolEntry, VariableDefinition, Visibility};
+use ignis_type::definition::{
+  Definition, DefinitionId, DefinitionKind, SelfReceiver, SymbolEntry, VariableDefinition, Visibility,
+};
 use ignis_type::span::Span;
 use ignis_type::symbol::SymbolId;
 use ignis_type::types::{Substitution, Type, TypeId};
@@ -3061,8 +3063,8 @@ impl<'a> Analyzer<'a> {
         (false, base_type)
       };
 
-    // Look up the method to determine if it requires &mut self
-    let method_info: Option<(DefinitionId, bool)> = match self.types.get(&receiver_record_type).clone() {
+    // Look up the method to determine how it takes its receiver
+    let method_info: Option<(DefinitionId, SelfReceiver)> = match self.types.get(&receiver_record_type).clone() {
       Type::Record(def_id) | Type::Instance { generic: def_id, .. } | Type::Enum(def_id) => {
         let instance_methods = match &self.defs.get(&def_id).kind {
           DefinitionKind::Record(rd) => rd.instance_methods.clone(),
@@ -3079,13 +3081,13 @@ impl<'a> Analyzer<'a> {
         // First check lookup_resolved_call (for overloaded methods)
         if let Some(method_id) = self.lookup_resolved_call(node_id).cloned() {
           if let DefinitionKind::Method(md) = &self.defs.get(&method_id).kind {
-            Some((method_id, md.self_mutable))
+            Some((method_id, md.self_receiver))
           } else {
             None
           }
         } else if let Some(method_id) = instance_methods.get(&ma.member).and_then(|e| e.as_single()) {
           if let DefinitionKind::Method(md) = &self.defs.get(method_id).kind {
-            Some((*method_id, md.self_mutable))
+            Some((*method_id, md.self_receiver))
           } else {
             None
           }
@@ -3101,14 +3103,14 @@ impl<'a> Analyzer<'a> {
           .lookup_resolved_call(node_id)
           .cloned()
           .and_then(|method_id| match &self.defs.get(&method_id).kind {
-            DefinitionKind::Method(md) => Some((method_id, md.self_mutable)),
+            DefinitionKind::Method(md) => Some((method_id, md.self_receiver)),
             _ => None,
           })
       },
       _ => None,
     };
 
-    let Some((method_id, self_mutable)) = method_info else {
+    let Some((method_id, self_receiver)) = method_info else {
       if let Some(ext_def_id) = self.lookup_resolved_call(node_id).cloned()
         && matches!(self.defs.get(&ext_def_id).kind, DefinitionKind::Function(_))
       {
@@ -3122,22 +3124,7 @@ impl<'a> Analyzer<'a> {
       });
     };
 
-    // Create the receiver with appropriate mutability.
-    // If base is already a reference, use it directly.
-    // If base is a value, take a reference to it (mutable if method requires &mut self).
-    let receiver_hir = if is_already_ref {
-      base
-    } else {
-      let ref_type = self.types.reference(base_type, self_mutable);
-      hir.alloc(HIRNode {
-        kind: HIRKind::Reference {
-          expression: base,
-          mutable: self_mutable,
-        },
-        span: ma.span.clone(),
-        type_id: ref_type,
-      })
-    };
+    let receiver_hir = self.lower_method_receiver(base, base_type, is_already_ref, self_receiver, &ma.span, hir);
 
     let args_hir: Vec<HIRId> = call
       .arguments
@@ -3156,6 +3143,36 @@ impl<'a> Analyzer<'a> {
       },
       span: call.span.clone(),
       type_id: result_type,
+    })
+  }
+
+  /// Build the receiver argument of a method call.
+  ///
+  /// A consuming receiver (`method(self)`) is passed as the base value itself, so the
+  /// call moves it. A borrowing receiver reuses an existing reference or takes one.
+  fn lower_method_receiver(
+    &mut self,
+    base: HIRId,
+    base_type: TypeId,
+    is_already_ref: bool,
+    self_receiver: SelfReceiver,
+    span: &Span,
+    hir: &mut HIR,
+  ) -> HIRId {
+    if self_receiver.is_by_value() || is_already_ref {
+      return base;
+    }
+
+    let mutable = self_receiver.is_mutable();
+    let ref_type = self.types.reference(base_type, mutable);
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Reference {
+        expression: base,
+        mutable,
+      },
+      span: span.clone(),
+      type_id: ref_type,
     })
   }
 
@@ -4517,7 +4534,7 @@ impl Analyzer<'_> {
         method_id,
         extra_args,
         type_args,
-        self_mutable,
+        self_receiver,
         insertion,
       }) => {
         let base = self.lower_node_to_hir(&receiver_node, hir, scope_kind);
@@ -4525,19 +4542,7 @@ impl Analyzer<'_> {
 
         let is_already_ref = matches!(self.types.get(&base_type).clone(), Type::Reference { .. });
 
-        let receiver_hir = if is_already_ref {
-          base
-        } else {
-          let ref_type = self.types.reference(base_type, self_mutable);
-          hir.alloc(HIRNode {
-            kind: HIRKind::Reference {
-              expression: base,
-              mutable: self_mutable,
-            },
-            span: span.clone(),
-            type_id: ref_type,
-          })
-        };
+        let receiver_hir = self.lower_method_receiver(base, base_type, is_already_ref, self_receiver, &span, hir);
 
         let all_args = self.assemble_pipe_args(lhs_hir, &extra_args, insertion, hir, scope_kind);
 

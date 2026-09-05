@@ -2445,10 +2445,8 @@ fn add_method_candidates(
 
       let self_param = if is_static {
         String::new()
-      } else if method_def.self_mutable {
-        "&mut self".to_string()
       } else {
-        "&self".to_string()
+        method_def.self_receiver.spelling().to_string()
       };
 
       let all_params = if self_param.is_empty() {

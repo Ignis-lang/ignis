@@ -27,7 +27,8 @@ use ignis_hir::BuiltinEqKind;
 use ignis_type::{
   attribute::FunctionAttr,
   definition::{
-    ConstValue, Definition, DefinitionId, DefinitionKind, RecordFieldDef, SymbolEntry, VariableDefinition, Visibility,
+    ConstValue, Definition, DefinitionId, DefinitionKind, RecordFieldDef, SelfReceiver, SymbolEntry,
+    VariableDefinition, Visibility,
   },
   inference::ConstraintReason,
   symbol::SymbolId,
@@ -2486,12 +2487,12 @@ impl<'a> Analyzer<'a> {
     let impl_method = self.defs.get(impl_method_id);
 
     let (trait_return, trait_self_mut) = match &trait_method.kind {
-      DefinitionKind::Method(md) => (md.return_type, md.self_mutable),
+      DefinitionKind::Method(md) => (md.return_type, md.self_receiver),
       _ => return,
     };
 
     let (impl_return, impl_self_mut, impl_is_static) = match &impl_method.kind {
-      DefinitionKind::Method(md) => (md.return_type, md.self_mutable, md.is_static),
+      DefinitionKind::Method(md) => (md.return_type, md.self_receiver, md.is_static),
       _ => return,
     };
 
@@ -2515,8 +2516,8 @@ impl<'a> Analyzer<'a> {
     };
 
     if trait_self_mut != impl_self_mut {
-      let expected = if trait_self_mut { "&mut self" } else { "&self" };
-      let got = if impl_self_mut { "&mut self" } else { "&self" };
+      let expected = trait_self_mut.spelling();
+      let got = impl_self_mut.spelling();
       self.add_diagnostic(
         DiagnosticMessage::TraitMethodSignatureMismatch {
           trait_name: trait_name.to_string(),
@@ -2582,6 +2583,45 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  /// A consuming receiver (`method(self)`) takes the value itself, so reaching one
+  /// through a reference would move out of a borrow.
+  fn check_consuming_receiver(
+    &mut self,
+    method: &ignis_type::definition::MethodDefinition,
+    receiver_node: &NodeId,
+    span: &Span,
+  ) {
+    if !method.self_by_value() {
+      return;
+    }
+
+    let Some(receiver_type) = self.lookup_type(receiver_node).copied() else {
+      return;
+    };
+
+    if !matches!(self.types.get(&receiver_type), Type::Reference { .. }) {
+      return;
+    }
+
+    self.add_diagnostic(DiagnosticMessage::CannotMoveOutOfBorrowedValue { span: span.clone() }.report());
+  }
+
+  /// Type of the injected `self` parameter for a receiver form.
+  ///
+  /// A consuming receiver owns the value, so its parameter type is the owner type
+  /// itself rather than a reference to it.
+  fn self_param_type(
+    &mut self,
+    owner_type: TypeId,
+    self_receiver: SelfReceiver,
+  ) -> TypeId {
+    if self_receiver.is_by_value() {
+      owner_type
+    } else {
+      self.types.reference(owner_type, self_receiver.is_mutable())
+    }
+  }
+
   /// Clone a trait's default method for a record, giving it the record's self type.
   /// Typechecks the body in the record's scope and registers the clone for HIR lowering.
   fn clone_trait_default_for_record(
@@ -2591,12 +2631,12 @@ impl<'a> Analyzer<'a> {
     record_span: &Span,
   ) -> DefinitionId {
     let trait_method = self.defs.get(trait_method_id);
-    let (params, return_type, self_mutable, type_params, inline_mode, attrs) =
+    let (params, return_type, self_receiver, type_params, inline_mode, attrs) =
       if let DefinitionKind::Method(md) = &trait_method.kind {
         (
           md.params.clone(),
           md.return_type,
-          md.self_mutable,
+          md.self_receiver,
           md.type_params.clone(),
           md.inline_mode,
           md.attrs.clone(),
@@ -2611,13 +2651,13 @@ impl<'a> Analyzer<'a> {
     let method_doc = trait_method.doc.clone();
 
     let record_type = *self.defs.type_of(record_def_id);
-    let self_ref_type = self.types.reference(record_type, self_mutable);
+    let self_param_type = self.self_param_type(record_type, self_receiver);
 
     let self_symbol = self.symbols.borrow_mut().intern("self");
     let self_def = ignis_type::definition::Definition {
       kind: DefinitionKind::Parameter(ignis_type::definition::ParameterDefinition {
-        type_id: self_ref_type,
-        mutable: self_mutable,
+        type_id: self_param_type,
+        mutable: self_receiver.is_mutable(),
         attrs: vec![],
       }),
       name: self_symbol,
@@ -2640,7 +2680,7 @@ impl<'a> Analyzer<'a> {
         params: new_params,
         return_type,
         is_static: false,
-        self_mutable,
+        self_receiver,
         inline_mode,
         attrs,
       }),
@@ -2754,10 +2794,10 @@ impl<'a> Analyzer<'a> {
     self.scopes.push(ScopeKind::Function);
 
     // For instance methods, inject `self` parameter
-    let (is_static, self_mutable) = if let DefinitionKind::Method(md) = &self.defs.get(method_def_id).kind {
-      (md.is_static, md.self_mutable)
+    let (is_static, self_receiver) = if let DefinitionKind::Method(md) = &self.defs.get(method_def_id).kind {
+      (md.is_static, md.self_receiver)
     } else {
-      (true, false)
+      (true, SelfReceiver::Ref)
     };
 
     // A receiver has to be written to be used: `get(&self)` and `get(&mut self)`
@@ -2802,14 +2842,13 @@ impl<'a> Analyzer<'a> {
         _ => *self.defs.type_of(&owner_def_id),
       };
 
-      // Use &mut Self for methods with &mut self, &Self otherwise
-      let self_ref_type = self.types.reference(self_type, self_mutable);
+      let self_param_type = self.self_param_type(self_type, self_receiver);
 
       let self_symbol = self.symbols.borrow_mut().intern("self");
       let self_def = ignis_type::definition::Definition {
         kind: DefinitionKind::Parameter(ignis_type::definition::ParameterDefinition {
-          type_id: self_ref_type,
-          mutable: self_mutable,
+          type_id: self_param_type,
+          mutable: self_receiver.is_mutable(),
           attrs: vec![],
         }),
         name: self_symbol,
@@ -2893,15 +2932,14 @@ impl<'a> Analyzer<'a> {
       return false;
     };
 
-    // self is always a reference (&Self or &mut Self)
+    // A borrowing receiver is `&Self`/`&mut Self`; a consuming receiver is `Self`.
     let self_type = self.types.get(&param.type_id);
-    let Type::Reference { inner, .. } = self_type else {
-      return false;
+    let owner_type = match self_type {
+      Type::Reference { inner, .. } => self.types.get(inner),
+      other => other,
     };
 
-    // Get the underlying record/instance type
-    let inner_type = self.types.get(inner);
-    let self_record_def_id = match inner_type {
+    let self_record_def_id = match owner_type {
       Type::Record(def_id) => def_id,
       Type::Instance { generic, .. } => generic,
       _ => return false,
@@ -4891,8 +4929,10 @@ impl<'a> Analyzer<'a> {
         },
       };
 
+    self.check_consuming_receiver(&method, &ma.object, &ma.span);
+
     // Mutability check
-    if method.self_mutable {
+    if method.self_mutable() {
       self.mark_mutation_target(&ma.object);
 
       let obj_node = self.ast.get(&ma.object);
@@ -5038,7 +5078,7 @@ impl<'a> Analyzer<'a> {
         method_id,
         extra_args: call.arguments.clone(),
         type_args: vec![],
-        self_mutable: method.self_mutable,
+        self_receiver: method.self_receiver,
         insertion,
       },
     );
@@ -5167,8 +5207,10 @@ impl<'a> Analyzer<'a> {
         None => return self.types.error(),
       };
 
+    self.check_consuming_receiver(&method, &ma.object, &ma.span);
+
     // Mutability check
-    if method.self_mutable {
+    if method.self_mutable() {
       self.mark_mutation_target(&ma.object);
 
       let obj_node = self.ast.get(&ma.object);
@@ -5219,7 +5261,7 @@ impl<'a> Analyzer<'a> {
         method_id,
         extra_args: vec![],
         type_args: vec![],
-        self_mutable: method.self_mutable,
+        self_receiver: method.self_receiver,
         insertion: PipeArgInsertion::Prepend,
       },
     );
@@ -6178,8 +6220,10 @@ impl<'a> Analyzer<'a> {
                 method.clone()
               };
 
+              self.check_consuming_receiver(&method, &ma.object, &ma.span);
+
               // Check if method requires &mut self but receiver is not mutable
-              if method.self_mutable {
+              if method.self_mutable() {
                 self.mark_mutation_target(&ma.object);
 
                 let obj_node = self.ast.get(&ma.object);
@@ -6402,8 +6446,10 @@ impl<'a> Analyzer<'a> {
                 method.clone()
               };
 
+              self.check_consuming_receiver(&method, &ma.object, &ma.span);
+
               // Check if method requires &mut self but receiver is not mutable
-              if method.self_mutable {
+              if method.self_mutable() {
                 self.mark_mutation_target(&ma.object);
 
                 let obj_node = self.ast.get(&ma.object);
@@ -6650,7 +6696,9 @@ impl<'a> Analyzer<'a> {
                 method.clone()
               };
 
-              if method.self_mutable {
+              self.check_consuming_receiver(&method, &ma.object, &ma.span);
+
+              if method.self_mutable() {
                 self.mark_mutation_target(&ma.object);
 
                 let obj_node = self.ast.get(&ma.object);
@@ -11289,7 +11337,7 @@ impl<'a> Analyzer<'a> {
         _ => None,
       })?;
 
-    let signature_ok = !md.self_mutable
+    let signature_ok = md.self_receiver == SelfReceiver::Ref
       && md.params.len() == 2
       && self.eq_other_param_matches_type(other_type, expected_other, type_def_id)
       && self.types.types_equal(&md.return_type, &self.types.boolean());
@@ -11589,7 +11637,7 @@ impl<'a> Analyzer<'a> {
       _ => None,
     });
 
-    let signature_ok = !md.self_mutable
+    let signature_ok = md.self_receiver == SelfReceiver::Ref
       && params.len() == 2
       && other_type.is_some_and(|other_type| self.eq_other_param_matches_type(other_type, expected_other, type_def_id))
       && self.types.types_equal(&return_type, &self.types.boolean());
@@ -11598,7 +11646,7 @@ impl<'a> Analyzer<'a> {
       return Some(method_def_id);
     }
 
-    let got = self.format_eq_method_signature(&params, md.self_mutable, return_type);
+    let got = self.format_eq_method_signature(&params, md.self_receiver, return_type);
     self.report_eq_method_issue(&type_name, &method_span, diagnostic, Some(expected), Some(got));
     None
   }
@@ -11631,14 +11679,10 @@ impl<'a> Analyzer<'a> {
   fn format_eq_method_signature(
     &self,
     params: &[DefinitionId],
-    self_mutable: bool,
+    self_receiver: SelfReceiver,
     return_type: TypeId,
   ) -> String {
-    let mut param_parts = vec![if self_mutable {
-      "&mut self".to_string()
-    } else {
-      "&self".to_string()
-    }];
+    let mut param_parts = vec![self_receiver.spelling().to_string()];
 
     for param_id in params.iter().skip(1) {
       let param_type = match &self.defs.get(param_id).kind {
@@ -11807,7 +11851,7 @@ impl<'a> Analyzer<'a> {
       return;
     };
 
-    let self_mutable = md.self_mutable;
+    let self_mutable = md.self_mutable();
     let params = md.params.clone();
     let return_type = md.return_type;
 

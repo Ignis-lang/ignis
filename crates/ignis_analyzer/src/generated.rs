@@ -9,7 +9,7 @@ use ignis_diagnostics::message::DiagnosticMessage;
 use ignis_type::attribute::DirectivePhase;
 use ignis_type::definition::{
   Definition, DefinitionId, DefinitionKind, DirectiveDefId, GeneratedItemKind, GeneratedItemMetadata, MethodDefinition,
-  SymbolEntry, Visibility, InlineMode,
+  SelfReceiver, SymbolEntry, Visibility, InlineMode,
 };
 use ignis_type::span::Span;
 
@@ -570,7 +570,7 @@ fn materialize_generated_method(
       params,
       return_type: analyzer.types.void(),
       is_static,
-      self_mutable: false,
+      self_receiver: SelfReceiver::Ref,
       inline_mode: InlineMode::None,
       attrs: Vec::new(),
     }),
@@ -655,7 +655,7 @@ fn append_generated_method_ast(
     IgnisTypeSyntax::Void,
     body_node,
     metadata,
-    (!is_static).then_some(false),
+    (!is_static).then_some(SelfReceiver::Ref),
     method_span.clone(),
     None,
     InlineMode::None,

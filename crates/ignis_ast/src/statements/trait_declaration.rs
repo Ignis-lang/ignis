@@ -1,4 +1,8 @@
-use ignis_type::{definition::InlineMode, span::Span, symbol::SymbolId};
+use ignis_type::{
+  definition::{InlineMode, SelfReceiver},
+  span::Span,
+  symbol::SymbolId,
+};
 
 use crate::{attribute::ASTAttribute, generics::ASTGenericParams, type_::IgnisTypeSyntax, NodeId};
 
@@ -47,7 +51,7 @@ pub struct ASTTraitMethod {
   /// `None` = required method (no body), `Some` = default method (with body)
   pub body: Option<NodeId>,
   /// `Some(true)` = `&mut self`, `Some(false)` = `&self`, `None` = no self param
-  pub self_param: Option<bool>,
+  pub self_param: Option<SelfReceiver>,
   pub span: Span,
   pub doc: Option<String>,
   pub inline_mode: InlineMode,
@@ -62,7 +66,7 @@ impl ASTTraitMethod {
     parameters: Vec<ASTParameter>,
     return_type: IgnisTypeSyntax,
     body: Option<NodeId>,
-    self_param: Option<bool>,
+    self_param: Option<SelfReceiver>,
     span: Span,
     doc: Option<String>,
     inline_mode: InlineMode,

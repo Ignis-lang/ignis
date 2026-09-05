@@ -2291,6 +2291,37 @@ export namespace Analyzer {
       };
     }
 
+    /// Reports a consuming receiver (`method(self)`) reached through a reference.
+    /// The call takes the value itself, so going through a borrow would move out
+    /// of it. Returns `true` when the call was rejected.
+    function rejectConsumingReceiverThroughReference(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      info: &Analyzer::Typecheck::MethodCallInfo,
+      objectType: Analyzer::TypeId,
+      span: SourceSpan,
+    ): boolean {
+      if (!info.selfByValue) {
+        return false;
+      }
+
+      let referenceMutability: Option<boolean> = Analyzer::Typecheck::receiverReferenceMutability(defStore, typeStore, objectType);
+
+      if (referenceMutability.isNone()) {
+        return false;
+      }
+
+      Analyzer::Typecheck::emitDiagnostic(
+        state,
+        span,
+        DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW,
+        "cannot move out of borrowed value",
+      );
+
+      return true;
+    }
+
     function requireNonGenericRecordDefId(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -3815,6 +3846,7 @@ export namespace Analyzer {
     record MethodCallInfo {
       public isStatic: boolean;
       public selfMutable: boolean;
+      public selfByValue: boolean;
       public returnType: Analyzer::TypeId;
     }
 
@@ -3835,6 +3867,7 @@ export namespace Analyzer {
           return Option::SOME(Analyzer::Typecheck::MethodCallInfo {
             isStatic: method.isStatic,
             selfMutable: method.selfMutable,
+            selfByValue: method.selfByValue,
             returnType: method.returnType,
           });
         },

@@ -1473,12 +1473,8 @@ impl<'a> AstChunkFormatter<'a> {
     }
 
     let mut parameters = Vec::new();
-    if let Some(mutable) = method.self_param {
-      parameters.push(if mutable {
-        "&mut self".to_string()
-      } else {
-        "&self".to_string()
-      });
+    if let Some(self_receiver) = method.self_param {
+      parameters.push(self_receiver.spelling().to_string());
     }
     parameters.extend(
       method
@@ -1512,12 +1508,8 @@ impl<'a> AstChunkFormatter<'a> {
     }
 
     let mut parameters = Vec::new();
-    if let Some(mutable) = method.self_param {
-      parameters.push(if mutable {
-        "&mut self".to_string()
-      } else {
-        "&self".to_string()
-      });
+    if let Some(self_receiver) = method.self_param {
+      parameters.push(self_receiver.spelling().to_string());
     }
     parameters.extend(
       method

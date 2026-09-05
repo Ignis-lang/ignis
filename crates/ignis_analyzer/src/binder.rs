@@ -29,9 +29,9 @@ use ignis_type::{
   definition::{
     ConstantDefinition, Definition, DefinitionId, DefinitionKind, DirectiveDefId, DirectiveDefinition,
     DirectiveProvenance, EnumDefinition, EnumVariantDef, FieldDefinition, FunctionDefinition, LangTraitSet,
-    MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef, SymbolEntry,
-    TraitDefinition, TraitMethodEntry, TryCapability, TypeAliasDefinition, TypeParamDefinition, VariableDefinition,
-    VariantDefinition, Visibility,
+    MethodDefinition, NamespaceDefinition, ParameterDefinition, RecordDefinition, RecordFieldDef, SelfReceiver,
+    SymbolEntry, TraitDefinition, TraitMethodEntry, TryCapability, TypeAliasDefinition, TypeParamDefinition,
+    VariableDefinition, VariantDefinition, Visibility,
   },
 };
 
@@ -781,7 +781,7 @@ impl<'a> Analyzer<'a> {
         params: param_defs.clone(),
         return_type: self.types.error(), // Resolved in typeck
         is_static,
-        self_mutable: method.self_param.unwrap_or(false),
+        self_receiver: method.self_param.unwrap_or(SelfReceiver::Ref),
         inline_mode: method.inline_mode,
         attrs: method_attrs,
       }),
@@ -953,7 +953,7 @@ impl<'a> Analyzer<'a> {
         params: param_defs.clone(),
         return_type: self.types.error(),
         is_static: false,
-        self_mutable: method.self_param.unwrap_or(false),
+        self_receiver: method.self_param.unwrap_or(SelfReceiver::Ref),
         inline_mode: method.inline_mode,
         attrs: method_attrs,
       }),

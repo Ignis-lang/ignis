@@ -347,7 +347,13 @@
                     (<block> | ";")
 
 <method-parameters> ::= <self-parameter> ("," <parameters>)? | <parameters>
-<self-parameter> ::= "&" "mut"? "self"
+<self-parameter> ::= "self" | "&" "mut"? "self"
+
+// A bare `self` is the consuming receiver: `x.method()` moves `x`, and inside the
+// body `self` is an owned local dropped at scope end unless it is moved out.
+// Reaching a consuming method through a reference moves out of a borrow and is
+// rejected. There is no `mut self` form, because parameters carry no `mut`
+// modifier; rebind with `let mut` inside the body instead.
 
 <property-modifier> ::= "public" | "private" | "static"
 <method-modifier> ::= "public" | "private" | "static" | <inline-modifier>
