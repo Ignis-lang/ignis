@@ -366,6 +366,154 @@ function clapFmtConflictError(
   return message;
 }
 
+/// Which of the two order-sensitive `fmt` conflicts `parseArguments` has
+/// already seen a flag for: `--use-tabs`/`--spaces` name whichever one
+/// `clap` saw first as the conflict's subject.
+record FmtFlagState {
+  public useTabsSeen: boolean;
+  public spacesSeen: boolean;
+}
+
+/// Handles one `fmt`-only flag during `parseArguments`'s scan. `Ok(Some(i))`
+/// means `argument` was one of these flags and parsing resumes at index `i`;
+/// `Ok(None)` means it was not, so the caller keeps trying other cases.
+/// Split out of `parseArguments` itself, which was long enough on its own to
+/// make the `fmt`-specific cases hard to see among the rest.
+function tryParseFmtFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
+): Result<Option<u64>, String> {
+  let mut optionsRef: &mut CliOptions = options;
+  let mut stateRef: &mut FmtFlagState = state;
+
+  if (argument.equals("--project")) {
+    if (optionsRef.fmtStdinJson) {
+      return Result::ERROR(clapFmtConflictError(
+        "--stdin-json",
+        "--project <PROJECT>",
+        "--stdin-json",
+        true,
+        "[FILE_PATHS]...",
+      ));
+    }
+
+    let Option::SOME(value) = arguments.get(index + 1) else {
+      return Result::ERROR(cliMissingValue("--project", "a directory"));
+    };
+
+    optionsRef.fmtProject = Option::SOME(value.clone());
+    return Result::OK(Option::SOME(index + 2));
+  }
+
+  if (argument.equals("--check")) {
+    optionsRef.fmtCheck = true;
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  if (argument.equals("--config")) {
+    let Option::SOME(value) = arguments.get(index + 1) else {
+      return Result::ERROR(cliMissingValue("--config", "a file"));
+    };
+
+    optionsRef.fmtConfigPath = Option::SOME(value.clone());
+    return Result::OK(Option::SOME(index + 2));
+  }
+
+  if (argument.equals("--indent-width")) {
+    let Option::SOME(value) = arguments.get(index + 1) else {
+      return Result::ERROR(cliMissingValue("--indent-width", "a number"));
+    };
+
+    let Option::SOME(width) = parseDecimal(value) else {
+      return Result::ERROR(`error: invalid indent width: ${value.toStr()}`);
+    };
+
+    optionsRef.fmtIndentWidth = Option::SOME(width);
+    return Result::OK(Option::SOME(index + 2));
+  }
+
+  if (argument.equals("--line-width")) {
+    let Option::SOME(value) = arguments.get(index + 1) else {
+      return Result::ERROR(cliMissingValue("--line-width", "a number"));
+    };
+
+    let Option::SOME(width) = parseDecimal(value) else {
+      return Result::ERROR(`error: invalid line width: ${value.toStr()}`);
+    };
+
+    optionsRef.fmtLineWidth = Option::SOME(width);
+    return Result::OK(Option::SOME(index + 2));
+  }
+
+  if (argument.equals("--use-tabs")) {
+    if (stateRef.spacesSeen) {
+      return Result::ERROR(clapFmtConflictError("--spaces", "--use-tabs", "--spaces", true, "<FILE_PATHS>..."));
+    }
+
+    stateRef.useTabsSeen = true;
+    optionsRef.fmtUseTabs = Option::SOME(true);
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  if (argument.equals("--spaces")) {
+    if (stateRef.useTabsSeen) {
+      return Result::ERROR(clapFmtConflictError("--use-tabs", "--spaces", "--use-tabs", true, "<FILE_PATHS>..."));
+    }
+
+    stateRef.spacesSeen = true;
+    optionsRef.fmtUseTabs = Option::SOME(false);
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  if (argument.equals("--sort-imports")) {
+    optionsRef.fmtSortImports = true;
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  if (argument.equals("--stdin-json")) {
+    if (let Option::SOME(_) = &optionsRef.fmtProject) {
+      return Result::ERROR(clapFmtConflictError(
+        "--project <PROJECT>",
+        "--stdin-json",
+        "--project",
+        true,
+        "<PROJECT> [FILE_PATHS]...",
+      ));
+    }
+
+    if (optionsRef.fmtFilePaths.length() > 0) {
+      return Result::ERROR(clapFmtConflictError("[FILE_PATHS]...", "--stdin-json", "<FILE_PATHS>...", false, ""));
+    }
+
+    optionsRef.fmtStdinJson = true;
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  if (argument.equals("--emit")) {
+    let Option::SOME(value) = arguments.get(index + 1) else {
+      return Result::ERROR(cliMissingValue("--emit", "a mode"));
+    };
+
+    let modes: Vector<String> = splitCommaSeparated(value);
+    let mut modeIndex: u64 = 0;
+
+    while (modeIndex < modes.length()) {
+      if (let Option::SOME(mode) = modes.get(modeIndex) && mode.equals("diff")) {
+        optionsRef.fmtEmitDiff = true;
+      }
+
+      modeIndex += 1;
+    }
+
+    return Result::OK(Option::SOME(index + 2));
+  }
+
+  return Result::OK(Option::NONE);
+}
+
 /// Parses a command line into the options every subcommand reads.
 ///
 /// `arguments` is the process argument vector, so the first entry is the
@@ -384,8 +532,7 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
   }
 
   let mut options: CliOptions = CliOptions::create(command);
-  let mut sawFmtUseTabsFlag: boolean = false;
-  let mut sawFmtSpacesFlag: boolean = false;
+  let mut fmtFlagState: FmtFlagState = FmtFlagState { useTabsSeen: false, spacesSeen: false };
 
   while (index < arguments.length()) {
     let Option::SOME(argument) = arguments.get(index) else {
@@ -564,136 +711,18 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
-    if (options.isFmtMode() && argument.equals("--project")) {
-      if (options.fmtStdinJson) {
-        return Result::ERROR(clapFmtConflictError(
-          "--stdin-json",
-          "--project <PROJECT>",
-          "--stdin-json",
-          true,
-          "[FILE_PATHS]...",
-        ));
-      }
-
-      let Option::SOME(value) = arguments.get(index + 1) else {
-        return Result::ERROR(cliMissingValue("--project", "a directory"));
+    if (options.isFmtMode()) {
+      match (tryParseFmtFlag(arguments, argument, index, &mut options, &mut fmtFlagState)) {
+        Result::ERROR(message) -> {
+          return Result::ERROR(message);
+        },
+        Result::OK(handled) -> {
+          if (let Option::SOME(newIndex) = handled) {
+            index = newIndex;
+            continue;
+          }
+        },
       };
-
-      options.fmtProject = Option::SOME(value.clone());
-      index += 2;
-      continue;
-    }
-
-    if (options.isFmtMode() && argument.equals("--check")) {
-      options.fmtCheck = true;
-      index += 1;
-      continue;
-    }
-
-    if (options.isFmtMode() && argument.equals("--config")) {
-      let Option::SOME(value) = arguments.get(index + 1) else {
-        return Result::ERROR(cliMissingValue("--config", "a file"));
-      };
-
-      options.fmtConfigPath = Option::SOME(value.clone());
-      index += 2;
-      continue;
-    }
-
-    if (options.isFmtMode() && argument.equals("--indent-width")) {
-      let Option::SOME(value) = arguments.get(index + 1) else {
-        return Result::ERROR(cliMissingValue("--indent-width", "a number"));
-      };
-
-      let Option::SOME(width) = parseDecimal(value) else {
-        return Result::ERROR(`error: invalid indent width: ${value.toStr()}`);
-      };
-
-      options.fmtIndentWidth = Option::SOME(width);
-      index += 2;
-      continue;
-    }
-
-    if (options.isFmtMode() && argument.equals("--line-width")) {
-      let Option::SOME(value) = arguments.get(index + 1) else {
-        return Result::ERROR(cliMissingValue("--line-width", "a number"));
-      };
-
-      let Option::SOME(width) = parseDecimal(value) else {
-        return Result::ERROR(`error: invalid line width: ${value.toStr()}`);
-      };
-
-      options.fmtLineWidth = Option::SOME(width);
-      index += 2;
-      continue;
-    }
-
-    if (options.isFmtMode() && argument.equals("--use-tabs")) {
-      if (sawFmtSpacesFlag) {
-        return Result::ERROR(clapFmtConflictError("--spaces", "--use-tabs", "--spaces", true, "<FILE_PATHS>..."));
-      }
-
-      sawFmtUseTabsFlag = true;
-      options.fmtUseTabs = Option::SOME(true);
-      index += 1;
-      continue;
-    }
-
-    if (options.isFmtMode() && argument.equals("--spaces")) {
-      if (sawFmtUseTabsFlag) {
-        return Result::ERROR(clapFmtConflictError("--use-tabs", "--spaces", "--use-tabs", true, "<FILE_PATHS>..."));
-      }
-
-      sawFmtSpacesFlag = true;
-      options.fmtUseTabs = Option::SOME(false);
-      index += 1;
-      continue;
-    }
-
-    if (options.isFmtMode() && argument.equals("--sort-imports")) {
-      options.fmtSortImports = true;
-      index += 1;
-      continue;
-    }
-
-    if (options.isFmtMode() && argument.equals("--stdin-json")) {
-      if (let Option::SOME(_) = &options.fmtProject) {
-        return Result::ERROR(clapFmtConflictError(
-          "--project <PROJECT>",
-          "--stdin-json",
-          "--project",
-          true,
-          "<PROJECT> [FILE_PATHS]...",
-        ));
-      }
-
-      if (options.fmtFilePaths.length() > 0) {
-        return Result::ERROR(clapFmtConflictError("[FILE_PATHS]...", "--stdin-json", "<FILE_PATHS>...", false, ""));
-      }
-
-      options.fmtStdinJson = true;
-      index += 1;
-      continue;
-    }
-
-    if (options.isFmtMode() && argument.equals("--emit")) {
-      let Option::SOME(value) = arguments.get(index + 1) else {
-        return Result::ERROR(cliMissingValue("--emit", "a mode"));
-      };
-
-      let modes: Vector<String> = splitCommaSeparated(value);
-      let mut modeIndex: u64 = 0;
-
-      while (modeIndex < modes.length()) {
-        if (let Option::SOME(mode) = modes.get(modeIndex) && mode.equals("diff")) {
-          options.fmtEmitDiff = true;
-        }
-
-        modeIndex += 1;
-      }
-
-      index += 2;
-      continue;
     }
 
     if (argument.startsWith("-")) {

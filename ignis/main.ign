@@ -1973,12 +1973,25 @@ function collectProjectIgnFilesRecursive(
       continue;
     }
 
-    let Result::OK(entryMetadata) = Fs::metadata(&entry.path) else {
-      continue;
-    };
+    // A failed `stat` (a broken symlink, most commonly) is not a directory,
+    // the same way the host's `Path::is_dir()` treats it: it still reaches
+    // the extension check below and gets pushed if its name ends in `.ign`,
+    // so it is reported (and fails with "could not read file" once
+    // `formatFile` actually opens it) instead of silently disappearing.
+    let mut isDirectory: boolean = false;
 
-    if (entryMetadata.isDir()) {
-      collectProjectIgnFilesRecursive(&entry.path, files)!;
+    if (let Result::OK(entryMetadata) = Fs::metadata(&entry.path)) {
+      isDirectory = entryMetadata.isDir();
+    }
+
+    if (isDirectory) {
+      let recursed: Result<void, String> = collectProjectIgnFilesRecursive(&entry.path, files);
+
+      let Result::OK(_) = recursed else {
+        reader.close();
+        return recursed;
+      };
+
       continue;
     }
 
@@ -2185,11 +2198,110 @@ function fmtReadStdinChunk(buf: *mut u8, bufSize: u64): FmtStdinReadOutcome {
 
   if (count < 0) {
     let error: Io::IoError = Io::IoError::lastError();
-    let message: String = String::create(error.errorMessage());
+
+    // Matches Rust's `std::io::Error` `Display`: the `strerror` text, then
+    // the raw errno in parentheses.
+    let mut message: String = String::create(error.errorMessage());
+    let rawCodeValue: i32 = error.rawCode();
+    let rawCode: String = rawCodeValue.toString();
+    message.pushStr(" (os error ");
+    message.push(&rawCode);
+    message.pushStr(")");
+
     return FmtStdinReadOutcome { count: count, readError: Option::SOME(message) };
   }
 
   return FmtStdinReadOutcome { count: count, readError: Option::NONE };
+}
+
+/// Finds the first `\n` at or after `start`, scanning only the unexamined
+/// suffix of `text`. `runFmtStdinJson` tracks how far it has already
+/// searched a growing `pending` buffer so a long line's bytes are each
+/// examined once as new chunks arrive, not rescanned from the start of
+/// `pending` on every 4096-byte read (which is quadratic in the line's
+/// length).
+function findNewlineFrom(text: &String, start: u64): Option<u64> {
+  let mut cursor: u64 = start;
+
+  while (cursor < text.length()) {
+    let Option::SOME(byte) = text.byteAt(cursor) else {
+      break;
+    };
+
+    if (byte == '\n' as u8) {
+      return Option::SOME(cursor);
+    }
+
+    cursor += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// Rust's `char::is_whitespace()` (the Unicode `White_Space` property),
+/// which is what `str::trim()` uses: `String::trimAsciiWhitespace` only
+/// covers the ASCII subset, so `--stdin-json`'s line trimming used the wrong
+/// set for e.g. U+00A0 (NBSP) or U+2028 (LINE SEPARATOR).
+function isUnicodeWhitespace(character: char): boolean {
+  let code: u32 = character as u32;
+
+  if (code == 0x09 || code == 0x0A || code == 0x0B || code == 0x0C || code == 0x0D || code == 0x20) {
+    return true;
+  }
+
+  if (code == 0x85 || code == 0xA0 || code == 0x1680) {
+    return true;
+  }
+
+  if (code >= 0x2000 && code <= 0x200A) {
+    return true;
+  }
+
+  return code == 0x2028 || code == 0x2029 || code == 0x202F || code == 0x205F || code == 0x3000;
+}
+
+/// `Rust`'s `str::trim()`, trimming every Unicode `White_Space` character
+/// rather than only the ASCII ones `String::trimAsciiWhitespace` covers.
+function trimUnicodeWhitespace(text: &String): String {
+  let length: u64 = text.length();
+  let mut startByte: u64 = length;
+  let mut cursor: u64 = 0;
+
+  while (cursor < length) {
+    let mut charEnd: u64 = cursor;
+    let Option::SOME(character) = text.charAt(cursor, &mut charEnd) else {
+      break;
+    };
+
+    if (!isUnicodeWhitespace(character)) {
+      startByte = cursor;
+      break;
+    }
+
+    cursor = charEnd;
+  }
+
+  if (startByte == length) {
+    return String::new();
+  }
+
+  let mut lastNonWhitespaceEnd: u64 = startByte;
+  let mut scanCursor: u64 = startByte;
+
+  while (scanCursor < length) {
+    let mut charEnd: u64 = scanCursor;
+    let Option::SOME(character) = text.charAt(scanCursor, &mut charEnd) else {
+      break;
+    };
+
+    if (!isUnicodeWhitespace(character)) {
+      lastNonWhitespaceEnd = charEnd;
+    }
+
+    scanCursor = charEnd;
+  }
+
+  return text.substringBytes(startByte, lastNonWhitespaceEnd);
 }
 
 function fmtAppendStdinChunk(pending: &mut String, buf: *mut u8, count: CType::SSizeT): void {
@@ -2273,17 +2385,16 @@ function runFmtStdinJson(options: &CliOptions): i32 {
   defer Memory::free(buf);
 
   let mut pending: String = String::new();
+  let mut scannedUpTo: u64 = 0;
   let mut reachedEnd: boolean = false;
   let mut anyError: boolean = false;
   let mut anyChanged: boolean = false;
 
   while (true) {
-    let Option::SOME(newlineIndex) = pending.findByte((byte: u8): boolean -> {
-  return byte == '\n' as u8;
-}) else {
+    let Option::SOME(newlineIndex) = findNewlineFrom(&pending, scannedUpTo) else {
       if (reachedEnd) {
         if (pending.length() > 0) {
-          let trimmed: String = pending.trimAsciiWhitespace();
+          let trimmed: String = trimUnicodeWhitespace(&pending);
 
           if (trimmed.length() > 0) {
             let result: FmtStdinLineResult = processFmtStdinLine(&trimmed, &formatterConfig, emitDiff);
@@ -2313,13 +2424,15 @@ function runFmtStdinJson(options: &CliOptions): i32 {
         continue;
       }
 
+      scannedUpTo = pending.length();
       fmtAppendStdinChunk(&mut pending, buf, outcome.count);
       continue;
     };
 
     let line: String = pending.substringBytes(0, newlineIndex);
     pending = pending.substringBytes(newlineIndex + 1, pending.length());
-    let trimmed: String = line.trimAsciiWhitespace();
+    scannedUpTo = 0;
+    let trimmed: String = trimUnicodeWhitespace(&line);
 
     if (trimmed.length() == 0) {
       continue;

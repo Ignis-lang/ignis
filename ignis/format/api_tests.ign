@@ -400,3 +400,361 @@ function apiReportsAFormatterErrorOnAnNdjsonResponse(): void {
   let response: Format::StdinResponse = Format::processStdinRequest(&request, &config, false);
   Test::assertEq<boolean>(response.hasError, true);
 }
+
+/// F11: a surrogate pair decodes to one scalar, not two replacement
+/// characters.
+@test
+function apiDecodesASurrogatePairToOneScalar(): void {
+  let line: String = String::create("{\"path\":\"\\ud83d\\ude00\",\"text\":\"function main(): i32 {\\n  return 1;\\n}\\n\"}");
+
+  let Result::OK(request) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(request.path.toStr(), "😀");
+}
+
+/// F11: a lone high surrogate with nothing after it. Matches the host's
+/// exact wording.
+@test
+function apiReportsTheHostsWordingForALoneHighSurrogate(): void {
+  let line: String = String::create("{\"path\":\"\\ud83d\",\"text\":\"\"}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "failed to parse NDJSON record: unexpected end of hex escape at line 1 column 16"
+  );
+}
+
+/// F11: a high surrogate followed by a non-low-surrogate escape.
+@test
+function apiReportsTheHostsWordingForAnUnpairedHighSurrogate(): void {
+  let line: String = String::create("{\"path\":\"\\ud83d\\u0041\",\"text\":\"\"}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "failed to parse NDJSON record: lone leading surrogate in hex escape at line 1 column 21"
+  );
+}
+
+/// F11: a lone low surrogate with no preceding high surrogate.
+@test
+function apiReportsTheHostsWordingForALoneLowSurrogate(): void {
+  let line: String = String::create("{\"path\":\"\\ude00\",\"text\":\"\"}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "failed to parse NDJSON record: lone leading surrogate in hex escape at line 1 column 15"
+  );
+}
+
+/// F12: a `path` set to 50000 nested arrays fails immediately with
+/// `invalid type: sequence`, at any depth, instead of recursing at all.
+@test
+function apiRejectsADeeplyNestedArrayInPathWithoutRecursing(): void {
+  let mut line: String = String::create("{\"path\":");
+  let mut index: u64 = 0;
+
+  while (index < 50000) {
+    line.pushByte('[' as u8);
+    index += 1;
+  }
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "failed to parse NDJSON record: invalid type: sequence, expected a string at line 1 column 8"
+  );
+}
+
+/// F12: an unknown field's value is skipped iteratively, so 200000 levels of
+/// nesting in it does not overflow the stack (matching the host's
+/// `IgnoredAny`, which also has no recursion limit for a skipped field).
+@test
+function apiSkipsADeeplyNestedIgnoredFieldWithoutRecursing(): void {
+  let mut line: String = String::create("{\"other\":");
+  let mut index: u64 = 0;
+
+  while (index < 200000) {
+    line.pushByte('[' as u8);
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < 200000) {
+    line.pushByte(']' as u8);
+    index += 1;
+  }
+
+  line.pushStr(",\"path\":\"a.ign\",\"text\":\"function main(): i32 {\\n  return 1;\\n}\\n\"}");
+
+  let Result::OK(request) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(request.path.toStr(), "a.ign");
+}
+
+/// F13: an unrecognized escape sequence.
+@test
+function apiReportsTheHostsWordingForAnInvalidEscape(): void {
+  let line: String = String::create("{\"path\":\"a\\qb\",\"text\":\"\"}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "failed to parse NDJSON record: invalid escape at line 1 column 12");
+}
+
+/// F13: a raw control byte inside a JSON string.
+@test
+function apiReportsTheHostsWordingForARawControlCharacter(): void {
+  let mut line: String = String::create("{\"path\":\"a");
+  line.pushByte(1);
+  line.pushStr("b\",\"text\":\"\"}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "failed to parse NDJSON record: control character (\\u0000-\\u001F) found while parsing a string at line 1 column 11"
+  );
+}
+
+/// F13: `01` is a malformed JSON number (a leading zero cannot be followed
+/// by another digit).
+@test
+function apiReportsTheHostsWordingForANumberWithALeadingZero(): void {
+  let line: String = String::create("{\"path\":\"a\",\"text\":01}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "failed to parse NDJSON record: invalid number at line 1 column 21");
+}
+
+/// F13: `1e` is a malformed JSON number (an exponent marker needs at least
+/// one digit after it).
+@test
+function apiReportsTheHostsWordingForANumberWithAnEmptyExponent(): void {
+  let line: String = String::create("{\"path\":\"a\",\"text\":1e}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "failed to parse NDJSON record: invalid number at line 1 column 22");
+}
+
+/// F13: a bare `-` is a malformed JSON number (a digit must follow the
+/// minus sign).
+@test
+function apiReportsTheHostsWordingForABareMinusSign(): void {
+  let line: String = String::create("{\"path\":\"a\",\"text\":-}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "failed to parse NDJSON record: invalid number at line 1 column 21");
+}
+
+/// F14: a repeated `path` key is rejected the moment its own string finishes
+/// parsing, before its value (here, a perfectly valid string) is even
+/// looked at.
+@test
+function apiReportsTheHostsWordingForADuplicateField(): void {
+  let line: String = String::create("{\"path\":\"a\",\"path\":\"b\",\"text\":\"\"}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "failed to parse NDJSON record: duplicate field `path` at line 1 column 18");
+}
+
+/// F14: the doc comment on the old scanner claimed "later occurrence
+/// overwrites"; a duplicate is actually rejected regardless of which
+/// occurrence, or its value's type, comes first.
+@test
+function apiReportsADuplicateFieldEvenWhenTheSecondValueIsWrongTyped(): void {
+  let line: String = String::create("{\"path\":\"b\",\"path\":1,\"text\":\"\"}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "failed to parse NDJSON record: duplicate field `path` at line 1 column 18");
+}
+
+/// F15: a container-valued field reports the position right before its
+/// opening bracket, not after it (unlike every scalar, which is reported
+/// after being fully read).
+@test
+function apiReportsTheHostsColumnForAnObjectValuedField(): void {
+  let line: String = String::create("{\"path\":{\"x\":1},\"text\":\"\"}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "failed to parse NDJSON record: invalid type: map, expected a string at line 1 column 8"
+  );
+}
+
+/// F16: `serde_json` always classifies `-0` as `-0.0`, a float, to keep the
+/// sign bit no 64-bit integer type can represent.
+@test
+function apiDescribesNegativeZeroAsAFloat(): void {
+  let line: String = String::create("{\"path\":-0,\"text\":\"\"}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "failed to parse NDJSON record: invalid type: floating point `-0.0`, expected a string at line 1 column 10"
+  );
+}
+
+/// F17: Rust's `{:?}` string escaping in a description uses `\u{8}` for a
+/// backspace, not JSON's `\b`.
+@test
+function apiDescribesABackspaceWithRustDebugEscaping(): void {
+  let line: String = String::create("\"a\\bb\"");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "failed to parse NDJSON record: invalid type: string \"a\\u{8}b\", expected struct StdinRecord at line 1 column 6"
+  );
+}
+
+/// F17: DEL (0x7F) also becomes `\u{7f}`.
+@test
+function apiDescribesADelByteWithRustDebugEscaping(): void {
+  let mut line: String = String::create("\"a");
+  line.pushByte(127);
+  line.pushStr("b\"");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "failed to parse NDJSON record: invalid type: string \"a\\u{7f}b\", expected struct StdinRecord at line 1 column 5"
+  );
+}
+
+/// F19: a trailing comma before `}` has its own wording, not the generic
+/// `expected value`.
+@test
+function apiReportsTheHostsWordingForATrailingComma(): void {
+  let line: String = String::create("{\"path\":\"a\",\"text\":\"b\",}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "failed to parse NDJSON record: trailing comma at line 1 column 24");
+}
+
+/// F19: a missing comma between two entries.
+@test
+function apiReportsTheHostsWordingForAMissingComma(): void {
+  let line: String = String::create("{\"path\":\"a\" \"text\":\"b\"}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "failed to parse NDJSON record: expected `,` or `}` at line 1 column 13");
+}
+
+/// F19: a missing colon after a key.
+@test
+function apiReportsTheHostsWordingForAMissingColon(): void {
+  let line: String = String::create("{\"path\" \"a\",\"text\":\"b\"}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "failed to parse NDJSON record: expected `:` at line 1 column 9");
+}
+
+/// F19: a top-level (positional) array with a trailing comma after its
+/// second element also needs the dedicated wording, not the generic
+/// `expected value` the array element scanner would otherwise fall into.
+@test
+function apiReportsTheHostsWordingForATrailingCommaAfterTheSecondArrayElement(): void {
+  let line: String = String::create("[\"a\",\"b\",]");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "failed to parse NDJSON record: trailing comma at line 1 column 10");
+}
+
+/// F19: the same wording applies to a trailing comma right after the first
+/// (and only, at that point) array element.
+@test
+function apiReportsTheHostsWordingForATrailingCommaAfterTheFirstArrayElement(): void {
+  let line: String = String::create("[\"a\",]");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "failed to parse NDJSON record: trailing comma at line 1 column 6");
+}
