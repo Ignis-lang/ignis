@@ -1,0 +1,313 @@
+//!
+//! # Memory Allocator
+//!
+//! The process allocator every Ignis allocation goes through.
+//!
+//! ## Overview
+//!
+//! Each allocation is a `malloc` block with an `AllocHeader` placed immediately
+//! before the pointer handed to the caller. The header stores the requested size
+//! and the raw `malloc` base, which is what makes over-aligned allocations and
+//! live-byte accounting possible without a side table.
+//!
+//! ```text
+//!   malloc block
+//!   ┌───────────────┬────────────────┬──────────────────────────────┐
+//!   │ slack         │ AllocHeader    │ payload (aligned)            │
+//!   │ 0..alignment-1│ size, base     │ size bytes                   │
+//!   └───────────────┴────────────────┴──────────────────────────────┘
+//!                                    ▲
+//!                                    └── the returned pointer
+//! ```
+//!
+//! ## Exported C symbols
+//!
+//! `ignis_alloc`, `ignis_realloc` and `ignis_free` keep their C names because
+//! the parts of the runtime still written in C (`std/runtime/internal/rt_string.c`)
+//! call them. Everything else is reached from Ignis by name.
+//!
+//! ## Failure behavior
+//!
+//! A non-zero allocation is infallible: an out-of-memory host, an invalid
+//! alignment, or a size overflow panics instead of returning null. A zero-sized
+//! request returns null and allocates nothing.
+//!
+//! ## Example
+//!
+//! ```ignis
+//! import Memory from "std::memory";
+//!
+//! function main(): i32 {
+//!   let before: Stats = Memory::stats();
+//!   let buffer: *mut u8 = Memory::allocate<u8>(64);
+//!   Memory::free<u8>(buffer);
+//!
+//!   return Memory::stats().allocTotal == before.allocTotal + 1 ? 0 : 1;
+//! }
+//! ```
+
+import LibC from "std::libc";
+
+/// Alignment of the C `max_align_t` on every host Ignis targets.
+///
+/// It is the floor for every allocation, so a pointer handed back by this
+/// allocator is always suitable for any fundamental C type.
+const MAX_ALIGNMENT: u64 = 16;
+
+/// Largest representable `u64`, used for the overflow check in `checkedMul`.
+const U64_MAX: u64 = 18446744073709551615;
+
+/// Bookkeeping written in front of every allocation.
+///
+/// `base` is the raw `malloc` pointer; the header sits at `payload - HEADER_SIZE`,
+/// which is at least `MAX_ALIGNMENT`-aligned, so the record is always aligned
+/// for its own fields.
+record AllocHeader {
+  /// Payload size the caller asked for, in bytes.
+  public size: u64;
+
+  /// Raw `malloc` pointer this allocation has to be released with.
+  public base: *mut u8;
+}
+
+/// Live allocator counters.
+///
+/// The fields are process globals with translation-unit linkage, so every
+/// reader has to live in this file.
+record AllocStats {
+  static mut ALLOCS_LIVE: u64 = 0;
+  static mut BYTES_LIVE: u64 = 0;
+  static mut ALLOC_TOTAL: u64 = 0;
+  static mut FREE_TOTAL: u64 = 0;
+}
+
+/// Snapshot of the allocator counters.
+export record Stats {
+  /// Allocations handed out and not yet freed.
+  public allocsLive: u64;
+
+  /// Payload bytes handed out and not yet freed.
+  public bytesLive: u64;
+
+  /// Allocations made since the last reset.
+  public allocTotal: u64;
+
+  /// Allocations released since the last reset.
+  public freeTotal: u64;
+}
+
+/// Size of the header block that precedes every payload.
+function headerSize(): u64 {
+  return @sizeOf<AllocHeader>();
+}
+
+/// Reads the header that precedes `pointer`.
+function headerOf(pointer: *mut u8): AllocHeader {
+  return @read<AllocHeader>((pointer as u64 - headerSize()) as *mut AllocHeader);
+}
+
+function isPowerOfTwo(value: u64): boolean {
+  return value != 0 && (value & (value - 1)) == 0;
+}
+
+function alignUp(value: u64, alignment: u64): u64 {
+  return (value + (alignment - 1)) & ~(alignment - 1);
+}
+
+/// Multiplies `a` by `b`, returning 0 when the product would overflow.
+function checkedMul(a: u64, b: u64): u64 {
+  if (a == 0 || b == 0) {
+    return 0;
+  }
+
+  if (a > U64_MAX / b) {
+    return 0;
+  }
+
+  return a * b;
+}
+
+/// Allocates `size` bytes aligned to at least `alignment`, without accounting.
+///
+/// Returns null only for a zero size. Any other failure panics.
+function allocAlignedRaw(size: u64, alignment: u64): *mut u8 {
+  if (size == 0) {
+    return null;
+  }
+
+  if (!isPowerOfTwo(alignment)) {
+    @panic("ignis: invalid alignment");
+  }
+
+  let effective: u64 = alignment < MAX_ALIGNMENT ? MAX_ALIGNMENT : alignment;
+  let total: u64 = headerSize() + size + effective - 1;
+  let base: *mut u8 = LibC::Allocator::malloc(total) as *mut u8;
+
+  if (base == null) {
+    @panic("ignis: out of memory");
+  }
+
+  let aligned: u64 = alignUp(base as u64 + headerSize(), effective);
+
+  @write<AllocHeader>((aligned - headerSize()) as *mut AllocHeader, AllocHeader {
+      size: size,
+      base: base,
+    });
+
+  return aligned as *mut u8;
+}
+
+function trackAlloc(size: u64): void {
+  AllocStats::ALLOCS_LIVE += 1;
+  AllocStats::BYTES_LIVE += size;
+  AllocStats::ALLOC_TOTAL += 1;
+}
+
+function trackFree(size: u64): void {
+  AllocStats::ALLOCS_LIVE -= 1;
+  AllocStats::BYTES_LIVE -= size;
+  AllocStats::FREE_TOTAL += 1;
+}
+
+/// Allocates `size` bytes aligned for any fundamental type.
+///
+/// Exported because `std/runtime/internal/rt_string.c` allocates through it.
+@externName("ignis_alloc")
+export function ignisAlloc(size: u64): *mut u8 {
+  return RawAllocator::allocateAligned(size, MAX_ALIGNMENT);
+}
+
+/// Resizes `pointer` to `size` bytes, preserving the shared prefix.
+///
+/// Exported because `std/runtime/internal/rt_string.c` grows buffers through it.
+@externName("ignis_realloc")
+export function ignisRealloc(pointer: *mut u8, size: u64): *mut u8 {
+  return RawAllocator::reallocateAligned(pointer, size, MAX_ALIGNMENT);
+}
+
+/// Releases a pointer returned by this allocator.
+///
+/// Exported because `std/runtime/internal/rt_string.c` frees through it.
+@externName("ignis_free")
+export function ignisFree(pointer: *mut u8): void {
+  RawAllocator::free(pointer);
+}
+
+/// The process allocator behind `Memory` and `GlobalAllocator`.
+export namespace RawAllocator {
+  /// Allocates `size` bytes with at least `alignment` alignment.
+  ///
+  /// Returns null only when `size` is 0.
+  function allocateAligned(size: u64, alignment: u64): *mut u8 {
+    let pointer: *mut u8 = allocAlignedRaw(size, alignment);
+
+    if (pointer == null) {
+      return null;
+    }
+
+    trackAlloc(size);
+
+    return pointer;
+  }
+
+  /// Allocates `count * size` zeroed bytes with at least `alignment` alignment.
+  function allocateZeroedAligned(count: u64, size: u64, alignment: u64): *mut u8 {
+    let total: u64 = checkedMul(count, size);
+
+    if (count != 0 && size != 0 && total == 0) {
+      @panic("ignis: allocation size overflow");
+    }
+
+    let pointer: *mut u8 = RawAllocator::allocateAligned(total, alignment);
+
+    if (pointer != null) {
+      LibC::MemoryOperations::memset(pointer as *mut void, 0, total);
+    }
+
+    return pointer;
+  }
+
+  /// Resizes `pointer` so the result satisfies `alignment`.
+  ///
+  /// A null pointer allocates, and a zero size frees and returns null.
+  function reallocateAligned(pointer: *mut u8, size: u64, alignment: u64): *mut u8 {
+    if (pointer == null) {
+      return RawAllocator::allocateAligned(size, alignment);
+    }
+
+    if (size == 0) {
+      RawAllocator::free(pointer);
+      return null;
+    }
+
+    let header: AllocHeader = headerOf(pointer);
+    let moved: *mut u8 = allocAlignedRaw(size, alignment);
+
+    if (moved == null) {
+      return null;
+    }
+
+    let copySize: u64 = header.size < size ? header.size : size;
+
+    if (copySize > 0) {
+      LibC::MemoryOperations::memcpy(moved as *mut void, pointer as *void, copySize);
+    }
+
+    AllocStats::BYTES_LIVE = AllocStats::BYTES_LIVE - header.size + size;
+    LibC::Allocator::free(header.base as *mut void);
+
+    return moved;
+  }
+
+  /// Releases a pointer this allocator returned. Null is a no-op.
+  function free(pointer: *mut u8): void {
+    if (pointer == null) {
+      return;
+    }
+
+    let header: AllocHeader = headerOf(pointer);
+
+    trackFree(header.size);
+    LibC::Allocator::free(header.base as *mut void);
+  }
+
+  /// Copies `count` bytes from `source` to `destination`; regions must not overlap.
+  ///
+  /// A null operand or a zero count is a no-op.
+  function copyBytes(destination: *mut u8, source: *u8, count: u64): void {
+    if (destination == null || source == null || count == 0) {
+      return;
+    }
+
+    LibC::MemoryOperations::memcpy(destination as *mut void, source as *void, count);
+  }
+
+  /// Copies `count` bytes from `source` to `destination`, overlap allowed.
+  ///
+  /// A null operand or a zero count is a no-op.
+  function moveBytes(destination: *mut u8, source: *u8, count: u64): void {
+    if (destination == null || source == null || count == 0) {
+      return;
+    }
+
+    LibC::MemoryOperations::memmove(destination as *mut void, source as *void, count);
+  }
+
+  /// Returns a snapshot of the live allocator counters.
+  function stats(): Stats {
+    return Stats {
+      allocsLive: AllocStats::ALLOCS_LIVE,
+      bytesLive: AllocStats::BYTES_LIVE,
+      allocTotal: AllocStats::ALLOC_TOTAL,
+      freeTotal: AllocStats::FREE_TOTAL,
+    };
+  }
+
+  /// Clears every allocator counter, including the live ones.
+  function resetStats(): void {
+    AllocStats::ALLOCS_LIVE = 0;
+    AllocStats::BYTES_LIVE = 0;
+    AllocStats::ALLOC_TOTAL = 0;
+    AllocStats::FREE_TOTAL = 0;
+  }
+}

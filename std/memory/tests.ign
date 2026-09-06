@@ -1,0 +1,164 @@
+import ArenaAllocator, Layout, Memory, RawAllocator, Stats from "std::memory";
+import Hasher from "std::hash";
+import Test from "std::test";
+
+/// FNV-1a 64-bit offset basis, the seed a fresh `Hasher` starts from.
+const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
+
+function hashOf(value: str): u64 {
+  let mut hasher: Hasher = Hasher::new();
+  hasher.writeStr(value);
+
+  return hasher.finish();
+}
+
+@test
+function allocateResizeAndFreeRoundTrips(): void {
+  let first: *mut u8 = RawAllocator::allocateAligned(64, 16);
+  Test::assert(first != null);
+
+  @write<u8>(first, 7);
+
+  let resized: *mut u8 = RawAllocator::reallocateAligned(first, 128, 16);
+  Test::assert(resized != null);
+  Test::assertEq<u8>(@read<u8>(resized), 7);
+
+  RawAllocator::free(resized);
+}
+
+@test
+function allocateHonorsRequestedAlignment(): void {
+  Test::assert(RawAllocator::allocateAligned(0, 8) == null);
+
+  let over: *mut u8 = RawAllocator::allocateAligned(24, 32);
+  Test::assert(over != null);
+  Test::assertEq<u64>((over as u64) % 32, 0);
+
+  RawAllocator::free(over);
+}
+
+@test
+function allocateZeroedReturnsAlignedZeroBytes(): void {
+  let zeroed: *mut u8 = RawAllocator::allocateZeroedAligned(4, 4, 16);
+  Test::assert(zeroed != null);
+  Test::assertEq<u64>((zeroed as u64) % 16, 0);
+
+  let mut index: u64 = 0;
+
+  while (index < 16) {
+    Test::assertEq<u8>(@read<u8>(zeroed + index), 0);
+    index += 1;
+  }
+
+  RawAllocator::free(zeroed);
+}
+
+@test
+function freeReturnsEveryLiveByteToTheAllocator(): void {
+  let before: Stats = Memory::stats();
+
+  let block: *mut u8 = RawAllocator::allocateAligned(96, 16);
+  let mid: Stats = Memory::stats();
+
+  Test::assertEq<u64>(mid.allocsLive, before.allocsLive + 1);
+  Test::assertEq<u64>(mid.bytesLive, before.bytesLive + 96);
+  Test::assertEq<u64>(mid.allocTotal, before.allocTotal + 1);
+
+  RawAllocator::free(block);
+
+  let after: Stats = Memory::stats();
+
+  Test::assertEq<u64>(after.allocsLive, before.allocsLive);
+  Test::assertEq<u64>(after.bytesLive, before.bytesLive);
+  Test::assertEq<u64>(after.freeTotal, before.freeTotal + 1);
+}
+
+@test
+function reallocateKeepsTheLiveAllocationCountStable(): void {
+  let before: Stats = Memory::stats();
+
+  let block: *mut u8 = RawAllocator::allocateAligned(32, 16);
+  let grown: *mut u8 = RawAllocator::reallocateAligned(block, 64, 16);
+
+  let mid: Stats = Memory::stats();
+  Test::assertEq<u64>(mid.allocsLive, before.allocsLive + 1);
+  Test::assertEq<u64>(mid.bytesLive, before.bytesLive + 64);
+
+  RawAllocator::free(grown);
+
+  Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive);
+}
+
+@test
+function copyBytesAndMoveBytesHandleOverlap(): void {
+  let source: *mut u8 = RawAllocator::allocateZeroedAligned(1, 8, 16);
+  let destination: *mut u8 = RawAllocator::allocateZeroedAligned(1, 8, 16);
+
+  @write<u8>(source, 1);
+  @write<u8>(source + 1, 2);
+  @write<u8>(source + 2, 3);
+
+  RawAllocator::copyBytes(destination, source as *u8, 3);
+
+  Test::assertEq<u8>(@read<u8>(destination), 1);
+  Test::assertEq<u8>(@read<u8>(destination + 2), 3);
+
+  RawAllocator::moveBytes(source + 1, source as *u8, 3);
+
+  Test::assertEq<u8>(@read<u8>(source + 1), 1);
+  Test::assertEq<u8>(@read<u8>(source + 3), 3);
+
+  RawAllocator::free(source);
+  RawAllocator::free(destination);
+}
+
+@test
+function arenaReusesResetSpaceAndGrowsForLargeRequests(): void {
+  let mut arena: ArenaAllocator = ArenaAllocator::new(64);
+
+  let first: *mut u8 = arena.allocate(Layout::new(24 as u64, 8 as u64));
+  let second: *mut u8 = arena.allocate(Layout::new(24 as u64, 8 as u64));
+
+  Test::assert(first != null);
+  Test::assert(second != null);
+  Test::assert(first != second);
+
+  arena.reset();
+
+  let reused: *mut u8 = arena.allocate(Layout::new(24 as u64, 8 as u64));
+  Test::assert(reused == first);
+
+  let large: *mut u8 = arena.allocate(Layout::new(256 as u64, 16 as u64));
+  Test::assert(large != null);
+  Test::assertEq<u64>((large as u64) % 16, 0);
+
+  arena.destroy();
+
+  Test::assert(arena.allocate(Layout::new(8 as u64, 8 as u64)) == null);
+}
+
+@test
+function arenaReleasesEveryBlockOnDestroy(): void {
+  let before: Stats = Memory::stats();
+
+  let mut arena: ArenaAllocator = ArenaAllocator::new(64);
+  Test::assert(arena.allocate(Layout::new(24 as u64, 8 as u64)) != null);
+  Test::assert(arena.allocate(Layout::new(256 as u64, 16 as u64)) != null);
+
+  Test::assert(Memory::stats().allocsLive > before.allocsLive);
+
+  arena.destroy();
+
+  Test::assertEq<u64>(Memory::stats().allocsLive, before.allocsLive);
+}
+
+@test
+function stringHashingIsDeterministicAndSeedDependent(): void {
+  let first: u64 = hashOf("abc");
+  let second: u64 = hashOf("abc");
+  let different: u64 = hashOf("abd");
+
+  Test::assertEq<u64>(first, second);
+  Test::assertNe<u64>(first, FNV_OFFSET_BASIS);
+  Test::assertNe<u64>(first, different);
+}

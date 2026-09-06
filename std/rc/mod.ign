@@ -15,6 +15,14 @@
 //!
 //! Both types are **move-by-default**. Use `.clone()` to share.
 //!
+//! ## Where the payload destructor comes from
+//!
+//! The control block stores counts and nothing else. `Rc<T>` and `Weak<T>` are
+//! generic, so every operation already knows `T`, and the payload is destroyed
+//! with `@dropInPlace<T>` at the point the strong count reaches zero. Storing a
+//! destructor pointer in the block would need a raw C function pointer, which
+//! Ignis has no way to call.
+//!
 //! ## Example
 //!
 //! ```ignis
@@ -30,50 +38,150 @@
 //! }
 //! ```
 
-extern __rc_ffi {
-  @externName("ignis_rc_alloc")
-  /// Allocates an Rc control block and payload storage.
-  function ignis_rc_alloc(
-    payload_size: u64,
-    payload_align: u64,
-    drop_fn: (*mut u8) -> void
-  ): *mut void;
+import Align from "../memory/align";
+import RawAllocator from "../memory/allocator";
 
-  @externName("ignis_rc_get")
-  /// Returns the payload pointer for an Rc/Weak runtime handle.
-  function ignis_rc_get(handle: *mut void): *mut void;
+/// Alignment floor for a control block, matching the process allocator.
+const RC_MIN_ALIGNMENT: u64 = 16;
 
-  @externName("ignis_rc_retain")
-  /// Increments the strong reference count.
-  function ignis_rc_retain(handle: *mut void): void;
+/// Header shared by every `Rc<T>` and `Weak<T>` over one allocation.
+///
+/// The block lives at the front of the allocation and the payload follows it,
+/// aligned for `T`:
+///
+/// ```text
+///   ┌──────────────────┬─────────────┬──────────────────────────┐
+///   │ strong, weak     │ padding     │ T payload                │
+///   └──────────────────┴─────────────┴──────────────────────────┘
+///   ^ handle                         ^ handle + headerSize(alignOf<T>)
+/// ```
+record RcBox {
+  /// Live strong references. The payload is destroyed when this reaches zero.
+  public strong: u32;
 
-  @externName("ignis_rc_release")
-  /// Decrements the strong reference count and may drop the payload.
-  function ignis_rc_release(handle: *mut void): void;
+  /// Live weak references. The allocation is released when both counts are zero.
+  public weak: u32;
+}
 
-  @externName("ignis_rc_count")
-  /// Returns the current strong reference count.
-  function ignis_rc_count(handle: *mut void): u32;
+/// Operations on the shared control block.
+///
+/// The namespace is exported because a monomorphized `Rc<T>` method is emitted
+/// into whichever translation unit instantiates it, and that unit reaches these
+/// by name. Nothing outside `Rc<T>` and `Weak<T>` should call them.
+export namespace RcBlock {
+  /// Rounds a requested payload alignment to one the allocator can satisfy.
+  ///
+  /// Zero and non-power-of-two requests fall back to the floor rather than
+  /// producing an unusable layout.
+  function normalizedAlign(payloadAlign: u64): u64 {
+    if (payloadAlign == 0 || !Align::isPowerOfTwo(payloadAlign)) {
+      return RC_MIN_ALIGNMENT;
+    }
 
-  @externName("ignis_rc_downgrade")
-  /// Converts a strong handle into an additional weak reference.
-  function ignis_rc_downgrade(handle: *mut void): void;
+    return payloadAlign < RC_MIN_ALIGNMENT ? RC_MIN_ALIGNMENT : payloadAlign;
+  }
 
-  @externName("ignis_rc_upgrade")
-  /// Attempts to upgrade a weak handle to a strong handle.
-  function ignis_rc_upgrade(handle: *mut void): *mut void;
+  /// Byte offset from the allocation base to a payload aligned for `payloadAlign`.
+  function headerSize(payloadAlign: u64): u64 {
+    return Align::alignUp(@sizeOf<RcBox>(), RcBlock::normalizedAlign(payloadAlign));
+  }
 
-  @externName("ignis_weak_retain")
-  /// Increments the weak reference count.
-  function ignis_weak_retain(handle: *mut void): void;
+  /// Allocates a zeroed control block plus payload storage, with strong count 1.
+  function allocate(payloadSize: u64, payloadAlign: u64): *mut void {
+    let alignment: u64 = RcBlock::normalizedAlign(payloadAlign);
+    let total: u64 = RcBlock::headerSize(payloadAlign) + payloadSize;
+    let block: *mut u8 = RawAllocator::allocateZeroedAligned(1, total, alignment);
 
-  @externName("ignis_weak_release")
-  /// Decrements the weak reference count and may free the control block.
-  function ignis_weak_release(handle: *mut void): void;
+    @write<RcBox>(block as *mut RcBox, RcBox {
+        strong: 1,
+        weak: 0,
+      });
 
-  @externName("ignis_weak_count")
-  /// Returns the current weak reference count.
-  function ignis_weak_count(handle: *mut void): u32;
+    return block as *mut void;
+  }
+
+  function strongCount(handle: *mut void): u32 {
+    return @read<RcBox>(handle as *mut RcBox).strong;
+  }
+
+  function weakCount(handle: *mut void): u32 {
+    return @read<RcBox>(handle as *mut RcBox).weak;
+  }
+
+  function retain(handle: *mut void): void {
+    let mut header: RcBox = @read<RcBox>(handle as *mut RcBox);
+
+    header.strong += 1;
+
+    @write<RcBox>(handle as *mut RcBox, header);
+  }
+
+  function retainWeak(handle: *mut void): void {
+    let mut header: RcBox = @read<RcBox>(handle as *mut RcBox);
+
+    header.weak += 1;
+
+    @write<RcBox>(handle as *mut RcBox, header);
+  }
+
+  /// Decrements the strong count.
+  ///
+  /// Returns true exactly on the transition to zero, which is the one moment the
+  /// caller must destroy the payload.
+  function releaseStrong(handle: *mut void): boolean {
+    let mut header: RcBox = @read<RcBox>(handle as *mut RcBox);
+
+    if (header.strong == 0) {
+      return false;
+    }
+
+    header.strong -= 1;
+
+    @write<RcBox>(handle as *mut RcBox, header);
+
+    return header.strong == 0;
+  }
+
+  /// Decrements the weak count and releases the allocation when nothing is left.
+  function releaseWeak(handle: *mut void): void {
+    let mut header: RcBox = @read<RcBox>(handle as *mut RcBox);
+
+    if (header.weak == 0) {
+      return;
+    }
+
+    header.weak -= 1;
+
+    @write<RcBox>(handle as *mut RcBox, header);
+
+    if (header.weak == 0 && header.strong == 0) {
+      RawAllocator::free(handle as *mut u8);
+    }
+  }
+
+  /// Releases the allocation once no strong or weak reference is left.
+  function releaseIfUnreferenced(handle: *mut void): void {
+    let header: RcBox = @read<RcBox>(handle as *mut RcBox);
+
+    if (header.strong == 0 && header.weak == 0) {
+      RawAllocator::free(handle as *mut u8);
+    }
+  }
+
+  /// Adds a strong reference when the payload is still alive.
+  function tryRetain(handle: *mut void): boolean {
+    let mut header: RcBox = @read<RcBox>(handle as *mut RcBox);
+
+    if (header.strong == 0) {
+      return false;
+    }
+
+    header.strong += 1;
+
+    @write<RcBox>(handle as *mut RcBox, header);
+
+    return true;
+  }
 }
 
 /// Reference-counted shared pointer.
@@ -88,14 +196,13 @@ extern __rc_ffi {
 ///                ┌───────────────────────┐
 ///                │  strong: u32          │  reference counts
 ///                │  weak:   u32          │
-///                │  drop_fn: fn ptr      │
 ///                ├───────────────────────┤
 ///                │  T payload            │  user data
 ///                └───────────────────────┘
 /// ```
 ///
-/// When `strong` reaches 0, `drop_fn` runs on the payload. The allocation
-/// is freed when both `strong` and `weak` reach 0.
+/// When `strong` reaches 0 the payload is destroyed. The allocation is freed
+/// when both `strong` and `weak` reach 0.
 ///
 /// ## Method Reference
 ///
@@ -123,19 +230,22 @@ export record Rc<T> {
   /// let r: Rc<i32> = Rc::new<i32>(100);
   /// ```
   public static new(value: T): Rc<T> {
-    let h: *mut void = __rc_ffi::ignis_rc_alloc(
-      @sizeOf<T>(),
-      @alignOf<T>(),
-      @dropGlue<T>()
-    );
+    let handle: *mut void = RcBlock::allocate(@sizeOf<T>(), @alignOf<T>());
+    let mut slot: *mut T = (handle as u64 + RcBlock::headerSize(@alignOf<T>())) as *mut T;
 
-    let payload: *mut void = __rc_ffi::ignis_rc_get(h);
-
-    @write<T>(payload as *mut T, value);
+    // An indexed store moves `value` into the payload. `@write` copies it and
+    // leaves the parameter owned, which then drops at the end of this function
+    // and destroys the payload the caller just handed over.
+    slot[0] = value;
 
     return Rc {
-      handle: h,
+      handle: handle,
     };
+  }
+
+  /// Returns the payload address for this allocation.
+  payloadPointer(&self): *mut T {
+    return (self.handle as u64 + RcBlock::headerSize(@alignOf<T>())) as *mut T;
   }
 
   /// Returns the number of live strong references.
@@ -150,7 +260,7 @@ export record Rc<T> {
   /// let n: u32 = a.strongCount(); // 2
   /// ```
   public strongCount(&self): u32 {
-    return __rc_ffi::ignis_rc_count(self.handle);
+    return RcBlock::strongCount(self.handle);
   }
 
   /// Returns the number of live weak references.
@@ -165,7 +275,7 @@ export record Rc<T> {
   /// let n: u32 = a.weakCount(); // 1
   /// ```
   public weakCount(&self): u32 {
-    return __rc_ffi::ignis_weak_count(self.handle);
+    return RcBlock::weakCount(self.handle);
   }
 
   /// Creates a `Weak<T>` that does not keep the value alive.
@@ -179,7 +289,7 @@ export record Rc<T> {
   /// let w: Weak<i32> = a.downgrade();
   /// ```
   public downgrade(&self): Weak<T> {
-    __rc_ffi::ignis_rc_downgrade(self.handle);
+    RcBlock::retainWeak(self.handle);
 
     return Weak {
       handle: self.handle,
@@ -197,8 +307,7 @@ export record Rc<T> {
   /// let val: &i32 = a.get();
   /// ```
   public get(&self): &T {
-    let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
-    return (payload as *mut T) as &T;
+    return self.payloadPointer() as &T;
   }
 
   /// Returns a mutable pointer to the inner value if this `Rc` is the
@@ -214,9 +323,8 @@ export record Rc<T> {
   /// let ptr: Option<*mut i32> = a.getMut(); // SOME (unique owner)
   /// ```
   public getMut(&mut self): Option<*mut T> {
-    if (__rc_ffi::ignis_rc_count(self.handle) == 1) {
-      let payload: *mut void = __rc_ffi::ignis_rc_get(self.handle);
-      return Option::SOME(payload as *mut T);
+    if (RcBlock::strongCount(self.handle) == 1) {
+      return Option::SOME(self.payloadPointer());
     }
 
     return Option::NONE;
@@ -233,7 +341,7 @@ export record Rc<T> {
   /// let b: Rc<i32> = a.clone();
   /// ```
   clone(&self): Rc<T> {
-    __rc_ffi::ignis_rc_retain(self.handle);
+    RcBlock::retain(self.handle);
 
     return Rc {
       handle: self.handle,
@@ -243,7 +351,11 @@ export record Rc<T> {
   /// Decrements the strong count. Runs the payload destructor when it
   /// reaches zero. Frees the allocation when both counts reach zero.
   drop(&mut self): void {
-    __rc_ffi::ignis_rc_release(self.handle);
+    if (RcBlock::releaseStrong(self.handle)) {
+      @dropInPlace<T>(self.payloadPointer());
+    }
+
+    RcBlock::releaseIfUnreferenced(self.handle);
   }
 }
 
@@ -297,13 +409,13 @@ export record Weak<T> {
   /// let upgraded: Option<Rc<i32>> = w.upgrade(); // SOME while a is alive
   /// ```
   public upgrade(&self): Option<Rc<T>> {
-    let result: *mut void = __rc_ffi::ignis_rc_upgrade(self.handle);
-
-    if (result as u64 != 0) {
-      return Option::SOME(Rc { handle: result });
+    if (!RcBlock::tryRetain(self.handle)) {
+      return Option::NONE;
     }
 
-    return Option::NONE;
+    return Option::SOME(Rc {
+      handle: self.handle,
+    });
   }
 
   /// Returns the number of live weak references.
@@ -318,7 +430,7 @@ export record Weak<T> {
   /// let n: u32 = w.weakCount(); // 1
   /// ```
   public weakCount(&self): u32 {
-    return __rc_ffi::ignis_weak_count(self.handle);
+    return RcBlock::weakCount(self.handle);
   }
 
   /// Returns the number of live strong references.
@@ -333,7 +445,7 @@ export record Weak<T> {
   /// let n: u32 = w.strongCount(); // 1
   /// ```
   public strongCount(&self): u32 {
-    return __rc_ffi::ignis_rc_count(self.handle);
+    return RcBlock::strongCount(self.handle);
   }
 
   /// Increments the weak count and returns a new `Weak` sharing the header.
@@ -348,7 +460,7 @@ export record Weak<T> {
   /// let w2: Weak<i32> = w1.clone();
   /// ```
   clone(&self): Weak<T> {
-    __rc_ffi::ignis_weak_retain(self.handle);
+    RcBlock::retainWeak(self.handle);
 
     return Weak {
       handle: self.handle,
@@ -358,6 +470,6 @@ export record Weak<T> {
   /// Decrements the weak count. Frees the allocation when both counts
   /// reach zero.
   drop(&mut self): void {
-    __rc_ffi::ignis_weak_release(self.handle);
+    RcBlock::releaseWeak(self.handle);
   }
 }

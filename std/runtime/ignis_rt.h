@@ -9,6 +9,17 @@
 #include <unistd.h>
 
 // =============================================================================
+// Runtime type definitions
+//
+// Both compilers emit this same block into every translation unit they produce,
+// under this guard, so a unit that also includes this header keeps exactly one
+// definition of each name. Keep the two copies in step.
+// =============================================================================
+
+#ifndef IGNIS_RT_TYPES_H
+#define IGNIS_RT_TYPES_H
+
+// =============================================================================
 // Primitive type aliases
 // =============================================================================
 
@@ -86,203 +97,7 @@ typedef struct IgnisString {
  */
 typedef void *null;
 
-// =============================================================================
-// Process bootstrap helpers
-// =============================================================================
-
-/**
- * Stores the host argv snapshot for std::process.
- */
-void ignis_runtime_init(i32 argc, char **argv);
-
-/**
- * Returns the stored startup argument count, including argv[0].
- */
-i32 ignis_process_arg_count(void);
-
-/**
- * Returns the stored argument at index, or NULL when out of range.
- */
-const char *ignis_process_arg_at(i32 index);
-
-// =============================================================================
-// Reference counting (Rc)
-// =============================================================================
-
-/**
- * Function pointer type for drop callbacks.
- * Receives a pointer to the payload (not the RcBox header).
- */
-typedef void (*IgnisDropFn)(void *);
-
-/**
- * Header for reference-counted allocations.
- *
- * Layout in memory: [IgnisRcBox header][payload bytes...]
- * The payload starts at (char*)rc + sizeof(IgnisRcBox), aligned to max_align_t.
- *
- * The allocation is freed when both refcount and weak_count reach 0.
- */
-typedef struct {
-  uint32_t refcount;
-  uint32_t weak_count;
-  IgnisDropFn drop_fn;
-  size_t payload_size;
-  size_t payload_align;
-} IgnisRcBox;
-
-/**
- * Allocates an IgnisRcBox with `payload_size` bytes of payload.
- * The refcount is initialized to 1.
- *
- * @param payload_size Size of the payload in bytes.
- * @param payload_align Required payload alignment in bytes (power-of-two).
- * @param drop_fn Optional destructor called on the payload when refcount reaches 0.
- *                Pass NULL if no cleanup is needed.
- * @return Pointer to the IgnisRcBox, or NULL on allocation failure.
- */
-IgnisRcBox *ignis_rc_alloc(size_t payload_size, size_t payload_align, IgnisDropFn drop_fn);
-
-/**
- * Increments the reference count.
- *
- * @param rc Pointer to an IgnisRcBox (must not be NULL).
- */
-void ignis_rc_retain(IgnisRcBox *rc);
-
-/**
- * Decrements the reference count.
- * When the count reaches 0, calls drop_fn(payload) if set.
- * Frees the allocation only if weak_count is also 0.
- *
- * @param rc Pointer to an IgnisRcBox (must not be NULL).
- */
-void ignis_rc_release(IgnisRcBox *rc);
-
-/**
- * Returns a pointer to the payload stored after the IgnisRcBox header.
- *
- * @param rc Pointer to an IgnisRcBox (must not be NULL).
- * @return Pointer to the payload.
- */
-void *ignis_rc_get(IgnisRcBox *rc);
-
-/**
- * Returns the current strong reference count.
- */
-uint32_t ignis_rc_count(const IgnisRcBox *rc);
-
-/**
- * Increments the weak count (creates a weak reference).
- */
-void ignis_rc_downgrade(IgnisRcBox *rc);
-
-/**
- * If refcount > 0, increments it and returns `rc`. Otherwise returns NULL.
- */
-IgnisRcBox *ignis_rc_upgrade(IgnisRcBox *rc);
-
-/**
- * Increments the weak count (clones a weak reference).
- */
-void ignis_weak_retain(IgnisRcBox *rc);
-
-/**
- * Decrements the weak count.
- * Frees the allocation if both counts reach 0.
- */
-void ignis_weak_release(IgnisRcBox *rc);
-
-/**
- * Returns the current weak reference count.
- */
-uint32_t ignis_weak_count(const IgnisRcBox *rc);
-
-// =============================================================================
-// Memory allocation
-// =============================================================================
-
-typedef struct {
-  size_t allocs_live;
-  size_t bytes_live;
-  size_t alloc_total;
-  size_t free_total;
-} IgnisMemStats;
-
-IgnisMemStats ignis_mem_stats(void);
-void ignis_mem_reset_stats(void);
-
-/**
- * Allocates `size` bytes with the runtime allocator.
- * Aborts the process on allocation failure (OOM).
- */
-void *ignis_alloc(size_t size);
-
-/**
- * Allocates `size` bytes with at least `alignment` alignment.
- * `alignment` must be a non-zero power of two.
- * Returns NULL only when `size == 0`.
- * Aborts the process on allocation failure (OOM) or invalid alignment.
- */
-void *ignis_alloc_aligned(size_t size, size_t alignment);
-
-/**
- * Resizes a previously allocated block.
- * Aborts the process on allocation failure (OOM).
- */
-void *ignis_realloc(void *ptr, size_t size);
-
-/**
- * Reallocates a block so the resulting storage satisfies `alignment`.
- * `alignment` must be a non-zero power of two.
- * Returns NULL only when `size == 0`.
- * Aborts the process on allocation failure (OOM) or invalid alignment.
- */
-void *ignis_realloc_aligned(void *ptr, size_t size, size_t alignment);
-
-/**
- * Allocates `count` elements of `size` bytes, zero-initialized.
- */
-void *ignis_calloc(size_t count, size_t size);
-
-/**
- * Allocates `count * size` bytes with `alignment` alignment and zero-fills them.
- * Returns NULL only when the total size is 0.
- * Aborts on overflow, allocation failure, or invalid alignment.
- */
-void *ignis_calloc_aligned(size_t count, size_t size, size_t alignment);
-
-/**
- * Frees a previously allocated block.
- */
-void ignis_free(void *ptr);
-
-/**
- * Copies `n` bytes from `src` to `dest`. Regions must not overlap.
- */
-void ignis_memcpy(void *dest, const void *src, size_t n);
-
-/**
- * Copies `n` bytes from `src` to `dest`. Handles overlapping regions.
- */
-void ignis_memmove(void *dest, const void *src, size_t n);
-
-// =============================================================================
-// Arena allocation
-// =============================================================================
-
-typedef struct IgnisArena IgnisArena;
-
-IgnisArena *ignis_arena_create(size_t block_size);
-void *ignis_arena_allocate(IgnisArena *arena, size_t size, size_t alignment);
-void ignis_arena_reset(IgnisArena *arena);
-void ignis_arena_destroy(IgnisArena *arena);
-
-// =============================================================================
-// Hashing
-// =============================================================================
-
-u64 ignis_hash_fnv1a_cstr(u64 state, const char *value);
+#endif // IGNIS_RT_TYPES_H
 
 // =============================================================================
 // String base API

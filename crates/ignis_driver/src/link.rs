@@ -385,6 +385,13 @@ pub fn link_executable(
     cmd.arg(obj);
   }
 
+  // libignis_rt.a is one of `objects` and calls back into the allocator the std
+  // archive now owns, so the std archive is offered a second time after it. A
+  // repeated archive is portable in a way `--start-group` is not.
+  if let Some(std_archive) = &link_plan.std_archive {
+    cmd.arg(std_archive);
+  }
+
   cmd.arg("-o").arg(bin_path);
 
   for lib in &link_plan.libs {
@@ -446,6 +453,11 @@ pub fn link_executable_multi(
 
   for obj in &link_plan.objects {
     cmd.arg(obj);
+  }
+
+  // See `link_executable`: the runtime archive depends on the std archive.
+  if let Some(std_archive) = &link_plan.std_archive {
+    cmd.arg(std_archive);
   }
 
   cmd.arg("-o").arg(bin_path);
