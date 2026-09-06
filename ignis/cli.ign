@@ -441,42 +441,52 @@ function applyFmtEmitModes(options: &mut CliOptions, value: &String): void {
 /// `Ok(None)` means it was not, so the caller keeps trying other cases.
 /// Split out of `parseArguments` itself, which was long enough on its own to
 /// make the `fmt`-specific cases hard to see among the rest.
-function tryParseFmtFlag(
+/// `--project`/`--project=<dir>`, including its conflict with `--stdin-json`.
+function tryParseFmtProjectFlag(
   arguments: &Vector<String>,
   argument: &String,
   index: u64,
-  options: &mut CliOptions,
-  state: &mut FmtFlagState
+  options: &mut CliOptions
 ): Result<Option<u64>, String> {
   let mut optionsRef: &mut CliOptions = options;
-  let mut stateRef: &mut FmtFlagState = state;
-
   let projectEqualsValue: Option<String> = flagEqualsValue(argument, "--project");
   let isProjectFlag: boolean = argument.equals("--project") || projectEqualsValue.isSome();
 
-  if (isProjectFlag) {
-    if (optionsRef.fmtStdinJson) {
-      return Result::ERROR(clapFmtConflictError(
-        "--stdin-json",
-        "--project <PROJECT>",
-        "--stdin-json",
-        true,
-        "[FILE_PATHS]...",
-      ));
-    }
-
-    if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--project")) {
-      optionsRef.fmtProject = Option::SOME(equalsValue);
-      return Result::OK(Option::SOME(index + 1));
-    }
-
-    let Option::SOME(value) = arguments.get(index + 1) else {
-      return Result::ERROR(cliMissingValue("--project", "a directory"));
-    };
-
-    optionsRef.fmtProject = Option::SOME(value.clone());
-    return Result::OK(Option::SOME(index + 2));
+  if (!isProjectFlag) {
+    return Result::OK(Option::NONE);
   }
+
+  if (optionsRef.fmtStdinJson) {
+    return Result::ERROR(clapFmtConflictError(
+      "--stdin-json",
+      "--project <PROJECT>",
+      "--stdin-json",
+      true,
+      "[FILE_PATHS]...",
+    ));
+  }
+
+  if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--project")) {
+    optionsRef.fmtProject = Option::SOME(equalsValue);
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  let Option::SOME(value) = arguments.get(index + 1) else {
+    return Result::ERROR(cliMissingValue("--project", "a directory"));
+  };
+
+  optionsRef.fmtProject = Option::SOME(value.clone());
+  return Result::OK(Option::SOME(index + 2));
+}
+
+/// `--check` and `--config`/`--config=<file>`.
+function tryParseFmtCheckOrConfigFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions
+): Result<Option<u64>, String> {
+  let mut optionsRef: &mut CliOptions = options;
 
   if (argument.equals("--check")) {
     optionsRef.fmtCheck = true;
@@ -496,6 +506,18 @@ function tryParseFmtFlag(
     optionsRef.fmtConfigPath = Option::SOME(value.clone());
     return Result::OK(Option::SOME(index + 2));
   }
+
+  return Result::OK(Option::NONE);
+}
+
+/// `--indent-width`/`--indent-width=<n>` and `--line-width`/`--line-width=<n>`.
+function tryParseFmtWidthFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions
+): Result<Option<u64>, String> {
+  let mut optionsRef: &mut CliOptions = options;
 
   if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--indent-width")) {
     if (equalsValue.length() == 0) {
@@ -549,6 +571,20 @@ function tryParseFmtFlag(
     return Result::OK(Option::SOME(index + 2));
   }
 
+  return Result::OK(Option::NONE);
+}
+
+/// `--use-tabs`/`--spaces` (mutually exclusive, tracked in `state`) and the
+/// plain boolean `--sort-imports`.
+function tryParseFmtStyleFlag(
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
+): Result<Option<u64>, String> {
+  let mut optionsRef: &mut CliOptions = options;
+  let mut stateRef: &mut FmtFlagState = state;
+
   if (argument.equals("--use-tabs")) {
     if (stateRef.spacesSeen) {
       return Result::ERROR(clapFmtConflictError("--spaces", "--use-tabs", "--spaces", true, "<FILE_PATHS>..."));
@@ -574,24 +610,48 @@ function tryParseFmtFlag(
     return Result::OK(Option::SOME(index + 1));
   }
 
-  if (argument.equals("--stdin-json")) {
-    if (let Option::SOME(_) = &optionsRef.fmtProject) {
-      return Result::ERROR(clapFmtConflictError(
-        "--project <PROJECT>",
-        "--stdin-json",
-        "--project",
-        true,
-        "<PROJECT> [FILE_PATHS]...",
-      ));
-    }
+  return Result::OK(Option::NONE);
+}
 
-    if (optionsRef.fmtFilePaths.length() > 0) {
-      return Result::ERROR(clapFmtConflictError("[FILE_PATHS]...", "--stdin-json", "<FILE_PATHS>...", false, ""));
-    }
+/// `--stdin-json`, including its conflicts with `--project` and explicit
+/// file paths.
+function tryParseFmtStdinJsonFlag(
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions
+): Result<Option<u64>, String> {
+  let mut optionsRef: &mut CliOptions = options;
 
-    optionsRef.fmtStdinJson = true;
-    return Result::OK(Option::SOME(index + 1));
+  if (!argument.equals("--stdin-json")) {
+    return Result::OK(Option::NONE);
   }
+
+  if (let Option::SOME(_) = &optionsRef.fmtProject) {
+    return Result::ERROR(clapFmtConflictError(
+      "--project <PROJECT>",
+      "--stdin-json",
+      "--project",
+      true,
+      "<PROJECT> [FILE_PATHS]...",
+    ));
+  }
+
+  if (optionsRef.fmtFilePaths.length() > 0) {
+    return Result::ERROR(clapFmtConflictError("[FILE_PATHS]...", "--stdin-json", "<FILE_PATHS>...", false, ""));
+  }
+
+  optionsRef.fmtStdinJson = true;
+  return Result::OK(Option::SOME(index + 1));
+}
+
+/// `--emit`/`--emit=<modes>`.
+function tryParseFmtEmitFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions
+): Result<Option<u64>, String> {
+  let optionsRef: &mut CliOptions = options;
 
   if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--emit")) {
     applyFmtEmitModes(optionsRef, &equalsValue);
@@ -608,6 +668,71 @@ function tryParseFmtFlag(
   }
 
   return Result::OK(Option::NONE);
+}
+
+function tryParseFmtFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
+): Result<Option<u64>, String> {
+  match (tryParseFmtProjectFlag(arguments, argument, index, options)) {
+    Result::ERROR(message) -> {
+      return Result::ERROR(message);
+    },
+    Result::OK(handled) -> {
+      if (let Option::SOME(_) = handled) {
+        return Result::OK(handled);
+      }
+    },
+  };
+
+  match (tryParseFmtCheckOrConfigFlag(arguments, argument, index, options)) {
+    Result::ERROR(message) -> {
+      return Result::ERROR(message);
+    },
+    Result::OK(handled) -> {
+      if (let Option::SOME(_) = handled) {
+        return Result::OK(handled);
+      }
+    },
+  };
+
+  match (tryParseFmtWidthFlag(arguments, argument, index, options)) {
+    Result::ERROR(message) -> {
+      return Result::ERROR(message);
+    },
+    Result::OK(handled) -> {
+      if (let Option::SOME(_) = handled) {
+        return Result::OK(handled);
+      }
+    },
+  };
+
+  match (tryParseFmtStyleFlag(argument, index, options, state)) {
+    Result::ERROR(message) -> {
+      return Result::ERROR(message);
+    },
+    Result::OK(handled) -> {
+      if (let Option::SOME(_) = handled) {
+        return Result::OK(handled);
+      }
+    },
+  };
+
+  match (tryParseFmtStdinJsonFlag(argument, index, options)) {
+    Result::ERROR(message) -> {
+      return Result::ERROR(message);
+    },
+    Result::OK(handled) -> {
+      if (let Option::SOME(_) = handled) {
+        return Result::OK(handled);
+      }
+    },
+  };
+
+  return tryParseFmtEmitFlag(arguments, argument, index, options);
 }
 
 /// Parses a command line into the options every subcommand reads.

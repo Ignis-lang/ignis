@@ -837,18 +837,56 @@ export namespace Format {
     return false;
   }
 
+  /// A JSON scalar's kind, as a plain (payload-free) enum: matching an enum
+  /// that carries an owned payload through a reference to a field of an
+  /// already-bound local double-frees on this compiler (repro
+  /// "field-move-double-free", which turns out to cover this shape too, not
+  /// just a bare `record.field` move), so the payload instead lives
+  /// alongside the tag as `ShallowScalarRead.text`, a plain `String` field.
+  enum ShallowScalarTag {
+    STRING,
+    BOOL_TRUE,
+    BOOL_FALSE,
+    NULL,
+    NUMBER,
+  }
+
   /// A JSON scalar (string, number, `true`/`false`/`null`) fully consumed at
-  /// `valueStart`, together with its `serde`-`Unexpected`-shaped description.
-  /// A container (`{`/`[`) never reaches this: a caller checks for one with
+  /// `valueStart`, described lazily rather than eagerly: `text` holds the
+  /// decoded string (`STRING`) or the raw number literal (`NUMBER`), empty
+  /// otherwise, and `describeShallowScalar` builds the actual
+  /// `serde`-`Unexpected`-shaped description from it only when a caller
+  /// needs one (the scalar turned out to be the wrong type). A container
+  /// (`{`/`[`) never reaches this: a caller checks for one with
   /// `Json::classifyContainerStart` first, since `serde` classifies a
   /// container by peeking its opening bracket without consuming it (a
-  /// different column convention than every scalar here, which is fully read
-  /// before it is described).
+  /// different column convention than every scalar here, which is fully
+  /// read before it is described).
   record ShallowScalarRead {
-    public isString: boolean;
-    public value: String;
-    public description: String;
+    public tag: ShallowScalarTag;
+    public text: String;
     public endOffset: u64;
+  }
+
+  /// Whether `tag` is `STRING`, matched through a reference rather than an
+  /// owned local's field directly (matching an owned local's enum field by
+  /// value double-frees its record's other fields afterward on this
+  /// compiler — repro "field-move-double-free", covering this shape too).
+  function isShallowScalarString(tag: &Format::ShallowScalarTag): boolean {
+    return match (tag) {
+      Format::ShallowScalarTag::STRING -> true,
+      _ -> false,
+    };
+  }
+
+  function describeShallowScalar(scalar: &Format::ShallowScalarRead): String {
+    return match (scalar.tag) {
+      Format::ShallowScalarTag::STRING -> Format::describeString(&scalar.text),
+      Format::ShallowScalarTag::BOOL_TRUE -> Format::describeBool(true),
+      Format::ShallowScalarTag::BOOL_FALSE -> Format::describeBool(false),
+      Format::ShallowScalarTag::NULL -> String::create("null"),
+      Format::ShallowScalarTag::NUMBER -> Format::describeNumber(&scalar.text),
+    };
   }
 
   function readShallowScalar(
@@ -867,16 +905,13 @@ export namespace Format {
         },
       };
 
-      let description: String = Format::describeString(&read.value);
-
       // `.clone()`, not a move: `read` is a bound local that still drops
       // normally at scope exit, so moving `value` out of it double-frees the
       // string's backing storage on this compiler (repro
       // "field-move-double-free").
       return Result::OK(Format::ShallowScalarRead {
-        isString: true,
-        value: read.value.clone(),
-        description: description,
+        tag: Format::ShallowScalarTag::STRING,
+        text: read.value.clone(),
         endOffset: read.nextIndex,
       });
     }
@@ -890,9 +925,8 @@ export namespace Format {
       };
 
       return Result::OK(Format::ShallowScalarRead {
-        isString: false,
-        value: String::new(),
-        description: Format::describeBool(true),
+        tag: Format::ShallowScalarTag::BOOL_TRUE,
+        text: String::new(),
         endOffset: endOffset,
       });
     }
@@ -906,9 +940,8 @@ export namespace Format {
       };
 
       return Result::OK(Format::ShallowScalarRead {
-        isString: false,
-        value: String::new(),
-        description: Format::describeBool(false),
+        tag: Format::ShallowScalarTag::BOOL_FALSE,
+        text: String::new(),
         endOffset: endOffset,
       });
     }
@@ -922,9 +955,8 @@ export namespace Format {
       };
 
       return Result::OK(Format::ShallowScalarRead {
-        isString: false,
-        value: String::new(),
-        description: String::create("null"),
+        tag: Format::ShallowScalarTag::NULL,
+        text: String::new(),
         endOffset: endOffset,
       });
     }
@@ -943,10 +975,11 @@ export namespace Format {
         return Result::ERROR(Format::ndjsonNumberOutOfRange(numberRead.endOffset));
       }
 
+      // `.clone()` for the same reason the `STRING` case above clones:
+      // `numberRead` is a bound local (repro "field-move-double-free").
       return Result::OK(Format::ShallowScalarRead {
-        isString: false,
-        value: String::new(),
-        description: Format::describeNumber(&numberRead.text),
+        tag: Format::ShallowScalarTag::NUMBER,
+        text: numberRead.text.clone(),
         endOffset: numberRead.endOffset,
       });
     }
@@ -984,11 +1017,12 @@ export namespace Format {
 
     let scalar: Format::ShallowScalarRead = Format::readShallowScalar(line, valueStart)!;
 
-    if (scalar.isString) {
-      return Result::OK(Format::FieldValueRead { value: scalar.value, endOffset: scalar.endOffset });
+    if (Format::isShallowScalarString(&scalar.tag)) {
+      return Result::OK(Format::FieldValueRead { value: scalar.text, endOffset: scalar.endOffset });
     }
 
-    return Result::ERROR(Format::ndjsonInvalidFieldType(&scalar.description, scalar.endOffset));
+    let description: String = Format::describeShallowScalar(&scalar);
+    return Result::ERROR(Format::ndjsonInvalidFieldType(&description, scalar.endOffset));
   }
 
   function skipAsciiWhitespaceFrom(line: &String, start: u64): u64 {
@@ -1020,128 +1054,166 @@ export namespace Format {
   /// `deny_unknown_fields`, and with the same no-recursion-limit iterative
   /// skip `serde_json`'s `IgnoredAny` uses (`Json::skipValue`), confirmed
   /// against the host up to 200000 levels of nesting in an ignored field.
+  /// `stdinRequestFromObjectScan`'s working state: the scan position and
+  /// whichever of `path`/`text` have been seen so far.
+  record ObjectScanState {
+    public cursor: u64;
+    public path: Option<String>;
+    public text: Option<String>;
+  }
+
+  /// Reads one `"key": value` entry of the top-level object, updating
+  /// `state` in place: a known field (`path`/`text`) is read and stored, an
+  /// unknown one is skipped without being parsed into a tree. Returns
+  /// `Option::SOME(finalCursor)` once `}` closes the object, or
+  /// `Option::NONE` to keep scanning entries.
+  function stdinRequestFromObjectScanEntry(
+    line: &String,
+    state: &mut ObjectScanState
+  ): Result<Option<u64>, String> {
+    let mut stateRef: &mut ObjectScanState = state;
+    stateRef.cursor = Format::skipAsciiWhitespaceFrom(line, stateRef.cursor);
+
+    let Option::SOME(keyByte) = line.byteAt(stateRef.cursor) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "an object")));
+    };
+
+    if (keyByte != '"' as u8) {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonKeyMustBeStringMessage(stateRef.cursor)));
+    }
+
+    let key: JsonStringRead = match (readString(line, stateRef.cursor)) {
+      Result::OK(value) -> value,
+      Result::ERROR(message) -> {
+        return Result::ERROR(Format::ndjsonParseErrorOwned(message));
+      },
+    };
+
+    // `.clone()` for the same reason `readShallowScalar` clones its own
+    // string read: `key` is a bound local (repro
+    // "field-move-double-free").
+    let keyText: String = key.value.clone();
+    let keyEndOffset: u64 = key.nextIndex;
+    stateRef.cursor = Format::skipAsciiWhitespaceFrom(line, keyEndOffset);
+
+    let Option::SOME(colon) = line.byteAt(stateRef.cursor) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "an object")));
+    };
+
+    if (colon != ':' as u8) {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonExpectedColonMessage(stateRef.cursor)));
+    }
+
+    stateRef.cursor = Format::skipAsciiWhitespaceFrom(line, stateRef.cursor + 1);
+
+    let isPathKey: boolean = keyText.equals("path");
+    let isTextKey: boolean = keyText.equals("text");
+
+    if (isPathKey || isTextKey) {
+      let alreadySeen: boolean = isPathKey ? stateRef.path.isSome() : stateRef.text.isSome();
+
+      if (alreadySeen) {
+        let fieldName: str = isPathKey ? "path" : "text";
+        return Result::ERROR(Format::ndjsonDuplicateField(fieldName, keyEndOffset));
+      }
+
+      let fieldRead: Format::FieldValueRead = Format::readObjectFieldValue(line, stateRef.cursor)!;
+
+      if (isPathKey) {
+        stateRef.path = Option::SOME(fieldRead.value);
+      } else {
+        stateRef.text = Option::SOME(fieldRead.value);
+      }
+
+      stateRef.cursor = fieldRead.endOffset;
+    } else {
+      stateRef.cursor = match (skipValue(line, stateRef.cursor)) {
+        Result::OK(value) -> value,
+        Result::ERROR(message) -> {
+          return Result::ERROR(Format::ndjsonParseErrorOwned(message));
+        },
+      };
+    }
+
+    stateRef.cursor = Format::skipAsciiWhitespaceFrom(line, stateRef.cursor);
+
+    let Option::SOME(next) = line.byteAt(stateRef.cursor) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "an object")));
+    };
+
+    if (next == ',' as u8) {
+      stateRef.cursor = Format::skipAsciiWhitespaceFrom(line, stateRef.cursor + 1);
+
+      // Past the comma, `serde` reads the next key through the same
+      // generic value dispatch a colon's value uses (there is no
+      // dedicated "read a map key" token check), so running off the end
+      // of the source here is `EOF while parsing a value`, not `an
+      // object`, unlike every other EOF check in this scan.
+      let Option::SOME(afterComma) = line.byteAt(stateRef.cursor) else {
+        return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a value")));
+      };
+
+      if (afterComma == '}' as u8) {
+        return Result::ERROR(Format::ndjsonParseErrorOwned(jsonTrailingCommaMessage(stateRef.cursor)));
+      }
+
+      return Result::OK(Option::NONE);
+    }
+
+    if (next == '}' as u8) {
+      stateRef.cursor += 1;
+      return Result::OK(Option::SOME(stateRef.cursor));
+    }
+
+    return Result::ERROR(Format::ndjsonParseErrorOwned(jsonExpectedCommaOrBraceMessage(stateRef.cursor)));
+  }
+
   function stdinRequestFromObjectScan(
     line: &String,
     openBraceIndex: u64
   ): Result<Format::StdinRequest, String> {
-    let mut cursor: u64 = Format::skipAsciiWhitespaceFrom(line, openBraceIndex + 1);
-    let mut path: Option<String> = Option::NONE;
-    let mut text: Option<String> = Option::NONE;
+    let mut state: ObjectScanState = ObjectScanState {
+      cursor: Format::skipAsciiWhitespaceFrom(line, openBraceIndex + 1),
+      path: Option::NONE,
+      text: Option::NONE,
+    };
 
-    let Option::SOME(firstByte) = line.byteAt(cursor) else {
+    let Option::SOME(firstByte) = line.byteAt(state.cursor) else {
       return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "an object")));
     };
 
     if (firstByte != '}' as u8) {
       while (true) {
-        cursor = Format::skipAsciiWhitespaceFrom(line, cursor);
-
-        let Option::SOME(keyByte) = line.byteAt(cursor) else {
-          return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "an object")));
-        };
-
-        if (keyByte != '"' as u8) {
-          return Result::ERROR(Format::ndjsonParseErrorOwned(jsonKeyMustBeStringMessage(cursor)));
-        }
-
-        let key: JsonStringRead = match (readString(line, cursor)) {
-          Result::OK(value) -> value,
-          Result::ERROR(message) -> {
-            return Result::ERROR(Format::ndjsonParseErrorOwned(message));
-          },
-        };
-
-        // `.clone()` for the same reason `readShallowScalar` clones its own
-        // string read: `key` is a bound local (repro
-        // "field-move-double-free").
-        let keyText: String = key.value.clone();
-        let keyEndOffset: u64 = key.nextIndex;
-        cursor = Format::skipAsciiWhitespaceFrom(line, keyEndOffset);
-
-        let Option::SOME(colon) = line.byteAt(cursor) else {
-          return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "an object")));
-        };
-
-        if (colon != ':' as u8) {
-          return Result::ERROR(Format::ndjsonParseErrorOwned(jsonExpectedColonMessage(cursor)));
-        }
-
-        cursor = Format::skipAsciiWhitespaceFrom(line, cursor + 1);
-
-        let isPathKey: boolean = keyText.equals("path");
-        let isTextKey: boolean = keyText.equals("text");
-
-        if (isPathKey || isTextKey) {
-          let alreadySeen: boolean = isPathKey ? path.isSome() : text.isSome();
-
-          if (alreadySeen) {
-            let fieldName: str = isPathKey ? "path" : "text";
-            return Result::ERROR(Format::ndjsonDuplicateField(fieldName, keyEndOffset));
-          }
-
-          let fieldRead: Format::FieldValueRead = Format::readObjectFieldValue(line, cursor)!;
-
-          if (isPathKey) {
-            path = Option::SOME(fieldRead.value);
-          } else {
-            text = Option::SOME(fieldRead.value);
-          }
-
-          cursor = fieldRead.endOffset;
-        } else {
-          cursor = match (skipValue(line, cursor)) {
-            Result::OK(value) -> value,
-            Result::ERROR(message) -> {
-              return Result::ERROR(Format::ndjsonParseErrorOwned(message));
-            },
-          };
-        }
-
-        cursor = Format::skipAsciiWhitespaceFrom(line, cursor);
-
-        let Option::SOME(next) = line.byteAt(cursor) else {
-          return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "an object")));
-        };
-
-        if (next == ',' as u8) {
-          cursor = Format::skipAsciiWhitespaceFrom(line, cursor + 1);
-
-          // Past the comma, `serde` reads the next key through the same
-          // generic value dispatch a colon's value uses (there is no
-          // dedicated "read a map key" token check), so running off the end
-          // of the source here is `EOF while parsing a value`, not `an
-          // object`, unlike every other EOF check in this scan.
-          let Option::SOME(afterComma) = line.byteAt(cursor) else {
-            return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a value")));
-          };
-
-          if (afterComma == '}' as u8) {
-            return Result::ERROR(Format::ndjsonParseErrorOwned(jsonTrailingCommaMessage(cursor)));
-          }
-
+        let Option::SOME(finalCursor) = stdinRequestFromObjectScanEntry(line, &mut state)! else {
           continue;
-        }
+        };
 
-        if (next == '}' as u8) {
-          cursor += 1;
-          break;
-        }
-
-        return Result::ERROR(Format::ndjsonParseErrorOwned(jsonExpectedCommaOrBraceMessage(cursor)));
+        state.cursor = finalCursor;
+        break;
       }
     } else {
-      cursor += 1;
+      state.cursor += 1;
     }
 
-    let Option::SOME(pathValue) = path else {
-      return Result::ERROR(Format::ndjsonMissingField("path", cursor));
+    // Cloned through a reference, not moved: `state` is a bound local that
+    // still drops normally at scope exit, so moving `path`/`text` out of it
+    // double-frees their backing storage on this compiler (repro
+    // "field-move-double-free").
+    let pathValue: String = match (&state.path) {
+      Option::SOME(value) -> value.clone(),
+      Option::NONE -> {
+        return Result::ERROR(Format::ndjsonMissingField("path", state.cursor));
+      },
     };
 
-    let Option::SOME(textValue) = text else {
-      return Result::ERROR(Format::ndjsonMissingField("text", cursor));
+    let textValue: String = match (&state.text) {
+      Option::SOME(value) -> value.clone(),
+      Option::NONE -> {
+        return Result::ERROR(Format::ndjsonMissingField("text", state.cursor));
+      },
     };
 
-    let afterObject: u64 = Format::skipAsciiWhitespaceFrom(line, cursor);
+    let afterObject: u64 = Format::skipAsciiWhitespaceFrom(line, state.cursor);
     let lineLength: u64 = line.length();
 
     if (afterObject != lineLength) {
@@ -1275,7 +1347,8 @@ export namespace Format {
     }
 
     let scalar: Format::ShallowScalarRead = Format::readShallowScalar(line, 0)!;
-    return Result::ERROR(Format::ndjsonInvalidType(&scalar.description, scalar.endOffset));
+    let description: String = Format::describeShallowScalar(&scalar);
+    return Result::ERROR(Format::ndjsonInvalidType(&description, scalar.endOffset));
   }
 
   function escapeJsonString(value: &String, output: &mut String): void {
