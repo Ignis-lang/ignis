@@ -809,3 +809,66 @@ function forEachDecodesEveryScalarAndAdvancesPastMalformedBytes(): void {
 
   Test::assertEq<u64>(replacements, 1);
 }
+
+@test
+function substringClampsItsStartAndLengthToTheOwnedBytes(): void {
+  let value: String = String::create("hello world");
+
+  Test::assertEq<str>(value.substring(6, 5).toStr(), "world");
+  Test::assertEq<str>(value.substring(6, 99).toStr(), "world");
+  Test::assertEq<str>(value.substring(-3, 5).toStr(), "hello");
+  Test::assertEq<str>(value.substring(11, 1).toStr(), "");
+  Test::assertEq<str>(value.substring(2, 0).toStr(), "");
+  Test::assertEq<str>(value.substring(2, -1).toStr(), "");
+}
+
+@test
+function substringOfAnEmptyStringIsEmpty(): void {
+  let empty: String = String::create("");
+
+  Test::assertEq<u64>(empty.substring(0, 4).length(), 0);
+}
+
+@test
+function substringCopiesInteriorNulBytes(): void {
+  let value: String = buildInteriorNulString('b');
+  let slice: String = value.substring(1, 2);
+
+  Test::assertEq<u64>(slice.length(), 2);
+  Test::assertEq<u8>(slice.byteAt(0 as u64).unwrap(), 0 as u8);
+  Test::assertEq<u8>(slice.byteAt(1 as u64).unwrap(), 'b' as u8);
+}
+
+@test
+function concatKeepsAllOwnedBytesOfBothOperands(): void {
+  let left: String = buildInteriorNulString('b');
+  let right: String = String::create("cd");
+  let joined: String = left.concat(&right);
+
+  Test::assertEq<u64>(joined.length(), 5);
+  Test::assertEq<u8>(joined.byteAt(1 as u64).unwrap(), 0 as u8);
+  Test::assertEq<u8>(joined.byteAt(4 as u64).unwrap(), 'd' as u8);
+}
+
+@test
+function caseConversionMapsAsciiAndReplacesEveryNonAsciiByte(): void {
+  let ascii: String = String::create("Hello, World 42!");
+
+  Test::assertEq<str>(ascii.toUpperCase().toStr(), "HELLO, WORLD 42!");
+  Test::assertEq<str>(ascii.toLowerCase().toStr(), "hello, world 42!");
+
+  // Byte-oriented conversion: each byte of the two-byte scalar becomes U+FFFD.
+  let mut accented: String = String::new();
+  accented.pushByte('h' as u8);
+  accented.pushChar(233 as char);
+
+  let upper: String = accented.toUpperCase();
+
+  Test::assertEq<u64>(accented.length(), 3);
+  Test::assertEq<u64>(upper.length(), 7);
+  Test::assertEq<u8>(upper.byteAt(0 as u64).unwrap(), 'H' as u8);
+  Test::assertEq<u8>(upper.byteAt(1 as u64).unwrap(), 239 as u8);
+  Test::assertEq<u8>(upper.byteAt(2 as u64).unwrap(), 191 as u8);
+  Test::assertEq<u8>(upper.byteAt(3 as u64).unwrap(), 189 as u8);
+  Test::assertEq<u8>(upper.byteAt(4 as u64).unwrap(), 239 as u8);
+}

@@ -112,6 +112,40 @@ function stringAsciiWhitespace(value: char): boolean {
   return value == ' ' || value == '\n' || value == '\r' || value == '\t';
 }
 
+/// Maps one byte to its ASCII uppercase scalar, or to U+FFFD when it is not ASCII.
+///
+/// Case conversion is byte-oriented and always has been: the C runtime pushed
+/// `(char)toupper(byte)` as a scalar, so any byte above 127 sign-extended out
+/// of the Unicode range and the encoder replaced it. Keeping that result is
+/// deliberate, because changing it would change what `toUpperCase` returns for
+/// every non-ASCII string.
+function stringAsciiUpper(byte: u8): char {
+  if (byte >= 128) {
+    return UNICODE_REPLACEMENT as char;
+  }
+
+  if (byte >= 'a' as u8 && byte <= 'z' as u8) {
+    return (byte - 32) as char;
+  }
+
+  return byte as char;
+}
+
+/// Maps one byte to its ASCII lowercase scalar, or to U+FFFD when it is not ASCII.
+///
+/// The non-ASCII result matches `stringAsciiUpper` and for the same reason.
+function stringAsciiLower(byte: u8): char {
+  if (byte >= 128) {
+    return UNICODE_REPLACEMENT as char;
+  }
+
+  if (byte >= 'A' as u8 && byte <= 'Z' as u8) {
+    return (byte + 32) as char;
+  }
+
+  return byte as char;
+}
+
 extern __string_bytes {
   /// Returns the number of bytes before the first NUL byte of `s`.
   function strlen(s: *u8): u64;
@@ -120,15 +154,6 @@ extern __string_bytes {
 }
 
 extern __string {
-  /// Initializes `out` as the concatenation of `a` and `b`.
-  function ignis_string_init_concat(out: &mut String, a: &String, b: &String): void;
-  /// Initializes `out` from a byte-range substring of `s`.
-  function ignis_string_init_substring(out: &mut String, s: &String, start: i64, len: i64): void;
-  /// Initializes `out` as an ASCII uppercase copy of `s`.
-  function ignis_string_init_to_upper(out: &mut String, s: &String): void;
-  /// Initializes `out` as an ASCII lowercase copy of `s`.
-  function ignis_string_init_to_lower(out: &mut String, s: &String): void;
-
   // Number-to-string init functions
   /// Initializes `out` with the decimal text of an `i8`.
   function ignis_string_init_from_i8(out: &mut String, value: i8): void;
@@ -730,23 +755,21 @@ export record String {
   /// let msg: String = a.concat(&b);  // "hello world"
   /// ```
   public concat(&self, other: &String): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_concat(&mut result, self, other);
+    let mut result: String = String::new();
+
+    result.push(self);
+    result.push(other);
+
     return result;
   }
 
   /// Overload note: takes `other` by value (moved) instead of `&String`.
   public concat(&self, other: String): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_concat(&mut result, self, &other);
+    let mut result: String = String::new();
+
+    result.push(self);
+    result.push(&other);
+
     return result;
   }
 
@@ -903,13 +926,20 @@ export record String {
   /// let sub: String = s.substring(6, 5);  // "world"
   /// ```
   public substring(&self, start: i64, length: i64): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_substring(&mut result, self, start, length);
-    return result;
+    if (length <= 0) {
+      return String::new();
+    }
+
+    let startByte: u64 = start < 0 ? 0 : start as u64;
+
+    if (startByte >= self.len) {
+      return String::new();
+    }
+
+    let available: u64 = self.len - startByte;
+    let count: u64 = (length as u64) > available ? available : length as u64;
+
+    return String::create(self.data + startByte, count);
   }
 
   /// Returns a new string containing bytes in `startByte..endByte`.
@@ -982,7 +1012,10 @@ export record String {
   }
 
   /// Returns a new string with all ASCII lowercase bytes converted to
-  /// uppercase. Non-ASCII bytes are copied unchanged.
+  /// uppercase.
+  ///
+  /// Conversion is byte-oriented: every byte above 127 becomes U+FFFD, so this
+  /// is only safe on ASCII content.
   ///
   /// # Example
   ///
@@ -993,17 +1026,22 @@ export record String {
   /// let upper: String = s.toUpperCase();  // "HELLO"
   /// ```
   public toUpperCase(&self): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_to_upper(&mut result, self);
+    let mut result: String = String::withCapacity(self.len + 1);
+
+    let mut index: u64 = 0;
+    while (index < self.len) {
+      result.pushChar(stringAsciiUpper(@read<u8>(self.data + index)));
+      index += 1;
+    }
+
     return result;
   }
 
   /// Returns a new string with all ASCII uppercase bytes converted to
-  /// lowercase. Non-ASCII bytes are copied unchanged.
+  /// lowercase.
+  ///
+  /// Conversion is byte-oriented: every byte above 127 becomes U+FFFD, so this
+  /// is only safe on ASCII content.
   ///
   /// # Example
   ///
@@ -1014,12 +1052,14 @@ export record String {
   /// let lower: String = s.toLowerCase();  // "hello"
   /// ```
   public toLowerCase(&self): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_to_lower(&mut result, self);
+    let mut result: String = String::withCapacity(self.len + 1);
+
+    let mut index: u64 = 0;
+    while (index < self.len) {
+      result.pushChar(stringAsciiLower(@read<u8>(self.data + index)));
+      index += 1;
+    }
+
     return result;
   }
 

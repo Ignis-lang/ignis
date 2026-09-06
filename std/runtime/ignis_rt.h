@@ -113,47 +113,6 @@ typedef void *null;
 void ignis_runtime_init(i32 argc, void *argv);
 
 // =============================================================================
-// String operations
-//
-// Construction, mutation, release, access, comparison and search now live in
-// `std/string`, which owns the `IgnisString` buffer end to end. What remains
-// here are the derived-string operations that have not moved yet.
-// =============================================================================
-
-/**
- * Creates a new string by concatenating `a` and `b`.
- */
-IgnisString ignis_string_concat(const IgnisString *a, const IgnisString *b);
-
-/**
- * Creates a substring from `start` with length `len`.
- */
-IgnisString ignis_string_substring(const IgnisString *s, i64 start, i64 len);
-
-/**
- * Returns a new string with all characters converted to uppercase.
- */
-IgnisString ignis_string_to_upper(const IgnisString *s);
-
-/**
- * Returns a new string with all characters converted to lowercase.
- */
-IgnisString ignis_string_to_lower(const IgnisString *s);
-
-// =============================================================================
-// String init functions (output-pointer variants)
-//
-// These write into a pre-allocated IgnisString through a pointer, avoiding
-// return-by-value ABI issues when the caller's struct has a different size
-// (e.g. the compiler-generated struct has an extra __ignis_drop_state field).
-// =============================================================================
-
-void ignis_string_init_concat(IgnisString *out, const IgnisString *a, const IgnisString *b);
-void ignis_string_init_substring(IgnisString *out, const IgnisString *s, i64 start, i64 len);
-void ignis_string_init_to_upper(IgnisString *out, const IgnisString *s);
-void ignis_string_init_to_lower(IgnisString *out, const IgnisString *s);
-
-// =============================================================================
 // Number to string conversions
 // =============================================================================
 
@@ -170,7 +129,9 @@ IgnisString ignis_u64_to_string(u64 value);
 IgnisString ignis_f32_to_string(f32 value);
 IgnisString ignis_f64_to_string(f64 value);
 
-// Output-pointer variants for number-to-string conversions.
+// Output-pointer variants. These write through a pointer because the caller's
+// struct may carry extra trailing fields (the compiler-generated
+// __ignis_drop_state) that return-by-value would not account for.
 void ignis_string_init_from_i8(IgnisString *out, i8 value);
 void ignis_string_init_from_i16(IgnisString *out, i16 value);
 void ignis_string_init_from_i32(IgnisString *out, i32 value);
