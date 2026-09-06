@@ -100,6 +100,7 @@
 //! ```
 
 import Hasher from "std::hash";
+import LibC from "std::libc";
 import Memory from "std::memory";
 
 /// Capacity handed to a string that did not ask for one.
@@ -107,6 +108,12 @@ const STRING_DEFAULT_CAPACITY: u64 = 16;
 
 /// U+FFFD, substituted for any scalar outside the Unicode scalar range.
 const UNICODE_REPLACEMENT: u32 = 65533;
+
+/// Buffer a `%g` rendering is formatted into.
+///
+/// `%g` never needs more than 14 bytes for a `double`, so this is only ever a
+/// ceiling; it matches the stack buffer the C runtime used.
+const FLOAT_TEXT_CAPACITY: u64 = 32;
 
 function stringAsciiWhitespace(value: char): boolean {
   return value == ' ' || value == '\n' || value == '\r' || value == '\t';
@@ -164,13 +171,6 @@ extern __string_bytes {
   function strlen(s: *u8): u64;
   /// Compares `count` bytes of `left` and `right`, returning zero when equal.
   function memcmp(left: *u8, right: *u8, count: u64): i32;
-}
-
-extern __string {
-  /// Initializes `out` with the `%g` text of an `f32`.
-  function ignis_string_init_from_f32(out: &mut String, value: f32): void;
-  /// Initializes `out` with the `%g` text of an `f64`.
-  function ignis_string_init_from_f64(out: &mut String, value: f64): void;
 }
 
 /// Owned, heap-backed UTF-8 byte string.
@@ -262,6 +262,18 @@ export record String {
       @write<u8>(self.data + start + position, ('0' as u8) + (remaining % 10) as u8);
       remaining = remaining / 10;
     }
+  }
+
+  /// Replaces the contents with the `%g` rendering of `value`.
+  ///
+  /// The buffer must already hold `FLOAT_TEXT_CAPACITY` bytes. `%g` is left to
+  /// libc rather than reimplemented, because its six-significant-digit rounding
+  /// is over the exact value of the double and needs exact decimal arithmetic.
+  private fillWithFloatText(&mut self, value: f64): void {
+    let written: i32 = LibC::Stdio::snprintfDouble(self.data, FLOAT_TEXT_CAPACITY, "%g" as *u8, value);
+
+    self.len = written < 0 ? 0 : written as u64;
+    self.terminate();
   }
 
   /// Restores the NUL byte the `data[len]` invariant requires.
@@ -444,23 +456,14 @@ export record String {
 
   /// Creates an owned String from an `f32`.
   public static create(value: f32): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_from_f32(&mut result, value);
-    return result;
+    return String::create(value as f64);
   }
 
   /// Creates an owned String from an `f64`.
   public static create(value: f64): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_from_f64(&mut result, value);
+    let mut result: String = String::withCapacity(FLOAT_TEXT_CAPACITY);
+    result.fillWithFloatText(value);
+
     return result;
   }
 

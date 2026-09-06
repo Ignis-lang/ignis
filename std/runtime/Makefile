@@ -2,7 +2,7 @@ CC ?= gcc
 AR ?= ar
 CFLAGS ?= -O2 -g -fPIC -I. -Wall -Wextra
 
-INTERNAL_SRCS = internal/rt_string.c internal/rt_fs.c
+INTERNAL_SRCS = internal/rt_fs.c
 INTERNAL_OBJS = $(INTERNAL_SRCS:.c=.o)
 
 .PHONY: all clean

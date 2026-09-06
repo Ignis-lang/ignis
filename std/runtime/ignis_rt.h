@@ -113,23 +113,6 @@ typedef void *null;
 void ignis_runtime_init(i32 argc, void *argv);
 
 // =============================================================================
-// Float to string conversions
-//
-// Integer conversions are now Ignis, in `std/string`. These two stay in C
-// because they are `snprintf("%g")` and its correctly-rounded output cannot be
-// reproduced with the double arithmetic the standard library has.
-// =============================================================================
-
-IgnisString ignis_f32_to_string(f32 value);
-IgnisString ignis_f64_to_string(f64 value);
-
-// Output-pointer variants. These write through a pointer because the caller's
-// struct may carry extra trailing fields (the compiler-generated
-// __ignis_drop_state) that return-by-value would not account for.
-void ignis_string_init_from_f32(IgnisString *out, f32 value);
-void ignis_string_init_from_f64(IgnisString *out, f64 value);
-
-// =============================================================================
 // Filesystem helpers (rt_fs.c)
 // =============================================================================
 

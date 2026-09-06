@@ -35,6 +35,15 @@
 //! | `remove`    | Delete file by pathname                           |
 //! | `rename`    | Rename file                                       |
 //! | `mkstemp`   | Create and open a unique temporary file           |
+//! | `snprintfDouble` | Format one `double` into a sized buffer      |
+//!
+//! ## Variadic functions
+//!
+//! `snprintf` is variadic, and Ignis has no variadic call syntax. Each argument
+//! shape it is used with gets its own fixed-arity binding here, named after the
+//! argument it takes. The declaration is only the Ignis-side type: the emitted
+//! call is compiled against the real prototype from `stdio.h`, so the host's
+//! variadic call sequence is what the C compiler generates.
 //!
 //! ## Example
 //!
@@ -113,6 +122,13 @@ extern __stdio {
   /// `template` must be mutable and end in six `X` characters. The host replaces
   /// those bytes with the created path and returns an open file descriptor.
   function mkstemp(template: CType::CStr): CType::CInt;
+  /// C `snprintf` with exactly one trailing `double` argument.
+  function snprintf(
+    buffer: CType::CStr,
+    size: CType::SizeT,
+    format: CType::CConstStr,
+    value: CType::CDouble
+  ): CType::CInt;
 }
 
 /// C standard I/O streams (stdio.h)
@@ -239,5 +255,23 @@ namespace LibC::Stdio {
   @configFlag(@platform("linux") || @platform("macos"))
   function mkstemp(template: CType::CStr): CType::CInt {
     return __stdio::mkstemp(template);
+  }
+
+  /// Formats `value` into `buffer` with `format`, writing at most `size` bytes
+  /// including the NUL terminator.
+  ///
+  /// Returns the length the complete output would have had, which is what C
+  /// returns, so a result at or above `size` means the output was truncated.
+  ///
+  /// This is the only `snprintf` argument shape the standard library binds.
+  /// Another one needs its own extern declaration next to this, because Ignis
+  /// cannot express a variadic call.
+  function snprintfDouble(
+    buffer: CType::CStr,
+    size: CType::SizeT,
+    format: CType::CConstStr,
+    value: CType::CDouble
+  ): CType::CInt {
+    return __stdio::snprintf(buffer, size, format, value);
   }
 }

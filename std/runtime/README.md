@@ -34,10 +34,7 @@ Core runtime types, IDs, and APIs.
   - `IGNIS_TYPE_*_ID` macros (primitives, pointer)
 - Alloc/Free:
   - `ignis_alloc`, `ignis_realloc`, `ignis_free`, defined in `std/memory/allocator.ign`
-- String API still in C:
-  - `ignis_f32_to_string`, `ignis_f64_to_string` and their
-    `ignis_string_init_from_f32` / `ignis_string_init_from_f64` variants
-- String API now in Ignis, in `std/string/mod.ign`:
+- The whole string API is now Ignis, in `std/string/mod.ign`:
   - construction and capacity: `String::new`, `String::withCapacity`, `String::create`
   - mutation: `String::pushChar`, `String::pushByte`, `String::pushStr`, `String::push`,
     `String::clear`, `String::reserve`
@@ -47,8 +44,10 @@ Core runtime types, IDs, and APIs.
   - derived strings: `String::concat`, `String::substring`, `String::toUpperCase`,
     `String::toLowerCase`
   - copies and release: `String::clone`, `String::drop`
-  - integer conversions: `String::create` for `i8` through `u64`, and the
-    matching `toString` extensions
+  - number conversions: `String::create` for `i8` through `f64`, and the
+    matching `toString` extensions. `f32` and `f64` go through
+    `LibC::Stdio::snprintfDouble` with `%g`, which is the same libc call the C
+    runtime made.
 
 ### `std/runtime/memory/memory.h` and `std/runtime/memory/memory.c`
 Wrappers used by `std/memory/mod.ign`.
