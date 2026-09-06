@@ -279,9 +279,82 @@ export namespace Format {
     public error: String;
   }
 
+  /// Wraps a bare message with the prefix every NDJSON parse failure carries.
+  function ndjsonParseError(message: &String): String {
+    let mut result: String = String::create("failed to parse NDJSON record: ");
+    result.push(message);
+    return result;
+  }
+
+  /// The `EOF while parsing a string at line 1 column N` message the host's
+  /// `serde_json` reports whenever a string literal (key or value) runs off
+  /// the end of the line before its closing quote.
+  function ndjsonEofWhileParsingAString(line: &String): String {
+    let lineLength: u64 = line.length();
+    let column: String = lineLength.toString();
+
+    let mut message: String = String::create("EOF while parsing a string at line 1 column ");
+    message.push(&column);
+    return Format::ndjsonParseError(&message);
+  }
+
+  /// The `missing field \`name\` at line 1 column N` message `serde_json`
+  /// reports once a whole object parses but a required field never showed up.
+  /// `serde` reports the first missing field in the struct's declared order,
+  /// which is `path` then `text`.
+  function ndjsonMissingField(line: &String, name: str): String {
+    let lineLength: u64 = line.length();
+    let column: String = lineLength.toString();
+
+    let mut message: String = String::create("missing field `");
+    message.pushStr(name);
+    message.pushStr("` at line 1 column ");
+    message.push(&column);
+    return Format::ndjsonParseError(&message);
+  }
+
   /// Reads one NDJSON request line. Only the two string fields the protocol
   /// defines are recognised; anything else in the object is skipped.
-  function parseStdinRequest(line: &String): Result<Format::StdinRequest, FormatError> {
+  ///
+  /// The error strings mirror the host's `serde_json` messages for the shapes
+  /// the `--stdin-json` protocol actually has to reject: a string cut off
+  /// before its closing quote, a line that is a bare JSON value rather than an
+  /// object, and an object missing `path` or `text`.
+  function parseStdinRequest(line: &String): Result<Format::StdinRequest, String> {
+    let Option::SOME(firstByte) = line.byteAt(0) else {
+      let emptyMessage: String = String::create("EOF while parsing a value at line 1 column 0");
+      return Result::ERROR(Format::ndjsonParseError(&emptyMessage));
+    };
+
+    if (firstByte == '"' as u8) {
+      let Option::SOME(bareString) = Format::readJsonString(line, 0) else {
+        return Result::ERROR(Format::ndjsonEofWhileParsingAString(line));
+      };
+
+      if (bareString.nextIndex == line.length()) {
+        let mut quoted: String = String::new();
+        Format::escapeJsonString(&bareString.value, &mut quoted);
+
+        let lineLength: u64 = line.length();
+        let column: String = lineLength.toString();
+
+        let mut message: String = String::create("invalid type: string ");
+        message.push(&quoted);
+        message.pushStr(", expected struct StdinRecord at line 1 column ");
+        message.push(&column);
+
+        return Result::ERROR(Format::ndjsonParseError(&message));
+      }
+
+      let trailingMessage: String = String::create("trailing characters at line 1 column 1");
+      return Result::ERROR(Format::ndjsonParseError(&trailingMessage));
+    }
+
+    if (firstByte != '{' as u8) {
+      let expectedMessage: String = String::create("expected value at line 1 column 1");
+      return Result::ERROR(Format::ndjsonParseError(&expectedMessage));
+    }
+
     let mut path: Option<String> = Option::NONE;
     let mut text: Option<String> = Option::NONE;
     let mut cursor: u64 = 0;
@@ -297,7 +370,7 @@ export namespace Format {
       }
 
       let Option::SOME(key) = Format::readJsonString(line, cursor) else {
-        return Result::ERROR(FormatError::model("failed to parse NDJSON record: unterminated key"));
+        return Result::ERROR(Format::ndjsonEofWhileParsingAString(line));
       };
 
       cursor = key.nextIndex;
@@ -342,7 +415,7 @@ export namespace Format {
       }
 
       let Option::SOME(value) = Format::readJsonString(line, cursor) else {
-        return Result::ERROR(FormatError::model("failed to parse NDJSON record: unterminated value"));
+        return Result::ERROR(Format::ndjsonEofWhileParsingAString(line));
       };
 
       cursor = value.nextIndex;
@@ -355,11 +428,11 @@ export namespace Format {
     }
 
     let Option::SOME(pathValue) = path else {
-      return Result::ERROR(FormatError::model("failed to parse NDJSON record: missing 'path'"));
+      return Result::ERROR(Format::ndjsonMissingField(line, "path"));
     };
 
     let Option::SOME(textValue) = text else {
-      return Result::ERROR(FormatError::model("failed to parse NDJSON record: missing 'text'"));
+      return Result::ERROR(Format::ndjsonMissingField(line, "text"));
     };
 
     return Result::OK(Format::StdinRequest { path: pathValue, text: textValue });

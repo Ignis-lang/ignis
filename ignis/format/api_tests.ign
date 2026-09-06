@@ -165,6 +165,57 @@ function apiRejectsAnNdjsonRequestMissingItsText(): void {
   };
 }
 
+/// Matches the host's `serde_json` wording exactly: a string that runs off
+/// the end of the line reports EOF at the line's full length.
+@test
+function apiReportsTheHostsWordingForATruncatedNdjsonLine(): void {
+  let line: String = String::create("{\"path\":\"a.ign\",\"tex");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "failed to parse NDJSON record: EOF while parsing a string at line 1 column 20"
+  );
+}
+
+/// Matches the host's `serde_json` wording exactly: a bare JSON string is
+/// valid JSON but not the expected `StdinRecord` object.
+@test
+function apiReportsTheHostsWordingForANonObjectNdjsonLine(): void {
+  let line: String = String::create("\"just a string\"");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "failed to parse NDJSON record: invalid type: string \"just a string\", expected struct StdinRecord at line 1 column 15"
+  );
+}
+
+/// Matches the host's `serde_json` wording exactly: `path` is declared before
+/// `text`, so a missing `path` is reported even when `text` is present.
+@test
+function apiReportsTheHostsWordingForAnNdjsonLineMissingPath(): void {
+  let line: String = String::create("{\"text\":\"function main(): i32 {\\n  return 1;\\n}\\n\"}");
+
+  let Result::ERROR(message) = Format::parseStdinRequest(&line) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "failed to parse NDJSON record: missing field `path` at line 1 column 51"
+  );
+}
+
 @test
 function apiRendersAnNdjsonResponseWithTheFormattedText(): void {
   let line: String = String::create("{\"path\":\"a.ign\",\"text\":\"function main(): void { return; }\\n\"}");
