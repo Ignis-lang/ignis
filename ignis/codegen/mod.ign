@@ -997,6 +997,21 @@ export namespace CodegenC {
     outputRef.pushStr(line.toStr());
   }
 
+  /// Mark the place at `expression` as already dropped, so any later drop of it is a
+  /// no-op.
+  ///
+  /// This is how the compiler represents a partial move. Moving a droppable field out of
+  /// a local does not cancel the local's drop: the local is still dropped at scope end,
+  /// and the per-place `__ignis_drop_state` flags this writes are what keep the moved
+  /// field from being freed a second time while its siblings are still freed once.
+  /// Reassigning the field overwrites the flag along with the value, so the field becomes
+  /// droppable again, and the flags travel with the bytes when the whole local is copied
+  /// or moved on.
+  ///
+  /// For that to hold, this must mark exactly the places `emitFieldDrops` would drop. A
+  /// nominal carrying the Drop trait owns a flag of its own and stops the walk; anything
+  /// else is opened up — record fields by index, enum payloads through a switch on the
+  /// tag, because that is the only variant whose payload the drop side would touch.
   function emitUninitializedDropState(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -1037,6 +1052,8 @@ export namespace CodegenC {
     }
 
     if (isEnum) {
+      CodegenC::emitUninitializedEnumVariantState(defStore, typeStore, output, expression, nominal);
+
       return;
     }
 
@@ -1076,6 +1093,87 @@ export namespace CodegenC {
 
       fieldIndex += 1;
     }
+  }
+
+  /// Mark the live variant's droppable payloads as already dropped.
+  ///
+  /// The tag is only known at run time, so this mirrors `emitEnumVariantDrops`: the same
+  /// switch over the same variants, reaching the same payload places, marking each
+  /// instead of dropping it.
+  function emitUninitializedEnumVariantState(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    output: &mut String,
+    expression: &String,
+    defId: Analyzer::DefinitionId,
+  ): void {
+    let mut variants: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Enum(enumDef) = definition) {
+        variants = CodegenC::copyDefIds(&enumDef.variants);
+      }
+    }
+
+    let mut body: String = String::create("");
+    let mut variantIndex: u64 = 0;
+
+    while (variantIndex < variants.length()) {
+      let Option::SOME(variantId) = variants.get(variantIndex) else {
+        variantIndex += 1;
+        continue;
+      };
+
+      let Option::SOME(variantDefinition) = defStore.get(*variantId) else {
+        variantIndex += 1;
+        continue;
+      };
+
+      let Analyzer::Definition::Variant(variantDef) = variantDefinition else {
+        variantIndex += 1;
+        continue;
+      };
+
+      let tag: u32 = variantDef.tagValue;
+      let payload: Vector<Analyzer::TypeId> = CodegenC::copyTypeIds(&variantDef.payload);
+
+      let mut arm: String = String::create("");
+      let mut payloadIndex: u64 = 0;
+
+      while (payloadIndex < payload.length()) {
+        let Option::SOME(payloadType) = payload.get(payloadIndex) else {
+          payloadIndex += 1;
+          continue;
+        };
+
+        if (Borrowck::needsDropType(defStore, typeStore, *payloadType)) {
+          let access: String = `${expression.toStr()}.payload.variant_${tag}.field_${payloadIndex}`;
+          CodegenC::emitUninitializedDropState(defStore, typeStore, &mut arm, &access, *payloadType);
+        }
+
+        payloadIndex += 1;
+      }
+
+      if (arm.length() > 0) {
+        let label: String = `      case ${tag}:\n`;
+        body.pushStr(label.toStr());
+        body.pushStr(arm.toStr());
+        body.pushStr("        break;\n");
+      }
+
+      variantIndex += 1;
+    }
+
+    if (body.length() == 0) {
+      return;
+    }
+
+    let open: String = `    switch ((${expression.toStr()}).tag) {\n`;
+
+    let mut outputRef: &mut String = output;
+    outputRef.pushStr(open.toStr());
+    outputRef.pushStr(body.toStr());
+    outputRef.pushStr("    }\n");
   }
 
   /// A builtin operand arrives as a pointer to the value, so reading it needs
