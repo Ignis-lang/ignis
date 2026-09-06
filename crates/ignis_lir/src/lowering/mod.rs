@@ -2205,11 +2205,21 @@ impl<'a> LoweringContext<'a> {
     // drop tracking when no arm extracts the inner value.
     let scrutinee_aliases_external_storage = Self::hir_aliases_external_storage(self.hir.get(scrutinee));
 
-    let track_scrutinee_drop = !scrutinee_aliases_external_storage
-      && self.types.needs_drop_with_defs(&scrutinee_ty, self.defs)
-      && !arms
-        .iter()
-        .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
+    let scrutinee_needs_drop = self.types.needs_drop_with_defs(&scrutinee_ty, self.defs);
+
+    let some_arm_moves_payload = arms
+      .iter()
+      .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
+
+    let track_scrutinee_drop = !scrutinee_aliases_external_storage && scrutinee_needs_drop && !some_arm_moves_payload;
+
+    // A scrutinee that is not a place is a value this match owns outright: nothing else
+    // holds it and no other schedule frees it. When one arm takes its payload the whole
+    // scrutinee is left untracked above, so every arm that does *not* take the payload
+    // would drop nothing. Those arms drop the scrutinee themselves, at the end of the arm.
+    // Place scrutinees keep the block-scoped schedule they already had.
+    let drop_scrutinee_per_arm =
+      scrutinee_needs_drop && some_arm_moves_payload && Self::hir_is_temporary(self.hir.get(scrutinee));
 
     let scrut_local = if track_scrutinee_drop {
       self.alloc_synthetic_local(scrutinee_ty, false)
@@ -2333,6 +2343,10 @@ impl<'a> LoweringContext<'a> {
         // and ownership analysis leaves such a binding out of this schedule.
         self.emit_match_arm_drops(arm.body);
 
+        if drop_scrutinee_per_arm && !self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern) {
+          self.fn_builder().emit(Instr::Drop { local: scrut_local });
+        }
+
         self.fn_builder().terminate(Terminator::Goto(merge_block));
       }
     }
@@ -2367,6 +2381,12 @@ impl<'a> LoweringContext<'a> {
       node.kind,
       HIRKind::FieldAccess { .. } | HIRKind::Index { .. } | HIRKind::Dereference(_) | HIRKind::StaticAccess { .. }
     )
+  }
+
+  /// True when the HIR node produces a fresh value rather than naming a place. Such a
+  /// value has no owner other than the expression that consumes it.
+  fn hir_is_temporary(node: &ignis_hir::HIRNode) -> bool {
+    !matches!(node.kind, HIRKind::Variable(_)) && !Self::hir_aliases_external_storage(node)
   }
 
   fn lower_tuple_match(

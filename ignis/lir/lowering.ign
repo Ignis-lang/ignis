@@ -3425,6 +3425,20 @@ export namespace LirLowering {
     return Lir::Operand::Temp(dest);
   }
 
+  /// True when the node produces a fresh value rather than naming a place.
+  /// Such a value has no owner other than the expression that consumes it.
+  function hirIsTemporary(hirStore: &Hir::HirStore, nodeId: Hir::HirId): boolean {
+    let Option::SOME(node) = hirStore.get(nodeId) else {
+      return false;
+    };
+
+    if (let Hir::HirKind::Variable(_) = &node.kind) {
+      return false;
+    }
+
+    return !Borrowck::aliasesExternalStorage(hirStore, nodeId);
+  }
+
   function lowerMatch(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3492,6 +3506,37 @@ export namespace LirLowering {
         dest: scrutineeSlot,
         value: scrutineeValue,
       }));
+    }
+
+    // A scrutinee that names no place is a value this match owns outright:
+    // nothing else holds it and no other schedule frees it. When one arm takes
+    // its payload the scrutinee carries no schedule of its own, so every arm
+    // that does not take the payload drops it at the end of that arm. A place
+    // scrutinee keeps the schedule its own storage already has.
+    let mut dropScrutineePerArm: boolean = false;
+
+    if (!isTupleScrutinee) {
+      let scrutineeNeedsDrop: boolean = Borrowck::needsDropType(defStore, typeStore, scrutineeType);
+      let someArmMovesPayload: boolean = Borrowck::armsMoveScrutineePayload(
+        defStore,
+        typeStore,
+        scrutineeType,
+        &matchNode.arms,
+      );
+      let scrutineeIsTemporary: boolean = LirLowering::hirIsTemporary(hirStore, matchNode.scrutinee);
+
+      dropScrutineePerArm = scrutineeNeedsDrop && someArmMovesPayload && scrutineeIsTemporary;
+
+      // When no arm takes the payload the scrutinee leaves the match whole, so
+      // the block that opened it owns the drop, exactly as it would for any
+      // other unnamed temporary. A scrutinee that aliases storage it does not
+      // own is left alone: the owner's schedule already frees it. Mirrors
+      // `track_scrutinee_drop`.
+      let aliasesExternalStorage: boolean = Borrowck::aliasesExternalStorage(hirStore, matchNode.scrutinee);
+
+      if (scrutineeNeedsDrop && !someArmMovesPayload && !aliasesExternalStorage) {
+        LirLowering::registerSyntheticLocal(state, scrutineeSlot);
+      }
     }
 
     let mut resultSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
@@ -3639,6 +3684,14 @@ export namespace LirLowering {
         // handed it over, and ownership analysis leaves such a binding out of
         // this list.
         LirLowering::emitMatchArmDrops(dropSchedules, function_, state, arm.body);
+
+        let armTakesPayload: boolean = Borrowck::patternMovesOwnedValue(defStore, typeStore, scrutineeType, &arm.pattern);
+
+        if (dropScrutineePerArm && !armTakesPayload) {
+          LirLowering::pushInstr(function_, state, Lir::Instr::Drop(Lir::InstrDrop {
+            local: scrutineeSlot,
+          }));
+        }
 
         LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
       }

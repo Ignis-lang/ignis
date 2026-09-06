@@ -801,6 +801,19 @@ function borrowckReportsFieldOwnerMoveThroughReference(): void {
   Test::assertEq<u64>(diagnostics.length(), 2);
 }
 
+/// Scenario: a `let` condition over a call temporary. The desugared match has
+/// literal arm bodies, so the arm cannot own the binding's drop; the branch the
+/// condition guards is where the binding leaves scope and owes it.
+/// Spec: IGN-221 — a `let` condition hands its bindings to the guarded branch.
+@test
+function borrowckSchedulesLetConditionBindingAtGuardedBranchEnd(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nfunction make(): Maybe {\n  return Maybe::SOME(Owned { id: 1 });\n}\n\nfunction run(): u32 {\n  if (let Maybe::SOME(payload) = make()) {\n    return payload.id;\n  }\n\n  return 0;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: payload\nexit return: payload\n");
+}
+
 /// Scenario: a borrowed base whose arm only reads its binding. No owner drop
 /// was suppressed, so the payload is still the referenced storage's and its
 /// schedule frees it; scheduling an arm-end drop here would free it twice.

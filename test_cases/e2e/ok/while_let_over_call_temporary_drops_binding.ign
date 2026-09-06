@@ -1,0 +1,37 @@
+// e2e: std
+import Option from "std::option";
+
+record Counter {
+    static mut LIVE: i32 = 0;
+}
+
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        Counter::LIVE -= 1;
+        return;
+    }
+}
+
+function makeOption(tag: i32): Option<Resource> {
+    Counter::LIVE += 1;
+    return Option::SOME(Resource { tag: tag });
+}
+
+function main(): i32 {
+    let mut rounds: i32 = 0;
+
+    while (let Option::SOME(resource) = makeOption(1)) {
+        rounds += resource.tag;
+
+        if (rounds > 2) {
+            break;
+        }
+    }
+
+    // The exit code is the number of instances still live: every iteration made one
+    // and every iteration, including the one that broke out, owes its drop.
+    return Counter::LIVE;
+}
