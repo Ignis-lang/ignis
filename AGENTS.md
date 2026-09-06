@@ -453,7 +453,7 @@ fn my_semantic_check() {
 | `std/manifest.toml` | Std module registry and linking config |
 | `std/test/mod.ign` | `std::test::Test` namespace: assertions and snapshots |
 | `std/runtime/ignis_rt.h` | C runtime API (memory, strings, I/O) |
-| `std/runtime/internal/rt_string.c` | IgnisString runtime implementation |
+| `std/string/mod.ign` | String runtime: buffer, UTF-8, search, conversions |
 
 ## UTF-8 String/Char Semantics (v0.4)
 
