@@ -1695,3 +1695,55 @@ fn a_cli_fixture_directory_is_added_to_the_project_corpus() {
     "exit_code: 9\nstdout: (empty)\nstderr: (empty)"
   );
 }
+
+/// A std-using program fixture, named so every one of them differs.
+fn std_greeting_fixture_source(name: &str) -> String {
+  format!(
+    "// e2e: std\nimport Io from \"std::io\";\nimport String from \"std::string\";\n\nfunction main(): i32 {{\n  let greeting: String = String::create(\"{name}\");\n  Io::println(greeting.toStr());\n  return 0;\n}}\n"
+  )
+}
+
+/// Every fixture compiles against the one std archive the pool built up
+/// front. Before the fix, `fixture_compile_config` pointed each fixture's
+/// build output at the shared project output directory: under a pool with
+/// more than one worker, several fixtures could re-check and rebuild that
+/// archive (and overwrite each other's umbrella header) at the same time,
+/// corrupting the link for whichever fixture lost the race. Running a pool
+/// of std fixtures twice with more than one worker must produce the exact
+/// same passing result both times.
+#[test]
+fn concurrent_std_fixtures_produce_stable_results_across_repeated_runs() {
+  ignis_driver::jobs::set_job_limit(Some(4));
+
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+  let fixture_names = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"];
+
+  for name in fixture_names {
+    write_fixture_file(
+      project.path(),
+      &format!("corpus/ok/greets_{name}.ign"),
+      &std_greeting_fixture_source(name),
+    );
+    write_fixture_snapshot(
+      project.path(),
+      &format!("corpus/ok/greets_{name}.ign"),
+      &format!("exit_code: 0\nstdout: {name}\nstderr: (empty)"),
+    );
+  }
+
+  for attempt in 1..=2 {
+    let result = run_project_tests_with_options(project.path(), &fixture_options());
+
+    assert!(
+      result.is_ok(),
+      "expected every std fixture to compile, run and match its snapshot on attempt {attempt}"
+    );
+  }
+
+  let std_archive_path = project.path().join("build/std/lib/libignis_std.a");
+
+  assert!(
+    std_archive_path.exists(),
+    "expected the pool to have built the shared std archive at least once"
+  );
+}

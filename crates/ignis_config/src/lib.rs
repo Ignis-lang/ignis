@@ -422,6 +422,26 @@ pub struct IgnisConfig {
   pub cflags: Vec<String>,
   /// Import path aliases from `[aliases]` in ignis.toml (resolved to absolute paths).
   pub aliases: HashMap<String, std::path::PathBuf>,
+  /// Skips the per-compile std freshness check and archive (re)build.
+  ///
+  /// Set by a caller that already built std once under this exact output
+  /// directory and guarantees no other writer touches it for the lifetime of
+  /// this config, such as the native test runner's fixture pool: every
+  /// fixture shares the same std archive, so re-checking (and potentially
+  /// rebuilding) it per fixture is both redundant and, under concurrent
+  /// fixture workers, a data race on the shared archive file.
+  pub assume_std_built: bool,
+  /// Overrides where the per-module ("user" side) build tree is written,
+  /// independent of `build_config.output_dir`.
+  ///
+  /// `output_dir` still locates the shared, read-only std archive, but a
+  /// caller that compiles many small programs against that one archive
+  /// concurrently (the fixture pool) needs each compile's own headers,
+  /// objects, and umbrella header written somewhere private: the umbrella
+  /// header in particular has one fixed name per output directory, so two
+  /// fixtures sharing `output_dir` would overwrite each other's while a
+  /// concurrent compile was still reading it.
+  pub user_build_dir_override: Option<String>,
 }
 
 impl IgnisConfig {
@@ -478,6 +498,8 @@ impl IgnisConfig {
       c_compiler,
       cflags,
       aliases: HashMap::new(),
+      assume_std_built: false,
+      user_build_dir_override: None,
     }
   }
 

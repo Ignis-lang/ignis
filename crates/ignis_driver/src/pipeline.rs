@@ -634,7 +634,7 @@ pub fn compile_project(
 
       trace_dbg!(&config, DebugTrace::Std, "ensuring standard library is built");
 
-      if ensure_std_built(&used_modules, &ctx.module_graph, &config).is_err() {
+      if !config.assume_std_built && ensure_std_built(&used_modules, &ctx.module_graph, &config).is_err() {
         cmd_fail!(&config, "Build failed", start.elapsed());
         return Err(());
       }
@@ -854,9 +854,20 @@ pub fn compile_project(
             std::env::current_dir().ok()
           };
 
+          // `output_dir` locates the shared, already-built std archive; the
+          // user-side build tree (headers, objects, umbrella header) is kept
+          // separate when the caller asks for it, so concurrent compiles
+          // against that one archive never share a path to write into (the
+          // umbrella header has one fixed name per output directory).
+          let user_build_dir = config
+            .user_build_dir_override
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| out_dir_path.to_path_buf());
+
           let layout = match &project_root {
-            Some(root) => BuildLayout::with_project_root(base_name, out_dir_path, root),
-            None => BuildLayout::new(base_name, out_dir_path),
+            Some(root) => BuildLayout::with_project_root(base_name, &user_build_dir, root),
+            None => BuildLayout::new(base_name, &user_build_dir),
           };
 
           // Create user directories
@@ -2038,6 +2049,22 @@ fn fixture_compile_config(
   config.c_compiler = project.cc.clone();
   config.aliases = project.aliases.clone();
   config.cflags = project.cflags.clone();
+
+  // The fixture pool builds std exactly once, up front, before any fixture
+  // compile starts (see `run_project_tests_with_options`). Every fixture
+  // shares that one archive under `project.out_dir`, so a fixture must never
+  // re-run the freshness check or rebuild it: under a parallel pool, many
+  // fixtures hitting that check at once raced on the same archive file and
+  // corrupted the link for whichever fixture lost the race.
+  config.assume_std_built = true;
+
+  // The user-side build tree (headers, objects, umbrella header) still has to
+  // be private to this fixture: it shares `project.out_dir` with every other
+  // fixture only for locating the prebuilt std archive above, and the
+  // umbrella header in particular has one fixed name per output directory,
+  // so two fixtures compiling at once under the same directory would
+  // overwrite each other's while gcc was still reading it.
+  config.user_build_dir_override = Some(fixture_work_dir(context, case).to_string_lossy().to_string());
 
   if !allow_leak && bin_path.is_some() {
     config.cflags.extend(leak_check_cflags());
