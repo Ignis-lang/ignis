@@ -905,13 +905,9 @@ export namespace Format {
         },
       };
 
-      // `.clone()`, not a move: `read` is a bound local that still drops
-      // normally at scope exit, so moving `value` out of it double-frees the
-      // string's backing storage on this compiler (repro
-      // "field-move-double-free").
       return Result::OK(Format::ShallowScalarRead {
         tag: Format::ShallowScalarTag::STRING,
-        text: read.value.clone(),
+        text: read.value,
         endOffset: read.nextIndex,
       });
     }
@@ -975,11 +971,9 @@ export namespace Format {
         return Result::ERROR(Format::ndjsonNumberOutOfRange(numberRead.endOffset));
       }
 
-      // `.clone()` for the same reason the `STRING` case above clones:
-      // `numberRead` is a bound local (repro "field-move-double-free").
       return Result::OK(Format::ShallowScalarRead {
         tag: Format::ShallowScalarTag::NUMBER,
-        text: numberRead.text.clone(),
+        text: numberRead.text,
         endOffset: numberRead.endOffset,
       });
     }
@@ -1089,10 +1083,7 @@ export namespace Format {
       },
     };
 
-    // `.clone()` for the same reason `readShallowScalar` clones its own
-    // string read: `key` is a bound local (repro
-    // "field-move-double-free").
-    let keyText: String = key.value.clone();
+    let keyText: String = key.value;
     let keyEndOffset: u64 = key.nextIndex;
     stateRef.cursor = Format::skipAsciiWhitespaceFrom(line, keyEndOffset);
 

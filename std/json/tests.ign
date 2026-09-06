@@ -3,12 +3,9 @@ import Test from "std::test";
 import Vector from "std::vector";
 import Json, JsonValueKind, readString, scanNumber, skipValue from "./mod";
 
-/// Extracts a `NUMBER`'s text by cloning through a reference, rather than a
-/// `let`-`else` destructure that would move it out of `kind` (a field on an
-/// already-bound local), which double-frees on this compiler (repro
-/// "field-move-double-free": extracting a field out of an already-bound
-/// local record, rather than a fresh construction or a whole-value move,
-/// double-frees the field's backing storage on drop).
+/// `kind` is a reference, so a matched payload binds as `&String`: cloning
+/// is a genuine move-out-of-a-borrow requirement, not a workaround for a
+/// compiler bug.
 function numberTextOf(kind: &JsonValueKind): Option<String> {
   return match (kind) {
     JsonValueKind::NUMBER(text) -> Option::SOME(text.clone()),
