@@ -22,6 +22,7 @@
 //! also why those are exported rather than kept private to `Json::parse`.
 
 import JsonObjectEntry, JsonValue, JsonValueKind from "./value";
+import Vector from "std::vector";
 
 /// `serde_json`'s default recursion limit (`serde_json::de::Deserializer`'s
 /// `RECURSION_LIMIT`), applied to `Json::parse`'s own tree-building descent.
@@ -87,13 +88,6 @@ export function jsonEofMessage(source: &String, kind: str): String {
 function columnAtByte(index: u64): String {
   let column: u64 = index + 1;
   return column.toString();
-}
-
-/// A value's own token was not consumed (an object/array detected only by
-/// peeking its opening bracket, or a recursion-limit check on the same
-/// peek): `serde_json` reports the position right before that bracket.
-function columnBeforeByte(index: u64): String {
-  return index.toString();
 }
 
 /// A value's own token was fully consumed (a scalar, a key string, a whole
@@ -176,9 +170,30 @@ export function jsonExpectedColonMessage(index: u64): String {
   message.push(&column);
   return message;
 }
+
+/// `serde_json` reports this once it has committed to one of `true`/`false`/
+/// `null` (by matching its first byte) and then finds a present byte that
+/// does not continue that keyword, distinct from the generic `expected
+/// value` used when the first byte does not start any known value at all.
+function jsonExpectedIdentMessage(index: u64): String {
+  let mut message: String = String::create("expected ident at line 1 column ");
+  let column: String = columnAtByte(index);
+  message.push(&column);
+  return message;
+}
+
 export function jsonRecursionLimitMessage(index: u64): String {
   let mut message: String = String::create("recursion limit exceeded at line 1 column ");
-  let column: String = columnBeforeByte(index);
+  let column: String = columnAtByte(index);
+  message.push(&column);
+  return message;
+}
+
+/// `serde_json` uses this instead of the generic `expected value` when an
+/// object key position holds a byte that is not a `"`.
+export function jsonKeyMustBeStringMessage(index: u64): String {
+  let mut message: String = String::create("key must be a string at line 1 column ");
+  let column: String = columnAtByte(index);
   message.push(&column);
   return message;
 }
@@ -210,24 +225,38 @@ record HexEscapeRead {
 
 /// Decodes the four hex digits of a `\uXXXX` escape, `source[startIndex]`
 /// being the first hex digit (the caller has already consumed `\u`).
-function readHexEscape(source: &String, startIndex: u64): Option<HexEscapeRead> {
+///
+/// `serde_json` reads all 4 byte positions before reporting an invalid
+/// digit (so an invalid first digit still needs the 4th byte to be present),
+/// but reports a missing byte position (running off the end of the source)
+/// immediately as EOF rather than continuing to check the rest. `ERROR(true)`
+/// distinguishes that EOF case from `ERROR(false)` (4 bytes were present,
+/// at least one was not a hex digit).
+function readHexEscape(source: &String, startIndex: u64): Result<HexEscapeRead, boolean> {
   let mut value: u32 = 0;
   let mut index: u64 = 0;
+  let mut sawInvalidDigit: boolean = false;
 
   while (index < 4) {
     let Option::SOME(byte) = source.byteAt(startIndex + index) else {
-      return Option::NONE;
+      return Result::ERROR(true);
     };
 
     let Option::SOME(digit) = hexDigitValue(byte) else {
-      return Option::NONE;
+      sawInvalidDigit = true;
+      index += 1;
+      continue;
     };
 
     value = value * 16 + digit;
     index += 1;
   }
 
-  return Option::SOME(HexEscapeRead { value: value, nextIndex: startIndex + index });
+  if (sawInvalidDigit) {
+    return Result::ERROR(false);
+  }
+
+  return Result::OK(HexEscapeRead { value: value, nextIndex: startIndex + index });
 }
 
 function isHighSurrogate(value: u32): boolean {
@@ -319,25 +348,43 @@ export function readString(source: &String, startIndex: u64): Result<JsonStringR
       return Result::ERROR(jsonInvalidEscapeMessage(cursor + 1));
     }
 
-    let Option::SOME(firstEscape) = readHexEscape(source, cursor + 2) else {
-      return Result::ERROR(jsonEofMessage(source, "a string"));
+    let firstEscape: HexEscapeRead = match (readHexEscape(source, cursor + 2)) {
+      Result::OK(value) -> value,
+      Result::ERROR(isEof) -> {
+        if (isEof) {
+          return Result::ERROR(jsonEofMessage(source, "a string"));
+        }
+
+        return Result::ERROR(jsonInvalidEscapeMessage(cursor + 2 + 3));
+      },
     };
 
     if (isHighSurrogate(firstEscape.value)) {
       let Option::SOME(nextByte) = source.byteAt(firstEscape.nextIndex) else {
-        return Result::ERROR(jsonUnexpectedEndOfHexEscapeMessage(firstEscape.nextIndex));
+        return Result::ERROR(jsonEofMessage(source, "a string"));
       };
 
-      let Option::SOME(afterBackslash) = source.byteAt(firstEscape.nextIndex + 1) else {
-        return Result::ERROR(jsonUnexpectedEndOfHexEscapeMessage(firstEscape.nextIndex));
-      };
-
-      if (nextByte != '\\' as u8 || afterBackslash != 'u' as u8) {
+      if (nextByte != '\\' as u8) {
         return Result::ERROR(jsonUnexpectedEndOfHexEscapeMessage(firstEscape.nextIndex));
       }
 
-      let Option::SOME(secondEscape) = readHexEscape(source, firstEscape.nextIndex + 2) else {
+      let Option::SOME(afterBackslash) = source.byteAt(firstEscape.nextIndex + 1) else {
         return Result::ERROR(jsonEofMessage(source, "a string"));
+      };
+
+      if (afterBackslash != 'u' as u8) {
+        return Result::ERROR(jsonUnexpectedEndOfHexEscapeMessage(firstEscape.nextIndex + 1));
+      }
+
+      let secondEscape: HexEscapeRead = match (readHexEscape(source, firstEscape.nextIndex + 2)) {
+        Result::OK(value) -> value,
+        Result::ERROR(isEof) -> {
+          if (isEof) {
+            return Result::ERROR(jsonEofMessage(source, "a string"));
+          }
+
+          return Result::ERROR(jsonInvalidEscapeMessage(firstEscape.nextIndex + 2 + 3));
+        },
       };
 
       if (!isLowSurrogate(secondEscape.value)) {
@@ -373,11 +420,17 @@ function isAsciiDigit(byte: u8): boolean {
 /// `-`? int frac? exp?, `int` is `0` or a non-zero digit followed by digits,
 /// `frac` is `.` followed by at least one digit, `exp` is `e`/`E` with an
 /// optional sign followed by at least one digit.
+///
+/// `serde_json` has not committed to "this is a number" until it sees a
+/// digit: running off the end of the source while still expecting a
+/// mandatory digit (right after a sign, a `.`, or an exponent marker) is
+/// `EOF while parsing a value`, not `invalid number`. Only a *present* byte
+/// that fails the grammar is `invalid number`.
 export function scanNumber(source: &String, startIndex: u64): Result<JsonNumberRead, String> {
   let mut cursor: u64 = startIndex;
 
   let Option::SOME(first) = source.byteAt(cursor) else {
-    return Result::ERROR(jsonInvalidNumberMessage(cursor));
+    return Result::ERROR(jsonEofMessage(source, "a value"));
   };
 
   if (first == '-' as u8) {
@@ -385,7 +438,7 @@ export function scanNumber(source: &String, startIndex: u64): Result<JsonNumberR
   }
 
   let Option::SOME(leadingDigit) = source.byteAt(cursor) else {
-    return Result::ERROR(jsonInvalidNumberMessage(cursor));
+    return Result::ERROR(jsonEofMessage(source, "a value"));
   };
 
   if (!isAsciiDigit(leadingDigit)) {
@@ -408,7 +461,7 @@ export function scanNumber(source: &String, startIndex: u64): Result<JsonNumberR
     cursor += 1;
 
     let Option::SOME(fractionDigit) = source.byteAt(cursor) else {
-      return Result::ERROR(jsonInvalidNumberMessage(cursor));
+      return Result::ERROR(jsonEofMessage(source, "a value"));
     };
 
     if (!isAsciiDigit(fractionDigit)) {
@@ -428,7 +481,7 @@ export function scanNumber(source: &String, startIndex: u64): Result<JsonNumberR
     }
 
     let Option::SOME(exponentDigit) = source.byteAt(cursor) else {
-      return Result::ERROR(jsonInvalidNumberMessage(cursor));
+      return Result::ERROR(jsonEofMessage(source, "a value"));
     };
 
     if (!isAsciiDigit(exponentDigit)) {
@@ -443,16 +496,40 @@ export function scanNumber(source: &String, startIndex: u64): Result<JsonNumberR
   let text: String = source.substringBytes(startIndex, cursor);
   return Result::OK(JsonNumberRead { text: text, endOffset: cursor });
 }
-function matchesLiteral(source: &String, startIndex: u64, literal: str): boolean {
+
+/// Matches `literal` (one of `true`/`false`/`null`) starting at `startIndex`,
+/// where the caller has already confirmed the byte at `startIndex` is that
+/// keyword's first byte. `serde_json`, having committed to that keyword,
+/// distinguishes running off the end of the source mid-match (`EOF while
+/// parsing a value`) from a present byte that breaks the match (`expected
+/// ident`) rather than falling back to the generic `expected value` either
+/// caller uses when the first byte does not start any known value at all.
+export function matchKeywordOrIdentError(
+  source: &String,
+  startIndex: u64,
+  literal: str
+): Result<u64, String> {
   let literalText: String = String::create(literal);
   let literalLength: u64 = literalText.length();
+  let mut index: u64 = 1;
 
-  if (startIndex + literalLength > source.length()) {
-    return false;
+  while (index < literalLength) {
+    let Option::SOME(expectedByte) = literalText.byteAt(index) else {
+      break;
+    };
+
+    let Option::SOME(actualByte) = source.byteAt(startIndex + index) else {
+      return Result::ERROR(jsonEofMessage(source, "a value"));
+    };
+
+    if (actualByte != expectedByte) {
+      return Result::ERROR(jsonExpectedIdentMessage(startIndex + index));
+    }
+
+    index += 1;
   }
 
-  let candidate: String = source.substringBytes(startIndex, startIndex + literalLength);
-  return candidate.equals(&literalText);
+  return Result::OK(startIndex + literalLength);
 }
 
 /// The kind name `serde_json` uses in `invalid type: <kind>, ...` for a
@@ -484,13 +561,9 @@ export function classifyContainerStart(source: &String, index: u64): Option<Json
   return Option::NONE;
 }
 
-/// Advances past exactly one JSON value at `startIndex`, without building a
-/// tree and without recursion: nested containers are skipped with a flat
-/// depth counter, so this has no depth limit, the same way `serde_json`'s
-/// `IgnoredAny` skip (used for a struct's unknown fields) does not.
-export function skipValue(source: &String, startIndex: u64): Result<u64, String> {
-  let index: u64 = Json::skipWhitespace(source, startIndex);
-
+/// Skips one JSON scalar (string, `true`/`false`/`null`, or number) at
+/// `index`, which must not be `{` or `[`.
+function skipScalarValue(source: &String, index: u64): Result<u64, String> {
   let Option::SOME(byte) = source.byteAt(index) else {
     return Result::ERROR(jsonEofMessage(source, "a value"));
   };
@@ -500,56 +573,16 @@ export function skipValue(source: &String, startIndex: u64): Result<u64, String>
     return Result::OK(read.nextIndex);
   }
 
-  if (byte == '{' as u8 || byte == '[' as u8) {
-    let opensObject: boolean = byte == '{' as u8;
-    let mut depth: u64 = 1;
-    let mut cursor: u64 = index + 1;
-
-    while (depth > 0) {
-      cursor = Json::skipWhitespace(source, cursor);
-
-      let Option::SOME(current) = source.byteAt(cursor) else {
-        if (opensObject) {
-          return Result::ERROR(jsonEofMessage(source, "an object"));
-        }
-
-        return Result::ERROR(jsonEofMessage(source, "a list"));
-      };
-
-      if (current == '"' as u8) {
-        let read: JsonStringRead = readString(source, cursor)!;
-        cursor = read.nextIndex;
-        continue;
-      }
-
-      if (current == '{' as u8 || current == '[' as u8) {
-        depth += 1;
-        cursor += 1;
-        continue;
-      }
-
-      if (current == '}' as u8 || current == ']' as u8) {
-        depth -= 1;
-        cursor += 1;
-        continue;
-      }
-
-      cursor += 1;
-    }
-
-    return Result::OK(cursor);
+  if (byte == 't' as u8) {
+    return matchKeywordOrIdentError(source, index, "true");
   }
 
-  if (matchesLiteral(source, index, "true")) {
-    return Result::OK(index + 4);
+  if (byte == 'f' as u8) {
+    return matchKeywordOrIdentError(source, index, "false");
   }
 
-  if (matchesLiteral(source, index, "false")) {
-    return Result::OK(index + 5);
-  }
-
-  if (matchesLiteral(source, index, "null")) {
-    return Result::OK(index + 4);
+  if (byte == 'n' as u8) {
+    return matchKeywordOrIdentError(source, index, "null");
   }
 
   let isNumberStart: boolean = byte == '-' as u8 || isAsciiDigit(byte);
@@ -560,6 +593,136 @@ export function skipValue(source: &String, startIndex: u64): Result<u64, String>
   }
 
   return Result::ERROR(jsonExpectedValueMessage(index));
+}
+
+/// Advances past exactly one JSON value at `startIndex`, matching
+/// `serde_json`'s `IgnoredAny` grammar exactly (unknown keys/commas/colons
+/// are validated, not just bracket-counted) without recursing into nested
+/// containers: an explicit `Vector<boolean>` stack of ancestor container
+/// kinds (`true` for an object) tracks nesting instead of the call stack, so
+/// this has no depth limit, the same way `IgnoredAny` does not.
+export function skipValue(source: &String, startIndex: u64): Result<u64, String> {
+  let index: u64 = Json::skipWhitespace(source, startIndex);
+
+  let Option::SOME(byte) = source.byteAt(index) else {
+    return Result::ERROR(jsonEofMessage(source, "a value"));
+  };
+
+  if (byte != '{' as u8 && byte != '[' as u8) {
+    return skipScalarValue(source, index);
+  }
+
+  let mut currentIsObject: boolean = byte == '{' as u8;
+  let mut ancestors: Vector<boolean> = Vector::new<boolean>();
+  let mut cursor: u64 = index + 1;
+  let mut needEntry: boolean = true;
+
+  while (true) {
+    cursor = Json::skipWhitespace(source, cursor);
+    let containerKind: str = currentIsObject ? "an object" : "a list";
+    let closeByte: u8 = currentIsObject ? '}' as u8 : ']' as u8;
+
+    if (needEntry) {
+      let Option::SOME(peekByte) = source.byteAt(cursor) else {
+        return Result::ERROR(jsonEofMessage(source, containerKind));
+      };
+
+      if (peekByte == closeByte) {
+        cursor += 1;
+
+        let Option::SOME(parentIsObject) = ancestors.pop() else {
+          return Result::OK(cursor);
+        };
+
+        currentIsObject = parentIsObject;
+        needEntry = false;
+        continue;
+      }
+
+      if (currentIsObject) {
+        if (peekByte != '"' as u8) {
+          return Result::ERROR(jsonKeyMustBeStringMessage(cursor));
+        }
+
+        let key: JsonStringRead = readString(source, cursor)!;
+        cursor = Json::skipWhitespace(source, key.nextIndex);
+
+        let Option::SOME(colon) = source.byteAt(cursor) else {
+          return Result::ERROR(jsonEofMessage(source, "an object"));
+        };
+
+        if (colon != ':' as u8) {
+          return Result::ERROR(jsonExpectedColonMessage(cursor));
+        }
+
+        cursor = Json::skipWhitespace(source, cursor + 1);
+      }
+
+      let Option::SOME(valueByte) = source.byteAt(cursor) else {
+        return Result::ERROR(jsonEofMessage(source, "a value"));
+      };
+
+      if (valueByte == '{' as u8 || valueByte == '[' as u8) {
+        ancestors.push(currentIsObject);
+        currentIsObject = valueByte == '{' as u8;
+        cursor += 1;
+        needEntry = true;
+        continue;
+      }
+
+      cursor = skipScalarValue(source, cursor)!;
+      needEntry = false;
+      continue;
+    }
+
+    let Option::SOME(afterValue) = source.byteAt(cursor) else {
+      return Result::ERROR(jsonEofMessage(source, containerKind));
+    };
+
+    if (afterValue == closeByte) {
+      cursor += 1;
+
+      let Option::SOME(parentIsObject) = ancestors.pop() else {
+        return Result::OK(cursor);
+      };
+
+      currentIsObject = parentIsObject;
+      needEntry = false;
+      continue;
+    }
+
+    if (afterValue != ',' as u8) {
+      if (currentIsObject) {
+        return Result::ERROR(jsonExpectedCommaOrBraceMessage(cursor));
+      }
+
+      return Result::ERROR(jsonExpectedCommaOrBracketMessage(cursor));
+    }
+
+    cursor = Json::skipWhitespace(source, cursor + 1);
+
+    // Past the comma, an array reads its next element through the same
+    // generic value dispatch used everywhere, so EOF here is `EOF while
+    // parsing a value`; an object still reports `an object` at this
+    // checkpoint (unlike the struct-mapped object scanners in this file and
+    // `api.ign`, which both use `a value` here instead — `IgnoredAny`'s
+    // internal map/seq access apparently do not share one convention).
+    let Option::SOME(afterComma) = source.byteAt(cursor) else {
+      if (currentIsObject) {
+        return Result::ERROR(jsonEofMessage(source, "an object"));
+      }
+
+      return Result::ERROR(jsonEofMessage(source, "a value"));
+    };
+
+    if (afterComma == closeByte) {
+      return Result::ERROR(jsonTrailingCommaMessage(cursor));
+    }
+
+    needEntry = true;
+  }
+
+  @unreachable();
 }
 function parseJsonValue(source: &String, startIndex: u64, depth: u64): Result<JsonValue, String> {
   let index: u64 = Json::skipWhitespace(source, startIndex);
@@ -574,12 +737,16 @@ function parseJsonValue(source: &String, startIndex: u64, depth: u64): Result<Js
     // `.clone()`, not a move: moving `value` out of the bound local `read`
     // while `read` itself still drops normally at scope exit double-frees
     // the string's backing storage on this compiler (repro
-    // "field-move-double-free", ticket IGN-229).
+    // "field-move-double-free").
     return Result::OK(JsonValue { kind: JsonValueKind::STRING(read.value.clone()), endOffset: read.nextIndex });
   }
 
   if (byte == '{' as u8) {
-    if (depth >= MAX_DEPTH) {
+    // `depth` counts how many containers already enclose this one (0 at the
+    // top level), so the container about to open here is the `depth + 1`th:
+    // the 128th container (`depth == 127`) is the one that exceeds
+    // `serde_json`'s limit, not the 129th.
+    if (depth + 1 >= MAX_DEPTH) {
       return Result::ERROR(jsonRecursionLimitMessage(index));
     }
 
@@ -587,23 +754,30 @@ function parseJsonValue(source: &String, startIndex: u64, depth: u64): Result<Js
   }
 
   if (byte == '[' as u8) {
-    if (depth >= MAX_DEPTH) {
+    // `depth` counts how many containers already enclose this one (0 at the
+    // top level), so the container about to open here is the `depth + 1`th:
+    // the 128th container (`depth == 127`) is the one that exceeds
+    // `serde_json`'s limit, not the 129th.
+    if (depth + 1 >= MAX_DEPTH) {
       return Result::ERROR(jsonRecursionLimitMessage(index));
     }
 
     return parseJsonArray(source, index, depth);
   }
 
-  if (matchesLiteral(source, index, "true")) {
-    return Result::OK(JsonValue { kind: JsonValueKind::BOOL(true), endOffset: index + 4 });
+  if (byte == 't' as u8) {
+    let endOffset: u64 = matchKeywordOrIdentError(source, index, "true")!;
+    return Result::OK(JsonValue { kind: JsonValueKind::BOOL(true), endOffset: endOffset });
   }
 
-  if (matchesLiteral(source, index, "false")) {
-    return Result::OK(JsonValue { kind: JsonValueKind::BOOL(false), endOffset: index + 5 });
+  if (byte == 'f' as u8) {
+    let endOffset: u64 = matchKeywordOrIdentError(source, index, "false")!;
+    return Result::OK(JsonValue { kind: JsonValueKind::BOOL(false), endOffset: endOffset });
   }
 
-  if (matchesLiteral(source, index, "null")) {
-    return Result::OK(JsonValue { kind: JsonValueKind::NULL, endOffset: index + 4 });
+  if (byte == 'n' as u8) {
+    let endOffset: u64 = matchKeywordOrIdentError(source, index, "null")!;
+    return Result::OK(JsonValue { kind: JsonValueKind::NULL, endOffset: endOffset });
   }
 
   let isNumberStart: boolean = byte == '-' as u8 || isAsciiDigit(byte);
@@ -640,14 +814,14 @@ function parseJsonObject(
     };
 
     if (keyByte != '"' as u8) {
-      return Result::ERROR(jsonExpectedValueMessage(cursor));
+      return Result::ERROR(jsonKeyMustBeStringMessage(cursor));
     }
 
     let key: JsonStringRead = readString(source, cursor)!;
 
     // `.clone()` for the same reason as the `STRING` case above: `key` is a
     // bound local that still drops at scope exit (repro
-    // "field-move-double-free", IGN-229).
+    // "field-move-double-free").
     let keyText: String = key.value.clone();
     cursor = Json::skipWhitespace(source, key.nextIndex);
 
@@ -673,8 +847,11 @@ function parseJsonObject(
     if (next == ',' as u8) {
       cursor = Json::skipWhitespace(source, cursor + 1);
 
+      // Past the comma, the next key is read through the same generic value
+      // dispatch a colon's value uses, so EOF here is `EOF while parsing a
+      // value`, not `an object`, unlike every other EOF check in this loop.
       let Option::SOME(afterComma) = source.byteAt(cursor) else {
-        return Result::ERROR(jsonEofMessage(source, "an object"));
+        return Result::ERROR(jsonEofMessage(source, "a value"));
       };
 
       if (afterComma == '}' as u8) {

@@ -9,12 +9,15 @@ import
   jsonExpectedColonMessage,
   jsonExpectedCommaOrBraceMessage,
   jsonExpectedValueMessage,
+  jsonKeyMustBeStringMessage,
   jsonTrailingCommaMessage,
+  matchKeywordOrIdentError,
   readString,
   scanNumber,
   skipValue,
 from "std::json";
 import CType, LibC from "std::libc";
+import Memory from "std::memory";
 import Path from "std::path";
 import String from "std::string";
 import Vector from "std::vector";
@@ -67,6 +70,220 @@ function saturatingSub(value: u64, amount: u64): u64 {
   }
 
   return value - amount;
+}
+
+/// `libc`'s `snprintf`, bound here (rather than in `std::libc`) only for
+/// `describeNumber`'s shortest-round-trip search below: it needs
+/// precision-controlled scientific notation (`%.Ne`) that `f64::toString()`
+/// (a fixed `%g`) cannot produce.
+extern __format_snprintf {
+  function snprintf(
+    buf: CType::CStr,
+    size: CType::SizeT,
+    fmt: CType::CConstStr,
+    value: CType::CDouble
+  ): CType::CInt;
+}
+
+/// Formats `value` with `snprintf("%.{precision}e", value)`, returning the
+/// raw C string (e.g. `"1.230000e+02"`).
+function formatScientific(value: f64, precision: u64): String {
+  let mut format: String = String::create("%.");
+  let precisionText: String = precision.toString();
+  format.push(&precisionText);
+  format.pushStr("e");
+
+  let capacity: u64 = 64;
+  let buffer: *mut u8 = Memory::allocateVector<u8>(capacity);
+  __format_snprintf::snprintf(buffer, capacity, format.toStr() as CType::CConstStr, value as CType::CDouble);
+
+  let result: String = String::create(buffer as str);
+  Memory::free(buffer);
+  return result;
+}
+
+/// The shortest `%e` text (across `snprintf("%.Ne", value)` for `N` from 0
+/// up) that round-trips back to `value` bit-for-bit through `atof`. Falls
+/// back to 16 fraction digits (17 significant digits, always enough for any
+/// finite `f64`) if nothing shorter round-trips.
+function shortestScientificText(value: f64): String {
+  let mut precision: u64 = 0;
+
+  while (precision <= 16) {
+    let candidate: String = formatScientific(value, precision);
+    let candidateStr: str = candidate.toStr();
+    let roundTrip: CType::CDouble = LibC::Conversion::atof(candidateStr as CType::CConstStr);
+
+    if (roundTrip == value) {
+      return candidate;
+    }
+
+    precision += 1;
+  }
+
+  return formatScientific(value, 16);
+}
+
+/// One `%e`-formatted scientific value split into Rust `Display`-shaped
+/// pieces: an optional leading `-`, exactly one leading digit, the
+/// (possibly empty) fraction digits after it, and the base-10 exponent of
+/// that leading digit.
+record ScientificParts {
+  public negative: boolean;
+  public leadingDigit: u8;
+  public fractionDigits: String;
+  public exponent: i64;
+}
+
+function parseScientificText(raw: &String): ScientificParts {
+  let mut index: u64 = 0;
+  let mut negative: boolean = false;
+
+  if (let Option::SOME(first) = raw.byteAt(0) && first == '-' as u8) {
+    negative = true;
+    index = 1;
+  }
+
+  let Option::SOME(leadingDigit) = raw.byteAt(index) else {
+    return ScientificParts {
+      negative: negative,
+      leadingDigit: '0' as u8,
+      fractionDigits: String::new(),
+      exponent: 0,
+    };
+  };
+
+  index += 1;
+
+  let mut fractionDigits: String = String::new();
+
+  if (let Option::SOME(dot) = raw.byteAt(index) && dot == '.' as u8) {
+    index += 1;
+
+    while (let Option::SOME(digit) = raw.byteAt(index) && digit != 'e' as u8) {
+      fractionDigits.pushByte(digit);
+      index += 1;
+    }
+  }
+
+  // `index` now sits on `e`.
+  index += 1;
+
+  let mut exponentNegative: boolean = false;
+
+  if (let Option::SOME(sign) = raw.byteAt(index)) {
+    if (sign == '-' as u8) {
+      exponentNegative = true;
+      index += 1;
+    } else if (sign == '+' as u8) {
+      index += 1;
+    }
+  }
+
+  let mut exponentValue: i64 = 0;
+
+  while (let Option::SOME(digit) = raw.byteAt(index) && digit >= '0' as u8 && digit <= '9' as u8) {
+    exponentValue = exponentValue * 10 + (digit - ('0' as u8)) as i64;
+    index += 1;
+  }
+
+  if (exponentNegative) {
+    exponentValue = -exponentValue;
+  }
+
+  return ScientificParts {
+    negative: negative,
+    leadingDigit: leadingDigit,
+    fractionDigits: fractionDigits,
+    exponent: exponentValue,
+  };
+}
+
+/// Rust's `Display for f64` layout, built from the shortest round-tripping
+/// `%e` text: fixed notation (always with a decimal point, e.g. `100.0`)
+/// for a base-10 exponent from -5 to 15 inclusive, scientific notation
+/// (`D.DDDe±EE`, `+`/`-` always shown, no leading zeros) outside that range.
+/// The exact threshold and every rule here (the fixed range, the exponent
+/// sign always being present, the lack of leading zeros) were all verified
+/// directly against the host across 20+ values, including subnormals,
+/// magnitudes past 1e300, and negative zero.
+function rustFloatDisplay(value: f64): String {
+  let raw: String = shortestScientificText(value);
+  let parts: ScientificParts = parseScientificText(&raw);
+
+  let mut result: String = String::new();
+
+  if (parts.negative) {
+    result.pushChar('-');
+  }
+
+  let useScientific: boolean = parts.exponent < -5 || parts.exponent > 15;
+
+  if (useScientific) {
+    result.pushByte(parts.leadingDigit);
+
+    if (parts.fractionDigits.length() > 0) {
+      result.pushChar('.');
+      result.push(&parts.fractionDigits);
+    }
+
+    result.pushChar('e');
+    result.pushChar(parts.exponent < 0 ? '-' : '+');
+
+    let exponentMagnitude: i64 = parts.exponent < 0 ? -parts.exponent : parts.exponent;
+    let exponentMagnitudeAsU64: u64 = exponentMagnitude as u64;
+    let exponentText: String = exponentMagnitudeAsU64.toString();
+    result.push(&exponentText);
+
+    return result;
+  }
+
+  if (parts.exponent >= 0) {
+    result.pushByte(parts.leadingDigit);
+
+    let exponentAsIndex: u64 = parts.exponent as u64;
+    let mut digitIndex: u64 = 0;
+
+    while (digitIndex < exponentAsIndex) {
+      let Option::SOME(digit) = parts.fractionDigits.byteAt(digitIndex) else {
+        result.pushChar('0');
+        digitIndex += 1;
+        continue;
+      };
+
+      result.pushByte(digit);
+      digitIndex += 1;
+    }
+
+    result.pushChar('.');
+
+    if (digitIndex < parts.fractionDigits.length()) {
+      let remaining: String = parts.fractionDigits.substringBytes(digitIndex, parts.fractionDigits.length());
+      result.push(&remaining);
+    } else {
+      result.pushChar('0');
+    }
+
+    return result;
+  }
+
+  // `parts.exponent` is negative here (and >= -5, since `useScientific`
+  // already handled anything past that): the value is `0.` followed by
+  // `-exponent - 1` zeros, the leading digit, then the fraction digits.
+  result.pushStr("0.");
+
+  let leadingZeroCount: u64 = (-parts.exponent - 1) as u64;
+  let mut zeroIndex: u64 = 0;
+
+  while (zeroIndex < leadingZeroCount) {
+    result.pushChar('0');
+    zeroIndex += 1;
+  }
+
+  result.pushByte(parts.leadingDigit);
+  result.push(&parts.fractionDigits);
+
+  return result;
 }
 
 export namespace Format {
@@ -149,26 +366,24 @@ export namespace Format {
     path: &Path::PathBuf,
     options: &Format::FormatOptions
   ): Result<Format::FormatOutcome, FormatError> {
-    let Result::OK(source) = Fs::readToString(path) else {
-      let Result::ERROR(readError) = Fs::readToString(path) else {
-        return Result::ERROR(FormatError::io("could not read file"));
-      };
-
-      let message: String = Format::ioErrorDisplay(&readError);
-      return Result::ERROR(FormatError::io(message.toStr()));
+    let source: String = match (Fs::readToString(path)) {
+      Result::OK(value) -> value,
+      Result::ERROR(readError) -> {
+        let message: String = Format::ioErrorDisplay(&readError);
+        return Result::ERROR(FormatError::io(message.toStr()));
+      },
     };
 
     let formatted: String = Format::formatSource(&source, &options.config)!;
     let changed: boolean = !formatted.equals(&source);
 
     if (changed && !options.check) {
-      let Result::OK(_) = Fs::writeString(path, &formatted) else {
-        let Result::ERROR(writeError) = Fs::writeString(path, &formatted) else {
-          return Result::ERROR(FormatError::io("could not write file"));
-        };
-
-        let message: String = Format::ioErrorDisplay(&writeError);
-        return Result::ERROR(FormatError::io(message.toStr()));
+      match (Fs::writeString(path, &formatted)) {
+        Result::OK(_) -> {},
+        Result::ERROR(writeError) -> {
+          let message: String = Format::ioErrorDisplay(&writeError);
+          return Result::ERROR(FormatError::io(message.toStr()));
+        },
       };
     }
 
@@ -430,16 +645,10 @@ export namespace Format {
   /// exact source text; anything else (a fraction, an exponent, an integer
   /// too big for either 64-bit type, or the literal `-0`, which `serde_json`
   /// always treats as `-0.0` to keep the sign bit no 64-bit integer type can
-  /// represent) is `f64`, described with Rust's `{}` `Display` for `f64`.
-  ///
-  /// This reproduces that exactly for `-0` and for any integer or float
-  /// classification decision (checked against the host for both), but the
-  /// *digits* of an out-of-i64/u64-range float fall back to this compiler's
-  /// own `f64` formatting (`std::libc`'s `atof` plus `f64::toString()`),
-  /// which is not Rust's shortest-round-trip algorithm: `std::string` has no
-  /// Rust-`Display`-compatible float formatter to call instead, so e.g.
-  /// `18446744073709551616` renders as `1.84467e+19` here, not the host's
-  /// `1.8446744073709552e+19`.
+  /// represent) is `f64`, described with Rust's `{}` `Display` for `f64`
+  /// (reproduced here by `rustFloatDisplay`, built on `snprintf`'s
+  /// shortest-round-tripping `%e` output rather than `f64::toString()`'s
+  /// fixed-precision `%g`).
   function describeNumber(text: &String): String {
     if (text.equals("-0")) {
       return String::create("floating point `-0.0`");
@@ -485,7 +694,7 @@ export namespace Format {
 
     let rawText: str = text.toStr();
     let parsed: CType::CDouble = LibC::Conversion::atof(rawText as CType::CConstStr);
-    let valueText: String = parsed.toString();
+    let valueText: String = rustFloatDisplay(parsed);
 
     let mut message: String = String::create("floating point `");
     message.push(&valueText);
@@ -507,30 +716,35 @@ export namespace Format {
     let mut index: u64 = 0;
 
     while (index < text.length()) {
-      let Option::SOME(byte) = text.byteAt(index) else {
+      let mut endByte: u64 = index;
+      let Option::SOME(character) = text.charAt(index, &mut endByte) else {
         break;
       };
 
-      if (byte == '"' as u8) {
+      let codepoint: u32 = character as u32;
+
+      if (character == '"') {
         quoted.pushStr("\\\"");
-      } else if (byte == '\\' as u8) {
+      } else if (character == '\\') {
         quoted.pushStr("\\\\");
-      } else if (byte == '\n' as u8) {
+      } else if (character == '\n') {
         quoted.pushStr("\\n");
-      } else if (byte == '\r' as u8) {
+      } else if (character == '\r') {
         quoted.pushStr("\\r");
-      } else if (byte == '\t' as u8) {
+      } else if (character == '\t') {
         quoted.pushStr("\\t");
-      } else if (byte < 32 || byte == 127) {
-        let hexDigits: String = Format::hexNoLeadingZeros(byte);
+      } else if (codepoint == 0) {
+        quoted.pushStr("\\0");
+      } else if (codepoint < 32 || codepoint == 127 || Format::isNonPrintableAboveAscii(codepoint)) {
+        let hexDigits: String = Format::hexNoLeadingZeros(codepoint);
         quoted.pushStr("\\u{");
         quoted.push(&hexDigits);
         quoted.pushStr("}");
       } else {
-        quoted.pushByte(byte);
+        quoted.pushChar(character);
       }
 
-      index += 1;
+      index = endByte;
     }
 
     quoted.pushChar('"');
@@ -540,16 +754,16 @@ export namespace Format {
     return message;
   }
 
-  function hexNoLeadingZeros(value: u8): String {
+  function hexNoLeadingZeros(value: u32): String {
     if (value == 0) {
       return String::create("0");
     }
 
     let mut digits: Vector<u8> = Vector::new<u8>();
-    let mut remaining: u8 = value;
+    let mut remaining: u32 = value;
 
     while (remaining > 0) {
-      let digit: u8 = remaining % 16;
+      let digit: u8 = (remaining % 16) as u8;
       digits.push(Format::hexDigitByte(digit));
       remaining = remaining / 16;
     }
@@ -569,16 +783,27 @@ export namespace Format {
     return result;
   }
 
-  function matchesLiteral(line: &String, index: u64, literal: str): boolean {
-    let literalText: String = String::create(literal);
-    let literalLength: u64 = literalText.length();
-
-    if (index + literalLength > line.length()) {
-      return false;
+  /// A narrow approximation of Rust's `char::escape_debug` "is this scalar
+  /// printable" rule for non-ASCII scalars: it does not implement the full
+  /// Unicode `Grapheme_Extend`/`Cc`/`Cf`/`Cs`/`Co`/`Cn` classification Rust
+  /// uses, only the specific ranges verified against the host (C1 controls,
+  /// the general combining-diacritical block, and the soft hyphen). A
+  /// non-printable scalar outside these ranges is not escaped here even
+  /// though Rust's `{:?}` would escape it.
+  function isNonPrintableAboveAscii(codepoint: u32): boolean {
+    if (codepoint >= 0x80 && codepoint <= 0x9F) {
+      return true;
     }
 
-    let candidate: String = line.substringBytes(index, index + literalLength);
-    return candidate.equals(&literalText);
+    if (codepoint == 0xAD) {
+      return true;
+    }
+
+    if (codepoint >= 0x300 && codepoint <= 0x36F) {
+      return true;
+    }
+
+    return false;
   }
 
   /// A JSON scalar (string, number, `true`/`false`/`null`) fully consumed at
@@ -616,7 +841,7 @@ export namespace Format {
       // `.clone()`, not a move: `read` is a bound local that still drops
       // normally at scope exit, so moving `value` out of it double-frees the
       // string's backing storage on this compiler (repro
-      // "field-move-double-free", ticket IGN-229).
+      // "field-move-double-free").
       return Result::OK(Format::ShallowScalarRead {
         isString: true,
         value: read.value.clone(),
@@ -625,30 +850,51 @@ export namespace Format {
       });
     }
 
-    if (Format::matchesLiteral(line, valueStart, "true")) {
+    if (byte == 't' as u8) {
+      let endOffset: u64 = match (matchKeywordOrIdentError(line, valueStart, "true")) {
+        Result::OK(value) -> value,
+        Result::ERROR(message) -> {
+          return Result::ERROR(Format::ndjsonParseError(&message));
+        },
+      };
+
       return Result::OK(Format::ShallowScalarRead {
         isString: false,
         value: String::new(),
         description: Format::describeBool(true),
-        endOffset: valueStart + 4,
+        endOffset: endOffset,
       });
     }
 
-    if (Format::matchesLiteral(line, valueStart, "false")) {
+    if (byte == 'f' as u8) {
+      let endOffset: u64 = match (matchKeywordOrIdentError(line, valueStart, "false")) {
+        Result::OK(value) -> value,
+        Result::ERROR(message) -> {
+          return Result::ERROR(Format::ndjsonParseError(&message));
+        },
+      };
+
       return Result::OK(Format::ShallowScalarRead {
         isString: false,
         value: String::new(),
         description: Format::describeBool(false),
-        endOffset: valueStart + 5,
+        endOffset: endOffset,
       });
     }
 
-    if (Format::matchesLiteral(line, valueStart, "null")) {
+    if (byte == 'n' as u8) {
+      let endOffset: u64 = match (matchKeywordOrIdentError(line, valueStart, "null")) {
+        Result::OK(value) -> value,
+        Result::ERROR(message) -> {
+          return Result::ERROR(Format::ndjsonParseError(&message));
+        },
+      };
+
       return Result::OK(Format::ShallowScalarRead {
         isString: false,
         value: String::new(),
         description: String::create("null"),
-        endOffset: valueStart + 4,
+        endOffset: endOffset,
       });
     }
 
@@ -760,7 +1006,7 @@ export namespace Format {
         };
 
         if (keyByte != '"' as u8) {
-          return Result::ERROR(Format::ndjsonParseErrorOwned(jsonExpectedValueMessage(cursor)));
+          return Result::ERROR(Format::ndjsonParseErrorOwned(jsonKeyMustBeStringMessage(cursor)));
         }
 
         let key: JsonStringRead = match (readString(line, cursor)) {
@@ -771,8 +1017,8 @@ export namespace Format {
         };
 
         // `.clone()` for the same reason `readShallowScalar` clones its own
-        // string read: `key` is a bound local (repro "field-move-double-free",
-        // IGN-229).
+        // string read: `key` is a bound local (repro
+        // "field-move-double-free").
         let keyText: String = key.value.clone();
         let keyEndOffset: u64 = key.nextIndex;
         cursor = Format::skipAsciiWhitespaceFrom(line, keyEndOffset);
@@ -825,8 +1071,13 @@ export namespace Format {
         if (next == ',' as u8) {
           cursor = Format::skipAsciiWhitespaceFrom(line, cursor + 1);
 
+          // Past the comma, `serde` reads the next key through the same
+          // generic value dispatch a colon's value uses (there is no
+          // dedicated "read a map key" token check), so running off the end
+          // of the source here is `EOF while parsing a value`, not `an
+          // object`, unlike every other EOF check in this scan.
           let Option::SOME(afterComma) = line.byteAt(cursor) else {
-            return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "an object")));
+            return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a value")));
           };
 
           if (afterComma == '}' as u8) {
@@ -916,48 +1167,48 @@ export namespace Format {
     let secondElement: Format::FieldValueRead = Format::readObjectFieldValue(line, cursor)!;
     cursor = Format::skipAsciiWhitespaceFrom(line, secondElement.endOffset);
 
-    while (true) {
-      let Option::SOME(next) = line.byteAt(cursor) else {
-        return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a list")));
-      };
+    let Option::SOME(afterSecond) = line.byteAt(cursor) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a list")));
+    };
 
-      if (next == ']' as u8) {
-        cursor += 1;
-        break;
+    if (afterSecond == ']' as u8) {
+      let afterArray: u64 = Format::skipAsciiWhitespaceFrom(line, cursor + 1);
+      let lineLength: u64 = line.length();
+
+      if (afterArray != lineLength) {
+        return Result::ERROR(Format::ndjsonTrailingCharacters(afterArray + 1));
       }
 
-      if (next != ',' as u8) {
-        return Result::ERROR(Format::ndjsonParseErrorOwned(Format::ndjsonExpectedCommaOrBracketAt(cursor)));
-      }
-
-      cursor = Format::skipAsciiWhitespaceFrom(line, cursor + 1);
-
-      let Option::SOME(afterComma) = line.byteAt(cursor) else {
-        return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a list")));
-      };
-
-      if (afterComma == ']' as u8) {
-        return Result::ERROR(Format::ndjsonParseErrorOwned(jsonTrailingCommaMessage(cursor)));
-      }
-
-      cursor = match (skipValue(line, cursor)) {
-        Result::OK(value) -> value,
-        Result::ERROR(message) -> {
-          return Result::ERROR(Format::ndjsonParseError(&message));
-        },
-      };
-
-      cursor = Format::skipAsciiWhitespaceFrom(line, cursor);
+      return Result::OK(Format::StdinRequest { path: firstElement.value, text: secondElement.value });
     }
 
-    let afterArray: u64 = Format::skipAsciiWhitespaceFrom(line, cursor);
-    let lineLength: u64 = line.length();
-
-    if (afterArray != lineLength) {
-      return Result::ERROR(Format::ndjsonTrailingCharacters(afterArray + 1));
+    // The struct backing a positional record only ever reads 2 elements: a
+    // 3rd is never requested, so `serde`'s `SeqAccess` never validates
+    // anything past the 2nd element, including whether a comma introduces
+    // it. Once the top-level value is "done" (2 elements read), any
+    // non-whitespace byte here other than `]` is unconsumed input, reported
+    // by the same generic "trailing characters" check regardless of what it
+    // is, except for one special case: a comma immediately followed (after
+    // whitespace) by `]`, which is `serde`'s own "trailing comma" wording.
+    if (afterSecond != ',' as u8) {
+      return Result::ERROR(Format::ndjsonTrailingCharacters(cursor + 1));
     }
 
-    return Result::OK(Format::StdinRequest { path: firstElement.value, text: secondElement.value });
+    // Running off the end of the source with nothing but whitespace after
+    // the comma reports at the comma's own position instead of wherever the
+    // whitespace skip lands.
+    let commaIndex: u64 = cursor;
+    let afterCommaSkip: u64 = Format::skipAsciiWhitespaceFrom(line, cursor + 1);
+
+    let Option::SOME(afterComma) = line.byteAt(afterCommaSkip) else {
+      return Result::ERROR(Format::ndjsonTrailingCharacters(commaIndex + 1));
+    };
+
+    if (afterComma == ']' as u8) {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonTrailingCommaMessage(afterCommaSkip)));
+    }
+
+    return Result::ERROR(Format::ndjsonTrailingCharacters(afterCommaSkip + 1));
   }
 
   function ndjsonExpectedCommaOrBracketAt(index: u64): String {
