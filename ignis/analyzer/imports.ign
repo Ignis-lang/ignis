@@ -234,7 +234,12 @@ export namespace Analyzer {
       };
     }
 
-    function directIndexFind(
+    /// The declaration another module may bind under `sym`.
+    ///
+    /// Entries the target keeps to itself are skipped, so a named import of a
+    /// declaration written without `export` finds nothing and is reported the
+    /// same way a name the target never declared is.
+    function directIndexFindExported(
       direct: &Analyzer::Imports::DirectDeclarationIndex,
       sym: Analyzer::SymbolId,
     ): Option<Analyzer::DefinitionId> {
@@ -246,14 +251,15 @@ export namespace Analyzer {
           continue;
         };
 
-        if (existing.raw() == sym.raw()) {
-          let Option::SOME(defId) = direct.defs.get(index) else {
-            return Option::NONE;
-          };
-          return Option::SOME(*defId);
+        if (existing.raw() != sym.raw() || !Analyzer::Imports::directIndexEntryIsExported(direct, index)) {
+          index += 1;
+          continue;
         }
 
-        index += 1;
+        let Option::SOME(defId) = direct.defs.get(index) else {
+          return Option::NONE;
+        };
+        return Option::SOME(*defId);
       }
 
       return Option::NONE;

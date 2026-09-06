@@ -113,7 +113,7 @@ export namespace Analyzer {
       let Option::SOME(recordIndex) = Analyzer::importModuleIndexForSource(infos, &importItem.source) else {
         Analyzer::Imports::appendImportSourceDiagnostic(
           diagnostics,
-          importItem.source.toStr(),
+          importItem.writtenSource.toStr(),
           importItem.sourceSpan,
         );
         rootIndex += 1;
@@ -182,11 +182,11 @@ export namespace Analyzer {
           continue;
         }
 
-        let Option::SOME(targetDef) = Analyzer::Imports::directIndexFind(targetDirect, sourceName) else {
+        let Option::SOME(targetDef) = Analyzer::Imports::directIndexFindExported(targetDirect, sourceName) else {
           Analyzer::Imports::appendImportMissingDiagnostic(
             diagnostics,
             sourceNameText.toStr(),
-            importItem.source.toStr(),
+            importItem.writtenSource.toStr(),
             binding.span,
           );
           bindingIndex += 1;
@@ -387,37 +387,171 @@ export namespace Analyzer {
           continue;
         };
 
-        let prefix: String = `${nameText.toStr()}::`;
-        let mut declIndex: u64 = 0;
+        Analyzer::appendReExportedName(direct, targetDirect, &nameText);
+        bindingIndex += 1;
+      }
 
-        while (declIndex < targetDirect.qualifiedNames.length()) {
-          let Option::SOME(qualifiedName) = targetDirect.qualifiedNames.get(declIndex) else {
-            declIndex += 1;
-            continue;
-          };
+      rootIndex += 1;
+    }
+  }
 
-          let matchesName: boolean = qualifiedName.equals(nameText.toStr()) || qualifiedName.startsWith(prefix.toStr());
+  /// Publish, out of `targetDirect`, the declaration written as `nameText` and
+  /// everything written under `nameText::` when it names a namespace.
+  ///
+  /// A declaration the target keeps to itself stays there: a re-export
+  /// publishes what the target published, it does not lift the target's own
+  /// visibility decision.
+  function appendReExportedName(
+    direct: &mut Analyzer::Imports::DirectDeclarationIndex,
+    targetDirect: &Analyzer::Imports::DirectDeclarationIndex,
+    nameText: &String,
+  ): void {
+    let prefix: String = `${nameText.toStr()}::`;
+    let mut declIndex: u64 = 0;
 
-          if (!matchesName) {
-            declIndex += 1;
-            continue;
-          }
+    while (declIndex < targetDirect.qualifiedNames.length()) {
+      let Option::SOME(qualifiedName) = targetDirect.qualifiedNames.get(declIndex) else {
+        declIndex += 1;
+        continue;
+      };
 
-          let Option::SOME(sym) = targetDirect.syms.get(declIndex) else {
-            declIndex += 1;
-            continue;
-          };
-          let Option::SOME(defId) = targetDirect.defs.get(declIndex) else {
-            declIndex += 1;
-            continue;
-          };
-          let Option::SOME(span) = targetDirect.spans.get(declIndex) else {
-            declIndex += 1;
-            continue;
-          };
+      let matchesName: boolean = qualifiedName.equals(nameText.toStr()) || qualifiedName.startsWith(prefix.toStr());
 
-          Analyzer::Imports::appendDirectIndexEntryIfMissing(direct, *sym, *defId, *span, qualifiedName.clone(), true);
-          declIndex += 1;
+      if (!matchesName || !Analyzer::Imports::directIndexEntryIsExported(targetDirect, declIndex)) {
+        declIndex += 1;
+        continue;
+      }
+
+      let Option::SOME(sym) = targetDirect.syms.get(declIndex) else {
+        declIndex += 1;
+        continue;
+      };
+      let Option::SOME(defId) = targetDirect.defs.get(declIndex) else {
+        declIndex += 1;
+        continue;
+      };
+      let Option::SOME(span) = targetDirect.spans.get(declIndex) else {
+        declIndex += 1;
+        continue;
+      };
+
+      Analyzer::Imports::appendDirectIndexEntryIfMissing(direct, *sym, *defId, *span, qualifiedName.clone(), true);
+      declIndex += 1;
+    }
+  }
+
+  /// Re-publish what a bare `export Name;` names.
+  ///
+  /// The form republishes a name the module imported: `std/memory/mod.ign`
+  /// writes `import Align from "./align";` and then `export Align;`. The
+  /// declaration lives in the imported module, so the entry is copied from
+  /// there, the same way `export Name from "path"` copies it.
+  ///
+  /// Modules are indexed in dependency order, so a target that re-exports in
+  /// turn already carries the entry when its importer is indexed. That is what
+  /// makes a chain of re-exports resolve.
+  function appendBareReExports(
+    direct: &mut Analyzer::Imports::DirectDeclarationIndex,
+    module: &Ast::Module,
+    directs: &Vector<Analyzer::Imports::DirectDeclarationIndex>,
+    infos: &Vector<Analyzer::Imports::ModuleInfo>,
+  ): void {
+    let mut rootIndex: u64 = 0;
+
+    while (rootIndex < module.roots.length()) {
+      let Option::SOME(rootId) = module.roots.get(rootIndex) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(item) = module.items.get(*rootId) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Ast::Item::Node::Export(exportItem) = item else {
+        rootIndex += 1;
+        continue;
+      };
+
+      // `export declaration` publishes what this module declares, and
+      // `export Name from "path"` is handled where the source is read.
+      if (exportItem.declaration.isSome() || exportItem.source.isSome()) {
+        rootIndex += 1;
+        continue;
+      }
+
+      let mut bindingIndex: u64 = 0;
+      while (bindingIndex < exportItem.items.length()) {
+        let Option::SOME(binding) = exportItem.items.get(bindingIndex) else {
+          bindingIndex += 1;
+          continue;
+        };
+        let Option::SOME(nameText) = Ast::copyOptionalString(&binding.name) else {
+          bindingIndex += 1;
+          continue;
+        };
+
+        let Option::SOME(recordIndex) = Analyzer::importTargetForBoundName(module, infos, &nameText) else {
+          bindingIndex += 1;
+          continue;
+        };
+        let Option::SOME(targetDirect) = directs.get(recordIndex) else {
+          bindingIndex += 1;
+          continue;
+        };
+
+        Analyzer::appendReExportedName(direct, targetDirect, &nameText);
+        bindingIndex += 1;
+      }
+
+      rootIndex += 1;
+    }
+  }
+
+  /// The module-vector position an import statement binds `name` from.
+  ///
+  /// Only a binding that keeps the name it was declared under is followed: an
+  /// aliased one would have to be republished under the alias, which the
+  /// declaration index has no way to express.
+  function importTargetForBoundName(
+    module: &Ast::Module,
+    infos: &Vector<Analyzer::Imports::ModuleInfo>,
+    name: &String,
+  ): Option<u64> {
+    let mut rootIndex: u64 = 0;
+
+    while (rootIndex < module.roots.length()) {
+      let Option::SOME(rootId) = module.roots.get(rootIndex) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Option::SOME(item) = module.items.get(*rootId) else {
+        rootIndex += 1;
+        continue;
+      };
+      let Ast::Item::Node::Import(importItem) = item else {
+        rootIndex += 1;
+        continue;
+      };
+
+      let mut bindingIndex: u64 = 0;
+      while (bindingIndex < importItem.items.length()) {
+        let Option::SOME(binding) = importItem.items.get(bindingIndex) else {
+          bindingIndex += 1;
+          continue;
+        };
+
+        if (binding.kind != Ast::ImportBindingKind::Named || binding.alias.isSome()) {
+          bindingIndex += 1;
+          continue;
+        }
+
+        let Option::SOME(boundName) = Ast::copyOptionalString(&binding.name) else {
+          bindingIndex += 1;
+          continue;
+        };
+
+        if (boundName.equals(name.toStr())) {
+          return Analyzer::importModuleIndexForSource(infos, &importItem.source);
         }
 
         bindingIndex += 1;
@@ -425,6 +559,8 @@ export namespace Analyzer {
 
       rootIndex += 1;
     }
+
+    return Option::NONE;
   }
 
   /// Feed one module's declarations into the program-wide qualified index.
@@ -711,6 +847,11 @@ export namespace Analyzer {
       };
 
       if (Analyzer::Imports::directIndexSpan(currentDirect, *memberSym).isSome()) {
+        index += 1;
+        continue;
+      }
+
+      if (!Analyzer::Imports::directIndexEntryIsExported(targetDirect, index)) {
         index += 1;
         continue;
       }
@@ -1462,6 +1603,7 @@ export namespace Analyzer {
       // in `directs` when their importer binds.
       Analyzer::appendReExportedDeclarations(&mut direct, module, &directs, infos);
       Analyzer::appendNamedReExports(&mut direct, module, &directs, infos);
+      Analyzer::appendBareReExports(&mut direct, module, &directs, infos);
       Analyzer::appendDirectToProgramIndex(&mut programIndex, &direct);
       Analyzer::recordQualifiedNamesInDefStore(defStore, &direct, bindIndex);
 

@@ -138,17 +138,40 @@ function lintModuleWithImport(source: str, bindings: Vector<Ast::ImportBinding>)
     span: lintDummySpan(),
     items: bindings,
     source: String::create(source),
+    writtenSource: String::create(source),
     sourceSpan: lintDummySpan(),
     metadata: Ast::emptyMetadata(),
   }));
   return module;
 }
 
-/// Module `a.ign`: `function helper(): void { return; }`.
+/// Module `a.ign`: `export function helper(): void { return; }`. The
+/// declaration is published because an importing module can only bind a name
+/// its target exported.
 function lintHelperModule(): Ast::Module {
   let mut module: Ast::Module = Ast::Module::init();
   let body: Ast::StatementId = lintAddEmptyBody(&mut module);
-  lintAddFunction(&mut module, "helper", body, Ast::emptyMetadata());
+
+  let mut moduleRef: &mut Ast::Module = &mut module;
+  let inner: Ast::ItemId = moduleRef.addItem(Ast::Item::Node::Function(Ast::Item::Function {
+    span: lintDummySpan(),
+    name: String::create("helper"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    parameters: Vector::new<Ast::PatternId>(),
+    returnType: Option::NONE,
+    body: body,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  moduleRef.addRootItem(Ast::Item::Node::Export(Ast::Item::Export {
+    span: lintDummySpan(),
+    declaration: Option::SOME(inner),
+    items: Vector::new<Ast::ImportBinding>(),
+    source: Option::NONE,
+    sourceSpan: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+
   return module;
 }
 

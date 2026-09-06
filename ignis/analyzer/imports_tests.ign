@@ -111,6 +111,51 @@ function importsNamespaceWithNestedFunction(): Ast::Module {
   return module;
 }
 
+/// Publish an already-added item, the way `export record Foo {}` parses.
+function importsAddExportedRoot(module: &mut Ast::Module, inner: Ast::ItemId): Ast::ItemId {
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Export(Ast::Item::Export {
+    span: importsDummySpan(),
+    declaration: Option::SOME(inner),
+    items: Vector::new<Ast::ImportBinding>(),
+    source: Option::NONE,
+    sourceSpan: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// A root `export Name;` re-publishing a name the module imported.
+function importsAddBareReExport(module: &mut Ast::Module, name: str): Ast::ItemId {
+  let mut items: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  items.push(importsNamedBinding(name));
+
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Export(Ast::Item::Export {
+    span: importsDummySpan(),
+    declaration: Option::NONE,
+    items: items,
+    source: Option::NONE,
+    sourceSpan: Option::NONE,
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
+/// A root `export Name from "source";`.
+function importsAddReExportFrom(module: &mut Ast::Module, source: str, name: str): Ast::ItemId {
+  let mut items: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
+  items.push(importsNamedBinding(name));
+
+  let mut moduleRef: &mut Ast::Module = module;
+  return moduleRef.addRootItem(Ast::Item::Node::Export(Ast::Item::Export {
+    span: importsDummySpan(),
+    declaration: Option::NONE,
+    items: items,
+    source: Option::SOME(String::create(source)),
+    sourceSpan: Option::SOME(importsDummySpan()),
+    metadata: Ast::emptyMetadata(),
+  }));
+}
+
 function importsExportedFunctionModule(name: str): Ast::Module {
   let mut module: Ast::Module = Ast::Module::init();
   let ret: Ast::StatementId = importsAddReturn(&mut module);
@@ -120,14 +165,7 @@ function importsExportedFunctionModule(name: str): Ast::Module {
   let mut moduleRef: &mut Ast::Module = &mut module;
   let inner: Ast::ItemId = moduleRef.addItem(Ast::Item::Node::Function(importsFunctionItem(name, body)));
 
-  moduleRef.addRootItem(Ast::Item::Node::Export(Ast::Item::Export {
-    span: importsDummySpan(),
-    declaration: Option::SOME(inner),
-    items: Vector::new<Ast::ImportBinding>(),
-    source: Option::NONE,
-    sourceSpan: Option::NONE,
-    metadata: Ast::emptyMetadata(),
-  }));
+  importsAddExportedRoot(moduleRef, inner);
 
   return module;
 }
@@ -202,10 +240,21 @@ function importsAddRecord(
   }));
 }
 
+/// A module publishing one empty record, which is what an importing module
+/// needs the target to be for the name to bind.
 function importsRecordModule(name: str): Ast::Module {
   let mut module: Ast::Module = Ast::Module::init();
-  let fields: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
-  importsAddRecord(&mut module, name, fields);
+  let mut moduleRef: &mut Ast::Module = &mut module;
+  let inner: Ast::ItemId = moduleRef.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: importsDummySpan(),
+    name: String::create(name),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  importsAddExportedRoot(moduleRef, inner);
   return module;
 }
 
@@ -217,7 +266,9 @@ function importsGenericTraitModule(name: str): Ast::Module {
     name: String::create("T"),
     bounds: Vector::new<Ast::GenericBound>(),
   });
-  module.addRootItem(Ast::Item::Node::Trait(Ast::Item::Trait {
+
+  let mut moduleRef: &mut Ast::Module = &mut module;
+  let inner: Ast::ItemId = moduleRef.addItem(Ast::Item::Node::Trait(Ast::Item::Trait {
     span: importsDummySpan(),
     name: String::create(name),
     genericParameters: genericParameters,
@@ -225,6 +276,8 @@ function importsGenericTraitModule(name: str): Ast::Module {
     defaultMethods: Vector::new<Ast::ItemId>(),
     metadata: Ast::emptyMetadata(),
   }));
+
+  importsAddExportedRoot(moduleRef, inner);
   return module;
 }
 
@@ -277,6 +330,7 @@ function importsImportItemAt(
     span: importsDummySpan(),
     items: bindings,
     source: String::create(source),
+    writtenSource: String::create(source),
     sourceSpan: importsSpan(sourceStart, sourceEnd),
     metadata: Ast::emptyMetadata(),
   };
@@ -450,7 +504,9 @@ function importsEnumModule(name: str, variantName: str): Ast::Module {
   let variant: Ast::PatternId = importsAddAnnotatedField(&mut module, variantName, variantType);
   let mut variants: Vector<Ast::PatternId> = Vector::new<Ast::PatternId>();
   variants.push(variant);
-  module.addRootItem(Ast::Item::Node::Enum(Ast::Item::Enum {
+
+  let mut moduleRef: &mut Ast::Module = &mut module;
+  let inner: Ast::ItemId = moduleRef.addItem(Ast::Item::Node::Enum(Ast::Item::Enum {
     span: importsDummySpan(),
     name: String::create(name),
     genericParameters: Vector::new<Ast::GenericParam>(),
@@ -458,6 +514,8 @@ function importsEnumModule(name: str, variantName: str): Ast::Module {
     methods: Vector::new<Ast::ItemId>(),
     metadata: Ast::emptyMetadata(),
   }));
+
+  importsAddExportedRoot(moduleRef, inner);
   return module;
 }
 
@@ -698,7 +756,7 @@ function analyzeModuleWithEmptyOverlayMatchesAnalyzeModuleDiagnostics(): void {
 
 @test
 function importOverlayAddsResolvedDirectBinding(): void {
-  let first: Ast::Module = importsFunctionModule("Exported");
+  let first: Ast::Module = importsExportedFunctionModule("Exported");
   let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
   bindings.push(importsNamedBinding("Exported"));
   let second: Ast::Module = importsModuleWithImport("a.ign", bindings);
@@ -775,12 +833,14 @@ function importOverlayDiagnosesUnknownImportSource(): void {
 
 @test
 function importOverlayDiagnosesDuplicateLocalImportName(): void {
-  let mut first: Ast::Module = importsFunctionModule("Exported");
+  let mut first: Ast::Module = importsExportedFunctionModule("Exported");
   let ret: Ast::StatementId = importsAddReturn(&mut first);
   let mut statements: Vector<Ast::StatementId> = Vector::new<Ast::StatementId>();
   statements.push(ret);
   let body: Ast::StatementId = importsAddBlock(&mut first, statements);
-  importsAddFunction(&mut first, "Other", body);
+  let mut firstRef: &mut Ast::Module = &mut first;
+  let other: Ast::ItemId = firstRef.addItem(Ast::Item::Node::Function(importsFunctionItem("Other", body)));
+  importsAddExportedRoot(firstRef, other);
 
   let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
   bindings.push(importsNamedBindingAt("Exported", 10, 20));
@@ -1006,7 +1066,7 @@ function resolveTypesPrefersLocalTypeOverImportOverlay(): void {
 
 @test
 function analyzeProgramResolvesImportedBodyIdentifier(): void {
-  let first: Ast::Module = importsFunctionModule("ImportedFunction");
+  let first: Ast::Module = importsExportedFunctionModule("ImportedFunction");
   let mut bindings: Vector<Ast::ImportBinding> = Vector::new<Ast::ImportBinding>();
   bindings.push(importsNamedBinding("ImportedFunction"));
   let mut second: Ast::Module = importsModuleWithImport("a.ign", bindings);
@@ -1355,4 +1415,138 @@ function analyzeProgramScopesATraitBoundToTheDeclarationThatWroteIt(): void {
 
   Test::assertEq<str>(importsDiagnosticCodes(first).toStr(), "");
   Test::assertEq<str>(importsDiagnosticCodes(second).toStr(), "");
+}
+
+/// Analyzes a chain of parsed modules as one program, in the order given.
+/// Each module is named `<index>.ign`, so module 1 imports from `"0.ign"`.
+function importsAnalyzeSourceChain(
+  sources: &Vector<String>
+): Vector<Analyzer::ModuleAnalysisRecord> {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let mut modules: Vector<Ast::Module> = Vector::new<Ast::Module>();
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  let mut index: u64 = 0;
+
+  while (index < sources.length()) {
+    let Option::SOME(source) = sources.get(index) else {
+      @panic("missing chain source");
+    };
+
+    let pathText: String = `${index}.ign`;
+    modules.push(importsParseModule(pathText.toStr(), source.toStr()));
+    infos.push(importsModuleInfo(index, pathText.toStr()));
+    index += 1;
+  }
+
+  let noPrelude: Vector<String> = Vector::new<String>();
+  return Analyzer::analyzeProgram(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &modules,
+    &infos,
+    &noPrelude,
+  );
+}
+
+/// The diagnostic codes of the record at `index`, joined by `,`.
+function importsChainDiagnosticCodes(
+  records: &Vector<Analyzer::ModuleAnalysisRecord>,
+  index: u64,
+): String {
+  let Option::SOME(analysisRecord) = records.get(index) else {
+    @panic("missing chain analysis record");
+  };
+
+  return importsDiagnosticCodes(analysisRecord);
+}
+
+/// Scenario: a module imports a name and republishes it with a bare
+/// `export Name;`, and a third module imports it from there. The name has to
+/// be followed through the re-export, the way the host follows it.
+@test
+function analyzeProgramFollowsABareReExportIntoANamedImport(): void {
+  let mut sources: Vector<String> = Vector::new<String>();
+  sources.push(String::create("export function leafValue(): i32 {\n  return 7;\n}\n"));
+  sources.push(String::create("import leafValue from \"0.ign\";\n\nexport leafValue;\n"));
+  sources.push(String::create("import leafValue from \"1.ign\";\n\nexport function useLeaf(): i32 {\n  return leafValue();\n}\n"));
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeSourceChain(&sources);
+
+  Test::assertEq<str>(importsChainDiagnosticCodes(&records, 0).toStr(), "");
+  Test::assertEq<str>(importsChainDiagnosticCodes(&records, 1).toStr(), "");
+  Test::assertEq<str>(importsChainDiagnosticCodes(&records, 2).toStr(), "");
+}
+
+/// Scenario: the same re-export written twice in a row. Each module publishes
+/// what the one before it published, so the name has to be followed through
+/// both hops rather than only the nearest one.
+@test
+function analyzeProgramFollowsAChainOfBareReExports(): void {
+  let mut sources: Vector<String> = Vector::new<String>();
+  sources.push(String::create("export function leafValue(): i32 {\n  return 7;\n}\n"));
+  sources.push(String::create("import leafValue from \"0.ign\";\n\nexport leafValue;\n"));
+  sources.push(String::create("import leafValue from \"1.ign\";\n\nexport leafValue;\n"));
+  sources.push(String::create("import leafValue from \"2.ign\";\n\nexport function useLeaf(): i32 {\n  return leafValue();\n}\n"));
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeSourceChain(&sources);
+
+  Test::assertEq<str>(importsChainDiagnosticCodes(&records, 1).toStr(), "");
+  Test::assertEq<str>(importsChainDiagnosticCodes(&records, 2).toStr(), "");
+  Test::assertEq<str>(importsChainDiagnosticCodes(&records, 3).toStr(), "");
+}
+
+/// Scenario: a module imports a name its target declared without `export`.
+/// The target keeps it, so the import binds nothing and is reported the way
+/// the host reports it.
+@test
+function analyzeProgramRejectsANamedImportOfAPrivateDeclaration(): void {
+  let mut sources: Vector<String> = Vector::new<String>();
+  sources.push(String::create("export function shown(): i32 {\n  return 7;\n}\n\nfunction hidden(): i32 {\n  return 1;\n}\n"));
+  sources.push(String::create("import hidden from \"0.ign\";\n"));
+
+  let records: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeSourceChain(&sources);
+  let Option::SOME(importingRecord) = records.get(1) else {
+    @panic("missing importing record");
+  };
+  let Option::SOME(diagnostic) = importingRecord.output.diagnostics.get(0) else {
+    @panic("missing private-import diagnostic");
+  };
+
+  Test::assertEq<u64>(importingRecord.imports.syms.length(), 0);
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::SYMBOL_NOT_EXPORTED);
+  Test::assertEq<str>(diagnostic.messageText(), "Symbol 'hidden' is not exported from module '0.ign'");
+}
+
+/// Scenario: one module publishes a namespace and keeps another. Importing the
+/// published one brings its members; the kept one binds nothing, so neither it
+/// nor its members leak into the importing module.
+@test
+function analyzeProgramExpandsOnlyPublishedNamespaceMembers(): void {
+  let declaringSource: str = "export namespace Shared {\n  function open(): i32 {\n    return 7;\n  }\n}\n\nnamespace Hidden {\n  function closed(): i32 {\n    return 1;\n  }\n}\n";
+
+  let mut published: Vector<String> = Vector::new<String>();
+  published.push(String::create(declaringSource));
+  published.push(String::create("import Shared from \"0.ign\";\n\nexport function useShared(): i32 {\n  return Shared::open();\n}\n"));
+
+  let publishedRecords: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeSourceChain(&published);
+  Test::assertEq<str>(importsChainDiagnosticCodes(&publishedRecords, 1).toStr(), "");
+
+  let mut kept: Vector<String> = Vector::new<String>();
+  kept.push(String::create(declaringSource));
+  kept.push(String::create("import Hidden from \"0.ign\";\n"));
+
+  let keptRecords: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeSourceChain(&kept);
+  let Option::SOME(keptImporter) = keptRecords.get(1) else {
+    @panic("missing importing record");
+  };
+  let Option::SOME(diagnostic) = keptImporter.output.diagnostics.get(0) else {
+    @panic("missing private-namespace diagnostic");
+  };
+
+  Test::assertEq<u64>(keptImporter.imports.syms.length(), 0);
+  Test::assertEq<str>(diagnostic.code, DiagnosticCode::SYMBOL_NOT_EXPORTED);
 }
