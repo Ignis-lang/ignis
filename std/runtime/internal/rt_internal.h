@@ -2,7 +2,8 @@
  * Internal header for Ignis runtime implementation.
  *
  * This file is NOT part of the public API. It provides shared helpers,
- * macros, and standard includes for the rt_*.c implementation files.
+ * macros, and standard includes for the rt_*.c implementation files. The
+ * filesystem wrappers in `rt_fs.c` are all that is left of them.
  */
 
 #pragma once
@@ -25,19 +26,6 @@
 #endif
 
 #define IGNIS_STATIC_INLINE static inline
-
-/**
- * Allocator entry points the Ignis standard library owns.
- *
- * `std/memory/allocator.ign` defines these under their C names through
- * `@externName`, so the C that is still part of the runtime declares them here
- * rather than in the public header. The declarations describe the ABI, not the
- * emitted prototypes: the Ignis definitions use `u8 *` and `u64` where these
- * use `void *` and `size_t`.
- */
-void *ignis_alloc(size_t size);
-void *ignis_realloc(void *ptr, size_t size);
-void ignis_free(void *ptr);
 
 /**
  * Checked multiplication that returns 0 on overflow.

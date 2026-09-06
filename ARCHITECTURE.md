@@ -143,14 +143,11 @@ std/                              # Ignis standard library
   fs/mod.ign                      # Filesystem (readToString, writeString, Dir, File, Metadata)
   path/mod.ign                    # Path manipulation utilities
   test/mod.ign                    # `std::test::Test` assertions and snapshot helpers
-  runtime/                        # C runtime implementation
-    ignis_rt.h                    # Runtime API header (types, strings, Rc, memory)
+  runtime/                        # What is left of the C runtime
+    ignis_rt.h                    # Runtime type prelude and the filesystem ABI
     libignis_rt.a                 # Precompiled runtime archive
     Makefile                      # Runtime build system
-    internal/rt_memory.c          # malloc/free/realloc wrappers
-    internal/rt_string.c          # IgnisString operations
-    internal/rt_io.c              # stdout/stderr printing
-    internal/rt_rc.c              # Reference counting (Rc/Weak)
+    internal/rt_fs.c              # stat/readdir/open wrappers over struct layouts
 test_cases/analyzer/              # Ignis fixture files organized by feature
   borrows/                        # Borrow checking tests
   casts/                          # Cast validation tests

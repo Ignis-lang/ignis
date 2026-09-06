@@ -33,18 +33,21 @@ Core runtime types, IDs, and APIs.
   - `null`
   - `IGNIS_TYPE_*_ID` macros (primitives, pointer)
 - Alloc/Free:
-  - `ignis_alloc`, `ignis_realloc`, `ignis_calloc`, `ignis_free`
-- Drop:
-  - `ignis_string_drop`
-- String API:
-  - `ignis_string_new`, `ignis_string_with_capacity`
-  - `ignis_string_from_cstr`, `ignis_string_from_len`, `ignis_string_clone`
-  - `ignis_string_push_char`, `ignis_string_push_byte`, `ignis_string_push_cstr`, `ignis_string_push_str`
-  - `ignis_string_cstr`, `ignis_string_len`, `ignis_string_cap`
-  - `ignis_string_char_at`, `ignis_string_byte_at`, `ignis_string_clear`, `ignis_string_reserve`
-  - `ignis_string_drop`
-- Internal helpers in `ignis_rt.c`:
-  - `ignis_string_grow`
+  - `ignis_alloc`, `ignis_realloc`, `ignis_free`, defined in `std/memory/allocator.ign`
+- The whole string API is now Ignis, in `std/string/mod.ign`:
+  - construction and capacity: `String::new`, `String::withCapacity`, `String::create`
+  - mutation: `String::pushChar`, `String::pushByte`, `String::pushStr`, `String::push`,
+    `String::clear`, `String::reserve`
+  - reads: `String::length`, `String::byteAt`, `String::charAt`, `String::toStr`
+  - comparison and search: `String::compare`, `String::equals`, `String::indexOf`,
+    `String::contains`
+  - derived strings: `String::concat`, `String::substring`, `String::toUpperCase`,
+    `String::toLowerCase`
+  - copies and release: `String::clone`, `String::drop`
+  - number conversions: `String::create` for `i8` through `f64`, and the
+    matching `toString` extensions. `f32` and `f64` go through
+    `LibC::Stdio::snprintfDouble` with `%g`, which is the same libc call the C
+    runtime made.
 
 ### `std/runtime/memory/memory.h` and `std/runtime/memory/memory.c`
 Wrappers used by `std/memory/mod.ign`.
@@ -65,7 +68,7 @@ Numeric helpers and conversions used by `std/number` and `std/string`.
 - Utility: `stringEmpty`
 
 All string conversion helpers return heap-allocated `IgnisString` and must be
-released with `ignis_string_drop`.
+released with `String::drop` from `std/string`.
 
 ### `std/runtime/string/string.h` and `std/runtime/string/string.c`
 String operations built on `IgnisString`.

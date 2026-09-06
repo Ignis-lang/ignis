@@ -2,10 +2,10 @@ CC ?= gcc
 AR ?= ar
 CFLAGS ?= -O2 -g -fPIC -I. -Wall -Wextra
 
-INTERNAL_SRCS = internal/rt_string.c internal/rt_fs.c
+INTERNAL_SRCS = internal/rt_fs.c
 INTERNAL_OBJS = $(INTERNAL_SRCS:.c=.o)
 
-.PHONY: all clean test test-san
+.PHONY: all clean
 
 all: libignis_rt.a
 
@@ -21,28 +21,3 @@ libignis_rt.a: $(INTERNAL_OBJS)
 clean:
 	rm -f libignis_rt.a
 	rm -f internal/*.o
-	rm -f tests/test_smoke
-
-# Smoke tests
-test: libignis_rt.a
-	@mkdir -p tests
-	@if [ -f tests/test_smoke.c ]; then \
-		trap 'rm -f tests/test_smoke' EXIT; \
-		$(CC) $(CFLAGS) tests/test_smoke.c -L. -lignis_rt -o tests/test_smoke && \
-		./tests/test_smoke && \
-		echo "Tests passed"; \
-	else \
-		echo "No tests found (tests/test_smoke.c)"; \
-	fi
-
-# Smoke tests with leak sanitizer
-test-san: libignis_rt.a
-	@mkdir -p tests
-	@if [ -f tests/test_smoke.c ]; then \
-		trap 'rm -f tests/test_smoke' EXIT; \
-		$(CC) $(CFLAGS) -fsanitize=leak tests/test_smoke.c -L. -lignis_rt -o tests/test_smoke && \
-		./tests/test_smoke && \
-		echo "Tests passed (with leak sanitizer)"; \
-	else \
-		echo "No tests found (tests/test_smoke.c)"; \
-	fi

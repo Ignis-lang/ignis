@@ -1,5 +1,5 @@
 import Hasher from "std::hash";
-import Memory from "std::memory";
+import Memory, Stats from "std::memory";
 import String from "std::string";
 import Test from "std::test";
 
@@ -576,4 +576,388 @@ function concatBorrowedStringDoesNotConsumeIt(): void {
   Test::assertEq<str>(base.concat(&tail).toStr(), "ab");
   Test::assertEq<str>(base.concat(&tail).toStr(), "ab");
   Test::assertEq<str>(tail.toStr(), "b");
+}
+
+@test
+function newAllocatesTheDefaultCapacityFloor(): void {
+  let before: Stats = Memory::stats();
+
+  {
+    let value: String = String::new();
+    let during: Stats = Memory::stats();
+
+    Test::assertEq<u64>(value.length(), 0);
+    Test::assertEq<u64>(during.bytesLive, before.bytesLive + 16);
+    Test::assertEq<u64>(during.allocTotal, before.allocTotal + 1);
+  }
+
+  let after: Stats = Memory::stats();
+
+  Test::assertEq<u64>(after.bytesLive, before.bytesLive);
+  Test::assertEq<u64>(after.allocsLive, before.allocsLive);
+}
+
+@test
+function withCapacityAlwaysReservesRoomForTheTerminator(): void {
+  let before: Stats = Memory::stats();
+  let empty: String = String::withCapacity(0);
+  let after: Stats = Memory::stats();
+
+  Test::assertEq<u64>(empty.length(), 0);
+  Test::assertEq<u64>(after.bytesLive, before.bytesLive + 1);
+}
+
+@test
+function capacityDoublesOnlyWhenTheTerminatorNoLongerFits(): void {
+  let before: Stats = Memory::stats();
+  let mut value: String = String::new();
+
+  let mut index: u64 = 0;
+  while (index < 15) {
+    value.pushByte('x' as u8);
+    index += 1;
+  }
+
+  Test::assertEq<u64>(value.length(), 15);
+  Test::assertEq<u64>(Memory::stats().bytesLive, before.bytesLive + 16);
+
+  value.pushByte('y' as u8);
+
+  Test::assertEq<u64>(value.length(), 16);
+  Test::assertEq<u64>(Memory::stats().bytesLive, before.bytesLive + 32);
+}
+
+@test
+function reserveGrowsOnlyWhenTheRequestExceedsTheCapacity(): void {
+  let before: Stats = Memory::stats();
+  let mut value: String = String::withCapacity(8);
+
+  value.reserve(7);
+  Test::assertEq<u64>(Memory::stats().bytesLive, before.bytesLive + 8);
+
+  value.reserve(8);
+  Test::assertEq<u64>(Memory::stats().bytesLive, before.bytesLive + 16);
+}
+
+@test
+function clearEmptiesTheStringWithoutReleasingCapacity(): void {
+  let before: Stats = Memory::stats();
+  let mut value: String = String::create("hello");
+  let allocated: Stats = Memory::stats();
+
+  value.clear();
+
+  Test::assertEq<u64>(value.length(), 0);
+  Test::assertEq<str>(value.toStr(), "");
+  Test::assertEq<u64>(Memory::stats().bytesLive, allocated.bytesLive);
+
+  value.pushStr("again");
+  Test::assertEq<str>(value.toStr(), "again");
+  Test::assertEq<u64>(Memory::stats().bytesLive, before.bytesLive + 6);
+}
+
+@test
+function cloneCopiesBytesIntoAnIndependentAllocation(): void {
+  let mut original: String = String::create("source");
+  let copy: String = original.clone();
+
+  let copyPtr: u64 = @integerFromPointer(copy.toStr() as *u8);
+  let originalPtr: u64 = @integerFromPointer(original.toStr() as *u8);
+
+  Test::assertNe<u64>(copyPtr, originalPtr);
+
+  original.pushStr("-changed");
+
+  Test::assertEq<str>(copy.toStr(), "source");
+  Test::assertEq<str>(original.toStr(), "source-changed");
+}
+
+@test
+function pushCharReplacesSurrogatesWithTheReplacementCharacter(): void {
+  let mut value: String = String::new();
+  value.pushChar(55296 as char);
+
+  Test::assertEq<u64>(value.length(), 3);
+  Test::assertEq<u8>(value.byteAt(0 as u64).unwrap(), 239 as u8);
+  Test::assertEq<u8>(value.byteAt(1 as u64).unwrap(), 191 as u8);
+  Test::assertEq<u8>(value.byteAt(2 as u64).unwrap(), 189 as u8);
+}
+
+@test
+function pushCharEncodesEveryUtf8Width(): void {
+  let mut value: String = String::new();
+
+  value.pushChar('a');
+  Test::assertEq<u64>(value.length(), 1);
+
+  value.pushChar(233 as char);
+  Test::assertEq<u64>(value.length(), 3);
+
+  value.pushChar(20013 as char);
+  Test::assertEq<u64>(value.length(), 6);
+
+  value.pushChar(128512 as char);
+  Test::assertEq<u64>(value.length(), 10);
+}
+
+@test
+function createFromLenPreservesInteriorNulBytesAndTerminates(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(3);
+
+  @write<u8>(raw, 'a' as u8);
+  @write<u8>(raw + 1, 0 as u8);
+  @write<u8>(raw + 2, 'b' as u8);
+
+  let value: String = String::create(raw, 3 as u64);
+  Memory::free(raw);
+
+  Test::assertEq<u64>(value.length(), 3);
+  Test::assertEq<u8>(value.byteAt(1 as u64).unwrap(), 0 as u8);
+  Test::assertEq<u8>(value.byteAt(2 as u64).unwrap(), 'b' as u8);
+
+  let trailing: u8 = @integerFromPointer(value.toStr() as *u8) + value.length()
+    |> @pointerFromInteger<*mut u8>(_)
+    |> @read<u8>(_);
+
+  Test::assertEq<u8>(trailing, 0);
+}
+
+@test
+function compareOrdersByBytesAndThenByLength(): void {
+  let shorter: String = String::create("abc");
+  let longer: String = String::create("abcd");
+  let higher: String = String::create("abd");
+  let same: String = String::create("abc");
+
+  Test::assertEq<i32>(shorter.compare(&same), 0);
+  Test::assertEq<i32>(shorter.compare(&longer), -1);
+  Test::assertEq<i32>(longer.compare(&shorter), 1);
+  Test::assertEq<i32>(shorter.compare(&higher), -1);
+  Test::assertEq<i32>(higher.compare(&shorter), 1);
+}
+
+@test
+function compareIsByteOrderedAcrossTheSignedCharBoundary(): void {
+  let mut low: String = String::new();
+  low.pushByte(127 as u8);
+
+  let mut high: String = String::new();
+  high.pushByte(200 as u8);
+
+  Test::assertEq<i32>(low.compare(&high), -1);
+  Test::assertEq<i32>(high.compare(&low), 1);
+}
+
+@test
+function compareLooksPastInteriorNulBytes(): void {
+  let first: String = buildInteriorNulString('b');
+  let second: String = buildInteriorNulString('c');
+
+  Test::assertEq<i32>(first.compare(&second), -1);
+  Test::assertEq<boolean>(first.equals(&second), false);
+}
+
+@test
+function indexOfIsLengthAwareAndFindsTheFirstMatch(): void {
+  let haystack: String = String::create("abcabc");
+  let needle: String = String::create("bc");
+  let missing: String = String::create("bd");
+  let empty: String = String::create("");
+  let tooLong: String = String::create("abcabcd");
+
+  Test::assertEq<u64>(haystack.indexOf(&needle).unwrap(), 1);
+  Test::assertEq<boolean>(haystack.indexOf(&missing).isSome(), false);
+  Test::assertEq<u64>(haystack.indexOf(&empty).unwrap(), 0);
+  Test::assertEq<boolean>(haystack.indexOf(&tooLong).isSome(), false);
+  Test::assertEq<boolean>(haystack.contains(&needle), true);
+  Test::assertEq<boolean>(haystack.contains(&missing), false);
+}
+
+@test
+function indexOfSearchesPastInteriorNulBytes(): void {
+  let haystack: String = buildInteriorNulString('b');
+  let needle: String = String::create("b");
+
+  Test::assertEq<u64>(haystack.indexOf(&needle).unwrap(), 2);
+  Test::assertEq<boolean>(haystack.contains(&needle), true);
+}
+
+@test
+function forEachDecodesEveryScalarAndAdvancesPastMalformedBytes(): void {
+  let sample: String = utf8SampleString();
+  let mut visited: u64 = 0;
+  let mut codePoints: u64 = 0;
+
+  sample.forEach((value: char): void -> {
+    visited += 1;
+    codePoints = codePoints * 100000 + (value as u32) as u64;
+  });
+
+  Test::assertEq<u64>(visited, 3);
+  Test::assertEq<u64>(codePoints, 970023320013 as u64);
+
+  let mut malformed: String = String::new();
+  malformed.pushByte(195 as u8);
+  malformed.pushByte('z' as u8);
+
+  let mut replacements: u64 = 0;
+  malformed.forEach((value: char): void -> {
+    if (value as u32 == 65533) {
+      replacements += 1;
+    }
+  });
+
+  Test::assertEq<u64>(replacements, 1);
+}
+
+@test
+function substringClampsItsStartAndLengthToTheOwnedBytes(): void {
+  let value: String = String::create("hello world");
+
+  Test::assertEq<str>(value.substring(6, 5).toStr(), "world");
+  Test::assertEq<str>(value.substring(6, 99).toStr(), "world");
+  Test::assertEq<str>(value.substring(-3, 5).toStr(), "hello");
+  Test::assertEq<str>(value.substring(11, 1).toStr(), "");
+  Test::assertEq<str>(value.substring(2, 0).toStr(), "");
+  Test::assertEq<str>(value.substring(2, -1).toStr(), "");
+}
+
+@test
+function substringOfAnEmptyStringIsEmpty(): void {
+  let empty: String = String::create("");
+
+  Test::assertEq<u64>(empty.substring(0, 4).length(), 0);
+}
+
+@test
+function substringCopiesInteriorNulBytes(): void {
+  let value: String = buildInteriorNulString('b');
+  let slice: String = value.substring(1, 2);
+
+  Test::assertEq<u64>(slice.length(), 2);
+  Test::assertEq<u8>(slice.byteAt(0 as u64).unwrap(), 0 as u8);
+  Test::assertEq<u8>(slice.byteAt(1 as u64).unwrap(), 'b' as u8);
+}
+
+@test
+function concatKeepsAllOwnedBytesOfBothOperands(): void {
+  let left: String = buildInteriorNulString('b');
+  let right: String = String::create("cd");
+  let joined: String = left.concat(&right);
+
+  Test::assertEq<u64>(joined.length(), 5);
+  Test::assertEq<u8>(joined.byteAt(1 as u64).unwrap(), 0 as u8);
+  Test::assertEq<u8>(joined.byteAt(4 as u64).unwrap(), 'd' as u8);
+}
+
+@test
+function caseConversionMapsAsciiAndReplacesEveryNonAsciiByte(): void {
+  let ascii: String = String::create("Hello, World 42!");
+
+  Test::assertEq<str>(ascii.toUpperCase().toStr(), "HELLO, WORLD 42!");
+  Test::assertEq<str>(ascii.toLowerCase().toStr(), "hello, world 42!");
+
+  // Byte-oriented conversion: each byte of the two-byte scalar becomes U+FFFD.
+  let mut accented: String = String::new();
+  accented.pushByte('h' as u8);
+  accented.pushChar(233 as char);
+
+  let upper: String = accented.toUpperCase();
+
+  Test::assertEq<u64>(accented.length(), 3);
+  Test::assertEq<u64>(upper.length(), 7);
+  Test::assertEq<u8>(upper.byteAt(0 as u64).unwrap(), 'H' as u8);
+  Test::assertEq<u8>(upper.byteAt(1 as u64).unwrap(), 239 as u8);
+  Test::assertEq<u8>(upper.byteAt(2 as u64).unwrap(), 191 as u8);
+  Test::assertEq<u8>(upper.byteAt(3 as u64).unwrap(), 189 as u8);
+  Test::assertEq<u8>(upper.byteAt(4 as u64).unwrap(), 239 as u8);
+}
+
+@test
+function numericCreateRendersEveryIntegerWidthAsDecimal(): void {
+  Test::assertEq<str>(String::create(0 as u64).toStr(), "0");
+  Test::assertEq<str>(String::create(7 as u8).toStr(), "7");
+  Test::assertEq<str>(String::create(255 as u8).toStr(), "255");
+  Test::assertEq<str>(String::create(65535 as u16).toStr(), "65535");
+  Test::assertEq<str>(String::create(4294967295 as u32).toStr(), "4294967295");
+  Test::assertEq<str>(String::create(18446744073709551615 as u64).toStr(), "18446744073709551615");
+}
+
+@test
+function numericCreateRendersSignedValuesIncludingTheMinimums(): void {
+  Test::assertEq<str>(String::create(-1 as i8).toStr(), "-1");
+  Test::assertEq<str>(String::create(-128 as i8).toStr(), "-128");
+  Test::assertEq<str>(String::create(127 as i8).toStr(), "127");
+  Test::assertEq<str>(String::create(-32768 as i16).toStr(), "-32768");
+  Test::assertEq<str>(String::create(-2147483648 as i32).toStr(), "-2147483648");
+  Test::assertEq<str>(String::create(-9223372036854775808 as i64).toStr(), "-9223372036854775808");
+  Test::assertEq<str>(String::create(9223372036854775807 as i64).toStr(), "9223372036854775807");
+}
+
+@test
+function numericCreateReservesExactlyTheDigitsPlusTheTerminator(): void {
+  let before: Stats = Memory::stats();
+  let rendered: String = String::create(4096 as u64);
+  let after: Stats = Memory::stats();
+
+  Test::assertEq<u64>(rendered.length(), 4);
+  Test::assertEq<u64>(after.bytesLive, before.bytesLive + 5);
+  Test::assertEq<u64>(after.allocTotal, before.allocTotal + 1);
+}
+
+@test
+function toStringExtensionsMatchTheCreateOverloads(): void {
+  let negative: i32 = -42;
+  let positive: u32 = 42;
+  let zero: i64 = 0;
+
+  Test::assertEq<str>(negative.toString().toStr(), "-42");
+  Test::assertEq<str>(positive.toString().toStr(), "42");
+  Test::assertEq<str>(zero.toString().toStr(), "0");
+}
+
+@test
+function floatCreateMatchesTheRuntimeGFormat(): void {
+  let pi: f64 = 3.14;
+  let small: f64 = 0.0001;
+  let large: f64 = 1000000000000000000000.0;
+  let sevenDigits: f64 = 1234567.0;
+  let zero: f64 = 0.0;
+  let whole: f64 = 42.0;
+
+  Test::assertEq<str>(String::create(pi).toStr(), "3.14");
+  Test::assertEq<str>(String::create(small).toStr(), "0.0001");
+  Test::assertEq<str>(String::create(large).toStr(), "1e+21");
+  Test::assertEq<str>(String::create(sevenDigits).toStr(), "1.23457e+06");
+  Test::assertEq<str>(String::create(zero).toStr(), "0");
+  Test::assertEq<str>(String::create(whole).toStr(), "42");
+}
+
+@test
+function floatCreateRoundsToSixSignificantDigitsAtTheTie(): void {
+  let tie: f64 = 123456.5;
+  let negative: f64 = -2.5;
+  let repeating: f64 = 0.1;
+
+  Test::assertEq<str>(String::create(tie).toStr(), "123456");
+  Test::assertEq<str>(String::create(negative).toStr(), "-2.5");
+  Test::assertEq<str>(String::create(repeating).toStr(), "0.1");
+}
+
+@test
+function floatCreateNarrowsF32ThroughTheSameFormat(): void {
+  let tenth: f32 = 0.1;
+  let half: f32 = 0.5;
+
+  Test::assertEq<str>(String::create(tenth).toStr(), "0.1");
+  Test::assertEq<str>(String::create(half).toStr(), "0.5");
+}
+
+@test
+function floatToStringExtensionsMatchTheCreateOverloads(): void {
+  let wide: f64 = -0.5;
+  let narrow: f32 = 2.25;
+
+  Test::assertEq<str>(wide.toString().toStr(), "-0.5");
+  Test::assertEq<str>(narrow.toString().toStr(), "2.25");
 }
