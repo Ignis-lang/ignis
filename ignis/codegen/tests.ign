@@ -464,3 +464,48 @@ function codegenKeepsHarnessSymbolsExternallyVisible(): void {
   Test::assert(codegenContains(&emission.source, "void harnessed_"));
   Test::assert(!codegenContains(&emission.source, "static void harnessed_"));
 }
+
+/// A method call on a receiver that carries `@implements(Drop)` reads its drop
+/// state byte first, so calling into a value that was already dropped panics
+/// instead of reading freed memory.
+@test
+function codegenGuardsMethodCallsOnDroppedReceivers(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "@implements(Drop)\nrecord Payload {\n  public value: i32;\n\n  public drop(&mut self): void {\n    return;\n  }\n\n  public peek(&self): i32 {\n    return 7;\n  }\n}\n\nfunction main(): i32 {\n  let payload: Payload = Payload { value: 1 };\n\n  return payload.peek();\n}\n",
+  );
+
+  Test::assert(
+    codegenContains(
+      &emission.source,
+      "__ignis_drop_state) { fprintf(stderr, \"panic: use of dropped value\\n\"); exit(101); }",
+    ),
+  );
+}
+
+/// Reaching a field through a base whose nominal carries `@implements(Drop)`
+/// is guarded the same way, which is what catches a read of a field moved out
+/// of its owner.
+@test
+function codegenGuardsFieldAccessThroughDroppedValues(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "@implements(Drop)\nrecord Payload {\n  public value: i32;\n\n  public drop(&mut self): void {\n    return;\n  }\n}\n\nfunction readValue(payload: &Payload): i32 {\n  return payload.value;\n}\n\nfunction main(): i32 {\n  let payload: Payload = Payload { value: 1 };\n\n  return readValue(&payload);\n}\n",
+  );
+
+  Test::assert(
+    codegenContains(
+      &emission.source,
+      ")->__ignis_drop_state) { fprintf(stderr, \"panic: use of dropped value\\n\"); exit(101); }",
+    ),
+  );
+}
+
+/// A nominal without `@implements(Drop)` owns no drop state byte, so nothing
+/// about it is guarded.
+@test
+function codegenLeavesNonDroppableAccessUnguarded(): void {
+  let emission: CodegenEmission = codegenEmit(
+    "record Payload {\n  public value: i32;\n}\n\nfunction readValue(payload: &Payload): i32 {\n  return payload.value;\n}\n\nfunction main(): i32 {\n  let payload: Payload = Payload { value: 1 };\n\n  return readValue(&payload);\n}\n",
+  );
+
+  Test::assert(!codegenContains(&emission.source, "panic: use of dropped value"));
+}

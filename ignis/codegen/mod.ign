@@ -638,6 +638,134 @@ export namespace CodegenC {
     };
   }
 
+  /// The nominal a type names, looked through any pointers and references,
+  /// when that nominal carries `@implements(Drop)` and so owns a
+  /// `__ignis_drop_state` byte.
+  function resolveDroppableRecord(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    typeId: Analyzer::TypeId,
+  ): Option<Analyzer::DefinitionId> {
+    let mut current: Analyzer::TypeId = typeId;
+
+    while (true) {
+      let mut nominal: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut pointee: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(typeNode) = typeStore.get(current)) {
+        match (typeNode) {
+          Analyzer::Type::Record(defId) -> {
+            nominal = Option::SOME(defId);
+          },
+          Analyzer::Type::Enum(defId) -> {
+            nominal = Option::SOME(defId);
+          },
+          Analyzer::Type::Pointer(pointer) -> {
+            pointee = Option::SOME(pointer.pointee);
+          },
+          Analyzer::Type::Reference(reference) -> {
+            pointee = Option::SOME(reference.referent);
+          },
+          _ -> {},
+        };
+      }
+
+      if (let Option::SOME(defId) = nominal) {
+        if (CodegenC::hasDropTrait(defStore, defId)) {
+          return Option::SOME(defId);
+        }
+
+        return Option::NONE;
+      }
+
+      let Option::SOME(inner) = pointee else {
+        return Option::NONE;
+      };
+
+      current = inner;
+    }
+
+    return Option::NONE;
+  }
+
+  /// Trap before an instance method reads a receiver that was already dropped.
+  ///
+  /// The drop state byte outlives the value's storage, so this turns what
+  /// would be a read of freed memory into the same panic the ownership rules
+  /// describe.
+  function emitMethodReceiverDropGuard(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+    callee: Analyzer::DefinitionId,
+    args: &Vector<Lir::Operand>,
+  ): void {
+    let mut ownerOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(definition) = defStore.get(callee)) {
+      if (let Analyzer::Definition::Method(methodDef) = definition) {
+        if (!methodDef.isStatic) {
+          ownerOpt = Option::SOME(methodDef.owner);
+        }
+      }
+    }
+
+    let Option::SOME(owner) = ownerOpt else {
+      return;
+    };
+
+    if (!CodegenC::hasDropTrait(defStore, owner)) {
+      return;
+    }
+
+    let Option::SOME(receiver) = args.get(0) else {
+      return;
+    };
+
+    let value: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, receiver);
+    let access: String = `(${value.toStr()})->`;
+
+    CodegenC::emitDropStateGuard(output, &access);
+  }
+
+  /// Trap before a field is reached through a base whose nominal was already
+  /// dropped, for the same reason the receiver guard exists.
+  function emitFieldPointerDropGuard(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &Lir::FunctionLir,
+    output: &mut String,
+    base: &String,
+    operand: &Lir::Operand,
+  ): void {
+    let Option::SOME(baseType) = CodegenC::operandType(function_, operand) else {
+      return;
+    };
+
+    if (CodegenC::resolveDroppableRecord(defStore, typeStore, baseType).isNone()) {
+      return;
+    }
+
+    let mut access: String = `(${base.toStr()}).`;
+
+    if (CodegenC::operandIsIndirect(typeStore, function_, operand)) {
+      access = `(${base.toStr()})->`;
+    }
+
+    CodegenC::emitDropStateGuard(output, &access);
+  }
+
+  /// The shared body of both drop guards: read the drop state byte reached by
+  /// `access` and panic when it is set.
+  function emitDropStateGuard(output: &mut String, access: &String): void {
+    let line: String = `    if (${access.toStr()}__ignis_drop_state) { fprintf(stderr, "panic: use of dropped value\\n"); exit(101); }\n`;
+
+    let mut outputRef: &mut String = output;
+    outputRef.pushStr(line.toStr());
+  }
+
   /// The user-written `drop` method of a nominal, if it declares one.
   ///
   /// A monomorphized record or enum keeps an empty method list: mono
@@ -1678,6 +1806,9 @@ export namespace CodegenC {
       },
       Lir::Instr::GetFieldPtr(node) -> {
         let base: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.base);
+
+        CodegenC::emitFieldPointerDropGuard(defStore, typeStore, function_, output, &base, &node.base);
+
         let mut line: String = `    t${node.dest.raw()} = &((${base.toStr()})->field_${node.fieldIndex});\n`;
 
         if (CodegenC::operandIsEnvironmentPointer(typeStore, function_, &node.base)) {
@@ -1769,6 +1900,8 @@ export namespace CodegenC {
         CodegenC::emitInitializedDropState(defStore, typeStore, output, &destination, node.recordType);
       },
       Lir::Instr::Call(node) -> {
+        CodegenC::emitMethodReceiverDropGuard(defStore, typeStore, symbols, output, closures, node.callee, &node.args);
+
         let callee: String = CodegenC::mangledName(defStore, symbols, node.callee);
         let calleeIsExtern: boolean = CodegenC::isExternFunction(defStore, node.callee);
 
