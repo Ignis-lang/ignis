@@ -1,0 +1,46 @@
+@lang(try)
+enum Outcome<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+trait Emit {
+    emit(&self): Outcome<i32, i32>;
+}
+
+@implements(Emit)
+record Label {
+    public ok: boolean;
+    public weight: i32;
+
+    emit(&self): Outcome<i32, i32> {
+        if (self.ok) {
+            return Outcome::Ok(self.weight);
+        }
+
+        return Outcome::Err(7);
+    }
+}
+
+function render<T: Emit>(value: &T): Outcome<i32, i32> {
+    let carried: i32 = value.emit()!;
+
+    return Outcome::Ok(carried + 1);
+}
+
+function main(): i32 {
+    let good: Label = Label { ok: true, weight: 4 };
+    let bad: Label = Label { ok: false, weight: 4 };
+
+    let rendered: i32 = match (render<Label>(&good)) {
+        Outcome::Ok(value) -> value,
+        Outcome::Err(_) -> -1,
+    };
+
+    let failed: i32 = match (render<Label>(&bad)) {
+        Outcome::Ok(_) -> -1,
+        Outcome::Err(code) -> code,
+    };
+
+    return rendered * 10 + failed;
+}

@@ -12,7 +12,8 @@ use cli::{BuildCommand, CheckCommand, Cli, DocCommand, FmtCommand, SubCommand, T
 use ignis_config::{IgnisBuildConfig, IgnisConfig, IgnisSTDManifest};
 use ignis_driver::{
   build_std, check_runtime, check_std, compile_project, find_project_root, load_project_toml, resolve_project,
-  run_project_tests, run_single_file_tests, run_std_tests, CliOverrides, Project,
+  run_project_tests_with_options, run_single_file_tests_with_options, run_std_tests, CliOverrides, Project,
+  TestRunOptions,
 };
 use ignis_formatter::{FormatOptions, FormatterCliOverrides, FormatterConfigPaths, format_file, load_formatter_config};
 use init::run_init;
@@ -588,10 +589,36 @@ fn run_test(
   _cli: &Cli,
   cmd: &TestCommand,
 ) -> Result<(), ()> {
+  let options = build_test_run_options(cmd)?;
+
   match resolve_test_input(cmd)? {
-    TestInput::SingleFile(path) => run_single_file_tests(&path, None, cmd.update_snapshots, None),
-    TestInput::Project(project) => run_project_tests(&project.root, cmd.filter.as_deref(), cmd.update_snapshots),
+    TestInput::SingleFile(path) => run_single_file_tests_with_options(
+      &path,
+      &TestRunOptions {
+        filter: None,
+        ..options
+      },
+      None,
+    ),
+    TestInput::Project(project) => run_project_tests_with_options(&project.root, &options),
   }
+}
+
+fn build_test_run_options(cmd: &TestCommand) -> Result<TestRunOptions, ()> {
+  let partition = match cmd.partition.as_deref() {
+    Some(raw) => Some(ignis_driver::parse_partition_spec(raw).map_err(|error| {
+      eprintln!("{} {}", "Error:".red().bold(), error);
+    })?),
+    None => None,
+  };
+
+  Ok(TestRunOptions {
+    filter: cmd.filter.clone(),
+    update_snapshots: cmd.update_snapshots,
+    fixture_dirs: cmd.fixtures.iter().map(PathBuf::from).collect(),
+    partition,
+    timeout: cmd.test_timeout.map(std::time::Duration::from_secs),
+  })
 }
 
 fn run_test_std(
@@ -1197,6 +1224,9 @@ mod tests {
       filter: Some(file_path.to_string_lossy().into_owned()),
       project: None,
       update_snapshots: true,
+      fixtures: None,
+      partition: None,
+      test_timeout: None,
     };
 
     match resolve_test_input(&cmd).expect("resolve test input") {
@@ -1216,6 +1246,9 @@ mod tests {
       filter: Some("math".to_string()),
       project: Some(temp_dir.to_string_lossy().into_owned()),
       update_snapshots: true,
+      fixtures: None,
+      partition: None,
+      test_timeout: None,
     };
 
     let resolved = resolve_test_input(&cmd).expect("resolve test input");
@@ -1244,6 +1277,9 @@ mod tests {
       filter: Some(filter_path.to_string_lossy().into_owned()),
       project: Some(temp_dir.to_string_lossy().into_owned()),
       update_snapshots: false,
+      fixtures: None,
+      partition: None,
+      test_timeout: None,
     };
 
     let resolved = resolve_test_input(&cmd).expect("resolve test input");
@@ -1269,6 +1305,9 @@ mod tests {
       filter: Some(file_path.to_string_lossy().into_owned()),
       project: None,
       update_snapshots: false,
+      fixtures: None,
+      partition: None,
+      test_timeout: None,
     };
 
     match resolve_test_input(&cmd).expect("resolve test input") {
