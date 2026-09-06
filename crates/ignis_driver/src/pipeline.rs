@@ -2576,10 +2576,106 @@ fn execute_test_plan(
 
   crate::jobs::map_parallel(&entries, jobs, |entry| match entry {
     PlanEntry::HarnessTest(test) => run_single_test(binary_path, test, update_snapshots, timeout),
-    PlanEntry::Fixture(case) => Ok(run_single_fixture(fixture_context, case)),
+    PlanEntry::Fixture(case) => Ok(run_fixture_catching_panics(fixture_context, case)),
   })
   .into_iter()
   .collect()
+}
+
+/// Runs one fixture, turning a panic into a failing result instead of
+/// unwinding through the worker pool.
+///
+/// `run_single_fixture` runs the compiler in-process on the calling worker
+/// thread (inside `jobs::map_parallel`'s `std::thread::scope`). An analyzer
+/// panic on one fixture would otherwise resume-unwind when the scope joins
+/// its workers, aborting the whole run and losing every other fixture's
+/// result along with it.
+fn run_fixture_catching_panics(
+  context: &FixtureRunContext,
+  case: &crate::fixture_tests::FixtureCase,
+) -> TestExecutionResult {
+  match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_single_fixture(context, case))) {
+    Ok(result) => result,
+    Err(payload) => TestExecutionResult {
+      fq_name: case.name.clone(),
+      success: false,
+      exit_code: 1,
+      stdout: String::new(),
+      stderr: format!("compiler panicked: {}", panic_payload_message(&*payload)),
+    },
+  }
+}
+
+/// Extracts a human-readable message from a caught panic payload.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+  if let Some(message) = payload.downcast_ref::<&str>() {
+    return (*message).to_string();
+  }
+
+  if let Some(message) = payload.downcast_ref::<String>() {
+    return message.clone();
+  }
+
+  "non-string panic payload".to_string()
+}
+
+#[cfg(test)]
+mod fixture_panic_isolation {
+  use super::{panic_payload_message, TestExecutionResult};
+
+  /// Mirrors `run_fixture_catching_panics`'s catch-and-convert step against a
+  /// closure that panics instead of a real fixture compile, so the test stays
+  /// independent of any specific compiler bug: the panic is injected here,
+  /// not discovered in the analyzer.
+  fn run_catching_panics(work: impl FnOnce()) -> TestExecutionResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+      Ok(()) => TestExecutionResult {
+        fq_name: "fixture".to_string(),
+        success: true,
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+      },
+      Err(payload) => TestExecutionResult {
+        fq_name: "fixture".to_string(),
+        success: false,
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: format!("compiler panicked: {}", panic_payload_message(&*payload)),
+      },
+    }
+  }
+
+  #[test]
+  fn a_panic_becomes_a_failing_result_instead_of_unwinding() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
+    let result = run_catching_panics(|| panic!("simulated analyzer panic"));
+
+    std::panic::set_hook(previous_hook);
+
+    assert!(!result.success, "expected the panic to be reported as a failure");
+    assert_eq!(result.exit_code, 1);
+    assert!(
+      result.stderr.contains("simulated analyzer panic"),
+      "expected the panic message in the result, got: {}",
+      result.stderr
+    );
+  }
+
+  #[test]
+  fn a_non_string_panic_payload_still_produces_a_readable_message() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
+    let result = run_catching_panics(|| std::panic::panic_any(42_i32));
+
+    std::panic::set_hook(previous_hook);
+
+    assert!(!result.success);
+    assert!(result.stderr.contains("non-string panic payload"));
+  }
 }
 
 #[cfg(test)]
@@ -2780,6 +2876,26 @@ pub fn run_project_tests_with_options(
   if build_std(config.clone(), &build_dir).is_err() {
     cmd_fail!(&config, "Test setup failed", start.elapsed());
     return Err(());
+  }
+
+  // Every fixture compile sets `assume_std_built` and skips its own
+  // freshness check (see `fixture_compile_config`), trusting the archive
+  // `build_std` just (re)built above under this exact `build_dir`. That
+  // trust is only sound if the archive actually landed where fixtures will
+  // look for it, so check it once, here, before the pool starts, rather than
+  // let every fixture fail later with a confusing link error.
+  if !plan.fixtures.is_empty() && project.std_path.is_some() {
+    let std_archive_path = BuildLayout::new("std", Path::new(&build_dir)).std_lib_path();
+
+    if !std_archive_path.exists() {
+      cmd_fail!(&config, "Test setup failed", start.elapsed());
+      eprintln!(
+        "{} std archive not found at '{}' after building it; fixtures cannot assume it is ready",
+        "Error:".red().bold(),
+        std_archive_path.display()
+      );
+      return Err(());
+    }
   }
 
   let mut link_plan = LinkPlan::from_modules(

@@ -66,7 +66,7 @@ FIXTURE_HEADER_MARKER = "// e2e:"
 LEAK_EXEMPT_HELPERS = {"allow-leak"}
 
 LEAK_CFLAGS = ("-fsanitize=leak", "-g", "-fno-omit-frame-pointer")
-LSAN_ENVIRONMENT = "detect_leaks=1:leak_check_at_exit=1"
+LSAN_ENVIRONMENT = "detect_leaks=1:leak_check_at_exit=1:use_stacks=0"
 LSAN_EXIT_CODE = 23
 LSAN_HEADER = "ERROR: LeakSanitizer:"
 
