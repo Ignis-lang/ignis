@@ -76,8 +76,9 @@ typedef u32 IgnisTypeId;
  *
  * IgnisString is a value type: instances live inline (on the stack or inside
  * other structs). Only the `data` buffer is heap-allocated. Functions that
- * create new strings return IgnisString by value. `ignis_string_drop` frees
- * the data buffer and zeroes the struct, but does NOT free the struct itself.
+ * create new strings return IgnisString by value. `String::drop` in
+ * `std/string` frees the data buffer and zeroes the struct, but never frees
+ * the struct itself.
  *
  * len is measured in bytes. Storage is owned and may contain interior NUL
  * bytes; callers that need the full contents must honor `len` instead of
@@ -112,56 +113,12 @@ typedef void *null;
 void ignis_runtime_init(i32 argc, void *argv);
 
 // =============================================================================
-// String base API
+// String access API
+//
+// Construction, mutation and destruction now live in `std/string`, which owns
+// the `IgnisString` buffer end to end. What remains here are the read-only and
+// derived-string operations that have not moved yet.
 // =============================================================================
-
-/**
- * Creates a new empty string with default capacity.
- */
-IgnisString ignis_string_new(void);
-
-/**
- * Creates a new empty string with at least `cap` capacity.
- */
-IgnisString ignis_string_with_capacity(size_t cap);
-
-/**
- * Creates a new string from a null-terminated C string.
- */
-IgnisString ignis_string_from_cstr(const char *s);
-
-/**
- * Creates a new string from a UTF-8 byte slice of the given length.
- *
- * Copies exactly `len` bytes, preserves interior NUL bytes, and appends a
- * trailing NUL terminator at `data[len]` for C interop.
- */
-IgnisString ignis_string_from_len(const char *s, size_t len);
-
-/**
- * Creates a deep copy of an existing string.
- */
-IgnisString ignis_string_clone(const IgnisString *s);
-
-/**
- * Appends a Unicode scalar to the string in place, encoded as UTF-8 bytes.
- */
-void ignis_string_push_char(IgnisString *s, ignis_char_t c);
-
-/**
- * Appends a single raw byte to the string in place.
- */
-void ignis_string_push_byte(IgnisString *s, u8 c);
-
-/**
- * Appends a C string to the string in place.
- */
-void ignis_string_push_cstr(IgnisString *s, const char *cstr);
-
-/**
- * Appends another IgnisString to the string in place.
- */
-void ignis_string_push_str(IgnisString *s, const IgnisString *other);
 
 /**
  * Returns a null-terminated borrowed view of the string data.
@@ -170,16 +127,6 @@ void ignis_string_push_str(IgnisString *s, const IgnisString *other);
  * semantics may stop at the first interior NUL byte.
  */
 const char *ignis_string_cstr(const IgnisString *s);
-
-/**
- * Returns the length of the string in bytes.
- */
-size_t ignis_string_len(const IgnisString *s);
-
-/**
- * Returns the capacity of the string buffer in bytes.
- */
-size_t ignis_string_cap(const IgnisString *s);
 
 /**
  * Decodes the scalar that starts at byte `idx`.
@@ -194,22 +141,6 @@ ignis_char_t ignis_string_char_at(const IgnisString *s, size_t idx, size_t *out_
  * Returns the raw byte at `idx`, or 0 if out of range.
  */
 u8 ignis_string_byte_at(const IgnisString *s, size_t idx);
-
-/**
- * Clears the string to length 0 without releasing capacity.
- */
-void ignis_string_clear(IgnisString *s);
-
-/**
- * Ensures capacity for `additional` bytes beyond current length.
- */
-void ignis_string_reserve(IgnisString *s, size_t additional);
-
-/**
- * Releases the data buffer and zeroes the struct.
- * Does NOT free the IgnisString struct itself (it is a value type).
- */
-void ignis_string_drop(IgnisString *s);
 
 // =============================================================================
 // String operations
@@ -262,11 +193,6 @@ IgnisString ignis_string_to_lower(const IgnisString *s);
 // (e.g. the compiler-generated struct has an extra __ignis_drop_state field).
 // =============================================================================
 
-void ignis_string_init_new(IgnisString *out);
-void ignis_string_init_with_capacity(IgnisString *out, size_t cap);
-void ignis_string_init_from_cstr(IgnisString *out, const char *cstr);
-void ignis_string_init_from_len(IgnisString *out, const char *s, size_t len);
-void ignis_string_init_clone(IgnisString *out, const IgnisString *s);
 void ignis_string_init_concat(IgnisString *out, const IgnisString *a, const IgnisString *b);
 void ignis_string_init_substring(IgnisString *out, const IgnisString *s, i64 start, i64 len);
 void ignis_string_init_to_upper(IgnisString *out, const IgnisString *s);

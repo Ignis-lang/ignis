@@ -100,23 +100,24 @@
 //! ```
 
 import Hasher from "std::hash";
+import Memory from "std::memory";
+
+/// Capacity handed to a string that did not ask for one.
+const STRING_DEFAULT_CAPACITY: u64 = 16;
+
+/// U+FFFD, substituted for any scalar outside the Unicode scalar range.
+const UNICODE_REPLACEMENT: u32 = 65533;
 
 function stringAsciiWhitespace(value: char): boolean {
   return value == ' ' || value == '\n' || value == '\r' || value == '\t';
 }
 
+extern __string_bytes {
+  /// Returns the number of bytes before the first NUL byte of `s`.
+  function strlen(s: *u8): u64;
+}
+
 extern __string {
-  // Init functions (write into &mut String, never return by value)
-  /// Initializes `out` as an empty runtime string.
-  function ignis_string_init_new(out: &mut String): void;
-  /// Initializes `out` as an empty runtime string with at least `cap` bytes.
-  function ignis_string_init_with_capacity(out: &mut String, cap: u64): void;
-  /// Initializes `out` by copying a NUL-terminated string view.
-  function ignis_string_init_from_cstr(out: &mut String, s: str): void;
-  /// Initializes `out` by copying `len` bytes from `s`, preserving interior NULs.
-  function ignis_string_init_from_len(out: &mut String, s: *mut u8, len: u64): void;
-  /// Initializes `out` as a deep clone of `s`.
-  function ignis_string_init_clone(out: &mut String, s: &String): void;
   /// Initializes `out` as the concatenation of `a` and `b`.
   function ignis_string_init_concat(out: &mut String, a: &String, b: &String): void;
   /// Initializes `out` from a byte-range substring of `s`.
@@ -127,8 +128,6 @@ extern __string {
   function ignis_string_init_to_lower(out: &mut String, s: &String): void;
 
   // Read operations
-  /// Returns the byte length of `s`.
-  function ignis_string_len(s: &String): u64;
   /// Compares two strings byte-wise using runtime ordering semantics.
   function ignis_string_compare(a: &String, b: &String): i32;
   /// Returns the scalar at byte `idx` and writes the exclusive end byte offset.
@@ -141,22 +140,6 @@ extern __string {
   function ignis_string_contains(haystack: &String, needle: &String): boolean;
   /// Returns the NUL-terminated borrowed view of `s`.
   function ignis_string_cstr(s: &String): str;
-
-  // Mutating operations
-  /// Appends one Unicode-scalar `char` to `s` as UTF-8.
-  function ignis_string_push_char(s: &mut String, c: char): void;
-  /// Appends one raw byte to `s`.
-  function ignis_string_push_byte(s: &mut String, c: u8): void;
-  /// Appends a NUL-terminated string view to `s`.
-  function ignis_string_push_cstr(s: &mut String, cstr: str): void;
-  /// Appends the owned bytes from `other` to `s`.
-  function ignis_string_push_str(s: &mut String, other: &String): void;
-  /// Clears `s` without freeing its capacity.
-  function ignis_string_clear(s: &mut String): void;
-  /// Reserves room for at least `additional` more bytes.
-  function ignis_string_reserve(s: &mut String, additional: u64): void;
-  /// Releases the runtime allocation held by `s`.
-  function ignis_string_drop(s: &mut String): void;
 
   // Number-to-string init functions
   /// Initializes `out` with the decimal text of an `i8`.
@@ -217,6 +200,56 @@ export record String {
   cap: u64;
 
   // ---------------------------------------------------------------------------
+  // Buffer primitives
+  // ---------------------------------------------------------------------------
+
+  /// Grows the buffer by doubling until it holds at least `minCapacity` bytes.
+  ///
+  /// The doubling schedule, starting from a floor of 16, is what the standard
+  /// library tests that measure allocations through `Memory::stats()` expect.
+  private growTo(&mut self, minCapacity: u64): void {
+    let mut newCapacity: u64 = self.cap;
+
+    if (newCapacity == 0) {
+      newCapacity = STRING_DEFAULT_CAPACITY;
+    }
+
+    while (newCapacity < minCapacity) {
+      newCapacity *= 2;
+    }
+
+    self.data = Memory::reallocate<u8>(self.data, newCapacity);
+    self.cap = newCapacity;
+  }
+
+  /// Ensures room for `additional` more bytes plus the NUL terminator.
+  private reserveExact(&mut self, additional: u64): void {
+    let required: u64 = self.len + additional + 1;
+
+    if (required > self.cap) {
+      self.growTo(required);
+    }
+  }
+
+  /// Restores the NUL byte the `data[len]` invariant requires.
+  private terminate(&mut self): void {
+    @write<u8>(self.data + self.len, 0);
+  }
+
+  /// Replaces the contents of a freshly reserved string with `len` bytes of `bytes`.
+  ///
+  /// The caller must have reserved at least `len + 1` bytes. A null source or a
+  /// zero length leaves the buffer empty.
+  private fillFrom(&mut self, bytes: *mut u8, len: u64): void {
+    if (bytes != null && len > 0) {
+      Memory::copyBytes(self.data, bytes as *u8, len);
+    }
+
+    self.len = len;
+    self.terminate();
+  }
+
+  // ---------------------------------------------------------------------------
   // Static constructors
   // ---------------------------------------------------------------------------
 
@@ -231,13 +264,7 @@ export record String {
   /// s.pushStr("hello");
   /// ```
   public static new(): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_new(&mut result);
-    return result;
+    return String::withCapacity(STRING_DEFAULT_CAPACITY);
   }
 
   /// Creates a new empty string with at least `capacity` bytes reserved.
@@ -258,13 +285,16 @@ export record String {
   /// s.pushStr("pre-allocated buffer");
   /// ```
   public static withCapacity(capacity: u64): String {
-    let mut result: String = String {
-      data: null,
+    let reserved: u64 = capacity < 1 ? 1 : capacity;
+    let buffer: *mut u8 = Memory::allocate<u8>(reserved);
+
+    @write<u8>(buffer, 0);
+
+    return String {
+      data: buffer,
       len: 0,
-      cap: 0,
+      cap: reserved,
     };
-    __string::ignis_string_init_with_capacity(&mut result, capacity);
-    return result;
   }
 
   /// Creates an owned String from an immutable `str` literal.
@@ -284,13 +314,11 @@ export record String {
   /// let greeting: String = String::create("hello world");
   /// ```
   public static create(s: str): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_from_cstr(&mut result, s);
-    return result;
+    if ((s as *u8) == null) {
+      return String::new();
+    }
+
+    return String::create(s as *mut u8, __string_bytes::strlen(s as *u8));
   }
 
   /// Creates an owned String by copying exactly `len` bytes from `bytes`.
@@ -300,12 +328,9 @@ export record String {
   /// zero-copy interop view and C-string consumers may stop at the first
   /// interior NUL.
   public static create(bytes: *mut u8, len: u64): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_from_len(&mut result, bytes, len);
+    let mut result: String = String::withCapacity(len + 1);
+    result.fillFrom(bytes, len);
+
     return result;
   }
 
@@ -451,7 +476,7 @@ export record String {
   /// let len: u64 = s.length();  // 5
   /// ```
   public length(&self): u64 {
-    return __string::ignis_string_len(self);
+    return self.len;
   }
 
   /// Lexicographically compares this string with `other` byte-by-byte.
@@ -1034,13 +1059,11 @@ export record String {
   /// // original and copy are independent heap allocations
   /// ```
   public clone(&self): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_clone(&mut result, self);
-    return result;
+    if (self.data == null) {
+      return String::new();
+    }
+
+    return String::create(self.data, self.len);
   }
 
   public equals(&self, other: &String): boolean {
@@ -1103,12 +1126,44 @@ export record String {
   /// s.pushChar('c');  // s is now "abc"
   /// ```
   public pushChar(&mut self, c: char): void {
-    __string::ignis_string_push_char(self, c);
+    let scalar: u32 = Utf8::normalizeScalar(c as u32);
+
+    if (scalar <= 127) {
+      self.pushByte(scalar as u8);
+      return;
+    }
+
+    if (scalar <= 2047) {
+      self.reserveExact(2);
+      @write<u8>(self.data + self.len, (192 | (scalar >> 6)) as u8);
+      @write<u8>(self.data + self.len + 1, (128 | (scalar & 63)) as u8);
+      self.len += 2;
+    } else if (scalar <= 65535) {
+      self.reserveExact(3);
+      @write<u8>(self.data + self.len, (224 | (scalar >> 12)) as u8);
+      @write<u8>(self.data + self.len + 1, (128 | ((scalar >> 6) & 63)) as u8);
+      @write<u8>(self.data + self.len + 2, (128 | (scalar & 63)) as u8);
+      self.len += 3;
+    } else {
+      self.reserveExact(4);
+      @write<u8>(self.data + self.len, (240 | (scalar >> 18)) as u8);
+      @write<u8>(self.data + self.len + 1, (128 | ((scalar >> 12) & 63)) as u8);
+      @write<u8>(self.data + self.len + 2, (128 | ((scalar >> 6) & 63)) as u8);
+      @write<u8>(self.data + self.len + 3, (128 | (scalar & 63)) as u8);
+      self.len += 4;
+    }
+
+    self.terminate();
   }
 
   /// Appends a raw byte to the end of this string.
   public pushByte(&mut self, c: u8): void {
-    __string::ignis_string_push_byte(self, c);
+    self.reserveExact(1);
+
+    @write<u8>(self.data + self.len, c);
+    self.len += 1;
+
+    self.terminate();
   }
 
   /// Appends a `str` literal to the end of this string.
@@ -1128,7 +1183,21 @@ export record String {
   /// // s is now "hello world"
   /// ```
   public pushStr(&mut self, s: str): void {
-    __string::ignis_string_push_cstr(self, s);
+    if ((s as *u8) == null) {
+      return;
+    }
+
+    let count: u64 = __string_bytes::strlen(s as *u8);
+
+    if (count == 0) {
+      return;
+    }
+
+    self.reserveExact(count);
+    Memory::copyBytes(self.data + self.len, s as *u8, count);
+    self.len += count;
+
+    self.terminate();
   }
 
   /// Appends `text` `count` times.
@@ -1158,7 +1227,15 @@ export record String {
   /// // s is now "hello world"
   /// ```
   public push(&mut self, other: &String): void {
-    __string::ignis_string_push_str(self, other);
+    if (other.len == 0) {
+      return;
+    }
+
+    self.reserveExact(other.len);
+    Memory::copyBytes(self.data + self.len, other.data as *u8, other.len);
+    self.len += other.len;
+
+    self.terminate();
   }
 
   /// Resets the string length to 0 without releasing the backing buffer.
@@ -1175,7 +1252,11 @@ export record String {
   /// // s.length() == 0, but capacity is still available
   /// ```
   public clear(&mut self): void {
-    __string::ignis_string_clear(self);
+    self.len = 0;
+
+    if (self.data != null) {
+      @write<u8>(self.data, 0);
+    }
   }
 
   /// Ensures the buffer has room for at least `additional` more bytes
@@ -1198,7 +1279,7 @@ export record String {
   /// // s can now hold at least 1024 bytes without reallocation
   /// ```
   public reserve(&mut self, additional: u64): void {
-    __string::ignis_string_reserve(self, additional);
+    self.reserveExact(additional);
   }
 
   // ---------------------------------------------------------------------------
@@ -1547,12 +1628,30 @@ export record String {
   /// `@implements(Drop)`. Can also be called manually to release
   /// memory early.
   public drop(&mut self): void {
-    __string::ignis_string_drop(self);
+    if (self.data != null) {
+      Memory::free<u8>(self.data);
+    }
+
+    self.data = null;
+    self.len = 0;
+    self.cap = 0;
   }
 }
 
 /// UTF-8 byte-backed decoding helpers for `String`.
 export namespace Utf8 {
+  /// Maps a surrogate or out-of-range value onto U+FFFD.
+  ///
+  /// Encoding never fails: an unrepresentable scalar becomes the replacement
+  /// character instead, which is what `pushChar` relies on.
+  function normalizeScalar(scalar: u32): u32 {
+    if ((scalar >= 55296 && scalar <= 57343) || scalar > 1114111) {
+      return UNICODE_REPLACEMENT;
+    }
+
+    return scalar;
+  }
+
   /// Returns the byte at `index` from a string, if present.
   function byteAt(source: &String, index: u64): Option<u8> {
     return source.byteAt(index);

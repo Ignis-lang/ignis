@@ -1,5 +1,5 @@
 import Hasher from "std::hash";
-import Memory from "std::memory";
+import Memory, Stats from "std::memory";
 import String from "std::string";
 import Test from "std::test";
 
@@ -576,4 +576,148 @@ function concatBorrowedStringDoesNotConsumeIt(): void {
   Test::assertEq<str>(base.concat(&tail).toStr(), "ab");
   Test::assertEq<str>(base.concat(&tail).toStr(), "ab");
   Test::assertEq<str>(tail.toStr(), "b");
+}
+
+@test
+function newAllocatesTheDefaultCapacityFloor(): void {
+  let before: Stats = Memory::stats();
+
+  {
+    let value: String = String::new();
+    let during: Stats = Memory::stats();
+
+    Test::assertEq<u64>(value.length(), 0);
+    Test::assertEq<u64>(during.bytesLive, before.bytesLive + 16);
+    Test::assertEq<u64>(during.allocTotal, before.allocTotal + 1);
+  }
+
+  let after: Stats = Memory::stats();
+
+  Test::assertEq<u64>(after.bytesLive, before.bytesLive);
+  Test::assertEq<u64>(after.allocsLive, before.allocsLive);
+}
+
+@test
+function withCapacityAlwaysReservesRoomForTheTerminator(): void {
+  let before: Stats = Memory::stats();
+  let empty: String = String::withCapacity(0);
+  let after: Stats = Memory::stats();
+
+  Test::assertEq<u64>(empty.length(), 0);
+  Test::assertEq<u64>(after.bytesLive, before.bytesLive + 1);
+}
+
+@test
+function capacityDoublesOnlyWhenTheTerminatorNoLongerFits(): void {
+  let before: Stats = Memory::stats();
+  let mut value: String = String::new();
+
+  let mut index: u64 = 0;
+  while (index < 15) {
+    value.pushByte('x' as u8);
+    index += 1;
+  }
+
+  Test::assertEq<u64>(value.length(), 15);
+  Test::assertEq<u64>(Memory::stats().bytesLive, before.bytesLive + 16);
+
+  value.pushByte('y' as u8);
+
+  Test::assertEq<u64>(value.length(), 16);
+  Test::assertEq<u64>(Memory::stats().bytesLive, before.bytesLive + 32);
+}
+
+@test
+function reserveGrowsOnlyWhenTheRequestExceedsTheCapacity(): void {
+  let before: Stats = Memory::stats();
+  let mut value: String = String::withCapacity(8);
+
+  value.reserve(7);
+  Test::assertEq<u64>(Memory::stats().bytesLive, before.bytesLive + 8);
+
+  value.reserve(8);
+  Test::assertEq<u64>(Memory::stats().bytesLive, before.bytesLive + 16);
+}
+
+@test
+function clearEmptiesTheStringWithoutReleasingCapacity(): void {
+  let before: Stats = Memory::stats();
+  let mut value: String = String::create("hello");
+  let allocated: Stats = Memory::stats();
+
+  value.clear();
+
+  Test::assertEq<u64>(value.length(), 0);
+  Test::assertEq<str>(value.toStr(), "");
+  Test::assertEq<u64>(Memory::stats().bytesLive, allocated.bytesLive);
+
+  value.pushStr("again");
+  Test::assertEq<str>(value.toStr(), "again");
+  Test::assertEq<u64>(Memory::stats().bytesLive, before.bytesLive + 6);
+}
+
+@test
+function cloneCopiesBytesIntoAnIndependentAllocation(): void {
+  let mut original: String = String::create("source");
+  let copy: String = original.clone();
+
+  let copyPtr: u64 = @integerFromPointer(copy.toStr() as *u8);
+  let originalPtr: u64 = @integerFromPointer(original.toStr() as *u8);
+
+  Test::assertNe<u64>(copyPtr, originalPtr);
+
+  original.pushStr("-changed");
+
+  Test::assertEq<str>(copy.toStr(), "source");
+  Test::assertEq<str>(original.toStr(), "source-changed");
+}
+
+@test
+function pushCharReplacesSurrogatesWithTheReplacementCharacter(): void {
+  let mut value: String = String::new();
+  value.pushChar(55296 as char);
+
+  Test::assertEq<u64>(value.length(), 3);
+  Test::assertEq<u8>(value.byteAt(0 as u64).unwrap(), 239 as u8);
+  Test::assertEq<u8>(value.byteAt(1 as u64).unwrap(), 191 as u8);
+  Test::assertEq<u8>(value.byteAt(2 as u64).unwrap(), 189 as u8);
+}
+
+@test
+function pushCharEncodesEveryUtf8Width(): void {
+  let mut value: String = String::new();
+
+  value.pushChar('a');
+  Test::assertEq<u64>(value.length(), 1);
+
+  value.pushChar(233 as char);
+  Test::assertEq<u64>(value.length(), 3);
+
+  value.pushChar(20013 as char);
+  Test::assertEq<u64>(value.length(), 6);
+
+  value.pushChar(128512 as char);
+  Test::assertEq<u64>(value.length(), 10);
+}
+
+@test
+function createFromLenPreservesInteriorNulBytesAndTerminates(): void {
+  let raw: *mut u8 = Memory::allocateVector<u8>(3);
+
+  @write<u8>(raw, 'a' as u8);
+  @write<u8>(raw + 1, 0 as u8);
+  @write<u8>(raw + 2, 'b' as u8);
+
+  let value: String = String::create(raw, 3 as u64);
+  Memory::free(raw);
+
+  Test::assertEq<u64>(value.length(), 3);
+  Test::assertEq<u8>(value.byteAt(1 as u64).unwrap(), 0 as u8);
+  Test::assertEq<u8>(value.byteAt(2 as u64).unwrap(), 'b' as u8);
+
+  let trailing: u8 = @integerFromPointer(value.toStr() as *u8) + value.length()
+    |> @pointerFromInteger<*mut u8>(_)
+    |> @read<u8>(_);
+
+  Test::assertEq<u8>(trailing, 0);
 }

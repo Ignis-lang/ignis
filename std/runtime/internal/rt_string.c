@@ -233,14 +233,20 @@ static i64 ignis_bytes_index_of(
 }
 
 // =============================================================================
-// String base API
+// String storage internals
+//
+// The exported construction, mutation and destruction API now lives in
+// `std/string`. What is left here is what the still-C operations below build
+// their results with.
 // =============================================================================
 
-IgnisString ignis_string_new(void) {
+static IgnisString ignis_string_with_capacity(size_t cap);
+
+static IgnisString ignis_string_new(void) {
   return ignis_string_with_capacity(16);
 }
 
-IgnisString ignis_string_with_capacity(size_t cap) {
+static IgnisString ignis_string_with_capacity(size_t cap) {
   IgnisString s;
 
   if (cap < 1) {
@@ -256,16 +262,7 @@ IgnisString ignis_string_with_capacity(size_t cap) {
   return s;
 }
 
-IgnisString ignis_string_from_cstr(const char *cstr) {
-  if (cstr == NULL) {
-    return ignis_string_new();
-  }
-
-  size_t len = strlen(cstr);
-  return ignis_string_from_len(cstr, len);
-}
-
-IgnisString ignis_string_from_len(const char *s, size_t len) {
+static IgnisString ignis_string_from_len(const char *s, size_t len) {
   size_t cap = len + 1;
   IgnisString str = ignis_string_with_capacity(cap);
 
@@ -279,15 +276,7 @@ IgnisString ignis_string_from_len(const char *s, size_t len) {
   return str;
 }
 
-IgnisString ignis_string_clone(const IgnisString *s) {
-  if (s == NULL || s->data == NULL) {
-    return ignis_string_new();
-  }
-
-  return ignis_string_from_len(s->data, s->len);
-}
-
-void ignis_string_push_char(IgnisString *s, ignis_char_t c) {
+static void ignis_string_push_char(IgnisString *s, ignis_char_t c) {
   if (s == NULL) {
     return;
   }
@@ -307,42 +296,7 @@ void ignis_string_push_char(IgnisString *s, ignis_char_t c) {
   s->data[s->len] = '\0';
 }
 
-void ignis_string_push_byte(IgnisString *s, u8 c) {
-  if (s == NULL) {
-    return;
-  }
-
-  size_t required = s->len + 2;
-  if (required > s->cap) {
-    ignis_string_grow(s, required);
-  }
-
-  s->data[s->len] = (char)c;
-  s->len++;
-  s->data[s->len] = '\0';
-}
-
-void ignis_string_push_cstr(IgnisString *s, const char *cstr) {
-  if (s == NULL || cstr == NULL) {
-    return;
-  }
-
-  size_t cstr_len = strlen(cstr);
-  if (cstr_len == 0) {
-    return;
-  }
-
-  size_t required = s->len + cstr_len + 1;
-  if (required > s->cap) {
-    ignis_string_grow(s, required);
-  }
-
-  memcpy(s->data + s->len, cstr, cstr_len);
-  s->len += cstr_len;
-  s->data[s->len] = '\0';
-}
-
-void ignis_string_push_str(IgnisString *s, const IgnisString *other) {
+static void ignis_string_push_str(IgnisString *s, const IgnisString *other) {
   if (s == NULL || other == NULL || other->len == 0) {
     return;
   }
@@ -365,22 +319,13 @@ const char *ignis_string_cstr(const IgnisString *s) {
   return s->data;
 }
 
-size_t ignis_string_len(const IgnisString *s) {
+static size_t ignis_string_len(const IgnisString *s) {
   if (s == NULL) {
     return 0;
   }
 
   return s->len;
 }
-
-size_t ignis_string_cap(const IgnisString *s) {
-  if (s == NULL) {
-    return 0;
-  }
-
-  return s->cap;
-}
-
 ignis_char_t ignis_string_char_at(const IgnisString *s, size_t idx, size_t *out_end) {
   ignis_char_t scalar = 0;
   if (!ignis_utf8_decode_at(s, idx, &scalar, out_end)) {
@@ -397,43 +342,6 @@ u8 ignis_string_byte_at(const IgnisString *s, size_t idx) {
 
   return (u8)s->data[idx];
 }
-
-void ignis_string_clear(IgnisString *s) {
-  if (s == NULL) {
-    return;
-  }
-
-  s->len = 0;
-  if (s->data != NULL) {
-    s->data[0] = '\0';
-  }
-}
-
-void ignis_string_reserve(IgnisString *s, size_t additional) {
-  if (s == NULL) {
-    return;
-  }
-
-  size_t required = s->len + additional + 1;
-  if (required > s->cap) {
-    ignis_string_grow(s, required);
-  }
-}
-
-void ignis_string_drop(IgnisString *s) {
-  if (s == NULL) {
-    return;
-  }
-
-  if (s->data != NULL) {
-    ignis_free(s->data);
-  }
-
-  s->data = NULL;
-  s->len = 0;
-  s->cap = 0;
-}
-
 // =============================================================================
 // String operations
 // =============================================================================
@@ -615,27 +523,6 @@ IgnisString ignis_f64_to_string(f64 value) {
 // may have a struct with extra trailing fields (e.g. __ignis_drop_state) that
 // are not touched by these functions.
 // =============================================================================
-
-void ignis_string_init_new(IgnisString *out) {
-  *out = ignis_string_new();
-}
-
-void ignis_string_init_with_capacity(IgnisString *out, size_t cap) {
-  *out = ignis_string_with_capacity(cap);
-}
-
-void ignis_string_init_from_cstr(IgnisString *out, const char *cstr) {
-  *out = ignis_string_from_cstr(cstr);
-}
-
-void ignis_string_init_from_len(IgnisString *out, const char *s, size_t len) {
-  *out = ignis_string_from_len(s, len);
-}
-
-void ignis_string_init_clone(IgnisString *out, const IgnisString *s) {
-  *out = ignis_string_clone(s);
-}
-
 void ignis_string_init_concat(IgnisString *out, const IgnisString *a, const IgnisString *b) {
   *out = ignis_string_concat(a, b);
 }

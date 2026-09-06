@@ -33,18 +33,20 @@ Core runtime types, IDs, and APIs.
   - `null`
   - `IGNIS_TYPE_*_ID` macros (primitives, pointer)
 - Alloc/Free:
-  - `ignis_alloc`, `ignis_realloc`, `ignis_calloc`, `ignis_free`
-- Drop:
-  - `ignis_string_drop`
-- String API:
-  - `ignis_string_new`, `ignis_string_with_capacity`
-  - `ignis_string_from_cstr`, `ignis_string_from_len`, `ignis_string_clone`
-  - `ignis_string_push_char`, `ignis_string_push_byte`, `ignis_string_push_cstr`, `ignis_string_push_str`
-  - `ignis_string_cstr`, `ignis_string_len`, `ignis_string_cap`
-  - `ignis_string_char_at`, `ignis_string_byte_at`, `ignis_string_clear`, `ignis_string_reserve`
-  - `ignis_string_drop`
-- Internal helpers in `ignis_rt.c`:
-  - `ignis_string_grow`
+  - `ignis_alloc`, `ignis_realloc`, `ignis_free`, defined in `std/memory/allocator.ign`
+- String API still in C:
+  - `ignis_string_cstr`, `ignis_string_char_at`, `ignis_string_byte_at`
+  - `ignis_string_compare`, `ignis_string_index_of`, `ignis_string_contains`
+  - `ignis_string_concat`, `ignis_string_substring`, `ignis_string_to_upper`, `ignis_string_to_lower`
+  - the `ignis_string_init_*` output-pointer variants for the four above
+  - `ignis_{i8,i16,i32,i64,u8,u16,u32,u64,f32,f64}_to_string` and their
+    `ignis_string_init_from_*` variants
+- String API now in Ignis, in `std/string/mod.ign`:
+  - construction and capacity: `String::new`, `String::withCapacity`, `String::create`
+  - mutation: `String::pushChar`, `String::pushByte`, `String::pushStr`, `String::push`,
+    `String::clear`, `String::reserve`
+  - reads: `String::length`, `String::byteAt`
+  - copies and release: `String::clone`, `String::drop`
 
 ### `std/runtime/memory/memory.h` and `std/runtime/memory/memory.c`
 Wrappers used by `std/memory/mod.ign`.
@@ -65,7 +67,7 @@ Numeric helpers and conversions used by `std/number` and `std/string`.
 - Utility: `stringEmpty`
 
 All string conversion helpers return heap-allocated `IgnisString` and must be
-released with `ignis_string_drop`.
+released with `String::drop` from `std/string`.
 
 ### `std/runtime/string/string.h` and `std/runtime/string/string.c`
 String operations built on `IgnisString`.
