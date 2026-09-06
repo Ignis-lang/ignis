@@ -9,6 +9,17 @@
 #include <unistd.h>
 
 // =============================================================================
+// Runtime type definitions
+//
+// Both compilers emit this same block into every translation unit they produce,
+// under this guard, so a unit that also includes this header keeps exactly one
+// definition of each name. Keep the two copies in step.
+// =============================================================================
+
+#ifndef IGNIS_RT_TYPES_H
+#define IGNIS_RT_TYPES_H
+
+// =============================================================================
 // Primitive type aliases
 // =============================================================================
 
@@ -85,6 +96,8 @@ typedef struct IgnisString {
  * Null pointer alias.
  */
 typedef void *null;
+
+#endif // IGNIS_RT_TYPES_H
 
 // =============================================================================
 // String base API

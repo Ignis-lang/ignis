@@ -3097,6 +3097,62 @@ export namespace CodegenC {
     }
   }
 
+  /// The runtime type definitions the emitted C is built on.
+  ///
+  /// These used to reach the translation unit only through `ignis_rt.h`.
+  /// Emitting them keeps the C this compiler produces self-describing while the
+  /// string and filesystem runtime is still C: `ignis_rt.h` guards the same
+  /// block with `IGNIS_RT_TYPES_H`, so whichever of the two is seen first
+  /// defines the types and the other skips them. The host emits this text byte
+  /// for byte; the two must not drift.
+  function emitTypePrelude(output: &mut String): void {
+    let mut outputRef: &mut String = output;
+
+    outputRef.pushStr("#ifndef IGNIS_RT_TYPES_H\n");
+    outputRef.pushStr("#define IGNIS_RT_TYPES_H\n\n");
+    outputRef.pushStr("#include <stdbool.h>\n");
+    outputRef.pushStr("#include <stddef.h>\n");
+    outputRef.pushStr("#include <stdint.h>\n\n");
+    outputRef.pushStr("typedef uint8_t u8;\n");
+    outputRef.pushStr("typedef uint16_t u16;\n");
+    outputRef.pushStr("typedef uint32_t u32;\n");
+    outputRef.pushStr("typedef uint64_t u64;\n\n");
+    outputRef.pushStr("typedef int8_t i8;\n");
+    outputRef.pushStr("typedef int16_t i16;\n");
+    outputRef.pushStr("typedef int32_t i32;\n");
+    outputRef.pushStr("typedef int64_t i64;\n\n");
+    outputRef.pushStr("typedef float f32;\n");
+    outputRef.pushStr("typedef double f64;\n\n");
+    outputRef.pushStr("typedef u8 boolean;\n\n");
+    outputRef.pushStr("typedef u32 ignis_atom_t;\n");
+    outputRef.pushStr("typedef u32 ignis_char_t;\n\n");
+    outputRef.pushStr("typedef void *Pointer;\n\n");
+    outputRef.pushStr("#define TRUE 1\n");
+    outputRef.pushStr("#define FALSE 0\n\n");
+    outputRef.pushStr("typedef u32 IgnisTypeId;\n\n");
+    outputRef.pushStr("#define IGNIS_TYPE_I8_ID 0\n");
+    outputRef.pushStr("#define IGNIS_TYPE_I16_ID 1\n");
+    outputRef.pushStr("#define IGNIS_TYPE_I32_ID 2\n");
+    outputRef.pushStr("#define IGNIS_TYPE_I64_ID 3\n");
+    outputRef.pushStr("#define IGNIS_TYPE_U8_ID 4\n");
+    outputRef.pushStr("#define IGNIS_TYPE_U16_ID 5\n");
+    outputRef.pushStr("#define IGNIS_TYPE_U32_ID 6\n");
+    outputRef.pushStr("#define IGNIS_TYPE_U64_ID 7\n");
+    outputRef.pushStr("#define IGNIS_TYPE_F32_ID 8\n");
+    outputRef.pushStr("#define IGNIS_TYPE_F64_ID 9\n");
+    outputRef.pushStr("#define IGNIS_TYPE_BOOL_ID 10\n");
+    outputRef.pushStr("#define IGNIS_TYPE_CHAR_ID 11\n");
+    outputRef.pushStr("#define IGNIS_TYPE_STRING_ID 12\n");
+    outputRef.pushStr("#define IGNIS_TYPE_PTR_ID 200\n\n");
+    outputRef.pushStr("typedef struct IgnisString {\n");
+    outputRef.pushStr("  char *data;\n");
+    outputRef.pushStr("  size_t len;\n");
+    outputRef.pushStr("  size_t cap;\n");
+    outputRef.pushStr("} IgnisString;\n\n");
+    outputRef.pushStr("typedef void *null;\n\n");
+    outputRef.pushStr("#endif // IGNIS_RT_TYPES_H\n\n");
+  }
+
   /// A declaration for every function the C side defines.
   ///
   function emitStdHeaders(output: &mut String): void {
@@ -3268,6 +3324,8 @@ export namespace CodegenC {
     let mut source: String = String::create("");
     let mut unsupported: u64 = 0;
     let mut functions: u64 = 0;
+
+    CodegenC::emitTypePrelude(&mut source);
 
     source.pushStr("#include \"ignis_rt.h\"\n");
 

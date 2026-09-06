@@ -26,6 +26,70 @@ use crate::EmitInput;
 const USER_MAIN_SYMBOL: &str = "__ignis_user_main";
 const GENERATED_C_LINE_FILE: &str = "<generated-c>";
 
+/// Runtime type definitions every emitted translation unit needs.
+///
+/// `std/runtime/ignis_rt.h` guards an identical block with the same macro, so a
+/// unit that sees both keeps exactly one definition of each name. The selfhost
+/// compiler emits this text byte for byte; the two must not drift.
+const RUNTIME_TYPE_PRELUDE: &str = r#"#ifndef IGNIS_RT_TYPES_H
+#define IGNIS_RT_TYPES_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+
+typedef int8_t i8;
+typedef int16_t i16;
+typedef int32_t i32;
+typedef int64_t i64;
+
+typedef float f32;
+typedef double f64;
+
+typedef u8 boolean;
+
+typedef u32 ignis_atom_t;
+typedef u32 ignis_char_t;
+
+typedef void *Pointer;
+
+#define TRUE 1
+#define FALSE 0
+
+typedef u32 IgnisTypeId;
+
+#define IGNIS_TYPE_I8_ID 0
+#define IGNIS_TYPE_I16_ID 1
+#define IGNIS_TYPE_I32_ID 2
+#define IGNIS_TYPE_I64_ID 3
+#define IGNIS_TYPE_U8_ID 4
+#define IGNIS_TYPE_U16_ID 5
+#define IGNIS_TYPE_U32_ID 6
+#define IGNIS_TYPE_U64_ID 7
+#define IGNIS_TYPE_F32_ID 8
+#define IGNIS_TYPE_F64_ID 9
+#define IGNIS_TYPE_BOOL_ID 10
+#define IGNIS_TYPE_CHAR_ID 11
+#define IGNIS_TYPE_STRING_ID 12
+#define IGNIS_TYPE_PTR_ID 200
+
+typedef struct IgnisString {
+  char *data;
+  size_t len;
+  size_t cap;
+} IgnisString;
+
+typedef void *null;
+
+#endif // IGNIS_RT_TYPES_H
+
+"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestHarnessEntry {
   pub def_id: DefinitionId,
@@ -369,6 +433,7 @@ impl<'a> CEmitter<'a> {
       self.forced_emit_defs = self.collect_forced_emit_defs(module_id);
     }
 
+    self.emit_type_prelude();
     self.emit_implicit_headers();
     self.emit_headers();
 
@@ -398,6 +463,7 @@ impl<'a> CEmitter<'a> {
   ) -> String {
     self.test_harness = Some(test_harness);
 
+    self.emit_type_prelude();
     self.emit_implicit_headers();
     self.emit_headers();
 
@@ -1754,6 +1820,17 @@ impl<'a> CEmitter<'a> {
       .get_function_attrs(def_id)
       .iter()
       .any(|attr| matches!(attr, FunctionAttr::ExternName(_)))
+  }
+
+  /// Write the runtime type definitions the emitted C is built on.
+  ///
+  /// These used to reach the translation unit only through `runtime/ignis_rt.h`.
+  /// Emitting them keeps the C the compiler produces self-describing while the
+  /// string and filesystem runtime is still C: `ignis_rt.h` guards the same
+  /// block with `IGNIS_RT_TYPES_H`, so whichever of the two is seen first
+  /// defines the types and the other skips them.
+  fn emit_type_prelude(&mut self) {
+    self.output.push_str(RUNTIME_TYPE_PRELUDE);
   }
 
   fn emit_headers(&mut self) {
@@ -7230,8 +7307,12 @@ mod tests {
     let sym = symbols.borrow();
     let output = emit_c(&program, &types, &defs, &namespaces, &sym, &[]);
 
-    // No hardcoded headers - emitter outputs only what it's given
-    assert!(!output.contains("#include"));
+    // The type prelude is unconditional and brings its own includes. Past it the
+    // emitter still writes only the headers it was given, which here is none.
+    assert!(output.starts_with(RUNTIME_TYPE_PRELUDE), "{output}");
+
+    let after_prelude = &output[RUNTIME_TYPE_PRELUDE.len()..];
+    assert!(!after_prelude.contains("#include"), "{after_prelude}");
   }
 
   #[test]
