@@ -1,0 +1,38 @@
+import String from "std::string";
+import Test from "std::test";
+
+import comparePathComponents from "./main";
+
+/// `a/b.ign` sorts before `a-b.ign`: the first path component `a` sorts
+/// before the whole second component `a-b.ign`, even though `-` (0x2D)
+/// sorts before `/` (0x2F) byte for byte. Matches Rust's `PathBuf`/`Path`
+/// `Ord`, which project-mode `fmt` has to reproduce (host reference:
+/// `crates/ignis_driver`'s file collection sorts `Vec<PathBuf>` directly).
+@test
+function comparePathComponentsOrdersASlashBeforeADash(): void {
+  let slashPath: String = String::create("a/b.ign");
+  let dashPath: String = String::create("a-b.ign");
+
+  Test::assert(comparePathComponents(&slashPath, &dashPath) < 0);
+  Test::assert(comparePathComponents(&dashPath, &slashPath) > 0);
+}
+
+/// At the second component, `b` (a whole component of `a/b/c.ign`) is a
+/// prefix of `b.ign` (a whole component of `a/b.ign`), so the shorter
+/// component sorts first — the same rule `comparePathComponentsOrdersASlashBeforeADash`
+/// exercises one level up, applied within a single component.
+@test
+function comparePathComponentsOrdersAShorterComponentFirst(): void {
+  let threeComponentPath: String = String::create("a/b/c.ign");
+  let twoComponentPath: String = String::create("a/b.ign");
+
+  Test::assert(comparePathComponents(&threeComponentPath, &twoComponentPath) < 0);
+}
+
+@test
+function comparePathComponentsIsEqualForIdenticalPaths(): void {
+  let left: String = String::create("a/b/c.ign");
+  let right: String = String::create("a/b/c.ign");
+
+  Test::assertEq<i32>(comparePathComponents(&left, &right), 0);
+}

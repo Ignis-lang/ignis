@@ -1,0 +1,372 @@
+//! A minimal JSON value parser, `serde_json`-shaped on the errors it
+//! reports: `Json::parse` exists so a consumer that has to match a `serde`
+//! host's exact wording (`ignis/format`'s `--stdin-json` protocol is the one
+//! that does) can build one on top of a real parse tree instead of a
+//! hand-rolled scanner that only sees quotes.
+//!
+//! This is not a general-purpose JSON library: it has no writer (`Json`'s
+//! `stringify`/`writeRoot` cover that), no streaming API, and no attempt at
+//! `serde_json`'s full error surface. It covers the shapes serde reports
+//! distinctly for a single-line JSON value: an unterminated string, an
+//! unterminated object or array, an unexpected token where a value was
+//! expected, and non-whitespace content left over after a complete value.
+//! Everything else this parser cannot yet explain reuses the closest of
+//! those.
+
+import JsonObjectEntry, JsonValue, JsonValueKind from "./value";
+
+function isJsonWhitespace(byte: u8): boolean {
+  return byte == ' ' as u8 || byte == '\t' as u8 || byte == '\n' as u8 || byte == '\r' as u8;
+}
+
+function skipJsonWhitespace(source: &String, index: u64): u64 {
+  let mut cursor: u64 = index;
+
+  while (cursor < source.length()) {
+    let Option::SOME(byte) = source.byteAt(cursor) else {
+      break;
+    };
+
+    if (!isJsonWhitespace(byte)) {
+      break;
+    }
+
+    cursor += 1;
+  }
+
+  return cursor;
+}
+
+/// The `EOF while parsing <kind> at line 1 column N` message `serde_json`
+/// reports whenever a value runs off the end of the source before it closes.
+/// `N` is always the source's full byte length: there is nothing left to
+/// read, so that is where `serde_json`'s reader sits.
+function jsonEofMessage(source: &String, kind: str): String {
+  let sourceLength: u64 = source.length();
+  let column: String = sourceLength.toString();
+
+  let mut message: String = String::create("EOF while parsing ");
+  message.pushStr(kind);
+  message.pushStr(" at line 1 column ");
+  message.push(&column);
+  return message;
+}
+
+/// The `expected value at line 1 column N` message `serde_json` reports when
+/// the byte at a position cannot start any JSON value.
+function jsonExpectedValueMessage(index: u64): String {
+  let column: u64 = index + 1;
+  let columnText: String = column.toString();
+
+  let mut message: String = String::create("expected value at line 1 column ");
+  message.push(&columnText);
+  return message;
+}
+
+record JsonStringRead {
+  public value: String;
+  public nextIndex: u64;
+}
+
+function hexDigitValue(byte: u8): Option<u32> {
+  if (byte >= '0' as u8 && byte <= '9' as u8) {
+    return Option::SOME((byte - ('0' as u8)) as u32);
+  }
+
+  if (byte >= 'a' as u8 && byte <= 'f' as u8) {
+    return Option::SOME((byte - ('a' as u8)) as u32 + 10);
+  }
+
+  if (byte >= 'A' as u8 && byte <= 'F' as u8) {
+    return Option::SOME((byte - ('A' as u8)) as u32 + 10);
+  }
+
+  return Option::NONE;
+}
+
+function readJsonUnicodeEscape(source: &String, startIndex: u64): Option<char> {
+  let mut value: u32 = 0;
+  let mut index: u64 = 0;
+
+  while (index < 4) {
+    let Option::SOME(byte) = source.byteAt(startIndex + index) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(digit) = hexDigitValue(byte) else {
+      return Option::NONE;
+    };
+
+    value = value * 16 + digit;
+    index += 1;
+  }
+
+  return Option::SOME(value as char);
+}
+
+/// Decodes the JSON string starting at the `"` on `startIndex`. `None` means
+/// the string ran off the end of `source` before its closing quote.
+function readJsonString(source: &String, startIndex: u64): Option<JsonStringRead> {
+  let mut value: String = String::new();
+  let mut cursor: u64 = startIndex + 1;
+
+  while (cursor < source.length()) {
+    let Option::SOME(byte) = source.byteAt(cursor) else {
+      return Option::NONE;
+    };
+
+    if (byte == '"' as u8) {
+      return Option::SOME(JsonStringRead { value: value, nextIndex: cursor + 1 });
+    }
+
+    if (byte != '\\' as u8) {
+      value.pushByte(byte);
+      cursor += 1;
+      continue;
+    }
+
+    let Option::SOME(escaped) = source.byteAt(cursor + 1) else {
+      return Option::NONE;
+    };
+
+    if (escaped == 'n' as u8) {
+      value.pushByte('\n' as u8);
+    } else if (escaped == 't' as u8) {
+      value.pushByte('\t' as u8);
+    } else if (escaped == 'r' as u8) {
+      value.pushByte('\r' as u8);
+    } else if (escaped == 'b' as u8) {
+      value.pushByte(8);
+    } else if (escaped == 'f' as u8) {
+      value.pushByte(12);
+    } else if (escaped == 'u' as u8) {
+      let Option::SOME(decoded) = readJsonUnicodeEscape(source, cursor + 2) else {
+        return Option::NONE;
+      };
+
+      value.pushChar(decoded);
+      cursor += 6;
+      continue;
+    } else {
+      value.pushByte(escaped);
+    }
+
+    cursor += 2;
+  }
+
+  return Option::NONE;
+}
+
+function parseJsonNumber(source: &String, startIndex: u64): u64 {
+  let mut cursor: u64 = startIndex;
+
+  let Option::SOME(first) = source.byteAt(cursor) else {
+    return cursor;
+  };
+
+  if (first == '-' as u8) {
+    cursor += 1;
+  }
+
+  while (cursor < source.length()) {
+    let Option::SOME(byte) = source.byteAt(cursor) else {
+      break;
+    };
+
+    let isDigit: boolean = byte >= '0' as u8 && byte <= '9' as u8;
+    let isFraction: boolean = byte == '.' as u8;
+    let isExponent: boolean = byte == 'e' as u8 || byte == 'E' as u8 || byte == '+' as u8 || byte == '-' as u8;
+
+    if (!isDigit && !isFraction && !isExponent) {
+      break;
+    }
+
+    cursor += 1;
+  }
+
+  return cursor;
+}
+
+function matchesLiteral(source: &String, startIndex: u64, literal: str): boolean {
+  let literalText: String = String::create(literal);
+  let literalLength: u64 = literalText.length();
+
+  if (startIndex + literalLength > source.length()) {
+    return false;
+  }
+
+  let candidate: String = source.substringBytes(startIndex, startIndex + literalLength);
+  return candidate.equals(&literalText);
+}
+
+/// Parses exactly one JSON value at `startIndex`.
+///
+/// Every recursive call site below binds this function's result to a local
+/// only to read `.endOffset` and move on; it never extracts a field back out
+/// of an already-bound local `JsonValue` (that pattern, and the equivalent
+/// one for `JsonStringRead`'s `.value`, corrupts the moved-from local's
+/// backing storage on drop, so every extraction here goes through `.clone()`
+/// instead — the same convention `ignis/format/api.ign`'s original
+/// hand-rolled scanner already followed for the same reason).
+function parseJsonValue(source: &String, startIndex: u64): Result<JsonValue, String> {
+  let index: u64 = skipJsonWhitespace(source, startIndex);
+
+  let Option::SOME(byte) = source.byteAt(index) else {
+    return Result::ERROR(jsonEofMessage(source, "a value"));
+  };
+
+  if (byte == '"' as u8) {
+    let Option::SOME(read) = readJsonString(source, index) else {
+      return Result::ERROR(jsonEofMessage(source, "a string"));
+    };
+
+    return Result::OK(JsonValue { kind: JsonValueKind::STRING(read.value.clone()), endOffset: read.nextIndex });
+  }
+
+  if (byte == '{' as u8) {
+    return parseJsonObject(source, index);
+  }
+
+  if (byte == '[' as u8) {
+    return parseJsonArray(source, index);
+  }
+
+  if (matchesLiteral(source, index, "true")) {
+    return Result::OK(JsonValue { kind: JsonValueKind::BOOL(true), endOffset: index + 4 });
+  }
+
+  if (matchesLiteral(source, index, "false")) {
+    return Result::OK(JsonValue { kind: JsonValueKind::BOOL(false), endOffset: index + 5 });
+  }
+
+  if (matchesLiteral(source, index, "null")) {
+    return Result::OK(JsonValue { kind: JsonValueKind::NULL, endOffset: index + 4 });
+  }
+
+  let isNumberStart: boolean = byte == '-' as u8 || (byte >= '0' as u8 && byte <= '9' as u8);
+
+  if (isNumberStart) {
+    let numberEnd: u64 = parseJsonNumber(source, index);
+    let numberText: String = source.substringBytes(index, numberEnd);
+
+    return Result::OK(JsonValue { kind: JsonValueKind::NUMBER(numberText), endOffset: numberEnd });
+  }
+
+  return Result::ERROR(jsonExpectedValueMessage(index));
+}
+
+function parseJsonObject(source: &String, openBraceIndex: u64): Result<JsonValue, String> {
+  let mut entries: Vector<JsonObjectEntry> = Vector::new<JsonObjectEntry>();
+  let mut cursor: u64 = skipJsonWhitespace(source, openBraceIndex + 1);
+
+  let Option::SOME(firstByte) = source.byteAt(cursor) else {
+    return Result::ERROR(jsonEofMessage(source, "an object"));
+  };
+
+  if (firstByte == '}' as u8) {
+    return Result::OK(JsonValue { kind: JsonValueKind::OBJECT(entries), endOffset: cursor + 1 });
+  }
+
+  while (true) {
+    cursor = skipJsonWhitespace(source, cursor);
+
+    let Option::SOME(keyByte) = source.byteAt(cursor) else {
+      return Result::ERROR(jsonEofMessage(source, "an object"));
+    };
+
+    if (keyByte != '"' as u8) {
+      return Result::ERROR(jsonExpectedValueMessage(cursor));
+    }
+
+    let Option::SOME(key) = readJsonString(source, cursor) else {
+      return Result::ERROR(jsonEofMessage(source, "a string"));
+    };
+
+    let keyText: String = key.value.clone();
+    cursor = skipJsonWhitespace(source, key.nextIndex);
+
+    let Option::SOME(colon) = source.byteAt(cursor) else {
+      return Result::ERROR(jsonEofMessage(source, "an object"));
+    };
+
+    if (colon != ':' as u8) {
+      return Result::ERROR(jsonExpectedValueMessage(cursor));
+    }
+
+    cursor = skipJsonWhitespace(source, cursor + 1);
+
+    let parsedValue: JsonValue = parseJsonValue(source, cursor)!;
+    let parsedValueEnd: u64 = parsedValue.endOffset;
+    entries.push(JsonObjectEntry { key: keyText, value: parsedValue });
+    cursor = skipJsonWhitespace(source, parsedValueEnd);
+
+    let Option::SOME(next) = source.byteAt(cursor) else {
+      return Result::ERROR(jsonEofMessage(source, "an object"));
+    };
+
+    if (next == ',' as u8) {
+      cursor += 1;
+      continue;
+    }
+
+    if (next == '}' as u8) {
+      return Result::OK(JsonValue { kind: JsonValueKind::OBJECT(entries), endOffset: cursor + 1 });
+    }
+
+    return Result::ERROR(jsonExpectedValueMessage(cursor));
+  }
+
+  return Result::ERROR(jsonEofMessage(source, "an object"));
+}
+
+function parseJsonArray(source: &String, openBracketIndex: u64): Result<JsonValue, String> {
+  let mut items: Vector<JsonValue> = Vector::new<JsonValue>();
+  let mut cursor: u64 = skipJsonWhitespace(source, openBracketIndex + 1);
+
+  let Option::SOME(firstByte) = source.byteAt(cursor) else {
+    return Result::ERROR(jsonEofMessage(source, "a list"));
+  };
+
+  if (firstByte == ']' as u8) {
+    return Result::OK(JsonValue { kind: JsonValueKind::ARRAY(items), endOffset: cursor + 1 });
+  }
+
+  while (true) {
+    cursor = skipJsonWhitespace(source, cursor);
+
+    let parsedValue: JsonValue = parseJsonValue(source, cursor)!;
+    let parsedValueEnd: u64 = parsedValue.endOffset;
+    items.push(parsedValue);
+    cursor = skipJsonWhitespace(source, parsedValueEnd);
+
+    let Option::SOME(next) = source.byteAt(cursor) else {
+      return Result::ERROR(jsonEofMessage(source, "a list"));
+    };
+
+    if (next == ',' as u8) {
+      cursor += 1;
+      continue;
+    }
+
+    if (next == ']' as u8) {
+      return Result::OK(JsonValue { kind: JsonValueKind::ARRAY(items), endOffset: cursor + 1 });
+    }
+
+    return Result::ERROR(jsonExpectedValueMessage(cursor));
+  }
+
+  return Result::ERROR(jsonEofMessage(source, "a list"));
+}
+
+export namespace Json {
+  /// Parses exactly one JSON value starting at the first non-whitespace byte
+  /// of `source`. Leading and trailing whitespace around that value is
+  /// allowed; trailing *non-whitespace* content is not the parser's problem
+  /// to reject, because `serde_json` only checks for it once a caller's
+  /// target type has already accepted the value (see
+  /// `Format::parseStdinRequest`'s doc comment for why that check lives
+  /// there instead of here).
+  function parse(source: &String): Result<JsonValue, String> {
+    return parseJsonValue(source, 0);
+  }
+}

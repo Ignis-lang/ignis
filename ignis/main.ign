@@ -1868,47 +1868,168 @@ function printFmtDiffForFile(path: &Path::PathBuf, formatted: &String): void {
   Io::print(Format::unifiedDiff(&pathText, &original, formatted));
 }
 
-/// Formats every file `sourceDir` holds, sorted the same way the host CLI's
-/// project-mode collection is.
-function collectProjectIgnFiles(sourceDir: &Path::PathBuf): Option<Vector<Path::PathBuf>> {
-  let sourceDirText: String = sourceDir.toString();
-
-  let Result::OK(entries) = Fs::collectWalk(sourceDirText.toStr()) else {
-    return Option::NONE;
-  };
-
-  let mut ignEntries: Vector<String> = Vector::new<String>();
+/// Splits a path string on `/`, dropping empty components (leading slash,
+/// repeated slashes).
+function splitPathComponents(path: &String): Vector<String> {
+  let mut parts: Vector<String> = Vector::new<String>();
+  let mut start: u64 = 0;
   let mut index: u64 = 0;
 
-  while (index < entries.length()) {
-    let Option::SOME(entry) = entries.get(index) else {
-      break;
-    };
+  while (index <= path.length()) {
+    let mut atSeparator: boolean = index == path.length();
 
-    let candidate: Path::PathBuf = Path::PathBuf::fromString(entry);
+    if (!atSeparator) {
+      if (let Option::SOME(byte) = path.byteAt(index)) {
+        atSeparator = byte == '/' as u8;
+      }
+    }
 
-    if (let Option::SOME(extension) = candidate.extension() && extension.equals("ign")) {
-      ignEntries.push(entry.clone());
+    if (atSeparator) {
+      if (index > start) {
+        parts.push(path.substringBytes(start, index));
+      }
+
+      start = index + 1;
     }
 
     index += 1;
   }
 
-  Sort::stableLexicalStrings(&mut ignEntries);
+  return parts;
+}
 
-  let mut files: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-  let mut sortedIndex: u64 = 0;
+/// Orders two paths component by component, the way Rust's `PathBuf`/`Path`
+/// `Ord` does and a plain string sort does not: `a/b.ign` sorts before
+/// `a-b.ign`, because the first path component `a` sorts before the whole
+/// second component `a-b.ign`, even though `-` (0x2D) sorts before `/`
+/// (0x2F) byte for byte.
+export function comparePathComponents(left: &String, right: &String): i32 {
+  let leftParts: Vector<String> = splitPathComponents(left);
+  let rightParts: Vector<String> = splitPathComponents(right);
+  let leftLength: u64 = leftParts.length();
+  let rightLength: u64 = rightParts.length();
+  let minLength: u64 = leftLength < rightLength ? leftLength : rightLength;
 
-  while (sortedIndex < ignEntries.length()) {
-    let Option::SOME(entry) = ignEntries.get(sortedIndex) else {
+  let mut index: u64 = 0;
+
+  while (index < minLength) {
+    let Option::SOME(leftPart) = leftParts.get(index) else {
       break;
     };
 
-    files.push(Path::PathBuf::fromString(entry));
+    let Option::SOME(rightPart) = rightParts.get(index) else {
+      break;
+    };
+
+    let comparison: i32 = leftPart.compare(rightPart);
+
+    if (comparison != 0) {
+      return comparison;
+    }
+
+    index += 1;
+  }
+
+  if (leftLength < rightLength) {
+    return -1;
+  }
+
+  if (leftLength > rightLength) {
+    return 1;
+  }
+
+  return 0;
+}
+
+/// Recursively collects every `.ign` file under `directory`, following
+/// symlinked directories the way the host CLI's `Path::is_dir()`-based
+/// recursion does (`Fs::collectWalk` deliberately does not, since its other
+/// callers need cycle-safe walking, so project-mode `fmt` has its own walker
+/// here instead of reusing it). A directory whose own name ends in `.ign` is
+/// still a directory: `Fs::metadata(...).isDir()` is checked before the
+/// extension, the same order `path.is_dir()` runs in on the host.
+function collectProjectIgnFilesRecursive(
+  directory: &Path::PathBuf,
+  files: &mut Vector<Path::PathBuf>
+): Result<void, String> {
+  let mut reader: Fs::ReadDir = match (Fs::ReadDir::open(directory.asStr())) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      return Result::ERROR(String::create("failed to read directory"));
+    },
+  };
+
+  while (true) {
+    let Result::OK(next) = reader.next() else {
+      reader.close();
+      return Result::ERROR(String::create("failed to read directory entry"));
+    };
+
+    let Option::SOME(entry) = next else {
+      break;
+    };
+
+    if (entry.name.equals(".") || entry.name.equals("..")) {
+      continue;
+    }
+
+    let Result::OK(entryMetadata) = Fs::metadata(&entry.path) else {
+      continue;
+    };
+
+    if (entryMetadata.isDir()) {
+      collectProjectIgnFilesRecursive(&entry.path, files)!;
+      continue;
+    }
+
+    if (let Option::SOME(extension) = entry.path.extension() && extension.equals("ign")) {
+      let mut filesRef: &mut Vector<Path::PathBuf> = files;
+      filesRef.push(entry.path.clone());
+    }
+  }
+
+  reader.close();
+  return Result::OK(());
+}
+
+/// Formats every file `sourceDir` holds, sorted the same way the host CLI's
+/// project-mode collection is: `PathBuf`'s component-wise `Ord`.
+function collectProjectIgnFiles(sourceDir: &Path::PathBuf): Option<Vector<Path::PathBuf>> {
+  let mut files: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+
+  let Result::OK(_) = collectProjectIgnFilesRecursive(sourceDir, &mut files) else {
+    return Option::NONE;
+  };
+
+  let mut pathTexts: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < files.length()) {
+    let Option::SOME(file) = files.get(index) else {
+      break;
+    };
+
+    pathTexts.push(file.toString());
+    index += 1;
+  }
+
+  Sort::stableStrings(&mut pathTexts, (left: &String, right: &String): i32 -> {
+    return comparePathComponents(left, right);
+  });
+
+  let mut sortedFiles: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut sortedIndex: u64 = 0;
+
+  while (sortedIndex < pathTexts.length()) {
+    let Option::SOME(entry) = pathTexts.get(sortedIndex) else {
+      break;
+    };
+
+    sortedFiles.push(Path::PathBuf::fromString(entry));
     sortedIndex += 1;
   }
 
-  return Option::SOME(files);
+  return Option::SOME(sortedFiles);
 }
 
 /// Formats the explicit files a `fmt` run named, resolving each file's own
@@ -2051,40 +2172,91 @@ function runFmtProject(
   return 0;
 }
 
-/// Reads everything available on stdin (file descriptor 0) into one owned
-/// `String`. Used only by `--stdin-json`'s NDJSON batch protocol, since
-/// `std::io` has no line-oriented stdin reader yet.
-function fmtReadAllStdin(): String {
-  let mut output: String = String::new();
-  let bufSize: u64 = 4096;
-  let buf: *mut u8 = Memory::allocateVector<u8>(bufSize);
+/// A single read of stdin (file descriptor 0) into a fixed buffer: `count`
+/// holds the byte count on a successful read (0 at end of input), and
+/// `readError` holds the `strerror`-style message on failure.
+record FmtStdinReadOutcome {
+  public count: CType::SSizeT;
+  public readError: Option<String>;
+}
 
-  defer Memory::free(buf);
+function fmtReadStdinChunk(buf: *mut u8, bufSize: u64): FmtStdinReadOutcome {
+  let count: CType::SSizeT = LibC::File::read(0, buf as CType::CVoidPtr, bufSize);
 
-  while (true) {
-    let count: CType::SSizeT = LibC::File::read(0, buf as CType::CVoidPtr, bufSize);
-
-    if (count <= 0) {
-      break;
-    }
-
-    let mut byteIndex: i64 = 0;
-
-    while (byteIndex < count) {
-      @integerFromPointer(buf) + byteIndex
-        |> @pointerFromInteger<*mut u8>(_)
-        |> @read<u8>(_)
-        |> output.pushByte();
-
-      byteIndex += 1;
-    }
+  if (count < 0) {
+    let error: Io::IoError = Io::IoError::lastError();
+    let message: String = String::create(error.errorMessage());
+    return FmtStdinReadOutcome { count: count, readError: Option::SOME(message) };
   }
 
-  return output;
+  return FmtStdinReadOutcome { count: count, readError: Option::NONE };
+}
+
+function fmtAppendStdinChunk(pending: &mut String, buf: *mut u8, count: CType::SSizeT): void {
+  let mut pendingRef: &mut String = pending;
+  let mut byteIndex: i64 = 0;
+
+  while (byteIndex < count) {
+    @integerFromPointer(buf) + byteIndex
+      |> @pointerFromInteger<*mut u8>(_)
+      |> @read<u8>(_)
+      |> pendingRef.pushByte();
+
+    byteIndex += 1;
+  }
+}
+
+record FmtStdinLineResult {
+  public changed: boolean;
+  public hadError: boolean;
+}
+
+/// Formats one already-parsed NDJSON request line and prints its response.
+/// Called as each line becomes available, so a driver feeding this process
+/// one request at a time sees each response before it writes the next one.
+function processFmtStdinLine(
+  trimmed: &String,
+  formatterConfig: &FormatterConfig,
+  emitDiff: boolean
+): FmtStdinLineResult {
+  return match (Format::parseStdinRequest(trimmed)) {
+    Result::OK(request) -> processFmtStdinRequest(&request, formatterConfig, emitDiff),
+    Result::ERROR(error) -> printFmtStdinParseError(error),
+  };
+}
+
+function processFmtStdinRequest(
+  request: &Format::StdinRequest,
+  formatterConfig: &FormatterConfig,
+  emitDiff: boolean
+): FmtStdinLineResult {
+  let response: Format::StdinResponse = Format::processStdinRequest(request, formatterConfig, emitDiff);
+  Io::println(Format::renderStdinResponse(&response));
+  return FmtStdinLineResult { changed: response.changed, hadError: response.hasError };
+}
+
+function printFmtStdinParseError(error: String): FmtStdinLineResult {
+  let response: Format::StdinResponse = Format::StdinResponse {
+    path: String::new(),
+    hasFormatted: false,
+    formatted: String::new(),
+    changed: false,
+    hasDiff: false,
+    diff: String::new(),
+    hasError: true,
+    error: error,
+  };
+
+  Io::println(Format::renderStdinResponse(&response));
+  return FmtStdinLineResult { changed: false, hadError: true };
 }
 
 /// Runs the `--stdin-json` NDJSON batch protocol: one request per line, one
-/// response per line, on stdout.
+/// response per line, on stdout, streamed as the host's `stdin.lock().lines()`
+/// is — a line is formatted and its response printed as soon as it is fully
+/// read, not after the whole input closes, so a driver that writes one
+/// request, waits for the response, and only then writes the next sees each
+/// response in turn instead of everything at once at EOF.
 function runFmtStdinJson(options: &CliOptions): i32 {
   let formatterConfig: FormatterConfig = match (resolveFmtConfigForStdin(options)) {
     Result::OK(value) -> value,
@@ -2095,58 +2267,73 @@ function runFmtStdinJson(options: &CliOptions): i32 {
   };
 
   let emitDiff: boolean = options.fmtEmitDiff;
-  let content: String = fmtReadAllStdin();
-  let lines: Vector<String> = content.lines();
+  let bufSize: u64 = 4096;
+  let buf: *mut u8 = Memory::allocateVector<u8>(bufSize);
 
+  defer Memory::free(buf);
+
+  let mut pending: String = String::new();
+  let mut reachedEnd: boolean = false;
   let mut anyError: boolean = false;
   let mut anyChanged: boolean = false;
-  let mut index: u64 = 0;
 
-  while (index < lines.length()) {
-    let Option::SOME(line) = lines.get(index) else {
-      index += 1;
+  while (true) {
+    let Option::SOME(newlineIndex) = pending.findByte((byte: u8): boolean -> {
+  return byte == '\n' as u8;
+}) else {
+      if (reachedEnd) {
+        if (pending.length() > 0) {
+          let trimmed: String = pending.trimAsciiWhitespace();
+
+          if (trimmed.length() > 0) {
+            let result: FmtStdinLineResult = processFmtStdinLine(&trimmed, &formatterConfig, emitDiff);
+
+            if (result.changed) {
+              anyChanged = true;
+            }
+
+            if (result.hadError) {
+              anyError = true;
+            }
+          }
+        }
+
+        break;
+      }
+
+      let outcome: FmtStdinReadOutcome = fmtReadStdinChunk(buf, bufSize);
+
+      if (let Option::SOME(message) = outcome.readError) {
+        Io::eprintln(`Error: Failed to read stdin: ${message.toStr()}`);
+        return 1;
+      }
+
+      if (outcome.count == 0) {
+        reachedEnd = true;
+        continue;
+      }
+
+      fmtAppendStdinChunk(&mut pending, buf, outcome.count);
       continue;
     };
 
+    let line: String = pending.substringBytes(0, newlineIndex);
+    pending = pending.substringBytes(newlineIndex + 1, pending.length());
     let trimmed: String = line.trimAsciiWhitespace();
 
     if (trimmed.length() == 0) {
-      index += 1;
       continue;
     }
 
-    match (Format::parseStdinRequest(&trimmed)) {
-      Result::OK(request) -> {
-        let response: Format::StdinResponse = Format::processStdinRequest(&request, &formatterConfig, emitDiff);
+    let result: FmtStdinLineResult = processFmtStdinLine(&trimmed, &formatterConfig, emitDiff);
 
-        if (response.changed) {
-          anyChanged = true;
-        }
+    if (result.changed) {
+      anyChanged = true;
+    }
 
-        if (response.hasError) {
-          anyError = true;
-        }
-
-        Io::println(Format::renderStdinResponse(&response));
-      },
-      Result::ERROR(error) -> {
-        let response: Format::StdinResponse = Format::StdinResponse {
-          path: String::new(),
-          hasFormatted: false,
-          formatted: String::new(),
-          changed: false,
-          hasDiff: false,
-          diff: String::new(),
-          hasError: true,
-          error: error,
-        };
-
-        Io::println(Format::renderStdinResponse(&response));
-        anyError = true;
-      },
-    };
-
-    index += 1;
+    if (result.hadError) {
+      anyError = true;
+    }
   }
 
   if (options.fmtCheck && anyChanged) {

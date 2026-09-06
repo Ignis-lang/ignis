@@ -1,4 +1,5 @@
 import Fs from "std::fs";
+import Json, JsonObjectEntry, JsonValue, JsonValueKind from "std::json";
 import Path from "std::path";
 import String from "std::string";
 import Vector from "std::vector";
@@ -286,25 +287,42 @@ export namespace Format {
     return result;
   }
 
-  /// The `EOF while parsing a string at line 1 column N` message the host's
-  /// `serde_json` reports whenever a string literal (key or value) runs off
-  /// the end of the line before its closing quote.
-  function ndjsonEofWhileParsingAString(line: &String): String {
-    let lineLength: u64 = line.length();
-    let column: String = lineLength.toString();
+  function ndjsonInvalidType(kindDescription: &String, endOffset: u64): String {
+    let column: String = endOffset.toString();
 
-    let mut message: String = String::create("EOF while parsing a string at line 1 column ");
+    let mut message: String = String::create("invalid type: ");
+    message.push(kindDescription);
+    message.pushStr(", expected struct StdinRecord at line 1 column ");
     message.push(&column);
     return Format::ndjsonParseError(&message);
   }
 
-  /// The `missing field \`name\` at line 1 column N` message `serde_json`
-  /// reports once a whole object parses but a required field never showed up.
+  function ndjsonInvalidFieldType(kindDescription: &String, endOffset: u64): String {
+    let column: String = endOffset.toString();
+
+    let mut message: String = String::create("invalid type: ");
+    message.push(kindDescription);
+    message.pushStr(", expected a string at line 1 column ");
+    message.push(&column);
+    return Format::ndjsonParseError(&message);
+  }
+
+  function ndjsonInvalidLength(itemCount: u64, endOffset: u64): String {
+    let countText: String = itemCount.toString();
+    let column: String = endOffset.toString();
+
+    let mut message: String = String::create("invalid length ");
+    message.push(&countText);
+    message.pushStr(", expected struct StdinRecord with 2 elements at line 1 column ");
+    message.push(&column);
+    return Format::ndjsonParseError(&message);
+  }
+
   /// `serde` reports the first missing field in the struct's declared order,
-  /// which is `path` then `text`.
-  function ndjsonMissingField(line: &String, name: str): String {
-    let lineLength: u64 = line.length();
-    let column: String = lineLength.toString();
+  /// which is `path` then `text`, at the position where the whole value
+  /// finished parsing.
+  function ndjsonMissingField(name: str, endOffset: u64): String {
+    let column: String = endOffset.toString();
 
     let mut message: String = String::create("missing field `");
     message.pushStr(name);
@@ -313,233 +331,266 @@ export namespace Format {
     return Format::ndjsonParseError(&message);
   }
 
-  /// Reads one NDJSON request line. Only the two string fields the protocol
-  /// defines are recognised; anything else in the object is skipped.
-  ///
-  /// The error strings mirror the host's `serde_json` messages for the shapes
-  /// the `--stdin-json` protocol actually has to reject: a string cut off
-  /// before its closing quote, a line that is a bare JSON value rather than an
-  /// object, and an object missing `path` or `text`.
-  function parseStdinRequest(line: &String): Result<Format::StdinRequest, String> {
-    let Option::SOME(firstByte) = line.byteAt(0) else {
-      let emptyMessage: String = String::create("EOF while parsing a value at line 1 column 0");
-      return Result::ERROR(Format::ndjsonParseError(&emptyMessage));
-    };
+  function ndjsonTrailingCharacters(column: u64): String {
+    let columnText: String = column.toString();
 
-    if (firstByte == '"' as u8) {
-      let Option::SOME(bareString) = Format::readJsonString(line, 0) else {
-        return Result::ERROR(Format::ndjsonEofWhileParsingAString(line));
+    let mut message: String = String::create("trailing characters at line 1 column ");
+    message.push(&columnText);
+    return Format::ndjsonParseError(&message);
+  }
+
+  function describeBool(value: boolean): String {
+    if (value) {
+      return String::create("boolean `true`");
+    }
+
+    return String::create("boolean `false`");
+  }
+
+  /// `serde_json` reports a JSON number as `integer` unless its text carries
+  /// a fractional or exponent part, in which case it is `floating point`.
+  function describeNumber(text: &String): String {
+    let mut isFloat: boolean = false;
+    let mut index: u64 = 0;
+
+    while (index < text.length()) {
+      let Option::SOME(byte) = text.byteAt(index) else {
+        break;
       };
 
-      if (bareString.nextIndex == line.length()) {
-        let mut quoted: String = String::new();
-        Format::escapeJsonString(&bareString.value, &mut quoted);
-
-        let lineLength: u64 = line.length();
-        let column: String = lineLength.toString();
-
-        let mut message: String = String::create("invalid type: string ");
-        message.push(&quoted);
-        message.pushStr(", expected struct StdinRecord at line 1 column ");
-        message.push(&column);
-
-        return Result::ERROR(Format::ndjsonParseError(&message));
+      if (byte == '.' as u8 || byte == 'e' as u8 || byte == 'E' as u8) {
+        isFloat = true;
+        break;
       }
 
-      let trailingMessage: String = String::create("trailing characters at line 1 column 1");
-      return Result::ERROR(Format::ndjsonParseError(&trailingMessage));
+      index += 1;
     }
 
-    if (firstByte != '{' as u8) {
-      let expectedMessage: String = String::create("expected value at line 1 column 1");
-      return Result::ERROR(Format::ndjsonParseError(&expectedMessage));
+    let mut message: String = String::new();
+
+    if (isFloat) {
+      message.pushStr("floating point `");
+    } else {
+      message.pushStr("integer `");
     }
 
-    let mut path: Option<String> = Option::NONE;
-    let mut text: Option<String> = Option::NONE;
-    let mut cursor: u64 = 0;
+    message.push(text);
+    message.pushStr("`");
+    return message;
+  }
+
+  function describeString(text: &String): String {
+    let mut quoted: String = String::new();
+    Format::escapeJsonString(text, &mut quoted);
+
+    let mut message: String = String::create("string ");
+    message.push(&quoted);
+    return message;
+  }
+
+  /// Describes a JSON value the way `serde`'s `Unexpected` enum's `Display`
+  /// impl does, for every `invalid type: <this>, ...` message `serde_json`
+  /// reports: `null` bare, `` boolean `true` ``, `` integer `123` `` or
+  /// `` floating point `1.5` ``, and `string "text"` with the same escaping
+  /// `Format::escapeJsonString` already produces for output. `ARRAY`/`OBJECT`
+  /// never reach this: `parseStdinRequest` gives arrays their own
+  /// `invalid length` message, and a top-level object is the success path.
+  function describeJsonValueKind(kind: &JsonValueKind): String {
+    return match (kind) {
+      JsonValueKind::NULL -> String::create("null"),
+      JsonValueKind::BOOL(value) -> Format::describeBool(value),
+      JsonValueKind::NUMBER(text) -> Format::describeNumber(&text),
+      JsonValueKind::STRING(text) -> Format::describeString(&text),
+      JsonValueKind::ARRAY(_) -> String::create("sequence"),
+      JsonValueKind::OBJECT(_) -> String::create("map"),
+    };
+  }
+
+  /// `None` when `value` is not a JSON string, for the field-level
+  /// `invalid type: ..., expected a string` check.
+  function jsonStringField(value: &JsonValue): Option<String> {
+    return match (&value.kind) {
+      JsonValueKind::STRING(text) -> Option::SOME(text.clone()),
+      _ -> Option::NONE,
+    };
+  }
+
+  function skipAsciiWhitespaceFrom(line: &String, start: u64): u64 {
+    let mut cursor: u64 = start;
 
     while (cursor < line.length()) {
       let Option::SOME(byte) = line.byteAt(cursor) else {
         break;
       };
 
-      if (byte != '"' as u8) {
-        cursor += 1;
-        continue;
+      if (byte != ' ' as u8 && byte != '\t' as u8 && byte != '\n' as u8 && byte != '\r' as u8) {
+        break;
       }
 
-      let Option::SOME(key) = Format::readJsonString(line, cursor) else {
-        return Result::ERROR(Format::ndjsonEofWhileParsingAString(line));
+      cursor += 1;
+    }
+
+    return cursor;
+  }
+
+  /// Maps a parsed top-level JSON object onto the two fields the protocol
+  /// defines, matching a `serde`-derived struct's field visitor: fields are
+  /// read in JSON order, a wrong-typed occurrence errors immediately (even if
+  /// a correctly-typed occurrence of the same key follows), and a later
+  /// correctly-typed occurrence of the same key silently overwrites an
+  /// earlier one. Any other key (including one nested inside another object,
+  /// like `"meta":{"path":"evil.ign"}`) is ignored, the same way an unknown
+  /// field is for a struct without `deny_unknown_fields`.
+  function stdinRequestFromObject(
+    line: &String,
+    objectValue: &JsonValue,
+    entries: &Vector<JsonObjectEntry>
+  ): Result<Format::StdinRequest, String> {
+    let mut path: Option<String> = Option::NONE;
+    let mut text: Option<String> = Option::NONE;
+    let mut index: u64 = 0;
+
+    while (index < entries.length()) {
+      let Option::SOME(entry) = entries.get(index) else {
+        index += 1;
+        continue;
       };
 
-      cursor = key.nextIndex;
+      let isPathKey: boolean = entry.key.equals("path");
+      let isTextKey: boolean = entry.key.equals("text");
 
-      while (cursor < line.length()) {
-        let Option::SOME(candidate) = line.byteAt(cursor) else {
-          break;
+      if (isPathKey || isTextKey) {
+        let Option::SOME(stringValue) = Format::jsonStringField(&entry.value) else {
+          let description: String = Format::describeJsonValueKind(&entry.value.kind);
+          return Result::ERROR(Format::ndjsonInvalidFieldType(&description, entry.value.endOffset));
         };
 
-        if (candidate == ':' as u8) {
-          cursor += 1;
-          break;
+        if (isPathKey) {
+          path = Option::SOME(stringValue);
+        } else {
+          text = Option::SOME(stringValue);
         }
-
-        if (candidate == ' ' as u8 || candidate == '\t' as u8) {
-          cursor += 1;
-          continue;
-        }
-
-        break;
       }
 
-      while (cursor < line.length()) {
-        let Option::SOME(candidate) = line.byteAt(cursor) else {
-          break;
-        };
-
-        if (candidate == ' ' as u8 || candidate == '\t' as u8) {
-          cursor += 1;
-          continue;
-        }
-
-        break;
-      }
-
-      let Option::SOME(nextByte) = line.byteAt(cursor) else {
-        break;
-      };
-
-      if (nextByte != '"' as u8) {
-        continue;
-      }
-
-      let Option::SOME(value) = Format::readJsonString(line, cursor) else {
-        return Result::ERROR(Format::ndjsonEofWhileParsingAString(line));
-      };
-
-      cursor = value.nextIndex;
-
-      if (key.value.equals("path")) {
-        path = Option::SOME(value.value.clone());
-      } else if (key.value.equals("text")) {
-        text = Option::SOME(value.value.clone());
-      }
+      index += 1;
     }
 
     let Option::SOME(pathValue) = path else {
-      return Result::ERROR(Format::ndjsonMissingField(line, "path"));
+      return Result::ERROR(Format::ndjsonMissingField("path", objectValue.endOffset));
     };
 
     let Option::SOME(textValue) = text else {
-      return Result::ERROR(Format::ndjsonMissingField(line, "text"));
+      return Result::ERROR(Format::ndjsonMissingField("text", objectValue.endOffset));
     };
+
+    let afterObject: u64 = Format::skipAsciiWhitespaceFrom(line, objectValue.endOffset);
+    let lineLength: u64 = line.length();
+
+    if (afterObject != lineLength) {
+      return Result::ERROR(Format::ndjsonTrailingCharacters(afterObject + 1));
+    }
 
     return Result::OK(Format::StdinRequest { path: pathValue, text: textValue });
   }
 
-  record JsonStringRead {
-    public value: String;
-    public nextIndex: u64;
-  }
+  /// Maps a parsed top-level JSON array onto the two fields the protocol
+  /// defines. A derived `serde` struct accepts a sequence positionally (index
+  /// 0 is the first declared field, `path`; index 1 is `text`) as well as a
+  /// map, so a 2-element array is not an `invalid length` error the way any
+  /// other length is: confirmed against the host with `["a","b"]`, which
+  /// succeeds with `path: "a"`, `text: "b"`.
+  function stdinRequestFromArray(
+    line: &String,
+    arrayValue: &JsonValue,
+    items: &Vector<JsonValue>
+  ): Result<Format::StdinRequest, String> {
+    let itemCount: u64 = items.length();
 
-  /// Decodes the JSON string starting at the `"` on `startIndex`.
-  function readJsonString(line: &String, startIndex: u64): Option<Format::JsonStringRead> {
-    let Option::SOME(openQuote) = line.byteAt(startIndex) else {
-      return Option::NONE;
+    if (itemCount != 2) {
+      return Result::ERROR(Format::ndjsonInvalidLength(itemCount, arrayValue.endOffset));
+    }
+
+    let Option::SOME(pathItem) = items.get(0) else {
+      return Result::ERROR(Format::ndjsonInvalidLength(itemCount, arrayValue.endOffset));
     };
 
-    if (openQuote != '"' as u8) {
-      return Option::NONE;
+    let Option::SOME(textItem) = items.get(1) else {
+      return Result::ERROR(Format::ndjsonInvalidLength(itemCount, arrayValue.endOffset));
+    };
+
+    let Option::SOME(pathValue) = Format::jsonStringField(pathItem) else {
+      return Result::ERROR(Format::ndjsonInvalidFieldTypeResult(&pathItem.kind, pathItem.endOffset));
+    };
+
+    let Option::SOME(textValue) = Format::jsonStringField(textItem) else {
+      return Result::ERROR(Format::ndjsonInvalidFieldTypeResult(&textItem.kind, textItem.endOffset));
+    };
+
+    let afterArray: u64 = Format::skipAsciiWhitespaceFrom(line, arrayValue.endOffset);
+    let lineLength: u64 = line.length();
+
+    if (afterArray != lineLength) {
+      return Result::ERROR(Format::ndjsonTrailingCharacters(afterArray + 1));
     }
 
-    let mut value: String = String::new();
-    let mut cursor: u64 = startIndex + 1;
-
-    while (cursor < line.length()) {
-      let Option::SOME(byte) = line.byteAt(cursor) else {
-        return Option::NONE;
-      };
-
-      if (byte == '"' as u8) {
-        return Option::SOME(Format::JsonStringRead { value: value, nextIndex: cursor + 1 });
-      }
-
-      if (byte != '\\' as u8) {
-        value.pushByte(byte);
-        cursor += 1;
-        continue;
-      }
-
-      let Option::SOME(escaped) = line.byteAt(cursor + 1) else {
-        return Option::NONE;
-      };
-
-      if (escaped == 'n' as u8) {
-        value.pushByte('\n' as u8);
-      } else if (escaped == 't' as u8) {
-        value.pushByte('\t' as u8);
-      } else if (escaped == 'r' as u8) {
-        value.pushByte('\r' as u8);
-      } else if (escaped == 'b' as u8) {
-        value.pushByte(8);
-      } else if (escaped == 'f' as u8) {
-        value.pushByte(12);
-      } else if (escaped == 'u' as u8) {
-        let Option::SOME(decoded) = Format::readJsonUnicodeEscape(line, cursor + 2) else {
-          return Option::NONE;
-        };
-
-        value.pushChar(decoded);
-        cursor += 6;
-        continue;
-      } else {
-        value.pushByte(escaped);
-      }
-
-      cursor += 2;
-    }
-
-    return Option::NONE;
+    return Result::OK(Format::StdinRequest { path: pathValue, text: textValue });
   }
 
-  /// Decodes the four hex digits of a `\uXXXX` escape. Surrogate pairs are not
-  /// recombined: the protocol's producer emits plain UTF-8 for anything above
-  /// the basic plane.
-  function readJsonUnicodeEscape(line: &String, startIndex: u64): Option<char> {
-    let mut value: u32 = 0;
-    let mut index: u64 = 0;
-
-    while (index < 4) {
-      let Option::SOME(byte) = line.byteAt(startIndex + index) else {
-        return Option::NONE;
-      };
-
-      let Option::SOME(digit) = Format::hexDigitValue(byte) else {
-        return Option::NONE;
-      };
-
-      value = value * 16 + digit;
-      index += 1;
-    }
-
-    return Option::SOME(value as char);
+  function ndjsonInvalidFieldTypeResult(kind: &JsonValueKind, endOffset: u64): String {
+    let description: String = Format::describeJsonValueKind(kind);
+    return Format::ndjsonInvalidFieldType(&description, endOffset);
   }
 
-  function hexDigitValue(byte: u8): Option<u32> {
-    if (byte >= '0' as u8 && byte <= '9' as u8) {
-      return Option::SOME((byte - ('0' as u8)) as u32);
-    }
+  /// Reads one NDJSON request line through a real JSON parse tree
+  /// (`Json::parse`) rather than a quote scanner, so a nested object cannot
+  /// leak a key into the top-level result and a malformed line is rejected
+  /// the way `serde_json::from_str::<StdinRecord>` rejects it.
+  ///
+  /// Every message mirrors the host's exact `serde_json` wording, checked
+  /// against the host binary for each shape below. The column `serde_json`
+  /// reports is the byte offset (1-based) immediately after whichever token
+  /// it was inspecting when it gave up:
+  ///
+  /// - A parse failure inside `Json::parse` (unterminated string, unterminated
+  ///   object) already carries `serde`'s "EOF while parsing ..." wording, at
+  ///   the full line length: nothing is left to read.
+  /// - A wrong-typed top-level scalar (`null`, a number, a bare string) or a
+  ///   wrong-typed field value (`"text":1`) is `invalid type: ...`, at the
+  ///   position right after that value's own token — deserializing into a
+  ///   `String` or a `StdinRecord` fails on sight, before the rest of the
+  ///   line is even looked at.
+  /// - A top-level array is `invalid length K, ..., expected ... with 2
+  ///   elements`, at the position right after the array's closing `]`:
+  ///   `serde`'s struct visitor also accepts a 2-element sequence, so an
+  ///   array is only rejected once its length is known.
+  /// - `missing field` and `trailing characters` are only reachable once the
+  ///   object as a whole parsed and every present field had the right type;
+  ///   their column is the position right after the object's closing `}` (for
+  ///   `missing field`) or right after the first non-whitespace byte that
+  ///   follows it (for `trailing characters`).
+  function parseStdinRequest(line: &String): Result<Format::StdinRequest, String> {
+    let value: JsonValue = match (Json::parse(line)) {
+      Result::OK(parsed) -> parsed,
+      Result::ERROR(message) -> {
+        return Result::ERROR(Format::ndjsonParseError(&message));
+      },
+    };
 
-    if (byte >= 'a' as u8 && byte <= 'f' as u8) {
-      return Option::SOME((byte - ('a' as u8)) as u32 + 10);
-    }
+    return match (&value.kind) {
+      JsonValueKind::OBJECT(entries) -> Format::stdinRequestFromObject(line, &value, &entries),
+      JsonValueKind::ARRAY(items) -> Format::stdinRequestFromArray(line, &value, &items),
+      _ -> Result::ERROR(Format::ndjsonInvalidTypeResult(&value.kind, value.endOffset)),
+    };
+  }
 
-    if (byte >= 'A' as u8 && byte <= 'F' as u8) {
-      return Option::SOME((byte - ('A' as u8)) as u32 + 10);
-    }
-
-    return Option::NONE;
+  /// `match` arm blocks that `let`-bind a name and then `return` it in the
+  /// same block fail to resolve that name (repro
+  /// "match-arm-let-return-scoping", also worked around in
+  /// `ignis/config/project.ign`'s `readToml`), so the arms above stay single
+  /// expressions and the `let`s move into these plain functions instead.
+  function ndjsonInvalidTypeResult(kind: &JsonValueKind, endOffset: u64): String {
+    let description: String = Format::describeJsonValueKind(kind);
+    return Format::ndjsonInvalidType(&description, endOffset);
   }
 
   function escapeJsonString(value: &String, output: &mut String): void {

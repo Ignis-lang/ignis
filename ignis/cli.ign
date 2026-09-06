@@ -282,6 +282,90 @@ function cliMissingValue(flag: str, expected: str): String {
   return `error: ${flag} requires ${expected}`;
 }
 
+/// `ESC`. Ignis string literals have no `\x`/`\u{}` escape, so every ANSI
+/// code below is built one `char` at a time from this rather than embedting
+/// a raw control byte in the source.
+function ansiEsc(): char {
+  return '\u{1b}';
+}
+
+function pushAnsiBold(output: &mut String, text: str): void {
+  let mut outputRef: &mut String = output;
+  outputRef.pushChar(ansiEsc());
+  outputRef.pushStr("[1m");
+  outputRef.pushStr(text);
+  outputRef.pushChar(ansiEsc());
+  outputRef.pushStr("[0m");
+}
+
+function pushAnsiYellow(output: &mut String, text: str): void {
+  let mut outputRef: &mut String = output;
+  outputRef.pushChar(ansiEsc());
+  outputRef.pushStr("[33m");
+  outputRef.pushStr(text);
+  outputRef.pushChar(ansiEsc());
+  outputRef.pushStr("[0m");
+}
+
+/// Reconstructs the exact `clap`-generated conflict error the host CLI
+/// prints. The host's `Cli` is `#[command(color = ColorChoice::Always)]`, so
+/// this always carries ANSI codes, checked byte-for-byte against the host
+/// binary, even though nothing here runs in a TTY.
+///
+/// `clap` names whichever argument was already present when the conflicting
+/// one was parsed as the "subject" (`subject`/`usageToken` here); the other
+/// argument (`other`) is the one that triggered the conflict. `usageToken` is
+/// the token the `Usage:` line shows for the subject; `boldUsageToken` is
+/// false only when the subject is the `FILE_PATHS` positional, which clap
+/// shows unbolded there (unlike every named flag, which it bolds).
+/// `usageRest` is the plain text clap prints after `usageToken`.
+function clapFmtConflictError(
+  subject: str,
+  other: str,
+  usageToken: str,
+  boldUsageToken: boolean,
+  usageRest: str
+): String {
+  let mut message: String = String::new();
+
+  message.pushChar(ansiEsc());
+  message.pushStr("[1m");
+  message.pushChar(ansiEsc());
+  message.pushStr("[31merror:");
+  message.pushChar(ansiEsc());
+  message.pushStr("[0m the argument '");
+  pushAnsiYellow(&mut message, subject);
+  message.pushStr("' cannot be used with '");
+  pushAnsiYellow(&mut message, other);
+  message.pushStr("'\n\n");
+  message.pushChar(ansiEsc());
+  message.pushStr("[1m");
+  message.pushChar(ansiEsc());
+  message.pushStr("[4mUsage:");
+  message.pushChar(ansiEsc());
+  message.pushStr("[0m ");
+  pushAnsiBold(&mut message, "ignis fmt");
+  message.pushStr(" ");
+
+  if (boldUsageToken) {
+    pushAnsiBold(&mut message, usageToken);
+  } else {
+    message.pushStr(usageToken);
+  }
+
+  let usageRestData: *mut u8 = usageRest as *mut u8;
+
+  if (*usageRestData != 0) {
+    message.pushStr(" ");
+    message.pushStr(usageRest);
+  }
+
+  message.pushStr("\n\nFor more information, try '");
+  pushAnsiBold(&mut message, "--help");
+  message.pushStr("'.");
+  return message;
+}
+
 /// Parses a command line into the options every subcommand reads.
 ///
 /// `arguments` is the process argument vector, so the first entry is the
@@ -300,6 +384,8 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
   }
 
   let mut options: CliOptions = CliOptions::create(command);
+  let mut sawFmtUseTabsFlag: boolean = false;
+  let mut sawFmtSpacesFlag: boolean = false;
 
   while (index < arguments.length()) {
     let Option::SOME(argument) = arguments.get(index) else {
@@ -479,6 +565,16 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
     }
 
     if (options.isFmtMode() && argument.equals("--project")) {
+      if (options.fmtStdinJson) {
+        return Result::ERROR(clapFmtConflictError(
+          "--stdin-json",
+          "--project <PROJECT>",
+          "--stdin-json",
+          true,
+          "[FILE_PATHS]...",
+        ));
+      }
+
       let Option::SOME(value) = arguments.get(index + 1) else {
         return Result::ERROR(cliMissingValue("--project", "a directory"));
       };
@@ -533,12 +629,22 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
     }
 
     if (options.isFmtMode() && argument.equals("--use-tabs")) {
+      if (sawFmtSpacesFlag) {
+        return Result::ERROR(clapFmtConflictError("--spaces", "--use-tabs", "--spaces", true, "<FILE_PATHS>..."));
+      }
+
+      sawFmtUseTabsFlag = true;
       options.fmtUseTabs = Option::SOME(true);
       index += 1;
       continue;
     }
 
     if (options.isFmtMode() && argument.equals("--spaces")) {
+      if (sawFmtUseTabsFlag) {
+        return Result::ERROR(clapFmtConflictError("--use-tabs", "--spaces", "--use-tabs", true, "<FILE_PATHS>..."));
+      }
+
+      sawFmtSpacesFlag = true;
       options.fmtUseTabs = Option::SOME(false);
       index += 1;
       continue;
@@ -551,6 +657,20 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
     }
 
     if (options.isFmtMode() && argument.equals("--stdin-json")) {
+      if (let Option::SOME(_) = &options.fmtProject) {
+        return Result::ERROR(clapFmtConflictError(
+          "--project <PROJECT>",
+          "--stdin-json",
+          "--project",
+          true,
+          "<PROJECT> [FILE_PATHS]...",
+        ));
+      }
+
+      if (options.fmtFilePaths.length() > 0) {
+        return Result::ERROR(clapFmtConflictError("[FILE_PATHS]...", "--stdin-json", "<FILE_PATHS>...", false, ""));
+      }
+
       options.fmtStdinJson = true;
       index += 1;
       continue;
@@ -581,6 +701,16 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
     }
 
     if (options.isFmtMode()) {
+      if (options.fmtStdinJson) {
+        return Result::ERROR(clapFmtConflictError(
+          "--stdin-json",
+          "[FILE_PATHS]...",
+          "--stdin-json",
+          true,
+          "[FILE_PATHS]...",
+        ));
+      }
+
       options.fmtFilePaths.push(argument.clone());
       index += 1;
       continue;
@@ -1110,4 +1240,145 @@ function cliRejectsFmtFlagsOutsideFmtMode(): void {
   cliPush(&mut arguments, "--check");
 
   Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: unknown argument: --check");
+}
+
+/// Strips `ESC [ ... <letter>` ANSI CSI sequences, keeping everything else
+/// (including whitespace and layout) so a stripped conflict message still
+/// reads the way the exact `clap`-generated text does, just without color.
+/// Used only to assert wording; the full-fidelity match with the host,
+/// escape codes included, is verified by running both binaries in the PR.
+function stripAnsi(text: &String): String {
+  let mut result: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    let Option::SOME(byte) = text.byteAt(index) else {
+      break;
+    };
+
+    if (byte == 27) {
+      index += 1;
+
+      while (index < text.length()) {
+        let Option::SOME(next) = text.byteAt(index) else {
+          break;
+        };
+
+        index += 1;
+
+        if ((next >= 'a' as u8 && next <= 'z' as u8) || (next >= 'A' as u8 && next <= 'Z' as u8)) {
+          break;
+        }
+      }
+
+      continue;
+    }
+
+    result.pushByte(byte);
+    index += 1;
+  }
+
+  return result;
+}
+
+/// `--use-tabs` then `--spaces`: `clap` names whichever flag it saw first as
+/// the subject. Matches the host's exact wording (color codes included,
+/// verified by running the host binary on this exact command line).
+@test
+function cliRejectsUseTabsWithSpaces(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--spaces");
+  cliPush(&mut arguments, "a.ign");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--use-tabs' cannot be used with '--spaces'\n\nUsage: ignis fmt --use-tabs <FILE_PATHS>...\n\nFor more information, try '--help'."
+  );
+}
+
+/// The reverse order swaps which flag `clap` names as the subject.
+@test
+function cliRejectsSpacesWithUseTabs(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--spaces");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "a.ign");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--spaces' cannot be used with '--use-tabs'\n\nUsage: ignis fmt --spaces <FILE_PATHS>...\n\nFor more information, try '--help'."
+  );
+}
+
+/// `--stdin-json` before an explicit file: matches the host's exact wording.
+@test
+function cliRejectsStdinJsonWithAnExplicitFile(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--stdin-json");
+  cliPush(&mut arguments, "a.ign");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--stdin-json' cannot be used with '[FILE_PATHS]...'\n\nUsage: ignis fmt --stdin-json [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// The reverse order swaps the subject and drops `--stdin-json` from usage.
+@test
+function cliRejectsAnExplicitFileWithStdinJson(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "a.ign");
+  cliPush(&mut arguments, "--stdin-json");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '[FILE_PATHS]...' cannot be used with '--stdin-json'\n\nUsage: ignis fmt <FILE_PATHS>...\n\nFor more information, try '--help'."
+  );
+}
+
+/// `--stdin-json` before `--project`: matches the host's exact wording.
+@test
+function cliRejectsStdinJsonWithProject(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--stdin-json");
+  cliPush(&mut arguments, "--project");
+  cliPush(&mut arguments, "demo");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--stdin-json' cannot be used with '--project <PROJECT>'\n\nUsage: ignis fmt --stdin-json [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// The reverse order swaps the subject and changes what usage shows.
+@test
+function cliRejectsProjectWithStdinJson(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--project");
+  cliPush(&mut arguments, "demo");
+  cliPush(&mut arguments, "--stdin-json");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--project <PROJECT>' cannot be used with '--stdin-json'\n\nUsage: ignis fmt --project <PROJECT> [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
 }
