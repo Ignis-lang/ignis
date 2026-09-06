@@ -3460,6 +3460,31 @@ impl<'a> LoweringContext<'a> {
 
   // === Records and enums lowering ===
 
+  /// Whether this place is reached through a reference or pointer rather than out of
+  /// storage this function owns.
+  ///
+  /// Auto-deref lowers `borrowed.field` into a `FieldAccess` over a `Dereference` of the
+  /// reference, so the base chain is the only record that a borrow was crossed; neither
+  /// the field access nor the dereference's own type says so. Mirrors the ownership
+  /// checker's `field_base_is_borrowed`.
+  fn base_is_behind_reference(
+    &self,
+    base: HIRId,
+  ) -> bool {
+    let node = self.hir.get(base);
+
+    if matches!(self.types.get(&node.type_id), Type::Pointer { .. } | Type::Reference { .. }) {
+      return true;
+    }
+
+    match &node.kind {
+      HIRKind::Dereference(inner) => self.base_is_behind_reference(*inner),
+      HIRKind::FieldAccess { base: inner_base, .. } => self.base_is_behind_reference(*inner_base),
+      HIRKind::Index { base: inner_base, .. } => self.base_is_behind_reference(*inner_base),
+      _ => false,
+    }
+  }
+
   fn lower_field_access(
     &mut self,
     base: HIRId,
@@ -3472,7 +3497,13 @@ impl<'a> LoweringContext<'a> {
 
     // Check if base is already a pointer/reference type
     let base_is_ptr = matches!(self.types.get(&base_ty), Type::Pointer { .. } | Type::Reference { .. });
-    let should_mark_field_moved = !base_is_ptr && self.types.needs_drop_with_defs(&field_ty, self.defs);
+
+    // Marking the field moved writes into the place the field pointer names. That is
+    // only the function's own storage when the base is reached without going through a
+    // reference: a borrowed base names storage someone else still owns and still drops,
+    // and marking it there would make the owner skip a drop it is responsible for.
+    let should_mark_field_moved =
+      !self.base_is_behind_reference(base) && self.types.needs_drop_with_defs(&field_ty, self.defs);
 
     let base_ptr_ty = self.types.pointer(base_ty, false);
     let base_ptr = if base_is_ptr {

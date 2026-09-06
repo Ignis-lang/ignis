@@ -1,0 +1,43 @@
+// e2e: std
+import Io from "std::io";
+import String from "std::string";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+enum Kind {
+  TRACKED(Tracked),
+}
+
+record Holder {
+  public kind: Kind;
+  public label: String;
+}
+
+function makeHolder(): Holder {
+  return Holder { kind: Kind::TRACKED(Tracked { id: 1 }), label: String::create("holder") };
+}
+
+function widthOf(kind: &Kind): i32 {
+  return match (kind) {
+    Kind::TRACKED(_) -> 0,
+  };
+}
+
+function main(): i32 {
+  let mut holder: Holder = makeHolder();
+
+  let taken: Kind = holder.kind;
+
+  holder.kind = Kind::TRACKED(Tracked { id: 2 });
+
+  Io::println("reassigned");
+
+  return widthOf(&taken) + widthOf(&holder.kind);
+}

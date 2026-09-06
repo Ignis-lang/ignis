@@ -386,6 +386,49 @@ export namespace LirLowering {
     return false;
   }
 
+  /// Whether this place is reached through a reference or pointer rather than out of
+  /// storage this function owns.
+  ///
+  /// Auto-deref lowers `borrowed.field` into a `FieldAccess` over a `Dereference` of the
+  /// reference, so the base chain is the only record that a borrow was crossed; neither
+  /// the field access nor the dereference's own type says so. Mirrors the oracle's
+  /// `base_is_behind_reference`.
+  function baseIsBehindReference(
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    hirId: Hir::HirId,
+  ): boolean {
+    let Option::SOME(node) = hirStore.get(hirId) else {
+      return false;
+    };
+
+    let nodeType: Analyzer::TypeId = node.typeId;
+    let mut innerOpt: Option<Hir::HirId> = Option::NONE;
+
+    match (&node.kind) {
+      Hir::HirKind::Dereference(inner) -> {
+        innerOpt = Option::SOME(inner);
+      },
+      Hir::HirKind::FieldAccess(fieldNode) -> {
+        innerOpt = Option::SOME(fieldNode.base);
+      },
+      Hir::HirKind::Index(indexNode) -> {
+        innerOpt = Option::SOME(indexNode.base);
+      },
+      _ -> {},
+    };
+
+    if (LirLowering::isPointerLikeType(typeStore, nodeType)) {
+      return true;
+    }
+
+    let Option::SOME(inner) = innerOpt else {
+      return false;
+    };
+
+    return LirLowering::baseIsBehindReference(typeStore, hirStore, inner);
+  }
+
   /// Allocates an anonymous slot for a value the next instruction needs an
   /// address for, the oracle's synthetic local.
   function allocSyntheticLocal(
@@ -1684,16 +1727,13 @@ export namespace LirLowering {
       },
       Hir::HirKind::FieldAccess(fieldNode) -> {
         // Reading a droppable field by value out of an owned base moves it:
-        // the base's drop must skip the field afterwards. Through a pointer or
-        // reference the base is borrowed and nothing moves. Mirrors the
-        // oracle's `should_mark_field_moved`.
-        let mut baseIsPointer: boolean = false;
-
-        if (let Option::SOME(baseNode) = hirStore.get(fieldNode.base)) {
-          baseIsPointer = LirLowering::isPointerLikeType(typeStore, baseNode.typeId);
-        }
-
-        let marksFieldMoved: boolean = !baseIsPointer && Borrowck::needsDropType(defStore, typeStore, nodeType);
+        // the base's drop must skip the field afterwards. Marking writes into the
+        // place the field pointer names, so it is only correct when the base is
+        // reached without going through a reference; a borrowed base names storage
+        // someone else still owns and still drops. Mirrors the oracle's
+        // `should_mark_field_moved`.
+        let baseIsBorrowed: boolean = LirLowering::baseIsBehindReference(typeStore, hirStore, fieldNode.base);
+        let marksFieldMoved: boolean = !baseIsBorrowed && Borrowck::needsDropType(defStore, typeStore, nodeType);
 
         let basePtr: Lir::Operand = LirLowering::lowerBasePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, fieldNode.base);
 

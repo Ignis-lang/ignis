@@ -1,0 +1,52 @@
+// e2e: std
+import Io from "std::io";
+import String from "std::string";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+enum Kind {
+  TRACKED(Tracked),
+}
+
+record Inner {
+  public kind: Kind;
+  public sibling: Kind;
+}
+
+record Outer {
+  public inner: Inner;
+  public label: String;
+}
+
+function makeOuter(): Outer {
+  return Outer {
+    inner: Inner {
+      kind: Kind::TRACKED(Tracked { id: 1 }),
+      sibling: Kind::TRACKED(Tracked { id: 2 }),
+    },
+    label: String::create("outer"),
+  };
+}
+
+function widthOf(kind: &Kind): i32 {
+  return match (kind) {
+    Kind::TRACKED(_) -> 0,
+  };
+}
+
+function main(): i32 {
+  let outer: Outer = makeOuter();
+
+  let taken: Kind = outer.inner.kind;
+
+  Io::println("moved");
+
+  return widthOf(&taken);
+}

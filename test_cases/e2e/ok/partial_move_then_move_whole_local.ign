@@ -1,0 +1,68 @@
+// e2e: std
+import Io from "std::io";
+import String from "std::string";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+enum Kind {
+  TRACKED(Tracked),
+}
+
+record Holder {
+  public kind: Kind;
+  public name: String;
+}
+
+function take(kind: Kind): void {
+  let _taken: Kind = kind;
+}
+
+function consume(holder: Holder): void {
+  Io::println(holder.name.toStr());
+
+  let _consumed: Holder = holder;
+}
+
+/// The moved-out field's flag has to survive every later whole-value copy, or one of
+/// these owners drops the payload a second time.
+function chainedMoves(): void {
+  let holder: Holder = Holder {
+    kind: Kind::TRACKED(Tracked { id: 1 }),
+    name: String::create("chained"),
+  };
+
+  take(holder.kind);
+
+  let other: Holder = holder;
+  let _third: Holder = other;
+}
+
+function passedByValue(): void {
+  let holder: Holder = Holder {
+    kind: Kind::TRACKED(Tracked { id: 2 }),
+    name: String::create("byvalue"),
+  };
+
+  take(holder.kind);
+
+  consume(holder);
+}
+
+function main(): i32 {
+  chainedMoves();
+
+  Io::println("chained done");
+
+  passedByValue();
+
+  Io::println("byvalue done");
+
+  return 0;
+}

@@ -2572,6 +2572,20 @@ impl<'a> CEmitter<'a> {
     writeln!(self.output).unwrap();
   }
 
+  /// Mark the place at `expr` as already dropped, so any later drop of it is a no-op.
+  ///
+  /// This is how the compiler represents a partial move. Moving a droppable field out of
+  /// a local does not cancel the local's drop: the local is still dropped at scope end,
+  /// and the per-place `__ignis_drop_state` flags this writes are what keep the moved
+  /// field from being freed a second time while its siblings are still freed once.
+  /// Reassigning the field overwrites the flag along with the value, so the field becomes
+  /// droppable again, and the flags travel with the bytes when the whole local is copied
+  /// or moved on.
+  ///
+  /// For that to hold, this must mark exactly the places `emit_field_drops` would drop.
+  /// A nominal carrying the Drop trait owns a flag of its own and stops the walk; anything
+  /// else is opened up — record fields by index, enum payloads through a switch on the tag,
+  /// because that is the only variant whose payload the drop side would touch.
   fn emit_uninitialized_drop_state(
     &mut self,
     expr: &str,
@@ -2602,11 +2616,73 @@ impl<'a> CEmitter<'a> {
           }
         }
       },
-      Type::Enum(def_id) if self.record_has_drop_trait(def_id) => {
-        writeln!(self.output, "    {}.__ignis_drop_state = 1;", expr).unwrap();
+      Type::Enum(def_id) => {
+        if self.record_has_drop_trait(def_id) {
+          writeln!(self.output, "    {}.__ignis_drop_state = 1;", expr).unwrap();
+          return;
+        }
+
+        self.emit_uninitialized_enum_variant_state(expr, def_id);
       },
       _ => {},
     }
+  }
+
+  /// Mark the live variant's droppable payloads as already dropped.
+  ///
+  /// The tag is only known at run time, so this mirrors `emit_enum_variant_drops`: the
+  /// same switch over the same variants, reaching the same payload places, marking each
+  /// instead of dropping it.
+  fn emit_uninitialized_enum_variant_state(
+    &mut self,
+    expr: &str,
+    def_id: DefinitionId,
+  ) {
+    let variants: Vec<_> = {
+      let def = self.defs.get(&def_id);
+      match &def.kind {
+        DefinitionKind::Enum(enum_definition) => enum_definition.variants.clone(),
+        _ => return,
+      }
+    };
+
+    let has_droppable_variant = variants.iter().any(|variant| {
+      variant
+        .payload
+        .iter()
+        .any(|payload_ty| self.types.needs_drop_with_defs(payload_ty, self.defs))
+    });
+
+    if !has_droppable_variant {
+      return;
+    }
+
+    writeln!(self.output, "    switch (({}).tag) {{", expr).unwrap();
+
+    for variant in &variants {
+      let droppable_fields: Vec<(usize, TypeId)> = variant
+        .payload
+        .iter()
+        .enumerate()
+        .filter(|(_, payload_ty)| self.types.needs_drop_with_defs(payload_ty, self.defs))
+        .map(|(index, payload_ty)| (index, *payload_ty))
+        .collect();
+
+      if droppable_fields.is_empty() {
+        continue;
+      }
+
+      writeln!(self.output, "    case {}:", variant.tag_value).unwrap();
+
+      for (field_index, field_ty) in droppable_fields {
+        let field_expr = format!("{}.payload.variant_{}.field_{}", expr, variant.tag_value, field_index);
+        self.emit_uninitialized_drop_state(&field_expr, field_ty);
+      }
+
+      writeln!(self.output, "    break;").unwrap();
+    }
+
+    writeln!(self.output, "    }}").unwrap();
   }
 
   fn emit_temps(
