@@ -1195,22 +1195,12 @@ export namespace Format {
       state.cursor += 1;
     }
 
-    // Cloned through a reference, not moved: `state` is a bound local that
-    // still drops normally at scope exit, so moving `path`/`text` out of it
-    // double-frees their backing storage on this compiler (repro
-    // "field-move-double-free").
-    let pathValue: String = match (&state.path) {
-      Option::SOME(value) -> value.clone(),
-      Option::NONE -> {
-        return Result::ERROR(Format::ndjsonMissingField("path", state.cursor));
-      },
+    let Option::SOME(pathValue) = state.path else {
+      return Result::ERROR(Format::ndjsonMissingField("path", state.cursor));
     };
 
-    let textValue: String = match (&state.text) {
-      Option::SOME(value) -> value.clone(),
-      Option::NONE -> {
-        return Result::ERROR(Format::ndjsonMissingField("text", state.cursor));
-      },
+    let Option::SOME(textValue) = state.text else {
+      return Result::ERROR(Format::ndjsonMissingField("text", state.cursor));
     };
 
     let afterObject: u64 = Format::skipAsciiWhitespaceFrom(line, state.cursor);

@@ -865,11 +865,7 @@ function parseJsonValue(source: &String, startIndex: u64, depth: u64): Result<Js
   if (byte == '"' as u8) {
     let read: JsonStringRead = readString(source, index)!;
 
-    // `.clone()`, not a move: moving `value` out of the bound local `read`
-    // while `read` itself still drops normally at scope exit double-frees
-    // the string's backing storage on this compiler (repro
-    // "field-move-double-free").
-    return Result::OK(JsonValue { kind: JsonValueKind::STRING(read.value.clone()), endOffset: read.nextIndex });
+    return Result::OK(JsonValue { kind: JsonValueKind::STRING(read.value), endOffset: read.nextIndex });
   }
 
   if (byte == '{' as u8) {
@@ -949,11 +945,7 @@ function parseJsonObject(
     }
 
     let key: JsonStringRead = readString(source, cursor)!;
-
-    // `.clone()` for the same reason as the `STRING` case above: `key` is a
-    // bound local that still drops at scope exit (repro
-    // "field-move-double-free").
-    let keyText: String = key.value.clone();
+    let keyText: String = key.value;
     cursor = Json::skipWhitespace(source, key.nextIndex);
 
     let Option::SOME(colon) = source.byteAt(cursor) else {
