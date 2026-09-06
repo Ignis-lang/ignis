@@ -1,14 +1,22 @@
+import CType, LibC from "std::libc";
 import Env from "std::env";
 import Fs from "std::fs";
 import Io from "std::io";
+import Memory from "std::memory";
 import Path from "std::path";
 import Process from "std::process";
+import Sort from "std::sort";
 
 import DiagnosticBag, DiagnosticRenderer, Severity, SourceFile from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Ast from "@compiler::ast";
+import Config, ResolvedProject from "@compiler::config";
 import ParseOutput, Parser from "@compiler::parser";
 import Hir from "@compiler::hir";
+
+import Format from "./format/api";
+import _ from "./format/config";
+import FormatterCliOverrides, FormatterConfig, FormatterConfigPaths from "./format/config";
 
 // Pulled in so `ignis check` analyzes them: nothing else in this binary's
 // import graph reaches HIR lowering or the borrow checker yet, and a module
@@ -1599,6 +1607,578 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
   return 0;
 }
 
+// =============================================================================
+// Fmt command
+// =============================================================================
+
+/// Where a `fmt` run applies: either the exact files the command line named,
+/// or the whole project a discovered `ignis.toml` governs.
+enum FmtInput {
+  ExplicitFiles(Vector<Path::PathBuf>),
+  Project(ResolvedProject),
+}
+
+/// Reports a formatter configuration failure the way the host CLI reports
+/// one that is not scoped to a particular file being formatted.
+function printFmtConfigError(bag: &DiagnosticBag): void {
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    Io::eprintln(String::create("Error: unknown formatter configuration error"));
+    return;
+  };
+
+  Io::eprintln(`Error: ${diagnostic.messageText()}`);
+}
+
+/// Reports a formatter configuration failure scoped to the file being
+/// formatted, the way the host CLI's per-file config resolution does.
+function printFmtConfigErrorForPath(path: &Path::PathBuf, bag: &DiagnosticBag): void {
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    Io::eprintln(`Error: ${path.asStr()}: unknown formatter configuration error`);
+    return;
+  };
+
+  Io::eprintln(`Error: ${path.asStr()}: ${diagnostic.messageText()}`);
+}
+
+/// Builds the overrides `Format::Config::load` applies on top of whatever a
+/// config file declares.
+function buildFmtCliOverrides(options: &CliOptions): FormatterCliOverrides {
+  let mut sortImports: Option<boolean> = Option::NONE;
+
+  if (options.fmtSortImports) {
+    sortImports = Option::SOME(true);
+  }
+
+  return FormatterCliOverrides {
+    indentWidth: options.fmtIndentWidth,
+    lineWidth: options.fmtLineWidth,
+    useTabs: options.fmtUseTabs,
+    sortImports: sortImports,
+  };
+}
+
+/// Resolves the formatter config for a stdin-json batch: a flat lookup under
+/// the current directory, with no upward search for `ignis.toml`.
+function resolveFmtConfigForStdin(options: &CliOptions): Result<FormatterConfig, DiagnosticBag> {
+  let cwd: Path::PathBuf = match (Env::currentDir()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> Path::PathBuf::create("."),
+  };
+
+  let ignisToml: Path::PathBuf = cwd.join("ignis.toml");
+  let dedicatedConfig: Path::PathBuf = cwd.join("ignisfmt.toml");
+
+  let mut ignisTomlOption: Option<Path::PathBuf> = Option::NONE;
+  if (Fs::exists(ignisToml.asStr())) {
+    ignisTomlOption = Option::SOME(ignisToml.clone());
+  }
+
+  let mut dedicatedConfigOption: Option<Path::PathBuf> = Option::NONE;
+  if (Fs::exists(dedicatedConfig.asStr())) {
+    dedicatedConfigOption = Option::SOME(dedicatedConfig.clone());
+  }
+
+  let explicitConfig: Option<Path::PathBuf> = match (&options.fmtConfigPath) {
+    Option::SOME(value) -> Option::SOME(Path::PathBuf::fromString(&value)),
+    Option::NONE -> Option::NONE,
+  };
+
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: cwd,
+    ignisToml: ignisTomlOption,
+    dedicatedConfig: dedicatedConfigOption,
+    explicitConfig: explicitConfig,
+  };
+
+  let overrides: FormatterCliOverrides = buildFmtCliOverrides(options);
+
+  return Format::Config::load(&paths, &overrides);
+}
+
+/// Resolves the formatter config for a whole project, rooted at the project
+/// directory `Config::loadProjectFile` already discovered.
+function resolveFmtConfigForProject(
+  project: &ResolvedProject,
+  options: &CliOptions
+): Result<FormatterConfig, DiagnosticBag> {
+  let root: Path::PathBuf = match (&project.root) {
+    Option::SOME(value) -> value.clone(),
+    Option::NONE -> Path::PathBuf::create("."),
+  };
+
+  let ignisToml: Option<Path::PathBuf> = match (&project.configPath) {
+    Option::SOME(value) -> Option::SOME(value.clone()),
+    Option::NONE -> Option::NONE,
+  };
+
+  let dedicatedConfig: Path::PathBuf = root.join("ignisfmt.toml");
+  let mut dedicatedConfigOption: Option<Path::PathBuf> = Option::NONE;
+
+  if (Fs::exists(dedicatedConfig.asStr())) {
+    dedicatedConfigOption = Option::SOME(dedicatedConfig.clone());
+  }
+
+  let explicitConfig: Option<Path::PathBuf> = match (&options.fmtConfigPath) {
+    Option::SOME(value) -> Option::SOME(Path::PathBuf::fromString(&value)),
+    Option::NONE -> Option::NONE,
+  };
+
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: root,
+    ignisToml: ignisToml,
+    dedicatedConfig: dedicatedConfigOption,
+    explicitConfig: explicitConfig,
+  };
+
+  let overrides: FormatterCliOverrides = buildFmtCliOverrides(options);
+
+  return Format::Config::load(&paths, &overrides);
+}
+
+/// Resolves the formatter config for one explicit file: the project the
+/// upward search from its directory finds, or that directory on its own.
+function resolveFmtConfigForFile(
+  path: &Path::PathBuf,
+  options: &CliOptions
+): Result<FormatterConfig, DiagnosticBag> {
+  let parentDir: Path::PathBuf = match (path.parent()) {
+    Option::SOME(value) -> value,
+    Option::NONE -> Path::PathBuf::create("."),
+  };
+
+  let projectRoot: Path::PathBuf = match (Config::findProjectFile(&parentDir)) {
+    Option::SOME(configPath) -> match (configPath.parent()) {
+      Option::SOME(root) -> root,
+      Option::NONE -> parentDir.clone(),
+    },
+    Option::NONE -> parentDir.clone(),
+  };
+
+  let ignisTomlCandidate: Path::PathBuf = projectRoot.join("ignis.toml");
+  let dedicatedConfig: Path::PathBuf = projectRoot.join("ignisfmt.toml");
+
+  let mut ignisTomlOption: Option<Path::PathBuf> = Option::NONE;
+  if (Fs::exists(ignisTomlCandidate.asStr())) {
+    ignisTomlOption = Option::SOME(ignisTomlCandidate.clone());
+  }
+
+  let mut dedicatedConfigOption: Option<Path::PathBuf> = Option::NONE;
+  if (Fs::exists(dedicatedConfig.asStr())) {
+    dedicatedConfigOption = Option::SOME(dedicatedConfig.clone());
+  }
+
+  let explicitConfig: Option<Path::PathBuf> = match (&options.fmtConfigPath) {
+    Option::SOME(value) -> Option::SOME(Path::PathBuf::fromString(&value)),
+    Option::NONE -> Option::NONE,
+  };
+
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: projectRoot,
+    ignisToml: ignisTomlOption,
+    dedicatedConfig: dedicatedConfigOption,
+    explicitConfig: explicitConfig,
+  };
+
+  let overrides: FormatterCliOverrides = buildFmtCliOverrides(options);
+
+  return Format::Config::load(&paths, &overrides);
+}
+
+/// Resolves what a `fmt` run applies to, printing the same messages the host
+/// CLI prints on failure.
+///
+/// Priority: `--project <dir>`, then explicit files, then the project
+/// containing the current directory.
+function resolveFmtInput(options: &CliOptions): Option<FmtInput> {
+  if (let Option::SOME(projectDir) = &options.fmtProject) {
+    let root: Path::PathBuf = Path::PathBuf::fromString(&projectDir);
+    let configPath: Path::PathBuf = root.join("ignis.toml");
+
+    if (!Fs::exists(configPath.asStr())) {
+      Io::eprintln(`Error: No ignis.toml found in '${root.asStr()}'`);
+      return Option::NONE;
+    }
+
+    return match (Config::loadProjectFile(&configPath)) {
+      Result::OK(project) -> Option::SOME(FmtInput::Project(project)),
+      Result::ERROR(bag) -> {
+        printFmtConfigError(&bag);
+        return Option::NONE;
+      },
+    };
+  }
+
+  if (options.fmtFilePaths.length() > 0) {
+    let mut paths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    let mut index: u64 = 0;
+
+    while (index < options.fmtFilePaths.length()) {
+      let Option::SOME(raw) = options.fmtFilePaths.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let path: Path::PathBuf = Path::PathBuf::fromString(raw);
+
+      if (!Fs::exists(path.asStr())) {
+        Io::eprintln(`Error: File not found: '${path.asStr()}'`);
+        return Option::NONE;
+      }
+
+      paths.push(path);
+      index += 1;
+    }
+
+    return Option::SOME(FmtInput::ExplicitFiles(paths));
+  }
+
+  let cwd: Path::PathBuf = match (Env::currentDir()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Io::eprintln(String::create("Error: Failed to get current directory"));
+      return Option::NONE;
+    },
+  };
+
+  return match (Config::findProjectFile(&cwd)) {
+    Option::SOME(configPath) -> match (Config::loadProjectFile(&configPath)) {
+      Result::OK(project) -> Option::SOME(FmtInput::Project(project)),
+      Result::ERROR(bag) -> {
+        printFmtConfigError(&bag);
+        return Option::NONE;
+      },
+    },
+    Option::NONE -> {
+      Io::eprintln(String::create("Error: No ignis.toml found"));
+      Io::eprintln(String::create("Hint: Run 'ignis init' to create a project, or provide a file path."));
+      return Option::NONE;
+    },
+  };
+}
+
+/// Prints a unified diff between the file currently on disk and `formatted`.
+/// Only called in a read-only run, so the file on disk is still the original.
+function printFmtDiffForFile(path: &Path::PathBuf, formatted: &String): void {
+  let original: String = match (Fs::readToString(path)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> String::new(),
+  };
+
+  let pathText: String = path.toString();
+  Io::print(Format::unifiedDiff(&pathText, &original, formatted));
+}
+
+/// Formats every file `sourceDir` holds, sorted the same way the host CLI's
+/// project-mode collection is.
+function collectProjectIgnFiles(sourceDir: &Path::PathBuf): Option<Vector<Path::PathBuf>> {
+  let sourceDirText: String = sourceDir.toString();
+
+  let Result::OK(entries) = Fs::collectWalk(sourceDirText.toStr()) else {
+    return Option::NONE;
+  };
+
+  let mut ignEntries: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < entries.length()) {
+    let Option::SOME(entry) = entries.get(index) else {
+      break;
+    };
+
+    let candidate: Path::PathBuf = Path::PathBuf::fromString(entry);
+
+    if (let Option::SOME(extension) = candidate.extension() && extension.equals("ign")) {
+      ignEntries.push(entry.clone());
+    }
+
+    index += 1;
+  }
+
+  Sort::stableLexicalStrings(&mut ignEntries);
+
+  let mut files: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut sortedIndex: u64 = 0;
+
+  while (sortedIndex < ignEntries.length()) {
+    let Option::SOME(entry) = ignEntries.get(sortedIndex) else {
+      break;
+    };
+
+    files.push(Path::PathBuf::fromString(entry));
+    sortedIndex += 1;
+  }
+
+  return Option::SOME(files);
+}
+
+/// Formats the explicit files a `fmt` run named, resolving each file's own
+/// formatter config the way the host CLI does.
+function runFmtExplicitFiles(
+  paths: &Vector<Path::PathBuf>,
+  options: &CliOptions,
+  readOnly: boolean,
+  emitDiff: boolean
+): i32 {
+  let mut dirtyFiles: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut index: u64 = 0;
+
+  while (index < paths.length()) {
+    let Option::SOME(path) = paths.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    let formatterConfig: FormatterConfig = match (resolveFmtConfigForFile(path, options)) {
+      Result::OK(value) -> value,
+      Result::ERROR(bag) -> {
+        printFmtConfigErrorForPath(path, &bag);
+        return 1;
+      },
+    };
+
+    let formatOptions: Format::FormatOptions = Format::FormatOptions { check: readOnly, config: formatterConfig };
+
+    let outcome: Format::FormatOutcome = match (Format::formatFile(path, &formatOptions)) {
+      Result::OK(value) -> value,
+      Result::ERROR(error) -> {
+        Io::eprintln(`Error: ${path.asStr()}: ${error.describe().toStr()}`);
+        return 1;
+      },
+    };
+
+    if (emitDiff && outcome.changed) {
+      printFmtDiffForFile(path, &outcome.formatted);
+    }
+
+    if (options.fmtCheck && outcome.changed) {
+      dirtyFiles.push(path.clone());
+    }
+
+    index += 1;
+  }
+
+  if (options.fmtCheck && dirtyFiles.length() > 0) {
+    let mut dirtyIndex: u64 = 0;
+
+    while (dirtyIndex < dirtyFiles.length()) {
+      let Option::SOME(file) = dirtyFiles.get(dirtyIndex) else {
+        dirtyIndex += 1;
+        continue;
+      };
+
+      Io::eprintln(`Check failed: ${file.asStr()}`);
+      dirtyIndex += 1;
+    }
+
+    return 1;
+  }
+
+  return 0;
+}
+
+/// Formats every `.ign` file a project's source directory holds, resolving
+/// the project's formatter config once up front.
+function runFmtProject(
+  project: &ResolvedProject,
+  options: &CliOptions,
+  readOnly: boolean,
+  emitDiff: boolean
+): i32 {
+  let formatterConfig: FormatterConfig = match (resolveFmtConfigForProject(project, options)) {
+    Result::OK(value) -> value,
+    Result::ERROR(bag) -> {
+      printFmtConfigError(&bag);
+      return 1;
+    },
+  };
+
+  let sourceDir: Path::PathBuf = match (&project.sourceDir) {
+    Option::SOME(value) -> value.clone(),
+    Option::NONE -> Path::PathBuf::create("."),
+  };
+
+  let Option::SOME(files) = collectProjectIgnFiles(&sourceDir) else {
+    Io::eprintln(String::create("Error: Failed to collect project files"));
+    return 1;
+  };
+
+  let formatOptions: Format::FormatOptions = Format::FormatOptions { check: readOnly, config: formatterConfig };
+
+  let mut dirtyFiles: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut index: u64 = 0;
+
+  while (index < files.length()) {
+    let Option::SOME(file) = files.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    let outcome: Format::FormatOutcome = match (Format::formatFile(file, &formatOptions)) {
+      Result::OK(value) -> value,
+      Result::ERROR(error) -> {
+        Io::eprintln(`Error: ${file.asStr()}: ${error.describe().toStr()}`);
+        return 1;
+      },
+    };
+
+    if (emitDiff && outcome.changed) {
+      printFmtDiffForFile(file, &outcome.formatted);
+    }
+
+    if (options.fmtCheck && outcome.changed) {
+      dirtyFiles.push(file.clone());
+    }
+
+    index += 1;
+  }
+
+  if (options.fmtCheck && dirtyFiles.length() > 0) {
+    let mut dirtyIndex: u64 = 0;
+
+    while (dirtyIndex < dirtyFiles.length()) {
+      let Option::SOME(file) = dirtyFiles.get(dirtyIndex) else {
+        dirtyIndex += 1;
+        continue;
+      };
+
+      Io::eprintln(`Check failed: ${file.asStr()}`);
+      dirtyIndex += 1;
+    }
+
+    return 1;
+  }
+
+  return 0;
+}
+
+/// Reads everything available on stdin (file descriptor 0) into one owned
+/// `String`. Used only by `--stdin-json`'s NDJSON batch protocol, since
+/// `std::io` has no line-oriented stdin reader yet.
+function fmtReadAllStdin(): String {
+  let mut output: String = String::new();
+  let bufSize: u64 = 4096;
+  let buf: *mut u8 = Memory::allocateVector<u8>(bufSize);
+
+  defer Memory::free(buf);
+
+  while (true) {
+    let count: CType::SSizeT = LibC::File::read(0, buf as CType::CVoidPtr, bufSize);
+
+    if (count <= 0) {
+      break;
+    }
+
+    let mut byteIndex: i64 = 0;
+
+    while (byteIndex < count) {
+      @integerFromPointer(buf) + byteIndex
+        |> @pointerFromInteger<*mut u8>(_)
+        |> @read<u8>(_)
+        |> output.pushByte();
+
+      byteIndex += 1;
+    }
+  }
+
+  return output;
+}
+
+/// Runs the `--stdin-json` NDJSON batch protocol: one request per line, one
+/// response per line, on stdout.
+function runFmtStdinJson(options: &CliOptions): i32 {
+  let formatterConfig: FormatterConfig = match (resolveFmtConfigForStdin(options)) {
+    Result::OK(value) -> value,
+    Result::ERROR(bag) -> {
+      printFmtConfigError(&bag);
+      return 1;
+    },
+  };
+
+  let emitDiff: boolean = options.fmtEmitDiff;
+  let content: String = fmtReadAllStdin();
+  let lines: Vector<String> = content.lines();
+
+  let mut anyError: boolean = false;
+  let mut anyChanged: boolean = false;
+  let mut index: u64 = 0;
+
+  while (index < lines.length()) {
+    let Option::SOME(line) = lines.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    let trimmed: String = line.trimAsciiWhitespace();
+
+    if (trimmed.length() == 0) {
+      index += 1;
+      continue;
+    }
+
+    match (Format::parseStdinRequest(&trimmed)) {
+      Result::OK(request) -> {
+        let response: Format::StdinResponse = Format::processStdinRequest(&request, &formatterConfig, emitDiff);
+
+        if (response.changed) {
+          anyChanged = true;
+        }
+
+        if (response.hasError) {
+          anyError = true;
+        }
+
+        Io::println(Format::renderStdinResponse(&response));
+      },
+      Result::ERROR(error) -> {
+        let response: Format::StdinResponse = Format::StdinResponse {
+          path: String::new(),
+          hasFormatted: false,
+          formatted: String::new(),
+          changed: false,
+          hasDiff: false,
+          diff: String::new(),
+          hasError: true,
+          error: error.describe(),
+        };
+
+        Io::println(Format::renderStdinResponse(&response));
+        anyError = true;
+      },
+    };
+
+    index += 1;
+  }
+
+  if (options.fmtCheck && anyChanged) {
+    return 1;
+  }
+
+  if (anyError) {
+    return 1;
+  }
+
+  return 0;
+}
+
+/// `ignis fmt`: formats the files, project, or stdin batch the command line
+/// named, mirroring the host CLI's flags and messages.
+function runFmt(options: &CliOptions): i32 {
+  if (options.fmtStdinJson) {
+    return runFmtStdinJson(options);
+  }
+
+  let readOnly: boolean = options.fmtCheck || options.fmtEmitDiff;
+
+  let Option::SOME(input) = resolveFmtInput(options) else {
+    return 1;
+  };
+
+  return match (input) {
+    FmtInput::ExplicitFiles(paths) -> runFmtExplicitFiles(&paths, options, readOnly, options.fmtEmitDiff),
+    FmtInput::Project(project) -> runFmtProject(&project, options, readOnly, options.fmtEmitDiff),
+  };
+}
+
 /// Where a command runs: a project directory, a source file, or the current
 /// directory when the command line named neither.
 record CommandTarget {
@@ -1770,6 +2350,10 @@ function main(): i32 {
 
   if (let CliCommand::BUILD_STD = options.command) {
     return runBuildStd(&options);
+  }
+
+  if (let CliCommand::FMT = options.command) {
+    return runFmt(&options);
   }
 
   let Option::SOME(target) = resolveTarget(&options) else {
