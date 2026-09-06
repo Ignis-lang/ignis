@@ -113,18 +113,12 @@ typedef void *null;
 void ignis_runtime_init(i32 argc, void *argv);
 
 // =============================================================================
-// Number to string conversions
+// Float to string conversions
+//
+// Integer conversions are now Ignis, in `std/string`. These two stay in C
+// because they are `snprintf("%g")` and its correctly-rounded output cannot be
+// reproduced with the double arithmetic the standard library has.
 // =============================================================================
-
-IgnisString ignis_i8_to_string(i8 value);
-IgnisString ignis_i16_to_string(i16 value);
-IgnisString ignis_i32_to_string(i32 value);
-IgnisString ignis_i64_to_string(i64 value);
-
-IgnisString ignis_u8_to_string(u8 value);
-IgnisString ignis_u16_to_string(u16 value);
-IgnisString ignis_u32_to_string(u32 value);
-IgnisString ignis_u64_to_string(u64 value);
 
 IgnisString ignis_f32_to_string(f32 value);
 IgnisString ignis_f64_to_string(f64 value);
@@ -132,14 +126,6 @@ IgnisString ignis_f64_to_string(f64 value);
 // Output-pointer variants. These write through a pointer because the caller's
 // struct may carry extra trailing fields (the compiler-generated
 // __ignis_drop_state) that return-by-value would not account for.
-void ignis_string_init_from_i8(IgnisString *out, i8 value);
-void ignis_string_init_from_i16(IgnisString *out, i16 value);
-void ignis_string_init_from_i32(IgnisString *out, i32 value);
-void ignis_string_init_from_i64(IgnisString *out, i64 value);
-void ignis_string_init_from_u8(IgnisString *out, u8 value);
-void ignis_string_init_from_u16(IgnisString *out, u16 value);
-void ignis_string_init_from_u32(IgnisString *out, u32 value);
-void ignis_string_init_from_u64(IgnisString *out, u64 value);
 void ignis_string_init_from_f32(IgnisString *out, f32 value);
 void ignis_string_init_from_f64(IgnisString *out, f64 value);
 

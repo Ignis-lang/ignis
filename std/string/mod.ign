@@ -112,6 +112,19 @@ function stringAsciiWhitespace(value: char): boolean {
   return value == ' ' || value == '\n' || value == '\r' || value == '\t';
 }
 
+/// Returns how many decimal digits `value` needs, at least one.
+function stringDecimalWidth(value: u64): u64 {
+  let mut width: u64 = 1;
+  let mut remaining: u64 = value;
+
+  while (remaining >= 10) {
+    remaining = remaining / 10;
+    width += 1;
+  }
+
+  return width;
+}
+
 /// Maps one byte to its ASCII uppercase scalar, or to U+FFFD when it is not ASCII.
 ///
 /// Case conversion is byte-oriented and always has been: the C runtime pushed
@@ -154,26 +167,9 @@ extern __string_bytes {
 }
 
 extern __string {
-  // Number-to-string init functions
-  /// Initializes `out` with the decimal text of an `i8`.
-  function ignis_string_init_from_i8(out: &mut String, value: i8): void;
-  /// Initializes `out` with the decimal text of an `i16`.
-  function ignis_string_init_from_i16(out: &mut String, value: i16): void;
-  /// Initializes `out` with the decimal text of an `i32`.
-  function ignis_string_init_from_i32(out: &mut String, value: i32): void;
-  /// Initializes `out` with the decimal text of an `i64`.
-  function ignis_string_init_from_i64(out: &mut String, value: i64): void;
-  /// Initializes `out` with the decimal text of a `u8`.
-  function ignis_string_init_from_u8(out: &mut String, value: u8): void;
-  /// Initializes `out` with the decimal text of a `u16`.
-  function ignis_string_init_from_u16(out: &mut String, value: u16): void;
-  /// Initializes `out` with the decimal text of a `u32`.
-  function ignis_string_init_from_u32(out: &mut String, value: u32): void;
-  /// Initializes `out` with the decimal text of a `u64`.
-  function ignis_string_init_from_u64(out: &mut String, value: u64): void;
-  /// Initializes `out` with the decimal text of an `f32`.
+  /// Initializes `out` with the `%g` text of an `f32`.
   function ignis_string_init_from_f32(out: &mut String, value: f32): void;
-  /// Initializes `out` with the decimal text of an `f64`.
+  /// Initializes `out` with the `%g` text of an `f64`.
   function ignis_string_init_from_f64(out: &mut String, value: f64): void;
 }
 
@@ -241,6 +237,30 @@ export record String {
 
     if (required > self.cap) {
       self.growTo(required);
+    }
+  }
+
+  /// Appends `value` as exactly `width` decimal digits.
+  ///
+  /// `width` has to come from `stringDecimalWidth(value)`: the digits are
+  /// filled in from the least significant end, so the room for them is
+  /// reserved first.
+  private appendDecimal(&mut self, value: u64, width: u64): void {
+    let start: u64 = self.len;
+
+    let mut index: u64 = 0;
+    while (index < width) {
+      self.pushByte('0' as u8);
+      index += 1;
+    }
+
+    let mut remaining: u64 = value;
+    let mut position: u64 = width;
+
+    while (position > 0) {
+      position -= 1;
+      @write<u8>(self.data + start + position, ('0' as u8) + (remaining % 10) as u8);
+      remaining = remaining / 10;
     }
   }
 
@@ -366,89 +386,59 @@ export record String {
   /// let c: String = String::create(255 as u8);    // "255"
   /// ```
   public static create(value: i8): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_from_i8(&mut result, value);
-    return result;
+    return String::create(value as i64);
   }
 
   /// Creates an owned String from an `i16`.
   public static create(value: i16): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_from_i16(&mut result, value);
-    return result;
+    return String::create(value as i64);
   }
 
   /// Creates an owned String from an `i32`.
   public static create(value: i32): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_from_i32(&mut result, value);
-    return result;
+    return String::create(value as i64);
   }
 
   /// Creates an owned String from an `i64`.
   public static create(value: i64): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_from_i64(&mut result, value);
+    if (value >= 0) {
+      return String::create(value as u64);
+    }
+
+    // Negating in i64 would overflow on the minimum value, so the magnitude is
+    // taken as the two's complement of the unsigned bit pattern.
+    let magnitude: u64 = ~(value as u64) + 1;
+    let width: u64 = stringDecimalWidth(magnitude);
+    let mut result: String = String::withCapacity(width + 2);
+
+    result.pushByte('-' as u8);
+    result.appendDecimal(magnitude, width);
+
     return result;
   }
 
   /// Creates an owned String from a `u8`.
   public static create(value: u8): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_from_u8(&mut result, value);
-    return result;
+    return String::create(value as u64);
   }
 
   /// Creates an owned String from a `u16`.
   public static create(value: u16): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_from_u16(&mut result, value);
-    return result;
+    return String::create(value as u64);
   }
 
   /// Creates an owned String from a `u32`.
   public static create(value: u32): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_from_u32(&mut result, value);
-    return result;
+    return String::create(value as u64);
   }
 
   /// Creates an owned String from a `u64`.
   public static create(value: u64): String {
-    let mut result: String = String {
-      data: null,
-      len: 0,
-      cap: 0,
-    };
-    __string::ignis_string_init_from_u64(&mut result, value);
+    let width: u64 = stringDecimalWidth(value);
+    let mut result: String = String::withCapacity(width + 1);
+
+    result.appendDecimal(value, width);
+
     return result;
   }
 

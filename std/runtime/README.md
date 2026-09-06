@@ -35,8 +35,8 @@ Core runtime types, IDs, and APIs.
 - Alloc/Free:
   - `ignis_alloc`, `ignis_realloc`, `ignis_free`, defined in `std/memory/allocator.ign`
 - String API still in C:
-  - `ignis_{i8,i16,i32,i64,u8,u16,u32,u64,f32,f64}_to_string` and their
-    `ignis_string_init_from_*` variants
+  - `ignis_f32_to_string`, `ignis_f64_to_string` and their
+    `ignis_string_init_from_f32` / `ignis_string_init_from_f64` variants
 - String API now in Ignis, in `std/string/mod.ign`:
   - construction and capacity: `String::new`, `String::withCapacity`, `String::create`
   - mutation: `String::pushChar`, `String::pushByte`, `String::pushStr`, `String::push`,
@@ -47,6 +47,8 @@ Core runtime types, IDs, and APIs.
   - derived strings: `String::concat`, `String::substring`, `String::toUpperCase`,
     `String::toLowerCase`
   - copies and release: `String::clone`, `String::drop`
+  - integer conversions: `String::create` for `i8` through `u64`, and the
+    matching `toString` extensions
 
 ### `std/runtime/memory/memory.h` and `std/runtime/memory/memory.c`
 Wrappers used by `std/memory/mod.ign`.

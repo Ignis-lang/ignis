@@ -872,3 +872,46 @@ function caseConversionMapsAsciiAndReplacesEveryNonAsciiByte(): void {
   Test::assertEq<u8>(upper.byteAt(3 as u64).unwrap(), 189 as u8);
   Test::assertEq<u8>(upper.byteAt(4 as u64).unwrap(), 239 as u8);
 }
+
+@test
+function numericCreateRendersEveryIntegerWidthAsDecimal(): void {
+  Test::assertEq<str>(String::create(0 as u64).toStr(), "0");
+  Test::assertEq<str>(String::create(7 as u8).toStr(), "7");
+  Test::assertEq<str>(String::create(255 as u8).toStr(), "255");
+  Test::assertEq<str>(String::create(65535 as u16).toStr(), "65535");
+  Test::assertEq<str>(String::create(4294967295 as u32).toStr(), "4294967295");
+  Test::assertEq<str>(String::create(18446744073709551615 as u64).toStr(), "18446744073709551615");
+}
+
+@test
+function numericCreateRendersSignedValuesIncludingTheMinimums(): void {
+  Test::assertEq<str>(String::create(-1 as i8).toStr(), "-1");
+  Test::assertEq<str>(String::create(-128 as i8).toStr(), "-128");
+  Test::assertEq<str>(String::create(127 as i8).toStr(), "127");
+  Test::assertEq<str>(String::create(-32768 as i16).toStr(), "-32768");
+  Test::assertEq<str>(String::create(-2147483648 as i32).toStr(), "-2147483648");
+  Test::assertEq<str>(String::create(-9223372036854775808 as i64).toStr(), "-9223372036854775808");
+  Test::assertEq<str>(String::create(9223372036854775807 as i64).toStr(), "9223372036854775807");
+}
+
+@test
+function numericCreateReservesExactlyTheDigitsPlusTheTerminator(): void {
+  let before: Stats = Memory::stats();
+  let rendered: String = String::create(4096 as u64);
+  let after: Stats = Memory::stats();
+
+  Test::assertEq<u64>(rendered.length(), 4);
+  Test::assertEq<u64>(after.bytesLive, before.bytesLive + 5);
+  Test::assertEq<u64>(after.allocTotal, before.allocTotal + 1);
+}
+
+@test
+function toStringExtensionsMatchTheCreateOverloads(): void {
+  let negative: i32 = -42;
+  let positive: u32 = 42;
+  let zero: i64 = 0;
+
+  Test::assertEq<str>(negative.toString().toStr(), "-42");
+  Test::assertEq<str>(positive.toString().toStr(), "42");
+  Test::assertEq<str>(zero.toString().toStr(), "0");
+}
