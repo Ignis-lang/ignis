@@ -100,6 +100,17 @@ typedef void *null;
 #endif // IGNIS_RT_TYPES_H
 
 // =============================================================================
+// Runtime entry point
+// =============================================================================
+
+/**
+ * Initializes the runtime before user code runs. Defined in Ignis
+ * (`std/process/runtime`, exported as this C symbol); declared here because
+ * the generated `main` wrappers and the test harness include only this header.
+ */
+void ignis_runtime_init(i32 argc, char **argv);
+
+// =============================================================================
 // String base API
 // =============================================================================
 
