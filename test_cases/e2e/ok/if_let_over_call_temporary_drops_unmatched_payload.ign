@@ -1,0 +1,29 @@
+// e2e: std
+import Result from "std::result";
+
+record Counter {
+    static mut LIVE: i32 = 0;
+}
+
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        Counter::LIVE -= 1;
+        return;
+    }
+}
+
+function makeError(tag: i32): Result<Resource, Resource> {
+    Counter::LIVE += 1;
+    return Result::ERROR(Resource { tag: tag });
+}
+
+function main(): i32 {
+    if (let Result::OK(resource) = makeError(3)) {
+        Counter::LIVE += resource.tag;
+    }
+
+    return Counter::LIVE;
+}

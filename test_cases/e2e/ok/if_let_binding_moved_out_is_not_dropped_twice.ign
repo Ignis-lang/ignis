@@ -1,0 +1,37 @@
+// e2e: std
+import Option from "std::option";
+
+record Counter {
+    static mut DROPS: i32 = 0;
+}
+
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        Counter::DROPS += 1;
+        return;
+    }
+}
+
+function makeOption(): Option<Resource> {
+    return Option::SOME(Resource { tag: 5 });
+}
+
+function take(): Resource {
+    if (let Option::SOME(resource) = makeOption()) {
+        return resource;
+    }
+
+    return Resource { tag: 0 };
+}
+
+function main(): i32 {
+    {
+        let taken: Resource = take();
+        Counter::DROPS += taken.tag - 5;
+    }
+
+    return Counter::DROPS - 1;
+}

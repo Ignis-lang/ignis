@@ -1,0 +1,36 @@
+// e2e: std
+import Option from "std::option";
+
+record Counter {
+    static mut LIVE: i32 = 0;
+}
+
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        Counter::LIVE -= 1;
+        return;
+    }
+}
+
+function makeOption(tag: i32): Option<Resource> {
+    Counter::LIVE += 1;
+    return Option::SOME(Resource { tag: tag });
+}
+
+function run(): i32 {
+    match (makeOption(2)) {
+        Option::NONE -> {},
+        _ -> {},
+    };
+
+    return 0;
+}
+
+function main(): i32 {
+    let observed: i32 = run();
+
+    return Counter::LIVE + observed;
+}

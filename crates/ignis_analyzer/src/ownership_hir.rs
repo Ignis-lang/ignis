@@ -111,6 +111,15 @@ pub struct HirOwnershipChecker<'a> {
   /// Pre-computed summaries: which parameters each function/method drops.
   /// Built by `build_summaries()` before the main analysis pass.
   summaries: HashMap<DefinitionId, FunctionDropSummary>,
+
+  /// Owning bindings introduced by a match whose matching arm has a literal body, keyed
+  /// by that match's HIRId.
+  ///
+  /// `if (let P = value)` and `while (let P = value)` lower to a match that yields a
+  /// boolean, so the binding is still live when the arm ends and the arm cannot own its
+  /// drop. The branch the condition guards is where the binding goes out of scope, so
+  /// `check_if` and `check_loop` read this map and declare the bindings there.
+  let_condition_bindings: HashMap<HIRId, Vec<DefinitionId>>,
 }
 
 impl<'a> HirOwnershipChecker<'a> {
@@ -140,6 +149,7 @@ impl<'a> HirOwnershipChecker<'a> {
       drop_suppressed_vars: HashSet::new(),
       borrowed_pattern_bindings: HashSet::new(),
       summaries: HashMap::new(),
+      let_condition_bindings: HashMap::new(),
     }
   }
 
@@ -967,7 +977,7 @@ impl<'a> HirOwnershipChecker<'a> {
       },
 
       HIRKind::Match { scrutinee, arms } => {
-        self.check_match(scrutinee, &arms, span);
+        self.check_match(hir_id, scrutinee, &arms, span);
       },
 
       HIRKind::Trap | HIRKind::BuiltinUnreachable => {
@@ -1008,6 +1018,23 @@ impl<'a> HirOwnershipChecker<'a> {
     statements: &[HIRId],
     expression: Option<HIRId>,
   ) {
+    self.check_block_owning(block_hir_id, statements, expression, &[]);
+  }
+
+  /// Check a block that additionally owns `extra_owned`, bindings declared outside it.
+  ///
+  /// The branch guarded by a `let` condition is the scope of that condition's bindings:
+  /// they are initialized only on the path that reaches the branch, and they leave scope
+  /// when it ends. Declaring them here gives them the same treatment as the block's own
+  /// locals — moves inside the branch consume them, early exits drop them, and whatever
+  /// is still valid at the end is dropped there.
+  fn check_block_owning(
+    &mut self,
+    block_hir_id: HIRId,
+    statements: &[HIRId],
+    expression: Option<HIRId>,
+    extra_owned: &[DefinitionId],
+  ) {
     // Push block scope
     self.scope_stack.push(ScopeEntry {
       block_hir_id: Some(block_hir_id),
@@ -1015,6 +1042,10 @@ impl<'a> HirOwnershipChecker<'a> {
       is_loop: false,
       deferred_bodies: Vec::new(),
     });
+
+    for &def in extra_owned {
+      self.declare_owned(def);
+    }
 
     // Check statements, stopping after terminators
     for &stmt_id in statements {
@@ -1178,6 +1209,29 @@ impl<'a> HirOwnershipChecker<'a> {
     }
   }
 
+  /// Check the branch a `let` condition guards, giving it ownership of that condition's
+  /// bindings.
+  ///
+  /// A branch that is not a block has no scope to hold them, so the bindings keep the
+  /// treatment they had before: no drop site, and the value outlives the branch.
+  fn check_guarded_branch(
+    &mut self,
+    branch: HIRId,
+    condition_bindings: &[DefinitionId],
+  ) {
+    if condition_bindings.is_empty() {
+      self.check_node(branch);
+      return;
+    }
+
+    match self.hir.get(branch).kind.clone() {
+      HIRKind::Block { statements, expression } => {
+        self.check_block_owning(branch, &statements, expression, condition_bindings);
+      },
+      _ => self.check_node(branch),
+    }
+  }
+
   fn check_if(
     &mut self,
     condition: HIRId,
@@ -1188,6 +1242,8 @@ impl<'a> HirOwnershipChecker<'a> {
     // Check condition
     self.check_node(condition);
 
+    let condition_bindings = self.let_condition_bindings.remove(&condition).unwrap_or_default();
+
     // Save reachability before branches
     let pre_if_reachable = self.reachable;
 
@@ -1196,7 +1252,15 @@ impl<'a> HirOwnershipChecker<'a> {
 
     // Check then branch
     self.reachable = pre_if_reachable;
-    self.check_node(then_branch);
+    self.check_guarded_branch(then_branch, &condition_bindings);
+
+    // Condition bindings only exist on the then path, so they must not reach the join
+    // point: leaving them in the snapshot would make an outer merge compare a state that
+    // the other branches have no notion of.
+    for def in &condition_bindings {
+      self.states.remove(def);
+    }
+
     let then_state = self.states.clone();
     let then_reachable = self.reachable;
 
@@ -1250,6 +1314,7 @@ impl<'a> HirOwnershipChecker<'a> {
 
   fn check_match(
     &mut self,
+    hir_id: HIRId,
     scrutinee: HIRId,
     arms: &[ignis_hir::HIRMatchArm],
     span: Span,
@@ -1296,6 +1361,11 @@ impl<'a> HirOwnershipChecker<'a> {
     );
 
     let bindings_borrow_payloads = self.scrutinee_binds_borrowed_payloads(scrutinee);
+
+    // Whether the match owns what a pattern takes out of it: the scrutinee is an owning
+    // value and some pattern moves an owning payload out of it.
+    let scrutinee_owns_moved_payload =
+      moves_scrutinee_payload && self.types.needs_drop_with_defs(&scrutinee_ty, self.defs);
 
     let pre_match_reachable = self.reachable;
     let pre_match_state = self.states.clone();
@@ -1367,23 +1437,37 @@ impl<'a> HirOwnershipChecker<'a> {
         .collect();
 
       // A literal arm body neither reads nor consumes the binding, which means the
-      // binding is live somewhere this match cannot see — an `if let` desugars to exactly
-      // this shape, and its `then` branch runs after the arm. Dropping here would free a
-      // value that branch still uses, so the drop is skipped and the value is left to
-      // leak rather than be freed early.
+      // binding is live somewhere this match cannot see — `if (let P = value)` and
+      // `while (let P = value)` desugar to exactly this shape, and the branch they guard
+      // runs after the arm. Dropping here would free a value that branch still uses, so
+      // the drop is handed to the enclosing `if`/`while` through `let_condition_bindings`.
       let body_is_literal = matches!(self.hir.get(arm.body).kind, HIRKind::Literal(_));
 
       if !pattern_drops.is_empty()
-        && !body_is_literal
         && (!scrutinee_aliases_external_storage || arm_bindings_own_payload)
         && !bindings_borrow_payloads
       {
-        self
-          .schedules
-          .on_match_arm_end
-          .entry(arm.body)
-          .or_default()
-          .extend(pattern_drops);
+        if body_is_literal {
+          // Only a pattern that takes an owning payload out of an owning scrutinee makes
+          // its bindings owners. `Option<&T>` hands out the pointee instead: the binding
+          // names storage the match never owned, and freeing it here frees it again when
+          // the real owner's schedule runs.
+          if scrutinee_owns_moved_payload {
+            // Declaration order, so the consumer can declare them like ordinary locals.
+            self
+              .let_condition_bindings
+              .entry(hir_id)
+              .or_default()
+              .extend(pattern_drops.iter().rev().copied());
+          }
+        } else {
+          self
+            .schedules
+            .on_match_arm_end
+            .entry(arm.body)
+            .or_default()
+            .extend(pattern_drops);
+        }
       }
 
       // Remove pattern bindings from the arm state snapshot before the cross-arm merge.
@@ -1411,11 +1495,14 @@ impl<'a> HirOwnershipChecker<'a> {
   ) {
     // Extract for-loop update to analyze after body (matching runtime execution order:
     // init → cond → body → update → cond → ...).
+    let mut condition_bindings = Vec::new();
+
     let for_update = match &condition {
       LoopKind::Infinite => None,
 
       LoopKind::While { condition: cond_id } => {
         self.check_node(*cond_id);
+        condition_bindings = self.let_condition_bindings.remove(cond_id).unwrap_or_default();
         None
       },
 
@@ -1451,7 +1538,7 @@ impl<'a> HirOwnershipChecker<'a> {
 
     // === First pass: analyze body and update ===
     let pre_body_reachable = self.reachable;
-    self.check_node(body);
+    self.check_guarded_branch(body, &condition_bindings);
 
     let body_falls_through = self.reachable;
     let continue_seen = *self.loop_continue_stack.last().unwrap_or(&false);
@@ -1483,7 +1570,7 @@ impl<'a> HirOwnershipChecker<'a> {
 
       // Re-check body with merged state (second iteration simulation)
       self.reachable = pre_body_reachable;
-      self.check_node(body);
+      self.check_guarded_branch(body, &condition_bindings);
 
       let body_falls_through_2 = self.reachable;
       let continue_seen_2 = *self.loop_continue_stack.last().unwrap_or(&false);
@@ -1505,6 +1592,10 @@ impl<'a> HirOwnershipChecker<'a> {
     self.loop_continue_stack.pop();
 
     self.scope_stack.pop();
+
+    for def in &condition_bindings {
+      self.states.remove(def);
+    }
 
     // After the loop, code is reachable: the loop condition might be false
     // from the start (while/for), or a break might exit (infinite).

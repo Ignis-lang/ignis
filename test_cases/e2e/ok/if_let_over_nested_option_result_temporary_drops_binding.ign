@@ -1,0 +1,31 @@
+// e2e: std
+import Option from "std::option";
+import Result from "std::result";
+
+record Counter {
+    static mut LIVE: i32 = 0;
+}
+
+@implements(Drop)
+record Resource {
+    public tag: i32;
+
+    drop(&mut self): void {
+        Counter::LIVE -= 1;
+        return;
+    }
+}
+
+function makeNested(tag: i32): Option<Result<Resource, i32>> {
+    Counter::LIVE += 1;
+    return Option::SOME(Result::OK(Resource { tag: tag }));
+}
+
+function main(): i32 {
+    if (let Option::SOME(Result::OK(resource)) = makeNested(4)) {
+        Counter::LIVE += resource.tag;
+        Counter::LIVE -= resource.tag;
+    }
+
+    return Counter::LIVE;
+}

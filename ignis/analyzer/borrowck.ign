@@ -193,6 +193,15 @@ export namespace Borrowck {
     /// the local would free them a second time. Mirrors `drop_suppressed_vars`.
     dropSuppressed: Vector<u32>;
 
+    /// Owning bindings a `let`-condition match introduced, as a flat map:
+    /// `letConditionMatches[i]` is the raw `HirId` of the match and
+    /// `letConditionOwned[i]` the raw definition it owes. The arm bodies of
+    /// such a match are literals, so the arm cannot own the drop; the branch
+    /// the condition guards takes it instead. Mirrors
+    /// `let_condition_bindings`.
+    letConditionMatches: Vector<u32>;
+    letConditionOwned: Vector<u32>;
+
     /// False after a terminator, until a join restores it.
     public reachable: boolean;
 
@@ -225,6 +234,8 @@ export namespace Borrowck {
         loopContinue: Vector::new<u32>(),
         borrowedBindings: Vector::new<u32>(),
         dropSuppressed: Vector::new<u32>(),
+        letConditionMatches: Vector::new<u32>(),
+        letConditionOwned: Vector::new<u32>(),
         reachable: true,
         inDefer: false,
         inDropMethod: false,
@@ -233,6 +244,51 @@ export namespace Borrowck {
 
     public setReachable(&mut self, value: boolean): void {
       self.reachable = value;
+    }
+
+    /// Note that `defRaw` is owed a drop by whatever branch the condition of
+    /// match `matchRaw` guards.
+    public recordLetConditionBinding(&mut self, matchRaw: u32, defRaw: u32): void {
+      self.letConditionMatches.push(matchRaw);
+      self.letConditionOwned.push(defRaw);
+    }
+
+    /// Hand over the bindings recorded for `matchRaw`, in declaration order,
+    /// and forget them. Taking rather than reading keeps a match that is walked
+    /// twice — a loop body re-checks its statements — from handing the same
+    /// binding to two drop sites.
+    public takeLetConditionBindings(&mut self, matchRaw: u32): Vector<u32> {
+      let mut taken: Vector<u32> = Vector::new<u32>();
+      let mut keptMatches: Vector<u32> = Vector::new<u32>();
+      let mut keptOwned: Vector<u32> = Vector::new<u32>();
+      let mut index: u64 = 0;
+
+      while (index < self.letConditionMatches.length()) {
+        let mut entryMatch: u32 = 0;
+        let mut entryOwned: u32 = 0;
+
+        if (let Option::SOME(raw) = self.letConditionMatches.get(index)) {
+          entryMatch = *raw;
+        }
+
+        if (let Option::SOME(raw) = self.letConditionOwned.get(index)) {
+          entryOwned = *raw;
+        }
+
+        if (entryMatch == matchRaw) {
+          taken.push(entryOwned);
+        } else {
+          keptMatches.push(entryMatch);
+          keptOwned.push(entryOwned);
+        }
+
+        index += 1;
+      }
+
+      self.letConditionMatches = keptMatches;
+      self.letConditionOwned = keptOwned;
+
+      return taken;
     }
 
     /// Mark `defRaw` as living in borrowed storage for as long as the arm that
@@ -2238,24 +2294,215 @@ export namespace Borrowck {
     Borrowck::emitCannotMoveOutOfBorrow(diagnostics, span);
   }
 
+  /// The payload types variant `variantTag` carries at `valueType`, or `NONE`
+  /// when the value is not that enum. Mirrors `variant_payload_types`: the
+  /// value's own enum answers, because after monomorphization the pattern still
+  /// names the generic definition while the value names the specialization.
+  function variantPayloadTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    valueType: Analyzer::TypeId,
+    enumDef: Analyzer::DefinitionId,
+    variantTag: u32,
+  ): Option<Vector<Analyzer::TypeId>> {
+    let mut ownerOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(typeNode) = typeStore.get(valueType)) {
+      match (typeNode) {
+        Analyzer::Type::Enum(defId) -> {
+          ownerOpt = Option::SOME(defId);
+        },
+        Analyzer::Type::Instance(instance) -> {
+          if (instance.definition.raw() == enumDef.raw()) {
+            ownerOpt = Option::SOME(enumDef);
+          }
+        },
+        _ -> {},
+      };
+    }
+
+    let Option::SOME(owner) = ownerOpt else {
+      return Option::NONE;
+    };
+
+    let mut variantOpt: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Option::SOME(definition) = defStore.get(owner)) {
+      if (let Analyzer::Definition::Enum(enumDefinition) = definition) {
+        if (let Option::SOME(variantId) = enumDefinition.variants.get(variantTag as u64)) {
+          variantOpt = Option::SOME(*variantId);
+        }
+      }
+    }
+
+    let Option::SOME(variantId) = variantOpt else {
+      return Option::NONE;
+    };
+
+    if (let Option::SOME(variantNode) = defStore.get(variantId)) {
+      if (let Analyzer::Definition::Variant(variantDef) = variantNode) {
+        let mut payload: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+        let mut index: u64 = 0;
+
+        while (index < variantDef.payload.length()) {
+          if (let Option::SOME(payloadType) = variantDef.payload.get(index)) {
+            payload.push(*payloadType);
+          }
+
+          index += 1;
+        }
+
+        return Option::SOME(payload);
+      }
+    }
+
+    return Option::NONE;
+  }
+
+  /// The element types of a tuple value, or `NONE` when the value is not one.
+  function tupleElementTypes(
+    typeStore: &mut Analyzer::TypeStore,
+    valueType: Analyzer::TypeId,
+  ): Option<Vector<Analyzer::TypeId>> {
+    let Option::SOME(typeNode) = typeStore.get(valueType) else {
+      return Option::NONE;
+    };
+
+    let Analyzer::Type::Tuple(tuple) = typeNode else {
+      return Option::NONE;
+    };
+
+    let mut elements: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = 0;
+
+    while (index < tuple.elements.length()) {
+      if (let Option::SOME(fieldType) = tuple.elements.get(index)) {
+        elements.push(*fieldType);
+      }
+
+      index += 1;
+    }
+
+    return Option::SOME(elements);
+  }
+
+  /// Whether `pattern` takes an owning payload out of a value of `valueType`.
+  /// Mirrors `pattern_moves_owned_value`.
+  ///
+  /// The answer comes from the scrutinee's payload types, never from what the
+  /// bindings were declared as. `Option<&T>` hands out the pointee: the binding
+  /// may well be typed as something that owns resources, but the match never
+  /// owned them, and treating it as a move is what makes a later drop free
+  /// storage a second time.
+  function patternMovesOwnedValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    valueType: Analyzer::TypeId,
+    pattern: &Hir::HirPattern,
+  ): boolean {
+    match (pattern) {
+      Hir::HirPattern::Wildcard -> {},
+      Hir::HirPattern::Literal(_) -> {},
+      Hir::HirPattern::Constant(_) -> {},
+      Hir::HirPattern::Binding(_) -> {
+        let owns: boolean = Borrowck::needsDropType(defStore, typeStore, valueType);
+        let copies: boolean = Analyzer::Typecheck::isCopyType(defStore, typeStore, valueType);
+
+        return owns && !copies;
+      },
+      Hir::HirPattern::Variant(variant) -> {
+        let Option::SOME(payload) = Borrowck::variantPayloadTypes(
+          defStore,
+          typeStore,
+          valueType,
+          variant.enumDef,
+          variant.variantTag,
+        ) else {
+          return false;
+        };
+
+        let mut index: u64 = 0;
+
+        while (index < variant.args.length() && index < payload.length()) {
+          let mut moves: boolean = false;
+
+          if (let Option::SOME(argument) = variant.args.get(index)) {
+            if (let Option::SOME(argumentType) = payload.get(index)) {
+              moves = Borrowck::patternMovesOwnedValue(defStore, typeStore, *argumentType, argument);
+            }
+          }
+
+          if (moves) {
+            return true;
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Tuple(elements) -> {
+        let Option::SOME(elementTypes) = Borrowck::tupleElementTypes(typeStore, valueType) else {
+          return false;
+        };
+
+        let mut index: u64 = 0;
+
+        while (index < elements.length() && index < elementTypes.length()) {
+          let mut moves: boolean = false;
+
+          if (let Option::SOME(element) = elements.get(index)) {
+            if (let Option::SOME(elementType) = elementTypes.get(index)) {
+              moves = Borrowck::patternMovesOwnedValue(defStore, typeStore, *elementType, element);
+            }
+          }
+
+          if (moves) {
+            return true;
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Or(patterns) -> {
+        let mut index: u64 = 0;
+
+        while (index < patterns.length()) {
+          let mut moves: boolean = false;
+
+          if (let Option::SOME(nested) = patterns.get(index)) {
+            moves = Borrowck::patternMovesOwnedValue(defStore, typeStore, valueType, nested);
+          }
+
+          if (moves) {
+            return true;
+          }
+
+          index += 1;
+        }
+      },
+    };
+
+    return false;
+  }
+
   /// Whether any arm of a match takes an owning payload out of the scrutinee.
-  /// Mirrors the `pattern_moves_owned_value` fold of `check_match`, reusing the
-  /// droppable-binding walk the arms already need.
+  /// Mirrors the `pattern_moves_owned_value` fold of `check_match`.
   function armsMoveScrutineePayload(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
+    scrutineeType: Analyzer::TypeId,
     arms: &Vector<Hir::HirMatchArm>,
   ): boolean {
     let mut index: u64 = 0;
 
     while (index < arms.length()) {
-      if (let Option::SOME(arm) = arms.get(index)) {
-        let mut bindings: Vector<u32> = Vector::new<u32>();
-        Borrowck::collectDroppableBindings(defStore, typeStore, &arm.pattern, &mut bindings);
+      let mut moves: boolean = false;
 
-        if (!bindings.isEmpty()) {
-          return true;
-        }
+      if (let Option::SOME(arm) = arms.get(index)) {
+        moves = Borrowck::patternMovesOwnedValue(defStore, typeStore, scrutineeType, &arm.pattern);
+      }
+
+      if (moves) {
+        return true;
       }
 
       index += 1;
@@ -2267,27 +2514,53 @@ export namespace Borrowck {
   /// Schedules the drops a match arm owes for its own pattern bindings, keyed
   /// by the arm body so that the body's block schedule and this one stay
   /// distinct. Mirrors the `on_match_arm_end` block of `check_match`, including
-  /// its three suppressions: a literal arm body (the `if let` desugaring, whose
-  /// binding is still live after the arm), a scrutinee that aliases storage it
-  /// does not own, and bindings that borrow their payloads. The external
-  /// storage suppression lifts when `armBindingsOwnPayload` is set, because the
-  /// base's drop was suppressed precisely so the payload the bindings now own
-  /// is freed exactly once.
+  /// its two suppressions: a scrutinee that aliases storage it does not own,
+  /// and bindings that borrow their payloads. The external storage suppression
+  /// lifts when `armBindingsOwnPayload` is set, because the base's drop was
+  /// suppressed precisely so the payload the bindings now own is freed exactly
+  /// once.
+  ///
+  /// A literal arm body is the `if (let P = value)` and `while (let P = value)`
+  /// desugaring: the binding is still live after the arm, so its drop goes to
+  /// the branch that condition guards rather than to the arm.
   function recordMatchArmDrops(
     state: &mut Borrowck::State,
     schedules: &mut Hir::DropSchedules,
     hir: &Hir::HirStore,
     bindings: &Vector<u32>,
+    matchId: Hir::HirId,
     body: Hir::HirId,
     aliasesExternalStorage: boolean,
     armBindingsOwnPayload: boolean,
     bindsBorrowedPayloads: boolean,
+    scrutineeOwnsMovedPayload: boolean,
   ): void {
     if ((aliasesExternalStorage && !armBindingsOwnPayload) || bindsBorrowedPayloads) {
       return;
     }
 
     if (Borrowck::bodyIsLiteral(hir, body)) {
+      // Only a pattern that takes an owning payload out of an owning scrutinee makes its
+      // bindings owners. `Option<&T>` hands out the pointee instead: the binding names
+      // storage the match never owned, and freeing it here frees it again when the real
+      // owner's schedule runs.
+      if (!scrutineeOwnsMovedPayload) {
+        return;
+      }
+
+      let mut forward: u64 = 0;
+
+      while (forward < bindings.length()) {
+        if (let Option::SOME(defRaw) = bindings.get(forward)) {
+          if (state.isMoveValid(*defRaw) && !state.isDropSuppressed(*defRaw)) {
+            let mut recordRef: &mut Borrowck::State = state;
+            recordRef.recordLetConditionBinding(matchId.raw(), *defRaw);
+          }
+        }
+
+        forward += 1;
+      }
+
       return;
     }
 
@@ -2673,7 +2946,7 @@ export namespace Borrowck {
         Borrowck::checkLoop(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &loopNode);
       },
       Hir::HirKind::Match(matchNode) -> {
-        Borrowck::checkMatch(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &matchNode, span);
+        Borrowck::checkMatch(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &matchNode, nodeId, span);
       },
 
       Hir::HirKind::Return(value) -> {
@@ -3188,8 +3461,42 @@ export namespace Borrowck {
     block: &Hir::HirBlock,
     blockId: Hir::HirId,
   ): void {
+    let empty: Vector<u32> = Vector::new<u32>();
+
+    Borrowck::checkBlockOwning(defStore, typeStore, symbols, hir, state, diagnostics, schedules, block, blockId, &empty);
+  }
+
+  /// Checks a block that additionally owns `extraOwned`, locals declared
+  /// outside it. The branch a `let` condition guards is the scope of that
+  /// condition's bindings: they hold a value only on the path that reaches the
+  /// branch and leave scope when it ends. Declaring them here gives them the
+  /// treatment the block's own locals get — a move inside consumes them, an
+  /// early exit drops them, and whatever is still live at the end is dropped
+  /// there. Mirrors `check_block_owning`.
+  function checkBlockOwning(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
+    block: &Hir::HirBlock,
+    blockId: Hir::HirId,
+    extraOwned: &Vector<u32>,
+  ): void {
     let mut enterRef: &mut Borrowck::State = state;
     enterRef.pushScope(blockId.raw(), true, false);
+
+    let mut ownedIndex: u64 = 0;
+
+    while (ownedIndex < extraOwned.length()) {
+      if (let Option::SOME(defRaw) = extraOwned.get(ownedIndex)) {
+        Borrowck::declareOwned(state, Id::fromRaw<Analyzer::DefinitionTag>(*defRaw));
+      }
+
+      ownedIndex += 1;
+    }
 
     let mut index: u64 = 0;
 
@@ -3214,6 +3521,68 @@ export namespace Borrowck {
     Borrowck::exitScope(state, schedules);
   }
 
+  /// Checks the branch a `let` condition guards, handing it ownership of that
+  /// condition's bindings. A branch that is not a block has no scope to hold
+  /// them, so they keep the treatment they had before: no drop site, and the
+  /// value outlives the branch. Mirrors `check_guarded_branch`.
+  function checkGuardedBranch(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
+    branch: Hir::HirId,
+    conditionBindings: &Vector<u32>,
+  ): void {
+    if (conditionBindings.isEmpty()) {
+      Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, branch);
+      return;
+    }
+
+    let Option::SOME(node) = hir.get(branch) else {
+      Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, branch);
+      return;
+    };
+
+    let Hir::HirKind::Block(block) = &node.kind else {
+      Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, branch);
+      return;
+    };
+
+    Borrowck::checkBlockOwning(
+      defStore,
+      typeStore,
+      symbols,
+      hir,
+      state,
+      diagnostics,
+      schedules,
+      &block,
+      branch,
+      conditionBindings,
+    );
+  }
+
+  /// Forgets the move state of bindings that only exist on one path, so a
+  /// later join does not compare a state the other paths have no notion of.
+  function forgetConditionBindings(
+    state: &mut Borrowck::State,
+    conditionBindings: &Vector<u32>
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < conditionBindings.length()) {
+      if (let Option::SOME(defRaw) = conditionBindings.get(index)) {
+        let mut stateRef: &mut Borrowck::State = state;
+        stateRef.removeMoveValue(*defRaw);
+      }
+
+      index += 1;
+    }
+  }
+
   function checkIf(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3227,6 +3596,9 @@ export namespace Borrowck {
   ): void {
     Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, ifNode.condition);
 
+    let mut conditionRef: &mut Borrowck::State = state;
+    let conditionBindings: Vector<u32> = conditionRef.takeLetConditionBindings(ifNode.condition.raw());
+
     let preReachable: boolean = state.reachable;
     let preMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
     let preBorrows: Borrowck::BorrowSnapshot = state.snapshotBorrows();
@@ -3234,7 +3606,19 @@ export namespace Borrowck {
     let mut thenRef: &mut Borrowck::State = state;
     thenRef.setReachable(preReachable);
 
-    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, ifNode.thenBranch);
+    Borrowck::checkGuardedBranch(
+      defStore,
+      typeStore,
+      symbols,
+      hir,
+      state,
+      diagnostics,
+      schedules,
+      ifNode.thenBranch,
+      &conditionBindings,
+    );
+
+    Borrowck::forgetConditionBindings(state, &conditionBindings);
 
     let thenMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
     let thenBorrows: Borrowck::BorrowSnapshot = state.snapshotBorrows();
@@ -3378,11 +3762,23 @@ export namespace Borrowck {
     diagnostics: &mut DiagnosticBag,
     schedules: &mut Hir::DropSchedules,
     matchNode: &Hir::HirMatch,
+    matchId: Hir::HirId,
     span: SourceSpan,
   ): void {
     Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, matchNode.scrutinee);
 
-    let movesScrutineePayload: boolean = Borrowck::armsMoveScrutineePayload(defStore, typeStore, &matchNode.arms);
+    let mut scrutineeType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+
+    if (let Option::SOME(scrutineeNode) = hir.get(matchNode.scrutinee)) {
+      scrutineeType = scrutineeNode.typeId;
+    }
+
+    let movesScrutineePayload: boolean = Borrowck::armsMoveScrutineePayload(
+      defStore,
+      typeStore,
+      scrutineeType,
+      &matchNode.arms,
+    );
     let scrutineeIsBorrowed: boolean = Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, matchNode.scrutinee);
 
     // Mirrors the `moves_scrutinee_payload` branch of `check_match`. A borrowed
@@ -3418,6 +3814,10 @@ export namespace Borrowck {
 
     let aliasesExternalStorage: boolean = Borrowck::aliasesExternalStorage(hir, matchNode.scrutinee);
     let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, state, matchNode.scrutinee);
+
+    // Whether the match owns what a pattern takes out of it: the scrutinee is an owning
+    // value and some pattern moves an owning payload out of it.
+    let scrutineeOwnsMovedPayload: boolean = movesScrutineePayload && Borrowck::needsDropType(defStore, typeStore, scrutineeType);
 
     let preReachable: boolean = state.reachable;
     let preMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
@@ -3490,10 +3890,12 @@ export namespace Borrowck {
         schedules,
         hir,
         &bindings,
+        matchId,
         arm.body,
         aliasesExternalStorage,
         armBindingsOwnPayload,
         bindsBorrowedPayloads,
+        scrutineeOwnsMovedPayload,
       );
 
       let mut removeIndex: u64 = 0;
@@ -3507,8 +3909,15 @@ export namespace Borrowck {
         removeIndex += 1;
       }
 
-      let mut borrowedRef: &mut Borrowck::State = state;
-      borrowedRef.truncateBorrowedBindings(borrowedMark);
+      // An arm-scoped binding stops being borrowed when the arm ends. A `let`
+      // condition's binding does not: its arm body is a literal and the value is
+      // still live in the branch the condition guards, which has to see it as
+      // borrowed for the same reason the arm did. The oracle never drops these
+      // marks at all, so keeping them here is what matches it.
+      if (!Borrowck::bodyIsLiteral(hir, arm.body)) {
+        let mut borrowedRef: &mut Borrowck::State = state;
+        borrowedRef.truncateBorrowedBindings(borrowedMark);
+      }
 
       branches.push(state.snapshotMoves());
 
@@ -3544,11 +3953,15 @@ export namespace Borrowck {
     loopNode: &Hir::HirLoop,
   ): void {
     let mut update: Option<Hir::HirId> = Option::NONE;
+    let mut conditionBindings: Vector<u32> = Vector::new<u32>();
 
     match (&loopNode.condition) {
       Hir::LoopKind::Infinite -> {},
       Hir::LoopKind::While(condition) -> {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, condition);
+
+        let mut conditionRef: &mut Borrowck::State = state;
+        conditionBindings = conditionRef.takeLetConditionBindings(condition.raw());
       },
       Hir::LoopKind::For(forLoop) -> {
         if (let Option::SOME(init) = forLoop.init) {
@@ -3574,7 +3987,17 @@ export namespace Borrowck {
     enterRef.pushScope(0, false, true);
     enterRef.pushLoop();
 
-    Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, loopNode.body);
+    Borrowck::checkGuardedBranch(
+      defStore,
+      typeStore,
+      symbols,
+      hir,
+      state,
+      diagnostics,
+      schedules,
+      loopNode.body,
+      &conditionBindings,
+    );
 
     let bodyFallsThrough: boolean = state.reachable;
     let continueSeen: boolean = state.continueSeen();
@@ -3596,7 +4019,17 @@ export namespace Borrowck {
 
       let mut secondPass: DiagnosticBag = DiagnosticBag::init();
 
-      Borrowck::checkNode(defStore, typeStore, symbols, hir, state, &mut secondPass, schedules, loopNode.body);
+      Borrowck::checkGuardedBranch(
+        defStore,
+        typeStore,
+        symbols,
+        hir,
+        state,
+        &mut secondPass,
+        schedules,
+        loopNode.body,
+        &conditionBindings,
+      );
 
       let secondFallsThrough: boolean = state.reachable;
       let secondContinueSeen: boolean = state.continueSeen();
@@ -3617,6 +4050,8 @@ export namespace Borrowck {
     exitRef.popLoop();
 
     Borrowck::exitScope(state, schedules);
+
+    Borrowck::forgetConditionBindings(state, &conditionBindings);
 
     Borrowck::conservativeMergeMoves(state, &preLoopMoves);
 

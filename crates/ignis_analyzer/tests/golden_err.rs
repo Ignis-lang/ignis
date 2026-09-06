@@ -3523,3 +3523,44 @@ function buildUser(): void {
     diagnostics
   );
 }
+
+/// A `let` condition over a call temporary gives its binding to the branch it guards, so
+/// a branch that hands the binding on consumes it there. Analysis must accept that: the
+/// value moved out, and nothing is left for the branch to drop.
+#[test]
+fn if_let_over_call_temporary_binding_moved_out_of_branch() {
+  common::assert_ok(
+    r#"
+enum Slot {
+    FULL(Payload),
+    EMPTY,
+}
+
+@implements(Drop)
+record Payload {
+    value: i32;
+
+    drop(&mut self): void {
+        return;
+    }
+}
+
+function makeSlot(): Slot {
+    return Slot::FULL(Payload { value: 1 });
+}
+
+function take(): Payload {
+    if (let Slot::FULL(payload) = makeSlot()) {
+        return payload;
+    }
+
+    return Payload { value: 0 };
+}
+
+function main(): void {
+    let taken: Payload = take();
+    return;
+}
+"#,
+  );
+}
