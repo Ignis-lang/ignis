@@ -46,10 +46,14 @@ pub(crate) struct ProcessOutcome {
 ///
 /// Both streams are drained on dedicated threads: a child that fills a pipe
 /// buffer would otherwise block on its own output and never reach the
-/// deadline check. Once the child (or the deadline) is settled, the group is
-/// killed unconditionally before the drain threads are joined, and that join
-/// is itself bounded, so an inherited pipe a stray descendant still holds
-/// open cannot hang the runner forever.
+/// deadline check. On the timeout path the whole group is killed before the
+/// direct child is; on the normal-exit path the group is left alone, since
+/// `try_wait`/`wait` have already reaped the child by then and its pid (and
+/// therefore its group id) can be recycled by the OS for an unrelated
+/// process on a busy machine, so signaling it after the fact risks hitting
+/// that unrelated process instead. Either way, the drain join is bounded, so
+/// an inherited pipe a stray descendant still holds open cannot hang the
+/// runner forever even when the group was never signaled.
 pub(crate) fn run_with_timeout(
   command: &mut Command,
   timeout: Duration,
@@ -77,6 +81,10 @@ pub(crate) fn run_with_timeout(
       None => {
         if started.elapsed() >= timeout {
           timed_out = true;
+          // The child (and its group) is still unreaped here, so its pid is
+          // still its own: signal the group first to reach any descendant
+          // that inherited the pipes, then kill the direct child itself.
+          kill_process_group(&child);
           let _ = child.kill();
           break child.wait().map_err(|error| error.to_string())?;
         }
@@ -86,10 +94,16 @@ pub(crate) fn run_with_timeout(
     }
   };
 
-  kill_process_group(&child);
-
-  let stdout = stdout_reader.recv_timeout(DRAIN_JOIN_BOUND).unwrap_or_default();
-  let stderr = stderr_reader.recv_timeout(DRAIN_JOIN_BOUND).unwrap_or_default();
+  // Both streams share one deadline instead of a fresh `DRAIN_JOIN_BOUND`
+  // each, so a stray descendant holding both pipes open costs the runner
+  // `DRAIN_JOIN_BOUND` once, not twice.
+  let drain_deadline = Instant::now() + DRAIN_JOIN_BOUND;
+  let stdout = stdout_reader
+    .recv_timeout(drain_deadline.saturating_duration_since(Instant::now()))
+    .unwrap_or_default();
+  let stderr = stderr_reader
+    .recv_timeout(drain_deadline.saturating_duration_since(Instant::now()))
+    .unwrap_or_default();
 
   let exit_code = if timed_out {
     TIMEOUT_EXIT_CODE
@@ -122,8 +136,14 @@ fn place_in_its_own_process_group(_command: &mut Command) {}
 
 /// Sends `SIGKILL` to every process in the child's process group (unix only).
 ///
-/// Best-effort: the group (or its remaining members) may already be gone,
-/// which `kill` reports as an ordinary error this function ignores.
+/// Callers must only reach this while `child` is known unreaped: once
+/// `try_wait`/`wait` returns a status, the pid is freed back to the OS and
+/// can be recycled for an unrelated process before this runs, and `child.id()`
+/// would still name that pid, so `kill(-pid, ...)` could signal a process
+/// (and its group) that has nothing to do with this run.
+///
+/// Best-effort otherwise: the group (or its remaining members) may already
+/// be gone, which `kill` reports as an ordinary error this function ignores.
 #[cfg(unix)]
 fn kill_process_group(child: &Child) {
   let pid = child.id() as i32;
