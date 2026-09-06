@@ -155,13 +155,21 @@ function linkerReadExpected(filename: str): String {
   };
 }
 
+/// A temporary path private to one test of this process. Tests run in a
+/// parallel pool and several of them compile or link, so a fixed name under
+/// `/tmp` would let two tests overwrite each other's files mid-compile.
+function linkerTestPath(testName: str, suffix: str): Path::PathBuf {
+  let name: String = `/tmp/ignis_linker_test_${testName}_${Process::id()}${suffix}`;
+  return Path::PathBuf::fromString(&name);
+}
+
 /// Compile and archive a small C source to produce a linkable object for link tests.
 ///
 /// Returns the object `.o` path on success.
-function linkerCompileTestObject(): Path::PathBuf {
+function linkerCompileTestObject(testName: str): Path::PathBuf {
   let cSrc: str = "int ignis_linker_test_main(void) { return 0; }\nint main(void) { return ignis_linker_test_main(); }\n";
-  let srcPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_linker_test_main.c");
-  let objPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_linker_test_main.o");
+  let srcPath: Path::PathBuf = linkerTestPath(testName, "_main.c");
+  let objPath: Path::PathBuf = linkerTestPath(testName, "_main.o");
 
   let cSrcStr: String = String::create(cSrc);
   match (Fs::writeString(&srcPath, &cSrcStr)) {
@@ -197,10 +205,10 @@ function linkerCompileTestObject(): Path::PathBuf {
 
 @test
 function linkerSuccessfulLink(): void {
-  let objPath: Path::PathBuf = linkerCompileTestObject();
+  let objPath: Path::PathBuf = linkerCompileTestObject("successful_link");
   let objPathStr: String = objPath.toString();
 
-  let outPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_linker_out");
+  let outPath: Path::PathBuf = linkerTestPath("successful_link", "_out");
 
   let mut objects: Vector<String> = Vector::new<String>();
   objects.push(objPathStr.clone());
@@ -228,7 +236,7 @@ function linkerSuccessfulLink(): void {
 
 @test
 function linkerFailsOnMissingObject(): void {
-  let outPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_linker_missing_out");
+  let outPath: Path::PathBuf = linkerTestPath("missing_object", "_out");
 
   let mut objects: Vector<String> = Vector::new<String>();
   objects.push(String::create("/tmp/ignis_nonexistent_object_zzz.o"));
@@ -256,10 +264,10 @@ function linkerFailsOnMissingObject(): void {
 
 @test
 function linkerDefaultsToGccWhenCcEmpty(): void {
-  let objPath: Path::PathBuf = linkerCompileTestObject();
+  let objPath: Path::PathBuf = linkerCompileTestObject("default_cc");
   let objPathStr: String = objPath.toString();
 
-  let outPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_linker_default_cc");
+  let outPath: Path::PathBuf = linkerTestPath("default_cc", "_out");
 
   let mut objects: Vector<String> = Vector::new<String>();
   objects.push(objPathStr.clone());
