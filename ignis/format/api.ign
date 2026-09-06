@@ -121,7 +121,10 @@ function shortestScientificText(value: f64): String {
     precision += 1;
   }
 
-  return formatScientific(value, 16);
+  // Unreachable: 17 significant digits (`precision == 16` above, one
+  // leading digit plus 16 fraction digits) always round-trips any finite
+  // `f64` exactly (Steele & White), so the loop above always returns.
+  @unreachable();
 }
 
 /// One `%e`-formatted scientific value split into Rust `Display`-shaped
@@ -199,14 +202,19 @@ function parseScientificText(raw: &String): ScientificParts {
   };
 }
 
-/// Rust's `Display for f64` layout, built from the shortest round-tripping
+/// `serde`'s rendering of an out-of-range `f64` value in its error messages
+/// (`Unexpected::Float`'s `Display`), built from the shortest round-tripping
 /// `%e` text: fixed notation (always with a decimal point, e.g. `100.0`)
 /// for a base-10 exponent from -5 to 15 inclusive, scientific notation
 /// (`D.DDDe±EE`, `+`/`-` always shown, no leading zeros) outside that range.
-/// The exact threshold and every rule here (the fixed range, the exponent
-/// sign always being present, the lack of leading zeros) were all verified
-/// directly against the host across 20+ values, including subnormals,
-/// magnitudes past 1e300, and negative zero.
+/// This is *not* Rust's actual `Display for f64` (which never switches to
+/// scientific notation on its own — `1e300` prints as a 301-digit decimal
+/// literal through `{}`); `serde_json`'s error-reporting path formats the
+/// value differently, and that different rendering is what this function
+/// reproduces. The exact threshold and every rule here (the fixed range,
+/// the exponent sign always being present, the lack of leading zeros) were
+/// all verified directly against the host across 20+ values, including
+/// subnormals, magnitudes past 1e300, and negative zero.
 function rustFloatDisplay(value: f64): String {
   let raw: String = shortestScientificText(value);
   let parts: ScientificParts = parseScientificText(&raw);
@@ -613,6 +621,29 @@ export namespace Format {
     return Format::ndjsonParseError(&message);
   }
 
+  /// `serde` reports this once it tries to interpret a syntactically valid
+  /// but too-large number (`1e400`, `-1e999`) as an `f64` and gets an
+  /// infinite result, at the column right after the number's own token
+  /// (`endOffset` used directly, not `endOffset + 1`, matching `serde`'s
+  /// "token already fully consumed" convention).
+  function ndjsonNumberOutOfRange(column: u64): String {
+    let columnText: String = column.toString();
+
+    let mut message: String = String::create("number out of range at line 1 column ");
+    message.push(&columnText);
+    return Format::ndjsonParseError(&message);
+  }
+
+  /// `f64::MAX`: any number literal that parses to a magnitude past this
+  /// overflowed to infinity, since `f64` cannot represent anything larger.
+  function numberOverflowsF64(text: &String): boolean {
+    let rawText: str = text.toStr();
+    let parsed: CType::CDouble = LibC::Conversion::atof(rawText as CType::CConstStr);
+    let magnitude: f64 = parsed < 0.0 ? -parsed : parsed;
+    let f64Max: CType::CDouble = LibC::Conversion::atof("1.7976931348623157e308" as CType::CConstStr);
+    return magnitude > f64Max;
+  }
+
   function describeBool(value: boolean): String {
     if (value) {
       return String::create("boolean `true`");
@@ -832,7 +863,7 @@ export namespace Format {
       let read: JsonStringRead = match (readString(line, valueStart)) {
         Result::OK(value) -> value,
         Result::ERROR(message) -> {
-          return Result::ERROR(Format::ndjsonParseError(&message));
+          return Result::ERROR(Format::ndjsonParseErrorOwned(message));
         },
       };
 
@@ -854,7 +885,7 @@ export namespace Format {
       let endOffset: u64 = match (matchKeywordOrIdentError(line, valueStart, "true")) {
         Result::OK(value) -> value,
         Result::ERROR(message) -> {
-          return Result::ERROR(Format::ndjsonParseError(&message));
+          return Result::ERROR(Format::ndjsonParseErrorOwned(message));
         },
       };
 
@@ -870,7 +901,7 @@ export namespace Format {
       let endOffset: u64 = match (matchKeywordOrIdentError(line, valueStart, "false")) {
         Result::OK(value) -> value,
         Result::ERROR(message) -> {
-          return Result::ERROR(Format::ndjsonParseError(&message));
+          return Result::ERROR(Format::ndjsonParseErrorOwned(message));
         },
       };
 
@@ -886,7 +917,7 @@ export namespace Format {
       let endOffset: u64 = match (matchKeywordOrIdentError(line, valueStart, "null")) {
         Result::OK(value) -> value,
         Result::ERROR(message) -> {
-          return Result::ERROR(Format::ndjsonParseError(&message));
+          return Result::ERROR(Format::ndjsonParseErrorOwned(message));
         },
       };
 
@@ -904,9 +935,13 @@ export namespace Format {
       let numberRead: JsonNumberRead = match (scanNumber(line, valueStart)) {
         Result::OK(value) -> value,
         Result::ERROR(message) -> {
-          return Result::ERROR(Format::ndjsonParseError(&message));
+          return Result::ERROR(Format::ndjsonParseErrorOwned(message));
         },
       };
+
+      if (Format::numberOverflowsF64(&numberRead.text)) {
+        return Result::ERROR(Format::ndjsonNumberOutOfRange(numberRead.endOffset));
+      }
 
       return Result::OK(Format::ShallowScalarRead {
         isString: false,
@@ -1012,7 +1047,7 @@ export namespace Format {
         let key: JsonStringRead = match (readString(line, cursor)) {
           Result::OK(value) -> value,
           Result::ERROR(message) -> {
-            return Result::ERROR(Format::ndjsonParseError(&message));
+            return Result::ERROR(Format::ndjsonParseErrorOwned(message));
           },
         };
 
@@ -1057,7 +1092,7 @@ export namespace Format {
           cursor = match (skipValue(line, cursor)) {
             Result::OK(value) -> value,
             Result::ERROR(message) -> {
-              return Result::ERROR(Format::ndjsonParseError(&message));
+              return Result::ERROR(Format::ndjsonParseErrorOwned(message));
             },
           };
         }
@@ -1157,7 +1192,7 @@ export namespace Format {
     cursor = Format::skipAsciiWhitespaceFrom(line, cursor + 1);
 
     let Option::SOME(afterFirstComma) = line.byteAt(cursor) else {
-      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a list")));
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a value")));
     };
 
     if (afterFirstComma == ']' as u8) {

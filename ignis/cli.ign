@@ -283,7 +283,7 @@ function cliMissingValue(flag: str, expected: str): String {
 }
 
 /// `ESC`. Ignis string literals have no `\x`/`\u{}` escape, so every ANSI
-/// code below is built one `char` at a time from this rather than embedting
+/// code below is built one `char` at a time from this rather than embedding
 /// a raw control byte in the source.
 function ansiEsc(): char {
   return '\u{1b}';
@@ -305,6 +305,29 @@ function pushAnsiYellow(output: &mut String, text: str): void {
   outputRef.pushStr(text);
   outputRef.pushChar(ansiEsc());
   outputRef.pushStr("[0m");
+}
+
+/// `--indent-width=`/`--line-width=` with nothing after the `=`: `clap`
+/// rejects an empty string for a numeric argument with this exact message
+/// (still `ColorChoice::Always`, so still ANSI) instead of the generic
+/// missing-value error a bare `--indent-width` with no argument at all gets.
+function clapEmptyIntegerValueError(flagUsage: str): String {
+  let mut message: String = String::new();
+
+  message.pushChar(ansiEsc());
+  message.pushStr("[1m");
+  message.pushChar(ansiEsc());
+  message.pushStr("[31merror:");
+  message.pushChar(ansiEsc());
+  message.pushStr("[0m invalid value '");
+  pushAnsiYellow(&mut message, "");
+  message.pushStr("' for '");
+  pushAnsiBold(&mut message, flagUsage);
+  message.pushStr("': cannot parse integer from empty string\n\nFor more information, try '");
+  pushAnsiBold(&mut message, "--help");
+  message.pushStr("'.");
+
+  return message;
 }
 
 /// Reconstructs the exact `clap`-generated conflict error the host CLI
@@ -374,6 +397,45 @@ record FmtFlagState {
   public spacesSeen: boolean;
 }
 
+/// If `argument` is exactly `flagName` followed by `=` and a (possibly
+/// empty) value, returns that value: the `--flag=value` form editors build
+/// argv with, which `clap` accepts for every value-taking flag alongside
+/// the two-token `--flag value` form.
+function flagEqualsValue(argument: &String, flagName: str): Option<String> {
+  if (!argument.startsWith(flagName)) {
+    return Option::NONE;
+  }
+
+  let flagNameText: String = String::create(flagName);
+  let prefixLength: u64 = flagNameText.length();
+
+  let Option::SOME(afterPrefix) = argument.byteAt(prefixLength) else {
+    return Option::NONE;
+  };
+
+  if (afterPrefix != '=' as u8) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(argument.substringBytes(prefixLength + 1, argument.length()));
+}
+
+/// Applies `--emit`'s comma-separated mode list to `options`. An empty
+/// value (`--emit=`) enables nothing, matching the host.
+function applyFmtEmitModes(options: &mut CliOptions, value: &String): void {
+  let mut optionsRef: &mut CliOptions = options;
+  let modes: Vector<String> = splitCommaSeparated(value);
+  let mut modeIndex: u64 = 0;
+
+  while (modeIndex < modes.length()) {
+    if (let Option::SOME(mode) = modes.get(modeIndex) && mode.equals("diff")) {
+      optionsRef.fmtEmitDiff = true;
+    }
+
+    modeIndex += 1;
+  }
+}
+
 /// Handles one `fmt`-only flag during `parseArguments`'s scan. `Ok(Some(i))`
 /// means `argument` was one of these flags and parsing resumes at index `i`;
 /// `Ok(None)` means it was not, so the caller keeps trying other cases.
@@ -389,7 +451,10 @@ function tryParseFmtFlag(
   let mut optionsRef: &mut CliOptions = options;
   let mut stateRef: &mut FmtFlagState = state;
 
-  if (argument.equals("--project")) {
+  let projectEqualsValue: Option<String> = flagEqualsValue(argument, "--project");
+  let isProjectFlag: boolean = argument.equals("--project") || projectEqualsValue.isSome();
+
+  if (isProjectFlag) {
     if (optionsRef.fmtStdinJson) {
       return Result::ERROR(clapFmtConflictError(
         "--stdin-json",
@@ -398,6 +463,11 @@ function tryParseFmtFlag(
         true,
         "[FILE_PATHS]...",
       ));
+    }
+
+    if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--project")) {
+      optionsRef.fmtProject = Option::SOME(equalsValue);
+      return Result::OK(Option::SOME(index + 1));
     }
 
     let Option::SOME(value) = arguments.get(index + 1) else {
@@ -413,6 +483,11 @@ function tryParseFmtFlag(
     return Result::OK(Option::SOME(index + 1));
   }
 
+  if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--config")) {
+    optionsRef.fmtConfigPath = Option::SOME(equalsValue);
+    return Result::OK(Option::SOME(index + 1));
+  }
+
   if (argument.equals("--config")) {
     let Option::SOME(value) = arguments.get(index + 1) else {
       return Result::ERROR(cliMissingValue("--config", "a file"));
@@ -420,6 +495,19 @@ function tryParseFmtFlag(
 
     optionsRef.fmtConfigPath = Option::SOME(value.clone());
     return Result::OK(Option::SOME(index + 2));
+  }
+
+  if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--indent-width")) {
+    if (equalsValue.length() == 0) {
+      return Result::ERROR(clapEmptyIntegerValueError("--indent-width <INDENT_WIDTH>"));
+    }
+
+    let Option::SOME(width) = parseDecimal(&equalsValue) else {
+      return Result::ERROR(`error: invalid indent width: ${equalsValue.toStr()}`);
+    };
+
+    optionsRef.fmtIndentWidth = Option::SOME(width);
+    return Result::OK(Option::SOME(index + 1));
   }
 
   if (argument.equals("--indent-width")) {
@@ -433,6 +521,19 @@ function tryParseFmtFlag(
 
     optionsRef.fmtIndentWidth = Option::SOME(width);
     return Result::OK(Option::SOME(index + 2));
+  }
+
+  if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--line-width")) {
+    if (equalsValue.length() == 0) {
+      return Result::ERROR(clapEmptyIntegerValueError("--line-width <LINE_WIDTH>"));
+    }
+
+    let Option::SOME(width) = parseDecimal(&equalsValue) else {
+      return Result::ERROR(`error: invalid line width: ${equalsValue.toStr()}`);
+    };
+
+    optionsRef.fmtLineWidth = Option::SOME(width);
+    return Result::OK(Option::SOME(index + 1));
   }
 
   if (argument.equals("--line-width")) {
@@ -492,22 +593,17 @@ function tryParseFmtFlag(
     return Result::OK(Option::SOME(index + 1));
   }
 
+  if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--emit")) {
+    applyFmtEmitModes(optionsRef, &equalsValue);
+    return Result::OK(Option::SOME(index + 1));
+  }
+
   if (argument.equals("--emit")) {
     let Option::SOME(value) = arguments.get(index + 1) else {
       return Result::ERROR(cliMissingValue("--emit", "a mode"));
     };
 
-    let modes: Vector<String> = splitCommaSeparated(value);
-    let mut modeIndex: u64 = 0;
-
-    while (modeIndex < modes.length()) {
-      if (let Option::SOME(mode) = modes.get(modeIndex) && mode.equals("diff")) {
-        optionsRef.fmtEmitDiff = true;
-      }
-
-      modeIndex += 1;
-    }
-
+    applyFmtEmitModes(optionsRef, value);
     return Result::OK(Option::SOME(index + 2));
   }
 

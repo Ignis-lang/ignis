@@ -1618,26 +1618,34 @@ enum FmtInput {
   Project(ResolvedProject),
 }
 
+/// The formatter configuration failure message the host CLI prints for one
+/// not scoped to a particular file being formatted, minus the `Error: `
+/// prefix `Io::eprintln` callers add.
+export function fmtConfigErrorMessage(bag: &DiagnosticBag): String {
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    return String::create("formatter configuration failed: unknown formatter configuration error");
+  };
+
+  return `formatter configuration failed: ${diagnostic.messageText()}`;
+}
+
 /// Reports a formatter configuration failure the way the host CLI reports
 /// one that is not scoped to a particular file being formatted.
 function printFmtConfigError(bag: &DiagnosticBag): void {
-  let Option::SOME(diagnostic) = bag.get(0) else {
-    Io::eprintln(String::create("Error: unknown formatter configuration error"));
-    return;
-  };
+  Io::eprintln(`Error: ${fmtConfigErrorMessage(bag).toStr()}`);
+}
 
-  Io::eprintln(`Error: ${diagnostic.messageText()}`);
+/// The formatter configuration failure message the host CLI prints for one
+/// scoped to the file being formatted, minus the `Error: ` prefix
+/// `Io::eprintln` callers add.
+export function fmtConfigErrorMessageForPath(path: &Path::PathBuf, bag: &DiagnosticBag): String {
+  return `${path.asStr()}: ${fmtConfigErrorMessage(bag).toStr()}`;
 }
 
 /// Reports a formatter configuration failure scoped to the file being
 /// formatted, the way the host CLI's per-file config resolution does.
 function printFmtConfigErrorForPath(path: &Path::PathBuf, bag: &DiagnosticBag): void {
-  let Option::SOME(diagnostic) = bag.get(0) else {
-    Io::eprintln(`Error: ${path.asStr()}: unknown formatter configuration error`);
-    return;
-  };
-
-  Io::eprintln(`Error: ${path.asStr()}: ${diagnostic.messageText()}`);
+  Io::eprintln(`Error: ${fmtConfigErrorMessageForPath(path, bag).toStr()}`);
 }
 
 /// Builds the overrides `Format::Config::load` applies on top of whatever a
@@ -2193,25 +2201,37 @@ record FmtStdinReadOutcome {
   public readError: Option<String>;
 }
 
+/// A `read(2)` interrupted by a signal (`EINTR`) before transferring any
+/// data is retried, the way Rust's `std::io::Read` implementations do,
+/// instead of surfacing a spurious error for a condition the caller cannot
+/// meaningfully act on.
 function fmtReadStdinChunk(buf: *mut u8, bufSize: u64): FmtStdinReadOutcome {
-  let count: CType::SSizeT = LibC::File::read(0, buf as CType::CVoidPtr, bufSize);
+  while (true) {
+    let count: CType::SSizeT = LibC::File::read(0, buf as CType::CVoidPtr, bufSize);
 
-  if (count < 0) {
-    let error: Io::IoError = Io::IoError::lastError();
+    if (count < 0) {
+      let error: Io::IoError = Io::IoError::lastError();
 
-    // Matches Rust's `std::io::Error` `Display`: the `strerror` text, then
-    // the raw errno in parentheses.
-    let mut message: String = String::create(error.errorMessage());
-    let rawCodeValue: i32 = error.rawCode();
-    let rawCode: String = rawCodeValue.toString();
-    message.pushStr(" (os error ");
-    message.push(&rawCode);
-    message.pushStr(")");
+      if (error.rawCode() == LibC::Errno::EINTR) {
+        continue;
+      }
 
-    return FmtStdinReadOutcome { count: count, readError: Option::SOME(message) };
+      // Matches Rust's `std::io::Error` `Display`: the `strerror` text, then
+      // the raw errno in parentheses.
+      let mut message: String = String::create(error.errorMessage());
+      let rawCodeValue: i32 = error.rawCode();
+      let rawCode: String = rawCodeValue.toString();
+      message.pushStr(" (os error ");
+      message.push(&rawCode);
+      message.pushStr(")");
+
+      return FmtStdinReadOutcome { count: count, readError: Option::SOME(message) };
+    }
+
+    return FmtStdinReadOutcome { count: count, readError: Option::NONE };
   }
 
-  return FmtStdinReadOutcome { count: count, readError: Option::NONE };
+  @unreachable();
 }
 
 /// Finds the first `\n` at or after `start`, scanning only the unexamined
@@ -2369,6 +2389,123 @@ function printFmtStdinParseError(error: String): FmtStdinLineResult {
 /// read, not after the whole input closes, so a driver that writes one
 /// request, waits for the response, and only then writes the next sees each
 /// response in turn instead of everything at once at EOF.
+function saturatingSubU64(value: u64, amount: u64): u64 {
+  if (value < amount) {
+    return 0;
+  }
+
+  return value - amount;
+}
+
+/// The byte length of the UTF-8 sequence `leadByte` starts, or `Option::NONE`
+/// if it cannot start one (a stray continuation byte or an invalid leading
+/// byte such as `0xFF`).
+function utf8SequenceLength(leadByte: u8): Option<u64> {
+  if (leadByte < 0x80) {
+    return Option::SOME(1);
+  }
+
+  if (leadByte >= 0xC2 && leadByte <= 0xDF) {
+    return Option::SOME(2);
+  }
+
+  if (leadByte >= 0xE0 && leadByte <= 0xEF) {
+    return Option::SOME(3);
+  }
+
+  if (leadByte >= 0xF0 && leadByte <= 0xF4) {
+    return Option::SOME(4);
+  }
+
+  return Option::NONE;
+}
+
+function isUtf8ContinuationByte(byte: u8): boolean {
+  return byte >= 0x80 && byte <= 0xBF;
+}
+
+/// Validates UTF-8 in `pending` from `start` onward, matching what Rust's
+/// `Stdin::read_to_string`-style validation rejects a batch for: a
+/// definitively invalid byte (bad continuation byte, overlong 2-byte
+/// encoding, an out-of-range or surrogate-range 3/4-byte encoding) fails
+/// immediately, and a multi-byte sequence cut short by the end of the bytes
+/// read so far only fails once `reachedEnd` is true (more input might still
+/// complete it otherwise). Returns the position right after the last fully
+/// validated sequence, which is where the next call should resume: either
+/// `pending.length()` (everything validated) or the start of a sequence
+/// still waiting on more bytes.
+export function validateUtf8From(pending: &String, start: u64, reachedEnd: boolean): Option<u64> {
+  let length: u64 = pending.length();
+  let mut cursor: u64 = start;
+
+  while (cursor < length) {
+    let Option::SOME(leadByte) = pending.byteAt(cursor) else {
+      break;
+    };
+
+    let Option::SOME(sequenceLength) = utf8SequenceLength(leadByte) else {
+      return Option::NONE;
+    };
+
+    if (cursor + sequenceLength > length) {
+      if (reachedEnd) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(cursor);
+    }
+
+    let mut continuationIndex: u64 = 1;
+
+    while (continuationIndex < sequenceLength) {
+      let Option::SOME(continuationByte) = pending.byteAt(cursor + continuationIndex) else {
+        return Option::NONE;
+      };
+
+      if (!isUtf8ContinuationByte(continuationByte)) {
+        return Option::NONE;
+      }
+
+      continuationIndex += 1;
+    }
+
+    if (sequenceLength == 2 && leadByte < 0xC2) {
+      return Option::NONE;
+    }
+
+    if (sequenceLength == 3) {
+      let Option::SOME(second) = pending.byteAt(cursor + 1) else {
+        return Option::NONE;
+      };
+
+      if (leadByte == 0xE0 && second < 0xA0) {
+        return Option::NONE;
+      }
+
+      if (leadByte == 0xED && second > 0x9F) {
+        return Option::NONE;
+      }
+    }
+
+    if (sequenceLength == 4) {
+      let Option::SOME(second) = pending.byteAt(cursor + 1) else {
+        return Option::NONE;
+      };
+
+      if (leadByte == 0xF0 && second < 0x90) {
+        return Option::NONE;
+      }
+
+      if (leadByte == 0xF4 && second > 0x8F) {
+        return Option::NONE;
+      }
+    }
+
+    cursor += sequenceLength;
+  }
+
+  return Option::SOME(cursor);
+}
 function runFmtStdinJson(options: &CliOptions): i32 {
   let formatterConfig: FormatterConfig = match (resolveFmtConfigForStdin(options)) {
     Result::OK(value) -> value,
@@ -2386,6 +2523,7 @@ function runFmtStdinJson(options: &CliOptions): i32 {
 
   let mut pending: String = String::new();
   let mut scannedUpTo: u64 = 0;
+  let mut utf8ValidatedUpTo: u64 = 0;
   let mut reachedEnd: boolean = false;
   let mut anyError: boolean = false;
   let mut anyChanged: boolean = false;
@@ -2421,17 +2559,31 @@ function runFmtStdinJson(options: &CliOptions): i32 {
 
       if (outcome.count == 0) {
         reachedEnd = true;
+
+        let Option::SOME(_) = validateUtf8From(&pending, utf8ValidatedUpTo, true) else {
+          Io::eprintln("Error: Failed to read stdin: stream did not contain valid UTF-8");
+          return 1;
+        };
+
         continue;
       }
 
       scannedUpTo = pending.length();
       fmtAppendStdinChunk(&mut pending, buf, outcome.count);
+
+      let Option::SOME(validatedUpTo) = validateUtf8From(&pending, utf8ValidatedUpTo, false) else {
+        Io::eprintln("Error: Failed to read stdin: stream did not contain valid UTF-8");
+        return 1;
+      };
+
+      utf8ValidatedUpTo = validatedUpTo;
       continue;
     };
 
     let line: String = pending.substringBytes(0, newlineIndex);
     pending = pending.substringBytes(newlineIndex + 1, pending.length());
     scannedUpTo = 0;
+    utf8ValidatedUpTo = saturatingSubU64(utf8ValidatedUpTo, newlineIndex + 1);
     let trimmed: String = trimUnicodeWhitespace(&line);
 
     if (trimmed.length() == 0) {

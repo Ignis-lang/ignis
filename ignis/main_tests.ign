@@ -1,7 +1,139 @@
+import Path from "std::path";
 import String from "std::string";
 import Test from "std::test";
 
-import comparePathComponents from "./main";
+import DiagnosticBag from "@compiler::diagnostics";
+
+import Format from "./format/api";
+import FormatterCliOverrides, FormatterConfigPaths from "./format/config";
+import
+  comparePathComponents,
+  fmtConfigErrorMessage,
+  fmtConfigErrorMessageForPath,
+  validateUtf8From,
+from "./main";
+
+function invalidIndentWidthBag(): DiagnosticBag {
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: Path::PathBuf::create("."),
+    ignisToml: Option::NONE,
+    dedicatedConfig: Option::NONE,
+    explicitConfig: Option::NONE,
+  };
+
+  let overrides: FormatterCliOverrides = FormatterCliOverrides {
+    indentWidth: Option::SOME(0),
+    lineWidth: Option::NONE,
+    useTabs: Option::NONE,
+    sortImports: Option::NONE,
+  };
+
+  let Result::ERROR(bag) = Format::Config::load(&paths, &overrides) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return bag;
+}
+
+/// The host CLI prefixes a formatter configuration failure with `formatter
+/// configuration failed: `; `printFmtConfigError` used to drop that prefix
+/// entirely.
+@test
+function fmtConfigErrorMessageAddsTheHostsPrefix(): void {
+  let bag: DiagnosticBag = invalidIndentWidthBag();
+  let message: String = fmtConfigErrorMessage(&bag);
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "formatter configuration failed: formatter config '<cli>' has invalid 'indent_width': expected 0 to be within 1..=8"
+  );
+}
+
+/// The per-file variant additionally prefixes the file path, the way the
+/// host CLI's per-file config resolution does.
+@test
+function fmtConfigErrorMessageForPathAddsThePathAndThePrefix(): void {
+  let bag: DiagnosticBag = invalidIndentWidthBag();
+  let path: Path::PathBuf = Path::PathBuf::create("src/main.ign");
+  let message: String = fmtConfigErrorMessageForPath(&path, &bag);
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "src/main.ign: formatter configuration failed: formatter config '<cli>' has invalid 'indent_width': expected 0 to be within 1..=8"
+  );
+}
+
+/// A raw control byte and an ASCII run are both valid UTF-8: the whole
+/// buffer validates in one pass regardless of where `reachedEnd` sits.
+@test
+function validateUtf8FromAcceptsPlainAsciiBytes(): void {
+  let text: String = String::create("hello");
+  let Option::SOME(validatedUpTo) = validateUtf8From(&text, 0, true) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(validatedUpTo, text.length());
+}
+
+/// A complete multi-byte scalar (`é`, `C3 A9`) validates fully once it is
+/// entirely present, whether or not more input might still follow.
+@test
+function validateUtf8FromAcceptsACompleteMultiByteScalar(): void {
+  let text: String = String::create("cafe\u{e9}");
+  let Option::SOME(validatedUpTo) = validateUtf8From(&text, 0, false) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(validatedUpTo, text.length());
+}
+
+/// A multi-byte sequence cut short by the end of the bytes read so far is
+/// left unvalidated (not an error yet) while more input might still
+/// complete it.
+@test
+function validateUtf8FromLeavesATruncatedSequenceForMoreInput(): void {
+  let mut text: String = String::create("a");
+  text.pushByte(0xC3);
+
+  let Option::SOME(validatedUpTo) = validateUtf8From(&text, 0, false) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(validatedUpTo, 1);
+}
+
+/// The same truncated sequence is a genuine error once no more input will
+/// arrive (`reachedEnd` true).
+@test
+function validateUtf8FromRejectsATruncatedSequenceAtTrueEof(): void {
+  let mut text: String = String::create("a");
+  text.pushByte(0xC3);
+
+  let Option::SOME(_) = validateUtf8From(&text, 0, true) else {
+    return;
+  };
+
+  Test::fail();
+}
+
+/// `0xFF` cannot start any UTF-8 sequence: rejected immediately regardless
+/// of `reachedEnd`.
+@test
+function validateUtf8FromRejectsAnInvalidLeadingByte(): void {
+  let mut text: String = String::create("a");
+  text.pushByte(0xFF);
+  text.pushByte(0xFE);
+
+  let Option::SOME(_) = validateUtf8From(&text, 0, false) else {
+    return;
+  };
+
+  Test::fail();
+}
 
 /// `a/b.ign` sorts before `a-b.ign`: the first path component `a` sorts
 /// before the whole second component `a-b.ign`, even though `-` (0x2D)

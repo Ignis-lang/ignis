@@ -126,6 +126,17 @@ function jsonControlCharacterMessage(index: u64): String {
   return message;
 }
 
+/// The same message as `jsonControlCharacterMessage`, but at the byte's raw
+/// 0-based index rather than `index + 1`: `serde`'s `IgnoredAny` string skip
+/// (used for an unknown field's value) reports this convention instead,
+/// verified against the host.
+function jsonControlCharacterAtRawIndexMessage(index: u64): String {
+  let mut message: String = String::create("control character (\\u0000-\\u001F) found while parsing a string at line 1 column ");
+  let column: String = index.toString();
+  message.push(&column);
+  return message;
+}
+
 function jsonUnexpectedEndOfHexEscapeMessage(index: u64): String {
   let mut message: String = String::create("unexpected end of hex escape at line 1 column ");
   let column: String = columnAtByte(index);
@@ -561,6 +572,63 @@ export function classifyContainerStart(source: &String, index: u64): Option<Json
   return Option::NONE;
 }
 
+/// Advances past a JSON string without decoding it, matching `serde_json`'s
+/// `IgnoredAny` string skip rather than a real `String` deserialize: escape
+/// characters are validated against the known set and a `\u` escape needs 4
+/// present hex digits, but a surrogate pair is never combined or checked for
+/// validity (an unpaired or out-of-order surrogate here is not an error, the
+/// same way the host accepts it in a field it never reads).
+function skipStringValue(source: &String, startIndex: u64): Result<u64, String> {
+  let mut cursor: u64 = startIndex + 1;
+
+  while (true) {
+    let Option::SOME(byte) = source.byteAt(cursor) else {
+      return Result::ERROR(jsonEofMessage(source, "a string"));
+    };
+
+    if (byte == '"' as u8) {
+      return Result::OK(cursor + 1);
+    }
+
+    if (byte < 32) {
+      return Result::ERROR(jsonControlCharacterAtRawIndexMessage(cursor));
+    }
+
+    if (byte != '\\' as u8) {
+      cursor += 1;
+      continue;
+    }
+
+    let Option::SOME(escaped) = source.byteAt(cursor + 1) else {
+      return Result::ERROR(jsonEofMessage(source, "a string"));
+    };
+
+    let isKnownShortEscape: boolean = escaped == 'n' as u8 || escaped == 't' as u8 || escaped == 'r' as u8 || escaped == 'b' as u8 || escaped == 'f' as u8 || escaped == '"' as u8 || escaped == '\\' as u8 || escaped == '/' as u8;
+
+    if (isKnownShortEscape) {
+      cursor += 2;
+      continue;
+    }
+
+    if (escaped != 'u' as u8) {
+      return Result::ERROR(jsonInvalidEscapeMessage(cursor + 1));
+    }
+
+    cursor = match (readHexEscape(source, cursor + 2)) {
+      Result::OK(escapeRead) -> escapeRead.nextIndex,
+      Result::ERROR(isEof) -> {
+        if (isEof) {
+          return Result::ERROR(jsonEofMessage(source, "a string"));
+        }
+
+        return Result::ERROR(jsonInvalidEscapeMessage(cursor + 2 + 3));
+      },
+    };
+  }
+
+  @unreachable();
+}
+
 /// Skips one JSON scalar (string, `true`/`false`/`null`, or number) at
 /// `index`, which must not be `{` or `[`.
 function skipScalarValue(source: &String, index: u64): Result<u64, String> {
@@ -569,8 +637,7 @@ function skipScalarValue(source: &String, index: u64): Result<u64, String> {
   };
 
   if (byte == '"' as u8) {
-    let read: JsonStringRead = readString(source, index)!;
-    return Result::OK(read.nextIndex);
+    return skipStringValue(source, index);
   }
 
   if (byte == 't' as u8) {
@@ -644,8 +711,8 @@ export function skipValue(source: &String, startIndex: u64): Result<u64, String>
           return Result::ERROR(jsonKeyMustBeStringMessage(cursor));
         }
 
-        let key: JsonStringRead = readString(source, cursor)!;
-        cursor = Json::skipWhitespace(source, key.nextIndex);
+        let keyEndOffset: u64 = skipStringValue(source, cursor)!;
+        cursor = Json::skipWhitespace(source, keyEndOffset);
 
         let Option::SOME(colon) = source.byteAt(cursor) else {
           return Result::ERROR(jsonEofMessage(source, "an object"));
@@ -902,8 +969,11 @@ function parseJsonArray(
     if (next == ',' as u8) {
       cursor = Json::skipWhitespace(source, cursor + 1);
 
+      // Past the comma, the next element is read through the same generic
+      // value dispatch every array element uses, so EOF here is `EOF while
+      // parsing a value`, not `a list` (matches `skipValue`'s array case).
       let Option::SOME(afterComma) = source.byteAt(cursor) else {
-        return Result::ERROR(jsonEofMessage(source, "a list"));
+        return Result::ERROR(jsonEofMessage(source, "a value"));
       };
 
       if (afterComma == ']' as u8) {
