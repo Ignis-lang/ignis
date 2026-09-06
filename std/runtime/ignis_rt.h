@@ -80,9 +80,9 @@ typedef u32 IgnisTypeId;
  * `std/string` frees the data buffer and zeroes the struct, but never frees
  * the struct itself.
  *
- * len is measured in bytes. Storage is owned and may contain interior NUL
- * bytes; callers that need the full contents must honor `len` instead of
- * stopping at the first interior NUL byte.
+ * len is measured in bytes. Owned storage preserves interior NUL bytes, so
+ * callers that need the full contents must honor `len` instead of stopping at
+ * the first interior NUL byte.
  *
  * Invariant: data[len] == '\0'
  * Invariant: cap >= len + 1
@@ -113,45 +113,12 @@ typedef void *null;
 void ignis_runtime_init(i32 argc, void *argv);
 
 // =============================================================================
-// String access API
-//
-// Construction, mutation and destruction now live in `std/string`, which owns
-// the `IgnisString` buffer end to end. What remains here are the read-only and
-// derived-string operations that have not moved yet.
-// =============================================================================
-
-/**
- * Returns a null-terminated borrowed view of the string data.
- *
- * This view is suitable for C interop, but consumers that rely on C-string
- * semantics may stop at the first interior NUL byte.
- */
-const char *ignis_string_cstr(const IgnisString *s);
-
-/**
- * Decodes the scalar that starts at byte `idx`.
- *
- * On success, returns the scalar and writes the exclusive end byte offset to
- * `out_end`. On failure or non-boundary input, returns 0 and leaves `*out_end`
- * equal to `idx`.
- */
-ignis_char_t ignis_string_char_at(const IgnisString *s, size_t idx, size_t *out_end);
-
-/**
- * Returns the raw byte at `idx`, or 0 if out of range.
- */
-u8 ignis_string_byte_at(const IgnisString *s, size_t idx);
-
-// =============================================================================
 // String operations
+//
+// Construction, mutation, release, access, comparison and search now live in
+// `std/string`, which owns the `IgnisString` buffer end to end. What remains
+// here are the derived-string operations that have not moved yet.
 // =============================================================================
-
-/**
- * Compares two strings lexicographically over all owned bytes.
- *
- * @return Negative if a < b, zero if equal, positive if a > b.
- */
-i32 ignis_string_compare(const IgnisString *a, const IgnisString *b);
 
 /**
  * Creates a new string by concatenating `a` and `b`.
@@ -162,18 +129,6 @@ IgnisString ignis_string_concat(const IgnisString *a, const IgnisString *b);
  * Creates a substring from `start` with length `len`.
  */
 IgnisString ignis_string_substring(const IgnisString *s, i64 start, i64 len);
-
-/**
- * Returns the first byte index of `needle` in `haystack`, or -1 if not found.
- *
- * Search is length-aware and does not stop at interior NUL bytes.
- */
-i64 ignis_string_index_of(const IgnisString *haystack, const IgnisString *needle);
-
-/**
- * Returns TRUE if `needle` appears in `haystack`.
- */
-boolean ignis_string_contains(const IgnisString *haystack, const IgnisString *needle);
 
 /**
  * Returns a new string with all characters converted to uppercase.

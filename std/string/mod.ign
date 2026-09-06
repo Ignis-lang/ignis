@@ -115,6 +115,8 @@ function stringAsciiWhitespace(value: char): boolean {
 extern __string_bytes {
   /// Returns the number of bytes before the first NUL byte of `s`.
   function strlen(s: *u8): u64;
+  /// Compares `count` bytes of `left` and `right`, returning zero when equal.
+  function memcmp(left: *u8, right: *u8, count: u64): i32;
 }
 
 extern __string {
@@ -126,20 +128,6 @@ extern __string {
   function ignis_string_init_to_upper(out: &mut String, s: &String): void;
   /// Initializes `out` as an ASCII lowercase copy of `s`.
   function ignis_string_init_to_lower(out: &mut String, s: &String): void;
-
-  // Read operations
-  /// Compares two strings byte-wise using runtime ordering semantics.
-  function ignis_string_compare(a: &String, b: &String): i32;
-  /// Returns the scalar at byte `idx` and writes the exclusive end byte offset.
-  function ignis_string_char_at(s: &String, idx: u64, outEnd: &mut u64): char;
-  /// Returns the raw byte at `idx`; callers wrap bounds checks.
-  function ignis_string_byte_at(s: &String, idx: u64): u8;
-  /// Returns the byte index of `needle` in `haystack`, or `-1`.
-  function ignis_string_index_of(haystack: &String, needle: &String): i64;
-  /// Returns whether `haystack` contains `needle`.
-  function ignis_string_contains(haystack: &String, needle: &String): boolean;
-  /// Returns the NUL-terminated borrowed view of `s`.
-  function ignis_string_cstr(s: &String): str;
 
   // Number-to-string init functions
   /// Initializes `out` with the decimal text of an `i8`.
@@ -497,7 +485,25 @@ export record String {
   /// let cmp: i32 = a.compare(&b);  // negative (a < b)
   /// ```
   public compare(&self, other: &String): i32 {
-    return __string::ignis_string_compare(self, other);
+    let shared: u64 = self.len < other.len ? self.len : other.len;
+
+    let mut index: u64 = 0;
+    while (index < shared) {
+      let left: u8 = @read<u8>(self.data + index);
+      let right: u8 = @read<u8>(other.data + index);
+
+      if (left != right) {
+        return left < right ? -1 : 1;
+      }
+
+      index += 1;
+    }
+
+    if (self.len == other.len) {
+      return 0;
+    }
+
+    return self.len < other.len ? -1 : 1;
   }
 
   /// Returns the byte at `index` as a `char`, or `NONE` if out of range.
@@ -563,7 +569,7 @@ export record String {
   /// Returns the raw byte at `index`, or `Option::NONE` when out of range.
   public byteAt(&self, index: u64): Option<u8> {
     if (index < self.len) {
-      return Option::SOME(__string::ignis_string_byte_at(self, index));
+      return Option::SOME(@read<u8>(self.data + index));
     }
 
     return Option::NONE;
@@ -591,10 +597,23 @@ export record String {
   /// let idx: Option<u64> = s.indexOf(&needle);  // Option::SOME(6)
   /// ```
   public indexOf(&self, needle: &String): Option<u64> {
-    let result: i64 = __string::ignis_string_index_of(self, needle);
+    if (needle.len == 0) {
+      return Option::SOME(0 as u64);
+    }
 
-    if (result >= 0) {
-      return Option::SOME(result as u64);
+    if (needle.len > self.len) {
+      return Option::NONE;
+    }
+
+    let lastStart: u64 = self.len - needle.len;
+    let mut start: u64 = 0;
+
+    while (start <= lastStart) {
+      if (__string_bytes::memcmp((self.data + start) as *u8, needle.data as *u8, needle.len) == 0) {
+        return Option::SOME(start);
+      }
+
+      start += 1;
     }
 
     return Option::NONE;
@@ -616,7 +635,7 @@ export record String {
   /// let found: boolean = s.contains(&needle);  // true
   /// ```
   public contains(&self, needle: &String): boolean {
-    return __string::ignis_string_contains(self, needle);
+    return self.indexOf(needle).isSome();
   }
 
   /// Returns whether this string starts with the NUL-terminated `prefix` bytes.
@@ -682,7 +701,11 @@ export record String {
   /// let view: str = s.toStr();  // "hello"
   /// ```
   public toStr(&self): str {
-    return __string::ignis_string_cstr(self);
+    if (self.data == null) {
+      return "";
+    }
+
+    return self.data as str;
   }
 
   // ---------------------------------------------------------------------------
@@ -1067,7 +1090,7 @@ export record String {
   }
 
   public equals(&self, other: &String): boolean {
-    return __string::ignis_string_compare(self, other) == 0;
+    return self.compare(other) == 0;
   }
 
   /// Returns whether this owned string has the same NUL-terminated bytes as `other`.
@@ -1085,7 +1108,7 @@ export record String {
 
     let mut index: u64 = 0;
     while (index < self.length()) {
-      let byte: u8 = __string::ignis_string_byte_at(self, index);
+      let byte: u8 = @read<u8>(self.data + index);
       let high: u8 = (byte >> 4) & 15;
       let low: u8 = byte & 15;
 
@@ -1295,10 +1318,13 @@ export record String {
 
     while (i < self.len) {
       let mut end: u64 = i;
-      let mut value: char = __string::ignis_string_char_at(self, i, &mut end);
+      let mut value: char = UNICODE_REPLACEMENT as char;
+
+      if (let Option::SOME(decoded) = self.charAt(i, &mut end)) {
+        value = decoded;
+      }
 
       if (end <= i) {
-        value = 65533 as char;
         end = i + 1;
       }
 
@@ -1353,10 +1379,13 @@ export record String {
 
     while (i < self.len) {
       let mut end: u64 = i;
-      let mut value: char = __string::ignis_string_char_at(self, i, &mut end);
+      let mut value: char = UNICODE_REPLACEMENT as char;
+
+      if (let Option::SOME(decoded) = self.charAt(i, &mut end)) {
+        value = decoded;
+      }
 
       if (end <= i) {
-        value = 65533 as char;
         end = i + 1;
       }
 

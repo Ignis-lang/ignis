@@ -721,3 +721,91 @@ function createFromLenPreservesInteriorNulBytesAndTerminates(): void {
 
   Test::assertEq<u8>(trailing, 0);
 }
+
+@test
+function compareOrdersByBytesAndThenByLength(): void {
+  let shorter: String = String::create("abc");
+  let longer: String = String::create("abcd");
+  let higher: String = String::create("abd");
+  let same: String = String::create("abc");
+
+  Test::assertEq<i32>(shorter.compare(&same), 0);
+  Test::assertEq<i32>(shorter.compare(&longer), -1);
+  Test::assertEq<i32>(longer.compare(&shorter), 1);
+  Test::assertEq<i32>(shorter.compare(&higher), -1);
+  Test::assertEq<i32>(higher.compare(&shorter), 1);
+}
+
+@test
+function compareIsByteOrderedAcrossTheSignedCharBoundary(): void {
+  let mut low: String = String::new();
+  low.pushByte(127 as u8);
+
+  let mut high: String = String::new();
+  high.pushByte(200 as u8);
+
+  Test::assertEq<i32>(low.compare(&high), -1);
+  Test::assertEq<i32>(high.compare(&low), 1);
+}
+
+@test
+function compareLooksPastInteriorNulBytes(): void {
+  let first: String = buildInteriorNulString('b');
+  let second: String = buildInteriorNulString('c');
+
+  Test::assertEq<i32>(first.compare(&second), -1);
+  Test::assertEq<boolean>(first.equals(&second), false);
+}
+
+@test
+function indexOfIsLengthAwareAndFindsTheFirstMatch(): void {
+  let haystack: String = String::create("abcabc");
+  let needle: String = String::create("bc");
+  let missing: String = String::create("bd");
+  let empty: String = String::create("");
+  let tooLong: String = String::create("abcabcd");
+
+  Test::assertEq<u64>(haystack.indexOf(&needle).unwrap(), 1);
+  Test::assertEq<boolean>(haystack.indexOf(&missing).isSome(), false);
+  Test::assertEq<u64>(haystack.indexOf(&empty).unwrap(), 0);
+  Test::assertEq<boolean>(haystack.indexOf(&tooLong).isSome(), false);
+  Test::assertEq<boolean>(haystack.contains(&needle), true);
+  Test::assertEq<boolean>(haystack.contains(&missing), false);
+}
+
+@test
+function indexOfSearchesPastInteriorNulBytes(): void {
+  let haystack: String = buildInteriorNulString('b');
+  let needle: String = String::create("b");
+
+  Test::assertEq<u64>(haystack.indexOf(&needle).unwrap(), 2);
+  Test::assertEq<boolean>(haystack.contains(&needle), true);
+}
+
+@test
+function forEachDecodesEveryScalarAndAdvancesPastMalformedBytes(): void {
+  let sample: String = utf8SampleString();
+  let mut visited: u64 = 0;
+  let mut codePoints: u64 = 0;
+
+  sample.forEach((value: char): void -> {
+    visited += 1;
+    codePoints = codePoints * 100000 + (value as u32) as u64;
+  });
+
+  Test::assertEq<u64>(visited, 3);
+  Test::assertEq<u64>(codePoints, 970023320013 as u64);
+
+  let mut malformed: String = String::new();
+  malformed.pushByte(195 as u8);
+  malformed.pushByte('z' as u8);
+
+  let mut replacements: u64 = 0;
+  malformed.forEach((value: char): void -> {
+    if (value as u32 == 65533) {
+      replacements += 1;
+    }
+  });
+
+  Test::assertEq<u64>(replacements, 1);
+}

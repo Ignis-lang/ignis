@@ -35,8 +35,6 @@ Core runtime types, IDs, and APIs.
 - Alloc/Free:
   - `ignis_alloc`, `ignis_realloc`, `ignis_free`, defined in `std/memory/allocator.ign`
 - String API still in C:
-  - `ignis_string_cstr`, `ignis_string_char_at`, `ignis_string_byte_at`
-  - `ignis_string_compare`, `ignis_string_index_of`, `ignis_string_contains`
   - `ignis_string_concat`, `ignis_string_substring`, `ignis_string_to_upper`, `ignis_string_to_lower`
   - the `ignis_string_init_*` output-pointer variants for the four above
   - `ignis_{i8,i16,i32,i64,u8,u16,u32,u64,f32,f64}_to_string` and their
@@ -45,7 +43,9 @@ Core runtime types, IDs, and APIs.
   - construction and capacity: `String::new`, `String::withCapacity`, `String::create`
   - mutation: `String::pushChar`, `String::pushByte`, `String::pushStr`, `String::push`,
     `String::clear`, `String::reserve`
-  - reads: `String::length`, `String::byteAt`
+  - reads: `String::length`, `String::byteAt`, `String::charAt`, `String::toStr`
+  - comparison and search: `String::compare`, `String::equals`, `String::indexOf`,
+    `String::contains`
   - copies and release: `String::clone`, `String::drop`
 
 ### `std/runtime/memory/memory.h` and `std/runtime/memory/memory.c`

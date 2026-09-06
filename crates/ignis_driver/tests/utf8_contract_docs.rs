@@ -63,7 +63,6 @@ fn utf8_fs_len_constructor_and_v04_char_contract_are_locked() {
 
   assert!(string_mod.contains("public static create(bytes: *mut u8, len: u64): String"));
   assert!(string_mod.contains("return String::create(s as *mut u8, __string_bytes::strlen(s as *u8));"));
-  assert!(string_mod.contains("return __string::ignis_string_cstr(self);"));
   assert!(fs_mod.contains("return Result::OK(String::create(raw, len));"));
   assert!(!fs_mod.contains("String::create(raw as str)"));
 
@@ -100,7 +99,7 @@ fn utf8_fs_len_constructor_and_v04_char_contract_are_locked() {
   assert!(!abi_reference.contains("`char` is emitted as `u8`"));
   assert!(!abi_reference.contains("| `char` | `u8` | `uint8_t` |"));
   assert!(runtime_readme.contains("`String::pushChar`, `String::pushByte`"));
-  assert!(runtime_readme.contains("ignis_string_byte_at"));
+  assert!(string_mod.contains("public byteAt(&self, index: u64): Option<u8>"));
   assert!(string_mod.contains("public pushChar(&mut self, c: char): void"));
   assert!(string_mod.contains("public pushByte(&mut self, c: u8): void"));
   assert!(emit.contains("Type::Char => \"ignis_char_t\".to_string()"));

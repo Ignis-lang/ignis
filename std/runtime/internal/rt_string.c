@@ -45,126 +45,6 @@ static size_t ignis_utf8_encode_scalar(ignis_char_t scalar, u8 out[4]) {
   out[3] = (u8)(0x80u | (normalized & 0x3Fu));
   return 4;
 }
-
-static bool ignis_utf8_decode_at(
-  const IgnisString *s,
-  size_t idx,
-  ignis_char_t *out_scalar,
-  size_t *out_end
-) {
-  if (out_end != NULL) {
-    *out_end = idx;
-  }
-
-  if (out_scalar != NULL) {
-    *out_scalar = 0;
-  }
-
-  if (s == NULL || s->data == NULL || idx >= s->len) {
-    return false;
-  }
-
-  const u8 *data = (const u8 *)s->data;
-  u8 first = data[idx];
-
-  if (first <= 0x7Fu) {
-    if (out_scalar != NULL) {
-      *out_scalar = (ignis_char_t)first;
-    }
-    if (out_end != NULL) {
-      *out_end = idx + 1;
-    }
-    return true;
-  }
-
-  if (first >= 0x80u && first <= 0xBFu) {
-    return false;
-  }
-
-  if (first >= 0xC2u && first <= 0xDFu) {
-    if (idx + 1 >= s->len) {
-      return false;
-    }
-
-    u8 second = data[idx + 1];
-    if (second < 0x80u || second > 0xBFu) {
-      return false;
-    }
-
-    if (out_scalar != NULL) {
-      *out_scalar = (ignis_char_t)(((first & 0x1Fu) << 6) | (second & 0x3Fu));
-    }
-    if (out_end != NULL) {
-      *out_end = idx + 2;
-    }
-    return true;
-  }
-
-  if (first >= 0xE0u && first <= 0xEFu) {
-    if (idx + 2 >= s->len) {
-      return false;
-    }
-
-    u8 second = data[idx + 1];
-    u8 third = data[idx + 2];
-    if (second < 0x80u || second > 0xBFu || third < 0x80u || third > 0xBFu) {
-      return false;
-    }
-    if (first == 0xE0u && second < 0xA0u) {
-      return false;
-    }
-    if (first == 0xEDu && second >= 0xA0u) {
-      return false;
-    }
-
-    if (out_scalar != NULL) {
-      *out_scalar = (ignis_char_t)(((first & 0x0Fu) << 12) | ((second & 0x3Fu) << 6) | (third & 0x3Fu));
-    }
-    if (out_end != NULL) {
-      *out_end = idx + 3;
-    }
-    return true;
-  }
-
-  if (first >= 0xF0u && first <= 0xF4u) {
-    if (idx + 3 >= s->len) {
-      return false;
-    }
-
-    u8 second = data[idx + 1];
-    u8 third = data[idx + 2];
-    u8 fourth = data[idx + 3];
-    if (
-      second < 0x80u || second > 0xBFu ||
-      third < 0x80u || third > 0xBFu ||
-      fourth < 0x80u || fourth > 0xBFu
-    ) {
-      return false;
-    }
-    if (first == 0xF0u && second < 0x90u) {
-      return false;
-    }
-    if (first == 0xF4u && second > 0x8Fu) {
-      return false;
-    }
-
-    if (out_scalar != NULL) {
-      *out_scalar = (ignis_char_t)(
-        ((first & 0x07u) << 18) |
-        ((second & 0x3Fu) << 12) |
-        ((third & 0x3Fu) << 6) |
-        (fourth & 0x3Fu)
-      );
-    }
-    if (out_end != NULL) {
-      *out_end = idx + 4;
-    }
-    return true;
-  }
-
-  return false;
-}
-
 // =============================================================================
 // Internal helpers
 // =============================================================================
@@ -183,55 +63,6 @@ static void ignis_string_grow(IgnisString *s, size_t min_cap) {
   s->data = (char *)ignis_realloc(s->data, new_cap);
   s->cap = new_cap;
 }
-
-static i32 ignis_bytes_compare(
-  const char *left,
-  size_t left_len,
-  const char *right,
-  size_t right_len
-) {
-  size_t shared = left_len < right_len ? left_len : right_len;
-
-  for (size_t index = 0; index < shared; index++) {
-    unsigned char left_byte = (unsigned char)left[index];
-    unsigned char right_byte = (unsigned char)right[index];
-
-    if (left_byte != right_byte) {
-      return left_byte < right_byte ? -1 : 1;
-    }
-  }
-
-  if (left_len == right_len) {
-    return 0;
-  }
-
-  return left_len < right_len ? -1 : 1;
-}
-
-static i64 ignis_bytes_index_of(
-  const char *haystack,
-  size_t haystack_len,
-  const char *needle,
-  size_t needle_len
-) {
-  if (needle_len == 0) {
-    return 0;
-  }
-
-  if (needle_len > haystack_len) {
-    return -1;
-  }
-
-  size_t last_start = haystack_len - needle_len;
-  for (size_t start = 0; start <= last_start; start++) {
-    if (memcmp(haystack + start, needle, needle_len) == 0) {
-      return (i64)start;
-    }
-  }
-
-  return -1;
-}
-
 // =============================================================================
 // String storage internals
 //
@@ -311,7 +142,7 @@ static void ignis_string_push_str(IgnisString *s, const IgnisString *other) {
   s->data[s->len] = '\0';
 }
 
-const char *ignis_string_cstr(const IgnisString *s) {
+static const char *ignis_string_cstr(const IgnisString *s) {
   if (s == NULL || s->data == NULL) {
     return "";
   }
@@ -326,35 +157,9 @@ static size_t ignis_string_len(const IgnisString *s) {
 
   return s->len;
 }
-ignis_char_t ignis_string_char_at(const IgnisString *s, size_t idx, size_t *out_end) {
-  ignis_char_t scalar = 0;
-  if (!ignis_utf8_decode_at(s, idx, &scalar, out_end)) {
-    return 0;
-  }
-
-  return scalar;
-}
-
-u8 ignis_string_byte_at(const IgnisString *s, size_t idx) {
-  if (s == NULL || idx >= s->len) {
-    return 0;
-  }
-
-  return (u8)s->data[idx];
-}
 // =============================================================================
 // String operations
 // =============================================================================
-
-i32 ignis_string_compare(const IgnisString *a, const IgnisString *b) {
-  const char *a_bytes = (a != NULL && a->data != NULL) ? a->data : "";
-  const char *b_bytes = (b != NULL && b->data != NULL) ? b->data : "";
-  size_t a_len = (a != NULL) ? a->len : 0;
-  size_t b_len = (b != NULL) ? b->len : 0;
-
-  return ignis_bytes_compare(a_bytes, a_len, b_bytes, b_len);
-}
-
 IgnisString ignis_string_concat(const IgnisString *a, const IgnisString *b) {
   IgnisString result = ignis_string_new();
 
@@ -391,21 +196,6 @@ IgnisString ignis_string_substring(const IgnisString *s, i64 start, i64 len) {
   }
 
   return ignis_string_from_len(s_data + start, actual_len);
-}
-
-i64 ignis_string_index_of(const IgnisString *haystack, const IgnisString *needle) {
-  if (haystack == NULL || needle == NULL) {
-    return -1;
-  }
-
-  const char *haystack_bytes = (haystack->data != NULL) ? haystack->data : "";
-  const char *needle_bytes = (needle->data != NULL) ? needle->data : "";
-
-  return ignis_bytes_index_of(haystack_bytes, haystack->len, needle_bytes, needle->len);
-}
-
-boolean ignis_string_contains(const IgnisString *haystack, const IgnisString *needle) {
-  return ignis_string_index_of(haystack, needle) >= 0 ? TRUE : FALSE;
 }
 
 IgnisString ignis_string_to_upper(const IgnisString *s) {
