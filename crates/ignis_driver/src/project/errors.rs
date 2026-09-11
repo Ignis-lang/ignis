@@ -24,9 +24,6 @@ pub enum ProjectError {
   /// std_path does not exist when std=true.
   StdPathNotFound { path: PathBuf },
 
-  /// runtime_path does not exist.
-  RuntimePathNotFound { path: PathBuf },
-
   /// opt_level is out of valid range (0-3).
   InvalidOptLevel { value: u8, max: u8 },
 
@@ -71,10 +68,6 @@ impl fmt::Display for ProjectError {
 
       ProjectError::StdPathNotFound { path } => {
         write!(f, "std_path not found: '{}'", path.display())
-      },
-
-      ProjectError::RuntimePathNotFound { path } => {
-        write!(f, "runtime_path not found: '{}'", path.display())
       },
 
       ProjectError::InvalidOptLevel { value, max } => {

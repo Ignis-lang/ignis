@@ -45,9 +45,6 @@ pub struct Project {
   /// Absolute path to the standard library (None if std=false).
   pub std_path: Option<PathBuf>,
 
-  /// Absolute path to the runtime directory.
-  pub runtime_path: Option<PathBuf>,
-
   /// Whether to produce an executable (vs library).
   pub bin: bool,
 
@@ -124,7 +121,7 @@ pub struct CliOverrides {
 ///
 /// # Errors
 /// Returns `ProjectError` if:
-/// - Paths don't exist (source_dir, entry, std_path, runtime_path)
+/// - Paths don't exist (source_dir, entry, std_path)
 /// - Values are out of range (opt_level)
 /// - Target is unsupported
 /// - emit values are invalid
@@ -185,31 +182,6 @@ pub fn resolve_project(
 
     if !path.exists() {
       return Err(ProjectError::StdPathNotFound { path });
-    }
-
-    Some(path.canonicalize().map_err(|e| ProjectError::IoError {
-      path: path.clone(),
-      source: e,
-    })?)
-  } else {
-    None
-  };
-
-  // Resolve runtime_path
-  let runtime_path = if toml.ignis.std {
-    let path = if let Some(toml_path) = &toml.ignis.runtime_path {
-      resolve_path(&root, toml_path)
-    } else if let Some(ref sp) = std_path {
-      sp.join("runtime")
-    } else {
-      // std=true but no std_path, this shouldn't happen (caught above)
-      return Err(ProjectError::RuntimePathNotFound {
-        path: PathBuf::from("(no std_path)"),
-      });
-    };
-
-    if !path.exists() {
-      return Err(ProjectError::RuntimePathNotFound { path });
     }
 
     Some(path.canonicalize().map_err(|e| ProjectError::IoError {
@@ -304,7 +276,6 @@ pub fn resolve_project(
     source_dir,
     out_dir,
     std_path,
-    runtime_path,
     bin: toml.build.bin,
     opt_level,
     debug,
@@ -374,7 +345,6 @@ mod tests {
       ignis: IgnisTomlConfig {
         std: false, // Disable std for simpler tests
         std_path: None,
-        runtime_path: None,
       },
       build: BuildTomlConfig {
         bin: true,
@@ -581,9 +551,7 @@ mod tests {
     let project = resolve_project(temp_dir.clone(), toml, &overrides).unwrap();
 
     assert!(project.std_path.is_some());
-    assert!(project.runtime_path.is_some());
     assert!(project.std_path.unwrap().ends_with("fake_std"));
-    assert!(project.runtime_path.unwrap().ends_with("runtime"));
 
     fs::remove_dir_all(&temp_dir).unwrap();
   }

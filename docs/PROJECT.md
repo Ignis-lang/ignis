@@ -17,7 +17,6 @@ repository = ""
 [ignis]
 std = true
 std_path = "../std"
-runtime_path = "../std/runtime"
 
 [build]
 bin = true
@@ -54,9 +53,6 @@ sort_imports = false
 
 - `std` - Enable standard library support.
 - `std_path` - Optional path to std root.
-- `runtime_path` - Optional path to runtime root.
-
-If `runtime_path` is omitted, the resolver uses `std_path/runtime`.
 
 ### `[build]`
 
@@ -145,9 +141,7 @@ When running `ignis init`, std paths are generated in this order:
 
 1. If `IGNIS_STD_PATH` is set and exists, it is used as `std_path`.
 2. Otherwise, if `../std` exists (relative to project root), `std_path = "../std"` is used.
-3. If neither is available, `std_path` and `runtime_path` are omitted.
-
-`runtime_path` is written only when `<std_path>/runtime` exists.
+3. If neither is available, `std_path` is omitted.
 
 ## Testing Behavior
 

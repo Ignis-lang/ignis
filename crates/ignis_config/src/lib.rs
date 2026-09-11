@@ -4,6 +4,13 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+/// Base header the emitted C is built on, relative to the std root.
+///
+/// The standard library no longer ships a C runtime, so this path is not
+/// configurable: it is always derived from `std_path`, and `ignis_rt.h` only
+/// guards the same type prelude the emitter already writes inline.
+pub const STD_BASE_HEADER: &str = "runtime/ignis_rt.h";
+
 /// Header to include in generated C code with style info
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CHeader {
@@ -16,10 +23,6 @@ pub struct CHeader {
 /// Toolchain configuration for the standard library
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StdToolchainConfig {
-  /// Base header providing fundamental types (e.g., "runtime/ignis_rt.h")
-  pub base_header: Option<String>,
-  /// Whether base_header uses quoted includes (default: true)
-  pub base_header_quoted: Option<bool>,
   /// Include directories relative to std_root (default: ["."])
   #[serde(default)]
   pub include_dirs: Vec<String>,
@@ -93,14 +96,6 @@ pub struct IgnisSTDManifest {
 }
 
 impl IgnisSTDManifest {
-  /// Get the base header as a CHeader if configured
-  pub fn get_base_header(&self) -> Option<CHeader> {
-    self.toolchain.base_header.as_ref().map(|path| CHeader {
-      path: path.clone(),
-      quoted: self.toolchain.base_header_quoted.unwrap_or(true),
-    })
-  }
-
   /// Get include directories (defaults to ["."] if empty)
   pub fn get_include_dirs(&self) -> Vec<&str> {
     if self.toolchain.include_dirs.is_empty() {
@@ -411,8 +406,6 @@ pub struct IgnisConfig {
   pub auto_load_std: bool,
   pub manifest: IgnisSTDManifest,
   pub check_std: bool,
-  pub check_runtime: bool,
-  pub runtime_path_override: Option<String>,
   /// C compiler executable used for C compilation/linking (e.g. gcc, clang).
   pub c_compiler: String,
   /// Additional C compiler/linker flags passed to the C toolchain invocation.
@@ -461,8 +454,6 @@ impl IgnisConfig {
     auto_load_std: bool,
     manifest: IgnisSTDManifest,
     check_std: bool,
-    check_runtime: bool,
-    runtime_path_override: Option<String>,
     c_compiler: String,
     cflags: Vec<String>,
   ) -> Self {
@@ -490,8 +481,6 @@ impl IgnisConfig {
       auto_load_std,
       manifest,
       check_std,
-      check_runtime,
-      runtime_path_override,
       c_compiler,
       cflags,
       aliases: HashMap::new(),

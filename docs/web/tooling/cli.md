@@ -20,7 +20,6 @@ ignis <command> [options]
 | `init` | Create or initialize a project. |
 | `build-std` | Build the standard library artifacts. |
 | `check-std` | Check the standard library's codegen output. |
-| `check-runtime` | Syntax-check the C runtime sources. |
 | `lsp` | Start the language server. |
 
 Every compiling command works in two modes: pass a path to act on one file, or pass nothing and

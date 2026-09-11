@@ -26,10 +26,9 @@ The generated `std_path` is resolved in order:
 
 1. `IGNIS_STD_PATH`, if it is set and the directory exists.
 2. `../std`, relative to the project root, if it exists.
-3. Neither, in which case `std_path` and `runtime_path` are left out entirely.
+3. Neither, in which case `std_path` is left out entirely.
 
-`runtime_path` is written only when `<std_path>/runtime` exists. If a fresh project cannot find the
-standard library, this is the setting to check first.
+If a fresh project cannot find the standard library, this is the setting to check first.
 
 ## The manifest
 
@@ -46,7 +45,6 @@ repository = ""
 [ignis]
 std = true
 std_path = "../std"
-runtime_path = "../std/runtime"
 
 [build]
 bin = true
@@ -68,8 +66,9 @@ name is what the produced binary is called.
 
 ### [ignis]
 
-`std` turns standard library support on. `std_path` and `runtime_path` point at their roots; if
-`runtime_path` is omitted the resolver falls back to `<std_path>/runtime`.
+`std` turns standard library support on and `std_path` points at the standard library root. The
+base header the emitted C includes is always `<std_path>/runtime/ignis_rt.h`; it is not
+configurable.
 
 ### [build]
 

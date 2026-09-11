@@ -21,7 +21,6 @@ Commands:
 - `init` - Create or initialize an Ignis project.
 - `build-std` - Build standard library artifacts.
 - `check-std` - Check standard library codegen output.
-- `check-runtime` - Syntax-check C runtime sources.
 - `lsp` - Start the language server.
 
 ## `ignis init`
@@ -259,14 +258,6 @@ Run standard library checks up to C emission without archiving.
 
 ```bash
 ignis check-std
-```
-
-## `ignis check-runtime`
-
-Syntax-check C runtime sources.
-
-```bash
-ignis check-runtime
 ```
 
 ## `ignis lsp`

@@ -58,10 +58,6 @@ pub struct IgnisTomlConfig {
 
   /// Path to the standard library (relative to project root or absolute).
   pub std_path: Option<String>,
-
-  /// Path to the runtime (relative to project root or absolute).
-  /// Default: std_path/runtime
-  pub runtime_path: Option<String>,
 }
 
 impl Default for IgnisTomlConfig {
@@ -69,7 +65,6 @@ impl Default for IgnisTomlConfig {
     Self {
       std: true,
       std_path: None,
-      runtime_path: None,
     }
   }
 }
@@ -220,7 +215,6 @@ repository = "https://github.com/test/test"
 [ignis]
 std = true
 std_path = "../std"
-runtime_path = "../std/runtime"
 
 [build]
 bin = true
@@ -241,7 +235,6 @@ emit = ["c", "obj"]
 
     assert_eq!(parsed.package.name, "allocator");
     assert_eq!(parsed.ignis.std_path, Some("../std".to_string()));
-    assert_eq!(parsed.ignis.runtime_path, Some("../std/runtime".to_string()));
     assert_eq!(parsed.build.opt_level, Some(2));
     assert!(parsed.build.debug);
     assert_eq!(parsed.build.target_triple, Some("x86_64-unknown-linux-gnu".to_string()));

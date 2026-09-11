@@ -9,13 +9,6 @@ import DiagnosticBag from "@compiler::diagnostics";
 
 import BuildDiagnosticCode, BuildDiagnostics from "./diagnostics";
 
-function buildManifestCloneOptionString(value: &Option<String>): Option<String> {
-  return match (value) {
-    Option::SOME(text) -> Option::SOME(text.clone()),
-    Option::NONE -> Option::NONE,
-  };
-}
-
 function buildManifestCloneStringVector(source: &Vector<String>): Vector<String> {
   let mut values: Vector<String> = Vector::new<String>();
   let mut index: u64 = 0;
@@ -117,25 +110,6 @@ function buildManifestParseString(
   return Result::OK(value);
 }
 
-function buildManifestParseBoolean(
-  manifestPath: &Path::PathBuf,
-  fieldPath: str,
-  valueText: &String,
-  start: u64,
-  end: u64,
-): Result<boolean, DiagnosticBag> {
-  let trimmed: String = valueText.trimAsciiWhitespace();
-  if (trimmed.equals("true")) {
-    return Result::OK(true);
-  }
-
-  if (trimmed.equals("false")) {
-    return Result::OK(false);
-  }
-
-  return Result::ERROR(BuildDiagnostics::invalidStdManifestFieldType(manifestPath, fieldPath, "a boolean", start, end));
-}
-
 function buildManifestParseStringArray(
   manifestPath: &Path::PathBuf,
   fieldPath: str,
@@ -191,16 +165,10 @@ export record StdManifestModule {
 
 export record StdManifest {
   public path: Path::PathBuf;
-  public baseHeader: Option<String>;
-  public baseHeaderQuoted: boolean;
   public includeDirs: Vector<String>;
   public modules: Vector<StdManifestModule>;
   public autoLoadModules: Vector<String>;
   public compileOnlyModules: Vector<String>;
-
-  public baseHeaderText(&self): Option<String> {
-    return buildManifestCloneOptionString(&self.baseHeader);
-  }
 
   public includeDirCount(&self): u64 {
     return self.includeDirs.length();
@@ -272,8 +240,6 @@ export namespace Manifest {
     let mut currentSection: String = String::new();
     let mut lineOffset: u64 = 0;
 
-    let mut baseHeader: Option<String> = Option::NONE;
-    let mut baseHeaderQuoted: boolean = true;
     let mut includeDirs: Vector<String> = Vector::new<String>();
     let mut modules: Vector<StdManifestModule> = Vector::new<StdManifestModule>();
     let mut autoLoadModules: Vector<String> = Vector::new<String>();
@@ -308,14 +274,6 @@ export namespace Manifest {
       };
 
       if (currentSection.equals("toolchain")) {
-        if (assignment.key.equals("base_header")) {
-          baseHeader = Option::SOME(buildManifestParseString(manifestPath, "toolchain.base_header", &assignment.value, lineStart, lineEnd)!);
-        }
-
-        if (assignment.key.equals("base_header_quoted")) {
-          baseHeaderQuoted = buildManifestParseBoolean(manifestPath, "toolchain.base_header_quoted", &assignment.value, lineStart, lineEnd)!;
-        }
-
         if (assignment.key.equals("include_dirs")) {
           includeDirs = buildManifestParseStringArray(manifestPath, "toolchain.include_dirs", &assignment.value, lineStart, lineEnd)!;
         }
@@ -349,8 +307,6 @@ export namespace Manifest {
 
     return Result::OK(StdManifest {
       path: manifestPath.clone(),
-      baseHeader: buildManifestCloneOptionString(&baseHeader),
-      baseHeaderQuoted: baseHeaderQuoted,
       includeDirs: buildManifestCloneStringVector(&includeDirs),
       modules: modules,
       autoLoadModules: buildManifestCloneStringVector(&autoLoadModules),
@@ -404,8 +360,6 @@ function manifestLoaderReadsFixtureManifestData(): void {
 
   match (Manifest::loadFile(&manifestPath)) {
     Result::OK(manifest) -> {
-      buildManifestAssertSomeString(manifest.baseHeaderText(), "runtime/ignis_rt.h");
-      Test::assert(manifest.baseHeaderQuoted);
       Test::assertEq<u64>(manifest.includeDirCount(), 2);
       buildManifestAssertSomeString(manifest.includeDirText(0), ".");
       buildManifestAssertSomeString(manifest.includeDirText(1), "runtime");

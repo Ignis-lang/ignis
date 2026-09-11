@@ -4,8 +4,19 @@ use std::process::Command;
 
 use colored::*;
 use ignis_analyzer::modules::ModuleGraph;
-use ignis_config::{CHeader, IgnisSTDManifest, StdLinkingInfo};
+use ignis_config::{CHeader, IgnisSTDManifest, StdLinkingInfo, STD_BASE_HEADER};
 use ignis_type::module::ModuleId;
+
+/// The base header every emitted translation unit includes.
+///
+/// Its location is fixed relative to the std root, so it is derived from
+/// `std_path` rather than read from the std manifest.
+fn std_base_header() -> CHeader {
+  CHeader {
+    path: STD_BASE_HEADER.to_string(),
+    quoted: true,
+  }
+}
 
 /// Get the linkable path from StdLinkingInfo, preferring archive over object.
 fn get_linkable_path(info: &StdLinkingInfo) -> Option<&String> {
@@ -78,10 +89,7 @@ impl LinkPlan {
         }
       }
 
-      // Add base header first
-      if let Some(base) = m.get_base_header() {
-        plan.headers.push(base);
-      }
+      plan.headers.push(std_base_header());
     } else {
       // Fallback: just add std_path as include dir
       plan.include_dirs.push(std_path.to_path_buf());
@@ -186,10 +194,7 @@ impl LinkPlan {
       }
     }
 
-    // Add base header first
-    if let Some(base) = manifest.get_base_header() {
-      plan.headers.push(base);
-    }
+    plan.headers.push(std_base_header());
 
     // Add headers/objects/libs for all modules in manifest
     for module_name in manifest.modules.keys() {
@@ -490,8 +495,6 @@ mod tests {
 
   fn create_test_manifest() -> IgnisSTDManifest {
     let toolchain = StdToolchainConfig {
-      base_header: Some("runtime/ignis_rt.h".to_string()),
-      base_header_quoted: Some(true),
       include_dirs: vec![".".to_string()],
     };
 
