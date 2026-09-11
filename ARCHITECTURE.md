@@ -143,11 +143,8 @@ std/                              # Ignis standard library
   fs/mod.ign                      # Filesystem (readToString, writeString, Dir, File, Metadata)
   path/mod.ign                    # Path manipulation utilities
   test/mod.ign                    # `std::test::Test` assertions and snapshot helpers
-  runtime/                        # What is left of the C runtime
-    ignis_rt.h                    # Runtime type prelude and the filesystem ABI
-    libignis_rt.a                 # Precompiled runtime archive
-    Makefile                      # Runtime build system
-    internal/rt_fs.c              # stat/readdir/open wrappers over struct layouts
+  runtime/
+    ignis_rt.h                    # Base type header; no C is compiled any more
 test_cases/analyzer/              # Ignis fixture files organized by feature
   borrows/                        # Borrow checking tests
   casts/                          # Cast validation tests
@@ -388,23 +385,25 @@ Key modules:
 
 **Auto-loaded modules** (always available without explicit import): `string`, `number`, `vector`, `types`, `option`, `result`.
 
-Std modules use `extern namespace` declarations backed by C runtime functions.
+Std modules reach the host through `extern` blocks bound directly to libc.
 
 The canonical equality contract behind generic test assertions is `std::hash::Eq`. Generic `Test::assertEq<T>` / `assertNe<T>` route through builtin `@eq<T>` after analyzer validation, and unsupported equality must be rejected before codegen.
 
-### C Runtime
+### Runtime
 
 **Location:** `std/runtime/`
 
-Provides:
-- **Memory:** `ignis_alloc`, `ignis_free`, `ignis_realloc`, `ignis_calloc`, `ignis_memcpy`, `ignis_memmove`.
-- **Strings:** `IgnisString` heap type with `ignis_string_new`, `ignis_string_from_cstr`, `ignis_string_concat`, `ignis_string_substring`, etc. Output-pointer `_init_` variants for safe struct return.
-- **I/O:** `ignis_print`, `ignis_eprint`.
-- **Reference counting:** `IgnisRcBox` with `ignis_rc_alloc`, `ignis_rc_retain`, `ignis_rc_release`, `ignis_rc_get`, weak references.
-- **Type conversions:** `ignis_i32_to_string`, `ignis_f64_to_string`, etc.
-- **Atoms:** `ignis_atom_t` (`u32`) type alias.
+There is no C runtime. Memory, strings, number formatting, reference counting,
+I/O and the filesystem syscall layer are Ignis, in `std/`, and link out of
+`libignis_std.a`. What remains is `ignis_rt.h`, the base type header the
+manifest names: the runtime type definitions under the `IGNIS_RT_TYPES_H`
+guard, plus the declaration of `ignis_runtime_init`.
 
-Built via `Makefile` → `libignis_rt.a`.
+Both compilers emit that same guarded block into every translation unit they
+produce, so a unit that also includes the header keeps exactly one definition of
+each name. `RUNTIME_TYPE_PRELUDE` in `crates/ignis_codegen_c/src/emit.rs` and
+`CodegenC::emitTypePrelude` in `ignis/codegen/mod.ign` must stay byte-identical
+to it.
 
 ## Data Flow
 

@@ -30,9 +30,7 @@ use crate::build_layout::{
   BuildFingerprint, BuildLayout, FileEntry, ModuleStamp, StdStamp,
 };
 use crate::context::CompilationContext;
-use crate::link::{
-  compile_to_object, format_tool_error, link_executable, link_executable_multi, rebuild_std_runtime, LinkPlan,
-};
+use crate::link::{compile_to_object, format_tool_error, link_executable, link_executable_multi, LinkPlan};
 use crate::project::{CliOverrides, load_project_toml, resolve_project};
 use crate::stages::{AnalyzedStage, BackendInput, CheckedStage, LirStage, ParsedStage, StageError};
 
@@ -660,16 +658,6 @@ pub fn compile_project(
       link_plan.cflags = config.cflags.clone();
       link_plan.opt_level = config.opt_level;
       link_plan.debug = config.build_debug;
-
-      if bc.rebuild_std {
-        trace_dbg!(&config, DebugTrace::Std, "rebuilding standard library runtime");
-
-        if let Err(e) = rebuild_std_runtime(Path::new(&config.std_path), config.quiet) {
-          cmd_fail!(&config, "Build failed", start.elapsed());
-          eprintln!("{} {}", "Error:".red().bold(), e);
-          return Err(());
-        }
-      }
 
       let mut types = semantic.types.clone();
 
@@ -1385,7 +1373,6 @@ fn build_test_driver_config(project_root: &Path) -> Result<(Arc<IgnisConfig>, cr
     None,
     None,
     None,
-    false,
     project.bin,
     false,
     true,
@@ -1538,7 +1525,6 @@ fn build_single_file_test_driver_input(
         .to_string_lossy()
         .to_string(),
     ),
-    false,
     true,
     false,
     true,
@@ -1608,7 +1594,6 @@ fn build_std_test_driver_input(
     None,
     None,
     Some(out_dir.join("bin/std-tests").to_string_lossy().to_string()),
-    false,
     true,
     false,
     true,
@@ -2083,7 +2068,6 @@ fn fixture_compile_config(
     None,
     None,
     bin_path.map(|path| path.to_string_lossy().to_string()),
-    false,
     bin_path.is_some(),
     false,
     bin_path.is_none(),

@@ -1,23 +1,24 @@
 #pragma once
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <float.h>
-#include <unistd.h>
-
 // =============================================================================
 // Runtime type definitions
 //
 // Both compilers emit this same block into every translation unit they produce,
 // under this guard, so a unit that also includes this header keeps exactly one
 // definition of each name. Keep the two copies in step.
+//
+// Nothing here is compiled any more: the standard library is Ignis end to end
+// and this header is only what the manifest names as the base include. It stays
+// because a translation unit that reaches it before the emitted prelude still
+// has to end up with one definition of each name.
 // =============================================================================
 
 #ifndef IGNIS_RT_TYPES_H
 #define IGNIS_RT_TYPES_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 // =============================================================================
 // Primitive type aliases
@@ -111,36 +112,3 @@ typedef void *null;
  * The signature mirrors the emitted one: `argv` is passed as an opaque pointer.
  */
 void ignis_runtime_init(i32 argc, void *argv);
-
-// =============================================================================
-// Filesystem helpers (rt_fs.c)
-// =============================================================================
-
-int ignis_stat_call(
-    const char *path,
-    u64 *out_dev, u64 *out_ino, u32 *out_mode, u64 *out_nlink,
-    u32 *out_uid, u32 *out_gid, i64 *out_size,
-    i64 *out_atime, i64 *out_mtime, i64 *out_ctime,
-    i64 *out_blksize, i64 *out_blocks);
-
-int ignis_fstat_call(
-    int fd,
-    u64 *out_dev, u64 *out_ino, u32 *out_mode, u64 *out_nlink,
-    u32 *out_uid, u32 *out_gid, i64 *out_size,
-    i64 *out_atime, i64 *out_mtime, i64 *out_ctime,
-    i64 *out_blksize, i64 *out_blocks);
-
-int ignis_lstat_call(
-    const char *path,
-    u64 *out_dev, u64 *out_ino, u32 *out_mode, u64 *out_nlink,
-    u32 *out_uid, u32 *out_gid, i64 *out_size,
-    i64 *out_atime, i64 *out_mtime, i64 *out_ctime,
-    i64 *out_blksize, i64 *out_blocks);
-
-int ignis_open3(const char *pathname, int flags, u32 mode);
-
-const char *ignis_dirent_name(void *entry);
-u64 ignis_dirent_ino(void *entry);
-u8 ignis_dirent_type(void *entry);
-int ignis_readdir_call(void *dirp, u64 *out_name, u64 *out_ino, u8 *out_type);
-int ignis_remove_dir_all_call(const char *path);

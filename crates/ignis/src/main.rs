@@ -768,7 +768,6 @@ fn build_config_from_project(
     emit_c,
     emit_obj,
     emit_bin,
-    cmd.rebuild_std,
     project.bin,
     cmd.lib,
     check_mode,
@@ -826,7 +825,6 @@ fn build_config_for_single_file(
     None, // emit_c
     None, // emit_obj
     emit_bin,
-    cmd.rebuild_std,
     cmd.bin,
     cmd.lib,
     check_mode,
@@ -935,7 +933,6 @@ fn check_config_from_project(
     emit_c,
     None, // emit_obj (not in check mode)
     None, // emit_bin (not in check mode)
-    false,
     cmd.bin,
     cmd.lib,
     true, // check_mode
@@ -980,7 +977,6 @@ fn check_config_for_single_file(
     None,
     None,
     None,
-    false,
     cmd.bin,
     cmd.lib,
     true,

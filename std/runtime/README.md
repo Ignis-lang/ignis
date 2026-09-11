@@ -1,98 +1,37 @@
 # Ignis Runtime
 
-## Overview
-The runtime is a small C library that defines core types and the C-facing API
-used by the Ignis standard library. It provides memory allocation, strings,
-dynamic buffers, and small I/O helpers.
+There is no C runtime any more. `std/runtime` holds one header and nothing
+else; there is no `Makefile`, no `.c` file, and no `libignis_rt.a`. Every
+runtime service the standard library used to reach through C is Ignis, in
+`std/`, and links out of `libignis_std.a`.
 
-**Note**: Language features (records, enums, generics, traits, type aliases) compile to
-standard C constructs and do not require additional runtime support.
+## What is left
 
-## Build
-The build is driven by `std/runtime/Makefile`. The `all` target produces:
+### `ignis_rt.h`
 
-- `libignis_rt.o` (core runtime)
-- `io/libignis_io.o`
-- `string/libignis_string.o`
-- `number/libignis_number.o`
-- `types/libignis_types.o`
-- `memory/libignis_memory.o`
+The base header `std/manifest.toml` names as `toolchain.base_header`. It
+carries the runtime type definitions — the integer aliases, `boolean`,
+`ignis_atom_t`, `ignis_char_t`, `Pointer`, `IgnisString`, `null` and the
+`IGNIS_TYPE_*_ID` constants — under the `IGNIS_RT_TYPES_H` guard, plus the
+declaration of `ignis_runtime_init`.
 
-All module objects depend on `libignis_rt.o`. The `clean` target removes the
-objects above.
+Both compilers emit that same guarded block at the top of every translation
+unit they produce, so a unit that also includes this header ends up with
+exactly one definition of each name whichever it reaches first. The two copies
+have to stay byte-identical:
 
-## Files and functions
+- `RUNTIME_TYPE_PRELUDE` in `crates/ignis_codegen_c/src/emit.rs`
+- `CodegenC::emitTypePrelude` in `ignis/codegen/mod.ign`
 
-### `std/runtime/ignis_rt.h` and `std/runtime/ignis_rt.c`
-Core runtime types, IDs, and APIs.
+## Where the runtime went
 
-- Types and IDs:
-  - `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`, `boolean`
-  - `IgnisTypeId`
-  - `IgnisHeader`, `IgnisString`
-  - `null`
-  - `IGNIS_TYPE_*_ID` macros (primitives, pointer)
-- Alloc/Free:
-  - `ignis_alloc`, `ignis_realloc`, `ignis_free`, defined in `std/memory/allocator.ign`
-- The whole string API is now Ignis, in `std/string/mod.ign`:
-  - construction and capacity: `String::new`, `String::withCapacity`, `String::create`
-  - mutation: `String::pushChar`, `String::pushByte`, `String::pushStr`, `String::push`,
-    `String::clear`, `String::reserve`
-  - reads: `String::length`, `String::byteAt`, `String::charAt`, `String::toStr`
-  - comparison and search: `String::compare`, `String::equals`, `String::indexOf`,
-    `String::contains`
-  - derived strings: `String::concat`, `String::substring`, `String::toUpperCase`,
-    `String::toLowerCase`
-  - copies and release: `String::clone`, `String::drop`
-  - number conversions: `String::create` for `i8` through `f64`, and the
-    matching `toString` extensions. `f32` and `f64` go through
-    `LibC::Stdio::snprintfDouble` with `%g`, which is the same libc call the C
-    runtime made.
-
-### `std/runtime/memory/memory.h` and `std/runtime/memory/memory.c`
-Wrappers used by `std/memory/mod.ign`.
-
-- Allocation:
-  - `memoryAllocate`, `memoryDeallocate`, `memoryReallocate`, `memoryAllocateZeroed`
-
-### `std/runtime/number/number.h` and `std/runtime/number/number.c`
-Numeric helpers and conversions used by `std/number` and `std/string`.
-
-- Absolute value: `i8Abs`, `i16Abs`, `i32Abs`, `i64Abs`, `f32Abs`, `f64Abs`
-- Rounding: `f32Floor`, `f64Floor`, `f32Ceil`, `f64Ceil`, `f32Round`, `f64Round`
-- Fixed decimals: `f32ToFixed`, `f64ToFixed`
-- Integers to string: `i8ToString`, `i16ToString`, `i32ToString`, `i64ToString`
-- Unsigned to string: `u8ToString`, `u16ToString`, `u32ToString`, `u64ToString`
-- Floats to string: `f32ToString`, `f64ToString`
-- Boolean to string: `booleanToString`
-- Utility: `stringEmpty`
-
-All string conversion helpers return heap-allocated `IgnisString` and must be
-released with `String::drop` from `std/string`.
-
-### `std/runtime/string/string.h` and `std/runtime/string/string.c`
-String operations built on `IgnisString`.
-
-- Length and comparison: `stringLength`, `stringCompare`
-- Construction: `stringConcat`, `stringSubstring`
-- Character access: `stringCharAt`
-- Search: `stringIndexOf`, `stringContains`
-- Case conversion: `stringToUpperCase`, `stringToLowerCase`
-- Mutation: `stringPushChar`
-
-### `std/runtime/types/types.h` and `std/runtime/types/types.c`
-Legacy type IDs for std/types.
-
-- Type ID constants: `TYPE_I8_ID`, `TYPE_I16_ID`, `TYPE_I32_ID`, `TYPE_I64_ID`,
-  `TYPE_U8_ID`, `TYPE_U16_ID`, `TYPE_U32_ID`, `TYPE_U64_ID`, `TYPE_F32_ID`,
-  `TYPE_F64_ID`, `TYPE_BOOL_ID`, `TYPE_CHAR_ID`, `TYPE_STRING_ID`,
-  `TYPE_POINTER_ID`
-
-### `std/runtime/types/primitives.h`
-Compatibility header that re-exports `ignis_rt.h` and `string/string.h`.
-
-### `std/runtime/io/io.h` and `std/runtime/io/io.c`
-String-based output helpers.
-
-- `print`
-- `eprint`
+| Service | Now lives in |
+| --- | --- |
+| Process allocator, arena | `std/memory/allocator.ign`, `std/memory/arena.ign` |
+| Startup argument capture (`ignis_runtime_init`) | `std/process/runtime/mod.ign` |
+| Reference counting | `std/rc/mod.ign` |
+| `IgnisString` buffer, UTF-8, search, case, conversions | `std/string/mod.ign` |
+| Number formatting | `std/string/mod.ign` over `std/libc` |
+| Filesystem syscalls, `stat`, `dirent`, recursive removal | `std/fs/sys/unix.ign` over `std/libc` |
+| Hashing | `std/hash/mod.ign` |
+| Output helpers | `std/io/mod.ign` |
