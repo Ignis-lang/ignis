@@ -839,13 +839,7 @@ export namespace Format {
 
   /// A JSON scalar's kind, carrying its own decoded payload (the string, or
   /// the raw number literal) directly rather than alongside it in a
-  /// separate field: confirmed against the rebased host (after check #172's
-  /// partial-move fix) that matching an owned local's payload-carrying enum
-  /// field by value, then still using another field of the same record
-  /// afterward, is sound — verified with both an ASan build and `valgrind`
-  /// on the standalone shape this mirrors (a record with an enum-with-
-  /// payload field plus a plain field, matched by value then the plain
-  /// field read afterward), 0 errors either way.
+  /// separate field.
   enum ShallowScalarKind {
     STRING(String),
     NUMBER(String),
@@ -1006,8 +1000,20 @@ export namespace Format {
       Format::ShallowScalarKind::STRING(value) -> {
         return Result::OK(Format::FieldValueRead { value: value, endOffset: endOffset });
       },
-      other -> {
-        let description: String = Format::describeShallowScalarKind(&other);
+      Format::ShallowScalarKind::NUMBER(text) -> {
+        let description: String = Format::describeNumber(&text);
+        return Result::ERROR(Format::ndjsonInvalidFieldType(&description, endOffset));
+      },
+      Format::ShallowScalarKind::BOOL_TRUE -> {
+        let description: String = Format::describeBool(true);
+        return Result::ERROR(Format::ndjsonInvalidFieldType(&description, endOffset));
+      },
+      Format::ShallowScalarKind::BOOL_FALSE -> {
+        let description: String = Format::describeBool(false);
+        return Result::ERROR(Format::ndjsonInvalidFieldType(&description, endOffset));
+      },
+      Format::ShallowScalarKind::NULL -> {
+        let description: String = String::create("null");
         return Result::ERROR(Format::ndjsonInvalidFieldType(&description, endOffset));
       },
     };
