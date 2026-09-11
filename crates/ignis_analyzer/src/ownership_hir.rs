@@ -14,6 +14,7 @@ use ignis_type::{
   span::Span,
   symbol::SymbolTable,
   types::{Type, TypeId, TypeStore, format_type_name},
+  value::IgnisLiteralValue,
 };
 
 /// Ownership state for a variable.
@@ -100,9 +101,6 @@ pub struct HirOwnershipChecker<'a> {
   /// Pushed on loop entry, popped on loop exit.
   loop_continue_stack: Vec<bool>,
 
-  /// Variables whose storage contains a field moved out by value.
-  drop_suppressed_vars: HashSet<DefinitionId>,
-
   /// Bindings introduced by destructuring a borrowed scrutinee. Their bytes still
   /// live in the referenced storage, so moving a non-copy field out of them is a
   /// move out of a borrow even though the binding's own type is not a reference.
@@ -146,7 +144,6 @@ impl<'a> HirOwnershipChecker<'a> {
       next_alias_set: 0,
       reachable: true,
       loop_continue_stack: Vec::new(),
-      drop_suppressed_vars: HashSet::new(),
       borrowed_pattern_bindings: HashSet::new(),
       summaries: HashMap::new(),
       let_condition_bindings: HashMap::new(),
@@ -601,7 +598,6 @@ impl<'a> HirOwnershipChecker<'a> {
     self.next_alias_set = 0;
     self.reachable = true;
     self.loop_continue_stack.clear();
-    self.drop_suppressed_vars.clear();
     self.borrowed_pattern_bindings.clear();
     self.current_fn = Some(fn_def_id);
 
@@ -1326,20 +1322,21 @@ impl<'a> HirOwnershipChecker<'a> {
       .iter()
       .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
 
-    // Set when the payload was moved out of a field of a value we own and the owner's
-    // drop was suppressed to keep that payload from being freed twice. Ownership of the
-    // payload then rests with the arm's pattern bindings and nowhere else.
+    // Set when the payload was moved out of a field of a value we own. Reading that
+    // field by value is a partial move: LIR lowering marks the field moved, so the
+    // owner's own drop skips it and the match is the only holder of those bytes.
+    // Ownership of the payload then rests with the arm's pattern bindings and nowhere
+    // else. The owner keeps every other drop it owed.
     let mut arm_bindings_own_payload = false;
 
     if moves_scrutinee_payload {
       if self.field_base_is_borrowed(scrutinee) {
-        // A borrowed base wins over field-owner drop suppression: suppressing the
-        // owner's drop would silently accept a move out of storage we do not own.
+        // A borrowed base cannot be partially moved out of: the storage belongs to
+        // someone else, who still drops the field this match would take.
         self.reject_move_out_of_borrow(scrutinee);
       } else if let Some(source_def) = self.get_moved_var(scrutinee) {
         self.try_consume(source_def, span.clone());
-      } else if let Some(owner_def) = self.get_moved_field_owner(scrutinee) {
-        self.drop_suppressed_vars.insert(owner_def);
+      } else if self.get_moved_field_owner(scrutinee).is_some() {
         arm_bindings_own_payload = true;
       } else {
         // Neither a variable nor a field of one we own: the only remaining source is a
@@ -1353,14 +1350,24 @@ impl<'a> HirOwnershipChecker<'a> {
     // Matching a place that belongs to something else — a field, an element, a
     // dereference — binds the payload without taking ownership of it. The bytes are still
     // the base's, and its own schedule frees them; dropping them here frees them twice.
-    // This does not hold once `arm_bindings_own_payload` is set: the base's drop was
-    // suppressed precisely because the payload left it, so no other schedule frees it.
+    // This does not hold once `arm_bindings_own_payload` is set: the field the payload
+    // came out of is marked moved, so the base's schedule skips it and nothing else
+    // frees it.
     let scrutinee_aliases_external_storage = matches!(
       self.hir.get(scrutinee).kind,
       HIRKind::FieldAccess { .. } | HIRKind::Index { .. } | HIRKind::Dereference(_) | HIRKind::StaticAccess { .. }
     );
 
     let bindings_borrow_payloads = self.scrutinee_binds_borrowed_payloads(scrutinee);
+
+    // `if (let P = value)` and `while (let P = value)` desugar to a two-armed match that
+    // yields `true` from the pattern arm and `false` from a trailing wildcard: the
+    // binding is live in the branch the condition guards, which runs after the arm, so
+    // dropping it at arm end would free a value that branch still uses. Its drop is
+    // handed to the enclosing `if`/`while` through `let_condition_bindings` instead. An
+    // ordinary arm whose body happens to be a literal is not that shape and owes its
+    // drop here like any other.
+    let is_let_condition_match = Self::arms_are_let_condition_desugaring(self.hir, arms);
 
     // Whether the match owns what a pattern takes out of it: the scrutinee is an owning
     // value and some pattern moves an owning payload out of it.
@@ -1431,23 +1438,16 @@ impl<'a> HirOwnershipChecker<'a> {
       // already written by check_block), so the arm body's own scope drops fire first.
       let pattern_drops: Vec<_> = arm_pattern_defs
         .iter()
-        .filter(|def| self.is_valid(def) && !self.drop_suppressed_vars.contains(def))
+        .filter(|def| self.is_valid(def))
         .rev()
         .copied()
         .collect();
-
-      // A literal arm body neither reads nor consumes the binding, which means the
-      // binding is live somewhere this match cannot see — `if (let P = value)` and
-      // `while (let P = value)` desugar to exactly this shape, and the branch they guard
-      // runs after the arm. Dropping here would free a value that branch still uses, so
-      // the drop is handed to the enclosing `if`/`while` through `let_condition_bindings`.
-      let body_is_literal = matches!(self.hir.get(arm.body).kind, HIRKind::Literal(_));
 
       if !pattern_drops.is_empty()
         && (!scrutinee_aliases_external_storage || arm_bindings_own_payload)
         && !bindings_borrow_payloads
       {
-        if body_is_literal {
+        if is_let_condition_match {
           // Only a pattern that takes an owning payload out of an owning scrutinee makes
           // its bindings owners. `Option<&T>` hands out the pointee instead: the binding
           // names storage the match never owned, and freeing it here frees it again when
@@ -1861,6 +1861,35 @@ impl<'a> HirOwnershipChecker<'a> {
     result
   }
 
+  /// Whether these arms are the shape `lowering.rs` emits for `if (let P = value)` and
+  /// `while (let P = value)`: the pattern arm yields the literal `true`, and a trailing
+  /// wildcard arm yields the literal `false`. Nothing else in the language produces a
+  /// match whose only two arm bodies are those two literals in that order, so an
+  /// ordinary arm with a literal body is not mistaken for a condition.
+  fn arms_are_let_condition_desugaring(
+    hir: &HIR,
+    arms: &[ignis_hir::HIRMatchArm],
+  ) -> bool {
+    let [pattern_arm, wildcard_arm] = arms else {
+      return false;
+    };
+
+    if !matches!(wildcard_arm.pattern, ignis_hir::HIRPattern::Wildcard)
+      || pattern_arm.guard.is_some()
+      || wildcard_arm.guard.is_some()
+    {
+      return false;
+    }
+
+    matches!(
+      (&hir.get(pattern_arm.body).kind, &hir.get(wildcard_arm.body).kind),
+      (
+        HIRKind::Literal(IgnisLiteralValue::Boolean(true)),
+        HIRKind::Literal(IgnisLiteralValue::Boolean(false)),
+      )
+    )
+  }
+
   fn collect_droppable_pattern_def_ids_into(
     &self,
     pattern: &ignis_hir::HIRPattern,
@@ -1905,7 +1934,7 @@ impl<'a> HirOwnershipChecker<'a> {
       .owned_vars
       .iter()
       .rev()
-      .filter(|def| self.is_valid(def) && !self.drop_suppressed_vars.contains(def))
+      .filter(|def| self.is_valid(def))
       .copied()
       .collect();
 
@@ -1937,7 +1966,7 @@ impl<'a> HirOwnershipChecker<'a> {
     for scope in self.scope_stack[exit_to_scope_idx..].iter().rev() {
       // Within each scope: reverse declaration order
       for def in scope.owned_vars.iter().rev() {
-        if self.is_valid(def) && !self.drop_suppressed_vars.contains(def) {
+        if self.is_valid(def) {
           drops.push(*def);
         }
       }

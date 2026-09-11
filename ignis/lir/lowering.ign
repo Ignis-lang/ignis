@@ -3425,18 +3425,33 @@ export namespace LirLowering {
     return Lir::Operand::Temp(dest);
   }
 
-  /// True when the node produces a fresh value rather than naming a place.
-  /// Such a value has no owner other than the expression that consumes it.
-  function hirIsTemporary(hirStore: &Hir::HirStore, nodeId: Hir::HirId): boolean {
+  /// Whether the value the match copies into its scrutinee slot is this match's
+  /// to free once an arm has taken the payload. A temporary has no other holder,
+  /// a local is consumed by the borrow checker (see `Borrowck::checkMatch`), and
+  /// reading a droppable field by value out of storage this function owns is a
+  /// partial move: the field access marks the field moved, so the owner's own
+  /// drop skips it. A field reached through a reference is the opposite case —
+  /// the referent still owns and drops it — and so are elements, dereferences
+  /// and statics, which are never marked moved. Mirrors
+  /// `match_owns_scrutinee`.
+  function matchOwnsScrutinee(
+    typeStore: &mut Analyzer::TypeStore,
+    hirStore: &Hir::HirStore,
+    nodeId: Hir::HirId,
+  ): boolean {
+    if (!Borrowck::aliasesExternalStorage(hirStore, nodeId)) {
+      return true;
+    }
+
     let Option::SOME(node) = hirStore.get(nodeId) else {
       return false;
     };
 
-    if (let Hir::HirKind::Variable(_) = &node.kind) {
-      return false;
+    if (let Hir::HirKind::FieldAccess(_) = &node.kind) {
+      return !LirLowering::baseIsBehindReference(typeStore, hirStore, nodeId);
     }
 
-    return !Borrowck::aliasesExternalStorage(hirStore, nodeId);
+    return false;
   }
 
   function lowerMatch(
@@ -3508,11 +3523,10 @@ export namespace LirLowering {
       }));
     }
 
-    // A scrutinee that names no place is a value this match owns outright:
-    // nothing else holds it and no other schedule frees it. When one arm takes
-    // its payload the scrutinee carries no schedule of its own, so every arm
-    // that does not take the payload drops it at the end of that arm. A place
-    // scrutinee keeps the schedule its own storage already has.
+    // When one arm takes the payload the scrutinee carries no schedule of its
+    // own, so every arm that does not take it — a wildcard, a payload-less
+    // variant, a variant destructured into wildcards — drops the scrutinee at
+    // the end of that arm. Mirrors `drop_scrutinee_per_arm`.
     let mut dropScrutineePerArm: boolean = false;
 
     if (!isTupleScrutinee) {
@@ -3523,9 +3537,9 @@ export namespace LirLowering {
         scrutineeType,
         &matchNode.arms,
       );
-      let scrutineeIsTemporary: boolean = LirLowering::hirIsTemporary(hirStore, matchNode.scrutinee);
+      let ownsScrutinee: boolean = LirLowering::matchOwnsScrutinee(typeStore, hirStore, matchNode.scrutinee);
 
-      dropScrutineePerArm = scrutineeNeedsDrop && someArmMovesPayload && scrutineeIsTemporary;
+      dropScrutineePerArm = ownsScrutinee && scrutineeNeedsDrop && someArmMovesPayload;
 
       // When no arm takes the payload the scrutinee leaves the match whole, so
       // the block that opened it owns the drop, exactly as it would for any

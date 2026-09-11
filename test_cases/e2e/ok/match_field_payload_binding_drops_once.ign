@@ -1,0 +1,88 @@
+// e2e: std
+// Matching an owned record's field by value is a partial move of that field: the match
+// holds the only live copy, so whatever no arm binds has to be dropped when the arm ends.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+enum Kind {
+  FIRST(Tracked),
+  SECOND(Tracked),
+  EMPTY,
+}
+
+record Holder {
+  public kind: Kind;
+  public tag: i32;
+}
+
+/// (a) The arm binds the payload and only reads it. The binding owns those bytes and
+/// drops them where the arm ends.
+function variantArm(holder: Holder): i32 {
+  return match (holder.kind) {
+    Kind::FIRST(first) -> first.id,
+    Kind::SECOND(second) -> second.id,
+    Kind::EMPTY -> 0,
+  };
+}
+
+/// (b) The catch-all binds the whole enum, payload and all, and drops it at arm end.
+function catchAllArm(holder: Holder): i32 {
+  return match (holder.kind) {
+    Kind::FIRST(first) -> first.id,
+    other -> holder.tag,
+  };
+}
+
+/// (c) The wildcard binds nothing, so the arm drops the scrutinee itself.
+function wildcardArm(holder: Holder): i32 {
+  return match (holder.kind) {
+    Kind::FIRST(first) -> first.id,
+    _ -> holder.tag,
+  };
+}
+
+/// A payload-less variant arm of an enum whose other variants carry payloads binds
+/// nothing either, and the value it matched has no payload to free.
+function emptyVariantArm(holder: Holder): i32 {
+  return match (holder.kind) {
+    Kind::FIRST(first) -> first.id,
+    Kind::SECOND(second) -> second.id,
+    Kind::EMPTY -> holder.tag,
+  };
+}
+
+/// Destructuring into a wildcard binds nothing, so the arm still owes the drop.
+function wildcardPayloadArm(holder: Holder): i32 {
+  return match (holder.kind) {
+    Kind::FIRST(first) -> first.id,
+    Kind::SECOND(_) -> holder.tag,
+    Kind::EMPTY -> 0,
+  };
+}
+
+function main(): i32 {
+  Io::println("variant arm");
+  Io::println(`${variantArm(Holder { kind: Kind::SECOND(Tracked { id: 1 }), tag: 10 })}`.toStr());
+
+  Io::println("catch-all arm");
+  Io::println(`${catchAllArm(Holder { kind: Kind::SECOND(Tracked { id: 2 }), tag: 20 })}`.toStr());
+
+  Io::println("wildcard arm");
+  Io::println(`${wildcardArm(Holder { kind: Kind::SECOND(Tracked { id: 3 }), tag: 30 })}`.toStr());
+
+  Io::println("empty variant arm");
+  Io::println(`${emptyVariantArm(Holder { kind: Kind::EMPTY, tag: 40 })}`.toStr());
+
+  Io::println("wildcard payload arm");
+  Io::println(`${wildcardPayloadArm(Holder { kind: Kind::SECOND(Tracked { id: 5 }), tag: 50 })}`.toStr());
+
+  return 0;
+}

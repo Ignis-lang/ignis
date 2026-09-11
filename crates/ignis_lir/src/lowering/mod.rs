@@ -2211,15 +2211,29 @@ impl<'a> LoweringContext<'a> {
       .iter()
       .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
 
+    // Reading a droppable field by value out of storage this function owns is a partial
+    // move: `lower_field_access` marks the field moved, so the owner's own drop skips it
+    // and this match holds the only live copy. A field reached through a reference is the
+    // opposite case — the referent still owns and drops it — and so are elements,
+    // dereferences and statics, which are never marked moved.
+    let scrutinee_is_partial_move = matches!(self.hir.get(scrutinee).kind, HIRKind::FieldAccess { .. })
+      && !self.base_is_behind_reference(scrutinee)
+      && scrutinee_needs_drop;
+
+    // Whether the value in the synthetic match local is this match's to free once an arm
+    // has taken the payload. A temporary has no other holder, a `Variable` is consumed by
+    // the ownership checker (see `ownership_hir::check_match`), and a partial move takes
+    // the field's bytes out of their owner. Anything else still belongs to the place it
+    // was read from.
+    let match_owns_scrutinee = !scrutinee_aliases_external_storage || scrutinee_is_partial_move;
+
     let track_scrutinee_drop = !scrutinee_aliases_external_storage && scrutinee_needs_drop && !some_arm_moves_payload;
 
-    // A scrutinee that is not a place is a value this match owns outright: nothing else
-    // holds it and no other schedule frees it. When one arm takes its payload the whole
-    // scrutinee is left untracked above, so every arm that does *not* take the payload
-    // would drop nothing. Those arms drop the scrutinee themselves, at the end of the arm.
-    // Place scrutinees keep the block-scoped schedule they already had.
-    let drop_scrutinee_per_arm =
-      scrutinee_needs_drop && some_arm_moves_payload && Self::hir_is_temporary(self.hir.get(scrutinee));
+    // When one arm takes the payload the whole scrutinee is left untracked above, so
+    // every arm that does *not* take the payload would drop nothing: those arms — a
+    // wildcard, a payload-less variant, a variant destructured into wildcards — drop the
+    // scrutinee themselves, at the end of the arm.
+    let drop_scrutinee_per_arm = match_owns_scrutinee && scrutinee_needs_drop && some_arm_moves_payload;
 
     let scrut_local = if track_scrutinee_drop {
       self.alloc_synthetic_local(scrutinee_ty, false)
@@ -2381,12 +2395,6 @@ impl<'a> LoweringContext<'a> {
       node.kind,
       HIRKind::FieldAccess { .. } | HIRKind::Index { .. } | HIRKind::Dereference(_) | HIRKind::StaticAccess { .. }
     )
-  }
-
-  /// True when the HIR node produces a fresh value rather than naming a place. Such a
-  /// value has no owner other than the expression that consumes it.
-  fn hir_is_temporary(node: &ignis_hir::HIRNode) -> bool {
-    !matches!(node.kind, HIRKind::Variable(_)) && !Self::hir_aliases_external_storage(node)
   }
 
   fn lower_tuple_match(

@@ -1,0 +1,107 @@
+// e2e: std
+// Matching a field by value moves that field only. The owner keeps every drop it still
+// owes, its other fields stay readable, and a later whole-value move carries the moved
+// field's flag along so the payload is never freed twice.
+import Io from "std::io";
+import String from "std::string";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+enum Kind {
+  TRACKED(Tracked),
+  OTHER(Tracked),
+  EMPTY,
+}
+
+record Holder {
+  public kind: Kind;
+  public label: Tracked;
+  public name: String;
+}
+
+function makeHolder(id: i32): Holder {
+  return Holder {
+    kind: Kind::TRACKED(Tracked { id: id }),
+    label: Tracked { id: id + 100 },
+    name: String::create("holder"),
+  };
+}
+
+/// The sibling fields the match never touched are dropped when the owner goes out of
+/// scope, and the name is still readable after the match.
+function siblingsSurvive(): i32 {
+  let holder: Holder = makeHolder(1);
+
+  let matched: i32 = match (holder.kind) {
+    Kind::TRACKED(tracked) -> tracked.id,
+    Kind::OTHER(other) -> other.id,
+    Kind::EMPTY -> 0,
+  };
+
+  Io::println(holder.name.toStr());
+
+  return matched;
+}
+
+function makeOtherHolder(id: i32): Holder {
+  return Holder {
+    kind: Kind::OTHER(Tracked { id: id }),
+    label: Tracked { id: id + 100 },
+    name: String::create("holder"),
+  };
+}
+
+/// An arm that binds nothing drops the moved field itself; the owner still drops its
+/// siblings afterwards.
+function siblingsSurviveWildcardArm(): i32 {
+  let holder: Holder = makeOtherHolder(2);
+
+  let matched: i32 = match (holder.kind) {
+    Kind::TRACKED(tracked) -> tracked.id,
+    _ -> 2,
+  };
+
+  Io::println(holder.name.toStr());
+
+  return matched;
+}
+
+function consume(holder: Holder): void {
+  Io::println(holder.name.toStr());
+}
+
+/// Moving the whole owner after the partial move hands the moved field's flag to the new
+/// owner, so its drop skips the field the match already freed.
+function ownerMovesAfterwards(): i32 {
+  let holder: Holder = makeHolder(3);
+
+  let matched: i32 = match (holder.kind) {
+    Kind::TRACKED(tracked) -> tracked.id,
+    Kind::OTHER(other) -> other.id,
+    Kind::EMPTY -> 0,
+  };
+
+  consume(holder);
+
+  return matched;
+}
+
+function main(): i32 {
+  Io::println("siblings survive");
+  Io::println(`${siblingsSurvive()}`.toStr());
+
+  Io::println("siblings survive wildcard arm");
+  Io::println(`${siblingsSurviveWildcardArm()}`.toStr());
+
+  Io::println("owner moves afterwards");
+  Io::println(`${ownerMovesAfterwards()}`.toStr());
+
+  return 0;
+}

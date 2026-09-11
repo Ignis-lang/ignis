@@ -1,0 +1,34 @@
+// e2e: err
+// An arm binding that took the payload out of an owned field owns it like any other
+// local: handing it on moves it, and the second use is a use of a moved value.
+@implements(Drop)
+record Owned {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+enum Kind {
+  SOME(Owned),
+  NONE,
+}
+
+record Holder {
+  public kind: Kind;
+  public tag: i32;
+}
+
+function take(owned: Owned): i32 {
+  return owned.id;
+}
+
+function main(): i32 {
+  let holder: Holder = Holder { kind: Kind::SOME(Owned { id: 1 }), tag: 0 };
+
+  return match (holder.kind) {
+    Kind::SOME(payload) -> take(payload) + take(payload),
+    Kind::NONE -> holder.tag,
+  };
+}

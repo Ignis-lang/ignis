@@ -188,11 +188,6 @@ export namespace Borrowck {
     /// these is what the oracle reports as a move out of a borrowed value.
     borrowedBindings: Vector<u32>;
 
-    /// Locals whose storage had an owning field moved out of it. The bytes the
-    /// field held now belong to whatever the move handed them to, so dropping
-    /// the local would free them a second time. Mirrors `drop_suppressed_vars`.
-    dropSuppressed: Vector<u32>;
-
     /// Owning bindings a `let`-condition match introduced, as a flat map:
     /// `letConditionMatches[i]` is the raw `HirId` of the match and
     /// `letConditionOwned[i]` the raw definition it owes. The arm bodies of
@@ -233,7 +228,6 @@ export namespace Borrowck {
         deferBodies: Vector::new<u32>(),
         loopContinue: Vector::new<u32>(),
         borrowedBindings: Vector::new<u32>(),
-        dropSuppressed: Vector::new<u32>(),
         letConditionMatches: Vector::new<u32>(),
         letConditionOwned: Vector::new<u32>(),
         reachable: true,
@@ -323,33 +317,6 @@ export namespace Borrowck {
       while (self.borrowedBindings.length() > mark) {
         self.borrowedBindings.pop();
       }
-    }
-
-    /// Take `defRaw` out of every drop list for the rest of the function. The
-    /// remaining fields of its storage leak, which is what the oracle accepts
-    /// rather than freeing the moved field twice.
-    public suppressDrop(&mut self, defRaw: u32): void {
-      if (self.isDropSuppressed(defRaw)) {
-        return;
-      }
-
-      self.dropSuppressed.push(defRaw);
-    }
-
-    public isDropSuppressed(&self, defRaw: u32): boolean {
-      let mut index: u64 = 0;
-
-      while (index < self.dropSuppressed.length()) {
-        if (let Option::SOME(entry) = self.dropSuppressed.get(index)) {
-          if (*entry == defRaw) {
-            return true;
-          }
-        }
-
-        index += 1;
-      }
-
-      return false;
     }
 
     public setInDefer(&mut self, value: boolean): void {
@@ -644,7 +611,7 @@ export namespace Borrowck {
           position -= 1;
 
           if (let Option::SOME(defRaw) = self.ownedVars.get(position)) {
-            if (self.isMoveValid(*defRaw) && !self.isDropSuppressed(*defRaw)) {
+            if (self.isMoveValid(*defRaw)) {
               drops.push(*defRaw);
             }
           }
@@ -2511,18 +2478,72 @@ export namespace Borrowck {
     return false;
   }
 
+  /// Whether these arms are the shape `lowering.rs` emits for
+  /// `if (let P = value)` and `while (let P = value)`: the pattern arm yields
+  /// the literal `true`, and a trailing wildcard arm yields the literal
+  /// `false`. Nothing else in the language produces a match whose only two arm
+  /// bodies are those two literals in that order, so an ordinary arm with a
+  /// literal body is not mistaken for a condition. Mirrors
+  /// `arms_are_let_condition_desugaring`.
+  function armsAreLetConditionDesugaring(
+    hir: &Hir::HirStore,
+    arms: &Vector<Hir::HirMatchArm>
+  ): boolean {
+    if (arms.length() != 2) {
+      return false;
+    }
+
+    let Option::SOME(patternArm) = arms.get(0) else {
+      return false;
+    };
+
+    let Option::SOME(wildcardArm) = arms.get(1) else {
+      return false;
+    };
+
+    if (patternArm.guard.isSome() || wildcardArm.guard.isSome()) {
+      return false;
+    }
+
+    let wildcardTrailing: boolean = match (&wildcardArm.pattern) {
+      Hir::HirPattern::Wildcard -> true,
+      _ -> false,
+    };
+
+    if (!wildcardTrailing) {
+      return false;
+    }
+
+    return Borrowck::bodyIsBooleanLiteral(hir, patternArm.body, true) && Borrowck::bodyIsBooleanLiteral(hir, wildcardArm.body, false);
+  }
+
+  function bodyIsBooleanLiteral(hir: &Hir::HirStore, body: Hir::HirId, expected: boolean): boolean {
+    let Option::SOME(node) = hir.get(body) else {
+      return false;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Literal(value) -> match (value) {
+        Hir::LiteralValue::Boolean(flag) -> flag == expected,
+        _ -> false,
+      },
+      _ -> false,
+    };
+  }
+
   /// Schedules the drops a match arm owes for its own pattern bindings, keyed
   /// by the arm body so that the body's block schedule and this one stay
   /// distinct. Mirrors the `on_match_arm_end` block of `check_match`, including
   /// its two suppressions: a scrutinee that aliases storage it does not own,
   /// and bindings that borrow their payloads. The external storage suppression
-  /// lifts when `armBindingsOwnPayload` is set, because the base's drop was
-  /// suppressed precisely so the payload the bindings now own is freed exactly
-  /// once.
+  /// lifts when `armBindingsOwnPayload` is set, because the field the payload
+  /// came out of is marked moved, so the base's schedule skips it and nothing
+  /// else frees it.
   ///
-  /// A literal arm body is the `if (let P = value)` and `while (let P = value)`
-  /// desugaring: the binding is still live after the arm, so its drop goes to
-  /// the branch that condition guards rather than to the arm.
+  /// A `let`-condition match keeps its binding live in the branch the condition
+  /// guards, which runs after the arm, so its drop goes to that branch rather
+  /// than to the arm. An ordinary arm whose body happens to be a literal is not
+  /// that shape and owes its drop here like any other.
   function recordMatchArmDrops(
     state: &mut Borrowck::State,
     schedules: &mut Hir::DropSchedules,
@@ -2534,12 +2555,13 @@ export namespace Borrowck {
     armBindingsOwnPayload: boolean,
     bindsBorrowedPayloads: boolean,
     scrutineeOwnsMovedPayload: boolean,
+    isLetConditionMatch: boolean,
   ): void {
     if ((aliasesExternalStorage && !armBindingsOwnPayload) || bindsBorrowedPayloads) {
       return;
     }
 
-    if (Borrowck::bodyIsLiteral(hir, body)) {
+    if (isLetConditionMatch) {
       // Only a pattern that takes an owning payload out of an owning scrutinee makes its
       // bindings owners. `Option<&T>` hands out the pointee instead: the binding names
       // storage the match never owned, and freeing it here frees it again when the real
@@ -2552,7 +2574,7 @@ export namespace Borrowck {
 
       while (forward < bindings.length()) {
         if (let Option::SOME(defRaw) = bindings.get(forward)) {
-          if (state.isMoveValid(*defRaw) && !state.isDropSuppressed(*defRaw)) {
+          if (state.isMoveValid(*defRaw)) {
             let mut recordRef: &mut Borrowck::State = state;
             recordRef.recordLetConditionBinding(matchId.raw(), *defRaw);
           }
@@ -2571,7 +2593,7 @@ export namespace Borrowck {
       position -= 1;
 
       if (let Option::SOME(defRaw) = bindings.get(position)) {
-        if (state.isMoveValid(*defRaw) && !state.isDropSuppressed(*defRaw)) {
+        if (state.isMoveValid(*defRaw)) {
           drops.push(*defRaw);
         }
       }
@@ -3782,16 +3804,15 @@ export namespace Borrowck {
     let scrutineeIsBorrowed: boolean = Borrowck::fieldBaseIsBorrowed(typeStore, hir, state, matchNode.scrutinee);
 
     // Mirrors the `moves_scrutinee_payload` branch of `check_match`. A borrowed
-    // base wins over consuming or suppressing the scrutinee's owner: taking the
-    // payload out of storage reached through a reference moves out of a borrow,
-    // and suppressing the owner's drop would accept it silently. Once the field
-    // owner's drop is suppressed the rest of its fields leak, which the oracle
-    // takes over freeing the moved payload twice.
+    // base wins over consuming the scrutinee's owner: taking the payload out of
+    // storage reached through a reference moves out of a borrow, and the
+    // referent still drops the field the match would take.
 
-    // Set when the payload was moved out of a field of a value we own and the
-    // owner's drop was suppressed to keep that payload from being freed twice.
-    // Ownership of the payload then rests with the arm's pattern bindings and
-    // nowhere else.
+    // Set when the payload was moved out of a field of a value we own. Reading
+    // that field by value is a partial move: LIR lowering marks the field moved,
+    // so the owner's own drop skips it and the match is the only holder of those
+    // bytes. Ownership of the payload then rests with the arm's pattern bindings
+    // and nowhere else. The owner keeps every other drop it owed.
     let mut armBindingsOwnPayload: boolean = false;
 
     if (movesScrutineePayload) {
@@ -3799,9 +3820,7 @@ export namespace Borrowck {
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, matchNode.scrutinee);
       } else if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
         Borrowck::tryConsume(state, source);
-      } else if (let Option::SOME(owner) = Borrowck::movedFieldOwner(defStore, typeStore, hir, matchNode.scrutinee)) {
-        let mut suppressRef: &mut Borrowck::State = state;
-        suppressRef.suppressDrop(owner.raw());
+      } else if (let Option::SOME(_owner) = Borrowck::movedFieldOwner(defStore, typeStore, hir, matchNode.scrutinee)) {
         armBindingsOwnPayload = true;
       } else {
         // Neither a local nor a field of one we own, so the payload sits behind
@@ -3812,6 +3831,7 @@ export namespace Borrowck {
       Borrowck::tryConsume(state, source);
     }
 
+    let isLetConditionMatch: boolean = Borrowck::armsAreLetConditionDesugaring(hir, &matchNode.arms);
     let aliasesExternalStorage: boolean = Borrowck::aliasesExternalStorage(hir, matchNode.scrutinee);
     let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, state, matchNode.scrutinee);
 
@@ -3896,6 +3916,7 @@ export namespace Borrowck {
         armBindingsOwnPayload,
         bindsBorrowedPayloads,
         scrutineeOwnsMovedPayload,
+        isLetConditionMatch,
       );
 
       let mut removeIndex: u64 = 0;
