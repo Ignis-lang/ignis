@@ -326,8 +326,14 @@ jobs:
           mkdir -p build/bootstrap
           STAGE0_JSON="build/bootstrap/stage0.json"
 
+          # `mode` records the workflow_dispatch input (auto/host/official) so
+          # `scripts/bootstrap.sh stages` can tell an explicit `stage0=official`
+          # (must fail outright if the asset cannot build stage1) apart from an
+          # `auto` resolution that landed on official (may fall back to the
+          # host — see build_stage1's stage0_explicit_official()).
           write_host_stage0() {
-            printf '{"kind": "host", "source": "target/ci/ignis", "sha256": ""}\n' >"$STAGE0_JSON"
+            jq -n --arg mode "$STAGE0_MODE" \
+              '{kind: "host", source: "target/ci/ignis", sha256: "", mode: $mode}' >"$STAGE0_JSON"
           }
 
           if [ "$STAGE0_MODE" = "host" ]; then
@@ -386,8 +392,8 @@ jobs:
 
           echo "IGNIS_STAGE0=${WORKDIR}/ignis-selfhost-linux-amd64" >>"$GITHUB_ENV"
 
-          jq -n --arg source "${WORKDIR}/ignis-selfhost-linux-amd64" --arg sha256 "$SHA256" \
-            '{kind: "official", source: $source, sha256: $sha256}' >"$STAGE0_JSON"
+          jq -n --arg source "${WORKDIR}/ignis-selfhost-linux-amd64" --arg sha256 "$SHA256" --arg mode "$STAGE0_MODE" \
+            '{kind: "official", source: $source, sha256: $sha256, mode: $mode}' >"$STAGE0_JSON"
 
           echo "stage0: official (sha ${SHA256})"
 

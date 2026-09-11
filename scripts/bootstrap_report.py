@@ -325,6 +325,10 @@ def format_stage0_line(stage0: dict) -> str:
     sha256 = stage0.get("sha256") or "unknown"
     return f"stage0: official (sha {sha256})"
 
+  if stage0.get("fallback"):
+    reason = stage0.get("fallback_reason") or "the official stage0 compiler could not build stage1"
+    return f"stage0: host (fallback from {stage0.get('original_kind', 'official')} — {reason})"
+
   return "stage0: host"
 
 

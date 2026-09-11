@@ -37,6 +37,11 @@ BOOTSTRAP_ROOT="${PROJECT_ROOT}/build/bootstrap"
 GATES_DIR="${BOOTSTRAP_ROOT}/gates"
 ENTRY="${PROJECT_ROOT}/ignis/main.ign"
 STAGE0="${IGNIS_STAGE0:-ignis}"
+# Host compiler used when stage1 falls back from a failing official/selfhost
+# stage0 (see build_stage1). The same binary `stage0=host` resolves to: the
+# nightly puts target/ci/ignis on PATH before either runs, so plain `ignis`
+# is right there too; a developer can point it elsewhere with this variable.
+HOST_STAGE0_FALLBACK="${IGNIS_STAGE0_HOST_FALLBACK:-ignis}"
 STAGE1_MEASURE="stage1-measure"
 G4_THRESHOLD="1.25"
 SELF="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
@@ -152,9 +157,12 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 #
 #   $1  stage name (output directory under build/bootstrap)
 #   $2  compiler binary to run
+#   $3  "soft" (optional) — return 1 instead of exiting on failure, so a
+#       caller can decide what to do next (see build_stage1's fallback).
 compile_stage() {
   local stage="$1"
   local compiler="$2"
+  local soft="${3-}"
   local dir
   dir="$(stage_dir "$stage")"
 
@@ -171,12 +179,33 @@ compile_stage() {
     --out "$dir/measure.json" \
     --label "$stage" \
     -- "$compiler" "$ENTRY" -o "$dir/ignis" 2>&1 | tee "$dir/log.txt"; then
+    [[ "$soft" == "soft" ]] && return 1
     fail "${stage}: the compiler reported errors, see ${dir}/log.txt"
   fi
 
-  [[ -x "$dir/ignis" ]] || fail "${stage}: no binary produced, see ${dir}/log.txt"
+  if [[ ! -x "$dir/ignis" ]]; then
+    [[ "$soft" == "soft" ]] && return 1
+    fail "${stage}: no binary produced, see ${dir}/log.txt"
+  fi
 
   info "${stage}: ok -> ${dir}/ignis"
+}
+
+# First line carrying "error" (case-insensitive) in a stage log, falling back
+# to the first non-blank line. Used to summarize a stage0 failure in one line
+# for the fallback log message and build/bootstrap/stage0.json, without
+# dumping the whole log there.
+first_error_line() {
+  local log="$1"
+  local line=""
+
+  if [[ -f "$log" ]]; then
+    line="$(grep -m1 -i 'error' "$log" 2>/dev/null || true)"
+    [[ -n "$line" ]] || line="$(grep -m1 -E '[^[:space:]]' "$log" 2>/dev/null || true)"
+    line="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"$line")"
+  fi
+
+  [[ -n "$line" ]] && echo "$line" || echo "see ${log}"
 }
 
 # stage0 is either the Rust host or a previously promoted selfhost binary
@@ -206,27 +235,79 @@ stage0_is_selfhost() {
   return 0
 }
 
-build_stage1() {
-  local stage0_bin
-  stage0_bin="$(command -v "$STAGE0" || true)"
-  [[ -n "$stage0_bin" ]] || fail "stage0 compiler not found: ${STAGE0} (set IGNIS_STAGE0)"
+# Whether stage0 was explicitly forced to `official` (`workflow_dispatch
+# stage0=official`, recorded as `"mode": "official"` in stage0.json, or a
+# developer's `IGNIS_STAGE0_MODE=official`) rather than resolved there by
+# `auto`. An explicit request exists to let a maintainer force and inspect
+# the official path, so it must fail outright rather than silently falling
+# back — only `auto` falls back to the host.
+stage0_explicit_official() {
+  local recorded_mode=""
 
-  if stage0_is_selfhost "$stage0_bin"; then
-    info "stage1: stage0 (${stage0_bin}) is a selfhost compiler, compiling ${ENTRY#"$PROJECT_ROOT/"} directly"
-    IGNIS_STD_PATH="${PROJECT_ROOT}/std" compile_stage stage1 "$stage0_bin"
-    return
+  if [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]]; then
+    recorded_mode="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("mode", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
   fi
 
+  [[ "${IGNIS_STAGE0_MODE:-$recorded_mode}" == "official" ]]
+}
+
+# Record that stage1 fell back from the official/selfhost stage0 to the host
+# compiler, so `bootstrap_report.py report` can surface it in report.md and
+# promotion.json (`stage0.fallback: true`). Keeps the previously recorded kind
+# as `original_kind` for context.
+write_stage0_fallback() {
+  local host_bin="$1"
+  local reason="$2"
+  local previous_kind="official"
+
+  mkdir -p "$BOOTSTRAP_ROOT"
+
+  if [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]]; then
+    previous_kind="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("kind", "official"))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || echo official)"
+  fi
+
+  HOST_BIN="$host_bin" REASON="$reason" PREVIOUS_KIND="$previous_kind" python3 -c '
+import json
+import os
+import sys
+
+payload = {
+  "kind": "host",
+  "source": os.environ["HOST_BIN"],
+  "sha256": "",
+  "fallback": True,
+  "fallback_reason": os.environ["REASON"],
+  "original_kind": os.environ["PREVIOUS_KIND"],
+}
+
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+  handle.write(json.dumps(payload, indent=2) + "\n")
+' "${BOOTSTRAP_ROOT}/stage0.json" || fail "stage1: could not record the stage0 fallback in ${BOOTSTRAP_ROOT}/stage0.json"
+
+  info "stage0: recorded the fallback in ${BOOTSTRAP_ROOT}/stage0.json"
+}
+
+# Build stage1 by driving a host-shaped compiler through `ignis build` against
+# ignis.toml. Used both for the direct host path (stage0 is the host) and for
+# the official-stage0 fallback below (stage0 is a selfhost binary that cannot
+# build stage1, so this rebuilds it with the same binary `stage0=host` uses).
+#
+#   $1  compiler binary to run
+#   $2  fallback reason (optional) — when set, stage0.json is rewritten to
+#       kind: host with this fallback_reason so the report shows it.
+build_stage1_with_host() {
+  local host_bin="$1"
+  local fallback_reason="${2-}"
   local dir
   dir="$(stage_dir stage1)"
   rm -rf "$dir"
   mkdir -p "$dir"
 
-  info "stage1: building with ${stage0_bin}"
+  info "stage1: building with ${host_bin}"
 
   # The host compiler reads ignis.toml and writes build/selfhost/bin/ignis; the
   # stage directory keeps a copy so later stages never depend on that path.
-  if ! (cd "$PROJECT_ROOT" && "$stage0_bin" build) 2>&1 | tee "$dir/log.txt"; then
+  if ! (cd "$PROJECT_ROOT" && "$host_bin" build) 2>&1 | tee "$dir/log.txt"; then
     fail "stage1: the host compiler reported errors, see ${dir}/log.txt"
   fi
 
@@ -235,6 +316,46 @@ build_stage1() {
 
   cp "$host_out" "$dir/ignis"
   info "stage1: ok -> ${dir}/ignis"
+
+  [[ -z "$fallback_reason" ]] || write_stage0_fallback "$host_bin" "$fallback_reason"
+}
+
+build_stage1() {
+  local stage0_bin
+  stage0_bin="$(command -v "$STAGE0" || true)"
+  [[ -n "$stage0_bin" ]] || fail "stage0 compiler not found: ${STAGE0} (set IGNIS_STAGE0)"
+
+  if stage0_is_selfhost "$stage0_bin"; then
+    info "stage1: stage0 (${stage0_bin}) is a selfhost compiler, compiling ${ENTRY#"$PROJECT_ROOT/"} directly"
+
+    if IGNIS_STD_PATH="${PROJECT_ROOT}/std" compile_stage stage1 "$stage0_bin" soft; then
+      return
+    fi
+
+    local first_error
+    first_error="$(first_error_line "$(stage_dir stage1)/log.txt")"
+
+    if stage0_explicit_official; then
+      fail "stage1: the official stage0 compiler reported errors (${first_error}), see $(stage_dir stage1)/log.txt"
+    fi
+
+    # A published selfhost binary can go stale against a link or runtime
+    # contract change on main (e.g. a std runtime archive it still passes to
+    # `ld` gets removed) well before its promotion streak resets. Falling
+    # back here keeps the ladder green on the host build CI already proved,
+    # instead of failing the whole nightly on a stage0 that is simply behind.
+    info "stage0: official binary cannot build stage1 (${first_error}), falling back to the host"
+
+    local host_bin
+    host_bin="$(command -v "$HOST_STAGE0_FALLBACK" || true)"
+    [[ -n "$host_bin" ]] ||
+      fail "stage1: official stage0 failed (${first_error}) and the host fallback (${HOST_STAGE0_FALLBACK}) was not found; set IGNIS_STAGE0_HOST_FALLBACK"
+
+    build_stage1_with_host "$host_bin" "official binary cannot build stage1 (${first_error})"
+    return
+  fi
+
+  build_stage1_with_host "$stage0_bin"
 }
 
 ensure_stage() {
