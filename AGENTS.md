@@ -23,9 +23,9 @@ crates/
   ignis_diagnostics/  # Diagnostic messages, severity, rendering
   ignis_log/          # Build output macros (cmd_header!, phase_log!, cmd_ok!, cmd_fail!)
   ignis_lsp/          # Language Server (tower-lsp): diagnostics, hover, goto-def, completions
-std/                  # Ignis standard library sources (.ign) + C runtime
+std/                  # Ignis standard library sources (.ign), runtime included
   manifest.toml       # Module registry and linking configuration
-  runtime/            # C runtime (ignis_rt.h, libignis_rt.a)
+  runtime/            # ignis_rt.h: the emitted type prelude guard (the runtime itself is Ignis)
   fs/                 # Filesystem: readToString, writeString, Dir, File, Metadata
   ffi/                # FFI utilities: CString
   path/               # Path manipulation
@@ -452,7 +452,7 @@ fn my_semantic_check() {
 | `crates/ignis_lsp/src/type_format.rs` | Type formatting for LSP hover/display |
 | `std/manifest.toml` | Std module registry and linking config |
 | `std/test/mod.ign` | `std::test::Test` namespace: assertions and snapshots |
-| `std/runtime/ignis_rt.h` | C runtime API (memory, strings, I/O) |
+| `std/runtime/ignis_rt.h` | Runtime type prelude guard; the runtime is implemented in std (memory, string, process, fs) |
 | `std/string/mod.ign` | String runtime: buffer, UTF-8, search, conversions |
 
 ## UTF-8 String/Char Semantics (v0.4)
