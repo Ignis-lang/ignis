@@ -640,3 +640,128 @@ function walkYieldsDescendantsAndExcludesTheDirectoryItself(): void {
   Test::assert(Fs::walkContains(&populatedWalk, emptyChildPath));
   Test::assert(!Fs::walkContains(&populatedWalk, rootPath));
 }
+
+@test
+function statReadsEveryFieldTheHostStructLayoutPlacesAtItsOwnOffset(): void {
+  let rootPath: str = "/tmp/ignis_std_test_runner_fs_stat_layout";
+  let filePath: str = "/tmp/ignis_std_test_runner_fs_stat_layout/payload.bin";
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_stat_layout");
+
+  defer shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_stat_layout");
+
+  let Result::OK(_) = Fs::createDirAll(rootPath) else {
+    Test::fail();
+    return;
+  };
+
+  let payload: String = String::create("nineteen bytes long");
+  let Result::OK(_) = Fs::writeString(filePath, &payload) else {
+    Test::fail();
+    return;
+  };
+
+  // `RawStat` mirrors the host `struct stat` field for field. A field added,
+  // dropped or reordered shifts every offset after it, so each assertion below
+  // reads one offset this module depends on.
+  Test::assert(Fs::Sys::rawStatMatchesHostLayout());
+
+  let fileStat: Fs::Sys::Stat = match (Fs::Sys::stat(filePath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<i64>(fileStat.size, 19);
+  Test::assertEq<u32>(fileStat.mode & Fs::Sys::S_IFMT, Fs::Sys::S_IFREG);
+  Test::assertEq<u64>(fileStat.nlink, 1);
+  Test::assert(fileStat.ino != 0);
+  Test::assert(fileStat.dev != 0);
+  Test::assert(fileStat.blksize > 0);
+  Test::assert(fileStat.mtime > 0);
+  Test::assert(fileStat.ctime > 0);
+
+  let dirStat: Fs::Sys::Stat = match (Fs::Sys::lstat(rootPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  Test::assertEq<u32>(dirStat.mode & Fs::Sys::S_IFMT, Fs::Sys::S_IFDIR);
+  Test::assert(dirStat.ino != fileStat.ino);
+}
+
+@test
+function readdirReadsTheNameAndTypeTheHostDirentLayoutPlacesAtTheirOwnOffsets(): void {
+  let rootPath: str = "/tmp/ignis_std_test_runner_fs_dirent_layout";
+
+  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_dirent_layout");
+
+  defer shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_dirent_layout");
+
+  let Result::OK(_) = Fs::createDirAll("/tmp/ignis_std_test_runner_fs_dirent_layout/child") else {
+    Test::fail();
+    return;
+  };
+
+  let payload: String = String::create("x");
+  let Result::OK(_) = Fs::writeString("/tmp/ignis_std_test_runner_fs_dirent_layout/leaf.txt", &payload) else {
+    Test::fail();
+    return;
+  };
+
+  let mut readDir: Fs::ReadDir = match (Fs::ReadDir::open(rootPath)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let mut sawChildDirectory: boolean = false;
+  let mut sawLeafFile: boolean = false;
+  let mut sawDotEntry: boolean = false;
+
+  let mut steps: i32 = 0;
+
+  while (steps < 16) {
+    match (readDir.next()) {
+      Result::OK(Option::SOME(entry)) -> {
+        let childName: String = String::create("child");
+        let leafName: String = String::create("leaf.txt");
+        let dotName: String = String::create(".");
+
+        // `d_type` and `d_ino` each sit at their own offset in the entry.
+        if (entry.name.equals(&childName)) {
+          sawChildDirectory = entry.isDir() && entry.ino != 0;
+        }
+
+        if (entry.name.equals(&leafName)) {
+          sawLeafFile = entry.isFile() && entry.ino != 0;
+        }
+
+        if (entry.name.equals(&dotName)) {
+          sawDotEntry = true;
+        }
+      },
+      Result::OK(Option::NONE) -> {
+        break;
+      },
+      Result::ERROR(_) -> Test::fail(),
+    };
+
+    steps += 1;
+  }
+
+  readDir.close();
+
+  // `d_name` is an inline array, so a wrong offset yields garbage rather than
+  // the names the directory was built with.
+  Test::assert(sawChildDirectory);
+  Test::assert(sawLeafFile);
+  Test::assert(sawDotEntry);
+}

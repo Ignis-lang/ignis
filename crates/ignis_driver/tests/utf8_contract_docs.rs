@@ -59,7 +59,6 @@ fn utf8_fs_len_constructor_and_v04_char_contract_are_locked() {
   let emit = read_repo_file("crates/ignis_codegen_c/src/emit.rs");
   let language_reference = read_repo_file("docs/LANGUAGE_REFERENCE_CURRENT.md");
   let abi_reference = read_repo_file("docs/ABI_CURRENT.md");
-  let runtime_readme = read_repo_file("std/runtime/README.md");
 
   assert!(string_mod.contains("public static create(bytes: *mut u8, len: u64): String"));
   assert!(string_mod.contains("return String::create(s as *mut u8, __string_bytes::strlen(s as *u8));"));
@@ -98,7 +97,6 @@ fn utf8_fs_len_constructor_and_v04_char_contract_are_locked() {
   assert!(abi_reference.contains("| `char` | `ignis_char_t` | Unicode scalar value |"));
   assert!(!abi_reference.contains("`char` is emitted as `u8`"));
   assert!(!abi_reference.contains("| `char` | `u8` | `uint8_t` |"));
-  assert!(runtime_readme.contains("`String::pushChar`, `String::pushByte`"));
   assert!(string_mod.contains("public byteAt(&self, index: u64): Option<u8>"));
   assert!(string_mod.contains("public pushChar(&mut self, c: char): void"));
   assert!(string_mod.contains("public pushByte(&mut self, c: u8): void"));

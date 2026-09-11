@@ -385,13 +385,6 @@ pub fn link_executable(
     cmd.arg(obj);
   }
 
-  // libignis_rt.a is one of `objects` and calls back into the allocator the std
-  // archive now owns, so the std archive is offered a second time after it. A
-  // repeated archive is portable in a way `--start-group` is not.
-  if let Some(std_archive) = &link_plan.std_archive {
-    cmd.arg(std_archive);
-  }
-
   cmd.arg("-o").arg(bin_path);
 
   for lib in &link_plan.libs {
@@ -455,11 +448,6 @@ pub fn link_executable_multi(
     cmd.arg(obj);
   }
 
-  // See `link_executable`: the runtime archive depends on the std archive.
-  if let Some(std_archive) = &link_plan.std_archive {
-    cmd.arg(std_archive);
-  }
-
   cmd.arg("-o").arg(bin_path);
 
   for lib in &link_plan.libs {
@@ -482,36 +470,6 @@ pub fn link_executable_multi(
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     return Err(format_tool_error(compiler, "linking", &stderr));
-  }
-
-  Ok(())
-}
-
-/// Rebuild the std runtime by running make in std/runtime.
-pub fn rebuild_std_runtime(
-  std_path: &Path,
-  quiet: bool,
-) -> Result<(), String> {
-  let runtime_path = std_path.join("runtime");
-
-  if !runtime_path.exists() {
-    return Err(format!("Runtime directory not found: {}", runtime_path.display()));
-  }
-
-  if !quiet {
-    println!("{} Rebuilding std runtime...", "-->".bright_cyan().bold());
-  }
-
-  let output = Command::new("make")
-    .arg("-C")
-    .arg(&runtime_path)
-    .arg("all")
-    .output()
-    .map_err(|e| format!("Failed to run make: {}", e))?;
-
-  if !output.status.success() {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format_tool_error("make", "rebuild", &stderr));
   }
 
   Ok(())
@@ -550,7 +508,7 @@ mod tests {
         headers: vec![],
         header_quoted: Some(true),
         object: None,
-        archive: Some("runtime/libignis_rt.a".to_string()),
+        archive: None,
         lib: None,
       },
     );
@@ -613,7 +571,7 @@ mod tests {
     assert_eq!(plan.headers.len(), 1);
     assert_eq!(plan.headers[0].path, "runtime/ignis_rt.h");
     assert!(plan.headers[0].quoted);
-    // No module-specific objects (all in libignis_rt.a)
+    // Nothing to link beside the std archive itself
     assert!(plan.objects.is_empty());
     assert!(plan.libs.is_empty());
   }
@@ -641,7 +599,7 @@ mod tests {
     assert_eq!(plan.headers.len(), 1);
     assert_eq!(plan.headers[0].path, "runtime/ignis_rt.h");
 
-    // No module-specific objects (all consolidated in libignis_rt.a)
+    // Nothing to link beside the std archive itself
     assert!(plan.objects.is_empty());
   }
 

@@ -1735,10 +1735,11 @@ mod std_imports {
     let content = std::fs::read_to_string(&manifest_path).expect("Failed to read manifest");
     let manifest: IgnisSTDManifest = toml::from_str(&content).expect("Failed to parse manifest");
 
-    // Only ignis_rt and math have linking info (modules use unified runtime)
+    // Only ignis_rt and math have linking info. `ignis_rt` is the base type
+    // header and nothing else: there is no C runtime archive to link.
     let rt_linking = manifest.get_linking_info("ignis_rt").expect("ignis_rt linking info");
     assert!(rt_linking.header.is_some());
-    assert!(rt_linking.archive.is_some());
+    assert!(rt_linking.archive.is_none());
 
     let math_linking = manifest.get_linking_info("math").expect("math linking info");
     assert!(math_linking.header.is_some());

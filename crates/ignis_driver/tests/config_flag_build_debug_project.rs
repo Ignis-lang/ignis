@@ -85,7 +85,6 @@ fn build_config(project: &Project) -> Arc<IgnisConfig> {
     None,
     None,
     Some(bin_path.to_string_lossy().to_string()),
-    false,
     project.bin,
     false,
     false,

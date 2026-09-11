@@ -23,11 +23,11 @@
 //! | `mkdir`    | `mkdir(2)`         | `Result<void, IoError>`           |
 //! | `unlink`   | `unlink(2)`        | `Result<void, IoError>`           |
 //! | `rmdir`    | `rmdir(2)`         | `Result<void, IoError>`           |
-//! | `removeDirAll` | runtime helper  | `Result<void, IoError>`           |
+//! | `removeDirAll` | recursive removal | `Result<void, IoError>`         |
 //! | `rename`   | `rename(2)`        | `Result<void, IoError>`           |
 //! | `opendir`  | `opendir(3)`       | `Result<DirPtr, IoError>`         |
 //! | `readdir`  | `readdir(3)`       | `Result<Option<SysDirEntry>, IoError>` |
-//! | `readdirEntry` | runtime helper  | `Result<boolean, IoError>`        |
+//! | `readdirEntry` | `readdir(3)`      | `Result<boolean, IoError>`      |
 //! | `closedir` | `closedir(3)`      | `void`                            |
 //!
 //! ## Types
@@ -52,26 +52,26 @@
 //! Functions that succeed without a meaningful value (close, mkdir, etc.)
 //! return `Result<void, Io::IoError>` with `Result::OK(())`.
 //!
-//! ## C Runtime Dependency
+//! ## Host Layout Dependency
 //!
-//! Six functions live in C (`std/runtime/internal/rt_fs.c`) because they
-//! cannot be expressed in pure Ignis today:
+//! Every function here calls libc directly through an Ignis `extern` block.
+//! Two of those calls read a struct whose layout is fixed by the target's
+//! kernel ABI rather than by POSIX:
 //!
-//! | C function          | Why C is needed                                    |
-//! |---------------------|----------------------------------------------------|
-//! | `ignis_stat_call`   | `struct stat` layout is platform-dependent          |
-//! | `ignis_fstat_call`  | same                                                |
-//! | `ignis_lstat_call`  | same                                                |
-//! | `ignis_open3`       | `open(2)` is variadic; Ignis has no variadic calls  |
-//! | `ignis_readdir_call` | `struct dirent` layout is platform-dependent       |
-//! | `ignis_remove_dir_all_call` | symlink-safe recursion uses libc structs     |
+//! | Struct          | Read as                                              |
+//! |-----------------|------------------------------------------------------|
+//! | `struct stat`   | the `RawStat` record, laid out field for field       |
+//! | `struct dirent` | the `DIRENT_*` byte offsets, read through the pointer |
 //!
-//! Everything else (`read`, `write`, `close`, `lseek`, `unlink`, `rmdir`,
-//! `rename`, `mkdir`, `opendir`, `closedir`, `readdir`, `realpath`) calls libc
-//! directly through Ignis `extern` blocks.
+//! Both are the x86_64 Linux layout and are gated on
+//! `@platform("linux") && @arch("x86_64")`. They exist only for that target,
+//! so a target whose layout has not been checked fails to compile instead of
+//! reading the wrong bytes; adding one means adding its layout under its own
+//! `@configFlag`.
 //!
-//! When `@platform` / `@target` / `@feature` attributes land, the C
-//! helpers can be replaced with platform-conditional Ignis code.
+//! `open(2)` is variadic and Ignis has no variadic call syntax. No prototype is
+//! emitted for an `extern` declaration, so the fixed three-argument binding in
+//! `__fs_io` is compiled against the real declaration from `<fcntl.h>`.
 //!
 //! ## Example
 //!
@@ -106,6 +106,13 @@ import String from "std::string";
 
 // POSIX file I/O primitives and related constants (fcntl.h, unistd.h, sys/stat.h).
 extern __fs_io {
+  /// POSIX `open`; bound at the three-argument shape so `mode` is always passed.
+  ///
+  /// `open(2)` is variadic. Ignis has no variadic call syntax, and no prototype
+  /// is emitted for an `extern` declaration, so this fixed-arity binding is
+  /// compiled against the real variadic declaration from `<fcntl.h>` and GCC
+  /// generates the host's variadic call sequence.
+  function open(pathname: *u8, flags: i32, mode: u32): i32;
   /// POSIX `read`; returns bytes read, 0 on EOF, or -1.
   function read(fd: i32, buf: *mut void, count: u64): i64;
   /// POSIX `write`; returns bytes written or -1.
@@ -156,6 +163,52 @@ extern __fs_io {
   const S_IXOTH: u32;
 }
 
+/// Host `struct stat`, laid out field for field.
+///
+/// `stat(2)` fills a caller-provided struct whose layout is fixed by the
+/// target's kernel ABI, not by POSIX. On x86_64 Linux that layout is the
+/// kernel's `stat` for the architecture, including the padding word after
+/// `st_gid`, the three `timespec` pairs, and three reserved words at the end.
+/// Every member is listed, including the ones this module never reads, so the
+/// record's size and every offset match the struct the kernel writes.
+///
+/// The record exists only for the target its layout was checked against, so a
+/// target without one fails to compile rather than reading the wrong bytes.
+/// Adding a target means adding its layout under its own `@configFlag`.
+@configFlag(@platform("linux") && @arch("x86_64"))
+record RawStat {
+  public dev: u64;
+  public ino: u64;
+  public nlink: u64;
+  public mode: u32;
+  public uid: u32;
+  public gid: u32;
+  public pad0: u32;
+  public rdev: u64;
+  public size: i64;
+  public blksize: i64;
+  public blocks: i64;
+  public atimeSec: i64;
+  public atimeNsec: i64;
+  public mtimeSec: i64;
+  public mtimeNsec: i64;
+  public ctimeSec: i64;
+  public ctimeNsec: i64;
+  public reserved0: i64;
+  public reserved1: i64;
+  public reserved2: i64;
+}
+
+// POSIX stat family (sys/stat.h). Each fills a caller-owned `RawStat`.
+extern __fs_stat {
+  /// POSIX `stat`; follows symlinks.
+  function stat(pathname: *u8, statbuf: &mut RawStat): i32;
+  /// POSIX `fstat`; describes an open file descriptor.
+  function fstat(fd: i32, statbuf: &mut RawStat): i32;
+  /// POSIX `lstat`; describes the link itself.
+  function lstat(pathname: *u8, statbuf: &mut RawStat): i32;
+}
+
 // POSIX directory stream operations (dirent.h).
 extern __fs_dir {
   /// POSIX `opendir`; opens a directory stream.
@@ -163,8 +216,8 @@ extern __fs_dir {
   /// POSIX `closedir`; closes a directory stream.
   function closedir(dirp: CType::DirPtr): i32;
 
-  // readdir returns a pointer to an internal dirent struct.
-  // We treat it as *mut void and use C helpers to extract fields.
+  // readdir returns a pointer into a stream-owned dirent. It is typed as
+  // *mut void here and read through the DIRENT_* offsets below.
   /// POSIX `readdir`; returns a host-owned `dirent` pointer or null.
   function readdir(dirp: CType::DirPtr): *mut void;
 }
@@ -201,80 +254,6 @@ extern __fs_errno {
   const EINTR: i32;
   const EAGAIN: i32;
   const ETIMEDOUT: i32;
-}
-
-// C runtime helpers implemented in std/runtime/internal/rt_fs.c.
-// Needed for platform-dependent structs (`stat`, `dirent`) and `open(2)` variadics.
-extern __fs_rt {
-  /// Runtime bridge for `stat(2)` with layout-independent out parameters.
-  function ignis_stat_call(
-    path: *u8,
-    outDev: &mut u64,
-    outIno: &mut u64,
-    outMode: &mut u32,
-    outNlink: &mut u64,
-    outUid: &mut u32,
-    outGid: &mut u32,
-    outSize: &mut i64,
-    outAtime: &mut i64,
-    outMtime: &mut i64,
-    outCtime: &mut i64,
-    outBlksize: &mut i64,
-    outBlocks: &mut i64,
-  ): i32;
-
-  /// Runtime bridge for `fstat(2)` with layout-independent out parameters.
-  function ignis_fstat_call(
-    fd: i32,
-    outDev: &mut u64,
-    outIno: &mut u64,
-    outMode: &mut u32,
-    outNlink: &mut u64,
-    outUid: &mut u32,
-    outGid: &mut u32,
-    outSize: &mut i64,
-    outAtime: &mut i64,
-    outMtime: &mut i64,
-    outCtime: &mut i64,
-    outBlksize: &mut i64,
-    outBlocks: &mut i64,
-  ): i32;
-
-  /// Runtime bridge for `lstat(2)` that does not follow symlinks.
-  function ignis_lstat_call(
-    path: *u8,
-    outDev: &mut u64,
-    outIno: &mut u64,
-    outMode: &mut u32,
-    outNlink: &mut u64,
-    outUid: &mut u32,
-    outGid: &mut u32,
-    outSize: &mut i64,
-    outAtime: &mut i64,
-    outMtime: &mut i64,
-    outCtime: &mut i64,
-    outBlksize: &mut i64,
-    outBlocks: &mut i64,
-  ): i32;
-
-  /// Runtime bridge for variadic `open(path, flags, mode)`.
-  function ignis_open3(pathname: *u8, flags: i32, mode: u32): i32;
-
-  /// Returns the `d_name` pointer from a host `dirent`.
-  function ignis_dirent_name(entry: *mut void): *u8;
-  /// Returns the inode from a host `dirent`.
-  function ignis_dirent_ino(entry: *mut void): u64;
-  /// Returns the file-type byte from a host `dirent`.
-  function ignis_dirent_type(entry: *mut void): u8;
-  /// Runtime bridge for `readdir` with extracted out parameters.
-  function ignis_readdir_call(
-    dirp: CType::DirPtr,
-    outName: &mut u64,
-    outIno: &mut u64,
-    outType: &mut u8
-  ): i32;
-  /// Runtime recursive directory removal helper.
-  function ignis_remove_dir_all_call(path: *u8): i32;
 }
 
 // =============================================================================
@@ -368,6 +347,61 @@ export namespace Fs::Sys {
   const DT_LNK: u8 = 10;
 
   // =========================================================================
+  // Host `struct dirent` layout
+  // =========================================================================
+
+  // `readdir(3)` hands back a pointer into a stream-owned `struct dirent`. The
+  // offsets below are the only part of that struct this module reads, so the
+  // struct is never mirrored as a whole. On x86_64 Linux the layout is the
+  // kernel's UAPI `dirent64`: `d_ino` (u64) at 0, `d_off` (i64) at 8,
+  // `d_reclen` (u16) at 16, `d_type` (u8) at 18, and the inline `d_name`
+  // character array at 19.
+  //
+  // Any target whose layout has not been checked has to fail at compile time
+  // rather than read the wrong bytes. These constants exist only for the
+  // target they were checked against, so on any other one the module fails to
+  // compile with the offsets reported undeclared.
+  //
+  // A second definition under the negated condition would say so in a
+  // sentence instead, but `@configFlag` with a negated predicate is not
+  // honored by the selfhost compiler: it keeps the declaration and reports the
+  // pair as a redefinition. See
+  // `test_cases/repro/configflag_negated_predicate.ign`.
+
+  /// Byte offset of `d_ino` inside the host `struct dirent`.
+  @configFlag(@platform("linux") && @arch("x86_64"))
+  const DIRENT_INO_OFFSET: u64 = 0;
+
+  /// Byte offset of `d_type` inside the host `struct dirent`.
+  @configFlag(@platform("linux") && @arch("x86_64"))
+  const DIRENT_TYPE_OFFSET: u64 = 18;
+
+  /// Byte offset of the inline `d_name` array inside the host `struct dirent`.
+  @configFlag(@platform("linux") && @arch("x86_64"))
+  const DIRENT_NAME_OFFSET: u64 = 19;
+
+  /// Returns the `d_name` array address inside a host `dirent`.
+  ///
+  /// The array is inline in the entry, so this borrows from the directory
+  /// stream and stays valid only until the next `readdir` or `closedir`.
+  function direntName(entry: *mut void): str {
+    let base: *mut u8 = @pointerCast<*mut u8>(entry);
+    return (base + Fs::Sys::DIRENT_NAME_OFFSET) as str;
+  }
+
+  /// Returns `d_ino` from a host `dirent`.
+  function direntIno(entry: *mut void): u64 {
+    let base: *mut u8 = @pointerCast<*mut u8>(entry);
+    return @read<u64>(@pointerCast<*mut u64>(base + Fs::Sys::DIRENT_INO_OFFSET));
+  }
+
+  /// Returns `d_type` from a host `dirent`.
+  function direntType(entry: *mut void): u8 {
+    let base: *mut u8 = @pointerCast<*mut u8>(entry);
+    return @read<u8>(base + Fs::Sys::DIRENT_TYPE_OFFSET);
+  }
+
+  // =========================================================================
   // errno helper (private)
   // =========================================================================
 
@@ -403,7 +437,7 @@ export namespace Fs::Sys {
   /// Uses the 3-argument `open(2)` so `mode` is always available for
   /// `O_CREAT`. Pass 0 for `mode` when not creating.
   function open(path: str, flags: i32, mode: u32): Result<i32, Io::IoError> {
-    let fd: i32 = __fs_rt::ignis_open3(path as *u8, flags, mode);
+    let fd: i32 = __fs_io::open(path as *u8, flags, mode);
     if (fd == -1) {
       return Result::ERROR(lastError());
     }
@@ -470,109 +504,89 @@ export namespace Fs::Sys {
     return Option::NONE;
   }
 
+  /// Size of the host `struct stat`, in bytes.
+  ///
+  /// Nothing allocates against this value; it exists so `RawStat` can be
+  /// pinned to the size the kernel writes. Like the `DIRENT_*` offsets it is
+  /// defined only for the target it was checked against.
+  @configFlag(@platform("linux") && @arch("x86_64"))
+  const STAT_STRUCT_SIZE: u64 = 144;
+
+  /// True when the compiled `RawStat` is the size of the host `struct stat`.
+  ///
+  /// `std/fs/tests.ign` pins this, so a field added to or dropped from
+  /// `RawStat` fails a test instead of silently shifting every offset after it.
+  function rawStatMatchesHostLayout(): boolean {
+    return @sizeOf<RawStat>() == Fs::Sys::STAT_STRUCT_SIZE;
+  }
+
+  /// Returns a zeroed `RawStat` for a `stat` family call to fill.
+  function emptyRawStat(): RawStat {
+    return RawStat {
+      dev: 0, ino: 0, nlink: 0, mode: 0, uid: 0, gid: 0, pad0: 0, rdev: 0,
+      size: 0, blksize: 0, blocks: 0,
+      atimeSec: 0, atimeNsec: 0,
+      mtimeSec: 0, mtimeNsec: 0,
+      ctimeSec: 0, ctimeNsec: 0,
+      reserved0: 0, reserved1: 0, reserved2: 0,
+    };
+  }
+
+  /// Projects a filled `RawStat` onto the portable `Stat` this module returns.
+  ///
+  /// Sub-second timestamp precision is dropped here, as it was when these
+  /// fields were extracted in C.
+  function statFromRaw(raw: &RawStat): Stat {
+    return Stat {
+      dev: raw.dev,
+      ino: raw.ino,
+      mode: raw.mode,
+      nlink: raw.nlink,
+      uid: raw.uid,
+      gid: raw.gid,
+      size: raw.size,
+      atime: raw.atimeSec,
+      mtime: raw.mtimeSec,
+      ctime: raw.ctimeSec,
+      blksize: raw.blksize,
+      blocks: raw.blocks,
+    };
+  }
+
   /// Returns file metadata for `path`.
   function stat(path: str): Result<Stat, Io::IoError> {
-    let mut dev: u64 = 0;
-    let mut ino: u64 = 0;
-    let mut mode: u32 = 0;
-    let mut nlink: u64 = 0;
-    let mut uid: u32 = 0;
-    let mut gid: u32 = 0;
-    let mut size: i64 = 0;
-    let mut atime: i64 = 0;
-    let mut mtime: i64 = 0;
-    let mut ctime: i64 = 0;
-    let mut blksize: i64 = 0;
-    let mut blocks: i64 = 0;
-
-    let rc: i32 = __fs_rt::ignis_stat_call(
-      path as *u8,
-      &mut dev, &mut ino, &mut mode, &mut nlink,
-      &mut uid, &mut gid, &mut size,
-      &mut atime, &mut mtime, &mut ctime,
-      &mut blksize, &mut blocks,
-    );
+    let mut raw: RawStat = Fs::Sys::emptyRawStat();
+    let rc: i32 = __fs_stat::stat(path as *u8, &mut raw);
 
     if (rc == -1) {
       return Result::ERROR(lastError());
     }
 
-    return Result::OK(Stat {
-      dev: dev, ino: ino, mode: mode, nlink: nlink,
-      uid: uid, gid: gid, size: size,
-      atime: atime, mtime: mtime, ctime: ctime,
-      blksize: blksize, blocks: blocks,
-    });
+    return Result::OK(Fs::Sys::statFromRaw(&raw));
   }
 
   /// Returns file metadata for open file descriptor `fd`.
   function fstat(fd: i32): Result<Stat, Io::IoError> {
-    let mut dev: u64 = 0;
-    let mut ino: u64 = 0;
-    let mut mode: u32 = 0;
-    let mut nlink: u64 = 0;
-    let mut uid: u32 = 0;
-    let mut gid: u32 = 0;
-    let mut size: i64 = 0;
-    let mut atime: i64 = 0;
-    let mut mtime: i64 = 0;
-    let mut ctime: i64 = 0;
-    let mut blksize: i64 = 0;
-    let mut blocks: i64 = 0;
-
-    let rc: i32 = __fs_rt::ignis_fstat_call(
-      fd,
-      &mut dev, &mut ino, &mut mode, &mut nlink,
-      &mut uid, &mut gid, &mut size,
-      &mut atime, &mut mtime, &mut ctime,
-      &mut blksize, &mut blocks,
-    );
+    let mut raw: RawStat = Fs::Sys::emptyRawStat();
+    let rc: i32 = __fs_stat::fstat(fd, &mut raw);
 
     if (rc == -1) {
       return Result::ERROR(lastError());
     }
 
-    return Result::OK(Stat {
-      dev: dev, ino: ino, mode: mode, nlink: nlink,
-      uid: uid, gid: gid, size: size,
-      atime: atime, mtime: mtime, ctime: ctime,
-      blksize: blksize, blocks: blocks,
-    });
+    return Result::OK(Fs::Sys::statFromRaw(&raw));
   }
 
   /// Returns file metadata for `path` without following symlinks.
   function lstat(path: str): Result<Stat, Io::IoError> {
-    let mut dev: u64 = 0;
-    let mut ino: u64 = 0;
-    let mut mode: u32 = 0;
-    let mut nlink: u64 = 0;
-    let mut uid: u32 = 0;
-    let mut gid: u32 = 0;
-    let mut size: i64 = 0;
-    let mut atime: i64 = 0;
-    let mut mtime: i64 = 0;
-    let mut ctime: i64 = 0;
-    let mut blksize: i64 = 0;
-    let mut blocks: i64 = 0;
-
-    let rc: i32 = __fs_rt::ignis_lstat_call(
-      path as *u8,
-      &mut dev, &mut ino, &mut mode, &mut nlink,
-      &mut uid, &mut gid, &mut size,
-      &mut atime, &mut mtime, &mut ctime,
-      &mut blksize, &mut blocks,
-    );
+    let mut raw: RawStat = Fs::Sys::emptyRawStat();
+    let rc: i32 = __fs_stat::lstat(path as *u8, &mut raw);
 
     if (rc == -1) {
       return Result::ERROR(lastError());
     }
 
-    return Result::OK(Stat {
-      dev: dev, ino: ino, mode: mode, nlink: nlink,
-      uid: uid, gid: gid, size: size,
-      atime: atime, mtime: mtime, ctime: ctime,
-      blksize: blksize, blocks: blocks,
-    });
+    return Result::OK(Fs::Sys::statFromRaw(&raw));
   }
 
   /// Resolves `path` to an existing canonical absolute path.
@@ -635,10 +649,82 @@ export namespace Fs::Sys {
 
   /// Recursively removes a directory tree without following symlink directories.
   function removeDirAll(path: str): Result<void, Io::IoError> {
-    let rc: i32 = __fs_rt::ignis_remove_dir_all_call(path as *u8);
+    let entry: Stat = Fs::Sys::lstat(path)!;
 
-    if (rc == -1) {
+    if ((entry.mode & Fs::Sys::S_IFMT) != Fs::Sys::S_IFDIR) {
+      return Fs::Sys::unlink(path);
+    }
+
+    Fs::Sys::removeDirChildren(path)!;
+
+    return Fs::Sys::rmdir(path);
+  }
+
+  /// True for the `.` and `..` entries every directory stream yields.
+  function isDotEntryName(name: *mut u8): boolean {
+    if (@read<u8>(name) != ('.' as u8)) {
+      return false;
+    }
+
+    let second: u8 = @read<u8>(name + 1);
+
+    if (second == 0) {
+      return true;
+    }
+
+    if (second != ('.' as u8)) {
+      return false;
+    }
+
+    return @read<u8>(name + 2) == 0;
+  }
+
+  /// Removes every entry under `path`, leaving the directory itself in place.
+  ///
+  /// The stream stays open across the recursive calls, matching the traversal
+  /// the C helper this replaced performed.
+  function removeDirChildren(path: str): Result<void, Io::IoError> {
+    let dirp: CType::DirPtr = Fs::Sys::opendir(path)!;
+    let outcome: Result<void, Io::IoError> = Fs::Sys::removeOpenDirChildren(path, dirp);
+
+    if (outcome.isError()) {
+      Fs::Sys::closedir(dirp);
+      return outcome;
+    }
+
+    if (__fs_dir::closedir(dirp) == -1) {
       return Result::ERROR(lastError());
+    }
+
+    return Result::OK(());
+  }
+
+  /// Drains an open directory stream, removing each entry it yields.
+  function removeOpenDirChildren(path: str, dirp: CType::DirPtr): Result<void, Io::IoError> {
+    while (true) {
+      let mut rawName: u64 = 0;
+      let mut rawIno: u64 = 0;
+      let mut rawFileType: u8 = 0;
+      let hasEntry: boolean = Fs::Sys::readdirEntry(dirp, &mut rawName, &mut rawIno, &mut rawFileType)!;
+
+      if (!hasEntry) {
+        break;
+      }
+
+      let namePointer: *mut u8 = @pointerFromInteger<*mut u8>(rawName);
+
+      if (Fs::Sys::isDotEntryName(namePointer)) {
+        continue;
+      }
+
+      let mut childPath: String = String::create(path);
+      childPath.pushStr("/");
+      childPath.pushStr(namePointer as str);
+
+      let removed: Result<void, Io::IoError> = Fs::Sys::removeDirAll(childPath.toStr());
+
+      childPath.drop();
+      removed!;
     }
 
     return Result::OK(());
@@ -675,13 +761,23 @@ export namespace Fs::Sys {
       return Result::ERROR(Io::IoError::fromErrno(__fs_errno::EINVAL));
     }
 
-    let rc: i32 = __fs_rt::ignis_readdir_call(dirp, outName, outIno, outType);
+    @write<i32>(__fs_errno_fn::errno_location(), 0);
 
-    if (rc == -1) {
+    let entry: *mut void = __fs_dir::readdir(dirp);
+
+    if (entry == null) {
+      if (@read<i32>(__fs_errno_fn::errno_location()) == 0) {
+        return Result::OK(false);
+      }
+
       return Result::ERROR(lastError());
     }
 
-    return Result::OK(rc == 1);
+    outName = @integerFromPointer(Fs::Sys::direntName(entry) as *u8);
+    outIno = Fs::Sys::direntIno(entry);
+    outType = Fs::Sys::direntType(entry);
+
+    return Result::OK(true);
   }
 
   /// Reads the next entry from a directory stream.
@@ -707,9 +803,9 @@ export namespace Fs::Sys {
       return Result::ERROR(lastError());
     }
 
-    let name: str = __fs_rt::ignis_dirent_name(entry) as str;
-    let ino: u64 = __fs_rt::ignis_dirent_ino(entry);
-    let fileType: u8 = __fs_rt::ignis_dirent_type(entry);
+    let name: str = Fs::Sys::direntName(entry);
+    let ino: u64 = Fs::Sys::direntIno(entry);
+    let fileType: u8 = Fs::Sys::direntType(entry);
 
     return Result::OK(Option::SOME(SysDirEntry { name: name, ino: ino, fileType: fileType }));
   }

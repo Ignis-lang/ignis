@@ -125,10 +125,6 @@ pub struct BuildCommand {
   #[arg(long, value_delimiter = ',')]
   pub emit: Vec<String>,
 
-  /// Rebuild std runtime before linking
-  #[arg(long)]
-  pub rebuild_std: bool,
-
   /// Produce a linked executable (default)
   #[arg(long = "bin", short = 'b', conflicts_with = "lib")]
   pub bin: bool,

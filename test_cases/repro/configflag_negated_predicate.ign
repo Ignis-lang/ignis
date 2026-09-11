@@ -1,0 +1,28 @@
+// `@configFlag` with a negated predicate is not honored by the selfhost
+// compiler: the declaration is kept whatever the negation evaluates to.
+//
+// On x86_64 Linux `!@platform("linux")` is false, so the constant below must
+// not exist.
+//
+//   Host:     A0035 "Undeclared identifier 'Repro::ONLY_ON_OTHER'".
+//   Selfhost: analyze ok; the constant is declared and `main` returns 2.
+//
+// An unnegated predicate is honored by both: swapping the condition for
+// `@platform("windows")` makes the selfhost drop the constant too, which is
+// why `std/libc/primitives.ign` — whose only pairs are positive — has never
+// hit this. A pair of mutually exclusive declarations guarded by `P` and `!P`
+// is reported by the selfhost as a redefinition (A0034 for a `const`, A0052
+// for a `type`), because the `!P` half is never dropped.
+//
+// The condition parser in `ignis/parser/expressions.ign` computes `!inner`
+// correctly, so the negation is lost somewhere between that result and the
+// declaration filter.
+
+namespace Repro {
+  @configFlag(!@platform("linux"))
+  const ONLY_ON_OTHER: u64 = 2;
+}
+
+function main(): i32 {
+  return Repro::ONLY_ON_OTHER as i32;
+}

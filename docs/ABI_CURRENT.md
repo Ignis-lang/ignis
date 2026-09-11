@@ -478,28 +478,26 @@ Each module generates a `.h` file with:
 1. C source is emitted to `.c` files.
 2. **Compile to object**: `gcc -c <file.c> -o <file.o> [-I <include_dirs>] [<cflags>]`
 3. **Archive creation** (for libraries): `ar rcs <archive.a> <obj1.o> <obj2.o> ...`
-4. **Link executable**: `gcc <user.o> [<archives>] <runtime_objects> -o <binary> [-l<lib>]`
+4. **Link executable**: `gcc <user.o> [<archives>] -o <binary> [-l<lib>]`
 
 ### Link Order
 
 1. All user object files
 2. User archive (`libignis_user.a`) if present
 3. Std archive (`libignis_std.a`) if present
-4. Runtime objects (`libignis_rt.a`, module-specific objects)
-5. Output binary (`-o`)
-6. External library flags (`-lm`, etc.)
+4. Output binary (`-o`)
+5. External library flags (`-lm`, etc.)
 
 ### Archive Layout
 
 | Archive | Location | Contents |
 |---------|----------|----------|
-| Runtime | `std/runtime/libignis_rt.a` | Core C runtime |
 | Std | `build/std/lib/libignis_std.a` | Compiled std modules |
 | User | `build/user/lib/libignis_user.a` | Compiled user modules |
 
 ### Precompiled Std
 
-The linker checks for `build/std/include/ignis_std.h` and `build/std/lib/libignis_std.a`. If both exist, it uses the precompiled std and links all runtime objects from the manifest.
+The linker checks for `build/std/include/ignis_std.h` and `build/std/lib/libignis_std.a`. If both exist, it uses the precompiled std.
 
 ### Standard Library Manifest
 
@@ -507,7 +505,7 @@ The module registry at `std/manifest.toml` declares:
 
 - **Modules**: `libc`, `io`, `math`, `string`, `number`, `types`, `option`, `result`, `memory`, `vector`, `ptr`, `rc`, `path`, `ffi`, `fs`
 - **Auto-loaded modules** (imported implicitly): `string`, `number`, `vector`, `types`, `option`, `result`
-- **Runtime linking**: `runtime/libignis_rt.a` with header `runtime/ignis_rt.h`
+- **Base header**: `runtime/ignis_rt.h`; there is no runtime archive
 - **System libraries**: `math` links `-lm`
 
 ## Definition Classification
