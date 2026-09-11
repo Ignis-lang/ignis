@@ -191,17 +191,24 @@ compile_stage() {
   info "${stage}: ok -> ${dir}/ignis"
 }
 
-# First line carrying "error" (case-insensitive) in a stage log, falling back
-# to the first non-blank line. Used to summarize a stage0 failure in one line
-# for the fallback log message and build/bootstrap/stage0.json, without
-# dumping the whole log there.
+# The most specific error line in a stage log, used to summarize a stage0
+# failure in one line for the fallback log message and
+# build/bootstrap/stage0.json, without dumping the whole log there. Preferred
+# in order: Ignis's own `Error[<code>]:` diagnostics, a linker/gcc `error:`
+# line, any case-insensitive "error", then the first non-blank line (banner
+# text from the compiler's phase report, as a last resort). ANSI color codes
+# are stripped first since the compiler colors its own "Error" banner.
 first_error_line() {
   local log="$1"
   local line=""
+  local stripped=""
 
   if [[ -f "$log" ]]; then
-    line="$(grep -m1 -i 'error' "$log" 2>/dev/null || true)"
-    [[ -n "$line" ]] || line="$(grep -m1 -E '[^[:space:]]' "$log" 2>/dev/null || true)"
+    stripped="$(sed -E 's/\x1b\[[0-9;]*m//g' "$log")"
+    line="$(grep -m1 -E 'Error\[' <<<"$stripped" || true)"
+    [[ -n "$line" ]] || line="$(grep -m1 -E 'error:' <<<"$stripped" || true)"
+    [[ -n "$line" ]] || line="$(grep -m1 -i 'error' <<<"$stripped" || true)"
+    [[ -n "$line" ]] || line="$(grep -m1 -E '[^[:space:]]' <<<"$stripped" || true)"
     line="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"$line")"
   fi
 
@@ -253,35 +260,59 @@ stage0_explicit_official() {
 
 # Record that stage1 fell back from the official/selfhost stage0 to the host
 # compiler, so `bootstrap_report.py report` can surface it in report.md and
-# promotion.json (`stage0.fallback: true`). Keeps the previously recorded kind
-# as `original_kind` for context.
+# promotion.json (`stage0.fallback: true`).
+#
+# `kind` (and `mode`) are left exactly as they were: `stage0_is_selfhost` and
+# `stage0_explicit_official` read them on every later `build_stage1` call
+# (e.g. a second `stage1` invocation, or `ensure_stage stage1` from `stage2`
+# when stage1 is missing), and overwriting `kind` to `host` here would make
+# that oracle believe stage0 itself changed kind, so a later call would try
+# to run the still-official stage0 binary in the host's `<bin> build` form
+# instead of retrying the fallback. What was actually used to build stage1
+# this run is recorded separately as `used_kind`.
 write_stage0_fallback() {
   local host_bin="$1"
   local reason="$2"
-  local previous_kind="official"
+  local existing='{"kind": "official", "source": "", "sha256": ""}'
 
   mkdir -p "$BOOTSTRAP_ROOT"
 
   if [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]]; then
-    previous_kind="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("kind", "official"))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || echo official)"
+    existing="$(cat "${BOOTSTRAP_ROOT}/stage0.json")"
   fi
 
-  HOST_BIN="$host_bin" REASON="$reason" PREVIOUS_KIND="$previous_kind" python3 -c '
+  # Written to a temp file and renamed into place: the nightly's supersede
+  # watcher can SIGTERM/SIGKILL this process group mid-run, and a half-written
+  # stage0.json would otherwise corrupt every later read of it (including the
+  # very next `stage0_is_selfhost` probe in this same run).
+  EXISTING_JSON="$existing" HOST_BIN="$host_bin" REASON="$reason" python3 -c '
 import json
 import os
 import sys
+import tempfile
 
-payload = {
-  "kind": "host",
-  "source": os.environ["HOST_BIN"],
-  "sha256": "",
-  "fallback": True,
-  "fallback_reason": os.environ["REASON"],
-  "original_kind": os.environ["PREVIOUS_KIND"],
-}
+path = sys.argv[1]
 
-with open(sys.argv[1], "w", encoding="utf-8") as handle:
-  handle.write(json.dumps(payload, indent=2) + "\n")
+try:
+  payload = json.loads(os.environ["EXISTING_JSON"])
+except json.JSONDecodeError:
+  payload = {"kind": "official", "source": "", "sha256": ""}
+
+payload["fallback"] = True
+payload["fallback_reason"] = os.environ["REASON"]
+payload["original_kind"] = payload.get("kind", "official")
+payload["used_kind"] = "host"
+payload["used_source"] = os.environ["HOST_BIN"]
+
+directory = os.path.dirname(path) or "."
+fd, temp_path = tempfile.mkstemp(prefix=".stage0.", suffix=".json.tmp", dir=directory)
+try:
+  with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload, indent=2) + "\n")
+  os.replace(temp_path, path)
+except BaseException:
+  os.unlink(temp_path)
+  raise
 ' "${BOOTSTRAP_ROOT}/stage0.json" || fail "stage1: could not record the stage0 fallback in ${BOOTSTRAP_ROOT}/stage0.json"
 
   info "stage0: recorded the fallback in ${BOOTSTRAP_ROOT}/stage0.json"
@@ -294,14 +325,28 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
 #
 #   $1  compiler binary to run
 #   $2  fallback reason (optional) — when set, stage0.json is rewritten to
-#       kind: host with this fallback_reason so the report shows it.
+#       record the fallback so the report shows it.
 build_stage1_with_host() {
   local host_bin="$1"
   local fallback_reason="${2-}"
   local dir
   dir="$(stage_dir stage1)"
+
+  # A fallback rebuilds over the official/selfhost stage0's failed attempt.
+  # Its log is the only record of why the fallback happened, so it is copied
+  # aside before the directory is wiped rather than lost with it.
+  local preserved_official_log=""
+  if [[ -n "$fallback_reason" && -f "$dir/log.txt" ]]; then
+    preserved_official_log="$(mktemp)"
+    cp "$dir/log.txt" "$preserved_official_log"
+  fi
+
   rm -rf "$dir"
   mkdir -p "$dir"
+
+  if [[ -n "$preserved_official_log" ]]; then
+    mv "$preserved_official_log" "$dir/log-stage0-official.txt"
+  fi
 
   info "stage1: building with ${host_bin}"
 
