@@ -837,58 +837,59 @@ export namespace Format {
     return false;
   }
 
-  /// A JSON scalar's kind, as a plain (payload-free) enum: matching an enum
-  /// that carries an owned payload through a reference to a field of an
-  /// already-bound local double-frees on this compiler (repro
-  /// "field-move-double-free", which turns out to cover this shape too, not
-  /// just a bare `record.field` move), so the payload instead lives
-  /// alongside the tag as `ShallowScalarRead.text`, a plain `String` field.
-  enum ShallowScalarTag {
-    STRING,
+  /// A JSON scalar's kind, carrying its own decoded payload (the string, or
+  /// the raw number literal) directly rather than alongside it in a
+  /// separate field: confirmed against the rebased host (after check #172's
+  /// partial-move fix) that matching an owned local's payload-carrying enum
+  /// field by value, then still using another field of the same record
+  /// afterward, is sound — verified with both an ASan build and `valgrind`
+  /// on the standalone shape this mirrors (a record with an enum-with-
+  /// payload field plus a plain field, matched by value then the plain
+  /// field read afterward), 0 errors either way.
+  enum ShallowScalarKind {
+    STRING(String),
+    NUMBER(String),
     BOOL_TRUE,
     BOOL_FALSE,
     NULL,
-    NUMBER,
   }
 
   /// A JSON scalar (string, number, `true`/`false`/`null`) fully consumed at
-  /// `valueStart`, described lazily rather than eagerly: `text` holds the
-  /// decoded string (`STRING`) or the raw number literal (`NUMBER`), empty
-  /// otherwise, and `describeShallowScalar` builds the actual
-  /// `serde`-`Unexpected`-shaped description from it only when a caller
-  /// needs one (the scalar turned out to be the wrong type). A container
-  /// (`{`/`[`) never reaches this: a caller checks for one with
-  /// `Json::classifyContainerStart` first, since `serde` classifies a
-  /// container by peeking its opening bracket without consuming it (a
-  /// different column convention than every scalar here, which is fully
-  /// read before it is described).
+  /// `valueStart`. A container (`{`/`[`) never reaches this: a caller checks
+  /// for one with `Json::classifyContainerStart` first, since `serde`
+  /// classifies a container by peeking its opening bracket without
+  /// consuming it (a different column convention than every scalar here,
+  /// which is fully read before it is described).
   record ShallowScalarRead {
-    public tag: ShallowScalarTag;
-    public text: String;
+    public kind: ShallowScalarKind;
     public endOffset: u64;
   }
 
-  /// Whether `tag` is `STRING`, matched through a reference rather than an
-  /// owned local's field directly (matching an owned local's enum field by
-  /// value double-frees its record's other fields afterward on this
-  /// compiler — repro "field-move-double-free", covering this shape too).
-  function isShallowScalarString(tag: &Format::ShallowScalarTag): boolean {
-    return match (tag) {
-      Format::ShallowScalarTag::STRING -> true,
-      _ -> false,
+  /// Builds the actual `serde`-`Unexpected`-shaped description lazily,
+  /// rather than eagerly for every scalar `readShallowScalar` reads: this
+  /// matters concretely for `NUMBER`, whose description does a `snprintf`
+  /// round-trip search that is wasted work for every valid `path`/`text`
+  /// string.
+  function describeShallowScalarKind(kind: &Format::ShallowScalarKind): String {
+    return match (kind) {
+      Format::ShallowScalarKind::STRING(text) -> Format::describeString(&text),
+      Format::ShallowScalarKind::NUMBER(text) -> Format::describeNumber(&text),
+      Format::ShallowScalarKind::BOOL_TRUE -> Format::describeBool(true),
+      Format::ShallowScalarKind::BOOL_FALSE -> Format::describeBool(false),
+      Format::ShallowScalarKind::NULL -> String::create("null"),
     };
   }
 
-  function describeShallowScalar(scalar: &Format::ShallowScalarRead): String {
-    return match (scalar.tag) {
-      Format::ShallowScalarTag::STRING -> Format::describeString(&scalar.text),
-      Format::ShallowScalarTag::BOOL_TRUE -> Format::describeBool(true),
-      Format::ShallowScalarTag::BOOL_FALSE -> Format::describeBool(false),
-      Format::ShallowScalarTag::NULL -> String::create("null"),
-      Format::ShallowScalarTag::NUMBER -> Format::describeNumber(&scalar.text),
-    };
-  }
-
+  /// Reads exactly one JSON scalar (string, number, `true`, `false`, or
+  /// `null`) starting at `valueStart`, without descending into a container:
+  /// a caller checks for `{`/`[` with `classifyContainerStart` first, since
+  /// a container is classified by peeking its opening bracket rather than
+  /// being read here. A string is fully decoded (escapes, surrogate pairs)
+  /// via `readString`; a number is validated against the JSON number
+  /// grammar via `scanNumber` and rejected with `number out of range` if it
+  /// overflows `f64`; `true`/`false`/`null` are matched exactly via
+  /// `matchKeywordOrIdentError`, which also covers a partially-matched
+  /// keyword. Any other byte is `expected value`.
   function readShallowScalar(
     line: &String,
     valueStart: u64
@@ -906,8 +907,7 @@ export namespace Format {
       };
 
       return Result::OK(Format::ShallowScalarRead {
-        tag: Format::ShallowScalarTag::STRING,
-        text: read.value,
+        kind: Format::ShallowScalarKind::STRING(read.value),
         endOffset: read.nextIndex,
       });
     }
@@ -920,11 +920,7 @@ export namespace Format {
         },
       };
 
-      return Result::OK(Format::ShallowScalarRead {
-        tag: Format::ShallowScalarTag::BOOL_TRUE,
-        text: String::new(),
-        endOffset: endOffset,
-      });
+      return Result::OK(Format::ShallowScalarRead { kind: Format::ShallowScalarKind::BOOL_TRUE, endOffset: endOffset });
     }
 
     if (byte == 'f' as u8) {
@@ -936,8 +932,7 @@ export namespace Format {
       };
 
       return Result::OK(Format::ShallowScalarRead {
-        tag: Format::ShallowScalarTag::BOOL_FALSE,
-        text: String::new(),
+        kind: Format::ShallowScalarKind::BOOL_FALSE,
         endOffset: endOffset,
       });
     }
@@ -950,11 +945,7 @@ export namespace Format {
         },
       };
 
-      return Result::OK(Format::ShallowScalarRead {
-        tag: Format::ShallowScalarTag::NULL,
-        text: String::new(),
-        endOffset: endOffset,
-      });
+      return Result::OK(Format::ShallowScalarRead { kind: Format::ShallowScalarKind::NULL, endOffset: endOffset });
     }
 
     let isNumberStart: boolean = byte == '-' as u8 || (byte >= '0' as u8 && byte <= '9' as u8);
@@ -972,8 +963,7 @@ export namespace Format {
       }
 
       return Result::OK(Format::ShallowScalarRead {
-        tag: Format::ShallowScalarTag::NUMBER,
-        text: numberRead.text,
+        kind: Format::ShallowScalarKind::NUMBER(numberRead.text),
         endOffset: numberRead.endOffset,
       });
     }
@@ -1010,13 +1000,17 @@ export namespace Format {
     }
 
     let scalar: Format::ShallowScalarRead = Format::readShallowScalar(line, valueStart)!;
+    let endOffset: u64 = scalar.endOffset;
 
-    if (Format::isShallowScalarString(&scalar.tag)) {
-      return Result::OK(Format::FieldValueRead { value: scalar.text, endOffset: scalar.endOffset });
-    }
-
-    let description: String = Format::describeShallowScalar(&scalar);
-    return Result::ERROR(Format::ndjsonInvalidFieldType(&description, scalar.endOffset));
+    match (scalar.kind) {
+      Format::ShallowScalarKind::STRING(value) -> {
+        return Result::OK(Format::FieldValueRead { value: value, endOffset: endOffset });
+      },
+      other -> {
+        let description: String = Format::describeShallowScalarKind(&other);
+        return Result::ERROR(Format::ndjsonInvalidFieldType(&description, endOffset));
+      },
+    };
   }
 
   function skipAsciiWhitespaceFrom(line: &String, start: u64): u64 {
@@ -1328,7 +1322,7 @@ export namespace Format {
     }
 
     let scalar: Format::ShallowScalarRead = Format::readShallowScalar(line, 0)!;
-    let description: String = Format::describeShallowScalar(&scalar);
+    let description: String = Format::describeShallowScalarKind(&scalar.kind);
     return Result::ERROR(Format::ndjsonInvalidType(&description, scalar.endOffset));
   }
 

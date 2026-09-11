@@ -360,6 +360,132 @@ function fmtFlagStateRecordToken(state: &mut FmtFlagState, boldPart: str, plainS
   stateRef.usageTokens.push(FmtUsageToken { boldPart: boldPart, plainSuffix: plainSuffix });
 }
 
+/// One `fmt`-only flag's shape, table-driven rather than one hand-written
+/// recognizer per flag: `plainSuffix` is `FmtUsageToken`'s (empty for a
+/// boolean flag), `takesValue` decides whether a bare `--name` token still
+/// needs a following value token (arity 2) or is complete on its own (arity
+/// 1; `--name=value` is always arity 1), and `repeatable` is false for
+/// every flag except `--emit`, the only one `clap` allows more than once.
+record FmtFlagSpec {
+  public name: str;
+  public plainSuffix: str;
+  public takesValue: boolean;
+  public repeatable: boolean;
+}
+
+/// The single source of truth for every `fmt`-only flag's identity, used by
+/// both the duplicate-flag pre-scan and the conflict `Usage:` line's
+/// forward scan, so the two can never drift out of sync with each other.
+function fmtFlagSpecTable(): Vector<FmtFlagSpec> {
+  let mut specs: Vector<FmtFlagSpec> = Vector::new<FmtFlagSpec>();
+  specs.push(FmtFlagSpec { name: "--check", plainSuffix: "", takesValue: false, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--sort-imports", plainSuffix: "", takesValue: false, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--use-tabs", plainSuffix: "", takesValue: false, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--spaces", plainSuffix: "", takesValue: false, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--stdin-json", plainSuffix: "", takesValue: false, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--project", plainSuffix: " <PROJECT>", takesValue: true, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--config", plainSuffix: " <CONFIG>", takesValue: true, repeatable: false });
+  specs.push(FmtFlagSpec {
+    name: "--indent-width",
+    plainSuffix: " <INDENT_WIDTH>",
+    takesValue: true,
+    repeatable: false,
+  });
+  specs.push(FmtFlagSpec { name: "--line-width", plainSuffix: " <LINE_WIDTH>", takesValue: true, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--emit", plainSuffix: " <EMIT>", takesValue: true, repeatable: true });
+  return specs;
+}
+
+/// Which spec in `fmtFlagSpecTable()` (by index) `argument` matches, and how
+/// many argv tokens that occurrence consumes: 1 for a boolean flag or the
+/// `--name=value` form, 2 for a value-taking flag's `--name value` form.
+record FmtFlagMatch {
+  public specIndex: u64;
+  public consumed: u64;
+}
+
+function fmtMatchFlagSpec(specs: &Vector<FmtFlagSpec>, argument: &String): Option<FmtFlagMatch> {
+  let mut index: u64 = 0;
+
+  while (index < specs.length()) {
+    if (let Option::SOME(spec) = specs.get(index)) {
+      if (spec.takesValue) {
+        if (let Option::SOME(_) = flagEqualsValue(argument, spec.name)) {
+          return Option::SOME(FmtFlagMatch { specIndex: index, consumed: 1 });
+        }
+
+        if (argument.equals(spec.name)) {
+          return Option::SOME(FmtFlagMatch { specIndex: index, consumed: 2 });
+        }
+      } else if (argument.equals(spec.name)) {
+        return Option::SOME(FmtFlagMatch { specIndex: index, consumed: 1 });
+      }
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// `clap` rejects a non-repeatable `fmt` flag given twice with `the
+/// argument '<name>' cannot be used multiple times`, and it does so only
+/// after matching the *entire* command line: a duplicate positioned after
+/// an unrelated conflict (`--use-tabs --spaces --check --check`) is still
+/// reported ahead of that conflict, and ahead of `--help`/`--version` too.
+/// This scans the whole `fmt` argument list once, independently of
+/// `parseArguments`'s own incremental loop, and returns the first
+/// non-repeatable flag (its message-form text, e.g. `--project <PROJECT>`)
+/// seen a second time — or `Option::NONE` if every flag present is either
+/// repeatable or seen at most once.
+function fmtFindFirstDuplicateFlag(arguments: &Vector<String>, startIndex: u64): Option<String> {
+  let specs: Vector<FmtFlagSpec> = fmtFlagSpecTable();
+  let mut seen: Vector<boolean> = Vector::new<boolean>();
+  let mut seenInit: u64 = 0;
+
+  while (seenInit < specs.length()) {
+    seen.push(false);
+    seenInit += 1;
+  }
+
+  let mut index: u64 = startIndex;
+
+  while (index < arguments.length()) {
+    let Option::SOME(argument) = arguments.get(index) else {
+      break;
+    };
+
+    let Option::SOME(matched) = fmtMatchFlagSpec(&specs, argument) else {
+      index += 1;
+      continue;
+    };
+
+    let Option::SOME(spec) = specs.get(matched.specIndex) else {
+      index += matched.consumed;
+      continue;
+    };
+
+    if (!spec.repeatable) {
+      let Option::SOME(alreadySeen) = seen.get(matched.specIndex) else {
+        index += matched.consumed;
+        continue;
+      };
+
+      if (*alreadySeen) {
+        let mut subject: String = String::create(spec.name);
+        subject.pushStr(spec.plainSuffix);
+        return Option::SOME(subject);
+      }
+
+      seen.set(matched.specIndex, true);
+    }
+
+    index += matched.consumed;
+  }
+
+  return Option::NONE;
+}
+
 /// `clap` validates argument conflicts only after matching the entire
 /// command line, so a flag or a `FILE_PATHS` value coming *after* the
 /// argument that triggers a conflict still appears in that conflict's
@@ -376,7 +502,8 @@ function fmtScanRemainingUsageTokensForConflict(
   fromIndex: u64,
   state: &mut FmtFlagState
 ): void {
-  let mut stateRef: &mut FmtFlagState = state;
+  let stateRef: &mut FmtFlagState = state;
+  let specs: Vector<FmtFlagSpec> = fmtFlagSpecTable();
   let mut index: u64 = fromIndex;
 
   while (index < arguments.length()) {
@@ -384,93 +511,12 @@ function fmtScanRemainingUsageTokensForConflict(
       break;
     };
 
-    if (argument.equals("--check")) {
-      fmtFlagStateRecordToken(stateRef, "--check", "");
-      index += 1;
-      continue;
-    }
+    if (let Option::SOME(matched) = fmtMatchFlagSpec(&specs, argument)) {
+      if (let Option::SOME(spec) = specs.get(matched.specIndex)) {
+        fmtFlagStateRecordToken(stateRef, spec.name, spec.plainSuffix);
+      }
 
-    if (argument.equals("--sort-imports")) {
-      fmtFlagStateRecordToken(stateRef, "--sort-imports", "");
-      index += 1;
-      continue;
-    }
-
-    if (argument.equals("--use-tabs")) {
-      fmtFlagStateRecordToken(stateRef, "--use-tabs", "");
-      index += 1;
-      continue;
-    }
-
-    if (argument.equals("--spaces")) {
-      fmtFlagStateRecordToken(stateRef, "--spaces", "");
-      index += 1;
-      continue;
-    }
-
-    if (argument.equals("--stdin-json")) {
-      fmtFlagStateRecordToken(stateRef, "--stdin-json", "");
-      index += 1;
-      continue;
-    }
-
-    if (let Option::SOME(_) = flagEqualsValue(argument, "--project")) {
-      fmtFlagStateRecordToken(stateRef, "--project", " <PROJECT>");
-      index += 1;
-      continue;
-    }
-
-    if (argument.equals("--project")) {
-      fmtFlagStateRecordToken(stateRef, "--project", " <PROJECT>");
-      index += 2;
-      continue;
-    }
-
-    if (let Option::SOME(_) = flagEqualsValue(argument, "--config")) {
-      fmtFlagStateRecordToken(stateRef, "--config", " <CONFIG>");
-      index += 1;
-      continue;
-    }
-
-    if (argument.equals("--config")) {
-      fmtFlagStateRecordToken(stateRef, "--config", " <CONFIG>");
-      index += 2;
-      continue;
-    }
-
-    if (let Option::SOME(_) = flagEqualsValue(argument, "--indent-width")) {
-      fmtFlagStateRecordToken(stateRef, "--indent-width", " <INDENT_WIDTH>");
-      index += 1;
-      continue;
-    }
-
-    if (argument.equals("--indent-width")) {
-      fmtFlagStateRecordToken(stateRef, "--indent-width", " <INDENT_WIDTH>");
-      index += 2;
-      continue;
-    }
-
-    if (let Option::SOME(_) = flagEqualsValue(argument, "--line-width")) {
-      fmtFlagStateRecordToken(stateRef, "--line-width", " <LINE_WIDTH>");
-      index += 1;
-      continue;
-    }
-
-    if (argument.equals("--line-width")) {
-      fmtFlagStateRecordToken(stateRef, "--line-width", " <LINE_WIDTH>");
-      index += 2;
-      continue;
-    }
-
-    if (let Option::SOME(_) = flagEqualsValue(argument, "--emit")) {
-      fmtFlagStateRecordToken(stateRef, "--emit", " <EMIT>");
-      index += 1;
-      continue;
-    }
-
-    if (argument.equals("--emit")) {
-      fmtFlagStateRecordToken(stateRef, "--emit", " <EMIT>");
-      index += 2;
+      index += matched.consumed;
       continue;
     }
 
@@ -482,6 +528,37 @@ function fmtScanRemainingUsageTokensForConflict(
     stateRef.sawFilePath = true;
     index += 1;
   }
+}
+
+/// Reconstructs the exact `clap`-generated "used multiple times" error: a
+/// generic `Usage: ignis fmt [OPTIONS] [FILE_PATHS]...` line, unlike a
+/// conflict error's accumulated one, since `clap` reports this before ever
+/// building a flag-specific usage summary. `subject` is the flag's own
+/// message-form text (e.g. `--project <PROJECT>`), matching
+/// `fmtFindFirstDuplicateFlag`'s return value.
+function clapFmtDuplicateError(subject: &String): String {
+  let mut message: String = String::new();
+
+  message.pushChar(ansiEsc());
+  message.pushStr("[1m");
+  message.pushChar(ansiEsc());
+  message.pushStr("[31merror:");
+  message.pushChar(ansiEsc());
+  message.pushStr("[0m the argument '");
+  pushAnsiYellow(&mut message, subject.toStr());
+  message.pushStr("' cannot be used multiple times\n\n");
+  message.pushChar(ansiEsc());
+  message.pushStr("[1m");
+  message.pushChar(ansiEsc());
+  message.pushStr("[4mUsage:");
+  message.pushChar(ansiEsc());
+  message.pushStr("[0m ");
+  pushAnsiBold(&mut message, "ignis fmt");
+  message.pushStr(" [OPTIONS] [FILE_PATHS]...");
+  message.pushStr("\n\nFor more information, try '");
+  pushAnsiBold(&mut message, "--help");
+  message.pushStr("'.");
+  return message;
 }
 
 /// Reconstructs the exact `clap`-generated conflict error the host CLI
@@ -916,6 +993,12 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       index = 2;
     } else if (!first.startsWith("-") && !cliLooksLikePath(first)) {
       return Result::ERROR(`error: unrecognized subcommand '${first.toStr()}'`);
+    }
+  }
+
+  if (let CliCommand::FMT = command) {
+    if (let Option::SOME(subject) = fmtFindFirstDuplicateFlag(arguments, index)) {
+      return Result::ERROR(clapFmtDuplicateError(&subject));
     }
   }
 
@@ -1876,21 +1959,114 @@ function cliRejectsStdinJsonWithProjectAfterAPrecedingFlag(): void {
   );
 }
 
-/// A `FILE_PATHS` value present anywhere on the line — even after the
-/// rejected argument, and never actually consumed — switches the trailing
-/// placeholder to `<FILE_PATHS>...`.
+/// A `FILE_PATHS` value present anywhere on the line — even *before* both
+/// conflicting flags, and never actually consumed since the conflict fires
+/// first — still switches the trailing placeholder to `<FILE_PATHS>...`.
 @test
-function cliRejectsUseTabsWithSpacesWithATrailingFilePath(): void {
+function cliRejectsUseTabsWithSpacesWithALeadingFilePath(): void {
   let mut arguments: Vector<String> = Vector::new<String>();
   cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "a.ign");
   cliPush(&mut arguments, "--use-tabs");
   cliPush(&mut arguments, "--spaces");
-  cliPush(&mut arguments, "a.ign");
 
   let message: String = cliParseError(&arguments);
 
   Test::assertEq<str>(
     stripAnsi(&message).toStr(),
     "error: the argument '--use-tabs' cannot be used with '--spaces'\n\nUsage: ignis fmt --use-tabs <FILE_PATHS>...\n\nFor more information, try '--help'."
+  );
+}
+
+/// A non-repeatable `fmt` flag given twice is `clap`'s own "used multiple
+/// times" error, not the formatter's own conflict wording, and its
+/// `Usage:` line is the generic one, not the accumulated per-flag list a
+/// conflict error builds. Verified against the host binary.
+@test
+function cliRejectsCheckUsedTwice(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "a.ign");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--check' cannot be used multiple times\n\nUsage: ignis fmt [OPTIONS] [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// Same as above for a value-taking flag: the message-form subject includes
+/// its placeholder (`--project <PROJECT>`), not just the flag name.
+@test
+function cliRejectsProjectUsedTwice(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--project");
+  cliPush(&mut arguments, "a");
+  cliPush(&mut arguments, "--project");
+  cliPush(&mut arguments, "b");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--project <PROJECT>' cannot be used multiple times\n\nUsage: ignis fmt [OPTIONS] [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// `--use-tabs` and `--spaces` are each individually non-repeatable too,
+/// independent of their mutual-exclusion conflict with each other.
+@test
+function cliRejectsUseTabsUsedTwice(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--use-tabs");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--use-tabs' cannot be used multiple times\n\nUsage: ignis fmt [OPTIONS] [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// `--emit` is the one `fmt` flag `clap` allows repeated: no error.
+@test
+function cliAllowsEmitUsedTwice(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--emit");
+  cliPush(&mut arguments, "diff");
+  cliPush(&mut arguments, "--emit");
+  cliPush(&mut arguments, "diff");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<boolean>(options.fmtEmitDiff, true);
+}
+
+/// A duplicate flag is reported ahead of an unrelated conflict elsewhere on
+/// the same line, even when the duplicate itself comes *after* the
+/// conflicting pair in argv order: `clap` matches the whole line before
+/// validating anything, and a "used multiple times" error takes priority
+/// over a conflict error. Verified against the host binary.
+@test
+function cliRejectsADuplicateFlagBeforeAnUnrelatedConflict(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--spaces");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "--check");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--check' cannot be used multiple times\n\nUsage: ignis fmt [OPTIONS] [FILE_PATHS]...\n\nFor more information, try '--help'."
   );
 }
