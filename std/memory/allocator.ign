@@ -20,13 +20,6 @@
 //!                                    └── the returned pointer
 //! ```
 //!
-//! ## Exported C symbols
-//!
-//! `ignis_alloc`, `ignis_realloc` and `ignis_free` keep their C names, which is
-//! the allocator's published ABI. Nothing in `std/runtime` calls them any more,
-//! now that the string runtime is Ignis; everything else is reached from Ignis
-//! by name.
-//!
 //! ## Failure behavior
 //!
 //! A non-zero allocation is infallible: an out-of-memory host, an invalid
@@ -168,30 +161,6 @@ function trackFree(size: u64): void {
   AllocStats::ALLOCS_LIVE -= 1;
   AllocStats::BYTES_LIVE -= size;
   AllocStats::FREE_TOTAL += 1;
-}
-
-/// Allocates `size` bytes aligned for any fundamental type.
-///
-/// Kept under its C name as the allocator's C-facing entry point.
-@externName("ignis_alloc")
-export function ignisAlloc(size: u64): *mut u8 {
-  return RawAllocator::allocateAligned(size, MAX_ALIGNMENT);
-}
-
-/// Resizes `pointer` to `size` bytes, preserving the shared prefix.
-///
-/// Kept under its C name as the allocator's C-facing entry point.
-@externName("ignis_realloc")
-export function ignisRealloc(pointer: *mut u8, size: u64): *mut u8 {
-  return RawAllocator::reallocateAligned(pointer, size, MAX_ALIGNMENT);
-}
-
-/// Releases a pointer returned by this allocator.
-///
-/// Kept under its C name as the allocator's C-facing entry point.
-@externName("ignis_free")
-export function ignisFree(pointer: *mut u8): void {
-  RawAllocator::free(pointer);
 }
 
 /// The process allocator behind `Memory` and `GlobalAllocator`.
