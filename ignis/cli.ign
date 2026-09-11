@@ -330,25 +330,173 @@ function clapEmptyIntegerValueError(flagUsage: str): String {
   return message;
 }
 
+/// One flag `clap` has already matched, as the `Usage:` line renders it: the
+/// flag name itself is always bold (`boldPart`), and a value-taking flag's
+/// placeholder is plain text appended after it (`plainSuffix`, including its
+/// own leading space, e.g. `" <PROJECT>"`; empty for a boolean flag).
+record FmtUsageToken {
+  public boldPart: str;
+  public plainSuffix: str;
+}
+
+/// Which of the two order-sensitive `fmt` conflicts `parseArguments` has
+/// already seen a flag for (`--use-tabs`/`--spaces` name whichever one
+/// `clap` saw first as the conflict's subject), plus everything a conflict
+/// error's `Usage:` line needs: every flag matched so far, in the order
+/// `clap` matched them, and whether a `FILE_PATHS` positional value has been
+/// seen anywhere (its own placeholder always renders last, regardless of
+/// where it appeared relative to the other flags: `<FILE_PATHS>...` once a
+/// value was given, `[FILE_PATHS]...` when none was).
+record FmtFlagState {
+  public useTabsSeen: boolean;
+  public spacesSeen: boolean;
+  public usageTokens: Vector<FmtUsageToken>;
+  public sawFilePath: boolean;
+}
+
+/// Appends one matched flag to `state`'s `Usage:`-line token list.
+function fmtFlagStateRecordToken(state: &mut FmtFlagState, boldPart: str, plainSuffix: str): void {
+  let mut stateRef: &mut FmtFlagState = state;
+  stateRef.usageTokens.push(FmtUsageToken { boldPart: boldPart, plainSuffix: plainSuffix });
+}
+
+/// `clap` validates argument conflicts only after matching the entire
+/// command line, so a flag or a `FILE_PATHS` value coming *after* the
+/// argument that triggers a conflict still appears in that conflict's
+/// `Usage:` line. This continues a read-only scan of `arguments` from
+/// `fromIndex` (the token right after the conflicting argument and its own
+/// value, if it takes one) purely to extend `state` with whatever `clap`
+/// would still recognize there. It does not apply any flag's effect, and it
+/// does not itself detect a second conflict or a missing value past this
+/// point: the line is already failing on the first one, and `clap`'s exact
+/// behavior for two independent failures on the same line is not this
+/// function's concern.
+function fmtScanRemainingUsageTokensForConflict(
+  arguments: &Vector<String>,
+  fromIndex: u64,
+  state: &mut FmtFlagState
+): void {
+  let mut stateRef: &mut FmtFlagState = state;
+  let mut index: u64 = fromIndex;
+
+  while (index < arguments.length()) {
+    let Option::SOME(argument) = arguments.get(index) else {
+      break;
+    };
+
+    if (argument.equals("--check")) {
+      fmtFlagStateRecordToken(stateRef, "--check", "");
+      index += 1;
+      continue;
+    }
+
+    if (argument.equals("--sort-imports")) {
+      fmtFlagStateRecordToken(stateRef, "--sort-imports", "");
+      index += 1;
+      continue;
+    }
+
+    if (argument.equals("--use-tabs")) {
+      fmtFlagStateRecordToken(stateRef, "--use-tabs", "");
+      index += 1;
+      continue;
+    }
+
+    if (argument.equals("--spaces")) {
+      fmtFlagStateRecordToken(stateRef, "--spaces", "");
+      index += 1;
+      continue;
+    }
+
+    if (argument.equals("--stdin-json")) {
+      fmtFlagStateRecordToken(stateRef, "--stdin-json", "");
+      index += 1;
+      continue;
+    }
+
+    if (let Option::SOME(_) = flagEqualsValue(argument, "--project")) {
+      fmtFlagStateRecordToken(stateRef, "--project", " <PROJECT>");
+      index += 1;
+      continue;
+    }
+
+    if (argument.equals("--project")) {
+      fmtFlagStateRecordToken(stateRef, "--project", " <PROJECT>");
+      index += 2;
+      continue;
+    }
+
+    if (let Option::SOME(_) = flagEqualsValue(argument, "--config")) {
+      fmtFlagStateRecordToken(stateRef, "--config", " <CONFIG>");
+      index += 1;
+      continue;
+    }
+
+    if (argument.equals("--config")) {
+      fmtFlagStateRecordToken(stateRef, "--config", " <CONFIG>");
+      index += 2;
+      continue;
+    }
+
+    if (let Option::SOME(_) = flagEqualsValue(argument, "--indent-width")) {
+      fmtFlagStateRecordToken(stateRef, "--indent-width", " <INDENT_WIDTH>");
+      index += 1;
+      continue;
+    }
+
+    if (argument.equals("--indent-width")) {
+      fmtFlagStateRecordToken(stateRef, "--indent-width", " <INDENT_WIDTH>");
+      index += 2;
+      continue;
+    }
+
+    if (let Option::SOME(_) = flagEqualsValue(argument, "--line-width")) {
+      fmtFlagStateRecordToken(stateRef, "--line-width", " <LINE_WIDTH>");
+      index += 1;
+      continue;
+    }
+
+    if (argument.equals("--line-width")) {
+      fmtFlagStateRecordToken(stateRef, "--line-width", " <LINE_WIDTH>");
+      index += 2;
+      continue;
+    }
+
+    if (let Option::SOME(_) = flagEqualsValue(argument, "--emit")) {
+      fmtFlagStateRecordToken(stateRef, "--emit", " <EMIT>");
+      index += 1;
+      continue;
+    }
+
+    if (argument.equals("--emit")) {
+      fmtFlagStateRecordToken(stateRef, "--emit", " <EMIT>");
+      index += 2;
+      continue;
+    }
+
+    if (argument.startsWith("-")) {
+      index += 1;
+      continue;
+    }
+
+    stateRef.sawFilePath = true;
+    index += 1;
+  }
+}
+
 /// Reconstructs the exact `clap`-generated conflict error the host CLI
 /// prints. The host's `Cli` is `#[command(color = ColorChoice::Always)]`, so
 /// this always carries ANSI codes, checked byte-for-byte against the host
 /// binary, even though nothing here runs in a TTY.
 ///
 /// `clap` names whichever argument was already present when the conflicting
-/// one was parsed as the "subject" (`subject`/`usageToken` here); the other
-/// argument (`other`) is the one that triggered the conflict. `usageToken` is
-/// the token the `Usage:` line shows for the subject; `boldUsageToken` is
-/// false only when the subject is the `FILE_PATHS` positional, which clap
-/// shows unbolded there (unlike every named flag, which it bolds).
-/// `usageRest` is the plain text clap prints after `usageToken`.
-function clapFmtConflictError(
-  subject: str,
-  other: str,
-  usageToken: str,
-  boldUsageToken: boolean,
-  usageRest: str
-): String {
+/// one was parsed as the "subject" (`subject` here); the other argument
+/// (`other`) is the one that triggered the conflict. The `Usage:` line lists
+/// every flag `clap` matched on the whole command line (in match order,
+/// each bolded, with any value placeholder plain), the rejected argument
+/// excluded, followed by the `FILE_PATHS` positional placeholder (always
+/// last, `state.sawFilePath` choosing its brackets).
+function clapFmtConflictError(subject: str, other: str, state: &mut FmtFlagState): String {
   let mut message: String = String::new();
 
   message.pushChar(ansiEsc());
@@ -368,33 +516,31 @@ function clapFmtConflictError(
   message.pushChar(ansiEsc());
   message.pushStr("[0m ");
   pushAnsiBold(&mut message, "ignis fmt");
-  message.pushStr(" ");
 
-  if (boldUsageToken) {
-    pushAnsiBold(&mut message, usageToken);
-  } else {
-    message.pushStr(usageToken);
+  let mut tokenIndex: u64 = 0;
+
+  while (tokenIndex < state.usageTokens.length()) {
+    if (let Option::SOME(token) = state.usageTokens.get(tokenIndex)) {
+      message.pushStr(" ");
+      pushAnsiBold(&mut message, token.boldPart);
+      message.pushStr(token.plainSuffix);
+    }
+
+    tokenIndex += 1;
   }
 
-  let usageRestData: *mut u8 = usageRest as *mut u8;
+  message.pushStr(" ");
 
-  if (*usageRestData != 0) {
-    message.pushStr(" ");
-    message.pushStr(usageRest);
+  if (state.sawFilePath) {
+    message.pushStr("<FILE_PATHS>...");
+  } else {
+    message.pushStr("[FILE_PATHS]...");
   }
 
   message.pushStr("\n\nFor more information, try '");
   pushAnsiBold(&mut message, "--help");
   message.pushStr("'.");
   return message;
-}
-
-/// Which of the two order-sensitive `fmt` conflicts `parseArguments` has
-/// already seen a flag for: `--use-tabs`/`--spaces` name whichever one
-/// `clap` saw first as the conflict's subject.
-record FmtFlagState {
-  public useTabsSeen: boolean;
-  public spacesSeen: boolean;
 }
 
 /// If `argument` is exactly `flagName` followed by `=` and a (possibly
@@ -436,19 +582,16 @@ function applyFmtEmitModes(options: &mut CliOptions, value: &String): void {
   }
 }
 
-/// Handles one `fmt`-only flag during `parseArguments`'s scan. `Ok(Some(i))`
-/// means `argument` was one of these flags and parsing resumes at index `i`;
-/// `Ok(None)` means it was not, so the caller keeps trying other cases.
-/// Split out of `parseArguments` itself, which was long enough on its own to
-/// make the `fmt`-specific cases hard to see among the rest.
 /// `--project`/`--project=<dir>`, including its conflict with `--stdin-json`.
 function tryParseFmtProjectFlag(
   arguments: &Vector<String>,
   argument: &String,
   index: u64,
-  options: &mut CliOptions
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
 ): Result<Option<u64>, String> {
   let mut optionsRef: &mut CliOptions = options;
+  let stateRef: &mut FmtFlagState = state;
   let projectEqualsValue: Option<String> = flagEqualsValue(argument, "--project");
   let isProjectFlag: boolean = argument.equals("--project") || projectEqualsValue.isSome();
 
@@ -457,14 +600,12 @@ function tryParseFmtProjectFlag(
   }
 
   if (optionsRef.fmtStdinJson) {
-    return Result::ERROR(clapFmtConflictError(
-      "--stdin-json",
-      "--project <PROJECT>",
-      "--stdin-json",
-      true,
-      "[FILE_PATHS]...",
-    ));
+    let projectArity: u64 = projectEqualsValue.isSome() ? 1 : 2;
+    fmtScanRemainingUsageTokensForConflict(arguments, index + projectArity, stateRef);
+    return Result::ERROR(clapFmtConflictError("--stdin-json", "--project <PROJECT>", stateRef));
   }
+
+  fmtFlagStateRecordToken(stateRef, "--project", " <PROJECT>");
 
   if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--project")) {
     optionsRef.fmtProject = Option::SOME(equalsValue);
@@ -484,17 +625,21 @@ function tryParseFmtCheckOrConfigFlag(
   arguments: &Vector<String>,
   argument: &String,
   index: u64,
-  options: &mut CliOptions
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
 ): Result<Option<u64>, String> {
   let mut optionsRef: &mut CliOptions = options;
+  let stateRef: &mut FmtFlagState = state;
 
   if (argument.equals("--check")) {
     optionsRef.fmtCheck = true;
+    fmtFlagStateRecordToken(stateRef, "--check", "");
     return Result::OK(Option::SOME(index + 1));
   }
 
   if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--config")) {
     optionsRef.fmtConfigPath = Option::SOME(equalsValue);
+    fmtFlagStateRecordToken(stateRef, "--config", " <CONFIG>");
     return Result::OK(Option::SOME(index + 1));
   }
 
@@ -504,6 +649,7 @@ function tryParseFmtCheckOrConfigFlag(
     };
 
     optionsRef.fmtConfigPath = Option::SOME(value.clone());
+    fmtFlagStateRecordToken(stateRef, "--config", " <CONFIG>");
     return Result::OK(Option::SOME(index + 2));
   }
 
@@ -515,9 +661,11 @@ function tryParseFmtWidthFlag(
   arguments: &Vector<String>,
   argument: &String,
   index: u64,
-  options: &mut CliOptions
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
 ): Result<Option<u64>, String> {
   let mut optionsRef: &mut CliOptions = options;
+  let stateRef: &mut FmtFlagState = state;
 
   if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--indent-width")) {
     if (equalsValue.length() == 0) {
@@ -529,6 +677,7 @@ function tryParseFmtWidthFlag(
     };
 
     optionsRef.fmtIndentWidth = Option::SOME(width);
+    fmtFlagStateRecordToken(stateRef, "--indent-width", " <INDENT_WIDTH>");
     return Result::OK(Option::SOME(index + 1));
   }
 
@@ -542,6 +691,7 @@ function tryParseFmtWidthFlag(
     };
 
     optionsRef.fmtIndentWidth = Option::SOME(width);
+    fmtFlagStateRecordToken(stateRef, "--indent-width", " <INDENT_WIDTH>");
     return Result::OK(Option::SOME(index + 2));
   }
 
@@ -555,6 +705,7 @@ function tryParseFmtWidthFlag(
     };
 
     optionsRef.fmtLineWidth = Option::SOME(width);
+    fmtFlagStateRecordToken(stateRef, "--line-width", " <LINE_WIDTH>");
     return Result::OK(Option::SOME(index + 1));
   }
 
@@ -568,6 +719,7 @@ function tryParseFmtWidthFlag(
     };
 
     optionsRef.fmtLineWidth = Option::SOME(width);
+    fmtFlagStateRecordToken(stateRef, "--line-width", " <LINE_WIDTH>");
     return Result::OK(Option::SOME(index + 2));
   }
 
@@ -577,6 +729,7 @@ function tryParseFmtWidthFlag(
 /// `--use-tabs`/`--spaces` (mutually exclusive, tracked in `state`) and the
 /// plain boolean `--sort-imports`.
 function tryParseFmtStyleFlag(
+  arguments: &Vector<String>,
   argument: &String,
   index: u64,
   options: &mut CliOptions,
@@ -587,26 +740,31 @@ function tryParseFmtStyleFlag(
 
   if (argument.equals("--use-tabs")) {
     if (stateRef.spacesSeen) {
-      return Result::ERROR(clapFmtConflictError("--spaces", "--use-tabs", "--spaces", true, "<FILE_PATHS>..."));
+      fmtScanRemainingUsageTokensForConflict(arguments, index + 1, stateRef);
+      return Result::ERROR(clapFmtConflictError("--spaces", "--use-tabs", stateRef));
     }
 
     stateRef.useTabsSeen = true;
     optionsRef.fmtUseTabs = Option::SOME(true);
+    fmtFlagStateRecordToken(stateRef, "--use-tabs", "");
     return Result::OK(Option::SOME(index + 1));
   }
 
   if (argument.equals("--spaces")) {
     if (stateRef.useTabsSeen) {
-      return Result::ERROR(clapFmtConflictError("--use-tabs", "--spaces", "--use-tabs", true, "<FILE_PATHS>..."));
+      fmtScanRemainingUsageTokensForConflict(arguments, index + 1, stateRef);
+      return Result::ERROR(clapFmtConflictError("--use-tabs", "--spaces", stateRef));
     }
 
     stateRef.spacesSeen = true;
     optionsRef.fmtUseTabs = Option::SOME(false);
+    fmtFlagStateRecordToken(stateRef, "--spaces", "");
     return Result::OK(Option::SOME(index + 1));
   }
 
   if (argument.equals("--sort-imports")) {
     optionsRef.fmtSortImports = true;
+    fmtFlagStateRecordToken(stateRef, "--sort-imports", "");
     return Result::OK(Option::SOME(index + 1));
   }
 
@@ -616,30 +774,30 @@ function tryParseFmtStyleFlag(
 /// `--stdin-json`, including its conflicts with `--project` and explicit
 /// file paths.
 function tryParseFmtStdinJsonFlag(
+  arguments: &Vector<String>,
   argument: &String,
   index: u64,
-  options: &mut CliOptions
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
 ): Result<Option<u64>, String> {
   let mut optionsRef: &mut CliOptions = options;
+  let stateRef: &mut FmtFlagState = state;
 
   if (!argument.equals("--stdin-json")) {
     return Result::OK(Option::NONE);
   }
 
   if (let Option::SOME(_) = &optionsRef.fmtProject) {
-    return Result::ERROR(clapFmtConflictError(
-      "--project <PROJECT>",
-      "--stdin-json",
-      "--project",
-      true,
-      "<PROJECT> [FILE_PATHS]...",
-    ));
+    fmtScanRemainingUsageTokensForConflict(arguments, index + 1, stateRef);
+    return Result::ERROR(clapFmtConflictError("--project <PROJECT>", "--stdin-json", stateRef));
   }
 
   if (optionsRef.fmtFilePaths.length() > 0) {
-    return Result::ERROR(clapFmtConflictError("[FILE_PATHS]...", "--stdin-json", "<FILE_PATHS>...", false, ""));
+    fmtScanRemainingUsageTokensForConflict(arguments, index + 1, stateRef);
+    return Result::ERROR(clapFmtConflictError("[FILE_PATHS]...", "--stdin-json", stateRef));
   }
 
+  fmtFlagStateRecordToken(stateRef, "--stdin-json", "");
   optionsRef.fmtStdinJson = true;
   return Result::OK(Option::SOME(index + 1));
 }
@@ -649,12 +807,15 @@ function tryParseFmtEmitFlag(
   arguments: &Vector<String>,
   argument: &String,
   index: u64,
-  options: &mut CliOptions
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
 ): Result<Option<u64>, String> {
   let optionsRef: &mut CliOptions = options;
+  let stateRef: &mut FmtFlagState = state;
 
   if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--emit")) {
     applyFmtEmitModes(optionsRef, &equalsValue);
+    fmtFlagStateRecordToken(stateRef, "--emit", " <EMIT>");
     return Result::OK(Option::SOME(index + 1));
   }
 
@@ -664,12 +825,18 @@ function tryParseFmtEmitFlag(
     };
 
     applyFmtEmitModes(optionsRef, value);
+    fmtFlagStateRecordToken(stateRef, "--emit", " <EMIT>");
     return Result::OK(Option::SOME(index + 2));
   }
 
   return Result::OK(Option::NONE);
 }
 
+/// Handles one `fmt`-only flag during `parseArguments`'s scan. `Ok(Some(i))`
+/// means `argument` was one of these flags and parsing resumes at index `i`;
+/// `Ok(None)` means it was not, so the caller keeps trying other cases.
+/// Split out of `parseArguments` itself, which was long enough on its own to
+/// make the `fmt`-specific cases hard to see among the rest.
 function tryParseFmtFlag(
   arguments: &Vector<String>,
   argument: &String,
@@ -677,7 +844,7 @@ function tryParseFmtFlag(
   options: &mut CliOptions,
   state: &mut FmtFlagState
 ): Result<Option<u64>, String> {
-  match (tryParseFmtProjectFlag(arguments, argument, index, options)) {
+  match (tryParseFmtProjectFlag(arguments, argument, index, options, state)) {
     Result::ERROR(message) -> {
       return Result::ERROR(message);
     },
@@ -688,7 +855,7 @@ function tryParseFmtFlag(
     },
   };
 
-  match (tryParseFmtCheckOrConfigFlag(arguments, argument, index, options)) {
+  match (tryParseFmtCheckOrConfigFlag(arguments, argument, index, options, state)) {
     Result::ERROR(message) -> {
       return Result::ERROR(message);
     },
@@ -699,7 +866,7 @@ function tryParseFmtFlag(
     },
   };
 
-  match (tryParseFmtWidthFlag(arguments, argument, index, options)) {
+  match (tryParseFmtWidthFlag(arguments, argument, index, options, state)) {
     Result::ERROR(message) -> {
       return Result::ERROR(message);
     },
@@ -710,7 +877,7 @@ function tryParseFmtFlag(
     },
   };
 
-  match (tryParseFmtStyleFlag(argument, index, options, state)) {
+  match (tryParseFmtStyleFlag(arguments, argument, index, options, state)) {
     Result::ERROR(message) -> {
       return Result::ERROR(message);
     },
@@ -721,7 +888,7 @@ function tryParseFmtFlag(
     },
   };
 
-  match (tryParseFmtStdinJsonFlag(argument, index, options)) {
+  match (tryParseFmtStdinJsonFlag(arguments, argument, index, options, state)) {
     Result::ERROR(message) -> {
       return Result::ERROR(message);
     },
@@ -732,7 +899,7 @@ function tryParseFmtFlag(
     },
   };
 
-  return tryParseFmtEmitFlag(arguments, argument, index, options);
+  return tryParseFmtEmitFlag(arguments, argument, index, options, state);
 }
 
 /// Parses a command line into the options every subcommand reads.
@@ -753,7 +920,12 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
   }
 
   let mut options: CliOptions = CliOptions::create(command);
-  let mut fmtFlagState: FmtFlagState = FmtFlagState { useTabsSeen: false, spacesSeen: false };
+  let mut fmtFlagState: FmtFlagState = FmtFlagState {
+    useTabsSeen: false,
+    spacesSeen: false,
+    usageTokens: Vector::new<FmtUsageToken>(),
+    sawFilePath: false,
+  };
 
   while (index < arguments.length()) {
     let Option::SOME(argument) = arguments.get(index) else {
@@ -952,16 +1124,12 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
 
     if (options.isFmtMode()) {
       if (options.fmtStdinJson) {
-        return Result::ERROR(clapFmtConflictError(
-          "--stdin-json",
-          "[FILE_PATHS]...",
-          "--stdin-json",
-          true,
-          "[FILE_PATHS]...",
-        ));
+        fmtScanRemainingUsageTokensForConflict(arguments, index + 1, &mut fmtFlagState);
+        return Result::ERROR(clapFmtConflictError("--stdin-json", "[FILE_PATHS]...", &mut fmtFlagState));
       }
 
       options.fmtFilePaths.push(argument.clone());
+      fmtFlagState.sawFilePath = true;
       index += 1;
       continue;
     }
@@ -1630,5 +1798,99 @@ function cliRejectsProjectWithStdinJson(): void {
   Test::assertEq<str>(
     stripAnsi(&message).toStr(),
     "error: the argument '--project <PROJECT>' cannot be used with '--stdin-json'\n\nUsage: ignis fmt --project <PROJECT> [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// `clap` validates conflicts only after matching the whole command line, so
+/// a preceding, non-conflicting flag still appears in the `Usage:` line
+/// (verified against the host binary on this exact command line).
+@test
+function cliRejectsUseTabsWithSpacesAfterOnePrecedingFlag(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--spaces");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--use-tabs' cannot be used with '--spaces'\n\nUsage: ignis fmt --check --use-tabs [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// Same as above with two preceding flags, in the order they were parsed.
+@test
+function cliRejectsUseTabsWithSpacesAfterTwoPrecedingFlags(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "--sort-imports");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--spaces");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--use-tabs' cannot be used with '--spaces'\n\nUsage: ignis fmt --check --sort-imports --use-tabs [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// A flag placed *after* the rejected argument still appears in the
+/// `Usage:` line: `clap` matches the whole line before validating a
+/// conflict, so this is not limited to flags seen before the conflict.
+@test
+function cliRejectsUseTabsWithSpacesFollowedByALaterFlag(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--spaces");
+  cliPush(&mut arguments, "--sort-imports");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--use-tabs' cannot be used with '--spaces'\n\nUsage: ignis fmt --use-tabs --sort-imports [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// `--stdin-json` after a preceding flag: the `Usage:` line keeps the
+/// preceding flag even though it is unrelated to the conflict.
+@test
+function cliRejectsStdinJsonWithProjectAfterAPrecedingFlag(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "--stdin-json");
+  cliPush(&mut arguments, "--project");
+  cliPush(&mut arguments, "demo");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--stdin-json' cannot be used with '--project <PROJECT>'\n\nUsage: ignis fmt --check --stdin-json [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// A `FILE_PATHS` value present anywhere on the line — even after the
+/// rejected argument, and never actually consumed — switches the trailing
+/// placeholder to `<FILE_PATHS>...`.
+@test
+function cliRejectsUseTabsWithSpacesWithATrailingFilePath(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--spaces");
+  cliPush(&mut arguments, "a.ign");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--use-tabs' cannot be used with '--spaces'\n\nUsage: ignis fmt --use-tabs <FILE_PATHS>...\n\nFor more information, try '--help'."
   );
 }

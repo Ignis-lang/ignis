@@ -278,8 +278,6 @@ function isLowSurrogate(value: u32): boolean {
   return value >= 0xDC00 && value <= 0xDFFF;
 }
 
-/// Decodes the JSON string starting at the `"` on `startIndex`, matching
-/// `serde_json`'s exact escape and surrogate-pair handling.
 /// The byte one of the short (non-`\u`) JSON string escapes (`\n`, `\t`,
 /// `\r`, `\b`, `\f`, `\"`, `\\`, `\/`) decodes to, or `Option::NONE` if
 /// `escaped` is not one of them.
@@ -325,10 +323,15 @@ export record UnicodeEscapeRead {
 }
 
 /// Decodes one `\u` escape, `cursor` being the index of its backslash
-/// (`source[cursor + 1]` is `u`): combines a high/low surrogate pair into
-/// one scalar when present, matching `serde_json`'s exact surrogate
-/// handling and error wording (see `readString`'s doc comment for the
-/// specific EOF/mismatch cases this covers).
+/// (`source[cursor + 1]` is `u`). A high surrogate must be immediately
+/// followed by `\u` and a low surrogate, combined into one scalar:
+/// anything else after a high surrogate but a `\` then a `u` is
+/// `jsonUnexpectedEndOfHexEscapeMessage`, and a hex escape there that
+/// decodes to something other than a low surrogate (including a lone low
+/// surrogate on its own, with no preceding high surrogate) is
+/// `jsonLoneSurrogateMessage`. Running out of source at any point along the
+/// way is `jsonEofMessage`, matching `serde_json`'s exact surrogate
+/// handling and error wording.
 function readUnicodeEscape(source: &String, cursor: u64): Result<UnicodeEscapeRead, String> {
   let firstEscape: HexEscapeRead = match (readHexEscape(source, cursor + 2)) {
     Result::OK(value) -> value,
@@ -676,12 +679,6 @@ function skipScalarValue(source: &String, index: u64): Result<u64, String> {
   return Result::ERROR(jsonExpectedValueMessage(index));
 }
 
-/// Advances past exactly one JSON value at `startIndex`, matching
-/// `serde_json`'s `IgnoredAny` grammar exactly (unknown keys/commas/colons
-/// are validated, not just bracket-counted) without recursing into nested
-/// containers: an explicit `Vector<boolean>` stack of ancestor container
-/// kinds (`true` for an object) tracks nesting instead of the call stack, so
-/// this has no depth limit, the same way `IgnoredAny` does not.
 /// `skipValue`'s working state for one open container, plus the stack of
 /// ancestor containers' own `currentIsObject` flags (`true` for an object)
 /// it restores from when the current one closes.
@@ -817,6 +814,12 @@ function skipValueHandleAfterEntry(
   return Result::OK(Option::NONE);
 }
 
+/// Advances past exactly one JSON value at `startIndex`, matching
+/// `serde_json`'s `IgnoredAny` grammar exactly (unknown keys/commas/colons
+/// are validated, not just bracket-counted) without recursing into nested
+/// containers: an explicit `Vector<boolean>` stack of ancestor container
+/// kinds (`true` for an object) tracks nesting instead of the call stack, so
+/// this has no depth limit, the same way `IgnoredAny` does not.
 export function skipValue(source: &String, startIndex: u64): Result<u64, String> {
   let index: u64 = Json::skipWhitespace(source, startIndex);
 

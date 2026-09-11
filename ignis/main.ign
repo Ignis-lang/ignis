@@ -2338,7 +2338,7 @@ function fmtAppendStdinChunk(pending: &mut String, buf: *mut u8, count: CType::S
   }
 }
 
-record FmtStdinLineResult {
+export record FmtStdinLineResult {
   public changed: boolean;
   public hadError: boolean;
 }
@@ -2381,20 +2381,6 @@ function printFmtStdinParseError(error: String): FmtStdinLineResult {
 
   Io::println(Format::renderStdinResponse(&response));
   return FmtStdinLineResult { changed: false, hadError: true };
-}
-
-/// Runs the `--stdin-json` NDJSON batch protocol: one request per line, one
-/// response per line, on stdout, streamed as the host's `stdin.lock().lines()`
-/// is — a line is formatted and its response printed as soon as it is fully
-/// read, not after the whole input closes, so a driver that writes one
-/// request, waits for the response, and only then writes the next sees each
-/// response in turn instead of everything at once at EOF.
-function saturatingSubU64(value: u64, amount: u64): u64 {
-  if (value < amount) {
-    return 0;
-  }
-
-  return value - amount;
 }
 
 /// The byte length of the UTF-8 sequence `leadByte` starts, or `Option::NONE`
@@ -2506,6 +2492,44 @@ export function validateUtf8From(pending: &String, start: u64, reachedEnd: boole
 
   return Option::SOME(cursor);
 }
+
+/// Validates one already-delimited line (a complete line found by
+/// `findNewlineFrom`, or the trailing chunk left in `pending` at true EOF)
+/// for UTF-8 before handing it to the formatter. Matches the host's
+/// `Stdin::lines()`: a line's bytes are only ever converted once the whole
+/// line is available, so an invalid byte fails the specific line that
+/// carries it without discarding any earlier line already formatted and
+/// printed. `Option::NONE` means the caller must report the stream-level
+/// UTF-8 error and exit; `Option::SOME` carries the line's own formatting
+/// outcome, a blank line included (`changed`/`hadError` both `false`).
+export function fmtStdinJsonValidateAndProcessLine(
+  line: &String,
+  formatterConfig: &FormatterConfig,
+  emitDiff: boolean
+): Option<FmtStdinLineResult> {
+  let Option::SOME(_) = validateUtf8From(line, 0, true) else {
+    return Option::NONE;
+  };
+
+  let trimmed: String = trimUnicodeWhitespace(line);
+
+  if (trimmed.length() == 0) {
+    return Option::SOME(FmtStdinLineResult { changed: false, hadError: false });
+  }
+
+  return Option::SOME(processFmtStdinLine(&trimmed, formatterConfig, emitDiff));
+}
+
+/// Runs the `--stdin-json` NDJSON batch protocol: one request per line, one
+/// response per line, on stdout, streamed as the host's `stdin.lock().lines()`
+/// is — a line is formatted and its response printed as soon as it is fully
+/// read, not after the whole input closes, so a driver that writes one
+/// request, waits for the response, and only then writes the next sees each
+/// response in turn instead of everything at once at EOF. UTF-8 is validated
+/// per complete line via `fmtStdinJsonValidateAndProcessLine`, not on the raw
+/// growing buffer, so an invalid byte only ever fails the line that carries
+/// it, after every earlier complete line has already been formatted and
+/// printed.
 function runFmtStdinJson(options: &CliOptions): i32 {
   let formatterConfig: FormatterConfig = match (resolveFmtConfigForStdin(options)) {
     Result::OK(value) -> value,
@@ -2523,7 +2547,6 @@ function runFmtStdinJson(options: &CliOptions): i32 {
 
   let mut pending: String = String::new();
   let mut scannedUpTo: u64 = 0;
-  let mut utf8ValidatedUpTo: u64 = 0;
   let mut reachedEnd: boolean = false;
   let mut anyError: boolean = false;
   let mut anyChanged: boolean = false;
@@ -2532,18 +2555,17 @@ function runFmtStdinJson(options: &CliOptions): i32 {
     let Option::SOME(newlineIndex) = findNewlineFrom(&pending, scannedUpTo) else {
       if (reachedEnd) {
         if (pending.length() > 0) {
-          let trimmed: String = trimUnicodeWhitespace(&pending);
+          let Option::SOME(result) = fmtStdinJsonValidateAndProcessLine(&pending, &formatterConfig, emitDiff) else {
+            Io::eprintln("Error: Failed to read stdin: stream did not contain valid UTF-8");
+            return 1;
+          };
 
-          if (trimmed.length() > 0) {
-            let result: FmtStdinLineResult = processFmtStdinLine(&trimmed, &formatterConfig, emitDiff);
+          if (result.changed) {
+            anyChanged = true;
+          }
 
-            if (result.changed) {
-              anyChanged = true;
-            }
-
-            if (result.hadError) {
-              anyError = true;
-            }
+          if (result.hadError) {
+            anyError = true;
           }
         }
 
@@ -2559,38 +2581,22 @@ function runFmtStdinJson(options: &CliOptions): i32 {
 
       if (outcome.count == 0) {
         reachedEnd = true;
-
-        let Option::SOME(_) = validateUtf8From(&pending, utf8ValidatedUpTo, true) else {
-          Io::eprintln("Error: Failed to read stdin: stream did not contain valid UTF-8");
-          return 1;
-        };
-
         continue;
       }
 
       scannedUpTo = pending.length();
       fmtAppendStdinChunk(&mut pending, buf, outcome.count);
-
-      let Option::SOME(validatedUpTo) = validateUtf8From(&pending, utf8ValidatedUpTo, false) else {
-        Io::eprintln("Error: Failed to read stdin: stream did not contain valid UTF-8");
-        return 1;
-      };
-
-      utf8ValidatedUpTo = validatedUpTo;
       continue;
     };
 
     let line: String = pending.substringBytes(0, newlineIndex);
     pending = pending.substringBytes(newlineIndex + 1, pending.length());
     scannedUpTo = 0;
-    utf8ValidatedUpTo = saturatingSubU64(utf8ValidatedUpTo, newlineIndex + 1);
-    let trimmed: String = trimUnicodeWhitespace(&line);
 
-    if (trimmed.length() == 0) {
-      continue;
-    }
-
-    let result: FmtStdinLineResult = processFmtStdinLine(&trimmed, &formatterConfig, emitDiff);
+    let Option::SOME(result) = fmtStdinJsonValidateAndProcessLine(&line, &formatterConfig, emitDiff) else {
+      Io::eprintln("Error: Failed to read stdin: stream did not contain valid UTF-8");
+      return 1;
+    };
 
     if (result.changed) {
       anyChanged = true;

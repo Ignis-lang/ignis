@@ -1037,17 +1037,6 @@ export namespace Format {
     return cursor;
   }
 
-  /// Maps a parsed top-level JSON object onto the two fields the protocol
-  /// defines, matching a `serde`-derived struct's field visitor: fields are
-  /// read in JSON order, a repeated key is a `duplicate field` error the
-  /// moment its own string finishes parsing (before its value is even looked
-  /// at), a wrong-typed occurrence errors immediately, and an unknown key
-  /// (including one nested inside another object, like
-  /// `"meta":{"path":"evil.ign"}`) is skipped without being parsed into a
-  /// tree — the same way an unknown field is ignored for a struct without
-  /// `deny_unknown_fields`, and with the same no-recursion-limit iterative
-  /// skip `serde_json`'s `IgnoredAny` uses (`Json::skipValue`), confirmed
-  /// against the host up to 200000 levels of nesting in an ignored field.
   /// `stdinRequestFromObjectScan`'s working state: the scan position and
   /// whichever of `path`/`text` have been seen so far.
   record ObjectScanState {
@@ -1159,6 +1148,17 @@ export namespace Format {
     return Result::ERROR(Format::ndjsonParseErrorOwned(jsonExpectedCommaOrBraceMessage(stateRef.cursor)));
   }
 
+  /// Maps a parsed top-level JSON object onto the two fields the protocol
+  /// defines, matching a `serde`-derived struct's field visitor: fields are
+  /// read in JSON order, a repeated key is a `duplicate field` error the
+  /// moment its own string finishes parsing (before its value is even looked
+  /// at), a wrong-typed occurrence errors immediately, and an unknown key
+  /// (including one nested inside another object, like
+  /// `"meta":{"path":"evil.ign"}`) is skipped without being parsed into a
+  /// tree — the same way an unknown field is ignored for a struct without
+  /// `deny_unknown_fields`, and with the same no-recursion-limit iterative
+  /// skip `serde_json`'s `IgnoredAny` uses (`Json::skipValue`), confirmed
+  /// against the host up to 200000 levels of nesting in an ignored field.
   function stdinRequestFromObjectScan(
     line: &String,
     openBraceIndex: u64

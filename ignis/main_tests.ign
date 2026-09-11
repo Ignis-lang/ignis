@@ -5,11 +5,12 @@ import Test from "std::test";
 import DiagnosticBag from "@compiler::diagnostics";
 
 import Format from "./format/api";
-import FormatterCliOverrides, FormatterConfigPaths from "./format/config";
+import FormatterCliOverrides, FormatterConfig, FormatterConfigPaths from "./format/config";
 import
   comparePathComponents,
   fmtConfigErrorMessage,
   fmtConfigErrorMessageForPath,
+  fmtStdinJsonValidateAndProcessLine,
   validateUtf8From,
 from "./main";
 
@@ -129,6 +130,43 @@ function validateUtf8FromRejectsAnInvalidLeadingByte(): void {
   text.pushByte(0xFE);
 
   let Option::SOME(_) = validateUtf8From(&text, 0, false) else {
+    return;
+  };
+
+  Test::fail();
+}
+
+/// A blank (whitespace-only) line is a valid line: it validates and is
+/// skipped, not treated as an error.
+@test
+function fmtStdinJsonValidateAndProcessLineAcceptsABlankLine(): void {
+  let line: String = String::create("   ");
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Option::SOME(result) = fmtStdinJsonValidateAndProcessLine(&line, &config, false) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(result.changed, false);
+  Test::assertEq<boolean>(result.hadError, false);
+}
+
+/// A line carrying an invalid UTF-8 byte reports the fatal stream-level
+/// failure (`Option::NONE`). Validation runs against this line's own bytes
+/// only: this is the contract `runFmtStdinJson` relies on to finish printing
+/// every earlier complete line's response before a later line's invalid
+/// byte aborts the batch, instead of validating the whole growing buffer
+/// (and discarding already-buffered valid lines) the moment any invalid
+/// byte arrives.
+@test
+function fmtStdinJsonValidateAndProcessLineRejectsAnInvalidUtf8Byte(): void {
+  let mut line: String = String::create("{\"path\":\"a\",\"text\":\"");
+  line.pushByte(0xFF);
+  line.pushStr("\"}");
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Option::SOME(_) = fmtStdinJsonValidateAndProcessLine(&line, &config, false) else {
     return;
   };
 
