@@ -273,13 +273,6 @@ pub struct CheckStdCommand {
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
-pub struct CheckRuntimeCommand {
-  /// Optional override for runtime root (defaults to std_path/runtime)
-  #[arg(long)]
-  pub runtime_path: Option<String>,
-}
-
-#[derive(Parser, Debug, Clone, PartialEq)]
 #[command(about = "Format Ignis source canonically with parse/reparse safety checks")]
 pub struct FmtCommand {
   /// Files to format explicitly, or nothing for project mode
@@ -418,8 +411,6 @@ pub enum SubCommand {
   Doc(DocCommand),
   /// Check the standard library up to C codegen without archiving
   CheckStd(CheckStdCommand),
-  /// Check the C runtime with syntax-only compilation
-  CheckRuntime(CheckRuntimeCommand),
   /// Format Ignis source canonically with parse/reparse safety checks
   Fmt(FmtCommand),
   /// Start the Language Server Protocol server

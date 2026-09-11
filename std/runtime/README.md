@@ -9,8 +9,8 @@ runtime service the standard library used to reach through C is Ignis, in
 
 ### `ignis_rt.h`
 
-The base header `std/manifest.toml` names as `toolchain.base_header`. It
-carries the runtime type definitions — the integer aliases, `boolean`,
+The base header both compilers include, always at `<std_path>/runtime/ignis_rt.h`
+and not configurable anywhere. It carries the runtime type definitions — the integer aliases, `boolean`,
 `ignis_atom_t`, `ignis_char_t`, `Pointer`, `IgnisString`, `null` and the
 `IGNIS_TYPE_*_ID` constants — under the `IGNIS_RT_TYPES_H` guard, plus the
 declaration of `ignis_runtime_init`.

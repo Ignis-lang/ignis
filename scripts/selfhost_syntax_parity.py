@@ -411,7 +411,6 @@ def project_manifest(std_path: Path) -> str:
     "[ignis]\n"
     "std = true\n"
     f'std_path = "{std_path}"\n'
-    f'runtime_path = "{std_path / "runtime"}"\n'
     "\n"
     "[build]\n"
     "bin = true\n"

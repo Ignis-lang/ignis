@@ -505,7 +505,7 @@ The module registry at `std/manifest.toml` declares:
 
 - **Modules**: `libc`, `io`, `math`, `string`, `number`, `types`, `option`, `result`, `memory`, `vector`, `ptr`, `rc`, `path`, `ffi`, `fs`
 - **Auto-loaded modules** (imported implicitly): `string`, `number`, `vector`, `types`, `option`, `result`
-- **Base header**: `runtime/ignis_rt.h`; there is no runtime archive
+- **Base header**: `runtime/ignis_rt.h`, derived from `std_path` rather than declared in the manifest; there is no runtime archive
 - **System libraries**: `math` links `-lm`
 
 ## Definition Classification

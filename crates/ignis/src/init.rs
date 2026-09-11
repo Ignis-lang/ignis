@@ -32,9 +32,6 @@ struct IgnisSection {
 
   #[serde(skip_serializing_if = "Option::is_none")]
   std_path: Option<String>,
-
-  #[serde(skip_serializing_if = "Option::is_none")]
-  runtime_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -53,7 +50,6 @@ struct BuildSection {
 
 struct DetectedStdPaths {
   std_path: Option<String>,
-  runtime_path: Option<String>,
 }
 
 pub fn run_init(
@@ -141,7 +137,6 @@ pub fn run_init(
     ignis: IgnisSection {
       std: true,
       std_path: detected_std_paths.std_path,
-      runtime_path: detected_std_paths.runtime_path,
     },
     build: BuildSection {
       bin: !cmd.lib,
@@ -239,19 +234,13 @@ fn detect_std_paths(project_root: &Path) -> DetectedStdPaths {
   if let Some(parent) = project_root.parent() {
     let std_candidate = parent.join("std");
     if std_candidate.is_dir() {
-      let runtime_candidate = std_candidate.join("runtime");
-
       return DetectedStdPaths {
         std_path: Some("../std".to_string()),
-        runtime_path: runtime_candidate.is_dir().then(|| "../std/runtime".to_string()),
       };
     }
   }
 
-  DetectedStdPaths {
-    std_path: None,
-    runtime_path: None,
-  }
+  DetectedStdPaths { std_path: None }
 }
 
 fn detect_std_paths_from_env() -> Option<DetectedStdPaths> {
@@ -269,13 +258,8 @@ fn detect_std_paths_from_env() -> Option<DetectedStdPaths> {
 
   let std_path = std_path.canonicalize().ok()?;
 
-  let runtime_path = std_path.join("runtime");
-
   Some(DetectedStdPaths {
     std_path: Some(std_path.to_string_lossy().to_string()),
-    runtime_path: runtime_path
-      .is_dir()
-      .then(|| runtime_path.to_string_lossy().to_string()),
   })
 }
 

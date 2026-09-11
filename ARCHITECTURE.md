@@ -170,7 +170,7 @@ docs/                             # Language reference and ABI docs
 
 Parses commands via `clap`, resolves compile input (project `ignis.toml` or single file), and builds `IgnisConfig` with CLI overrides (`opt_level`, `debug`, `out_dir`, `std_path`, `cc`, `emit`).
 
-Subcommands: `build`, `check`, `fmt`, `test`, `build-std`, `check-std`, `check-runtime`, `lsp`.
+Subcommands: `build`, `check`, `fmt`, `test`, `build-std`, `check-std`, `lsp`.
 
 ### Formatter
 

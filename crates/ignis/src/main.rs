@@ -11,7 +11,7 @@ use colored::*;
 use cli::{BuildCommand, CheckCommand, Cli, DocCommand, FmtCommand, SubCommand, Target, TestCommand, TestStdCommand};
 use ignis_config::{IgnisBuildConfig, IgnisConfig, IgnisSTDManifest};
 use ignis_driver::{
-  build_std, check_runtime, check_std, compile_project, find_project_root, load_project_toml, resolve_project,
+  build_std, check_std, compile_project, find_project_root, load_project_toml, resolve_project,
   run_project_tests_with_options, run_single_file_tests_with_options, run_std_tests, CliOverrides, Project,
   TestRunOptions,
 };
@@ -1075,14 +1075,6 @@ fn run_check_std(
   check_std(config, output_dir)
 }
 
-fn run_check_runtime(
-  cli: &Cli,
-  runtime_path: Option<&str>,
-) -> Result<(), ()> {
-  let config = build_std_config(cli);
-  check_runtime(config, runtime_path)
-}
-
 fn build_std_config(cli: &Cli) -> Arc<IgnisConfig> {
   let mut config = IgnisConfig::new_basic(
     cli.debug,
@@ -1158,8 +1150,6 @@ fn main() {
     SubCommand::BuildStd(cmd) => run_build_std(&cli, &cmd.output_dir),
 
     SubCommand::CheckStd(cmd) => run_check_std(&cli, &cmd.output_dir),
-
-    SubCommand::CheckRuntime(cmd) => run_check_runtime(&cli, cmd.runtime_path.as_deref()),
 
     SubCommand::Fmt(cmd) => run_fmt(cmd),
 

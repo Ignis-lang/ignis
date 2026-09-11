@@ -4929,69 +4929,6 @@ pub fn check_std(
   Ok(())
 }
 
-pub fn check_runtime(
-  config: Arc<IgnisConfig>,
-  runtime_path: Option<&str>,
-) -> Result<(), ()> {
-  let root = if let Some(path) = runtime_path {
-    PathBuf::from(path)
-  } else {
-    Path::new(&config.std_path).join("runtime")
-  };
-
-  if !root.exists() {
-    eprintln!("{} runtime path '{}' does not exist", "Error:".red().bold(), root.display());
-    return Err(());
-  }
-
-  let mut c_files = Vec::new();
-  collect_c_files(&root, &mut c_files);
-
-  if c_files.is_empty() {
-    eprintln!("{} No runtime C files found under '{}'", "Error:".red().bold(), root.display());
-    return Err(());
-  }
-
-  for file in &c_files {
-    let status = Command::new("cc").arg("-fsyntax-only").arg(file).status();
-
-    let status = match status {
-      Ok(s) => s,
-      Err(e) => {
-        eprintln!("{} Failed to run cc: {}", "Error:".red().bold(), e);
-        return Err(());
-      },
-    };
-
-    if !status.success() {
-      eprintln!("{} Runtime check failed for '{}'", "Error:".red().bold(), file.display());
-      return Err(());
-    }
-  }
-
-  phase_ok!(&config, "Runtime check complete");
-
-  Ok(())
-}
-
-fn collect_c_files(
-  root: &Path,
-  out: &mut Vec<PathBuf>,
-) {
-  if let Ok(entries) = std::fs::read_dir(root) {
-    for entry in entries.flatten() {
-      let path = entry.path();
-      if path.is_dir() {
-        collect_c_files(&path, out);
-      } else if let Some(ext) = path.extension()
-        && ext == "c"
-      {
-        out.push(path);
-      }
-    }
-  }
-}
-
 fn ensure_std_built(
   used_modules: &[ignis_type::module::ModuleId],
   module_graph: &ignis_analyzer::modules::ModuleGraph,

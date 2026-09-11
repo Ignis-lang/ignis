@@ -66,11 +66,9 @@ fn build_driver_test_config(
   config.std_path = fixtures_dir.to_string_lossy().to_string();
   config.manifest = IgnisSTDManifest {
     toolchain: StdToolchainConfig {
-      base_header: Some("types.h".to_string()),
-      base_header_quoted: Some(true),
       include_dirs: vec![".".to_string()],
     },
-    modules: std::collections::HashMap::from([("__test_base".to_string(), "types.h".to_string())]),
+    modules: std::collections::HashMap::from([("__test_base".to_string(), "runtime/ignis_rt.h".to_string())]),
     ..Default::default()
   };
   config.cflags = cflags;
@@ -405,7 +403,7 @@ fn compile_to_c(source: &str) -> Result<String, String> {
   }
 
   let headers = vec![CHeader {
-    path: "types.h".to_string(),
+    path: "runtime/ignis_rt.h".to_string(),
     quoted: true,
   }];
 
@@ -728,7 +726,7 @@ fn compile_to_c_with_ctx(
   }
 
   let headers = vec![CHeader {
-    path: "types.h".to_string(),
+    path: "runtime/ignis_rt.h".to_string(),
     quoted: true,
   }];
 

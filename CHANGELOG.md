@@ -4,6 +4,15 @@ All notable changes to the Ignis compiler will be documented in this file.
 
 ## Unreleased
 
+### Breaking Changes
+
+- Removed the dead C-runtime configuration surface left over after the runtime moved into Ignis:
+  `runtime_path` in `[ignis]` of `ignis.toml`, the `ignis check-runtime` subcommand (and its
+  `--runtime-path` flag), and `toolchain.base_header` / `toolchain.base_header_quoted` in
+  `std/manifest.toml`. The base header is now always derived from `std_path` as
+  `<std_path>/runtime/ignis_rt.h`. Both compilers ignore the removed keys, so an existing
+  `ignis.toml` or `manifest.toml` keeps working unchanged; delete the stale lines at your leisure.
+
 ### Features
 
 - Added template literals: backtick strings with `${}` interpolation, multiline and nestable, producing an owned `String`. An interpolated place expression is borrowed rather than moved.

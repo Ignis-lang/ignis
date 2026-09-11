@@ -53,7 +53,6 @@ export record ResolvedProject {
   public knownFeatures: Vector<String>;
   public stdEnabled: boolean;
   public stdRoot: Option<Path::PathBuf>;
-  public runtimeRoot: Option<Path::PathBuf>;
   public stdManifestPath: Option<Path::PathBuf>;
   public aliases: Vector<AliasBinding>;
   /// `[test] fixtures`, resolved against the project root. A directory that
@@ -179,13 +178,6 @@ export record ResolvedProject {
 
   public stdRootText(&self): Option<String> {
     return match (&self.stdRoot) {
-      Option::SOME(value) -> Option::SOME(value.toString()),
-      Option::NONE -> Option::NONE,
-    };
-  }
-
-  public runtimeRootText(&self): Option<String> {
-    return match (&self.runtimeRoot) {
       Option::SOME(value) -> Option::SOME(value.toString()),
       Option::NONE -> Option::NONE,
     };
@@ -816,10 +808,8 @@ export namespace Config {
     }
 
     let stdPathValue: Option<ConfigStringValue> = optionalString(&document, configPath, "ignis.std_path")!;
-    let runtimePathValue: Option<ConfigStringValue> = optionalString(&document, configPath, "ignis.runtime_path")!;
 
     let mut stdRoot: Option<Path::PathBuf> = Option::NONE;
-    let mut stdRootForRuntime: Option<Path::PathBuf> = Option::NONE;
     let mut stdManifestPath: Option<Path::PathBuf> = Option::NONE;
     if (stdEnabled) {
       match (stdPathValue) {
@@ -827,7 +817,6 @@ export namespace Config {
           let resolved: Path::PathBuf = resolveProjectPath(&root, &value.value);
           let canonical: Path::PathBuf = canonicalExistingPath(configPath, "ignis.std_path", &resolved)!;
 
-          stdRootForRuntime = Option::SOME(canonical.clone());
           stdManifestPath = manifestPath(&canonical);
           stdRoot = Option::SOME(canonical);
         },
@@ -837,7 +826,6 @@ export namespace Config {
               let resolved: Path::PathBuf = resolveEnvPath(&value);
               let canonical: Path::PathBuf = canonicalExistingPath(configPath, "IGNIS_STD_PATH", &resolved)!;
 
-              stdRootForRuntime = Option::SOME(canonical.clone());
               stdManifestPath = manifestPath(&canonical);
               stdRoot = Option::SOME(canonical);
             },
@@ -851,37 +839,6 @@ export namespace Config {
         Option::NONE -> {},
       };
     }
-
-    let mut runtimeRoot: Option<Path::PathBuf> = Option::NONE;
-    match (runtimePathValue) {
-      Option::SOME(value) -> {
-        match (stdRootForRuntime) {
-          Option::SOME(_) -> {},
-          Option::NONE -> {},
-        };
-
-        let resolved: Path::PathBuf = resolveProjectPath(&root, &value.value);
-        let canonical: Path::PathBuf = canonicalExistingPath(configPath, "ignis.runtime_path", &resolved)!;
-
-        runtimeRoot = Option::SOME(canonical);
-      },
-      Option::NONE -> {
-        match (stdRootForRuntime) {
-          Option::SOME(path) -> {
-            let resolved: Path::PathBuf = path.join("runtime");
-            if (Fs::exists(resolved.asStr())) {
-              match (Fs::canonicalize(&resolved)) {
-                Result::OK(canonical) -> {
-                  runtimeRoot = Option::SOME(canonical);
-                },
-                Result::ERROR(_) -> {},
-              };
-            }
-          },
-          Option::NONE -> {},
-        };
-      },
-    };
 
     return Result::OK(ResolvedProject {
       mode: BuildMode::PROJECT,
@@ -904,7 +861,6 @@ export namespace Config {
       knownFeatures: cloneStringVector(&knownFeatures),
       stdEnabled: stdEnabled,
       stdRoot: cloneOptionPath(&stdRoot),
-      runtimeRoot: cloneOptionPath(&runtimeRoot),
       stdManifestPath: cloneOptionPath(&stdManifestPath),
       aliases: cloneAliases(&aliases),
       testFixtures: clonePathVector(&testFixtures),
@@ -994,7 +950,6 @@ function emptyProject(): ResolvedProject {
     knownFeatures: Vector::new<String>(),
     stdEnabled: false,
     stdRoot: Option::NONE,
-    runtimeRoot: Option::NONE,
     stdManifestPath: Option::NONE,
     aliases: Vector::new<AliasBinding>(),
     testFixtures: Vector::new<Path::PathBuf>(),
@@ -1089,7 +1044,6 @@ function projectLoaderConsumesReturnedWorkspaceProjectFields(): void {
       assertSomeStringUnderRoot(project.outDirText(), &workspaceRoot, "/build/selfhost");
       assertSomeStringUnderRoot(project.stdManifestPathText(), &workspaceRoot, "/std/manifest.toml");
       assertSomeStringUnderRoot(project.stdRootText(), &workspaceRoot, "/std");
-      assertSomeStringUnderRoot(project.runtimeRootText(), &workspaceRoot, "/std/runtime");
       Test::assertEq<u64>(project.aliasCount(), 1);
       assertSomeString(project.aliasRawPathText("@compiler"), "./ignis");
       assertSomeStringUnderRoot(project.aliasPathText("@compiler"), &workspaceRoot, "/ignis");
