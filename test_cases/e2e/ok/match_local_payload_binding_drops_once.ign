@@ -1,0 +1,70 @@
+// e2e: std
+// The same three arm shapes over a plain local. The match consumes the local, so the
+// arms that bind no payload are the only place left that can free the value.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+enum Kind {
+  FIRST(Tracked),
+  SECOND(Tracked),
+  EMPTY,
+}
+
+/// (a) The arm binds the payload and only reads it.
+function variantArm(kind: Kind): i32 {
+  return match (kind) {
+    Kind::FIRST(first) -> first.id,
+    Kind::SECOND(second) -> second.id,
+    Kind::EMPTY -> 0,
+  };
+}
+
+/// (b) The catch-all binds the whole enum.
+function catchAllArm(kind: Kind): i32 {
+  return match (kind) {
+    Kind::FIRST(first) -> first.id,
+    other -> 20,
+  };
+}
+
+/// (c) The wildcard binds nothing.
+function wildcardArm(kind: Kind): i32 {
+  return match (kind) {
+    Kind::FIRST(first) -> first.id,
+    _ -> 30,
+  };
+}
+
+/// A local scrutinee named by a `let`, matched after it is built.
+function letLocalWildcardArm(): i32 {
+  let kind: Kind = Kind::SECOND(Tracked { id: 4 });
+
+  return match (kind) {
+    Kind::FIRST(first) -> first.id,
+    _ -> 40,
+  };
+}
+
+function main(): i32 {
+  Io::println("variant arm");
+  Io::println(`${variantArm(Kind::SECOND(Tracked { id: 1 }))}`.toStr());
+
+  Io::println("catch-all arm");
+  Io::println(`${catchAllArm(Kind::SECOND(Tracked { id: 2 }))}`.toStr());
+
+  Io::println("wildcard arm");
+  Io::println(`${wildcardArm(Kind::SECOND(Tracked { id: 3 }))}`.toStr());
+
+  Io::println("let local wildcard arm");
+  Io::println(`${letLocalWildcardArm()}`.toStr());
+
+  return 0;
+}

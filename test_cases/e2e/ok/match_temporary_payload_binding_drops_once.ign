@@ -1,0 +1,72 @@
+// e2e: std
+// The same three arm shapes over a call temporary. Nothing else ever held the value, so
+// every arm that binds no payload drops it where the arm ends.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+enum Kind {
+  FIRST(Tracked),
+  SECOND(Tracked),
+  EMPTY,
+}
+
+function makeKind(id: i32): Kind {
+  return Kind::SECOND(Tracked { id: id });
+}
+
+/// (a) The arm binds the payload and only reads it.
+function variantArm(id: i32): i32 {
+  return match (makeKind(id)) {
+    Kind::FIRST(first) -> first.id,
+    Kind::SECOND(second) -> second.id,
+    Kind::EMPTY -> 0,
+  };
+}
+
+/// (b) The catch-all binds the whole enum.
+function catchAllArm(id: i32): i32 {
+  return match (makeKind(id)) {
+    Kind::FIRST(first) -> first.id,
+    other -> 20,
+  };
+}
+
+/// (c) The wildcard binds nothing.
+function wildcardArm(id: i32): i32 {
+  return match (makeKind(id)) {
+    Kind::FIRST(first) -> first.id,
+    _ -> 30,
+  };
+}
+
+/// A constructed temporary rather than a call result.
+function enumLiteralWildcardArm(id: i32): i32 {
+  return match (Kind::SECOND(Tracked { id: id })) {
+    Kind::FIRST(first) -> first.id,
+    _ -> 40,
+  };
+}
+
+function main(): i32 {
+  Io::println("variant arm");
+  Io::println(`${variantArm(1)}`.toStr());
+
+  Io::println("catch-all arm");
+  Io::println(`${catchAllArm(2)}`.toStr());
+
+  Io::println("wildcard arm");
+  Io::println(`${wildcardArm(3)}`.toStr());
+
+  Io::println("enum literal wildcard arm");
+  Io::println(`${enumLiteralWildcardArm(4)}`.toStr());
+
+  return 0;
+}

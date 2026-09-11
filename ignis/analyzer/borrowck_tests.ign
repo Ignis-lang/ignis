@@ -760,22 +760,22 @@ function borrowckSchedulesNestedMatchThroughReference(): void {
 }
 
 /// Scenario: a match takes an owning payload out of a field of a local it
-/// owns. The bytes leave with the payload, so the local owes no drop anywhere
-/// and the remaining fields leak rather than being freed twice.
-/// Spec: IGN-39 — `drop_suppressed_vars`, filled from the field owner.
+/// owns. That is a partial move of the field, not of the local: the payload
+/// leaves with the binding, and the local still drops every field it kept.
+/// Spec: IGN-39 — a field move leaves the owner's own drops in place.
 @test
 function borrowckSchedulesSuppressesFieldOwnerDrop(): void {
   let rendered: String = borrowckSchedules(
     "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nrecord Holder {\n  public first: Maybe;\n  public second: Maybe;\n}\n\nfunction run(holder: Holder): u32 {\n  let taken: Owned = match (holder.first) {\n    Maybe::SOME(payload) -> payload,\n    Maybe::NONE -> Owned { id: 0 },\n  };\n\n  return taken.id;\n}\n",
   );
 
-  Test::assertEq<str>(rendered.toStr(), "scope-end: taken\nexit return: taken\n");
+  Test::assertEq<str>(rendered.toStr(), "scope-end: taken\nexit return: taken, holder\nexit fn-end run: holder\n");
 }
 
 /// Scenario: the same move out of an owned field, but the arm only reads its
-/// binding instead of handing it on. Suppressing the owner's drop left nothing
-/// else to free the payload, so the binding owes the drop at the arm's end
-/// even though the scrutinee names a field.
+/// binding instead of handing it on. The field the payload came out of is
+/// marked moved, so nothing else frees it and the binding owes the drop at the
+/// arm's end even though the scrutinee names a field. The owner still drops.
 /// Spec: IGN-39 — `arm_bindings_own_payload` lifts the external-storage veto.
 @test
 function borrowckSchedulesArmBindingOwningMovedFieldPayload(): void {
@@ -783,14 +783,40 @@ function borrowckSchedulesArmBindingOwningMovedFieldPayload(): void {
     "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nrecord Holder {\n  public first: Maybe;\n  public second: Maybe;\n}\n\nfunction run(holder: Holder): u32 {\n  return match (holder.first) {\n    Maybe::SOME(payload) -> payload.id,\n    Maybe::NONE -> 0,\n  };\n}\n",
   );
 
+  Test::assertEq<str>(rendered.toStr(), "match-arm-end: payload\nexit return: holder\nexit fn-end run: holder\n");
+}
+
+/// Scenario: a catch-all arm over the same moved field binds the whole enum,
+/// payload and all, so it owes the drop at the arm's end just like a variant
+/// arm that bound the payload directly.
+/// Spec: IGN-39 — an arm binding owns whatever it binds.
+@test
+function borrowckSchedulesCatchAllArmOwningMovedFieldPayload(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nrecord Holder {\n  public first: Maybe;\n  public second: Maybe;\n}\n\nfunction other(value: &Maybe): u32 {\n  return 0;\n}\n\nfunction run(holder: Holder): u32 {\n  return match (holder.first) {\n    Maybe::SOME(payload) -> payload.id,\n    rest -> other(&rest),\n  };\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "match-arm-end: payload\nmatch-arm-end: rest\nexit return: holder\nexit fn-end run: holder\n");
+}
+
+/// Scenario: an arm whose body is a literal but whose match is not a `let`
+/// condition. The old proxy for the desugaring took any literal body, which
+/// handed this binding's drop to an `if` that does not exist and leaked it.
+/// Spec: IGN-221 — only the `true`/`false` two-arm shape is a `let` condition.
+@test
+function borrowckSchedulesArmWithLiteralBodyKeepsItsDrop(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nfunction run(value: Maybe): u32 {\n  return match (value) {\n    Maybe::SOME(payload) -> 1,\n    Maybe::NONE -> 0,\n  };\n}\n",
+  );
+
   Test::assertEq<str>(rendered.toStr(), "match-arm-end: payload\n");
 }
 
 /// Scenario: the same match, but the field is reached through a reference.
-/// Suppressing the owner's drop there would silently accept a move out of
-/// storage the function does not own, so the move is rejected instead: once
-/// for the scrutinee and once for the payload the arm hands to the result.
-/// Spec: IGN-178 — a borrowed base wins over field-owner drop suppression.
+/// The referent still owns and drops that field, so the move is rejected
+/// instead: once for the scrutinee and once for the payload the arm hands to
+/// the result.
+/// Spec: IGN-178 — a borrowed base cannot be partially moved out of.
 @test
 function borrowckReportsFieldOwnerMoveThroughReference(): void {
   let diagnostics: DiagnosticBag = borrowckDiagnostics(
@@ -801,9 +827,10 @@ function borrowckReportsFieldOwnerMoveThroughReference(): void {
   Test::assertEq<u64>(diagnostics.length(), 2);
 }
 
-/// Scenario: a `let` condition over a call temporary. The desugared match has
-/// literal arm bodies, so the arm cannot own the binding's drop; the branch the
-/// condition guards is where the binding leaves scope and owes it.
+/// Scenario: a `let` condition over a call temporary. The desugared match
+/// yields `true` from its pattern arm and `false` from a trailing wildcard, so
+/// the arm cannot own the binding's drop; the branch the condition guards is
+/// where the binding leaves scope and owes it.
 /// Spec: IGN-221 — a `let` condition hands its bindings to the guarded branch.
 @test
 function borrowckSchedulesLetConditionBindingAtGuardedBranchEnd(): void {
@@ -814,10 +841,10 @@ function borrowckSchedulesLetConditionBindingAtGuardedBranchEnd(): void {
   Test::assertEq<str>(rendered.toStr(), "scope-end: payload\nexit return: payload\n");
 }
 
-/// Scenario: a borrowed base whose arm only reads its binding. No owner drop
-/// was suppressed, so the payload is still the referenced storage's and its
+/// Scenario: a borrowed base whose arm only reads its binding. Nothing was
+/// marked moved, so the payload is still the referenced storage's and its
 /// schedule frees it; scheduling an arm-end drop here would free it twice.
-/// Spec: IGN-178 — the external-storage veto stands without a suppressed owner.
+/// Spec: IGN-178 — the external-storage veto stands for a borrowed base.
 @test
 function borrowckSchedulesNoArmEndDropForBorrowedFieldBase(): void {
   let rendered: String = borrowckSchedules(
@@ -827,9 +854,8 @@ function borrowckSchedulesNoArmEndDropForBorrowedFieldBase(): void {
   Test::assertEq<str>(rendered.toStr(), "");
 }
 
-/// Scenario: the arms bind a `Copy` payload, so nothing leaves the field and
-/// the owner keeps every drop it owed.
-/// Spec: IGN-39 — suppression is driven by the payload, not by the field.
+/// Scenario: the arms bind a `Copy` payload, so nothing leaves the field.
+/// Spec: IGN-39 — the partial move is driven by the payload, not by the field.
 @test
 function borrowckSchedulesKeepsFieldOwnerDropForCopyPayload(): void {
   let rendered: String = borrowckSchedules(
