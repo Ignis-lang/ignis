@@ -261,6 +261,66 @@ pub fn build_std_with_target(target: TargetBackend) -> Result<StdCommandAttempt,
   })
 }
 
+static SHARED_STD_BUILD: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
+
+/// Builds the workspace std archive exactly once for the whole test binary
+/// (guarded by `OnceLock`, so concurrent `#[test]`s block on the first
+/// caller instead of each paying for their own build) and returns the `std`
+/// subdirectory it was built into, containing `lib/libignis_std.a`,
+/// `include/*.h`, and `.stamp`.
+///
+/// A full std build is expensive (compiling and archiving ~60 C files
+/// through a debug-profile driver), so a test that only cares about
+/// user-module caching should seed its own output directory from this
+/// shared snapshot via `seed_std_from_shared_snapshot` instead of triggering
+/// its own build.
+pub fn shared_workspace_std_snapshot(target: TargetBackend) -> PathBuf {
+  let temp_dir = SHARED_STD_BUILD.get_or_init(|| {
+    let temp_dir = TempDir::new().expect("failed to create shared std build dir");
+    let output_dir = temp_dir.path().join("build");
+    std::fs::create_dir_all(&output_dir).expect("failed to create shared std build dir");
+    let config = build_std_test_config(&output_dir, target).expect("failed to build shared std config");
+    build_std(config, output_dir.to_string_lossy().as_ref()).expect("failed to build shared std");
+    temp_dir
+  });
+
+  temp_dir.path().join("build").join("std")
+}
+
+/// Recursively copies a directory tree. Used to seed a test's own output
+/// directory from `shared_workspace_std_snapshot` without mutating the
+/// shared original (which every test in the binary reuses).
+pub fn copy_dir_recursive(
+  src: &Path,
+  dst: &Path,
+) {
+  std::fs::create_dir_all(dst).expect("failed to create destination directory");
+
+  for entry in std::fs::read_dir(src).expect("failed to read source directory") {
+    let entry = entry.expect("failed to read directory entry");
+    let file_type = entry.file_type().expect("failed to read file type");
+    let dst_path = dst.join(entry.file_name());
+
+    if file_type.is_dir() {
+      copy_dir_recursive(&entry.path(), &dst_path);
+    } else {
+      std::fs::copy(entry.path(), &dst_path).expect("failed to copy file");
+    }
+  }
+}
+
+/// Seeds `output_dir/std` from the shared std build (see
+/// `shared_workspace_std_snapshot`), so a subsequent compile against
+/// `output_dir` finds an already-valid std archive and stamp instead of
+/// rebuilding std from scratch.
+pub fn seed_std_from_shared_snapshot(
+  output_dir: &Path,
+  target: TargetBackend,
+) {
+  let shared_std = shared_workspace_std_snapshot(target);
+  copy_dir_recursive(&shared_std, &output_dir.join("std"));
+}
+
 pub fn compile_project_single_file_with_workspace_std(
   source: &str,
   target: TargetBackend,

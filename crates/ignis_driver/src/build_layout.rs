@@ -335,9 +335,13 @@ static COMPILER_EXE_KEY: OnceLock<String> = OnceLock::new();
 /// Deliberately avoids hashing the executable's contents: that costs over a
 /// hundred milliseconds for a debug binary of a couple hundred megabytes,
 /// which is unacceptable on a cache-hit path that should stay near-instant.
-/// Path + size + mtime + inode is exactly what changes on a rebuild (a
-/// linker never reuses the old inode in place) and is unaffected in place
-/// for an unchanged binary.
+/// Path + size + mtime + inode is unaffected for an unchanged binary, and at
+/// least one of size or mtime changes on essentially every rebuild a linker
+/// produces. Inode reuse alone (e.g. a tool that replaces the binary via
+/// `cp`/`install`, truncating and rewriting the same inode in place rather
+/// than unlink-and-recreate) is exactly the case size and mtime are there to
+/// catch; the key holds through that because it does not depend on the inode
+/// changing too.
 pub fn compiler_identity(compiler_version: &str) -> String {
   let exe_key = COMPILER_EXE_KEY.get_or_init(compute_exe_key);
   format!("{}-{}", exe_key, compiler_version)

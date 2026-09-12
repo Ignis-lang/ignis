@@ -4967,16 +4967,17 @@ fn ensure_std_built(
     target: String::new(),
   };
 
-  let force_rebuild = config.build_config.as_ref().map(|bc| bc.force_rebuild).unwrap_or(false);
-
+  // `--force` intentionally does not extend to the precompiled std archive:
+  // it targets "my code might be stale", not a full std rebuild, which is a
+  // much larger and rarer cost. Std still rebuilds on its own whenever its
+  // fingerprint (sources, compiler identity, ABI) actually changes.
+  //
   // Check if archive exists AND stamp is valid
-  if archive_path.exists() && !force_rebuild {
+  if archive_path.exists() {
     if is_std_stamp_valid(&stamp_path, std_path, &fingerprint) {
       return Ok(());
     }
     phase_warn!(config, "std library outdated, rebuilding...");
-  } else if force_rebuild {
-    phase_warn!(config, "forcing full rebuild (--force)...");
   } else {
     phase_warn!(config, "std library not found, building...");
   }

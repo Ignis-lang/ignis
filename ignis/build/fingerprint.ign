@@ -136,11 +136,17 @@ function fingerprintCurrentExePath(): Option<Path::PathBuf> {
 }
 
 /// Per-process memoization for `fingerprintCurrentExeKey`. Only the exe-side
-/// key is cached; `compilerVersion` is appended fresh at each
-/// `fingerprintCompilerIdentity` call, so the cache cannot go stale relative
-/// to whatever version string a caller passes in.
+/// key (and whether computing it failed) is cached; `compilerVersion` is
+/// appended fresh at each `fingerprintCompilerIdentity` call, so the cache
+/// cannot go stale relative to whatever version string a caller passes in.
+///
+/// `failed` is tracked separately from `key` rather than using a sentinel
+/// numeric value: a real hash can legitimately land on any `u64`, including
+/// what might look like an obvious sentinel, so only an explicit flag can
+/// disambiguate "identity unknown" from "identity computed to this value".
 record CompilerExeIdentityCache {
   static mut initialized: boolean = false;
+  static mut failed: boolean = false;
   static mut key: u64 = 0;
 }
 
@@ -151,33 +157,42 @@ record CompilerExeIdentityCache {
 /// Deliberately avoids hashing the executable's contents: doing that over a
 /// debug binary of a couple hundred megabytes costs well over a hundred
 /// milliseconds, which is unacceptable on what should be a near-instant
-/// cache-hit path. Path + size + mtime + inode is exactly what changes when
-/// the compiler is rebuilt (a linker never reuses the old inode in place)
-/// and stays fixed for an unchanged binary.
+/// cache-hit path. Path + size + mtime + inode stays fixed for an unchanged
+/// binary, and at least one of size or mtime changes on essentially every
+/// rebuild a linker produces; inode reuse alone (e.g. a tool that replaces
+/// the binary via `cp`/`install`, rewriting the same inode in place rather
+/// than unlink-and-recreate) is exactly the case size and mtime are there to
+/// catch.
 ///
-/// Returns `0` if the executable cannot be located or `stat`-ed (e.g. it was
-/// deleted after the process started or `argv[0]` could not be trusted),
-/// after printing a warning; `0` is still stable for the rest of the
-/// process, it just cannot distinguish between different such compilers.
-function fingerprintCurrentExeKey(): u64 {
+/// Returns `Option::NONE` if the executable cannot be located or `stat`-ed
+/// (e.g. it was deleted after the process started or `argv[0]` could not be
+/// trusted), after printing a warning exactly once per process.
+function fingerprintCurrentExeKey(): Option<u64> {
   if (CompilerExeIdentityCache::initialized) {
-    return CompilerExeIdentityCache::key;
-  }
+    if (CompilerExeIdentityCache::failed) {
+      return Option::NONE;
+    }
 
-  let mut key: u64 = 0;
+    return Option::SOME(CompilerExeIdentityCache::key);
+  }
 
   match (fingerprintComputeCurrentExeKey()) {
     Option::SOME(value) -> {
-      key = value;
+      CompilerExeIdentityCache::key = value;
     },
     Option::NONE -> {
       Io::eprintln("Warning: could not determine the running compiler's identity; build caching may be imprecise until the process restarts");
+      CompilerExeIdentityCache::failed = true;
     },
   };
 
-  CompilerExeIdentityCache::key = key;
   CompilerExeIdentityCache::initialized = true;
-  return key;
+
+  if (CompilerExeIdentityCache::failed) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(CompilerExeIdentityCache::key);
 }
 
 function fingerprintComputeCurrentExeKey(): Option<u64> {
@@ -193,22 +208,38 @@ function fingerprintComputeCurrentExeKey(): Option<u64> {
   hasher.writeStr(exePath.asStr());
   hasher.writeI64(stat.size);
   hasher.writeI64(stat.mtime);
+  hasher.writeI64(stat.mtimeNsec);
   hasher.writeU64(stat.ino);
   return Option::SOME(hasher.finish());
 }
 
 /// Stable identity of the currently running compiler binary: a cheap
 /// metadata-based key (see `fingerprintCurrentExeKey`) combined with its
-/// declared version string.
+/// declared version string. Falls back to the literal `"unknown"` in place
+/// of the key when the key could not be computed, mirroring the Rust host's
+/// `"unknown-<version>"` fallback -- a value disjoint from every real key,
+/// since a real key is always ASCII digits.
 ///
-/// Mirrors the Rust `compiler_identity()` in
-/// `crates/ignis_driver/src/build_layout.rs`, so a stamp's `compiler_identity`
+/// Full-precision `mtime` (`Fs::Sys::Stat.mtimeNsec`, alongside its
+/// second-granularity `mtime`) matches the nanosecond `mtime` the Rust host's
+/// `compiler_identity()` (`crates/ignis_driver/src/build_layout.rs`) reads
+/// from `std::fs::Metadata::modified()`, so a stamp's `compiler_identity`
 /// field always distinguishes "a different compiler binary ran" from "the
 /// same compiler, same declared version" -- even across a local rebuild that
-/// did not bump the version string.
+/// landed in the same second and did not bump the version string.
 export function fingerprintCompilerIdentity(compilerVersion: str): String {
-  let key: u64 = fingerprintCurrentExeKey();
-  let mut identity: String = key.toString();
+  let mut identity: String = String::new();
+
+  match (fingerprintCurrentExeKey()) {
+    Option::SOME(key) -> {
+      let keyText: String = key.toString();
+      identity.push(&keyText);
+    },
+    Option::NONE -> {
+      identity.pushStr("unknown");
+    },
+  };
+
   identity.pushChar('-');
   identity.pushStr(compilerVersion);
   return identity;

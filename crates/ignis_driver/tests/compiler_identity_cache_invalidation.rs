@@ -10,12 +10,19 @@
 //! rewriting a stamp file's `compiler_identity=` line to a bogus value after
 //! a first successful build, then rebuilding into the same output directory
 //! and asserting the affected artifact is recompiled.
+//!
+//! A full std build is expensive (compiling and archiving ~60 C files
+//! through a debug-profile driver), so every test here seeds its own output
+//! directory from one shared std build (`common::seed_std_from_shared_snapshot`)
+//! instead of triggering its own. Only `changed_compiler_identity_forces_std_archive_rebuild`
+//! goes on to force a second, genuine std rebuild, since that rebuild is
+//! exactly what it exists to prove happens.
 
 mod common;
 
 use std::path::Path;
 
-use common::{compile_workspace_std_project_in, compile_workspace_std_project_in_with_force};
+use common::{compile_workspace_std_project_in, compile_workspace_std_project_in_with_force, seed_std_from_shared_snapshot};
 use ignis_config::TargetBackend;
 use tempfile::TempDir;
 
@@ -59,6 +66,7 @@ fn changed_compiler_identity_forces_module_object_recompilation() {
   let output_dir = temp_dir.path().join("build");
   std::fs::create_dir_all(&output_dir).expect("failed to create build dir");
   std::fs::write(&source_path, MAIN_SOURCE).expect("failed to write source file");
+  seed_std_from_shared_snapshot(&output_dir, TargetBackend::C);
 
   compile_workspace_std_project_in(&source_path, &output_dir, TargetBackend::C).expect("first build should succeed");
 
@@ -126,6 +134,7 @@ fn changed_compiler_identity_forces_std_archive_rebuild() {
   let output_dir = temp_dir.path().join("build");
   std::fs::create_dir_all(&output_dir).expect("failed to create build dir");
   std::fs::write(&source_path, MAIN_SOURCE).expect("failed to write source file");
+  seed_std_from_shared_snapshot(&output_dir, TargetBackend::C);
 
   compile_workspace_std_project_in(&source_path, &output_dir, TargetBackend::C).expect("first build should succeed");
 
@@ -167,6 +176,7 @@ fn force_rebuild_recompiles_a_module_with_an_otherwise_valid_cache() {
   let output_dir = temp_dir.path().join("build");
   std::fs::create_dir_all(&output_dir).expect("failed to create build dir");
   std::fs::write(&source_path, MAIN_SOURCE).expect("failed to write source file");
+  seed_std_from_shared_snapshot(&output_dir, TargetBackend::C);
 
   compile_workspace_std_project_in(&source_path, &output_dir, TargetBackend::C).expect("first build should succeed");
 

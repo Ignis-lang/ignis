@@ -149,7 +149,10 @@ pub struct BuildCommand {
   #[arg(long = "features", value_delimiter = ',')]
   pub features: Vec<String>,
 
-  /// Force a full rebuild, ignoring cached C/objects/archives from a previous build
+  /// Force a rebuild of this project's own C/objects/archives, ignoring the
+  /// cache from a previous build. Does not force a rebuild of the
+  /// precompiled standard library, which still rebuilds only when its own
+  /// fingerprint changes.
   #[arg(long = "force", short = 'f', visible_alias = "rebuild")]
   pub force: bool,
 }
