@@ -120,12 +120,12 @@ export namespace ParserTypes {
     parserRef.skipTrivia();
 
     if (parserRef.atPunctuation(Punctuation::LEFT_PAREN)) {
-      return ParserTypes::parseTupleOrFunctionType(parserRef);
+      return ParserTypes::parseFunctionType(parserRef);
     }
 
     if (!ParserTypes::isTypeSegment(parserRef)) {
       let token: Token = parserRef.current();
-      parserRef.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_TYPE, "Expected type", "type syntax must start with a path, tuple, or function type");
+      parserRef.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_TYPE, "Expected type", "type syntax must start with a path or function type");
       return Option::NONE;
     }
 
@@ -175,10 +175,19 @@ export namespace ParserTypes {
     })));
   }
 
-  function parseTupleOrFunctionType(parser: &mut ParserShared::State): Option<Ast::TypeId> {
+  /// Parses `(T, U) -> R` function type syntax.
+  ///
+  /// `(...)` in type position never spells a tuple type: the host parser
+  /// (`parse_function_type` in `crates/ignis_parser/src/parser/type_syntax.rs`)
+  /// always requires an `->` after the closing paren, even when it never
+  /// found one, so this mirrors that instead of falling back to
+  /// `Ast::Type::Node::Tuple` for the parenthesized list. Tuple *patterns*
+  /// and *expressions* still parse fine; only the type-syntax spelling is
+  /// unsupported, matching the host.
+  function parseFunctionType(parser: &mut ParserShared::State): Option<Ast::TypeId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
-    let openParen = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start tuple or function type")!;
+    let openParen = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' to start function type")!;
     let mut elements: Vector<Ast::TypeId> = Vector::new<Ast::TypeId>();
 
     if (!parserRef.atPunctuation(Punctuation::RIGHT_PAREN)) {
@@ -197,25 +206,19 @@ export namespace ParserTypes {
       }
     }
 
-    let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after tuple or function parameters")!;
-    if (parserRef.consumePunctuation(Punctuation::ARROW).isSome()) {
-      let functionParameters: Vector<Ast::TypeId> = ParserShared::copyTypeIds(&elements);
-      let returnType = ParserTypes::parseType(parserRef)!;
-      let returnSpan: SourceSpan = match (parserRef.module.types.get(returnType)) {
-        Option::SOME(node) -> Ast::Serializer::typeSpan(node),
-        Option::NONE -> closeParen.span,
-      };
-      return Option::SOME(parserRef.module.addType(Ast::Type::Node::Function(Ast::Type::Function {
-        span: ParserShared::mergeSpans(openParen.span, returnSpan),
-        parameters: functionParameters,
-        returnType: returnType,
-      })));
-    }
+    let closeParen = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after function type parameters")!;
+    let _arrow = parserRef.expectPunctuation(Punctuation::ARROW, "expected '->' after function type parameters; tuple type syntax is not supported")!;
 
-    let tupleElements: Vector<Ast::TypeId> = ParserShared::copyTypeIds(&elements);
-    return Option::SOME(parserRef.module.addType(Ast::Type::Node::Tuple(Ast::Type::Tuple {
-      span: ParserShared::mergeSpans(openParen.span, closeParen.span),
-      elements: tupleElements,
+    let functionParameters: Vector<Ast::TypeId> = ParserShared::copyTypeIds(&elements);
+    let returnType = ParserTypes::parseType(parserRef)!;
+    let returnSpan: SourceSpan = match (parserRef.module.types.get(returnType)) {
+      Option::SOME(node) -> Ast::Serializer::typeSpan(node),
+      Option::NONE -> closeParen.span,
+    };
+    return Option::SOME(parserRef.module.addType(Ast::Type::Node::Function(Ast::Type::Function {
+      span: ParserShared::mergeSpans(openParen.span, returnSpan),
+      parameters: functionParameters,
+      returnType: returnType,
     })));
   }
 }
