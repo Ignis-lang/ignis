@@ -120,6 +120,13 @@ pub struct HirOwnershipChecker<'a> {
   /// drop. The branch the condition guards is where the binding goes out of scope, so
   /// `check_if` and `check_loop` read this map and declare the bindings there.
   let_condition_bindings: HashMap<HIRId, Vec<DefinitionId>>,
+
+  /// The place a `let` condition consumed, keyed by that condition's match HIRId.
+  ///
+  /// The move is recorded once for the whole condition, but a `let` behind a `&&` only
+  /// runs when everything to its left was true. `take_condition_bindings` reads this map
+  /// to give the short-circuit's false path the drop the skipped move left owing.
+  let_condition_scrutinees: HashMap<HIRId, DefinitionId>,
 }
 
 impl<'a> HirOwnershipChecker<'a> {
@@ -149,6 +156,7 @@ impl<'a> HirOwnershipChecker<'a> {
       borrowed_pattern_bindings: HashSet::new(),
       summaries: HashMap::new(),
       let_condition_bindings: HashMap::new(),
+      let_condition_scrutinees: HashMap::new(),
     }
   }
 
@@ -1322,6 +1330,81 @@ impl<'a> HirOwnershipChecker<'a> {
     }
   }
 
+  /// Remembers the place a `let` condition is about to consume, so a short-circuit in
+  /// front of it can pay for the move that never happened.
+  ///
+  /// Only a value this function would otherwise free is worth recording: a place whose
+  /// type needs no drop owes nothing, a place that is not live was not this condition's
+  /// to take, and a binding that names borrowed storage belongs to its referent, whose
+  /// own schedule frees it.
+  fn record_let_condition_scrutinee(
+    &mut self,
+    match_id: HIRId,
+    scrutinee_def: DefinitionId,
+    is_let_condition_match: bool,
+  ) {
+    if !is_let_condition_match
+      || !self.is_valid(&scrutinee_def)
+      || self.borrowed_pattern_bindings.contains(&scrutinee_def)
+      || !self
+        .types
+        .needs_drop_with_defs(self.defs.type_of(&scrutinee_def), self.defs)
+    {
+      return;
+    }
+
+    self.let_condition_scrutinees.insert(match_id, scrutinee_def);
+  }
+
+  /// The places the `let` conditions inside a condition subexpression consume, in
+  /// declaration order.
+  ///
+  /// Walks the same `&&` chain `take_condition_bindings` walks, so a parenthesized
+  /// `a && (b && let X = place)` reports `place` for the outer `&&` too: its right
+  /// operand holds that `let`, and a false `a` skips all of it.
+  fn condition_scrutinee_places(
+    &self,
+    condition: HIRId,
+  ) -> Vec<DefinitionId> {
+    if let HIRKind::Binary {
+      operation: BinaryOperation::And,
+      left,
+      right,
+    } = &self.hir.get(condition).kind
+    {
+      let mut places = self.condition_scrutinee_places(*left);
+      places.extend(self.condition_scrutinee_places(*right));
+      return places;
+    }
+
+    self
+      .let_condition_scrutinees
+      .get(&condition)
+      .copied()
+      .into_iter()
+      .collect()
+  }
+
+  /// Every `&&` node in a condition expression, outermost first.
+  fn condition_and_nodes(
+    &self,
+    condition: HIRId,
+  ) -> Vec<HIRId> {
+    let HIRKind::Binary {
+      operation: BinaryOperation::And,
+      left,
+      right,
+    } = &self.hir.get(condition).kind
+    else {
+      return Vec::new();
+    };
+
+    let mut nodes = vec![condition];
+    nodes.extend(self.condition_and_nodes(*left));
+    nodes.extend(self.condition_and_nodes(*right));
+    nodes
+  }
+
   /// Collects the bindings every `let` condition in a condition expression produced, in
   /// declaration order, and schedules the drops a short-circuited `&&` owes.
   ///
@@ -1356,6 +1439,19 @@ impl<'a> HirOwnershipChecker<'a> {
         .schedules
         .on_condition_fail
         .insert(condition, bindings.iter().rev().copied().collect());
+    }
+
+    // The mirror image of the entry above. A false left operand skips the right one
+    // whole, so every `let` in it binds nothing and moves nothing: the places those
+    // `let`s were recorded against are still live, and scope end already wrote them off
+    // as moved. This path is where they are freed.
+    let skipped = self.condition_scrutinee_places(right);
+
+    if !skipped.is_empty() {
+      self
+        .schedules
+        .on_condition_skip
+        .insert(condition, skipped.iter().rev().copied().collect());
     }
 
     bindings.extend(self.take_condition_bindings(right));
@@ -1456,6 +1552,15 @@ impl<'a> HirOwnershipChecker<'a> {
       .iter()
       .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
 
+    // `if (let P = value)` and `while (let P = value)` desugar to a two-armed match that
+    // yields `true` from the pattern arm and `false` from a trailing wildcard: the
+    // binding is live in the branch the condition guards, which runs after the arm, so
+    // dropping it at arm end would free a value that branch still uses. Its drop is
+    // handed to the enclosing `if`/`while` through `let_condition_bindings` instead. An
+    // ordinary arm whose body happens to be a literal is not that shape and owes its
+    // drop here like any other.
+    let is_let_condition_match = Self::arms_are_let_condition_desugaring(self.hir, arms);
+
     // Set when the payload was moved out of a field of a value we own. Reading that
     // field by value is a partial move: LIR lowering marks the field moved, so the
     // owner's own drop skips it and the match is the only holder of those bytes.
@@ -1469,6 +1574,7 @@ impl<'a> HirOwnershipChecker<'a> {
         // someone else, who still drops the field this match would take.
         self.reject_move_out_of_borrow(scrutinee);
       } else if let Some(source_def) = self.get_moved_var(scrutinee) {
+        self.record_let_condition_scrutinee(hir_id, source_def, is_let_condition_match);
         self.try_consume(source_def, span.clone());
       } else if self.get_moved_field_owner(scrutinee).is_some() {
         arm_bindings_own_payload = true;
@@ -1478,6 +1584,7 @@ impl<'a> HirOwnershipChecker<'a> {
         self.reject_move_out_of_borrow(scrutinee);
       }
     } else if let Some(source_def) = self.get_moved_var(scrutinee) {
+      self.record_let_condition_scrutinee(hir_id, source_def, is_let_condition_match);
       self.try_consume(source_def, span.clone());
     }
 
@@ -1493,15 +1600,6 @@ impl<'a> HirOwnershipChecker<'a> {
     );
 
     let bindings_borrow_payloads = self.scrutinee_binds_borrowed_payloads(scrutinee);
-
-    // `if (let P = value)` and `while (let P = value)` desugar to a two-armed match that
-    // yields `true` from the pattern arm and `false` from a trailing wildcard: the
-    // binding is live in the branch the condition guards, which runs after the arm, so
-    // dropping it at arm end would free a value that branch still uses. Its drop is
-    // handed to the enclosing `if`/`while` through `let_condition_bindings` instead. An
-    // ordinary arm whose body happens to be a literal is not that shape and owes its
-    // drop here like any other.
-    let is_let_condition_match = Self::arms_are_let_condition_desugaring(self.hir, arms);
 
     // Whether the match owns what a pattern takes out of it: the scrutinee is an owning
     // value and some pattern moves an owning payload out of it.
@@ -1720,6 +1818,18 @@ impl<'a> HirOwnershipChecker<'a> {
     // loop can only execute once and there are no cross-iteration issues.
     let can_iterate_again = body_falls_through || continue_seen;
 
+    // A skip drop in a loop condition fires on the iteration that ends the loop, so the
+    // place it names has to still hold a value then. If an earlier iteration already let
+    // the `let` take that place apart and the body never put a value back, the drop would
+    // free what the binding already owns — and the condition itself reads a place it
+    // moved out of. Reporting that read is what keeps the skip path honest; the shape
+    // stays available with a body that reassigns the place.
+    if let LoopKind::While { condition: cond_id } = &condition
+      && can_iterate_again
+    {
+      self.reject_repeated_condition_skip(*cond_id);
+    }
+
     if can_iterate_again {
       let post_first_iter = self.states.clone();
       let diag_count_before_second_pass = self.diagnostics.len();
@@ -1762,6 +1872,35 @@ impl<'a> HirOwnershipChecker<'a> {
     // Use conservative post-loop state (merge pre-loop with post-iteration).
     self.states = self.conservative_merge(&pre_loop_state, &self.states.clone());
     self.reachable = pre_body_reachable;
+  }
+
+  /// Drops a loop condition's skip drops when a second iteration could reach them with
+  /// the place already moved, and reports that second read as the use of a moved value it
+  /// is.
+  fn reject_repeated_condition_skip(
+    &mut self,
+    condition: HIRId,
+  ) {
+    for node in self.condition_and_nodes(condition) {
+      let Some(places) = self.schedules.on_condition_skip.get(&node).cloned() else {
+        continue;
+      };
+
+      let stale: Vec<DefinitionId> = places.into_iter().filter(|def| !self.is_valid(def)).collect();
+
+      if stale.is_empty() {
+        continue;
+      }
+
+      self.schedules.on_condition_skip.remove(&node);
+
+      let span = self.hir.get(node).span.clone();
+
+      for def in stale {
+        let diagnostic = self.build_use_after_move_diagnostic(&def, span.clone());
+        self.diagnostics.push(diagnostic);
+      }
+    }
   }
 
   fn check_call(

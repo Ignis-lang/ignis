@@ -1,0 +1,115 @@
+// e2e: std
+//
+// A parenthesized conjunction in front of a `let`: `(a && let X = p) && let Y =
+// q`. Every `&&` owes two different drops on two different paths — what its left
+// side bound, when its right operand turns the chain false, and the place its
+// right operand would have consumed, when its left side did. The parentheses
+// change which `&&` owes what, and nothing else.
+//
+// The exit code is the construction/drop imbalance plus the difference between
+// what each case read and what it had to read, so 0 means every Tracked was
+// dropped exactly once.
+
+record Counters {
+  static mut MADE: i32 = 0;
+  static mut DROPPED: i32 = 0;
+}
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Counters::DROPPED += 1;
+    return;
+  }
+}
+
+enum Kind {
+  ONE(Tracked),
+  EMPTY,
+}
+
+function tracked(id: i32): Tracked {
+  Counters::MADE += 1;
+  return Tracked { id: id };
+}
+
+function one(id: i32): Kind {
+  return Kind::ONE(tracked(id));
+}
+
+function empty(): Kind {
+  return Kind::EMPTY;
+}
+
+/// The second `let` fails. The first one has already bound, and the branch that
+/// would have freed that binding never runs, so the outer `&&` owes it.
+function secondLetFails(flag: boolean): i32 {
+  let mut seen: i32 = 0;
+  let first: Kind = one(1);
+  let second: Kind = empty();
+
+  if ((flag && let Kind::ONE(left) = first) && let Kind::ONE(right) = second) {
+    seen = left.id + right.id;
+  }
+
+  return seen;
+}
+
+/// Both `let`s succeed, so the guarded branch owns both bindings and drops them
+/// at its end.
+function bothLetsBind(flag: boolean): i32 {
+  let mut seen: i32 = 0;
+  let first: Kind = one(2);
+  let second: Kind = one(4);
+
+  if ((flag && let Kind::ONE(left) = first) && let Kind::ONE(right) = second) {
+    seen = left.id + right.id;
+  }
+
+  return seen;
+}
+
+/// The boolean at the head of the chain is false, so neither `let` runs: both
+/// places are still live and each `&&` frees the one its own right side would
+/// have taken.
+function headBooleanFails(): i32 {
+  let mut seen: i32 = 0;
+  let first: Kind = one(8);
+  let second: Kind = one(16);
+
+  if ((false && let Kind::ONE(left) = first) && let Kind::ONE(right) = second) {
+    seen = left.id + right.id;
+  }
+
+  return seen;
+}
+
+/// The first `let` fails. It consumed its place, the second `let` never ran, and
+/// nothing was bound: exactly one place is owed.
+function firstLetFails(flag: boolean): i32 {
+  let mut seen: i32 = 0;
+  let first: Kind = empty();
+  let second: Kind = one(32);
+
+  if ((flag && let Kind::ONE(left) = first) && let Kind::ONE(right) = second) {
+    seen = left.id + right.id;
+  }
+
+  return seen;
+}
+
+function main(): i32 {
+  let mut observed: i32 = 0;
+
+  observed += secondLetFails(false);
+  observed += secondLetFails(true);
+  observed += bothLetsBind(false);
+  observed += bothLetsBind(true) - 6;
+  observed += headBooleanFails();
+  observed += firstLetFails(false);
+  observed += firstLetFails(true);
+
+  return Counters::MADE - Counters::DROPPED + observed;
+}

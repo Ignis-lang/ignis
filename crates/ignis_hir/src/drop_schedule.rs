@@ -67,6 +67,19 @@ pub struct DropSchedules {
   /// bindings listed here hold a value.
   pub on_condition_fail: HashMap<HIRId, Vec<DefinitionId>>,
 
+  /// Drops owed by a `&&` whose *left* operand evaluated to false, keyed by that
+  /// `Binary` HIRId.
+  ///
+  /// A `let` condition consumes its scrutinee, and the ownership walk records that move
+  /// once for the whole condition. Behind a short-circuit the move is conditional: with
+  /// `if (before && let P = value)` a false `before` skips the `let` entirely, so `value`
+  /// was never moved and no later site frees it — scope end already skipped it. This path
+  /// is where it is still live and unowned, and the only place its drop can go.
+  ///
+  /// Only a scrutinee that is a *place* is listed: a call temporary the skipped operand
+  /// would have produced was never created, so nothing is owed for it.
+  pub on_condition_skip: HashMap<HIRId, Vec<DefinitionId>>,
+
   /// Drops before overwriting an owned variable, keyed by Assign HIRId.
   pub on_overwrite: HashMap<HIRId, Vec<DefinitionId>>,
 
@@ -101,6 +114,7 @@ impl DropSchedules {
     self.on_scope_end.is_empty()
       && self.on_exit.is_empty()
       && self.on_condition_fail.is_empty()
+      && self.on_condition_skip.is_empty()
       && self.on_overwrite.is_empty()
       && self.on_field_overwrite.is_empty()
       && self.on_scope_end_defers.is_empty()

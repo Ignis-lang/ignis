@@ -197,6 +197,16 @@ export namespace Borrowck {
     letConditionMatches: Vector<u32>;
     letConditionOwned: Vector<u32>;
 
+    /// The place each `let`-condition match consumed, as a flat map:
+    /// `letConditionScrutineeMatches[i]` is the raw `HirId` of the match and
+    /// `letConditionScrutineeDefs[i]` the raw definition it took. A `let`
+    /// behind a `&&` only runs when everything to its left was true, so
+    /// `takeConditionBindings` reads this map to give the short-circuit's false
+    /// path the drop the skipped move left owing. Mirrors
+    /// `let_condition_scrutinees`.
+    letConditionScrutineeMatches: Vector<u32>;
+    letConditionScrutineeDefs: Vector<u32>;
+
     /// False after a terminator, until a join restores it.
     public reachable: boolean;
 
@@ -236,6 +246,8 @@ export namespace Borrowck {
         borrowedBindings: Vector::new<u32>(),
         letConditionMatches: Vector::new<u32>(),
         letConditionOwned: Vector::new<u32>(),
+        letConditionScrutineeMatches: Vector::new<u32>(),
+        letConditionScrutineeDefs: Vector::new<u32>(),
         reachable: true,
         inDefer: false,
         inDropMethod: false,
@@ -260,6 +272,48 @@ export namespace Borrowck {
     public recordLetConditionBinding(&mut self, matchRaw: u32, defRaw: u32): void {
       self.letConditionMatches.push(matchRaw);
       self.letConditionOwned.push(defRaw);
+    }
+
+    /// Note that match `matchRaw` consumed the place `defRaw`. Replacing rather
+    /// than appending mirrors the oracle's `HashMap::insert`, so a condition
+    /// walked twice records one place, not two.
+    public recordLetConditionScrutinee(&mut self, matchRaw: u32, defRaw: u32): void {
+      let mut index: u64 = 0;
+
+      while (index < self.letConditionScrutineeMatches.length()) {
+        if (let Option::SOME(raw) = self.letConditionScrutineeMatches.get(index)) {
+          if (*raw == matchRaw) {
+            self.letConditionScrutineeDefs.set(index, defRaw);
+            return;
+          }
+        }
+
+        index += 1;
+      }
+
+      self.letConditionScrutineeMatches.push(matchRaw);
+      self.letConditionScrutineeDefs.push(defRaw);
+    }
+
+    /// The place match `matchRaw` consumed, if it is a `let` condition that took
+    /// one. Reading rather than taking mirrors the oracle: the same entry is
+    /// read once per `&&` that stands in front of that `let`.
+    public letConditionScrutinee(&self, matchRaw: u32): Option<u32> {
+      let mut index: u64 = 0;
+
+      while (index < self.letConditionScrutineeMatches.length()) {
+        if (let Option::SOME(raw) = self.letConditionScrutineeMatches.get(index)) {
+          if (*raw == matchRaw) {
+            if (let Option::SOME(defRaw) = self.letConditionScrutineeDefs.get(index)) {
+              return Option::SOME(*defRaw);
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
     }
 
     /// Hand over the bindings recorded for `matchRaw`, in declaration order,
@@ -3798,6 +3852,128 @@ export namespace Borrowck {
     }
   }
 
+  /// Remembers the place a `let` condition is about to consume, so a
+  /// short-circuit in front of it can pay for the move that never happened.
+  /// Mirrors `record_let_condition_scrutinee`.
+  ///
+  /// Only a value this function would otherwise free is worth recording: a
+  /// place whose type needs no drop owes nothing, a place that is not live was
+  /// not this condition's to take, and a binding that names borrowed storage
+  /// belongs to its referent, whose own schedule frees it.
+  function recordLetConditionScrutinee(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    state: &mut Borrowck::State,
+    matchId: Hir::HirId,
+    scrutinee: Analyzer::DefinitionId,
+    isLetConditionMatch: boolean,
+  ): void {
+    if (!isLetConditionMatch) {
+      return;
+    }
+
+    if (!state.isMoveValid(scrutinee.raw()) || state.isBorrowedBinding(scrutinee.raw())) {
+      return;
+    }
+
+    let Option::SOME(scrutineeType) = Borrowck::variableTypeOf(defStore, scrutinee) else {
+      return;
+    };
+
+    if (!Borrowck::needsDropType(defStore, typeStore, scrutineeType)) {
+      return;
+    }
+
+    let mut stateRef: &mut Borrowck::State = state;
+    stateRef.recordLetConditionScrutinee(matchId.raw(), scrutinee.raw());
+  }
+
+  /// The places the `let` conditions inside a condition subexpression consume,
+  /// in declaration order. Mirrors `condition_scrutinee_places`.
+  ///
+  /// Walks the same `&&` chain `takeConditionBindings` walks, so a
+  /// parenthesized `a && (b && let X = place)` reports `place` for the outer
+  /// `&&` too: its right operand holds that `let`, and a false `a` skips all of
+  /// it.
+  function conditionScrutineePlaces(
+    hir: &Hir::HirStore,
+    state: &Borrowck::State,
+    condition: Hir::HirId,
+  ): Vector<u32> {
+    let mut places: Vector<u32> = Vector::new<u32>();
+
+    if (let Option::SOME(node) = hir.get(condition)) {
+      if (let Hir::HirKind::Binary(binaryNode) = &node.kind) {
+        if (let Hir::BinaryOperation::And = binaryNode.operation) {
+          places = Borrowck::conditionScrutineePlaces(hir, state, binaryNode.left);
+
+          let rightPlaces: Vector<u32> = Borrowck::conditionScrutineePlaces(hir, state, binaryNode.right);
+          let mut index: u64 = 0;
+
+          while (index < rightPlaces.length()) {
+            if (let Option::SOME(defRaw) = rightPlaces.get(index)) {
+              places.push(*defRaw);
+            }
+
+            index += 1;
+          }
+
+          return places;
+        }
+      }
+    }
+
+    if (let Option::SOME(defRaw) = state.letConditionScrutinee(condition.raw())) {
+      places.push(defRaw);
+    }
+
+    return places;
+  }
+
+  /// Every `&&` node in a condition expression, outermost first. Mirrors
+  /// `condition_and_nodes`.
+  function conditionAndNodes(hir: &Hir::HirStore, condition: Hir::HirId): Vector<Hir::HirId> {
+    let mut nodes: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    let Option::SOME(node) = hir.get(condition) else {
+      return nodes;
+    };
+
+    let Hir::HirKind::Binary(binaryNode) = &node.kind else {
+      return nodes;
+    };
+
+    let Hir::BinaryOperation::And = binaryNode.operation else {
+      return nodes;
+    };
+
+    nodes.push(condition);
+
+    let leftNodes: Vector<Hir::HirId> = Borrowck::conditionAndNodes(hir, binaryNode.left);
+    let mut leftIndex: u64 = 0;
+
+    while (leftIndex < leftNodes.length()) {
+      if (let Option::SOME(nodeId) = leftNodes.get(leftIndex)) {
+        nodes.push(*nodeId);
+      }
+
+      leftIndex += 1;
+    }
+
+    let rightNodes: Vector<Hir::HirId> = Borrowck::conditionAndNodes(hir, binaryNode.right);
+    let mut rightIndex: u64 = 0;
+
+    while (rightIndex < rightNodes.length()) {
+      if (let Option::SOME(nodeId) = rightNodes.get(rightIndex)) {
+        nodes.push(*nodeId);
+      }
+
+      rightIndex += 1;
+    }
+
+    return nodes;
+  }
+
   /// Collects the bindings every `let` condition in a condition expression
   /// produced, in declaration order, and schedules the drops a short-circuited
   /// `&&` owes. Mirrors `take_condition_bindings`.
@@ -3860,6 +4036,28 @@ export namespace Borrowck {
 
       let mut scheduleRef: &mut Hir::DropSchedules = schedules;
       scheduleRef.setConditionFail(condition, owed);
+    }
+
+    // The mirror image of the entry above. A false left operand skips the right
+    // one whole, so every `let` in it binds nothing and moves nothing: the
+    // places those `let`s were recorded against are still live, and scope end
+    // already wrote them off as moved. This path is where they are freed.
+    let skipped: Vector<u32> = Borrowck::conditionScrutineePlaces(hir, &*state, rightId);
+
+    if (!skipped.isEmpty()) {
+      let mut skippedOwed: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut skippedIndex: u64 = skipped.length();
+
+      while (skippedIndex > 0) {
+        skippedIndex -= 1;
+
+        if (let Option::SOME(defRaw) = skipped.get(skippedIndex)) {
+          skippedOwed.push(Id::fromRaw<Analyzer::DefinitionTag>(*defRaw));
+        }
+      }
+
+      let mut skipRef: &mut Hir::DropSchedules = schedules;
+      skipRef.setConditionSkip(condition, skippedOwed);
     }
 
     let rightBindings: Vector<u32> = Borrowck::takeConditionBindings(hir, state, schedules, rightId);
@@ -4086,10 +4284,13 @@ export namespace Borrowck {
     // and nowhere else. The owner keeps every other drop it owed.
     let mut armBindingsOwnPayload: boolean = false;
 
+    let isLetConditionMatch: boolean = Borrowck::armsAreLetConditionDesugaring(hir, &matchNode.arms);
+
     if (movesScrutineePayload) {
       if (scrutineeIsBorrowed) {
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, matchNode.scrutinee);
       } else if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
+        Borrowck::recordLetConditionScrutinee(defStore, typeStore, state, matchId, source, isLetConditionMatch);
         Borrowck::tryConsume(state, schedules, source, span);
       } else if (let Option::SOME(_owner) = Borrowck::movedFieldOwner(defStore, typeStore, hir, matchNode.scrutinee)) {
         armBindingsOwnPayload = true;
@@ -4099,10 +4300,9 @@ export namespace Borrowck {
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, matchNode.scrutinee);
       }
     } else if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
+      Borrowck::recordLetConditionScrutinee(defStore, typeStore, state, matchId, source, isLetConditionMatch);
       Borrowck::tryConsume(state, schedules, source, span);
     }
-
-    let isLetConditionMatch: boolean = Borrowck::armsAreLetConditionDesugaring(hir, &matchNode.arms);
     let aliasesExternalStorage: boolean = Borrowck::aliasesExternalStorage(hir, matchNode.scrutinee);
     let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, state, matchNode.scrutinee);
 
@@ -4262,6 +4462,70 @@ export namespace Borrowck {
     reachRef.setReachable(anyReachable);
   }
 
+  /// Drops a loop condition's skip drops when a second iteration could reach
+  /// them with the place already moved, and reports that second read as the use
+  /// of a moved value it is. Mirrors `reject_repeated_condition_skip`.
+  function rejectRepeatedConditionSkip(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    state: &Borrowck::State,
+    diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
+    condition: Hir::HirId,
+  ): void {
+    let nodes: Vector<Hir::HirId> = Borrowck::conditionAndNodes(hir, condition);
+    let mut index: u64 = 0;
+
+    while (index < nodes.length()) {
+      let Option::SOME(nodeId) = nodes.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let Option::SOME(node) = hir.get(*nodeId) else {
+        index += 1;
+        continue;
+      };
+
+      let span: SourceSpan = node.span;
+      let places: Vector<Analyzer::DefinitionId> = schedules.conditionSkipDrops(*nodeId);
+      let mut stale: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut placeIndex: u64 = 0;
+
+      while (placeIndex < places.length()) {
+        if (let Option::SOME(defId) = places.get(placeIndex)) {
+          if (!state.isMoveValid(defId.raw())) {
+            stale.push(*defId);
+          }
+        }
+
+        placeIndex += 1;
+      }
+
+      if (stale.isEmpty()) {
+        index += 1;
+        continue;
+      }
+
+      let mut clearRef: &mut Hir::DropSchedules = schedules;
+      clearRef.clearConditionSkip(*nodeId);
+
+      let mut staleIndex: u64 = 0;
+
+      while (staleIndex < stale.length()) {
+        if (let Option::SOME(defId) = stale.get(staleIndex)) {
+          Borrowck::emitUseAfterMove(defStore, typeStore, symbols, diagnostics, *defId, span);
+        }
+
+        staleIndex += 1;
+      }
+
+      index += 1;
+    }
+  }
+
   /// Loop bodies are walked twice: once for the first iteration, then once
   /// more from the back-edge state so a value moved in the body is reported on
   /// the second iteration. The second pass collects into its own bag so that
@@ -4277,6 +4541,7 @@ export namespace Borrowck {
     loopNode: &Hir::HirLoop,
   ): void {
     let mut update: Option<Hir::HirId> = Option::NONE;
+    let mut whileCondition: Option<Hir::HirId> = Option::NONE;
     let mut conditionBindings: Vector<u32> = Vector::new<u32>();
 
     match (&loopNode.condition) {
@@ -4285,6 +4550,7 @@ export namespace Borrowck {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, condition);
 
         conditionBindings = Borrowck::takeConditionBindings(hir, state, schedules, condition);
+        whileCondition = Option::SOME(condition);
       },
       Hir::LoopKind::For(forLoop) -> {
         if (let Option::SOME(init) = forLoop.init) {
@@ -4331,6 +4597,28 @@ export namespace Borrowck {
         updateRef.setReachable(true);
 
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, updateId);
+      }
+    }
+
+    // A skip drop in a loop condition fires on the iteration that ends the loop,
+    // so the place it names has to still hold a value then. If an earlier
+    // iteration already let the `let` take that place apart and the body never
+    // put a value back, the drop would free what the binding already owns — and
+    // the condition itself reads a place it moved out of. Reporting that read is
+    // what keeps the skip path honest; the shape stays available with a body
+    // that reassigns the place. Mirrors `reject_repeated_condition_skip`.
+    if (let Option::SOME(conditionId) = whileCondition) {
+      if (bodyFallsThrough || continueSeen) {
+        Borrowck::rejectRepeatedConditionSkip(
+          defStore,
+          typeStore,
+          symbols,
+          hir,
+          &*state,
+          diagnostics,
+          schedules,
+          conditionId,
+        );
       }
     }
 

@@ -520,7 +520,11 @@ impl super::IgnisParser {
 mod tests {
   use std::{cell::RefCell, rc::Rc};
 
-  use ignis_ast::{ASTNode, NodeId, statements::ASTStatement};
+  use ignis_ast::{
+    ASTNode, NodeId,
+    expressions::{ASTExpression, binary::ASTBinaryOperator},
+    statements::ASTStatement,
+  };
   use ignis_type::{Store, file::SourceMap, symbol::SymbolTable};
 
   use crate::{lexer::IgnisLexer, parser::IgnisParser};
@@ -613,6 +617,163 @@ mod tests {
       },
       other => panic!("expected variable, got {:?}", other),
     }
+  }
+
+  /// The condition of an `if`/`while` at `index`, as an expression node.
+  fn get_condition(
+    result: &ParseResult,
+    index: usize,
+  ) -> &ASTExpression {
+    let condition = match get_stmt(result, index) {
+      ASTStatement::If(if_stmt) => if_stmt.condition,
+      ASTStatement::While(while_stmt) => while_stmt.condition,
+      other => panic!("expected if or while, got {:?}", other),
+    };
+
+    expression_at(result, &condition)
+  }
+
+  /// Asserts that `condition` is `<left> && <right>` and hands both operands back.
+  fn expect_conjunction<'a>(
+    result: &'a ParseResult,
+    condition: &ASTExpression,
+  ) -> (&'a ASTExpression, &'a ASTExpression) {
+    let binary = match condition {
+      ASTExpression::Binary(binary) if binary.operator == ASTBinaryOperator::And => binary,
+      other => panic!("expected '&&', got {:?}", other),
+    };
+
+    (expression_at(result, &binary.left), expression_at(result, &binary.right))
+  }
+
+  /// The expression at `id`, with parentheses stepped through: HIR lowering drops the
+  /// `Grouped` wrapper, so the shape these tests pin is the one underneath it.
+  fn expression_at<'a>(
+    result: &'a ParseResult,
+    id: &NodeId,
+  ) -> &'a ASTExpression {
+    match result.nodes.get(id) {
+      ASTNode::Expression(ASTExpression::Grouped(grouped)) => expression_at(result, &grouped.expression),
+      ASTNode::Expression(expression) => expression,
+      other => panic!("expected expression operand, got {:?}", other),
+    }
+  }
+
+  /// `let` is an ordinary prefix expression, so a condition may reach one through any
+  /// number of conjuncts in front of it — the shape the selfhost parser has to match.
+  #[test]
+  fn parses_a_let_condition_behind_a_boolean() {
+    let result = parse_stmt("if (flag && let Slot::Filled(inner) = slot) { }");
+    let (left, right) = expect_conjunction(&result, get_condition(&result, 0));
+
+    assert!(
+      matches!(left, ASTExpression::Variable(_)),
+      "expected a variable, got {:?}",
+      left
+    );
+    assert!(
+      matches!(right, ASTExpression::LetCondition(_)),
+      "expected a let condition, got {:?}",
+      right
+    );
+  }
+
+  /// Left-associative, so the `let` is the right operand of the outermost `&&` and the
+  /// two booleans are its left.
+  #[test]
+  fn parses_a_let_condition_behind_two_booleans() {
+    let result = parse_stmt("if (first && second && let Slot::Filled(inner) = slot) { }");
+    let (left, right) = expect_conjunction(&result, get_condition(&result, 0));
+
+    assert!(
+      matches!(right, ASTExpression::LetCondition(_)),
+      "expected a let condition, got {:?}",
+      right
+    );
+
+    let (first, second) = expect_conjunction(&result, left);
+
+    assert!(
+      matches!(first, ASTExpression::Variable(_)),
+      "expected a variable, got {:?}",
+      first
+    );
+    assert!(
+      matches!(second, ASTExpression::Variable(_)),
+      "expected a variable, got {:?}",
+      second
+    );
+  }
+
+  #[test]
+  fn parses_a_while_let_condition_behind_a_boolean() {
+    let result = parse_stmt("while (flag && let Slot::Filled(inner) = slot) { }");
+    let (left, right) = expect_conjunction(&result, get_condition(&result, 0));
+
+    assert!(
+      matches!(left, ASTExpression::Variable(_)),
+      "expected a variable, got {:?}",
+      left
+    );
+    assert!(
+      matches!(right, ASTExpression::LetCondition(_)),
+      "expected a let condition, got {:?}",
+      right
+    );
+  }
+
+  /// A parenthesized conjunction keeps its own shape: the outer `&&` holds the inner one
+  /// on the left and the second `let` on the right.
+  #[test]
+  fn parses_a_parenthesized_conjunction_of_let_conditions() {
+    let result = parse_stmt("if ((flag && let Slot::Filled(left) = first) && let Slot::Filled(right) = second) { }");
+    let (outer_left, outer_right) = expect_conjunction(&result, get_condition(&result, 0));
+
+    assert!(
+      matches!(outer_right, ASTExpression::LetCondition(_)),
+      "expected a let condition, got {:?}",
+      outer_right
+    );
+
+    let (flag, inner_let) = expect_conjunction(&result, outer_left);
+
+    assert!(
+      matches!(flag, ASTExpression::Variable(_)),
+      "expected a variable, got {:?}",
+      flag
+    );
+    assert!(
+      matches!(inner_let, ASTExpression::LetCondition(_)),
+      "expected a let condition, got {:?}",
+      inner_let
+    );
+  }
+
+  /// A `let` after the value of another `let` binds to the conjunct, not to the value:
+  /// the scrutinee stops at `&&`.
+  #[test]
+  fn parses_a_let_condition_between_booleans() {
+    let result = parse_stmt("if (let Slot::Filled(inner) = slot && flag && let Slot::Filled(other) = second) { }");
+    let (left, right) = expect_conjunction(&result, get_condition(&result, 0));
+
+    assert!(
+      matches!(right, ASTExpression::LetCondition(_)),
+      "expected a let condition, got {:?}",
+      right
+    );
+
+    let (first_let, flag) = expect_conjunction(&result, left);
+
+    assert!(
+      matches!(first_let, ASTExpression::LetCondition(_)),
+      "expected a let condition, got {:?}",
+      first_let
+    );
+    assert!(
+      matches!(flag, ASTExpression::Variable(_)),
+      "expected a variable, got {:?}",
+      flag
+    );
   }
 
   #[test]

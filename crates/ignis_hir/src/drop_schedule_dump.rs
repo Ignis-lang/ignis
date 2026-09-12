@@ -108,6 +108,9 @@ pub enum DropReason {
   /// A later link of a `&&` chain of `let` conditions evaluated to false, so the branch
   /// that owned the earlier bindings never ran.
   ConditionFail,
+  /// The left operand of a `&&` evaluated to false, so the `let` condition behind it
+  /// never ran and never moved the scrutinee it would have consumed.
+  ConditionSkip,
 }
 
 impl DropReason {
@@ -121,6 +124,7 @@ impl DropReason {
       DropReason::FnEnd => "fn-end",
       DropReason::Overwrite => "overwrite",
       DropReason::ConditionFail => "condition-fail",
+      DropReason::ConditionSkip => "condition-skip",
     }
   }
 }
@@ -494,6 +498,12 @@ impl<'a> DropScheduleDumper<'a> {
     for (condition, dropped) in &self.schedules.on_condition_fail {
       if nodes.contains(condition) {
         record_drops(self, &mut values, &self.span_of(*condition), DropReason::ConditionFail, dropped);
+      }
+    }
+
+    for (condition, dropped) in &self.schedules.on_condition_skip {
+      if nodes.contains(condition) {
+        record_drops(self, &mut values, &self.span_of(*condition), DropReason::ConditionSkip, dropped);
       }
     }
 

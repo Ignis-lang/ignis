@@ -1,0 +1,38 @@
+// e2e: err
+//
+// A `let` condition behind a `&&` in a loop condition takes its place apart on
+// the round that reaches it. The round that reads a false conjunct instead is
+// where that place would be freed — but only a place that still holds a value
+// can be freed there, and a body that never puts one back leaves the condition
+// reading what the `let` already took: a use of a moved value.
+//
+// The same loop with `holder = one(1);` at the end of the body is accepted, and
+// `test_cases/e2e/ok/ownership_short_circuit_while.ign` covers it.
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+enum Kind {
+  ONE(Tracked),
+  EMPTY,
+}
+
+function one(id: i32): Kind {
+  return Kind::ONE(Tracked { id: id });
+}
+
+function main(): i32 {
+  let mut rounds: i32 = 0;
+  let holder: Kind = one(1);
+
+  while (rounds < 3 && let Kind::ONE(item) = holder) {
+    rounds += item.id;
+  }
+
+  return rounds;
+}

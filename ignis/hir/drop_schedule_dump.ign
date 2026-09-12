@@ -117,6 +117,7 @@ export namespace Hir {
     const REASON_FN_END: u32 = 5;
     const REASON_OVERWRITE: u32 = 6;
     const REASON_CONDITION_FAIL: u32 = 7;
+    const REASON_CONDITION_SKIP: u32 = 8;
 
     const KIND_LOCAL: str = "local";
     const KIND_BINDING: str = "binding";
@@ -1500,6 +1501,31 @@ export namespace Hir {
         }
 
         conditionFailIndex += 1;
+      }
+
+      let mut conditionSkipIndex: u64 = 0;
+
+      while (conditionSkipIndex < schedules.onConditionSkip.length()) {
+        if (let Option::SOME(entry) = schedules.onConditionSkip.get(conditionSkipIndex)) {
+          if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
+            let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
+            let mut defIndex: u64 = 0;
+
+            while (defIndex < entry.defs.length()) {
+              if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
+                values = Hir::DropScheduleDump::recordDropSite(
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                Hir::DropScheduleDump::REASON_CONDITION_SKIP, "condition-skip",
+              );
+              }
+
+              defIndex += 1;
+            }
+          }
+        }
+
+        conditionSkipIndex += 1;
       }
 
       let mut overwriteIndex: u64 = 0;
