@@ -183,6 +183,17 @@ export namespace Borrowck {
     /// One entry per enclosing loop, set when a `continue` was seen in it.
     loopContinue: Vector<u32>;
 
+    /// The places the enclosing loops' `let` conditions consume, laid out like
+    /// `ownedVars`: `loopScrutineeStarts[i]` is where loop `i` begins inside the
+    /// flat `loopScrutinees` stack. A loop condition takes its scrutinee apart on
+    /// every round, so the place is only refilled by a body that assigns to it,
+    /// and the condition that ends the loop is what frees whatever the last round
+    /// put there. A `break` never reaches that condition, so it owes the drop; one
+    /// frame per loop keeps a `break` out of an inner loop off an outer
+    /// condition's place. Mirrors `loop_condition_scrutinees`.
+    loopScrutineeStarts: Vector<u64>;
+    loopScrutinees: Vector<u32>;
+
     /// Pattern bindings whose bytes live in borrowed storage, because the
     /// scrutinee they were destructured from is a reference. Moving one of
     /// these is what the oracle reports as a move out of a borrowed value.
@@ -243,6 +254,8 @@ export namespace Borrowck {
         deferStarts: Vector::new<u64>(),
         deferBodies: Vector::new<u32>(),
         loopContinue: Vector::new<u32>(),
+        loopScrutineeStarts: Vector::new<u64>(),
+        loopScrutinees: Vector::new<u32>(),
         borrowedBindings: Vector::new<u32>(),
         letConditionMatches: Vector::new<u32>(),
         letConditionOwned: Vector::new<u32>(),
@@ -802,12 +815,60 @@ export namespace Borrowck {
       }
     }
 
-    public pushLoop(&mut self): void {
+    public pushLoop(&mut self, scrutinees: &Vector<u32>): void {
       self.loopContinue.push(0);
+      self.loopScrutineeStarts.push(self.loopScrutinees.length());
+
+      let mut index: u64 = 0;
+
+      while (index < scrutinees.length()) {
+        if (let Option::SOME(defRaw) = scrutinees.get(index)) {
+          self.loopScrutinees.push(*defRaw);
+        }
+
+        index += 1;
+      }
     }
 
     public popLoop(&mut self): void {
       let _discarded: Option<u32> = self.loopContinue.pop();
+
+      let Option::SOME(startValue) = self.loopScrutineeStarts.pop() else {
+        return;
+      };
+
+      while (self.loopScrutinees.length() > startValue) {
+        let _released: Option<u32> = self.loopScrutinees.pop();
+      }
+    }
+
+    /// The places the innermost enclosing loop's `let` condition consumes, in
+    /// declaration order. Empty outside a loop, and empty for a loop whose
+    /// condition holds no `let` over a place.
+    public innermostLoopScrutinees(&self): Vector<u32> {
+      let mut places: Vector<u32> = Vector::new<u32>();
+
+      if (self.loopScrutineeStarts.isEmpty()) {
+        return places;
+      }
+
+      let last: u64 = self.loopScrutineeStarts.length() - 1;
+
+      let Option::SOME(startValue) = self.loopScrutineeStarts.get(last) else {
+        return places;
+      };
+
+      let mut index: u64 = *startValue;
+
+      while (index < self.loopScrutinees.length()) {
+        if (let Option::SOME(defRaw) = self.loopScrutinees.get(index)) {
+          places.push(*defRaw);
+        }
+
+        index += 1;
+      }
+
+      return places;
     }
 
     public markContinue(&mut self): void {
@@ -2267,8 +2328,38 @@ export namespace Borrowck {
     key: &Hir::ExitKey,
     toScopeIndex: u64,
   ): void {
-    let drops: Vector<u32> = state.exitDrops(toScopeIndex);
+    let extra: Vector<u32> = Vector::new<u32>();
+
+    Borrowck::recordExitScheduleWith(state, schedules, key, toScopeIndex, &extra);
+  }
+
+  /// The same schedule, plus places that belong to no unwound scope.
+  ///
+  /// `extra` holds them in declaration order and is appended in the reverse, after
+  /// the scope drops: a loop condition's scrutinee lives outside the loop, so it is
+  /// freed last. A place that is already moved owes nothing, and the membership
+  /// guard keeps the one shape that could appear in both lists from dropping twice.
+  function recordExitScheduleWith(
+    state: &mut Borrowck::State,
+    schedules: &mut Hir::DropSchedules,
+    key: &Hir::ExitKey,
+    toScopeIndex: u64,
+    extra: &Vector<u32>,
+  ): void {
+    let mut drops: Vector<u32> = state.exitDrops(toScopeIndex);
     let defers: Vector<u32> = state.exitDefers(toScopeIndex);
+
+    let mut index: u64 = extra.length();
+
+    while (index > 0) {
+      index -= 1;
+
+      if (let Option::SOME(defRaw) = extra.get(index)) {
+        if (state.isMoveValid(*defRaw)) {
+          Borrowck::pushUniqueRaw(&mut drops, *defRaw);
+        }
+      }
+    }
 
     if (!drops.isEmpty()) {
       let mut scheduleRef: &mut Hir::DropSchedules = schedules;
@@ -2285,16 +2376,30 @@ export namespace Borrowck {
   /// the loop marker scope, which itself stays open. A jump with no enclosing
   /// loop schedules nothing, exactly as the oracle leaves it to the earlier
   /// semantic check to report.
+  ///
+  /// `paysConditionScrutinees` separates the two jumps. A `break` also owes the
+  /// place its loop's `let` condition consumes: that condition is the place's only
+  /// other drop site, and a `break` leaves without reaching it, so a body that
+  /// refilled the place before breaking would otherwise leak what it put there. A
+  /// `continue` jumps back to the condition, which is the drop site itself, and
+  /// owes nothing for it. Mirrors `check_break` and `check_continue`.
   function recordLoopExitSchedule(
     state: &mut Borrowck::State,
     schedules: &mut Hir::DropSchedules,
     key: Hir::ExitKey,
+    paysConditionScrutinees: boolean,
   ): void {
     let Option::SOME(loopIndex) = state.loopScopeIndex() else {
       return;
     };
 
-    Borrowck::recordExitSchedule(state, schedules, &key, loopIndex + 1);
+    let mut extra: Vector<u32> = Vector::new<u32>();
+
+    if (paysConditionScrutinees) {
+      extra = state.innermostLoopScrutinees();
+    }
+
+    Borrowck::recordExitScheduleWith(state, schedules, &key, loopIndex + 1, &extra);
   }
 
   /// Whether a match scrutinee names storage that belongs to something else: a
@@ -3226,13 +3331,13 @@ export namespace Borrowck {
         stateRef.setReachable(false);
       },
       Hir::HirKind::Break -> {
-        Borrowck::recordLoopExitSchedule(state, schedules, Hir::ExitKey::Break(nodeId));
+        Borrowck::recordLoopExitSchedule(state, schedules, Hir::ExitKey::Break(nodeId), true);
 
         let mut stateRef: &mut Borrowck::State = state;
         stateRef.setReachable(false);
       },
       Hir::HirKind::Continue -> {
-        Borrowck::recordLoopExitSchedule(state, schedules, Hir::ExitKey::Continue(nodeId));
+        Borrowck::recordLoopExitSchedule(state, schedules, Hir::ExitKey::Continue(nodeId), false);
 
         let mut stateRef: &mut Borrowck::State = state;
         stateRef.markContinue();
@@ -4543,12 +4648,14 @@ export namespace Borrowck {
     let mut update: Option<Hir::HirId> = Option::NONE;
     let mut whileCondition: Option<Hir::HirId> = Option::NONE;
     let mut conditionBindings: Vector<u32> = Vector::new<u32>();
+    let mut conditionScrutinees: Vector<u32> = Vector::new<u32>();
 
     match (&loopNode.condition) {
       Hir::LoopKind::Infinite -> {},
       Hir::LoopKind::While(condition) -> {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, condition);
 
+        conditionScrutinees = Borrowck::conditionScrutineePlaces(hir, &*state, condition);
         conditionBindings = Borrowck::takeConditionBindings(hir, state, schedules, condition);
         whileCondition = Option::SOME(condition);
       },
@@ -4559,6 +4666,8 @@ export namespace Borrowck {
 
         if (let Option::SOME(condition) = forLoop.condition) {
           Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, condition);
+
+          conditionScrutinees = Borrowck::conditionScrutineePlaces(hir, &*state, condition);
         }
 
         update = forLoop.update;
@@ -4574,7 +4683,7 @@ export namespace Borrowck {
     // to unwind. Mirrors the oracle's loop `ScopeEntry`.
     let mut enterRef: &mut Borrowck::State = state;
     enterRef.pushScope(0, false, true);
-    enterRef.pushLoop();
+    enterRef.pushLoop(&conditionScrutinees);
 
     Borrowck::checkGuardedBranch(
       defStore,
