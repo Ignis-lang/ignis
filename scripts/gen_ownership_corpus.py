@@ -12,7 +12,7 @@ The four axes are:
 
 - **scrutinee** — where the matched value comes from:
   `local` (an owned local), `field` (an owned record's field, `holder.kind`),
-  `call` (a call temporary), `refLocal` (`&kind`), `refField` (`&holder.kind`).
+  `call` (a call temporary).
 - **construct** — `match`, `ifLet`, `whileLet`, `letElse`.
 - **pattern** — `one` (a variant with one owning payload, bound),
   `two` (a variant with two payloads, both bound),
@@ -50,8 +50,13 @@ A combination is emitted only when it is valid Ignis. The rules, and why:
 4. **`moveOut` needs an owning binding.** `catchAll` binds the scrutinee rather
    than a payload and `wildcard` binds nothing, so neither can move a payload
    out.
-5. **Nothing moves out of a borrow.** `moveOut` is not generated for the
-   `refLocal` and `refField` scrutinees.
+5. **Borrowed scrutinees are out of scope.** `&kind` and `&holder.kind` were
+   generated at first and all 116 of their cases passed, which is the expected
+   result: matching through a shared borrow moves nothing, so no arm is ever
+   owed a drop and the bug class cannot reach them. They were dropped rather
+   than kept as a permanently-green third of the corpus, because the run time
+   is charged to every CI build. If borrowing ever gains a move-out form, this
+   is the rule to revisit.
 6. **`reassign` needs a field.** Putting the moved-from value back is only
    meaningful when the scrutinee was a field, and writing through a shared
    borrow is not allowed, so `reassign` is generated for the `field` scrutinee
@@ -109,18 +114,6 @@ CASE_STATUS: dict[str, str] = {
   "call_letElse_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
   "call_letElse_wildOfTwo_expr": "skip a pattern binding is never dropped: 1 value leaked",
   "call_letElse_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 1 value leaked",
-  "call_match_catchAll_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
-  "call_match_catchAll_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
-  "call_match_catchAll_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
-  "call_match_nested_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
-  "call_match_nested_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
-  "call_match_nested_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
-  "call_match_one_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
-  "call_match_one_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
-  "call_match_one_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
-  "call_match_two_blockBreak": "skip a pattern binding is never dropped: 2 values leaked",
-  "call_match_two_blockContinue": "skip a pattern binding is never dropped: 2 values leaked",
-  "call_match_two_blockReturn": "skip a pattern binding is never dropped: 2 values leaked",
   "call_match_wildOfTwo_block": "skip a pattern binding is never dropped: 1 value leaked",
   "call_match_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 2 values leaked",
   "call_match_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 2 values leaked",
@@ -143,18 +136,6 @@ CASE_STATUS: dict[str, str] = {
   "field_letElse_wildOfTwo_expr": "skip a pattern binding is never dropped: 1 value leaked",
   "field_letElse_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 1 value leaked",
   "field_letElse_wildOfTwo_reassign": "skip a pattern binding is never dropped: 1 value leaked",
-  "field_match_catchAll_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
-  "field_match_catchAll_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
-  "field_match_catchAll_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
-  "field_match_nested_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
-  "field_match_nested_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
-  "field_match_nested_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
-  "field_match_one_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
-  "field_match_one_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
-  "field_match_one_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
-  "field_match_two_blockBreak": "skip a pattern binding is never dropped: 2 values leaked",
-  "field_match_two_blockContinue": "skip a pattern binding is never dropped: 2 values leaked",
-  "field_match_two_blockReturn": "skip a pattern binding is never dropped: 2 values leaked",
   "field_match_wildOfTwo_block": "skip a pattern binding is never dropped: 1 value leaked",
   "field_match_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 2 values leaked",
   "field_match_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 2 values leaked",
@@ -177,18 +158,6 @@ CASE_STATUS: dict[str, str] = {
   "local_letElse_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
   "local_letElse_wildOfTwo_expr": "skip a pattern binding is never dropped: 1 value leaked",
   "local_letElse_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 1 value leaked",
-  "local_match_catchAll_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
-  "local_match_catchAll_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
-  "local_match_catchAll_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
-  "local_match_nested_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
-  "local_match_nested_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
-  "local_match_nested_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
-  "local_match_one_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
-  "local_match_one_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
-  "local_match_one_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
-  "local_match_two_blockBreak": "skip a pattern binding is never dropped: 2 values leaked",
-  "local_match_two_blockContinue": "skip a pattern binding is never dropped: 2 values leaked",
-  "local_match_two_blockReturn": "skip a pattern binding is never dropped: 2 values leaked",
   "local_match_wildOfTwo_block": "skip a pattern binding is never dropped: 1 value leaked",
   "local_match_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 2 values leaked",
   "local_match_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 2 values leaked",
@@ -206,7 +175,6 @@ class Scrutinee:
   description: str
   # Renders the statements that bring the scrutinee into being, given the
   # expression that builds an owned value and the type that value has.
-  borrowed: bool = False
   from_field: bool = False
   from_call: bool = False
 
@@ -228,17 +196,13 @@ class Scrutinee:
     if self.from_call:
       return "makeValue()"
 
-    base = "holder.kind" if self.from_field else "kind"
-
-    return f"&{base}" if self.borrowed else base
+    return "holder.kind" if self.from_field else "kind"
 
 
 SCRUTINEES: tuple[Scrutinee, ...] = (
   Scrutinee("local", "an owned local"),
   Scrutinee("field", "an owned record's field", from_field=True),
   Scrutinee("call", "a call temporary", from_call=True),
-  Scrutinee("refLocal", "a borrowed local", borrowed=True),
-  Scrutinee("refField", "a borrowed record field", borrowed=True, from_field=True),
 )
 
 
@@ -411,10 +375,6 @@ def is_valid(
 
   # 4. A `moveOut` needs a binding that owns a payload.
   if body.moves and not pattern.owning:
-    return False
-
-  # 5. Nothing moves out of a borrow.
-  if body.moves and scrutinee.borrowed:
     return False
 
   # 6. Only an owned field can be written back.
