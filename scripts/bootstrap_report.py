@@ -21,7 +21,17 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Gates whose status decides promotion. A gate stays out of this tuple until a
+# failure of it is a reason not to ship.
 GATE_IDS = ("G1", "G2", "G3", "G4", "G5", "G6")
+
+# Gates that are reported in full but never block promotion. G7 diffs the two
+# compilers' drop schedules: a divergence is a lead for an ownership bug, and
+# until the selfhost's ownership analysis is finished a non-zero count is the
+# expected state, so it must not hold the `candidate` verdict hostage.
+INFORMATIONAL_GATE_IDS = ("G7",)
+
+REPORTED_GATE_IDS = GATE_IDS + INFORMATIONAL_GATE_IDS
 
 GATE_TITLES = {
   "G1": "Fixed point (stage3 C identical to stage2)",
@@ -30,6 +40,7 @@ GATE_TITLES = {
   "G4": "Resource budget within 1.25x of the host",
   "G5": "Diagnostics equal or better than the host",
   "G6": "Syntax parity with the host parser",
+  "G7": "Drop-schedule parity with the host (informational)",
 }
 
 STATUS_PASS = "pass"
@@ -277,7 +288,7 @@ def collect_gates(gates_dir: Path) -> dict[str, dict]:
 
   gates = {}
 
-  for gate_id in GATE_IDS:
+  for gate_id in REPORTED_GATE_IDS:
     gates[gate_id] = found.pop(
       gate_id,
       {"gate": gate_id, "status": STATUS_SKIPPED, "summary": "no result was produced", "details": {}},
@@ -370,8 +381,10 @@ def format_report(
     f"- Generated: {generated_at}",
     f"- Candidate: **{'yes' if candidate else 'no'}**",
     "",
-    "A run is a candidate when every gate passes. Three consecutive candidate",
-    "nightly runs promote the stage2 binary to official.",
+    "A run is a candidate when every promotion gate passes. Three consecutive",
+    "candidate nightly runs promote the stage2 binary to official. Gates marked",
+    "informational (" + ", ".join(INFORMATIONAL_GATE_IDS) + ") are reported but",
+    "never counted towards that verdict.",
     "",
     "## Gates",
     "",
@@ -382,7 +395,8 @@ def format_report(
   for gate_id, gate in gates.items():
     title = GATE_TITLES.get(gate_id, gate_id)
     summary = str(gate["summary"]).replace("|", "\\|") or "—"
-    lines.append(f"| **{gate_id}** {title} | `{gate['status']}` | {summary} |")
+    status = f"`{gate['status']}`" + (" (informational)" if gate_id in INFORMATIONAL_GATE_IDS else "")
+    lines.append(f"| **{gate_id}** {title} | {status} | {summary} |")
 
   lines.extend(["", "## Details", ""])
 
