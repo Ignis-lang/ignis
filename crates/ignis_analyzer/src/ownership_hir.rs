@@ -1374,6 +1374,13 @@ impl<'a> HirOwnershipChecker<'a> {
     let scrutinee_owns_moved_payload =
       moves_scrutinee_payload && self.types.needs_drop_with_defs(&scrutinee_ty, self.defs);
 
+    // Whether an arm's bindings are this match's to free — the same test the arm-end
+    // schedule below applies. A borrowed payload still belongs to the referent, and a
+    // `let` condition's binding belongs to the branch that condition guards.
+    let arms_own_their_bindings = (!scrutinee_aliases_external_storage || arm_bindings_own_payload)
+      && !bindings_borrow_payloads
+      && !is_let_condition_match;
+
     let pre_match_reachable = self.reachable;
     let pre_match_state = self.states.clone();
 
@@ -1397,6 +1404,21 @@ impl<'a> HirOwnershipChecker<'a> {
 
       if bindings_borrow_payloads {
         self.borrowed_pattern_bindings.extend(arm_pattern_defs.iter().copied());
+      }
+
+      // An arm binding is live for the whole arm, including the paths that leave it
+      // early. Giving the arm its own scope entry is what puts those bindings in front of
+      // `calculate_exit_drops`, so a `return`, `break` or `continue` inside the arm body
+      // frees them like any other local in scope. The entry carries no block id, so
+      // `exit_block_scope` would write no schedule for it and the fall-through path keeps
+      // the `on_match_arm_end` schedule written below.
+      if arms_own_their_bindings {
+        self.scope_stack.push(ScopeEntry {
+          block_hir_id: None,
+          owned_vars: arm_pattern_defs.clone(),
+          is_loop: false,
+          deferred_bodies: Vec::new(),
+        });
       }
 
       if let Some(guard_id) = arm.guard {
@@ -1431,6 +1453,10 @@ impl<'a> HirOwnershipChecker<'a> {
             self.try_consume(result_def, span.clone());
           }
         }
+      }
+
+      if arms_own_their_bindings {
+        self.scope_stack.pop().expect("unbalanced scope stack");
       }
 
       // Schedule drops for arm pattern bindings that are still valid at arm body end.

@@ -3839,6 +3839,12 @@ export namespace Borrowck {
     // value and some pattern moves an owning payload out of it.
     let scrutineeOwnsMovedPayload: boolean = movesScrutineePayload && Borrowck::needsDropType(defStore, typeStore, scrutineeType);
 
+    // Whether an arm's bindings are this match's to free — the same test
+    // `recordMatchArmDrops` applies. A borrowed payload still belongs to the
+    // referent, and a `let` condition's binding belongs to the branch that
+    // condition guards. Mirrors `arms_own_their_bindings`.
+    let armsOwnTheirBindings: boolean = (!aliasesExternalStorage || armBindingsOwnPayload) && !bindsBorrowedPayloads && !isLetConditionMatch;
+
     let preReachable: boolean = state.reachable;
     let preMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
 
@@ -3877,6 +3883,28 @@ export namespace Borrowck {
         bindingIndex += 1;
       }
 
+      // An arm binding is live for the whole arm, including the paths that leave
+      // it early. Opening a scope that owns those bindings is what puts them in
+      // front of `exitDrops`, so a `return`, `break` or `continue` inside the arm
+      // body frees them like any other local in scope. The scope carries no block,
+      // so `exitScope` writes no schedule of its own and the fall-through path
+      // keeps the match-arm-end schedule `recordMatchArmDrops` writes below.
+      // Mirrors the arm scope `check_match` pushes.
+      if (armsOwnTheirBindings) {
+        let mut armScopeRef: &mut Borrowck::State = state;
+        armScopeRef.pushScope(0, false, false);
+
+        let mut ownedIndex: u64 = 0;
+
+        while (ownedIndex < bindings.length()) {
+          if (let Option::SOME(defRaw) = bindings.get(ownedIndex)) {
+            armScopeRef.pushOwned(*defRaw);
+          }
+
+          ownedIndex += 1;
+        }
+      }
+
       if (let Option::SOME(guard) = arm.guard) {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, guard);
       }
@@ -3903,6 +3931,10 @@ export namespace Borrowck {
             Borrowck::tryConsume(state, result);
           }
         }
+      }
+
+      if (armsOwnTheirBindings) {
+        Borrowck::exitScope(state, schedules);
       }
 
       Borrowck::recordMatchArmDrops(

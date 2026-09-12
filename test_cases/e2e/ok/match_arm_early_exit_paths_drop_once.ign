@@ -1,0 +1,126 @@
+// e2e: std
+// The early-exit drop must not become a second drop. An arm that only sometimes returns
+// frees the binding once on each path; an arm that hands the binding on before returning
+// leaves nothing for the exit to free; and the `let`-condition desugarings keep handing
+// their binding to the branch they guard.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+enum Kind {
+  FIRST(Tracked),
+  SECOND(Tracked),
+  EMPTY,
+}
+
+record Holder {
+  public kind: Kind;
+  public label: Tracked;
+}
+
+function describe(tracked: &Tracked): i32 {
+  return tracked.id;
+}
+
+function consume(tracked: Tracked): i32 {
+  return tracked.id;
+}
+
+function makeHolder(id: i32): Holder {
+  return Holder { kind: Kind::SECOND(Tracked { id: id }), label: Tracked { id: id + 100 } };
+}
+
+/// Both paths of a conditional return drop the binding exactly once, and the owner still
+/// drops the sibling field it kept.
+function conditionalReturn(holder: Holder, bail: boolean): i32 {
+  match (holder.kind) {
+    Kind::SECOND(payload) -> {
+      if (bail) {
+        return describe(&payload);
+      }
+
+      Io::println("fell through");
+    },
+    _ -> {},
+  };
+
+  return 0;
+}
+
+/// The arm moves the binding into a call before returning, so the exit path owes nothing.
+function movedThenReturn(holder: Holder): i32 {
+  match (holder.kind) {
+    Kind::SECOND(payload) -> {
+      return consume(payload);
+    },
+    _ -> {},
+  };
+
+  return 0;
+}
+
+/// A return nested inside blocks within the arm still sees the arm's binding.
+function nestedReturn(holder: Holder): i32 {
+  match (holder.kind) {
+    Kind::SECOND(payload) -> {
+      {
+        {
+          return describe(&payload);
+        }
+      }
+    },
+    _ -> {},
+  };
+
+  return 0;
+}
+
+/// `if (let ...)` hands its binding to the guarded branch, which returns out of it.
+function ifLetReturn(id: i32): i32 {
+  if (let Kind::SECOND(payload) = Kind::SECOND(Tracked { id: id })) {
+    return describe(&payload);
+  }
+
+  return 0;
+}
+
+/// `while (let ...)` does the same, with a `break` leaving the guarded body.
+function whileLetBreak(id: i32): i32 {
+  let mut total: i32 = 0;
+
+  while (let Kind::SECOND(payload) = Kind::SECOND(Tracked { id: id })) {
+    total = describe(&payload);
+    break;
+  }
+
+  return total;
+}
+
+function main(): i32 {
+  Io::println("conditional return, bail");
+  Io::println(`${conditionalReturn(makeHolder(1), true)}`.toStr());
+
+  Io::println("conditional return, fall through");
+  Io::println(`${conditionalReturn(makeHolder(2), false)}`.toStr());
+
+  Io::println("moved then return");
+  Io::println(`${movedThenReturn(makeHolder(3))}`.toStr());
+
+  Io::println("nested return");
+  Io::println(`${nestedReturn(makeHolder(4))}`.toStr());
+
+  Io::println("if let return");
+  Io::println(`${ifLetReturn(5)}`.toStr());
+
+  Io::println("while let break");
+  Io::println(`${whileLetBreak(6)}`.toStr());
+
+  return 0;
+}
