@@ -502,6 +502,255 @@ export namespace Hir {
     };
   }
 
+  /// Every direct child node of this kind, mirroring `HIRKind::child_ids`
+  /// variant by variant and in the same order.
+  ///
+  /// Exhaustive on purpose, like `offsetKind`: a new variant must be given a
+  /// traversal here or `--dump-drop-schedule` silently stops walking into it.
+  function childIds(kind: &Hir::HirKind): Vector<Hir::HirId> {
+    let mut children: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    match (kind) {
+      Hir::HirKind::Literal(_) -> {},
+      Hir::HirKind::Unit -> {},
+      Hir::HirKind::Variable(_) -> {},
+      Hir::HirKind::Break -> {},
+      Hir::HirKind::Continue -> {},
+      Hir::HirKind::Error -> {},
+      Hir::HirKind::SizeOf(_) -> {},
+      Hir::HirKind::AlignOf(_) -> {},
+      Hir::HirKind::MaxOf(_) -> {},
+      Hir::HirKind::MinOf(_) -> {},
+      Hir::HirKind::StaticAccess(_) -> {},
+      Hir::HirKind::Trap -> {},
+      Hir::HirKind::BuiltinUnreachable -> {},
+      Hir::HirKind::BuiltinDropGlue(_) -> {},
+      Hir::HirKind::Panic(id) -> {
+        children.push(id);
+      },
+      Hir::HirKind::TypeOf(id) -> {
+        children.push(id);
+      },
+      Hir::HirKind::Dereference(id) -> {
+        children.push(id);
+      },
+      Hir::HirKind::ExpressionStatement(id) -> {
+        children.push(id);
+      },
+      Hir::HirKind::BuiltinLoad(load) -> {
+        children.push(load.ptr);
+      },
+      Hir::HirKind::BuiltinDropInPlace(dropNode) -> {
+        children.push(dropNode.ptr);
+      },
+      Hir::HirKind::BuiltinStore(storeNode) -> {
+        children.push(storeNode.ptr);
+        children.push(storeNode.value);
+      },
+      Hir::HirKind::BuiltinHash(hashNode) -> {
+        children.push(hashNode.value);
+        children.push(hashNode.hasher);
+      },
+      Hir::HirKind::BuiltinEq(eqNode) -> {
+        children.push(eqNode.left);
+        children.push(eqNode.right);
+      },
+      Hir::HirKind::Binary(binaryNode) -> {
+        children.push(binaryNode.left);
+        children.push(binaryNode.right);
+      },
+      Hir::HirKind::Unary(unaryNode) -> {
+        children.push(unaryNode.operand);
+      },
+      Hir::HirKind::Call(call) -> {
+        let mut index: u64 = 0;
+
+        while (index < call.args.length()) {
+          if (let Option::SOME(arg) = call.args.get(index)) {
+            children.push(*arg);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirKind::CallClosure(call) -> {
+        children.push(call.callee);
+
+        let mut index: u64 = 0;
+
+        while (index < call.args.length()) {
+          if (let Option::SOME(arg) = call.args.get(index)) {
+            children.push(*arg);
+          }
+
+          index += 1;
+        }
+      },
+      // Everything else a closure carries is definitions or already-resolved
+      // metadata, not a HIR node this walk can reach. Mirrors the Rust arm,
+      // which only ever pushes `body`.
+      Hir::HirKind::Closure(closure) -> {
+        children.push(closure.body);
+      },
+      Hir::HirKind::Cast(cast) -> {
+        children.push(cast.expression);
+      },
+      Hir::HirKind::BitCast(cast) -> {
+        children.push(cast.expression);
+      },
+      Hir::HirKind::Reference(reference) -> {
+        children.push(reference.expression);
+      },
+      Hir::HirKind::Index(indexNode) -> {
+        children.push(indexNode.base);
+        children.push(indexNode.index);
+      },
+      Hir::HirKind::VectorLiteral(elements) -> {
+        let mut index: u64 = 0;
+
+        while (index < elements.length()) {
+          if (let Option::SOME(elem) = elements.get(index)) {
+            children.push(*elem);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirKind::TupleLiteral(elements) -> {
+        let mut index: u64 = 0;
+
+        while (index < elements.length()) {
+          if (let Option::SOME(elem) = elements.get(index)) {
+            children.push(*elem);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirKind::MakeSlice(makeSlice) -> {
+        children.push(makeSlice.data);
+        children.push(makeSlice.len);
+      },
+      Hir::HirKind::FieldAccess(access) -> {
+        children.push(access.base);
+      },
+      Hir::HirKind::RecordInit(init) -> {
+        let mut index: u64 = 0;
+
+        while (index < init.fields.length()) {
+          if (let Option::SOME(field) = init.fields.get(index)) {
+            children.push(field.value);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirKind::MethodCall(call) -> {
+        if (let Option::SOME(receiver) = call.receiver) {
+          children.push(receiver);
+        }
+
+        let mut index: u64 = 0;
+
+        while (index < call.args.length()) {
+          if (let Option::SOME(arg) = call.args.get(index)) {
+            children.push(*arg);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirKind::EnumVariant(variant) -> {
+        let mut index: u64 = 0;
+
+        while (index < variant.payload.length()) {
+          if (let Option::SOME(id) = variant.payload.get(index)) {
+            children.push(*id);
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirKind::Let(letNode) -> {
+        if (let Option::SOME(value) = letNode.value) {
+          children.push(value);
+        }
+      },
+      Hir::HirKind::Assign(assign) -> {
+        children.push(assign.target);
+        children.push(assign.value);
+      },
+      Hir::HirKind::Block(block) -> {
+        let mut index: u64 = 0;
+
+        while (index < block.statements.length()) {
+          if (let Option::SOME(statement) = block.statements.get(index)) {
+            children.push(*statement);
+          }
+
+          index += 1;
+        }
+
+        if (let Option::SOME(expression) = block.expression) {
+          children.push(expression);
+        }
+      },
+      Hir::HirKind::If(ifNode) -> {
+        children.push(ifNode.condition);
+        children.push(ifNode.thenBranch);
+
+        if (let Option::SOME(elseBranch) = ifNode.elseBranch) {
+          children.push(elseBranch);
+        }
+      },
+      Hir::HirKind::LetElse(letElse) -> {
+        children.push(letElse.value);
+        children.push(letElse.elseBlock);
+      },
+      Hir::HirKind::Loop(loopNode) -> {
+        let conditionChildren: Vector<Hir::HirId> = Hir::loopKindChildIds(&loopNode.condition);
+        let mut index: u64 = 0;
+
+        while (index < conditionChildren.length()) {
+          if (let Option::SOME(id) = conditionChildren.get(index)) {
+            children.push(*id);
+          }
+
+          index += 1;
+        }
+
+        children.push(loopNode.body);
+      },
+      Hir::HirKind::Return(value) -> {
+        if (let Option::SOME(id) = value) {
+          children.push(id);
+        }
+      },
+      Hir::HirKind::Defer(body) -> {
+        children.push(body);
+      },
+      Hir::HirKind::Match(matchNode) -> {
+        children.push(matchNode.scrutinee);
+
+        let mut index: u64 = 0;
+
+        while (index < matchNode.arms.length()) {
+          if (let Option::SOME(arm) = matchNode.arms.get(index)) {
+            if (let Option::SOME(guard) = arm.guard) {
+              children.push(guard);
+            }
+
+            children.push(arm.body);
+          }
+
+          index += 1;
+        }
+      },
+    };
+
+    return children;
+  }
+
   /// Insertion-ordered `DefinitionId -> HirId` map backed by parallel vectors.
   ///
   /// Replaces the Rust `HashMap` fields of `HIR`: the selfhost store favors

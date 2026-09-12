@@ -1,5 +1,6 @@
 import Vector from "std::vector";
 
+import SourceSpan from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 
 import _ from "./ids";
@@ -113,6 +114,22 @@ export namespace Hir {
     public bodies: Vector<Hir::HirId>;
   }
 
+  /// Mirrors `ignis_hir::drop_schedule::MoveSite`: a point where a binding's
+  /// ownership was transferred away. Recorded for `--dump-drop-schedule`
+  /// only; nothing in lowering reads it.
+  record MoveSite {
+    /// Function whose body contains the move.
+    public functionId: Analyzer::DefinitionId;
+    /// Span of the expression that consumed the binding.
+    public span: SourceSpan;
+  }
+
+  /// One binding's move sites, keyed by the moved definition.
+  record MoveEntry {
+    public def: Analyzer::DefinitionId;
+    public sites: Vector<Hir::MoveSite>;
+  }
+
   /// Mirrors `ignis_hir::drop_schedule::DropSchedules`, the output the Rust
   /// ownership walk produces alongside its diagnostics and that LIR lowering
   /// reads to place drop and defer emissions.
@@ -137,6 +154,11 @@ export namespace Hir {
     public onScopeEndDefers: Vector<Hir::NodeDeferEntry>;
     public onExitDefers: Vector<Hir::ExitDeferEntry>;
 
+    /// Where each binding was marked moved. Debug metadata only, mirroring
+    /// the Rust `moves` field: nothing in lowering reads it, and it is
+    /// deliberately excluded from `isEmpty`.
+    public moves: Vector<Hir::MoveEntry>;
+
     public static init(): DropSchedules {
       return DropSchedules {
         onScopeEnd: Vector::new<Hir::NodeDropEntry>(),
@@ -145,6 +167,7 @@ export namespace Hir {
         onOverwrite: Vector::new<Hir::NodeDropEntry>(),
         onScopeEndDefers: Vector::new<Hir::NodeDeferEntry>(),
         onExitDefers: Vector::new<Hir::ExitDeferEntry>(),
+        moves: Vector::new<Hir::MoveEntry>(),
       };
     }
 
@@ -245,6 +268,60 @@ export namespace Hir {
       }
 
       self.onExitDefers.push(Hir::ExitDeferEntry { key: key, bodies: bodies });
+    }
+
+    /// Appends one move site for `defId`, mirroring the Rust
+    /// `entry(..).or_default().push(..)` on `moves`.
+    public recordMove(
+      &mut self,
+      defId: Analyzer::DefinitionId,
+      functionId: Analyzer::DefinitionId,
+      span: SourceSpan
+    ): void {
+      let site: Hir::MoveSite = Hir::MoveSite { functionId: functionId, span: span };
+      let existing: Option<u64> = Hir::findMoveEntry(&self.moves, defId);
+
+      if (let Option::SOME(index) = existing) {
+        let mut sites: Vector<Hir::MoveSite> = self.movesOf(defId);
+        sites.push(site);
+
+        self.moves.set(index, Hir::MoveEntry { def: defId, sites: sites });
+        return;
+      }
+
+      let mut sites: Vector<Hir::MoveSite> = Vector::new<Hir::MoveSite>();
+      sites.push(site);
+
+      self.moves.push(Hir::MoveEntry { def: defId, sites: sites });
+    }
+
+    /// Move sites recorded for `defId`, in recording order. Returns a copy so
+    /// the caller can keep reading the schedules while it walks it.
+    public movesOf(&self, defId: Analyzer::DefinitionId): Vector<Hir::MoveSite> {
+      let mut index: u64 = 0;
+
+      while (index < self.moves.length()) {
+        if (let Option::SOME(entry) = self.moves.get(index)) {
+          if (entry.def.equals(&defId)) {
+            let mut result: Vector<Hir::MoveSite> = Vector::new<Hir::MoveSite>();
+            let mut siteIndex: u64 = 0;
+
+            while (siteIndex < entry.sites.length()) {
+              if (let Option::SOME(site) = entry.sites.get(siteIndex)) {
+                result.push(Hir::MoveSite { functionId: site.functionId, span: site.span });
+              }
+
+              siteIndex += 1;
+            }
+
+            return result;
+          }
+        }
+
+        index += 1;
+      }
+
+      return Vector::new<Hir::MoveSite>();
     }
 
     /// Drop list of a block, empty when nothing is scheduled there. Returns a
@@ -392,6 +469,25 @@ export namespace Hir {
     while (index < entries.length()) {
       if (let Option::SOME(entry) = entries.get(index)) {
         if (Hir::exitKeysEqual(&entry.key, key)) {
+          return Option::SOME(index);
+        }
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
+  }
+
+  function findMoveEntry(
+    entries: &Vector<Hir::MoveEntry>,
+    defId: Analyzer::DefinitionId
+  ): Option<u64> {
+    let mut index: u64 = 0;
+
+    while (index < entries.length()) {
+      if (let Option::SOME(entry) = entries.get(index)) {
+        if (entry.def.equals(&defId)) {
           return Option::SOME(index);
         }
       }

@@ -210,6 +210,12 @@ export namespace Borrowck {
     /// `is_inside_drop_method`.
     public inDropMethod: boolean;
 
+    /// Function whose body is currently being walked, mirroring the
+    /// ownership oracle's `current_fn`. Used only to attribute a recorded
+    /// move site to its owning function for `--dump-drop-schedule`; nothing
+    /// else in this checker reads it.
+    currentFunction: Analyzer::DefinitionId;
+
     public static init(): State {
       return State {
         borrowDefs: Vector::new<u32>(),
@@ -233,7 +239,16 @@ export namespace Borrowck {
         reachable: true,
         inDefer: false,
         inDropMethod: false,
+        currentFunction: Id::fromRaw<Analyzer::DefinitionTag>(0),
       };
+    }
+
+    public setCurrentFunction(&mut self, defId: Analyzer::DefinitionId): void {
+      self.currentFunction = defId;
+    }
+
+    public currentFunctionId(&self): Analyzer::DefinitionId {
+      return self.currentFunction;
     }
 
     public setReachable(&mut self, value: boolean): void {
@@ -1905,15 +1920,29 @@ export namespace Borrowck {
 
   /// Transitions a local to `Moved`. An already invalid state is left as it
   /// is, because `checkUse` has already reported it. Mirrors `try_consume`.
-  function tryConsume(state: &mut Borrowck::State, defId: Analyzer::DefinitionId): void {
+  ///
+  /// Records a move site on the `Valid -> Moved` transition only, mirroring
+  /// `record_move`: pure debugging metadata for `--dump-drop-schedule` that
+  /// never influences what is dropped.
+  function tryConsume(
+    state: &mut Borrowck::State,
+    schedules: &mut Hir::DropSchedules,
+    defId: Analyzer::DefinitionId,
+    span: SourceSpan,
+  ): void {
     if (let Option::SOME(value) = state.moveValue(defId.raw())) {
       if (value == Borrowck::MOVE_MOVED || value == Borrowck::MOVE_DROPPED || value == Borrowck::MOVE_FREED) {
         return;
       }
     }
 
+    let functionId: Analyzer::DefinitionId = state.currentFunctionId();
+
     let mut stateRef: &mut Borrowck::State = state;
     stateRef.setMoveValue(defId.raw(), Borrowck::MOVE_MOVED);
+
+    let mut schedulesRef: &mut Hir::DropSchedules = schedules;
+    schedulesRef.recordMove(defId, functionId, span);
   }
 
   /// Applies a manual `.drop()` to the local its receiver names. A live local
@@ -2890,13 +2919,13 @@ export namespace Borrowck {
       },
 
       Hir::HirKind::VectorLiteral(elements) -> {
-        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &elements);
+        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &elements, span);
       },
       Hir::HirKind::TupleLiteral(elements) -> {
-        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &elements);
+        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &elements, span);
       },
       Hir::HirKind::EnumVariant(variant) -> {
-        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &variant.payload);
+        Borrowck::checkMovingOperands(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &variant.payload, span);
       },
       Hir::HirKind::RecordInit(init) -> {
         let mut index: u64 = 0;
@@ -2907,7 +2936,7 @@ export namespace Borrowck {
             Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, field.value);
 
             if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, field.value)) {
-              Borrowck::tryConsume(state, source);
+              Borrowck::tryConsume(state, schedules, source, span);
             }
           }
 
@@ -2943,7 +2972,7 @@ export namespace Borrowck {
       // borrow checker's empty `Closure` arm; the ownership oracle still
       // consumes what the environment takes by value.
       Hir::HirKind::Closure(closure) -> {
-        Borrowck::checkClosureCaptures(defStore, typeStore, state, diagnostics, &closure.captures, span);
+        Borrowck::checkClosureCaptures(defStore, typeStore, state, diagnostics, schedules, &closure.captures, span);
       },
       Hir::HirKind::MethodCall(call) -> {
         Borrowck::checkMethodCall(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &call, span);
@@ -2962,7 +2991,7 @@ export namespace Borrowck {
         Borrowck::checkIf(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &ifNode, span);
       },
       Hir::HirKind::LetElse(letElse) -> {
-        Borrowck::checkLetElse(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &letElse);
+        Borrowck::checkLetElse(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &letElse, span);
       },
       Hir::HirKind::Loop(loopNode) -> {
         Borrowck::checkLoop(defStore, typeStore, symbols, hir, state, diagnostics, schedules, &loopNode);
@@ -3043,6 +3072,7 @@ export namespace Borrowck {
     typeStore: &mut Analyzer::TypeStore,
     state: &mut Borrowck::State,
     diagnostics: &mut DiagnosticBag,
+    schedules: &mut Hir::DropSchedules,
     captures: &Vector<Hir::HirCapture>,
     span: SourceSpan,
   ): void {
@@ -3056,7 +3086,7 @@ export namespace Borrowck {
               Borrowck::emitCannotMoveOutOfBorrow(diagnostics, span);
             }
 
-            Borrowck::tryConsume(state, capture.sourceDef);
+            Borrowck::tryConsume(state, schedules, capture.sourceDef, span);
           }
         }
       }
@@ -3130,7 +3160,7 @@ export namespace Borrowck {
           Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, receiver);
 
           if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, receiver)) {
-            Borrowck::tryConsume(state, source);
+            Borrowck::tryConsume(state, schedules, source, span);
           }
         }
       }
@@ -3183,6 +3213,7 @@ export namespace Borrowck {
     diagnostics: &mut DiagnosticBag,
     schedules: &mut Hir::DropSchedules,
     operands: &Vector<Hir::HirId>,
+    span: SourceSpan,
   ): void {
     let mut index: u64 = 0;
 
@@ -3192,7 +3223,7 @@ export namespace Borrowck {
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, *operand);
 
         if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *operand)) {
-          Borrowck::tryConsume(state, source);
+          Borrowck::tryConsume(state, schedules, source, span);
         }
       }
 
@@ -3223,7 +3254,7 @@ export namespace Borrowck {
         Borrowck::checkTemporaryBorrow(defStore, symbols, hir, state, diagnostics, *argument, span);
 
         if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *argument)) {
-          Borrowck::tryConsume(state, source);
+          Borrowck::tryConsume(state, schedules, source, span);
         }
       }
 
@@ -3303,7 +3334,7 @@ export namespace Borrowck {
       Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, value);
 
       if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, value)) {
-        Borrowck::tryConsume(state, source);
+        Borrowck::tryConsume(state, schedules, source, span);
       }
 
       Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, value);
@@ -3468,7 +3499,7 @@ export namespace Borrowck {
     Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, assign.value);
 
     if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, assign.value)) {
-      Borrowck::tryConsume(state, source);
+      Borrowck::tryConsume(state, schedules, source, span);
     }
   }
 
@@ -3717,6 +3748,7 @@ export namespace Borrowck {
     diagnostics: &mut DiagnosticBag,
     schedules: &mut Hir::DropSchedules,
     letElse: &Hir::HirLetElse,
+    span: SourceSpan,
   ): void {
     Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, letElse.value);
 
@@ -3748,7 +3780,7 @@ export namespace Borrowck {
     // scrutinee consumption in the oracle's `LetElse` arm.
     if (bindings.length() > 0 && !bindsBorrowedPayloads) {
       if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, letElse.value)) {
-        Borrowck::tryConsume(state, source);
+        Borrowck::tryConsume(state, schedules, source, span);
       }
     }
 
@@ -3819,7 +3851,7 @@ export namespace Borrowck {
       if (scrutineeIsBorrowed) {
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, matchNode.scrutinee);
       } else if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
-        Borrowck::tryConsume(state, source);
+        Borrowck::tryConsume(state, schedules, source, span);
       } else if (let Option::SOME(_owner) = Borrowck::movedFieldOwner(defStore, typeStore, hir, matchNode.scrutinee)) {
         armBindingsOwnPayload = true;
       } else {
@@ -3828,7 +3860,7 @@ export namespace Borrowck {
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, matchNode.scrutinee);
       }
     } else if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
-      Borrowck::tryConsume(state, source);
+      Borrowck::tryConsume(state, schedules, source, span);
     }
 
     let isLetConditionMatch: boolean = Borrowck::armsAreLetConditionDesugaring(hir, &matchNode.arms);
@@ -3928,7 +3960,7 @@ export namespace Borrowck {
           }
 
           if (Borrowck::containsRaw(&mut bindings, result.raw())) {
-            Borrowck::tryConsume(state, result);
+            Borrowck::tryConsume(state, schedules, result, span);
           }
         }
       }
@@ -4179,6 +4211,7 @@ export namespace Borrowck {
     let mut state: Borrowck::State = Borrowck::State::init();
     state.pushScope(0, false, false);
     state.setInDropMethod(Borrowck::isInstanceDropMethod(defStore, symbols, functionId));
+    state.setCurrentFunction(functionId);
 
     let mut index: u64 = 0;
 

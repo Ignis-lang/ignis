@@ -1,3 +1,5 @@
+import Vector from "std::vector";
+
 import Id from "@compiler::ids";
 
 import _ from "./ids";
@@ -27,6 +29,33 @@ export namespace Hir {
       Option::SOME(id) -> Option::SOME(Hir::offsetHirId(id, offset)),
       Option::NONE -> Option::NONE,
     };
+  }
+
+  /// Every direct child node of this loop header, mirroring
+  /// `LoopKind::child_ids`, in the same order: `init`, then `condition`, then
+  /// `update` for a `for` loop.
+  function loopKindChildIds(kind: &Hir::LoopKind): Vector<Hir::HirId> {
+    let mut children: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+
+    match (kind) {
+      Hir::LoopKind::Infinite -> {},
+      Hir::LoopKind::While(condition) -> {
+        children.push(condition);
+      },
+      Hir::LoopKind::For(forLoop) -> {
+        if (let Option::SOME(id) = forLoop.init) {
+          children.push(id);
+        }
+        if (let Option::SOME(id) = forLoop.condition) {
+          children.push(id);
+        }
+        if (let Option::SOME(id) = forLoop.update) {
+          children.push(id);
+        }
+      },
+    };
+
+    return children;
   }
 
   /// Offsets every `HirId` referenced by a loop condition, mirroring
