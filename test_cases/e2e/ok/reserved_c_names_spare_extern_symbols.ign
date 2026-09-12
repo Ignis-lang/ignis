@@ -1,0 +1,25 @@
+// e2e: std
+//
+// The reserved-name rule must never touch a name the C side owns. `strlen` is
+// in the reserved set, so if the rule reached an `extern` declaration or an
+// `@externName` override this would fail to link against `strlen__ign`.
+extern __reserved_libc {
+  function strlen(s: *u8): u64;
+
+  @externName("strlen")
+  function byteLength(s: *u8): u64;
+}
+
+function main(): i32 {
+  let text: str = "ignis";
+  let bytes: *u8 = text as *u8;
+
+  let viaExtern: u64 = __reserved_libc::strlen(bytes);
+  let viaExternName: u64 = __reserved_libc::byteLength(bytes);
+
+  if (viaExtern != 5 || viaExternName != 5) {
+    return 1;
+  }
+
+  return 0;
+}
