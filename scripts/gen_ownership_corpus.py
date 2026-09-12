@@ -1,0 +1,916 @@
+#!/usr/bin/env python3
+"""Generates the ownership matrix corpus under `test_cases/e2e/{ok,err}/ownership`.
+
+Every drop bug found in the pattern-matching paths so far has been the same
+shape: a binding produced by a pattern is dropped zero times or twice, and
+which one happens depends on the *combination* of what was matched, how it was
+matched, what the pattern bound and what the arm body did. Those four choices
+are independent, so the interesting space is their cartesian product, and a
+hand-written corpus samples it by accident. This script enumerates it.
+
+The four axes are:
+
+- **scrutinee** — where the matched value comes from:
+  `local` (an owned local), `field` (an owned record's field, `holder.kind`),
+  `call` (a call temporary).
+- **construct** — `match`, `ifLet`, `whileLet`, `letElse`.
+- **pattern** — `one` (a variant with one owning payload, bound),
+  `two` (a variant with two payloads, both bound),
+  `wildOfTwo` (`PAIR(left, _)`, one payload discarded),
+  `catchAll` (an identifier binding the whole scrutinee),
+  `wildcard` (`_`), `nested` (`Option<Result<Tracked, i32>>`).
+- **body** — `expr` (an expression arm), `block` (a block arm),
+  `blockReturn`, `blockBreak`, `blockContinue` (a block arm leaving early),
+  `moveOut` (the binding is moved into a consuming helper),
+  `reassign` (the moved-from field is written back before it drops).
+
+Each generated `ok` fixture counts constructions and drops in two `static mut`
+counters and returns the imbalance as its exit code, so 0 means every value was
+dropped exactly once. A double free shows up as a negative exit code or a crash,
+a leak as a positive one *and* as a LeakSanitizer failure, since leak checking
+is on for `ok` fixtures. The arm's observed value is folded into the same exit
+code, so an arm that runs but reads the wrong thing fails too.
+
+## Pruning rules
+
+A combination is emitted only when it is valid Ignis. The rules, and why:
+
+1. **Irrefutable patterns need a `match`.** `catchAll` and `wildcard` match
+   everything, so `if let` / `while let` / `let ... else` have nothing to fall
+   through to. They are generated for `match` only.
+2. **`while let` needs a draining scrutinee.** A `while let` over a fixed local,
+   field or reference either never terminates or moves the same value on every
+   iteration. Only the `call` scrutinee — a `Vector::pop()` that runs out — is
+   expressible, so `whileLet` is generated for `call` alone.
+3. **Collapsed bodies.** Only a `match` arm can be an expression, so `block` is
+   generated for `match` only: every other construct's body is already a block
+   and `expr` covers it. `let ... else` has no arm at all — its "body" is the
+   code after the binding — so `blockReturn` there is the same program as
+   `expr` and is not generated.
+4. **`moveOut` needs an owning binding.** `catchAll` binds the scrutinee rather
+   than a payload and `wildcard` binds nothing, so neither can move a payload
+   out.
+5. **Borrowed scrutinees are out of scope.** `&kind` and `&holder.kind` were
+   generated at first and all 116 of their cases passed, which is the expected
+   result: matching through a shared borrow moves nothing, so no arm is ever
+   owed a drop and the bug class cannot reach them. They were dropped rather
+   than kept as a permanently-green third of the corpus, because the run time
+   is charged to every CI build. If borrowing ever gains a move-out form, this
+   is the rule to revisit.
+6. **`reassign` needs a field.** Putting the moved-from value back is only
+   meaningful when the scrutinee was a field, and writing through a shared
+   borrow is not allowed, so `reassign` is generated for the `field` scrutinee
+   only.
+7. **Tuple patterns are unreachable.** The pattern grammar parses them, but the
+   *type* grammar has no tuple type, so an owning tuple value cannot be spelled
+   (`function makePair(): (Tracked, Tracked)` fails to parse). The axis is
+   dropped and the rejection is recorded once, as an `err` fixture, instead.
+
+## Case status
+
+`CASE_STATUS` records the cases the host does not handle today. A case listed
+as `err` is emitted into `test_cases/e2e/err/ownership` with an `// e2e: err`
+header, because the host rejects it and the self-hosted compiler has to reject
+it too. A case listed as `skip <reason>` stays in the `ok` corpus but carries a
+`// e2e: skip <reason>` header: the runner still compiles and runs it, reports
+it as skipped while it fails, and fails the run the moment it starts passing,
+so the list cannot rot.
+
+The table is data, not judgement: it is filled in from an actual host run, and
+an entry only leaves it when the compiler is fixed.
+
+## Determinism
+
+The script is deterministic and idempotent: case order comes from the axis
+declarations, every fixture is rendered from the same template, and nothing
+carries a timestamp. Re-running it on an unchanged tree produces no diff, which
+CI checks with `git diff --exit-code`.
+"""
+
+import argparse
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+
+REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+
+OK_DIR = REPOSITORY_ROOT / "test_cases" / "e2e" / "ok" / "ownership"
+ERR_DIR = REPOSITORY_ROOT / "test_cases" / "e2e" / "err" / "ownership"
+
+GENERATED_BANNER = "// Generated by scripts/gen_ownership_corpus.py. Do not edit by hand."
+
+# Cases the host does not handle today, as `case name -> status`.
+#
+# `err` moves the case into the error corpus; `skip <reason>` keeps it in the
+# ok corpus behind an expected-failure header. Every entry is evidence of an
+# open compiler bug, not a decision about what the language should do.
+CASE_STATUS: dict[str, str] = {
+  "call_ifLet_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_ifLet_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_ifLet_wildOfTwo_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_ifLet_wildOfTwo_expr": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_ifLet_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_letElse_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_letElse_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_letElse_wildOfTwo_expr": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_letElse_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_match_wildOfTwo_block": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_match_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 2 values leaked",
+  "call_match_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 2 values leaked",
+  "call_match_wildOfTwo_blockReturn": "skip a pattern binding is never dropped: 2 values leaked",
+  "call_match_wildOfTwo_expr": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_match_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_whileLet_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_whileLet_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 2 values leaked",
+  "call_whileLet_wildOfTwo_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
+  "call_whileLet_wildOfTwo_expr": "skip a pattern binding is never dropped: 2 values leaked",
+  "call_whileLet_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 2 values leaked",
+  "field_ifLet_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_ifLet_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_ifLet_wildOfTwo_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_ifLet_wildOfTwo_expr": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_ifLet_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_ifLet_wildOfTwo_reassign": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_letElse_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_letElse_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_letElse_wildOfTwo_expr": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_letElse_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_letElse_wildOfTwo_reassign": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_match_wildOfTwo_block": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_match_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 2 values leaked",
+  "field_match_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 2 values leaked",
+  "field_match_wildOfTwo_blockReturn": "skip a pattern binding is never dropped: 2 values leaked",
+  "field_match_wildOfTwo_expr": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_match_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_match_wildOfTwo_reassign": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_match_wildcard_block": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_match_wildcard_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_match_wildcard_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_match_wildcard_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_match_wildcard_expr": "skip a pattern binding is never dropped: 1 value leaked",
+  "field_match_wildcard_reassign": "skip a pattern binding is never dropped: 1 value leaked",
+  "local_ifLet_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
+  "local_ifLet_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
+  "local_ifLet_wildOfTwo_blockReturn": "skip a pattern binding is never dropped: 1 value leaked",
+  "local_ifLet_wildOfTwo_expr": "skip a pattern binding is never dropped: 1 value leaked",
+  "local_ifLet_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 1 value leaked",
+  "local_letElse_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 1 value leaked",
+  "local_letElse_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 1 value leaked",
+  "local_letElse_wildOfTwo_expr": "skip a pattern binding is never dropped: 1 value leaked",
+  "local_letElse_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 1 value leaked",
+  "local_match_wildOfTwo_block": "skip a pattern binding is never dropped: 1 value leaked",
+  "local_match_wildOfTwo_blockBreak": "skip a pattern binding is never dropped: 2 values leaked",
+  "local_match_wildOfTwo_blockContinue": "skip a pattern binding is never dropped: 2 values leaked",
+  "local_match_wildOfTwo_blockReturn": "skip a pattern binding is never dropped: 2 values leaked",
+  "local_match_wildOfTwo_expr": "skip a pattern binding is never dropped: 1 value leaked",
+  "local_match_wildOfTwo_moveOut": "skip a pattern binding is never dropped: 1 value leaked",
+}
+
+
+@dataclass(frozen=True)
+class Scrutinee:
+  """Where the matched value comes from."""
+
+  key: str
+  description: str
+  # Renders the statements that bring the scrutinee into being, given the
+  # expression that builds an owned value and the type that value has.
+  from_field: bool = False
+  from_call: bool = False
+
+  def setup(
+    self,
+    value_type: str,
+    build: str,
+  ) -> list[str]:
+    if self.from_call:
+      return []
+
+    if self.from_field:
+      mutable = "mut " if self.key == "field" else ""
+      return [f"let {mutable}holder: Holder = Holder {{ kind: {build}, tag: 0 }};"]
+
+    return [f"let kind: {value_type} = {build};"]
+
+  def expression(self) -> str:
+    if self.from_call:
+      return "makeValue()"
+
+    return "holder.kind" if self.from_field else "kind"
+
+
+SCRUTINEES: tuple[Scrutinee, ...] = (
+  Scrutinee("local", "an owned local"),
+  Scrutinee("field", "an owned record's field", from_field=True),
+  Scrutinee("call", "a call temporary", from_call=True),
+)
+
+
+@dataclass(frozen=True)
+class Pattern:
+  """What the pattern binds, and the value it is matched against."""
+
+  key: str
+  description: str
+  value_type: str
+  build: str
+  text: str
+  # The arm that is *not* taken, so a `match` stays exhaustive.
+  other_arm: str
+  # A value of the scrutinee's type that owns nothing, for a `reassign` body to
+  # put back into the moved-from field.
+  empty_value: str
+  read: str
+  expected: int
+  # Bindings that own a payload, in the order a `moveOut` body consumes them.
+  owning: tuple[str, ...] = ()
+  # True when the pattern matches every value of its type.
+  irrefutable: bool = False
+  needs_option: bool = False
+
+  def move_out(self) -> str:
+    return " + ".join(f"take({name})" for name in self.owning)
+
+
+PATTERNS: tuple[Pattern, ...] = (
+  Pattern(
+    key="one",
+    description="a variant with one owning payload, bound",
+    value_type="Kind",
+    build="Kind::ONE(tracked(1))",
+    text="Kind::ONE(payload)",
+    other_arm="Kind::EMPTY",
+    empty_value="Kind::EMPTY",
+    read="payload.id",
+    expected=1,
+    owning=("payload",),
+  ),
+  Pattern(
+    key="two",
+    description="a variant with two payloads, both bound",
+    value_type="Kind",
+    build="Kind::PAIR(tracked(1), tracked(2))",
+    text="Kind::PAIR(left, right)",
+    other_arm="Kind::EMPTY",
+    empty_value="Kind::EMPTY",
+    read="left.id + right.id",
+    expected=3,
+    owning=("left", "right"),
+  ),
+  Pattern(
+    key="wildOfTwo",
+    description="a variant with two payloads, one discarded by `_`",
+    value_type="Kind",
+    build="Kind::PAIR(tracked(1), tracked(2))",
+    text="Kind::PAIR(left, _)",
+    other_arm="Kind::EMPTY",
+    empty_value="Kind::EMPTY",
+    read="left.id",
+    expected=1,
+    owning=("left",),
+  ),
+  Pattern(
+    key="catchAll",
+    description="a catch-all identifier binding the whole scrutinee",
+    value_type="Kind",
+    build="Kind::ONE(tracked(1))",
+    text="other",
+    other_arm="Kind::EMPTY",
+    empty_value="Kind::EMPTY",
+    read="0",
+    expected=0,
+    irrefutable=True,
+  ),
+  Pattern(
+    key="wildcard",
+    description="the wildcard `_`, binding nothing",
+    value_type="Kind",
+    build="Kind::ONE(tracked(1))",
+    text="_",
+    other_arm="Kind::EMPTY",
+    empty_value="Kind::EMPTY",
+    read="0",
+    expected=0,
+    irrefutable=True,
+  ),
+  Pattern(
+    key="nested",
+    description="a nested `Option<Result<Tracked, i32>>` destructure",
+    value_type="Option<Result<Tracked, i32>>",
+    build="Option::SOME(Result::OK(tracked(1)))",
+    text="Option::SOME(Result::OK(payload))",
+    other_arm="Option::NONE",
+    empty_value="Option::NONE",
+    read="payload.id",
+    expected=1,
+    owning=("payload",),
+    needs_option=True,
+  ),
+)
+
+
+@dataclass(frozen=True)
+class Body:
+  """What the arm body does with the binding."""
+
+  key: str
+  description: str
+  # True when the construct has to sit inside a loop for the body to be legal.
+  in_loop: bool = False
+  moves: bool = False
+  reassigns: bool = False
+
+
+BODIES: tuple[Body, ...] = (
+  Body("expr", "an expression arm"),
+  Body("block", "a block arm"),
+  Body("blockReturn", "a block arm that returns early"),
+  Body("blockBreak", "a block arm that breaks out of the enclosing loop", in_loop=True),
+  Body("blockContinue", "a block arm that continues the enclosing loop", in_loop=True),
+  Body("moveOut", "an arm that moves the binding into a consuming helper", moves=True),
+  Body("reassign", "an arm whose moved-from field is written back before it drops", reassigns=True),
+)
+
+
+CONSTRUCTS: tuple[str, ...] = ("match", "ifLet", "whileLet", "letElse")
+
+
+@dataclass
+class Case:
+  """One generated fixture."""
+
+  scrutinee: Scrutinee
+  construct: str
+  pattern: Pattern
+  body: Body
+  lines: list[str] = field(default_factory=list)
+
+  @property
+  def name(self) -> str:
+    return f"{self.scrutinee.key}_{self.construct}_{self.pattern.key}_{self.body.key}"
+
+
+def is_valid(
+  scrutinee: Scrutinee,
+  construct: str,
+  pattern: Pattern,
+  body: Body,
+) -> bool:
+  """Applies the pruning rules documented in the module docstring."""
+
+  # 1. An irrefutable pattern has nothing to fall through to outside a `match`.
+  if pattern.irrefutable and construct != "match":
+    return False
+
+  # 2. Only a draining call can be re-evaluated by a `while let`.
+  if construct == "whileLet" and not scrutinee.from_call:
+    return False
+
+  # 3. Only a `match` arm can be an expression; `let ... else` has no arm.
+  if body.key == "block" and construct != "match":
+    return False
+
+  if body.key == "blockReturn" and construct == "letElse":
+    return False
+
+  # 4. A `moveOut` needs a binding that owns a payload.
+  if body.moves and not pattern.owning:
+    return False
+
+  # 6. Only an owned field can be written back.
+  if body.reassigns and scrutinee.key != "field":
+    return False
+
+  return True
+
+
+def enumerate_cases() -> list[Case]:
+  """Every surviving combination, in axis-declaration order."""
+
+  cases: list[Case] = []
+
+  for scrutinee in SCRUTINEES:
+    for construct in CONSTRUCTS:
+      for pattern in PATTERNS:
+        for body in BODIES:
+          if is_valid(scrutinee, construct, pattern, body):
+            cases.append(Case(scrutinee, construct, pattern, body))
+
+  return cases
+
+
+def indent(
+  lines: list[str],
+  depth: int,
+) -> list[str]:
+  pad = "  " * depth
+
+  return [f"{pad}{line}" if line else "" for line in lines]
+
+
+def render_match(
+  case: Case,
+  scrutinee_expression: str,
+) -> list[str]:
+  """The arm list of a `match`, with the selected pattern in the taken arm."""
+
+  pattern = case.pattern
+  body = case.body
+
+  if body.key == "expr":
+    taken = f"{pattern.text} -> {pattern.read},"
+  elif body.key == "moveOut":
+    taken = f"{pattern.text} -> {pattern.move_out()},"
+  elif body.key == "reassign":
+    taken = f"{pattern.text} -> {pattern.read},"
+  elif body.key == "block":
+    taken = None
+  else:
+    taken = None
+
+  arms: list[str] = []
+
+  # An irrefutable pattern has to come last or it shadows every other arm.
+  leading = [] if not pattern.irrefutable else [f"{pattern.other_arm} -> 0,"]
+  trailing = [] if pattern.irrefutable else ["_ -> 0,"]
+
+  if taken is not None:
+    arms = leading + [taken] + trailing
+
+    return [f"match ({scrutinee_expression}) {{", *indent(arms, 1), "};"]
+
+  inner: list[str] = []
+
+  if body.key == "block":
+    inner = [f"seen = {pattern.read};"]
+  elif body.key == "blockReturn":
+    inner = [f"return {pattern.read};"]
+  elif body.key == "blockBreak":
+    inner = [f"seen = {pattern.read};", "break;"]
+  elif body.key == "blockContinue":
+    inner = [f"seen = {pattern.read};", "continue;"]
+
+  block_arm = [f"{pattern.text} -> {{", *indent(inner, 1), "},"]
+  empty_arm = ["_ -> {},"] if not pattern.irrefutable else [f"{pattern.other_arm} -> {{}},"]
+  arms = (empty_arm + block_arm) if pattern.irrefutable else (block_arm + empty_arm)
+
+  return [f"match ({scrutinee_expression}) {{", *indent(arms, 1), "};"]
+
+
+def render_if_let(
+  case: Case,
+  scrutinee_expression: str,
+) -> list[str]:
+  pattern = case.pattern
+  body = case.body
+
+  if body.key == "blockReturn":
+    inner = [f"return {pattern.read};"]
+  elif body.key == "blockBreak":
+    inner = [f"seen = {pattern.read};", "break;"]
+  elif body.key == "blockContinue":
+    inner = [f"seen = {pattern.read};", "continue;"]
+  elif body.key == "moveOut":
+    inner = [f"seen = {pattern.move_out()};"]
+  else:
+    inner = [f"seen = {pattern.read};"]
+
+  return [f"if (let {pattern.text} = {scrutinee_expression}) {{", *indent(inner, 1), "}"]
+
+
+def render_let_else(
+  case: Case,
+  scrutinee_expression: str,
+) -> list[str]:
+  pattern = case.pattern
+  body = case.body
+
+  if body.key == "blockBreak":
+    diverge, after = "break;", [f"seen = {pattern.read};", "break;"]
+  elif body.key == "blockContinue":
+    diverge, after = "continue;", [f"seen = {pattern.read};", "continue;"]
+  elif body.key == "moveOut":
+    diverge, after = "return -1;", [f"return {pattern.move_out()};"]
+  else:
+    diverge, after = "return -1;", [f"seen = {pattern.read};"]
+
+  return [
+    f"let {pattern.text} = {scrutinee_expression} else {{",
+    *indent([diverge], 1),
+    "};",
+    "",
+    *after,
+  ]
+
+
+def render_while_let(case: Case) -> list[str]:
+  """A `while let` draining a two-element vector through `Vector::pop()`."""
+
+  pattern = case.pattern
+  body = case.body
+
+  if body.key == "blockReturn":
+    inner = [f"return seen + {pattern.read};"]
+  elif body.key == "blockBreak":
+    inner = [f"seen += {pattern.read};", "break;"]
+  elif body.key == "blockContinue":
+    inner = [f"seen += {pattern.read};", "continue;"]
+  elif body.key == "moveOut":
+    inner = [f"seen += {pattern.move_out()};"]
+  else:
+    inner = [f"seen += {pattern.read};"]
+
+  return [
+    f"let mut queue: Vector<{pattern.value_type}> = Vector::new<{pattern.value_type}>();",
+    f"queue.push({pattern.build});",
+    f"queue.push({pattern.build});",
+    "",
+    f"while (let Option::SOME({pattern.text}) = queue.pop()) {{",
+    *indent(inner, 1),
+    "}",
+  ]
+
+
+def expected_value(case: Case) -> int:
+  """What `run()` must report when the arm ran and read the right payload."""
+
+  pattern = case.pattern
+  body = case.body
+
+  if case.construct == "whileLet":
+    # The loop drains two elements unless the body leaves after the first.
+    return pattern.expected if body.key in ("blockBreak", "blockReturn") else pattern.expected * 2
+
+  return pattern.expected
+
+
+def render_run(case: Case) -> list[str]:
+  """The body of `run()`: build the scrutinee, match it, report what it read."""
+
+  pattern = case.pattern
+  body = case.body
+  statements: list[str] = []
+
+  if case.construct == "whileLet":
+    statements.append("let mut seen: i32 = 0;")
+    statements.append("")
+    statements.extend(render_while_let(case))
+    statements.append("")
+    statements.append("return seen;")
+
+    return statements
+
+  # A `match` used as an expression binds `seen` directly; every other shape has
+  # to declare it up front because the arm assigns to it.
+  binds_seen_directly = case.construct == "match" and body.key in ("expr", "moveOut", "reassign")
+  returns_directly = body.key == "blockReturn" or (body.key == "moveOut" and case.construct == "letElse")
+
+  if not binds_seen_directly and not returns_directly:
+    statements.append("let mut seen: i32 = 0;")
+
+  setup = case.scrutinee.setup(pattern.value_type, pattern.build)
+  scrutinee_expression = case.scrutinee.expression()
+
+  def construct_lines() -> list[str]:
+    if case.construct == "match":
+      return render_match(case, scrutinee_expression)
+    if case.construct == "ifLet":
+      return render_if_let(case, scrutinee_expression)
+
+    return render_let_else(case, scrutinee_expression)
+
+  # A `match` arm that is an expression is the value, not a statement.
+  if binds_seen_directly:
+    read = pattern.move_out() if body.key == "moveOut" else pattern.read
+    leading = [] if not pattern.irrefutable else [f"{pattern.other_arm} -> 0,"]
+    trailing = [] if pattern.irrefutable else ["_ -> 0,"]
+    arms = leading + [f"{pattern.text} -> {read},"] + trailing
+    body_lines = [
+      f"let seen: i32 = match ({scrutinee_expression}) {{",
+      *indent(arms, 1),
+      "};",
+    ]
+  else:
+    body_lines = construct_lines()
+
+  if body.in_loop:
+    # The scrutinee is built inside the loop so a second iteration never sees a
+    # moved-from value; the loop runs exactly once.
+    loop_body = ["rounds += 1;", ""] + setup + ([""] if setup else []) + body_lines
+    statements.extend(["let mut rounds: i32 = 0;", ""])
+    statements.append("while (rounds < 1) {")
+    statements.extend(indent(loop_body, 1))
+    statements.append("}")
+  else:
+    statements.extend(setup)
+
+    if setup:
+      statements.append("")
+
+    statements.extend(body_lines)
+
+  if body.reassigns:
+    statements.extend(["", f"holder.kind = {pattern.empty_value};"])
+
+  if body.key == "blockReturn":
+    statements.extend(["", "return 0;"])
+  elif not returns_directly:
+    statements.extend(["", "return seen;"])
+
+  return statements
+
+
+def render_fixture(
+  case: Case,
+  status: str,
+) -> str:
+  pattern = case.pattern
+  needs_vector = case.construct == "whileLet"
+  needs_option = pattern.needs_option or case.construct == "whileLet"
+  needs_holder = case.scrutinee.from_field
+
+  header = ["// e2e: std"]
+
+  if status.startswith("skip "):
+    header.append(f"// e2e: {status}")
+
+  lines = [
+    *header,
+    GENERATED_BANNER,
+    "//",
+    f"// scrutinee: {case.scrutinee.description}",
+    f"// construct: {case.construct}",
+    f"// pattern:   {pattern.description}",
+    f"// body:      {case.body.description}",
+    "//",
+    "// The exit code is the construction/drop imbalance plus the difference between",
+    "// what the arm read and what it had to read, so 0 means every Tracked was",
+    "// dropped exactly once and the arm saw the payload it bound.",
+  ]
+
+  imports = []
+
+  if needs_vector:
+    imports.append('import Vector from "std::vector";')
+
+  if needs_option:
+    imports.append('import Option from "std::option";')
+
+  if pattern.needs_option:
+    imports.append('import Result from "std::result";')
+
+  if imports:
+    lines.extend(["", *imports])
+
+  lines.extend(
+    [
+      "",
+      "record Counters {",
+      "  static mut MADE: i32 = 0;",
+      "  static mut DROPPED: i32 = 0;",
+      "}",
+      "",
+      "@implements(Drop)",
+      "record Tracked {",
+      "  public id: i32;",
+      "",
+      "  drop(&mut self): void {",
+      "    Counters::DROPPED += 1;",
+      "    return;",
+      "  }",
+      "}",
+      "",
+      "enum Kind {",
+      "  ONE(Tracked),",
+      "  PAIR(Tracked, Tracked),",
+      "  EMPTY,",
+      "}",
+      "",
+      "function tracked(id: i32): Tracked {",
+      "  Counters::MADE += 1;",
+      "  return Tracked { id: id };",
+      "}",
+      "",
+      "function take(payload: Tracked): i32 {",
+      "  return payload.id;",
+      "}",
+    ]
+  )
+
+  if needs_holder:
+    lines.extend(
+      [
+        "",
+        "record Holder {",
+        f"  public kind: {pattern.value_type};",
+        "  public tag: i32;",
+        "}",
+      ]
+    )
+
+  if case.scrutinee.from_call:
+    lines.extend(
+      [
+        "",
+        f"function makeValue(): {pattern.value_type} {{",
+        f"  return {pattern.build};",
+        "}",
+      ]
+    )
+
+  lines.extend(
+    [
+      "",
+      "/// Everything the case owns lives here, so `main` can read the counters once",
+      "/// every local has been dropped.",
+      "function run(): i32 {",
+      *indent(render_run(case), 1),
+      "}",
+      "",
+      "function main(): i32 {",
+      "  let seen: i32 = run();",
+      "",
+      f"  return Counters::MADE - Counters::DROPPED + seen - {expected_value(case)};",
+      "}",
+    ]
+  )
+
+  return "\n".join(lines) + "\n"
+
+
+def render_error_fixture(
+  name: str,
+  title: str,
+  source: str,
+) -> str:
+  return "\n".join(["// e2e: err", GENERATED_BANNER, "//", f"// {title}", "", source.strip()]) + "\n"
+
+
+# The combinations the host's grammar rules out outright, kept as error fixtures
+# so the self-hosted compiler has to reject them the same way.
+ERROR_FIXTURES: tuple[tuple[str, str, str], ...] = (
+  (
+    "tuple_pattern_needs_a_tuple_type",
+    "Pruning rule 7: tuple patterns parse, but no tuple type can be spelled, so an "
+    "owning tuple scrutinee cannot exist.",
+    """
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+function makePair(): (Tracked, Tracked) {
+  return (Tracked { id: 1 }, Tracked { id: 2 });
+}
+
+function main(): i32 {
+  let pair: (Tracked, Tracked) = makePair();
+
+  return match (pair) {
+    (left, right) -> left.id + right.id,
+  };
+}
+""",
+  ),
+)
+
+
+def write_if_changed(
+  path: Path,
+  content: str,
+) -> bool:
+  if path.exists() and path.read_text(encoding="utf-8") == content:
+    return False
+
+  path.parent.mkdir(parents=True, exist_ok=True)
+  path.write_text(content, encoding="utf-8")
+
+  return True
+
+
+def prune_stale(
+  directory: Path,
+  keep: set[str],
+) -> list[str]:
+  """Removes fixtures and baselines this run did not produce.
+
+  Without it the generator would not be idempotent across a change to the axes:
+  a renamed case would leave its old file behind and CI's dirty-tree check would
+  never see the removal.
+  """
+
+  removed: list[str] = []
+
+  if not directory.exists():
+    return removed
+
+  for fixture_path in sorted(directory.glob("*.ign")):
+    if fixture_path.stem in keep:
+      continue
+
+    fixture_path.unlink()
+    removed.append(fixture_path.name)
+
+  snapshot_dir = directory / "__snapshots__"
+
+  if snapshot_dir.exists():
+    for snapshot_path in sorted(snapshot_dir.glob("*.snap")):
+      if snapshot_path.stem in keep:
+        continue
+
+      snapshot_path.unlink()
+      removed.append(snapshot_path.name)
+
+  return removed
+
+
+def generate() -> tuple[list[str], list[str]]:
+  cases = enumerate_cases()
+
+  ok_names: set[str] = set()
+  err_names: set[str] = {name for name, _, _ in ERROR_FIXTURES}
+  written: list[str] = []
+
+  for case in cases:
+    status = CASE_STATUS.get(case.name, "ok")
+    directory = ERR_DIR if status == "err" else OK_DIR
+
+    if status == "err":
+      err_names.add(case.name)
+    else:
+      ok_names.add(case.name)
+
+    if write_if_changed(directory / f"{case.name}.ign", render_fixture(case, status)):
+      written.append(f"{directory.name}/{case.name}.ign")
+
+  for name, title, source in ERROR_FIXTURES:
+    if write_if_changed(ERR_DIR / f"{name}.ign", render_error_fixture(name, title, source)):
+      written.append(f"err/{name}.ign")
+
+  # A case that moved between the corpora must not keep its old baseline: the
+  # two modes record different things and a stale one would silently pass.
+  removed = prune_stale(OK_DIR, ok_names) + prune_stale(ERR_DIR, err_names)
+
+  # A skipped case never compares a baseline, so a leftover one is noise.
+  removed.extend(prune_skipped_snapshots())
+
+  return written, removed
+
+
+def prune_skipped_snapshots() -> list[str]:
+  removed: list[str] = []
+  snapshot_dir = OK_DIR / "__snapshots__"
+
+  if not snapshot_dir.exists():
+    return removed
+
+  for name, status in sorted(CASE_STATUS.items()):
+    if not status.startswith("skip "):
+      continue
+
+    snapshot_path = snapshot_dir / f"{name}.snap"
+
+    if snapshot_path.exists():
+      snapshot_path.unlink()
+      removed.append(snapshot_path.name)
+
+  return removed
+
+
+def main() -> int:
+  parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+  parser.add_argument("--list", action="store_true", help="print the case matrix instead of writing it")
+  parser.add_argument("--clean", action="store_true", help="remove the generated corpus and exit")
+  arguments = parser.parse_args()
+
+  if arguments.clean:
+    for directory in (OK_DIR, ERR_DIR):
+      shutil.rmtree(directory, ignore_errors=True)
+
+    print("removed the generated ownership corpus")
+
+    return 0
+
+  cases = enumerate_cases()
+
+  if arguments.list:
+    for case in cases:
+      print(f"{case.name}\t{CASE_STATUS.get(case.name, 'ok')}")
+
+    print(f"# {len(cases)} cases")
+
+    return 0
+
+  written, removed = generate()
+
+  print(f"{len(cases)} cases, {len(written)} written, {len(removed)} removed")
+
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

@@ -87,16 +87,38 @@ fn write_test_project(
   project_dir: &Path,
   source: &str,
 ) {
+  write_test_project_with_fixture_dirs(project_dir, source, &[]);
+}
+
+/// Like `write_test_project`, but also declares `[test] fixtures` so `ignis
+/// test` discovers fixtures under the given project-relative directories.
+fn write_test_project_with_fixture_dirs(
+  project_dir: &Path,
+  source: &str,
+  fixture_dirs: &[&str],
+) {
   fs::write(project_dir.join("src/main.ign"), source).expect("write main module");
+
+  let fixture_section = if fixture_dirs.is_empty() {
+    String::new()
+  } else {
+    let entries: Vec<String> = fixture_dirs.iter().map(|dir| format!("\"{}\"", dir)).collect();
+    format!("\n[test]\nfixtures = [{}]\n", entries.join(", "))
+  };
+
   fs::write(
     project_dir.join("ignis.toml"),
     format!(
-      "[package]\nname = \"native_test_runner_fixture\"\nversion = \"0.1.0\"\nauthors = []\ndescription = \"fixture\"\nkeywords = []\nlicense = \"MIT\"\nrepository = \"\"\n\n[ignis]\nstd = true\nstd_path = \"{}\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 0\ndebug = false\ntarget = \"c\"\ncc = \"cc\"\ncflags = []\nemit = []\n",
-      workspace_std_path().display()
+      "[package]\nname = \"native_test_runner_fixture\"\nversion = \"0.1.0\"\nauthors = []\ndescription = \"fixture\"\nkeywords = []\nlicense = \"MIT\"\nrepository = \"\"\n\n[ignis]\nstd = true\nstd_path = \"{}\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 0\ndebug = false\ntarget = \"c\"\ncc = \"cc\"\ncflags = []\nemit = []\n{}",
+      workspace_std_path().display(),
+      fixture_section
     ),
   )
   .expect("write ignis.toml");
 }
+
+/// `.ign` sources have no `@test` functions, used for fixture-only CLI runs.
+const NO_TESTS_MAIN: &str = "function main(): void {}\n";
 
 fn cleanup_project_dir(project_dir: &Path) {
   let _ = fs::remove_dir_all(project_dir);
@@ -1462,6 +1484,76 @@ fn ignis_fmt_help_mentions_safety_and_check_mode() {
     stdout.contains("without rewriting files"),
     "expected fmt help to describe check mode as no-write validation\nstdout:\n{stdout}"
   );
+}
+
+#[test]
+fn ignis_test_reports_a_skip_when_a_skipped_fixture_still_fails() {
+  let project_dir = make_temp_project_dir("skip-fixture-still-failing");
+  write_test_project_with_fixture_dirs(&project_dir, NO_TESTS_MAIN, &["corpus/ok"]);
+  write_project_file(
+    &project_dir,
+    "corpus/ok/still_broken.ign",
+    "// e2e: skip known regression, tracked in ISSUE-123\nfunction main(): i32 {\n  return 7;\n}\n",
+  );
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("test")
+    .arg("--project")
+    .arg(&project_dir)
+    .output()
+    .expect("run ignis test");
+
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+
+  assert!(
+    output.status.success(),
+    "expected a skipped fixture that still fails to leave the run green\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    stdout.contains("known regression, tracked in ISSUE-123")
+      || stderr.contains("known regression, tracked in ISSUE-123"),
+    "expected the skip reason in command output\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    stdout.contains("1 skipped") || stderr.contains("1 skipped"),
+    "expected the skipped count in command output\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+#[test]
+fn ignis_test_fails_when_a_skipped_fixture_now_passes() {
+  let project_dir = make_temp_project_dir("skip-fixture-now-passing");
+  write_test_project_with_fixture_dirs(&project_dir, NO_TESTS_MAIN, &["corpus/ok"]);
+  write_project_file(
+    &project_dir,
+    "corpus/ok/now_fixed.ign",
+    "// e2e: skip known regression, tracked in ISSUE-123\nfunction main(): i32 {\n  return 0;\n}\n",
+  );
+
+  let output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+    .arg("test")
+    .arg("--project")
+    .arg(&project_dir)
+    .output()
+    .expect("run ignis test");
+
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+
+  assert!(
+    !output.status.success(),
+    "expected a stale skip header to fail the run\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+  assert!(
+    stdout.contains("but now passes; remove the skip header and record its baseline")
+      || stderr.contains("but now passes; remove the skip header and record its baseline"),
+    "expected the stale-skip message in command output\nstdout:\n{stdout}\nstderr:\n{stderr}"
+  );
+
+  cleanup_project_dir(&project_dir);
 }
 
 #[test]

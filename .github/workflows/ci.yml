@@ -165,6 +165,19 @@ jobs:
       - name: Build Ignis
         run: cargo build --locked --profile ci -p ignis
 
+      # `git diff` alone would miss a fixture the generator newly *creates*,
+      # since an untracked file is not a diff. `git status --porcelain` with
+      # untracked files listed catches added, removed and modified alike.
+      - name: Check the ownership corpus generator is idempotent
+        run: |
+          python3 scripts/gen_ownership_corpus.py
+          dirty="$(git status --porcelain --untracked-files=all -- test_cases/e2e/ok/ownership test_cases/e2e/err/ownership)"
+          if [ -n "$dirty" ]; then
+            echo "The ownership corpus is out of date; re-run scripts/gen_ownership_corpus.py and commit the result." >&2
+            echo "$dirty" >&2
+            exit 1
+          fi
+
       - name: Add Ignis to PATH
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"
 

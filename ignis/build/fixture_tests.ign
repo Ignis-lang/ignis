@@ -63,11 +63,14 @@ export record FixtureMode {
 export record FixtureHeader {
   public mode: FixtureMode;
   public error: String;
+  /// Reason from a `// e2e: skip <reason>` header line; empty when absent.
+  public skipReason: String;
 
   public static failed(message: String): FixtureHeader {
     return FixtureHeader {
       mode: FixtureMode::program(),
       error: message,
+      skipReason: String::new(),
     };
   }
 }
@@ -81,6 +84,8 @@ export record FixtureCase {
   public mode: FixtureMode;
   /// Non-empty when the header was rejected; the fixture fails carrying it.
   public modeError: String;
+  /// Reason from a `// e2e: skip <reason>` header line; empty when absent.
+  public skipReason: String;
 
   public clone(&self): FixtureCase {
     return FixtureCase {
@@ -88,6 +93,7 @@ export record FixtureCase {
       path: self.path.clone(),
       mode: self.mode.clone(),
       modeError: self.modeError.clone(),
+      skipReason: self.skipReason.clone(),
     };
   }
 
@@ -247,6 +253,7 @@ export namespace FixtureTests {
     let mut allowLeak: boolean = false;
     let mut diagnostics: boolean = false;
     let mut warnings: boolean = false;
+    let mut skipReason: String = String::new();
 
     let markerLength: u64 = String::create(HEADER_MARKER).length();
     let sourceLines: Vector<String> = fixtureLines(source);
@@ -273,7 +280,38 @@ export namespace FixtureTests {
       }
 
       let options: String = trimmed.substringBytes(markerLength, trimmed.length());
-      let items: Vector<String> = fixtureHeaderOptions(&options);
+      let optionText: String = options.trimAsciiWhitespace();
+
+      // A header line whose trimmed option text starts with the word `skip`
+      // followed by whitespace carries the entire remainder of the line as
+      // its reason, unsplit: a comma-separated word list would otherwise
+      // mangle a reason that itself contains a comma.
+      let mut isSkipLine: boolean = false;
+
+      if (optionText.equals("skip")) {
+        isSkipLine = true;
+      } else if (optionText.startsWith("skip") && optionText.length() > 4) {
+        if (let Option::SOME(afterByte) = optionText.byteAt(4)) {
+          isSkipLine = afterByte == 32 || afterByte == 9;
+        }
+      }
+
+      if (isSkipLine) {
+        let reason: String = optionText.substringBytes(4, optionText.length()).trimAsciiWhitespace();
+
+        if (reason.length() == 0) {
+          return FixtureHeader::failed(String::create("Fixture header option 'skip' needs a reason"));
+        }
+
+        if (skipReason.length() > 0) {
+          return FixtureHeader::failed(String::create("Fixture header option 'skip' appears more than once"));
+        }
+
+        skipReason = reason;
+        continue;
+      }
+
+      let items: Vector<String> = fixtureHeaderOptions(&optionText);
       let mut itemIndex: u64 = 0;
 
       while (itemIndex < items.length()) {
@@ -289,6 +327,8 @@ export namespace FixtureTests {
           diagnostics = true;
         } else if (option.equals("warn")) {
           warnings = true;
+        } else if (option.equals("skip")) {
+          return FixtureHeader::failed(String::create("Fixture header option 'skip' needs a reason"));
         } else {
           return FixtureHeader::failed(`Unknown fixture header option '${option.toStr()}'`);
         }
@@ -317,6 +357,7 @@ export namespace FixtureTests {
           allowLeak: false,
         },
         error: String::new(),
+        skipReason: skipReason,
       };
     }
 
@@ -334,6 +375,7 @@ export namespace FixtureTests {
           allowLeak: false,
         },
         error: String::new(),
+        skipReason: skipReason,
       };
     }
 
@@ -344,6 +386,7 @@ export namespace FixtureTests {
         allowLeak: allowLeak,
       },
       error: String::new(),
+      skipReason: skipReason,
     };
   }
 
@@ -510,6 +553,7 @@ export namespace FixtureTests {
           path: sourcePath,
           mode: header.mode,
           modeError: header.error,
+          skipReason: header.skipReason,
         });
       }
     }
@@ -1097,6 +1141,84 @@ function fixtureHeaderRejectsAnUnknownOption(): void {
 }
 
 @test
+function fixtureHeaderSkipOptionCarriesItsReason(): void {
+  let source: String = String::create("// e2e: skip flaky on CI\nfunction main(): void {}");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "");
+  Test::assertEq<boolean>(header.mode.kind == FixtureKind::PROGRAM, true);
+  Test::assertEq<str>(header.skipReason.toStr(), "flaky on CI");
+}
+
+@test
+function fixtureHeaderSkipOptionCombinesWithStd(): void {
+  let source: String = String::create(
+    "// e2e: std\n// e2e: skip needs a native dependency\nfunction main(): void {}",
+  );
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "");
+  Test::assertEq<boolean>(header.mode.forceStd, true);
+  Test::assertEq<str>(header.skipReason.toStr(), "needs a native dependency");
+}
+
+@test
+function fixtureHeaderSkipOptionCombinesWithErr(): void {
+  let source: String = String::create(
+    "// e2e: err\n// e2e: skip diagnostic wording is still in flux\nfunction main(): i32 {}",
+  );
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "");
+  Test::assertEq<boolean>(header.mode.kind == FixtureKind::DIAGNOSTICS, true);
+  Test::assertEq<str>(header.skipReason.toStr(), "diagnostic wording is still in flux");
+}
+
+@test
+function fixtureHeaderRejectsABareSkipOption(): void {
+  let source: String = String::create("// e2e: skip\nfunction main(): void {}");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "Fixture header option 'skip' needs a reason");
+}
+
+@test
+function fixtureHeaderRejectsABareSkipInsideACommaList(): void {
+  let source: String = String::create("// e2e: std, skip\nfunction main(): void {}");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "Fixture header option 'skip' needs a reason");
+}
+
+@test
+function fixtureHeaderRejectsADuplicateSkipOption(): void {
+  let source: String = String::create(
+    "// e2e: skip first reason\n// e2e: skip second reason\nfunction main(): void {}",
+  );
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "Fixture header option 'skip' appears more than once");
+}
+
+@test
+function fixtureHeaderSkipReasonContainingACommaSurvivesIntact(): void {
+  let source: String = String::create("// e2e: skip flaky, needs investigation\nfunction main(): void {}");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "");
+  Test::assertEq<str>(header.skipReason.toStr(), "flaky, needs investigation");
+}
+
+@test
+function fixtureHeaderSkipAfterTheFirstCodeLineIsIgnored(): void {
+  let source: String = String::create("function main(): void {}\n// e2e: skip too late");
+  let header: FixtureHeader = FixtureTests::parseHeader(&source);
+
+  Test::assertEq<str>(header.error.toStr(), "");
+  Test::assertEq<str>(header.skipReason.toStr(), "");
+}
+
+@test
 function fixtureHeaderRejectsErrCombinedWithStd(): void {
   let source: String = String::create("// e2e: err, std\n");
   let header: FixtureHeader = FixtureTests::parseHeader(&source);
@@ -1158,6 +1280,7 @@ function fixtureBaselineSitsInASnapshotDirectoryNextToItsFixture(): void {
     path: Path::PathBuf::create("/corpus/ok/nested/deeper.ign"),
     mode: FixtureMode::program(),
     modeError: String::new(),
+    skipReason: String::new(),
   };
 
   Test::assertEq<str>(fixture.snapshotPath().asStr(), "/corpus/ok/nested/__snapshots__/deeper.snap");
