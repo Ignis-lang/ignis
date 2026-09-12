@@ -92,17 +92,16 @@ function dumpDropSchedule(source: str): String {
 
 const RESOURCE: str = "@implements(Drop)\nrecord Resource {\n  public value: i32;\n\n  drop(&mut self): void {\n    return;\n  }\n}\n";
 
-/// Scenario: a `match` over a temporary consumes an early return inside one
-/// arm without scheduling anything of its own, while the arm binding is
-/// dropped at the end of the arm. That asymmetry is exactly what the dump is
-/// for.
+/// Scenario: a `match` over a temporary binds a resource in one arm, and the
+/// arm's early return is a second drop site for that one binding. Seeing both
+/// sites at once is what the dump is for.
 /// Mirrors the host's `match_over_a_temporary_with_an_early_return_in_an_arm`.
 @test
 function dropScheduleDumpMatchOverTemporaryWithEarlyReturnInArm(): void {
   let mut source: String = String::create(RESOURCE);
   source.pushStr("\nenum Slot {\n  Filled(Resource),\n  Empty,\n}\n\nfunction make(): Slot {\n  return Slot::Filled(Resource { value: 1 });\n}\n\nfunction take(): i32 {\n  match (make()) {\n    Slot::Filled(inner) -> {\n      return inner.value;\n    },\n    Slot::Empty -> {\n      return 0;\n    },\n  };\n\n  return -1;\n}\n");
 
-  let expected: String = String::create("drop-schedule v1\nfunction drop at test.ign:5:25\n  <no owned values>\nfunction make at test.ign:15:23\n  <no owned values>\nfunction take at test.ign:19:22\n  value inner kind=binding declared at test.ign:21:28\n    drop at test.ign:21:28 reason=arm-end\n");
+  let expected: String = String::create("drop-schedule v1\nfunction drop at test.ign:5:25\n  <no owned values>\nfunction make at test.ign:15:23\n  <no owned values>\nfunction take at test.ign:19:22\n  value inner kind=binding declared at test.ign:21:28\n    drop at test.ign:21:28 reason=arm-end\n    drop at test.ign:22:7 reason=return\n");
 
   Test::assertEq<str>(dumpDropSchedule(source.toStr()).toStr(), expected.toStr());
 }
