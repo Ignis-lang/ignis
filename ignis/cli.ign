@@ -39,8 +39,6 @@ export record CliOptions {
   public targetTriple: Option<String>;
   public optLevel: Option<u64>;
   public debug: Option<boolean>;
-  /// `--force`/`--rebuild`: ignore cached C/objects/archives from a previous build.
-  public force: boolean;
   public features: Vector<String>;
   public filter: String;
   public updateSnapshots: boolean;
@@ -62,7 +60,6 @@ export record CliOptions {
       targetTriple: Option::NONE,
       optLevel: Option::NONE,
       debug: Option::NONE,
-      force: false,
       features: Vector::new<String>(),
       filter: String::new(),
       updateSnapshots: false,
@@ -356,12 +353,6 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
-    if (argument.equals("-f") || argument.equals("--force") || argument.equals("--rebuild")) {
-      options.force = true;
-      index += 1;
-      continue;
-    }
-
     if (argument.equals("--feature")) {
       let Option::SOME(value) = arguments.get(index + 1) else {
         return Result::ERROR(cliMissingValue("--feature", "a name"));
@@ -484,7 +475,6 @@ export function helpText(): String {
   text.pushStr("  -O, --opt-level <0-3>     Override [build] opt_level\n");
   text.pushStr("      --debug               Build with debug information\n");
   text.pushStr("      --no-debug            Build without debug information\n");
-  text.pushStr("  -f, --force, --rebuild    Force a full rebuild, ignoring cached C/objects/archives\n");
   text.pushStr("      --feature <NAME>      Enable one feature (can be repeated)\n");
   text.pushStr("      --features <LIST>     Enable features separated by commas\n");
   text.pushStr("      --filter <SUBSTRING>  Select tests whose name contains it (test only)\n");
@@ -805,6 +795,41 @@ function cliRejectsUnknownFlags(): void {
   cliPush(&mut arguments, "--nope");
 
   Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: unknown argument: --nope");
+}
+
+/// This compiler's build path never checks a stamp before recompiling, so
+/// there is no cache for a `--force` flag to bypass; it is rejected like any
+/// other flag this compiler does not answer, on every command, matching the
+/// host CLI rejecting `-f`/`--force` on `ignis check`/`ignis test`.
+@test
+function cliRejectsForceFlagAndItsAliasesOnBuild(): void {
+  let mut shortFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut shortFlag, "build");
+  cliPush(&mut shortFlag, "-f");
+  Test::assertEq<str>(cliParseError(&shortFlag).toStr(), "error: unknown argument: -f");
+
+  let mut longFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut longFlag, "build");
+  cliPush(&mut longFlag, "--force");
+  Test::assertEq<str>(cliParseError(&longFlag).toStr(), "error: unknown argument: --force");
+
+  let mut aliasFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut aliasFlag, "build");
+  cliPush(&mut aliasFlag, "--rebuild");
+  Test::assertEq<str>(cliParseError(&aliasFlag).toStr(), "error: unknown argument: --rebuild");
+}
+
+@test
+function cliRejectsForceFlagOnCheckAndTest(): void {
+  let mut checkFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut checkFlag, "check");
+  cliPush(&mut checkFlag, "-f");
+  Test::assertEq<str>(cliParseError(&checkFlag).toStr(), "error: unknown argument: -f");
+
+  let mut testFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut testFlag, "test");
+  cliPush(&mut testFlag, "-f");
+  Test::assertEq<str>(cliParseError(&testFlag).toStr(), "error: unknown argument: -f");
 }
 
 /// A first argument that is neither a subcommand nor a path is a typo.

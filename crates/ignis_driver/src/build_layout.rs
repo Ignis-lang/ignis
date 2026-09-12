@@ -4,6 +4,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use colored::Colorize;
+
 /// Build output directory structure.
 ///
 /// ```text
@@ -293,7 +295,7 @@ impl BuildLayout {
 // Format (key=value, sorted):
 //   version=3
 //   compiler_version=0.1.0
-//   compiler_identity=<blake3 of running exe bytes>-<compiler_version>
+//   compiler_identity=<exe path:size:mtime_ns:inode>-<compiler_version>
 //   codegen_abi_version=1
 //   target=
 //   file_count=N
@@ -314,7 +316,7 @@ impl BuildLayout {
 //   dep.0.hash=...
 //   ...
 //
-// `compiler_identity` bundles a content hash of the running compiler
+// `compiler_identity` bundles a cheap identity of the running compiler
 // executable with its declared version, so a rebuilt binary (even one that
 // keeps the same `CARGO_PKG_VERSION`, e.g. during local development) always
 // invalidates every cached C/object/archive it produced. Bumping
@@ -323,30 +325,59 @@ impl BuildLayout {
 
 const STAMP_VERSION: &str = "3";
 
-static COMPILER_IDENTITY: OnceLock<String> = OnceLock::new();
+static COMPILER_EXE_KEY: OnceLock<String> = OnceLock::new();
 
-/// Stable identity of the currently running compiler binary: a content hash
-/// of the executable bytes combined with its version string. Computed once
-/// per process and cached, since `current_exe()` and hashing a multi-MB
-/// binary are both too costly to repeat per module.
+/// Stable identity of the currently running compiler binary, combined with
+/// its version string. The exe-side key (path + size + mtime + inode) is
+/// computed once per process and cached; `compiler_version` is appended at
+/// each call so this function is honest about what varies per caller.
 ///
-/// Falls back to `"unknown-<version>"` if the running executable cannot be
-/// located or read (e.g. it was deleted after the process started); this
-/// still yields a stable-for-the-process value, it just cannot distinguish
-/// between different such compilers.
+/// Deliberately avoids hashing the executable's contents: that costs over a
+/// hundred milliseconds for a debug binary of a couple hundred megabytes,
+/// which is unacceptable on a cache-hit path that should stay near-instant.
+/// Path + size + mtime + inode is exactly what changes on a rebuild (a
+/// linker never reuses the old inode in place) and is unaffected in place
+/// for an unchanged binary.
 pub fn compiler_identity(compiler_version: &str) -> String {
-  COMPILER_IDENTITY
-    .get_or_init(|| {
-      let exe_hash = current_exe_hash().unwrap_or_else(|_| "unknown".to_string());
-      format!("{}-{}", exe_hash, compiler_version)
-    })
-    .clone()
+  let exe_key = COMPILER_EXE_KEY.get_or_init(compute_exe_key);
+  format!("{}-{}", exe_key, compiler_version)
 }
 
-fn current_exe_hash() -> io::Result<String> {
+fn compute_exe_key() -> String {
+  match current_exe_key() {
+    Ok(key) => key,
+    Err(e) => {
+      eprintln!(
+        "{} could not determine the running compiler's identity ({}); build caching may be imprecise until the process restarts",
+        "Warning:".yellow().bold(),
+        e
+      );
+      "unknown".to_string()
+    },
+  }
+}
+
+fn current_exe_key() -> io::Result<String> {
   let exe_path = std::env::current_exe()?;
   let exe_path = std::fs::canonicalize(&exe_path).unwrap_or(exe_path);
-  hash_file(&exe_path)
+  let metadata = std::fs::metadata(&exe_path)?;
+
+  let size = metadata.len();
+  let mtime_ns = metadata
+    .modified()?
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_nanos())
+    .unwrap_or(0);
+
+  #[cfg(unix)]
+  let inode = {
+    use std::os::unix::fs::MetadataExt;
+    metadata.ino()
+  };
+  #[cfg(not(unix))]
+  let inode: u64 = 0;
+
+  Ok(format!("{}:{}:{}:{}", exe_path.display(), size, mtime_ns, inode))
 }
 
 /// Build configuration that affects output.
@@ -1000,13 +1031,24 @@ mod tests {
   }
 
   #[test]
-  fn test_compiler_identity_is_stable_within_process() {
-    // compiler_identity() is cached per process (OnceLock): repeated calls
-    // must return the same value even if a different version string is
-    // passed in later.
+  fn test_compiler_identity_exe_key_is_stable_but_version_is_honest() {
+    // Only the exe-side key is memoized per process (OnceLock); the version
+    // string is appended fresh at every call, so compiler_identity(version)
+    // must reflect whatever version is actually passed in.
     let first = compiler_identity("0.1.0");
     let second = compiler_identity("9.9.9");
-    assert_eq!(first, second);
+    assert_ne!(first, second);
+    assert!(first.ends_with("-0.1.0"));
+    assert!(second.ends_with("-9.9.9"));
+
+    // The exe-side prefix (everything before the trailing "-<version>") must
+    // be identical, since it depends only on the running executable.
+    let first_prefix = first.strip_suffix("-0.1.0").unwrap();
+    let second_prefix = second.strip_suffix("-9.9.9").unwrap();
+    assert_eq!(first_prefix, second_prefix);
+
+    // Calling with the same version repeatedly must be perfectly stable.
+    assert_eq!(compiler_identity("0.1.0"), first);
   }
 
   #[test]

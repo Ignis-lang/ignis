@@ -101,6 +101,16 @@ fn build_workspace_std_driver_test_config(
   target: TargetBackend,
   cflags: Vec<String>,
 ) -> Result<Arc<IgnisConfig>, String> {
+  build_workspace_std_driver_test_config_with_force(file_path, output_dir, target, cflags, false)
+}
+
+fn build_workspace_std_driver_test_config_with_force(
+  file_path: &std::path::Path,
+  output_dir: &std::path::Path,
+  target: TargetBackend,
+  cflags: Vec<String>,
+  force_rebuild: bool,
+) -> Result<Arc<IgnisConfig>, String> {
   let std_path = workspace_std_path();
   let manifest = load_std_manifest(&std_path)?;
   let mut config = IgnisConfig::new_basic(false, Vec::new(), true, 0);
@@ -128,7 +138,7 @@ fn build_workspace_std_driver_test_config(
     false,
     false,
     false,
-    false, // force_rebuild
+    force_rebuild,
   ));
 
   Ok(Arc::new(config))
@@ -148,6 +158,17 @@ pub fn compile_workspace_std_project_in(
   target: TargetBackend,
 ) -> Result<(), String> {
   let config = build_workspace_std_driver_test_config(source_path, output_dir, target, Vec::new())?;
+  compile_project(config, source_path.to_string_lossy().as_ref()).map_err(|_| "compile_project failed".to_string())
+}
+
+/// Like `compile_workspace_std_project_in`, but with `--force` (`force_rebuild`)
+/// set, so a valid stamp is treated as stale regardless of content or identity.
+pub fn compile_workspace_std_project_in_with_force(
+  source_path: &Path,
+  output_dir: &Path,
+  target: TargetBackend,
+) -> Result<(), String> {
+  let config = build_workspace_std_driver_test_config_with_force(source_path, output_dir, target, Vec::new(), true)?;
   compile_project(config, source_path.to_string_lossy().as_ref()).map_err(|_| "compile_project failed".to_string())
 }
 
