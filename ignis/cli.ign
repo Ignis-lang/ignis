@@ -13,6 +13,7 @@ export enum CliCommand {
   CHECK,
   BUILD_STD,
   TEST,
+  FMT,
   HELP,
   VERSION,
 }
@@ -48,6 +49,22 @@ export record CliOptions {
   public partition: Option<PartitionSpec>;
   /// Wall-clock budget in seconds for a single test process.
   public testTimeout: Option<u64>;
+  /// Explicit files to format (fmt only); empty selects project discovery.
+  public fmtFilePaths: Vector<String>;
+  /// Explicit project directory to format (fmt only).
+  public fmtProject: Option<String>;
+  /// Validates formatting without rewriting files (fmt only).
+  public fmtCheck: boolean;
+  /// Explicit formatter config file (fmt only).
+  public fmtConfigPath: Option<String>;
+  public fmtIndentWidth: Option<u64>;
+  public fmtLineWidth: Option<u64>;
+  public fmtUseTabs: Option<boolean>;
+  public fmtSortImports: boolean;
+  /// Reads an NDJSON batch from stdin instead of formatting files (fmt only).
+  public fmtStdinJson: boolean;
+  /// Emits a unified diff instead of rewriting files (fmt only).
+  public fmtEmitDiff: boolean;
 
   public static create(command: CliCommand): CliOptions {
     return CliOptions {
@@ -66,6 +83,16 @@ export record CliOptions {
       fixtureDirs: Vector::new<String>(),
       partition: Option::NONE,
       testTimeout: Option::NONE,
+      fmtFilePaths: Vector::new<String>(),
+      fmtProject: Option::NONE,
+      fmtCheck: false,
+      fmtConfigPath: Option::NONE,
+      fmtIndentWidth: Option::NONE,
+      fmtLineWidth: Option::NONE,
+      fmtUseTabs: Option::NONE,
+      fmtSortImports: false,
+      fmtStdinJson: false,
+      fmtEmitDiff: false,
     };
   }
 
@@ -79,6 +106,14 @@ export record CliOptions {
 
   public isTestMode(&self): boolean {
     if (let CliCommand::TEST = self.command) {
+      return true;
+    }
+
+    return false;
+  }
+
+  public isFmtMode(&self): boolean {
+    if (let CliCommand::FMT = self.command) {
       return true;
     }
 
@@ -216,6 +251,10 @@ function cliSubcommandOf(argument: &String): Option<CliCommand> {
     return Option::SOME(CliCommand::TEST);
   }
 
+  if (argument.equals("fmt")) {
+    return Option::SOME(CliCommand::FMT);
+  }
+
   return Option::NONE;
 }
 
@@ -243,6 +282,703 @@ function cliMissingValue(flag: str, expected: str): String {
   return `error: ${flag} requires ${expected}`;
 }
 
+/// `ESC`. Ignis string literals have no `\x`/`\u{}` escape, so every ANSI
+/// code below is built one `char` at a time from this rather than embedding
+/// a raw control byte in the source.
+function ansiEsc(): char {
+  return '\u{1b}';
+}
+
+function pushAnsiBold(output: &mut String, text: str): void {
+  let mut outputRef: &mut String = output;
+  outputRef.pushChar(ansiEsc());
+  outputRef.pushStr("[1m");
+  outputRef.pushStr(text);
+  outputRef.pushChar(ansiEsc());
+  outputRef.pushStr("[0m");
+}
+
+function pushAnsiYellow(output: &mut String, text: str): void {
+  let mut outputRef: &mut String = output;
+  outputRef.pushChar(ansiEsc());
+  outputRef.pushStr("[33m");
+  outputRef.pushStr(text);
+  outputRef.pushChar(ansiEsc());
+  outputRef.pushStr("[0m");
+}
+
+/// `--indent-width=`/`--line-width=` with nothing after the `=`: `clap`
+/// rejects an empty string for a numeric argument with this exact message
+/// (still `ColorChoice::Always`, so still ANSI) instead of the generic
+/// missing-value error a bare `--indent-width` with no argument at all gets.
+function clapEmptyIntegerValueError(flagUsage: str): String {
+  let mut message: String = String::new();
+
+  message.pushChar(ansiEsc());
+  message.pushStr("[1m");
+  message.pushChar(ansiEsc());
+  message.pushStr("[31merror:");
+  message.pushChar(ansiEsc());
+  message.pushStr("[0m invalid value '");
+  pushAnsiYellow(&mut message, "");
+  message.pushStr("' for '");
+  pushAnsiBold(&mut message, flagUsage);
+  message.pushStr("': cannot parse integer from empty string\n\nFor more information, try '");
+  pushAnsiBold(&mut message, "--help");
+  message.pushStr("'.");
+
+  return message;
+}
+
+/// One flag `clap` has already matched, as the `Usage:` line renders it: the
+/// flag name itself is always bold (`boldPart`), and a value-taking flag's
+/// placeholder is plain text appended after it (`plainSuffix`, including its
+/// own leading space, e.g. `" <PROJECT>"`; empty for a boolean flag).
+record FmtUsageToken {
+  public boldPart: str;
+  public plainSuffix: str;
+}
+
+/// Which of the two order-sensitive `fmt` conflicts `parseArguments` has
+/// already seen a flag for (`--use-tabs`/`--spaces` name whichever one
+/// `clap` saw first as the conflict's subject), plus everything a conflict
+/// error's `Usage:` line needs: every flag matched so far, in the order
+/// `clap` matched them, and whether a `FILE_PATHS` positional value has been
+/// seen anywhere (its own placeholder always renders last, regardless of
+/// where it appeared relative to the other flags: `<FILE_PATHS>...` once a
+/// value was given, `[FILE_PATHS]...` when none was).
+record FmtFlagState {
+  public useTabsSeen: boolean;
+  public spacesSeen: boolean;
+  public usageTokens: Vector<FmtUsageToken>;
+  public sawFilePath: boolean;
+}
+
+/// Appends one matched flag to `state`'s `Usage:`-line token list.
+function fmtFlagStateRecordToken(state: &mut FmtFlagState, boldPart: str, plainSuffix: str): void {
+  let mut stateRef: &mut FmtFlagState = state;
+  stateRef.usageTokens.push(FmtUsageToken { boldPart: boldPart, plainSuffix: plainSuffix });
+}
+
+/// One `fmt`-only flag's shape, table-driven rather than one hand-written
+/// recognizer per flag: `plainSuffix` is `FmtUsageToken`'s (empty for a
+/// boolean flag), `takesValue` decides whether a bare `--name` token still
+/// needs a following value token (arity 2) or is complete on its own (arity
+/// 1; `--name=value` is always arity 1), and `repeatable` is false for
+/// every flag except `--emit`, the only one `clap` allows more than once.
+record FmtFlagSpec {
+  public name: str;
+  public plainSuffix: str;
+  public takesValue: boolean;
+  public repeatable: boolean;
+}
+
+/// The single source of truth for every `fmt`-only flag's identity, used by
+/// both the duplicate-flag pre-scan and the conflict `Usage:` line's
+/// forward scan, so the two can never drift out of sync with each other.
+function fmtFlagSpecTable(): Vector<FmtFlagSpec> {
+  let mut specs: Vector<FmtFlagSpec> = Vector::new<FmtFlagSpec>();
+  specs.push(FmtFlagSpec { name: "--check", plainSuffix: "", takesValue: false, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--sort-imports", plainSuffix: "", takesValue: false, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--use-tabs", plainSuffix: "", takesValue: false, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--spaces", plainSuffix: "", takesValue: false, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--stdin-json", plainSuffix: "", takesValue: false, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--project", plainSuffix: " <PROJECT>", takesValue: true, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--config", plainSuffix: " <CONFIG>", takesValue: true, repeatable: false });
+  specs.push(FmtFlagSpec {
+    name: "--indent-width",
+    plainSuffix: " <INDENT_WIDTH>",
+    takesValue: true,
+    repeatable: false,
+  });
+  specs.push(FmtFlagSpec { name: "--line-width", plainSuffix: " <LINE_WIDTH>", takesValue: true, repeatable: false });
+  specs.push(FmtFlagSpec { name: "--emit", plainSuffix: " <EMIT>", takesValue: true, repeatable: true });
+  return specs;
+}
+
+/// Which spec in `fmtFlagSpecTable()` (by index) `argument` matches, and how
+/// many argv tokens that occurrence consumes: 1 for a boolean flag or the
+/// `--name=value` form, 2 for a value-taking flag's `--name value` form.
+record FmtFlagMatch {
+  public specIndex: u64;
+  public consumed: u64;
+}
+
+function fmtMatchFlagSpec(specs: &Vector<FmtFlagSpec>, argument: &String): Option<FmtFlagMatch> {
+  let mut index: u64 = 0;
+
+  while (index < specs.length()) {
+    if (let Option::SOME(spec) = specs.get(index)) {
+      if (spec.takesValue) {
+        if (let Option::SOME(_) = flagEqualsValue(argument, spec.name)) {
+          return Option::SOME(FmtFlagMatch { specIndex: index, consumed: 1 });
+        }
+
+        if (argument.equals(spec.name)) {
+          return Option::SOME(FmtFlagMatch { specIndex: index, consumed: 2 });
+        }
+      } else if (argument.equals(spec.name)) {
+        return Option::SOME(FmtFlagMatch { specIndex: index, consumed: 1 });
+      }
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// `clap` rejects a non-repeatable `fmt` flag given twice with `the
+/// argument '<name>' cannot be used multiple times`, and it does so only
+/// after matching the *entire* command line: a duplicate positioned after
+/// an unrelated conflict (`--use-tabs --spaces --check --check`) is still
+/// reported ahead of that conflict, and ahead of `--help`/`--version` too.
+/// This scans the whole `fmt` argument list once, independently of
+/// `parseArguments`'s own incremental loop, and returns the first
+/// non-repeatable flag (its message-form text, e.g. `--project <PROJECT>`)
+/// seen a second time — or `Option::NONE` if every flag present is either
+/// repeatable or seen at most once.
+function fmtFindFirstDuplicateFlag(arguments: &Vector<String>, startIndex: u64): Option<String> {
+  let specs: Vector<FmtFlagSpec> = fmtFlagSpecTable();
+  let mut seen: Vector<boolean> = Vector::new<boolean>();
+  let mut seenInit: u64 = 0;
+
+  while (seenInit < specs.length()) {
+    seen.push(false);
+    seenInit += 1;
+  }
+
+  let mut index: u64 = startIndex;
+
+  while (index < arguments.length()) {
+    let Option::SOME(argument) = arguments.get(index) else {
+      break;
+    };
+
+    let Option::SOME(matched) = fmtMatchFlagSpec(&specs, argument) else {
+      index += 1;
+      continue;
+    };
+
+    let Option::SOME(spec) = specs.get(matched.specIndex) else {
+      index += matched.consumed;
+      continue;
+    };
+
+    if (!spec.repeatable) {
+      let Option::SOME(alreadySeen) = seen.get(matched.specIndex) else {
+        index += matched.consumed;
+        continue;
+      };
+
+      if (*alreadySeen) {
+        let mut subject: String = String::create(spec.name);
+        subject.pushStr(spec.plainSuffix);
+        return Option::SOME(subject);
+      }
+
+      seen.set(matched.specIndex, true);
+    }
+
+    index += matched.consumed;
+  }
+
+  return Option::NONE;
+}
+
+/// `clap` validates argument conflicts only after matching the entire
+/// command line, so a flag or a `FILE_PATHS` value coming *after* the
+/// argument that triggers a conflict still appears in that conflict's
+/// `Usage:` line. This continues a read-only scan of `arguments` from
+/// `fromIndex` (the token right after the conflicting argument and its own
+/// value, if it takes one) purely to extend `state` with whatever `clap`
+/// would still recognize there. It does not apply any flag's effect, and it
+/// does not itself detect a second conflict or a missing value past this
+/// point: the line is already failing on the first one, and `clap`'s exact
+/// behavior for two independent failures on the same line is not this
+/// function's concern.
+function fmtScanRemainingUsageTokensForConflict(
+  arguments: &Vector<String>,
+  fromIndex: u64,
+  state: &mut FmtFlagState
+): void {
+  let stateRef: &mut FmtFlagState = state;
+  let specs: Vector<FmtFlagSpec> = fmtFlagSpecTable();
+  let mut index: u64 = fromIndex;
+
+  while (index < arguments.length()) {
+    let Option::SOME(argument) = arguments.get(index) else {
+      break;
+    };
+
+    if (let Option::SOME(matched) = fmtMatchFlagSpec(&specs, argument)) {
+      if (let Option::SOME(spec) = specs.get(matched.specIndex)) {
+        fmtFlagStateRecordToken(stateRef, spec.name, spec.plainSuffix);
+      }
+
+      index += matched.consumed;
+      continue;
+    }
+
+    if (argument.startsWith("-")) {
+      index += 1;
+      continue;
+    }
+
+    stateRef.sawFilePath = true;
+    index += 1;
+  }
+}
+
+/// Reconstructs the exact `clap`-generated "used multiple times" error: a
+/// generic `Usage: ignis fmt [OPTIONS] [FILE_PATHS]...` line, unlike a
+/// conflict error's accumulated one, since `clap` reports this before ever
+/// building a flag-specific usage summary. `subject` is the flag's own
+/// message-form text (e.g. `--project <PROJECT>`), matching
+/// `fmtFindFirstDuplicateFlag`'s return value.
+function clapFmtDuplicateError(subject: &String): String {
+  let mut message: String = String::new();
+
+  message.pushChar(ansiEsc());
+  message.pushStr("[1m");
+  message.pushChar(ansiEsc());
+  message.pushStr("[31merror:");
+  message.pushChar(ansiEsc());
+  message.pushStr("[0m the argument '");
+  pushAnsiYellow(&mut message, subject.toStr());
+  message.pushStr("' cannot be used multiple times\n\n");
+  message.pushChar(ansiEsc());
+  message.pushStr("[1m");
+  message.pushChar(ansiEsc());
+  message.pushStr("[4mUsage:");
+  message.pushChar(ansiEsc());
+  message.pushStr("[0m ");
+  pushAnsiBold(&mut message, "ignis fmt");
+  message.pushStr(" [OPTIONS] [FILE_PATHS]...");
+  message.pushStr("\n\nFor more information, try '");
+  pushAnsiBold(&mut message, "--help");
+  message.pushStr("'.");
+  return message;
+}
+
+/// Reconstructs the exact `clap`-generated conflict error the host CLI
+/// prints. The host's `Cli` is `#[command(color = ColorChoice::Always)]`, so
+/// this always carries ANSI codes, checked byte-for-byte against the host
+/// binary, even though nothing here runs in a TTY.
+///
+/// `clap` names whichever argument was already present when the conflicting
+/// one was parsed as the "subject" (`subject` here); the other argument
+/// (`other`) is the one that triggered the conflict. The `Usage:` line lists
+/// every flag `clap` matched on the whole command line (in match order,
+/// each bolded, with any value placeholder plain), the rejected argument
+/// excluded, followed by the `FILE_PATHS` positional placeholder (always
+/// last, `state.sawFilePath` choosing its brackets).
+function clapFmtConflictError(subject: str, other: str, state: &mut FmtFlagState): String {
+  let mut message: String = String::new();
+
+  message.pushChar(ansiEsc());
+  message.pushStr("[1m");
+  message.pushChar(ansiEsc());
+  message.pushStr("[31merror:");
+  message.pushChar(ansiEsc());
+  message.pushStr("[0m the argument '");
+  pushAnsiYellow(&mut message, subject);
+  message.pushStr("' cannot be used with '");
+  pushAnsiYellow(&mut message, other);
+  message.pushStr("'\n\n");
+  message.pushChar(ansiEsc());
+  message.pushStr("[1m");
+  message.pushChar(ansiEsc());
+  message.pushStr("[4mUsage:");
+  message.pushChar(ansiEsc());
+  message.pushStr("[0m ");
+  pushAnsiBold(&mut message, "ignis fmt");
+
+  let mut tokenIndex: u64 = 0;
+
+  while (tokenIndex < state.usageTokens.length()) {
+    if (let Option::SOME(token) = state.usageTokens.get(tokenIndex)) {
+      message.pushStr(" ");
+      pushAnsiBold(&mut message, token.boldPart);
+      message.pushStr(token.plainSuffix);
+    }
+
+    tokenIndex += 1;
+  }
+
+  message.pushStr(" ");
+
+  if (state.sawFilePath) {
+    message.pushStr("<FILE_PATHS>...");
+  } else {
+    message.pushStr("[FILE_PATHS]...");
+  }
+
+  message.pushStr("\n\nFor more information, try '");
+  pushAnsiBold(&mut message, "--help");
+  message.pushStr("'.");
+  return message;
+}
+
+/// If `argument` is exactly `flagName` followed by `=` and a (possibly
+/// empty) value, returns that value: the `--flag=value` form editors build
+/// argv with, which `clap` accepts for every value-taking flag alongside
+/// the two-token `--flag value` form.
+function flagEqualsValue(argument: &String, flagName: str): Option<String> {
+  if (!argument.startsWith(flagName)) {
+    return Option::NONE;
+  }
+
+  let flagNameText: String = String::create(flagName);
+  let prefixLength: u64 = flagNameText.length();
+
+  let Option::SOME(afterPrefix) = argument.byteAt(prefixLength) else {
+    return Option::NONE;
+  };
+
+  if (afterPrefix != '=' as u8) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(argument.substringBytes(prefixLength + 1, argument.length()));
+}
+
+/// Applies `--emit`'s comma-separated mode list to `options`. An empty
+/// value (`--emit=`) enables nothing, matching the host.
+function applyFmtEmitModes(options: &mut CliOptions, value: &String): void {
+  let mut optionsRef: &mut CliOptions = options;
+  let modes: Vector<String> = splitCommaSeparated(value);
+  let mut modeIndex: u64 = 0;
+
+  while (modeIndex < modes.length()) {
+    if (let Option::SOME(mode) = modes.get(modeIndex) && mode.equals("diff")) {
+      optionsRef.fmtEmitDiff = true;
+    }
+
+    modeIndex += 1;
+  }
+}
+
+/// `--project`/`--project=<dir>`, including its conflict with `--stdin-json`.
+function tryParseFmtProjectFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
+): Result<Option<u64>, String> {
+  let mut optionsRef: &mut CliOptions = options;
+  let stateRef: &mut FmtFlagState = state;
+  let projectEqualsValue: Option<String> = flagEqualsValue(argument, "--project");
+  let isProjectFlag: boolean = argument.equals("--project") || projectEqualsValue.isSome();
+
+  if (!isProjectFlag) {
+    return Result::OK(Option::NONE);
+  }
+
+  if (optionsRef.fmtStdinJson) {
+    let projectArity: u64 = projectEqualsValue.isSome() ? 1 : 2;
+    fmtScanRemainingUsageTokensForConflict(arguments, index + projectArity, stateRef);
+    return Result::ERROR(clapFmtConflictError("--stdin-json", "--project <PROJECT>", stateRef));
+  }
+
+  fmtFlagStateRecordToken(stateRef, "--project", " <PROJECT>");
+
+  if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--project")) {
+    optionsRef.fmtProject = Option::SOME(equalsValue);
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  let Option::SOME(value) = arguments.get(index + 1) else {
+    return Result::ERROR(cliMissingValue("--project", "a directory"));
+  };
+
+  optionsRef.fmtProject = Option::SOME(value.clone());
+  return Result::OK(Option::SOME(index + 2));
+}
+
+/// `--check` and `--config`/`--config=<file>`.
+function tryParseFmtCheckOrConfigFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
+): Result<Option<u64>, String> {
+  let mut optionsRef: &mut CliOptions = options;
+  let stateRef: &mut FmtFlagState = state;
+
+  if (argument.equals("--check")) {
+    optionsRef.fmtCheck = true;
+    fmtFlagStateRecordToken(stateRef, "--check", "");
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--config")) {
+    optionsRef.fmtConfigPath = Option::SOME(equalsValue);
+    fmtFlagStateRecordToken(stateRef, "--config", " <CONFIG>");
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  if (argument.equals("--config")) {
+    let Option::SOME(value) = arguments.get(index + 1) else {
+      return Result::ERROR(cliMissingValue("--config", "a file"));
+    };
+
+    optionsRef.fmtConfigPath = Option::SOME(value.clone());
+    fmtFlagStateRecordToken(stateRef, "--config", " <CONFIG>");
+    return Result::OK(Option::SOME(index + 2));
+  }
+
+  return Result::OK(Option::NONE);
+}
+
+/// `--indent-width`/`--indent-width=<n>` and `--line-width`/`--line-width=<n>`.
+function tryParseFmtWidthFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
+): Result<Option<u64>, String> {
+  let mut optionsRef: &mut CliOptions = options;
+  let stateRef: &mut FmtFlagState = state;
+
+  if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--indent-width")) {
+    if (equalsValue.length() == 0) {
+      return Result::ERROR(clapEmptyIntegerValueError("--indent-width <INDENT_WIDTH>"));
+    }
+
+    let Option::SOME(width) = parseDecimal(&equalsValue) else {
+      return Result::ERROR(`error: invalid indent width: ${equalsValue.toStr()}`);
+    };
+
+    optionsRef.fmtIndentWidth = Option::SOME(width);
+    fmtFlagStateRecordToken(stateRef, "--indent-width", " <INDENT_WIDTH>");
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  if (argument.equals("--indent-width")) {
+    let Option::SOME(value) = arguments.get(index + 1) else {
+      return Result::ERROR(cliMissingValue("--indent-width", "a number"));
+    };
+
+    let Option::SOME(width) = parseDecimal(value) else {
+      return Result::ERROR(`error: invalid indent width: ${value.toStr()}`);
+    };
+
+    optionsRef.fmtIndentWidth = Option::SOME(width);
+    fmtFlagStateRecordToken(stateRef, "--indent-width", " <INDENT_WIDTH>");
+    return Result::OK(Option::SOME(index + 2));
+  }
+
+  if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--line-width")) {
+    if (equalsValue.length() == 0) {
+      return Result::ERROR(clapEmptyIntegerValueError("--line-width <LINE_WIDTH>"));
+    }
+
+    let Option::SOME(width) = parseDecimal(&equalsValue) else {
+      return Result::ERROR(`error: invalid line width: ${equalsValue.toStr()}`);
+    };
+
+    optionsRef.fmtLineWidth = Option::SOME(width);
+    fmtFlagStateRecordToken(stateRef, "--line-width", " <LINE_WIDTH>");
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  if (argument.equals("--line-width")) {
+    let Option::SOME(value) = arguments.get(index + 1) else {
+      return Result::ERROR(cliMissingValue("--line-width", "a number"));
+    };
+
+    let Option::SOME(width) = parseDecimal(value) else {
+      return Result::ERROR(`error: invalid line width: ${value.toStr()}`);
+    };
+
+    optionsRef.fmtLineWidth = Option::SOME(width);
+    fmtFlagStateRecordToken(stateRef, "--line-width", " <LINE_WIDTH>");
+    return Result::OK(Option::SOME(index + 2));
+  }
+
+  return Result::OK(Option::NONE);
+}
+
+/// `--use-tabs`/`--spaces` (mutually exclusive, tracked in `state`) and the
+/// plain boolean `--sort-imports`.
+function tryParseFmtStyleFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
+): Result<Option<u64>, String> {
+  let mut optionsRef: &mut CliOptions = options;
+  let mut stateRef: &mut FmtFlagState = state;
+
+  if (argument.equals("--use-tabs")) {
+    if (stateRef.spacesSeen) {
+      fmtScanRemainingUsageTokensForConflict(arguments, index + 1, stateRef);
+      return Result::ERROR(clapFmtConflictError("--spaces", "--use-tabs", stateRef));
+    }
+
+    stateRef.useTabsSeen = true;
+    optionsRef.fmtUseTabs = Option::SOME(true);
+    fmtFlagStateRecordToken(stateRef, "--use-tabs", "");
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  if (argument.equals("--spaces")) {
+    if (stateRef.useTabsSeen) {
+      fmtScanRemainingUsageTokensForConflict(arguments, index + 1, stateRef);
+      return Result::ERROR(clapFmtConflictError("--use-tabs", "--spaces", stateRef));
+    }
+
+    stateRef.spacesSeen = true;
+    optionsRef.fmtUseTabs = Option::SOME(false);
+    fmtFlagStateRecordToken(stateRef, "--spaces", "");
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  if (argument.equals("--sort-imports")) {
+    optionsRef.fmtSortImports = true;
+    fmtFlagStateRecordToken(stateRef, "--sort-imports", "");
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  return Result::OK(Option::NONE);
+}
+
+/// `--stdin-json`, including its conflicts with `--project` and explicit
+/// file paths.
+function tryParseFmtStdinJsonFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
+): Result<Option<u64>, String> {
+  let mut optionsRef: &mut CliOptions = options;
+  let stateRef: &mut FmtFlagState = state;
+
+  if (!argument.equals("--stdin-json")) {
+    return Result::OK(Option::NONE);
+  }
+
+  if (let Option::SOME(_) = &optionsRef.fmtProject) {
+    fmtScanRemainingUsageTokensForConflict(arguments, index + 1, stateRef);
+    return Result::ERROR(clapFmtConflictError("--project <PROJECT>", "--stdin-json", stateRef));
+  }
+
+  if (optionsRef.fmtFilePaths.length() > 0) {
+    fmtScanRemainingUsageTokensForConflict(arguments, index + 1, stateRef);
+    return Result::ERROR(clapFmtConflictError("[FILE_PATHS]...", "--stdin-json", stateRef));
+  }
+
+  fmtFlagStateRecordToken(stateRef, "--stdin-json", "");
+  optionsRef.fmtStdinJson = true;
+  return Result::OK(Option::SOME(index + 1));
+}
+
+/// `--emit`/`--emit=<modes>`.
+function tryParseFmtEmitFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
+): Result<Option<u64>, String> {
+  let optionsRef: &mut CliOptions = options;
+  let stateRef: &mut FmtFlagState = state;
+
+  if (let Option::SOME(equalsValue) = flagEqualsValue(argument, "--emit")) {
+    applyFmtEmitModes(optionsRef, &equalsValue);
+    fmtFlagStateRecordToken(stateRef, "--emit", " <EMIT>");
+    return Result::OK(Option::SOME(index + 1));
+  }
+
+  if (argument.equals("--emit")) {
+    let Option::SOME(value) = arguments.get(index + 1) else {
+      return Result::ERROR(cliMissingValue("--emit", "a mode"));
+    };
+
+    applyFmtEmitModes(optionsRef, value);
+    fmtFlagStateRecordToken(stateRef, "--emit", " <EMIT>");
+    return Result::OK(Option::SOME(index + 2));
+  }
+
+  return Result::OK(Option::NONE);
+}
+
+/// Handles one `fmt`-only flag during `parseArguments`'s scan. `Ok(Some(i))`
+/// means `argument` was one of these flags and parsing resumes at index `i`;
+/// `Ok(None)` means it was not, so the caller keeps trying other cases.
+/// Split out of `parseArguments` itself, which was long enough on its own to
+/// make the `fmt`-specific cases hard to see among the rest.
+function tryParseFmtFlag(
+  arguments: &Vector<String>,
+  argument: &String,
+  index: u64,
+  options: &mut CliOptions,
+  state: &mut FmtFlagState
+): Result<Option<u64>, String> {
+  match (tryParseFmtProjectFlag(arguments, argument, index, options, state)) {
+    Result::ERROR(message) -> {
+      return Result::ERROR(message);
+    },
+    Result::OK(handled) -> {
+      if (let Option::SOME(_) = handled) {
+        return Result::OK(handled);
+      }
+    },
+  };
+
+  match (tryParseFmtCheckOrConfigFlag(arguments, argument, index, options, state)) {
+    Result::ERROR(message) -> {
+      return Result::ERROR(message);
+    },
+    Result::OK(handled) -> {
+      if (let Option::SOME(_) = handled) {
+        return Result::OK(handled);
+      }
+    },
+  };
+
+  match (tryParseFmtWidthFlag(arguments, argument, index, options, state)) {
+    Result::ERROR(message) -> {
+      return Result::ERROR(message);
+    },
+    Result::OK(handled) -> {
+      if (let Option::SOME(_) = handled) {
+        return Result::OK(handled);
+      }
+    },
+  };
+
+  match (tryParseFmtStyleFlag(arguments, argument, index, options, state)) {
+    Result::ERROR(message) -> {
+      return Result::ERROR(message);
+    },
+    Result::OK(handled) -> {
+      if (let Option::SOME(_) = handled) {
+        return Result::OK(handled);
+      }
+    },
+  };
+
+  match (tryParseFmtStdinJsonFlag(arguments, argument, index, options, state)) {
+    Result::ERROR(message) -> {
+      return Result::ERROR(message);
+    },
+    Result::OK(handled) -> {
+      if (let Option::SOME(_) = handled) {
+        return Result::OK(handled);
+      }
+    },
+  };
+
+  return tryParseFmtEmitFlag(arguments, argument, index, options, state);
+}
+
 /// Parses a command line into the options every subcommand reads.
 ///
 /// `arguments` is the process argument vector, so the first entry is the
@@ -260,7 +996,19 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
     }
   }
 
+  if (let CliCommand::FMT = command) {
+    if (let Option::SOME(subject) = fmtFindFirstDuplicateFlag(arguments, index)) {
+      return Result::ERROR(clapFmtDuplicateError(&subject));
+    }
+  }
+
   let mut options: CliOptions = CliOptions::create(command);
+  let mut fmtFlagState: FmtFlagState = FmtFlagState {
+    useTabsSeen: false,
+    spacesSeen: false,
+    usageTokens: Vector::new<FmtUsageToken>(),
+    sawFilePath: false,
+  };
 
   while (index < arguments.length()) {
     let Option::SOME(argument) = arguments.get(index) else {
@@ -439,8 +1187,34 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    if (options.isFmtMode()) {
+      match (tryParseFmtFlag(arguments, argument, index, &mut options, &mut fmtFlagState)) {
+        Result::ERROR(message) -> {
+          return Result::ERROR(message);
+        },
+        Result::OK(handled) -> {
+          if (let Option::SOME(newIndex) = handled) {
+            index = newIndex;
+            continue;
+          }
+        },
+      };
+    }
+
     if (argument.startsWith("-")) {
       return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
+    }
+
+    if (options.isFmtMode()) {
+      if (options.fmtStdinJson) {
+        fmtScanRemainingUsageTokensForConflict(arguments, index + 1, &mut fmtFlagState);
+        return Result::ERROR(clapFmtConflictError("--stdin-json", "[FILE_PATHS]...", &mut fmtFlagState));
+      }
+
+      options.fmtFilePaths.push(argument.clone());
+      fmtFlagState.sawFilePath = true;
+      index += 1;
+      continue;
     }
 
     options.path = Option::SOME(argument.clone());
@@ -462,6 +1236,7 @@ export function helpText(): String {
   text.pushStr("  check      Check file or project without codegen or linking\n");
   text.pushStr("  build-std  Build the standard library\n");
   text.pushStr("  test       Run language-native tests for a project\n");
+  text.pushStr("  fmt        Format Ignis source canonically with parse/reparse safety checks\n");
   text.pushStr("\n");
   text.pushStr("Without a command the path is built, which is what `ignis build <path>` does.\n");
   text.pushStr("Without a path the project containing the current directory is used.\n");
@@ -482,6 +1257,16 @@ export function helpText(): String {
   text.pushStr("      --fixtures <DIR>      Add a directory of program fixture cases (test only)\n");
   text.pushStr("      --partition <K/N>     Run only shard K of N, 1-based (test only)\n");
   text.pushStr("      --test-timeout <SECS> Wall-clock budget for one test process (test only)\n");
+  text.pushStr("      --project <DIR>       Explicit project directory (fmt only)\n");
+  text.pushStr("      --check               Validate formatting without rewriting files (fmt only)\n");
+  text.pushStr("      --config <FILE>       Explicit formatter config file (fmt only)\n");
+  text.pushStr("      --indent-width <N>    Override formatter indentation width (fmt only)\n");
+  text.pushStr("      --line-width <N>      Override formatter line width (fmt only)\n");
+  text.pushStr("      --use-tabs            Override formatter indentation to use tabs (fmt only)\n");
+  text.pushStr("      --spaces              Override formatter indentation to use spaces (fmt only)\n");
+  text.pushStr("      --sort-imports        Enable import sorting (fmt only)\n");
+  text.pushStr("      --stdin-json          Read an NDJSON batch from stdin (fmt only)\n");
+  text.pushStr("      --emit <MODE>         Emit mode: diff previews without rewriting (fmt only)\n");
   text.pushStr("  -h, --help                Print this message\n");
   text.pushStr("  -V, --version             Print the compiler version\n");
   return text;
@@ -539,6 +1324,7 @@ function cliCommandName(command: CliCommand): str {
     CliCommand::CHECK -> "check",
     CliCommand::BUILD_STD -> "build-std",
     CliCommand::TEST -> "test",
+    CliCommand::FMT -> "fmt",
     CliCommand::HELP -> "help",
     CliCommand::VERSION -> "version",
   };
@@ -844,4 +1630,443 @@ function cliHelpAndVersionWinOverTheSubcommand(): void {
 @test
 function cliVersionTextMatchesTheHost(): void {
   Test::assertEq<str>(versionText().toStr(), "ignis 0.4.0");
+}
+
+/// `fmt --check --project <dir>` selects project mode with no explicit files.
+@test
+function cliParsesFmtSubcommandWithCheckAndProject(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "--project");
+  cliPush(&mut arguments, "demo");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<str>(cliCommandName(options.command), "fmt");
+  Test::assertEq<u64>(options.fmtFilePaths.length(), 0);
+  Test::assertEq<str>(cliOptionText(&options.fmtProject).toStr(), "demo");
+  Test::assertEq<boolean>(options.fmtCheck, true);
+}
+
+/// `fmt <file>` collects one explicit file, distinct from `path`.
+@test
+function cliParsesFmtSubcommandWithSingleFile(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "src/main.ign");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<u64>(options.fmtFilePaths.length(), 1);
+
+  let Option::SOME(filePath) = options.fmtFilePaths.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(filePath.toStr(), "src/main.ign");
+  Test::assertEq<boolean>(options.fmtProject.isNone(), true);
+}
+
+/// `fmt a.ign b.ign c.ign` collects every file in order.
+@test
+function cliParsesFmtSubcommandWithMultipleFiles(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "src/a.ign");
+  cliPush(&mut arguments, "src/b.ign");
+  cliPush(&mut arguments, "src/c.ign");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<u64>(options.fmtFilePaths.length(), 3);
+}
+
+/// Every formatter style override reaches the options fmt reads.
+@test
+function cliParsesFmtSubcommandWithStyleOverrides(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--indent-width");
+  cliPush(&mut arguments, "4");
+  cliPush(&mut arguments, "--line-width");
+  cliPush(&mut arguments, "120");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--sort-imports");
+  cliPush(&mut arguments, "--config");
+  cliPush(&mut arguments, "ignisfmt.toml");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<u64>(options.fmtIndentWidth.unwrapOr(0), 4);
+  Test::assertEq<u64>(options.fmtLineWidth.unwrapOr(0), 120);
+  Test::assertEq<boolean>(options.fmtUseTabs.unwrapOr(false), true);
+  Test::assertEq<boolean>(options.fmtSortImports, true);
+  Test::assertEq<str>(cliOptionText(&options.fmtConfigPath).toStr(), "ignisfmt.toml");
+}
+
+/// `--spaces` overrides indentation to spaces, distinct from leaving it unset.
+@test
+function cliFmtSpacesOverridesToSpaces(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--spaces");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<boolean>(options.fmtUseTabs.unwrapOr(true), false);
+}
+
+/// `--stdin-json` and `--emit diff` are both readable as fmt flags.
+@test
+function cliParsesFmtStdinJsonAndEmitDiff(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--stdin-json");
+  cliPush(&mut arguments, "--emit");
+  cliPush(&mut arguments, "diff");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<boolean>(options.fmtStdinJson, true);
+  Test::assertEq<boolean>(options.fmtEmitDiff, true);
+}
+
+/// A fmt-only flag stays rejected outside `fmt`, the same way test-only flags do.
+@test
+function cliRejectsFmtFlagsOutsideFmtMode(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "build");
+  cliPush(&mut arguments, "--check");
+
+  Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: unknown argument: --check");
+}
+
+/// Strips `ESC [ ... <letter>` ANSI CSI sequences, keeping everything else
+/// (including whitespace and layout) so a stripped conflict message still
+/// reads the way the exact `clap`-generated text does, just without color.
+/// Used only to assert wording; the full-fidelity match with the host,
+/// escape codes included, is verified by running both binaries in the PR.
+function stripAnsi(text: &String): String {
+  let mut result: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    let Option::SOME(byte) = text.byteAt(index) else {
+      break;
+    };
+
+    if (byte == 27) {
+      index += 1;
+
+      while (index < text.length()) {
+        let Option::SOME(next) = text.byteAt(index) else {
+          break;
+        };
+
+        index += 1;
+
+        if ((next >= 'a' as u8 && next <= 'z' as u8) || (next >= 'A' as u8 && next <= 'Z' as u8)) {
+          break;
+        }
+      }
+
+      continue;
+    }
+
+    result.pushByte(byte);
+    index += 1;
+  }
+
+  return result;
+}
+
+/// `--use-tabs` then `--spaces`: `clap` names whichever flag it saw first as
+/// the subject. Matches the host's exact wording (color codes included,
+/// verified by running the host binary on this exact command line).
+@test
+function cliRejectsUseTabsWithSpaces(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--spaces");
+  cliPush(&mut arguments, "a.ign");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--use-tabs' cannot be used with '--spaces'\n\nUsage: ignis fmt --use-tabs <FILE_PATHS>...\n\nFor more information, try '--help'."
+  );
+}
+
+/// The reverse order swaps which flag `clap` names as the subject.
+@test
+function cliRejectsSpacesWithUseTabs(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--spaces");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "a.ign");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--spaces' cannot be used with '--use-tabs'\n\nUsage: ignis fmt --spaces <FILE_PATHS>...\n\nFor more information, try '--help'."
+  );
+}
+
+/// `--stdin-json` before an explicit file: matches the host's exact wording.
+@test
+function cliRejectsStdinJsonWithAnExplicitFile(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--stdin-json");
+  cliPush(&mut arguments, "a.ign");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--stdin-json' cannot be used with '[FILE_PATHS]...'\n\nUsage: ignis fmt --stdin-json [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// The reverse order swaps the subject and drops `--stdin-json` from usage.
+@test
+function cliRejectsAnExplicitFileWithStdinJson(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "a.ign");
+  cliPush(&mut arguments, "--stdin-json");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '[FILE_PATHS]...' cannot be used with '--stdin-json'\n\nUsage: ignis fmt <FILE_PATHS>...\n\nFor more information, try '--help'."
+  );
+}
+
+/// `--stdin-json` before `--project`: matches the host's exact wording.
+@test
+function cliRejectsStdinJsonWithProject(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--stdin-json");
+  cliPush(&mut arguments, "--project");
+  cliPush(&mut arguments, "demo");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--stdin-json' cannot be used with '--project <PROJECT>'\n\nUsage: ignis fmt --stdin-json [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// The reverse order swaps the subject and changes what usage shows.
+@test
+function cliRejectsProjectWithStdinJson(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--project");
+  cliPush(&mut arguments, "demo");
+  cliPush(&mut arguments, "--stdin-json");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--project <PROJECT>' cannot be used with '--stdin-json'\n\nUsage: ignis fmt --project <PROJECT> [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// `clap` validates conflicts only after matching the whole command line, so
+/// a preceding, non-conflicting flag still appears in the `Usage:` line
+/// (verified against the host binary on this exact command line).
+@test
+function cliRejectsUseTabsWithSpacesAfterOnePrecedingFlag(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--spaces");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--use-tabs' cannot be used with '--spaces'\n\nUsage: ignis fmt --check --use-tabs [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// Same as above with two preceding flags, in the order they were parsed.
+@test
+function cliRejectsUseTabsWithSpacesAfterTwoPrecedingFlags(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "--sort-imports");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--spaces");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--use-tabs' cannot be used with '--spaces'\n\nUsage: ignis fmt --check --sort-imports --use-tabs [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// A flag placed *after* the rejected argument still appears in the
+/// `Usage:` line: `clap` matches the whole line before validating a
+/// conflict, so this is not limited to flags seen before the conflict.
+@test
+function cliRejectsUseTabsWithSpacesFollowedByALaterFlag(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--spaces");
+  cliPush(&mut arguments, "--sort-imports");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--use-tabs' cannot be used with '--spaces'\n\nUsage: ignis fmt --use-tabs --sort-imports [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// `--stdin-json` after a preceding flag: the `Usage:` line keeps the
+/// preceding flag even though it is unrelated to the conflict.
+@test
+function cliRejectsStdinJsonWithProjectAfterAPrecedingFlag(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "--stdin-json");
+  cliPush(&mut arguments, "--project");
+  cliPush(&mut arguments, "demo");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--stdin-json' cannot be used with '--project <PROJECT>'\n\nUsage: ignis fmt --check --stdin-json [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// A `FILE_PATHS` value present anywhere on the line — even *before* both
+/// conflicting flags, and never actually consumed since the conflict fires
+/// first — still switches the trailing placeholder to `<FILE_PATHS>...`.
+@test
+function cliRejectsUseTabsWithSpacesWithALeadingFilePath(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "a.ign");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--spaces");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--use-tabs' cannot be used with '--spaces'\n\nUsage: ignis fmt --use-tabs <FILE_PATHS>...\n\nFor more information, try '--help'."
+  );
+}
+
+/// A non-repeatable `fmt` flag given twice is `clap`'s own "used multiple
+/// times" error, not the formatter's own conflict wording, and its
+/// `Usage:` line is the generic one, not the accumulated per-flag list a
+/// conflict error builds. Verified against the host binary.
+@test
+function cliRejectsCheckUsedTwice(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "a.ign");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--check' cannot be used multiple times\n\nUsage: ignis fmt [OPTIONS] [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// Same as above for a value-taking flag: the message-form subject includes
+/// its placeholder (`--project <PROJECT>`), not just the flag name.
+@test
+function cliRejectsProjectUsedTwice(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--project");
+  cliPush(&mut arguments, "a");
+  cliPush(&mut arguments, "--project");
+  cliPush(&mut arguments, "b");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--project <PROJECT>' cannot be used multiple times\n\nUsage: ignis fmt [OPTIONS] [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// `--use-tabs` and `--spaces` are each individually non-repeatable too,
+/// independent of their mutual-exclusion conflict with each other.
+@test
+function cliRejectsUseTabsUsedTwice(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--use-tabs");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--use-tabs' cannot be used multiple times\n\nUsage: ignis fmt [OPTIONS] [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
+}
+
+/// `--emit` is the one `fmt` flag `clap` allows repeated: no error.
+@test
+function cliAllowsEmitUsedTwice(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--emit");
+  cliPush(&mut arguments, "diff");
+  cliPush(&mut arguments, "--emit");
+  cliPush(&mut arguments, "diff");
+
+  let options: CliOptions = cliParse(&arguments);
+
+  Test::assertEq<boolean>(options.fmtEmitDiff, true);
+}
+
+/// A duplicate flag is reported ahead of an unrelated conflict elsewhere on
+/// the same line, even when the duplicate itself comes *after* the
+/// conflicting pair in argv order: `clap` matches the whole line before
+/// validating anything, and a "used multiple times" error takes priority
+/// over a conflict error. Verified against the host binary.
+@test
+function cliRejectsADuplicateFlagBeforeAnUnrelatedConflict(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "fmt");
+  cliPush(&mut arguments, "--use-tabs");
+  cliPush(&mut arguments, "--spaces");
+  cliPush(&mut arguments, "--check");
+  cliPush(&mut arguments, "--check");
+
+  let message: String = cliParseError(&arguments);
+
+  Test::assertEq<str>(
+    stripAnsi(&message).toStr(),
+    "error: the argument '--check' cannot be used multiple times\n\nUsage: ignis fmt [OPTIONS] [FILE_PATHS]...\n\nFor more information, try '--help'."
+  );
 }

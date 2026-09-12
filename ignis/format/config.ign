@@ -1,4 +1,5 @@
 import Fs from "std::fs";
+import Io from "std::io";
 import Path from "std::path";
 import String from "std::string";
 import Toml, TomlDocument, TomlTable, TomlValue, TomlValueKind from "std::toml";
@@ -184,10 +185,27 @@ function applyTable(
   return Result::OK(());
 }
 
+/// Rust's `io::Error` `Display`: the strerror text plus ` (os error N)`.
+/// Duplicated from `ignis/format/api.ign`'s `Format::ioErrorDisplay` rather
+/// than shared, since `api.ign` already imports this module and a shared
+/// helper would create an import cycle.
+function configIoErrorDisplay(error: &Io::IoError): String {
+  let mut message: String = String::create(error.errorMessage());
+  let rawCode: i32 = error.rawCode();
+  let rawCodeText: String = rawCode.toString();
+  message.pushStr(" (os error ");
+  message.push(&rawCodeText);
+  message.pushStr(")");
+  return message;
+}
+
 function readToml(path: &Path::PathBuf): Result<TomlDocument, DiagnosticBag> {
-  let Result::OK(source) = Fs::readToString(path) else {
-    let message: String = String::create("could not read file");
-    return Result::ERROR(FormatConfigDiagnostics::io(path, &message));
+  let source: String = match (Fs::readToString(path)) {
+    Result::OK(value) -> value,
+    Result::ERROR(readError) -> {
+      let message: String = configIoErrorDisplay(&readError);
+      return Result::ERROR(FormatConfigDiagnostics::io(path, &message));
+    },
   };
 
   // Nested `let ... else` here, not a `match` arm block: a `let` followed by

@@ -1,14 +1,22 @@
+import CType, LibC from "std::libc";
 import Env from "std::env";
 import Fs from "std::fs";
 import Io from "std::io";
+import Memory from "std::memory";
 import Path from "std::path";
 import Process from "std::process";
+import Sort from "std::sort";
 
 import DiagnosticBag, DiagnosticRenderer, Severity, SourceFile from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Ast from "@compiler::ast";
+import Config, ResolvedProject from "@compiler::config";
 import ParseOutput, Parser from "@compiler::parser";
 import Hir from "@compiler::hir";
+
+import Format from "./format/api";
+import _ from "./format/config";
+import FormatterCliOverrides, FormatterConfig, FormatterConfigPaths from "./format/config";
 
 // Pulled in so `ignis check` analyzes them: nothing else in this binary's
 // import graph reaches HIR lowering or the borrow checker yet, and a module
@@ -1599,6 +1607,1036 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
   return 0;
 }
 
+// =============================================================================
+// Fmt command
+// =============================================================================
+
+/// Where a `fmt` run applies: either the exact files the command line named,
+/// or the whole project a discovered `ignis.toml` governs.
+enum FmtInput {
+  ExplicitFiles(Vector<Path::PathBuf>),
+  Project(ResolvedProject),
+}
+
+/// The formatter configuration failure message the host CLI prints for one
+/// not scoped to a particular file being formatted, minus the `Error: `
+/// prefix `Io::eprintln` callers add.
+export function fmtConfigErrorMessage(bag: &DiagnosticBag): String {
+  let Option::SOME(diagnostic) = bag.get(0) else {
+    return String::create("formatter configuration failed: unknown formatter configuration error");
+  };
+
+  return `formatter configuration failed: ${diagnostic.messageText()}`;
+}
+
+/// Reports a formatter configuration failure the way the host CLI reports
+/// one that is not scoped to a particular file being formatted.
+function printFmtConfigError(bag: &DiagnosticBag): void {
+  Io::eprintln(`Error: ${fmtConfigErrorMessage(bag).toStr()}`);
+}
+
+/// The formatter configuration failure message the host CLI prints for one
+/// scoped to the file being formatted, minus the `Error: ` prefix
+/// `Io::eprintln` callers add.
+export function fmtConfigErrorMessageForPath(path: &Path::PathBuf, bag: &DiagnosticBag): String {
+  return `${path.asStr()}: ${fmtConfigErrorMessage(bag).toStr()}`;
+}
+
+/// Reports a formatter configuration failure scoped to the file being
+/// formatted, the way the host CLI's per-file config resolution does.
+function printFmtConfigErrorForPath(path: &Path::PathBuf, bag: &DiagnosticBag): void {
+  Io::eprintln(`Error: ${fmtConfigErrorMessageForPath(path, bag).toStr()}`);
+}
+
+/// Builds the overrides `Format::Config::load` applies on top of whatever a
+/// config file declares.
+function buildFmtCliOverrides(options: &CliOptions): FormatterCliOverrides {
+  let mut sortImports: Option<boolean> = Option::NONE;
+
+  if (options.fmtSortImports) {
+    sortImports = Option::SOME(true);
+  }
+
+  return FormatterCliOverrides {
+    indentWidth: options.fmtIndentWidth,
+    lineWidth: options.fmtLineWidth,
+    useTabs: options.fmtUseTabs,
+    sortImports: sortImports,
+  };
+}
+
+/// Resolves the formatter config for a stdin-json batch: a flat lookup under
+/// the current directory, with no upward search for `ignis.toml`.
+function resolveFmtConfigForStdin(options: &CliOptions): Result<FormatterConfig, DiagnosticBag> {
+  let cwd: Path::PathBuf = match (Env::currentDir()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> Path::PathBuf::create("."),
+  };
+
+  let ignisToml: Path::PathBuf = cwd.join("ignis.toml");
+  let dedicatedConfig: Path::PathBuf = cwd.join("ignisfmt.toml");
+
+  let mut ignisTomlOption: Option<Path::PathBuf> = Option::NONE;
+  if (Fs::exists(ignisToml.asStr())) {
+    ignisTomlOption = Option::SOME(ignisToml.clone());
+  }
+
+  let mut dedicatedConfigOption: Option<Path::PathBuf> = Option::NONE;
+  if (Fs::exists(dedicatedConfig.asStr())) {
+    dedicatedConfigOption = Option::SOME(dedicatedConfig.clone());
+  }
+
+  let explicitConfig: Option<Path::PathBuf> = match (&options.fmtConfigPath) {
+    Option::SOME(value) -> Option::SOME(Path::PathBuf::fromString(&value)),
+    Option::NONE -> Option::NONE,
+  };
+
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: cwd,
+    ignisToml: ignisTomlOption,
+    dedicatedConfig: dedicatedConfigOption,
+    explicitConfig: explicitConfig,
+  };
+
+  let overrides: FormatterCliOverrides = buildFmtCliOverrides(options);
+
+  return Format::Config::load(&paths, &overrides);
+}
+
+/// Resolves the formatter config for a whole project, rooted at the project
+/// directory `Config::loadProjectFile` already discovered.
+function resolveFmtConfigForProject(
+  project: &ResolvedProject,
+  options: &CliOptions
+): Result<FormatterConfig, DiagnosticBag> {
+  let root: Path::PathBuf = match (&project.root) {
+    Option::SOME(value) -> value.clone(),
+    Option::NONE -> Path::PathBuf::create("."),
+  };
+
+  let ignisToml: Option<Path::PathBuf> = match (&project.configPath) {
+    Option::SOME(value) -> Option::SOME(value.clone()),
+    Option::NONE -> Option::NONE,
+  };
+
+  let dedicatedConfig: Path::PathBuf = root.join("ignisfmt.toml");
+  let mut dedicatedConfigOption: Option<Path::PathBuf> = Option::NONE;
+
+  if (Fs::exists(dedicatedConfig.asStr())) {
+    dedicatedConfigOption = Option::SOME(dedicatedConfig.clone());
+  }
+
+  let explicitConfig: Option<Path::PathBuf> = match (&options.fmtConfigPath) {
+    Option::SOME(value) -> Option::SOME(Path::PathBuf::fromString(&value)),
+    Option::NONE -> Option::NONE,
+  };
+
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: root,
+    ignisToml: ignisToml,
+    dedicatedConfig: dedicatedConfigOption,
+    explicitConfig: explicitConfig,
+  };
+
+  let overrides: FormatterCliOverrides = buildFmtCliOverrides(options);
+
+  return Format::Config::load(&paths, &overrides);
+}
+
+/// Resolves the formatter config for one explicit file: the project the
+/// upward search from its directory finds, or that directory on its own.
+function resolveFmtConfigForFile(
+  path: &Path::PathBuf,
+  options: &CliOptions
+): Result<FormatterConfig, DiagnosticBag> {
+  let parentDir: Path::PathBuf = match (path.parent()) {
+    Option::SOME(value) -> value,
+    Option::NONE -> Path::PathBuf::create("."),
+  };
+
+  let projectRoot: Path::PathBuf = match (Config::findProjectFile(&parentDir)) {
+    Option::SOME(configPath) -> match (configPath.parent()) {
+      Option::SOME(root) -> root,
+      Option::NONE -> parentDir.clone(),
+    },
+    Option::NONE -> parentDir.clone(),
+  };
+
+  let ignisTomlCandidate: Path::PathBuf = projectRoot.join("ignis.toml");
+  let dedicatedConfig: Path::PathBuf = projectRoot.join("ignisfmt.toml");
+
+  let mut ignisTomlOption: Option<Path::PathBuf> = Option::NONE;
+  if (Fs::exists(ignisTomlCandidate.asStr())) {
+    ignisTomlOption = Option::SOME(ignisTomlCandidate.clone());
+  }
+
+  let mut dedicatedConfigOption: Option<Path::PathBuf> = Option::NONE;
+  if (Fs::exists(dedicatedConfig.asStr())) {
+    dedicatedConfigOption = Option::SOME(dedicatedConfig.clone());
+  }
+
+  let explicitConfig: Option<Path::PathBuf> = match (&options.fmtConfigPath) {
+    Option::SOME(value) -> Option::SOME(Path::PathBuf::fromString(&value)),
+    Option::NONE -> Option::NONE,
+  };
+
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: projectRoot,
+    ignisToml: ignisTomlOption,
+    dedicatedConfig: dedicatedConfigOption,
+    explicitConfig: explicitConfig,
+  };
+
+  let overrides: FormatterCliOverrides = buildFmtCliOverrides(options);
+
+  return Format::Config::load(&paths, &overrides);
+}
+
+/// Resolves what a `fmt` run applies to, printing the same messages the host
+/// CLI prints on failure.
+///
+/// Priority: `--project <dir>`, then explicit files, then the project
+/// containing the current directory.
+function resolveFmtInput(options: &CliOptions): Option<FmtInput> {
+  if (let Option::SOME(projectDir) = &options.fmtProject) {
+    let root: Path::PathBuf = Path::PathBuf::fromString(&projectDir);
+    let configPath: Path::PathBuf = root.join("ignis.toml");
+
+    if (!Fs::exists(configPath.asStr())) {
+      Io::eprintln(`Error: No ignis.toml found in '${root.asStr()}'`);
+      return Option::NONE;
+    }
+
+    return match (Config::loadProjectFile(&configPath)) {
+      Result::OK(project) -> Option::SOME(FmtInput::Project(project)),
+      Result::ERROR(bag) -> {
+        printFmtConfigError(&bag);
+        return Option::NONE;
+      },
+    };
+  }
+
+  if (options.fmtFilePaths.length() > 0) {
+    let mut paths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+    let mut index: u64 = 0;
+
+    while (index < options.fmtFilePaths.length()) {
+      let Option::SOME(raw) = options.fmtFilePaths.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      let path: Path::PathBuf = Path::PathBuf::fromString(raw);
+
+      if (!Fs::exists(path.asStr())) {
+        Io::eprintln(`Error: File not found: '${path.asStr()}'`);
+        return Option::NONE;
+      }
+
+      paths.push(path);
+      index += 1;
+    }
+
+    return Option::SOME(FmtInput::ExplicitFiles(paths));
+  }
+
+  let cwd: Path::PathBuf = match (Env::currentDir()) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Io::eprintln(String::create("Error: Failed to get current directory"));
+      return Option::NONE;
+    },
+  };
+
+  return match (Config::findProjectFile(&cwd)) {
+    Option::SOME(configPath) -> match (Config::loadProjectFile(&configPath)) {
+      Result::OK(project) -> Option::SOME(FmtInput::Project(project)),
+      Result::ERROR(bag) -> {
+        printFmtConfigError(&bag);
+        return Option::NONE;
+      },
+    },
+    Option::NONE -> {
+      Io::eprintln(String::create("Error: No ignis.toml found"));
+      Io::eprintln(String::create("Hint: Run 'ignis init' to create a project, or provide a file path."));
+      return Option::NONE;
+    },
+  };
+}
+
+/// Prints a unified diff between the file currently on disk and `formatted`.
+/// Only called in a read-only run, so the file on disk is still the original.
+function printFmtDiffForFile(path: &Path::PathBuf, formatted: &String): void {
+  let original: String = match (Fs::readToString(path)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> String::new(),
+  };
+
+  let pathText: String = path.toString();
+  Io::print(Format::unifiedDiff(&pathText, &original, formatted));
+}
+
+/// Splits a path string on `/`, dropping empty components (leading slash,
+/// repeated slashes).
+function splitPathComponents(path: &String): Vector<String> {
+  let mut parts: Vector<String> = Vector::new<String>();
+  let mut start: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index <= path.length()) {
+    let mut atSeparator: boolean = index == path.length();
+
+    if (!atSeparator) {
+      if (let Option::SOME(byte) = path.byteAt(index)) {
+        atSeparator = byte == '/' as u8;
+      }
+    }
+
+    if (atSeparator) {
+      if (index > start) {
+        parts.push(path.substringBytes(start, index));
+      }
+
+      start = index + 1;
+    }
+
+    index += 1;
+  }
+
+  return parts;
+}
+
+/// Orders two paths component by component, the way Rust's `PathBuf`/`Path`
+/// `Ord` does and a plain string sort does not: `a/b.ign` sorts before
+/// `a-b.ign`, because the first path component `a` sorts before the whole
+/// second component `a-b.ign`, even though `-` (0x2D) sorts before `/`
+/// (0x2F) byte for byte.
+export function comparePathComponents(left: &String, right: &String): i32 {
+  let leftParts: Vector<String> = splitPathComponents(left);
+  let rightParts: Vector<String> = splitPathComponents(right);
+  let leftLength: u64 = leftParts.length();
+  let rightLength: u64 = rightParts.length();
+  let minLength: u64 = leftLength < rightLength ? leftLength : rightLength;
+
+  let mut index: u64 = 0;
+
+  while (index < minLength) {
+    let Option::SOME(leftPart) = leftParts.get(index) else {
+      break;
+    };
+
+    let Option::SOME(rightPart) = rightParts.get(index) else {
+      break;
+    };
+
+    let comparison: i32 = leftPart.compare(rightPart);
+
+    if (comparison != 0) {
+      return comparison;
+    }
+
+    index += 1;
+  }
+
+  if (leftLength < rightLength) {
+    return -1;
+  }
+
+  if (leftLength > rightLength) {
+    return 1;
+  }
+
+  return 0;
+}
+
+/// Recursively collects every `.ign` file under `directory`, following
+/// symlinked directories the way the host CLI's `Path::is_dir()`-based
+/// recursion does (`Fs::collectWalk` deliberately does not, since its other
+/// callers need cycle-safe walking, so project-mode `fmt` has its own walker
+/// here instead of reusing it). A directory whose own name ends in `.ign` is
+/// still a directory: `Fs::metadata(...).isDir()` is checked before the
+/// extension, the same order `path.is_dir()` runs in on the host.
+function collectProjectIgnFilesRecursive(
+  directory: &Path::PathBuf,
+  files: &mut Vector<Path::PathBuf>
+): Result<void, String> {
+  let mut reader: Fs::ReadDir = match (Fs::ReadDir::open(directory.asStr())) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      return Result::ERROR(String::create("failed to read directory"));
+    },
+  };
+
+  while (true) {
+    let Result::OK(next) = reader.next() else {
+      reader.close();
+      return Result::ERROR(String::create("failed to read directory entry"));
+    };
+
+    let Option::SOME(entry) = next else {
+      break;
+    };
+
+    if (entry.name.equals(".") || entry.name.equals("..")) {
+      continue;
+    }
+
+    // A failed `stat` (a broken symlink, most commonly) is not a directory,
+    // the same way the host's `Path::is_dir()` treats it: it still reaches
+    // the extension check below and gets pushed if its name ends in `.ign`,
+    // so it is reported (and fails with "could not read file" once
+    // `formatFile` actually opens it) instead of silently disappearing.
+    let mut isDirectory: boolean = false;
+
+    if (let Result::OK(entryMetadata) = Fs::metadata(&entry.path)) {
+      isDirectory = entryMetadata.isDir();
+    }
+
+    if (isDirectory) {
+      let recursed: Result<void, String> = collectProjectIgnFilesRecursive(&entry.path, files);
+
+      let Result::OK(_) = recursed else {
+        reader.close();
+        return recursed;
+      };
+
+      continue;
+    }
+
+    if (let Option::SOME(extension) = entry.path.extension() && extension.equals("ign")) {
+      let mut filesRef: &mut Vector<Path::PathBuf> = files;
+      filesRef.push(entry.path.clone());
+    }
+  }
+
+  reader.close();
+  return Result::OK(());
+}
+
+/// Formats every file `sourceDir` holds, sorted the same way the host CLI's
+/// project-mode collection is: `PathBuf`'s component-wise `Ord`.
+function collectProjectIgnFiles(sourceDir: &Path::PathBuf): Option<Vector<Path::PathBuf>> {
+  let mut files: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+
+  let Result::OK(_) = collectProjectIgnFilesRecursive(sourceDir, &mut files) else {
+    return Option::NONE;
+  };
+
+  let mut pathTexts: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < files.length()) {
+    let Option::SOME(file) = files.get(index) else {
+      break;
+    };
+
+    pathTexts.push(file.toString());
+    index += 1;
+  }
+
+  Sort::stableStrings(&mut pathTexts, (left: &String, right: &String): i32 -> {
+    return comparePathComponents(left, right);
+  });
+
+  let mut sortedFiles: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut sortedIndex: u64 = 0;
+
+  while (sortedIndex < pathTexts.length()) {
+    let Option::SOME(entry) = pathTexts.get(sortedIndex) else {
+      break;
+    };
+
+    sortedFiles.push(Path::PathBuf::fromString(entry));
+    sortedIndex += 1;
+  }
+
+  return Option::SOME(sortedFiles);
+}
+
+/// Formats the explicit files a `fmt` run named, resolving each file's own
+/// formatter config the way the host CLI does.
+function runFmtExplicitFiles(
+  paths: &Vector<Path::PathBuf>,
+  options: &CliOptions,
+  readOnly: boolean,
+  emitDiff: boolean
+): i32 {
+  let mut dirtyFiles: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut index: u64 = 0;
+
+  while (index < paths.length()) {
+    let Option::SOME(path) = paths.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    let formatterConfig: FormatterConfig = match (resolveFmtConfigForFile(path, options)) {
+      Result::OK(value) -> value,
+      Result::ERROR(bag) -> {
+        printFmtConfigErrorForPath(path, &bag);
+        return 1;
+      },
+    };
+
+    let formatOptions: Format::FormatOptions = Format::FormatOptions { check: readOnly, config: formatterConfig };
+
+    let outcome: Format::FormatOutcome = match (Format::formatFile(path, &formatOptions)) {
+      Result::OK(value) -> value,
+      Result::ERROR(error) -> {
+        Io::eprintln(`Error: ${path.asStr()}: ${error.describe().toStr()}`);
+        return 1;
+      },
+    };
+
+    if (emitDiff && outcome.changed) {
+      printFmtDiffForFile(path, &outcome.formatted);
+    }
+
+    if (options.fmtCheck && outcome.changed) {
+      dirtyFiles.push(path.clone());
+    }
+
+    index += 1;
+  }
+
+  if (options.fmtCheck && dirtyFiles.length() > 0) {
+    let mut dirtyIndex: u64 = 0;
+
+    while (dirtyIndex < dirtyFiles.length()) {
+      let Option::SOME(file) = dirtyFiles.get(dirtyIndex) else {
+        dirtyIndex += 1;
+        continue;
+      };
+
+      Io::eprintln(`Check failed: ${file.asStr()}`);
+      dirtyIndex += 1;
+    }
+
+    return 1;
+  }
+
+  return 0;
+}
+
+/// Formats every `.ign` file a project's source directory holds, resolving
+/// the project's formatter config once up front.
+function runFmtProject(
+  project: &ResolvedProject,
+  options: &CliOptions,
+  readOnly: boolean,
+  emitDiff: boolean
+): i32 {
+  let formatterConfig: FormatterConfig = match (resolveFmtConfigForProject(project, options)) {
+    Result::OK(value) -> value,
+    Result::ERROR(bag) -> {
+      printFmtConfigError(&bag);
+      return 1;
+    },
+  };
+
+  let sourceDir: Path::PathBuf = match (&project.sourceDir) {
+    Option::SOME(value) -> value.clone(),
+    Option::NONE -> Path::PathBuf::create("."),
+  };
+
+  let Option::SOME(files) = collectProjectIgnFiles(&sourceDir) else {
+    Io::eprintln(String::create("Error: Failed to collect project files"));
+    return 1;
+  };
+
+  let formatOptions: Format::FormatOptions = Format::FormatOptions { check: readOnly, config: formatterConfig };
+
+  let mut dirtyFiles: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut index: u64 = 0;
+
+  while (index < files.length()) {
+    let Option::SOME(file) = files.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    let outcome: Format::FormatOutcome = match (Format::formatFile(file, &formatOptions)) {
+      Result::OK(value) -> value,
+      Result::ERROR(error) -> {
+        Io::eprintln(`Error: ${file.asStr()}: ${error.describe().toStr()}`);
+        return 1;
+      },
+    };
+
+    if (emitDiff && outcome.changed) {
+      printFmtDiffForFile(file, &outcome.formatted);
+    }
+
+    if (options.fmtCheck && outcome.changed) {
+      dirtyFiles.push(file.clone());
+    }
+
+    index += 1;
+  }
+
+  if (options.fmtCheck && dirtyFiles.length() > 0) {
+    let mut dirtyIndex: u64 = 0;
+
+    while (dirtyIndex < dirtyFiles.length()) {
+      let Option::SOME(file) = dirtyFiles.get(dirtyIndex) else {
+        dirtyIndex += 1;
+        continue;
+      };
+
+      Io::eprintln(`Check failed: ${file.asStr()}`);
+      dirtyIndex += 1;
+    }
+
+    return 1;
+  }
+
+  return 0;
+}
+
+/// A single read of stdin (file descriptor 0) into a fixed buffer: `count`
+/// holds the byte count on a successful read (0 at end of input), and
+/// `readError` holds the `strerror`-style message on failure.
+record FmtStdinReadOutcome {
+  public count: CType::SSizeT;
+  public readError: Option<String>;
+}
+
+/// A `read(2)` interrupted by a signal (`EINTR`) before transferring any
+/// data is retried, the way Rust's `std::io::Read` implementations do,
+/// instead of surfacing a spurious error for a condition the caller cannot
+/// meaningfully act on.
+function fmtReadStdinChunk(buf: *mut u8, bufSize: u64): FmtStdinReadOutcome {
+  while (true) {
+    let count: CType::SSizeT = LibC::File::read(0, buf as CType::CVoidPtr, bufSize);
+
+    if (count < 0) {
+      let error: Io::IoError = Io::IoError::lastError();
+
+      if (error.rawCode() == LibC::Errno::EINTR) {
+        continue;
+      }
+
+      // Matches Rust's `std::io::Error` `Display`: the `strerror` text, then
+      // the raw errno in parentheses.
+      let mut message: String = String::create(error.errorMessage());
+      let rawCodeValue: i32 = error.rawCode();
+      let rawCode: String = rawCodeValue.toString();
+      message.pushStr(" (os error ");
+      message.push(&rawCode);
+      message.pushStr(")");
+
+      return FmtStdinReadOutcome { count: count, readError: Option::SOME(message) };
+    }
+
+    return FmtStdinReadOutcome { count: count, readError: Option::NONE };
+  }
+
+  @unreachable();
+}
+
+/// Finds the first `\n` at or after `start`, scanning only the unexamined
+/// suffix of `text`. `runFmtStdinJson` tracks how far it has already
+/// searched a growing `pending` buffer so a long line's bytes are each
+/// examined once as new chunks arrive, not rescanned from the start of
+/// `pending` on every 4096-byte read (which is quadratic in the line's
+/// length).
+function findNewlineFrom(text: &String, start: u64): Option<u64> {
+  let mut cursor: u64 = start;
+
+  while (cursor < text.length()) {
+    let Option::SOME(byte) = text.byteAt(cursor) else {
+      break;
+    };
+
+    if (byte == '\n' as u8) {
+      return Option::SOME(cursor);
+    }
+
+    cursor += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// Rust's `char::is_whitespace()` (the Unicode `White_Space` property),
+/// which is what `str::trim()` uses: `String::trimAsciiWhitespace` only
+/// covers the ASCII subset, so `--stdin-json`'s line trimming used the wrong
+/// set for e.g. U+00A0 (NBSP) or U+2028 (LINE SEPARATOR).
+function isUnicodeWhitespace(character: char): boolean {
+  let code: u32 = character as u32;
+
+  if (code == 0x09 || code == 0x0A || code == 0x0B || code == 0x0C || code == 0x0D || code == 0x20) {
+    return true;
+  }
+
+  if (code == 0x85 || code == 0xA0 || code == 0x1680) {
+    return true;
+  }
+
+  if (code >= 0x2000 && code <= 0x200A) {
+    return true;
+  }
+
+  return code == 0x2028 || code == 0x2029 || code == 0x202F || code == 0x205F || code == 0x3000;
+}
+
+/// `Rust`'s `str::trim()`, trimming every Unicode `White_Space` character
+/// rather than only the ASCII ones `String::trimAsciiWhitespace` covers.
+function trimUnicodeWhitespace(text: &String): String {
+  let length: u64 = text.length();
+  let mut startByte: u64 = length;
+  let mut cursor: u64 = 0;
+
+  while (cursor < length) {
+    let mut charEnd: u64 = cursor;
+    let Option::SOME(character) = text.charAt(cursor, &mut charEnd) else {
+      break;
+    };
+
+    if (!isUnicodeWhitespace(character)) {
+      startByte = cursor;
+      break;
+    }
+
+    cursor = charEnd;
+  }
+
+  if (startByte == length) {
+    return String::new();
+  }
+
+  let mut lastNonWhitespaceEnd: u64 = startByte;
+  let mut scanCursor: u64 = startByte;
+
+  while (scanCursor < length) {
+    let mut charEnd: u64 = scanCursor;
+    let Option::SOME(character) = text.charAt(scanCursor, &mut charEnd) else {
+      break;
+    };
+
+    if (!isUnicodeWhitespace(character)) {
+      lastNonWhitespaceEnd = charEnd;
+    }
+
+    scanCursor = charEnd;
+  }
+
+  return text.substringBytes(startByte, lastNonWhitespaceEnd);
+}
+
+function fmtAppendStdinChunk(pending: &mut String, buf: *mut u8, count: CType::SSizeT): void {
+  let mut pendingRef: &mut String = pending;
+  let mut byteIndex: i64 = 0;
+
+  while (byteIndex < count) {
+    @integerFromPointer(buf) + byteIndex
+      |> @pointerFromInteger<*mut u8>(_)
+      |> @read<u8>(_)
+      |> pendingRef.pushByte();
+
+    byteIndex += 1;
+  }
+}
+
+export record FmtStdinLineResult {
+  public changed: boolean;
+  public hadError: boolean;
+}
+
+/// Formats one already-parsed NDJSON request line and prints its response.
+/// Called as each line becomes available, so a driver feeding this process
+/// one request at a time sees each response before it writes the next one.
+function processFmtStdinLine(
+  trimmed: &String,
+  formatterConfig: &FormatterConfig,
+  emitDiff: boolean
+): FmtStdinLineResult {
+  return match (Format::parseStdinRequest(trimmed)) {
+    Result::OK(request) -> processFmtStdinRequest(&request, formatterConfig, emitDiff),
+    Result::ERROR(error) -> printFmtStdinParseError(error),
+  };
+}
+
+function processFmtStdinRequest(
+  request: &Format::StdinRequest,
+  formatterConfig: &FormatterConfig,
+  emitDiff: boolean
+): FmtStdinLineResult {
+  let response: Format::StdinResponse = Format::processStdinRequest(request, formatterConfig, emitDiff);
+  Io::println(Format::renderStdinResponse(&response));
+  return FmtStdinLineResult { changed: response.changed, hadError: response.hasError };
+}
+
+function printFmtStdinParseError(error: String): FmtStdinLineResult {
+  let response: Format::StdinResponse = Format::StdinResponse {
+    path: String::new(),
+    hasFormatted: false,
+    formatted: String::new(),
+    changed: false,
+    hasDiff: false,
+    diff: String::new(),
+    hasError: true,
+    error: error,
+  };
+
+  Io::println(Format::renderStdinResponse(&response));
+  return FmtStdinLineResult { changed: false, hadError: true };
+}
+
+/// The byte length of the UTF-8 sequence `leadByte` starts, or `Option::NONE`
+/// if it cannot start one (a stray continuation byte or an invalid leading
+/// byte such as `0xFF`).
+function utf8SequenceLength(leadByte: u8): Option<u64> {
+  if (leadByte < 0x80) {
+    return Option::SOME(1);
+  }
+
+  if (leadByte >= 0xC2 && leadByte <= 0xDF) {
+    return Option::SOME(2);
+  }
+
+  if (leadByte >= 0xE0 && leadByte <= 0xEF) {
+    return Option::SOME(3);
+  }
+
+  if (leadByte >= 0xF0 && leadByte <= 0xF4) {
+    return Option::SOME(4);
+  }
+
+  return Option::NONE;
+}
+
+function isUtf8ContinuationByte(byte: u8): boolean {
+  return byte >= 0x80 && byte <= 0xBF;
+}
+
+/// Validates UTF-8 in `pending` from `start` onward, matching what Rust's
+/// `Stdin::read_to_string`-style validation rejects a batch for: a
+/// definitively invalid byte (bad continuation byte, overlong 2-byte
+/// encoding, an out-of-range or surrogate-range 3/4-byte encoding) fails
+/// immediately, and a multi-byte sequence cut short by the end of the bytes
+/// read so far only fails once `reachedEnd` is true (more input might still
+/// complete it otherwise). Returns the position right after the last fully
+/// validated sequence, which is where the next call should resume: either
+/// `pending.length()` (everything validated) or the start of a sequence
+/// still waiting on more bytes.
+export function validateUtf8From(pending: &String, start: u64, reachedEnd: boolean): Option<u64> {
+  let length: u64 = pending.length();
+  let mut cursor: u64 = start;
+
+  while (cursor < length) {
+    let Option::SOME(leadByte) = pending.byteAt(cursor) else {
+      break;
+    };
+
+    let Option::SOME(sequenceLength) = utf8SequenceLength(leadByte) else {
+      return Option::NONE;
+    };
+
+    if (cursor + sequenceLength > length) {
+      if (reachedEnd) {
+        return Option::NONE;
+      }
+
+      return Option::SOME(cursor);
+    }
+
+    let mut continuationIndex: u64 = 1;
+
+    while (continuationIndex < sequenceLength) {
+      let Option::SOME(continuationByte) = pending.byteAt(cursor + continuationIndex) else {
+        return Option::NONE;
+      };
+
+      if (!isUtf8ContinuationByte(continuationByte)) {
+        return Option::NONE;
+      }
+
+      continuationIndex += 1;
+    }
+
+    if (sequenceLength == 2 && leadByte < 0xC2) {
+      return Option::NONE;
+    }
+
+    if (sequenceLength == 3) {
+      let Option::SOME(second) = pending.byteAt(cursor + 1) else {
+        return Option::NONE;
+      };
+
+      if (leadByte == 0xE0 && second < 0xA0) {
+        return Option::NONE;
+      }
+
+      if (leadByte == 0xED && second > 0x9F) {
+        return Option::NONE;
+      }
+    }
+
+    if (sequenceLength == 4) {
+      let Option::SOME(second) = pending.byteAt(cursor + 1) else {
+        return Option::NONE;
+      };
+
+      if (leadByte == 0xF0 && second < 0x90) {
+        return Option::NONE;
+      }
+
+      if (leadByte == 0xF4 && second > 0x8F) {
+        return Option::NONE;
+      }
+    }
+
+    cursor += sequenceLength;
+  }
+
+  return Option::SOME(cursor);
+}
+
+/// Validates one already-delimited line (a complete line found by
+/// `findNewlineFrom`, or the trailing chunk left in `pending` at true EOF)
+/// for UTF-8 before handing it to the formatter. Matches the host's
+/// `Stdin::lines()`: a line's bytes are only ever converted once the whole
+/// line is available, so an invalid byte fails the specific line that
+/// carries it without discarding any earlier line already formatted and
+/// printed. `Option::NONE` means the caller must report the stream-level
+/// UTF-8 error and exit; `Option::SOME` carries the line's own formatting
+/// outcome, a blank line included (`changed`/`hadError` both `false`).
+export function fmtStdinJsonValidateAndProcessLine(
+  line: &String,
+  formatterConfig: &FormatterConfig,
+  emitDiff: boolean
+): Option<FmtStdinLineResult> {
+  let Option::SOME(_) = validateUtf8From(line, 0, true) else {
+    return Option::NONE;
+  };
+
+  let trimmed: String = trimUnicodeWhitespace(line);
+
+  if (trimmed.length() == 0) {
+    return Option::SOME(FmtStdinLineResult { changed: false, hadError: false });
+  }
+
+  return Option::SOME(processFmtStdinLine(&trimmed, formatterConfig, emitDiff));
+}
+
+/// Runs the `--stdin-json` NDJSON batch protocol: one request per line, one
+/// response per line, on stdout, streamed as the host's `stdin.lock().lines()`
+/// is — a line is formatted and its response printed as soon as it is fully
+/// read, not after the whole input closes, so a driver that writes one
+/// request, waits for the response, and only then writes the next sees each
+/// response in turn instead of everything at once at EOF. UTF-8 is validated
+/// per complete line via `fmtStdinJsonValidateAndProcessLine`, not on the raw
+/// growing buffer, so an invalid byte only ever fails the line that carries
+/// it, after every earlier complete line has already been formatted and
+/// printed.
+function runFmtStdinJson(options: &CliOptions): i32 {
+  let formatterConfig: FormatterConfig = match (resolveFmtConfigForStdin(options)) {
+    Result::OK(value) -> value,
+    Result::ERROR(bag) -> {
+      printFmtConfigError(&bag);
+      return 1;
+    },
+  };
+
+  let emitDiff: boolean = options.fmtEmitDiff;
+  let bufSize: u64 = 4096;
+  let buf: *mut u8 = Memory::allocateVector<u8>(bufSize);
+
+  defer Memory::free(buf);
+
+  let mut pending: String = String::new();
+  let mut scannedUpTo: u64 = 0;
+  let mut reachedEnd: boolean = false;
+  let mut anyError: boolean = false;
+  let mut anyChanged: boolean = false;
+
+  while (true) {
+    let Option::SOME(newlineIndex) = findNewlineFrom(&pending, scannedUpTo) else {
+      if (reachedEnd) {
+        if (pending.length() > 0) {
+          let Option::SOME(result) = fmtStdinJsonValidateAndProcessLine(&pending, &formatterConfig, emitDiff) else {
+            Io::eprintln("Error: Failed to read stdin: stream did not contain valid UTF-8");
+            return 1;
+          };
+
+          if (result.changed) {
+            anyChanged = true;
+          }
+
+          if (result.hadError) {
+            anyError = true;
+          }
+        }
+
+        break;
+      }
+
+      let outcome: FmtStdinReadOutcome = fmtReadStdinChunk(buf, bufSize);
+
+      if (let Option::SOME(message) = outcome.readError) {
+        Io::eprintln(`Error: Failed to read stdin: ${message.toStr()}`);
+        return 1;
+      }
+
+      if (outcome.count == 0) {
+        reachedEnd = true;
+        continue;
+      }
+
+      scannedUpTo = pending.length();
+      fmtAppendStdinChunk(&mut pending, buf, outcome.count);
+      continue;
+    };
+
+    let line: String = pending.substringBytes(0, newlineIndex);
+    pending = pending.substringBytes(newlineIndex + 1, pending.length());
+    scannedUpTo = 0;
+
+    let Option::SOME(result) = fmtStdinJsonValidateAndProcessLine(&line, &formatterConfig, emitDiff) else {
+      Io::eprintln("Error: Failed to read stdin: stream did not contain valid UTF-8");
+      return 1;
+    };
+
+    if (result.changed) {
+      anyChanged = true;
+    }
+
+    if (result.hadError) {
+      anyError = true;
+    }
+  }
+
+  if (options.fmtCheck && anyChanged) {
+    return 1;
+  }
+
+  if (anyError) {
+    return 1;
+  }
+
+  return 0;
+}
+
+/// `ignis fmt`: formats the files, project, or stdin batch the command line
+/// named, mirroring the host CLI's flags and messages.
+function runFmt(options: &CliOptions): i32 {
+  if (options.fmtStdinJson) {
+    return runFmtStdinJson(options);
+  }
+
+  let readOnly: boolean = options.fmtCheck || options.fmtEmitDiff;
+
+  let Option::SOME(input) = resolveFmtInput(options) else {
+    return 1;
+  };
+
+  return match (input) {
+    FmtInput::ExplicitFiles(paths) -> runFmtExplicitFiles(&paths, options, readOnly, options.fmtEmitDiff),
+    FmtInput::Project(project) -> runFmtProject(&project, options, readOnly, options.fmtEmitDiff),
+  };
+}
+
 /// Where a command runs: a project directory, a source file, or the current
 /// directory when the command line named neither.
 record CommandTarget {
@@ -1770,6 +2808,10 @@ function main(): i32 {
 
   if (let CliCommand::BUILD_STD = options.command) {
     return runBuildStd(&options);
+  }
+
+  if (let CliCommand::FMT = options.command) {
+    return runFmt(&options);
   }
 
   let Option::SOME(target) = resolveTarget(&options) else {

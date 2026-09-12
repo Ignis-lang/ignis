@@ -1,0 +1,411 @@
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+import Json, JsonValueKind, readString, scanNumber, skipValue from "./mod";
+
+/// `kind` is a reference, so a matched payload binds as `&String`: cloning
+/// is a genuine move-out-of-a-borrow requirement, not a workaround for a
+/// compiler bug.
+function numberTextOf(kind: &JsonValueKind): Option<String> {
+  return match (kind) {
+    JsonValueKind::NUMBER(text) -> Option::SOME(text.clone()),
+    _ -> Option::NONE,
+  };
+}
+
+/// Same reasoning as `numberTextOf`, for `STRING`.
+function stringTextOf(kind: &JsonValueKind): Option<String> {
+  return match (kind) {
+    JsonValueKind::STRING(text) -> Option::SOME(text.clone()),
+    _ -> Option::NONE,
+  };
+}
+
+@test
+function readStringDecodesAQuoteEscape(): void {
+  let source: String = String::create("\"a\\\"b\"");
+
+  let Result::OK(read) = readString(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(read.value.toStr(), "a\"b");
+  Test::assertEq<u64>(read.nextIndex, source.length());
+}
+
+@test
+function readStringDecodesABackslashEscape(): void {
+  let source: String = String::create("\"a\\\\b\"");
+
+  let Result::OK(read) = readString(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(read.value.toStr(), "a\\b");
+}
+
+@test
+function readStringDecodesASlashEscape(): void {
+  let source: String = String::create("\"a\\/b\"");
+
+  let Result::OK(read) = readString(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(read.value.toStr(), "a/b");
+}
+
+@test
+function readStringDecodesTheWhitespaceEscapes(): void {
+  let source: String = String::create("\"a\\n\\r\\tb\"");
+
+  let Result::OK(read) = readString(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(read.value.toStr(), "a\n\r\tb");
+}
+
+@test
+function readStringDecodesAUnicodeEscape(): void {
+  let source: String = String::create("\"\\u0041\"");
+
+  let Result::OK(read) = readString(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(read.value.toStr(), "A");
+}
+
+@test
+function readStringDecodesASurrogatePair(): void {
+  let source: String = String::create("\"\\ud83d\\ude00\"");
+
+  let Result::OK(read) = readString(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(read.value.toStr(), "😀");
+}
+
+@test
+function readStringRejectsAControlByte(): void {
+  let mut source: String = String::create("\"a");
+  source.pushByte(1);
+  source.pushStr("b\"");
+
+  let Result::ERROR(message) = readString(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "control character (\\u0000-\\u001F) found while parsing a string at line 1 column 3"
+  );
+}
+
+@test
+function readStringRejectsAnUnterminatedString(): void {
+  let source: String = String::create("\"abc");
+
+  let Result::ERROR(message) = readString(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "EOF while parsing a string at line 1 column 4");
+}
+
+@test
+function scanNumberAcceptsEveryGrammarShape(): void {
+  let mut shapes: Vector<str> = Vector::new<str>();
+  shapes.push("0");
+  shapes.push("-0");
+  shapes.push("123");
+  shapes.push("-123");
+  shapes.push("0.5");
+  shapes.push("123.456");
+  shapes.push("1e10");
+  shapes.push("1E10");
+  shapes.push("1e+10");
+  shapes.push("1e-10");
+  shapes.push("1.5e-10");
+
+  let mut index: u64 = 0;
+
+  while (index < shapes.length()) {
+    let Option::SOME(shape) = shapes.get(index) else {
+      break;
+    };
+
+    let source: String = String::create(*shape);
+
+    let Result::OK(read) = scanNumber(&source, 0) else {
+      Test::fail();
+      index += 1;
+      continue;
+    };
+
+    Test::assertEq<str>(read.text.toStr(), *shape);
+    Test::assertEq<u64>(read.endOffset, source.length());
+    index += 1;
+  }
+}
+
+@test
+function scanNumberRejectsALeadingZeroFollowedByADigit(): void {
+  let source: String = String::create("01");
+
+  let Result::ERROR(message) = scanNumber(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "invalid number at line 1 column 2");
+}
+
+@test
+function scanNumberRejectsAnEmptyFraction(): void {
+  let source: String = String::create("1.}");
+
+  let Result::ERROR(message) = scanNumber(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "invalid number at line 1 column 3");
+}
+
+@test
+function scanNumberRejectsAnEmptyExponent(): void {
+  let source: String = String::create("1e}");
+
+  let Result::ERROR(message) = scanNumber(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "invalid number at line 1 column 3");
+}
+
+@test
+function skipValueSkipsAScalarOfEveryKind(): void {
+  let mut shapes: Vector<str> = Vector::new<str>();
+  shapes.push("\"a string\"");
+  shapes.push("true");
+  shapes.push("false");
+  shapes.push("null");
+  shapes.push("123.5");
+
+  let mut index: u64 = 0;
+
+  while (index < shapes.length()) {
+    let Option::SOME(shape) = shapes.get(index) else {
+      break;
+    };
+
+    let source: String = String::create(*shape);
+
+    let Result::OK(endOffset) = skipValue(&source, 0) else {
+      Test::fail();
+      index += 1;
+      continue;
+    };
+
+    Test::assertEq<u64>(endOffset, source.length());
+    index += 1;
+  }
+}
+
+@test
+function skipValueValidatesGrammarInsteadOfOnlyCountingBrackets(): void {
+  let source: String = String::create("[,]");
+
+  let Result::ERROR(message) = skipValue(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "expected value at line 1 column 2");
+}
+
+@test
+function skipValueRejectsANonStringObjectKey(): void {
+  let source: String = String::create("{,}");
+
+  let Result::ERROR(message) = skipValue(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "key must be a string at line 1 column 2");
+}
+
+@test
+function skipValueHasNoDepthLimit(): void {
+  let mut source: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < 5000) {
+    source.pushStr("[");
+    index += 1;
+  }
+
+  index = 0;
+
+  while (index < 5000) {
+    source.pushStr("]");
+    index += 1;
+  }
+
+  let Result::OK(endOffset) = skipValue(&source, 0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(endOffset, source.length());
+}
+
+@test
+function jsonParseBuildsATreeForANumber(): void {
+  let source: String = String::create("123.5");
+
+  let Result::OK(value) = Json::parse(&source) else {
+    Test::fail();
+    return;
+  };
+
+  let Option::SOME(text) = numberTextOf(&value.kind) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(text.toStr(), "123.5");
+  Test::assertEq<u64>(value.endOffset, source.length());
+}
+
+@test
+function jsonParseBuildsATreeForAString(): void {
+  let source: String = String::create("\"hi\"");
+
+  let Result::OK(value) = Json::parse(&source) else {
+    Test::fail();
+    return;
+  };
+
+  let Option::SOME(text) = stringTextOf(&value.kind) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(text.toStr(), "hi");
+}
+
+@test
+function jsonParseBuildsATreeForBoolAndNull(): void {
+  let trueSource: String = String::create("true");
+
+  let Result::OK(trueValue) = Json::parse(&trueSource) else {
+    Test::fail();
+    return;
+  };
+
+  let JsonValueKind::BOOL(trueFlag) = trueValue.kind else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(trueFlag, true);
+
+  let nullSource: String = String::create("null");
+
+  let Result::OK(nullValue) = Json::parse(&nullSource) else {
+    Test::fail();
+    return;
+  };
+
+  let isNull: boolean = match (&nullValue.kind) {
+    JsonValueKind::NULL -> true,
+    _ -> false,
+  };
+
+  Test::assertEq<boolean>(isNull, true);
+}
+
+@test
+function jsonParseBuildsATreeForAnArrayOfScalars(): void {
+  let source: String = String::create("[1,2,3]");
+
+  let Result::OK(value) = Json::parse(&source) else {
+    Test::fail();
+    return;
+  };
+
+  let isArray: boolean = match (&value.kind) {
+    JsonValueKind::ARRAY(_) -> true,
+    _ -> false,
+  };
+
+  Test::assertEq<boolean>(isArray, true);
+}
+
+@test
+function jsonParseAllowsExactly127NestedContainers(): void {
+  let mut source: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < 127) {
+    source.pushStr("[");
+    index += 1;
+  }
+
+  let Result::ERROR(message) = Json::parse(&source) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "EOF while parsing a list at line 1 column 127");
+}
+
+@test
+function jsonParseRejectsThe128thNestedArray(): void {
+  let mut source: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < 128) {
+    source.pushStr("[");
+    index += 1;
+  }
+
+  let Result::ERROR(message) = Json::parse(&source) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "recursion limit exceeded at line 1 column 128");
+}
+
+@test
+function jsonParseRejectsThe128thNestedObjectAtItsOwnColumn(): void {
+  let mut source: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < 128) {
+    source.pushStr("{\"a\":");
+    index += 1;
+  }
+
+  let Result::ERROR(message) = Json::parse(&source) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(message.toStr(), "recursion limit exceeded at line 1 column 636");
+}

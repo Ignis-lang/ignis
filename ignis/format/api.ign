@@ -1,4 +1,23 @@
 import Fs from "std::fs";
+import Io from "std::io";
+import
+  JsonContainerKind,
+  JsonNumberRead,
+  JsonStringRead,
+  classifyContainerStart,
+  jsonEofMessage,
+  jsonExpectedColonMessage,
+  jsonExpectedCommaOrBraceMessage,
+  jsonExpectedValueMessage,
+  jsonKeyMustBeStringMessage,
+  jsonTrailingCommaMessage,
+  matchKeywordOrIdentError,
+  readString,
+  scanNumber,
+  skipValue,
+from "std::json";
+import CType, LibC from "std::libc";
+import Memory from "std::memory";
 import Path from "std::path";
 import String from "std::string";
 import Vector from "std::vector";
@@ -51,6 +70,228 @@ function saturatingSub(value: u64, amount: u64): u64 {
   }
 
   return value - amount;
+}
+
+/// `libc`'s `snprintf`, bound here (rather than in `std::libc`) only for
+/// `describeNumber`'s shortest-round-trip search below: it needs
+/// precision-controlled scientific notation (`%.Ne`) that `f64::toString()`
+/// (a fixed `%g`) cannot produce.
+extern __format_snprintf {
+  function snprintf(
+    buf: CType::CStr,
+    size: CType::SizeT,
+    fmt: CType::CConstStr,
+    value: CType::CDouble
+  ): CType::CInt;
+}
+
+/// Formats `value` with `snprintf("%.{precision}e", value)`, returning the
+/// raw C string (e.g. `"1.230000e+02"`).
+function formatScientific(value: f64, precision: u64): String {
+  let mut format: String = String::create("%.");
+  let precisionText: String = precision.toString();
+  format.push(&precisionText);
+  format.pushStr("e");
+
+  let capacity: u64 = 64;
+  let buffer: *mut u8 = Memory::allocateVector<u8>(capacity);
+  __format_snprintf::snprintf(buffer, capacity, format.toStr() as CType::CConstStr, value as CType::CDouble);
+
+  let result: String = String::create(buffer as str);
+  Memory::free(buffer);
+  return result;
+}
+
+/// The shortest `%e` text (across `snprintf("%.Ne", value)` for `N` from 0
+/// up) that round-trips back to `value` bit-for-bit through `atof`. Falls
+/// back to 16 fraction digits (17 significant digits, always enough for any
+/// finite `f64`) if nothing shorter round-trips.
+function shortestScientificText(value: f64): String {
+  let mut precision: u64 = 0;
+
+  while (precision <= 16) {
+    let candidate: String = formatScientific(value, precision);
+    let candidateStr: str = candidate.toStr();
+    let roundTrip: CType::CDouble = LibC::Conversion::atof(candidateStr as CType::CConstStr);
+
+    if (roundTrip == value) {
+      return candidate;
+    }
+
+    precision += 1;
+  }
+
+  // Unreachable: 17 significant digits (`precision == 16` above, one
+  // leading digit plus 16 fraction digits) always round-trips any finite
+  // `f64` exactly (Steele & White), so the loop above always returns.
+  @unreachable();
+}
+
+/// One `%e`-formatted scientific value split into Rust `Display`-shaped
+/// pieces: an optional leading `-`, exactly one leading digit, the
+/// (possibly empty) fraction digits after it, and the base-10 exponent of
+/// that leading digit.
+record ScientificParts {
+  public negative: boolean;
+  public leadingDigit: u8;
+  public fractionDigits: String;
+  public exponent: i64;
+}
+
+function parseScientificText(raw: &String): ScientificParts {
+  let mut index: u64 = 0;
+  let mut negative: boolean = false;
+
+  if (let Option::SOME(first) = raw.byteAt(0) && first == '-' as u8) {
+    negative = true;
+    index = 1;
+  }
+
+  let Option::SOME(leadingDigit) = raw.byteAt(index) else {
+    return ScientificParts {
+      negative: negative,
+      leadingDigit: '0' as u8,
+      fractionDigits: String::new(),
+      exponent: 0,
+    };
+  };
+
+  index += 1;
+
+  let mut fractionDigits: String = String::new();
+
+  if (let Option::SOME(dot) = raw.byteAt(index) && dot == '.' as u8) {
+    index += 1;
+
+    while (let Option::SOME(digit) = raw.byteAt(index) && digit != 'e' as u8) {
+      fractionDigits.pushByte(digit);
+      index += 1;
+    }
+  }
+
+  // `index` now sits on `e`.
+  index += 1;
+
+  let mut exponentNegative: boolean = false;
+
+  if (let Option::SOME(sign) = raw.byteAt(index)) {
+    if (sign == '-' as u8) {
+      exponentNegative = true;
+      index += 1;
+    } else if (sign == '+' as u8) {
+      index += 1;
+    }
+  }
+
+  let mut exponentValue: i64 = 0;
+
+  while (let Option::SOME(digit) = raw.byteAt(index) && digit >= '0' as u8 && digit <= '9' as u8) {
+    exponentValue = exponentValue * 10 + (digit - ('0' as u8)) as i64;
+    index += 1;
+  }
+
+  if (exponentNegative) {
+    exponentValue = -exponentValue;
+  }
+
+  return ScientificParts {
+    negative: negative,
+    leadingDigit: leadingDigit,
+    fractionDigits: fractionDigits,
+    exponent: exponentValue,
+  };
+}
+
+/// `serde`'s rendering of an out-of-range `f64` value in its error messages
+/// (`Unexpected::Float`'s `Display`), built from the shortest round-tripping
+/// `%e` text: fixed notation (always with a decimal point, e.g. `100.0`)
+/// for a base-10 exponent from -5 to 15 inclusive, scientific notation
+/// (`D.DDDe±EE`, `+`/`-` always shown, no leading zeros) outside that range.
+/// This is *not* Rust's actual `Display for f64` (which never switches to
+/// scientific notation on its own — `1e300` prints as a 301-digit decimal
+/// literal through `{}`); `serde_json`'s error-reporting path formats the
+/// value differently, and that different rendering is what this function
+/// reproduces. The exact threshold and every rule here (the fixed range,
+/// the exponent sign always being present, the lack of leading zeros) were
+/// all verified directly against the host across 20+ values, including
+/// subnormals, magnitudes past 1e300, and negative zero.
+function rustFloatDisplay(value: f64): String {
+  let raw: String = shortestScientificText(value);
+  let parts: ScientificParts = parseScientificText(&raw);
+
+  let mut result: String = String::new();
+
+  if (parts.negative) {
+    result.pushChar('-');
+  }
+
+  let useScientific: boolean = parts.exponent < -5 || parts.exponent > 15;
+
+  if (useScientific) {
+    result.pushByte(parts.leadingDigit);
+
+    if (parts.fractionDigits.length() > 0) {
+      result.pushChar('.');
+      result.push(&parts.fractionDigits);
+    }
+
+    result.pushChar('e');
+    result.pushChar(parts.exponent < 0 ? '-' : '+');
+
+    let exponentMagnitude: i64 = parts.exponent < 0 ? -parts.exponent : parts.exponent;
+    let exponentMagnitudeAsU64: u64 = exponentMagnitude as u64;
+    let exponentText: String = exponentMagnitudeAsU64.toString();
+    result.push(&exponentText);
+
+    return result;
+  }
+
+  if (parts.exponent >= 0) {
+    result.pushByte(parts.leadingDigit);
+
+    let exponentAsIndex: u64 = parts.exponent as u64;
+    let mut digitIndex: u64 = 0;
+
+    while (digitIndex < exponentAsIndex) {
+      let Option::SOME(digit) = parts.fractionDigits.byteAt(digitIndex) else {
+        result.pushChar('0');
+        digitIndex += 1;
+        continue;
+      };
+
+      result.pushByte(digit);
+      digitIndex += 1;
+    }
+
+    result.pushChar('.');
+
+    if (digitIndex < parts.fractionDigits.length()) {
+      let remaining: String = parts.fractionDigits.substringBytes(digitIndex, parts.fractionDigits.length());
+      result.push(&remaining);
+    } else {
+      result.pushChar('0');
+    }
+
+    return result;
+  }
+
+  // `parts.exponent` is negative here (and >= -5, since `useScientific`
+  // already handled anything past that): the value is `0.` followed by
+  // `-exponent - 1` zeros, the leading digit, then the fraction digits.
+  result.pushStr("0.");
+
+  let leadingZeroCount: u64 = (-parts.exponent - 1) as u64;
+  let mut zeroIndex: u64 = 0;
+
+  while (zeroIndex < leadingZeroCount) {
+    result.pushChar('0');
+    zeroIndex += 1;
+  }
+
+  result.pushByte(parts.leadingDigit);
+  result.push(&parts.fractionDigits);
+
+  return result;
 }
 
 export namespace Format {
@@ -116,20 +357,41 @@ export namespace Format {
   }
 
   /// Formats the file at `path`, rewriting it unless the run is read-only.
+  /// Rust's `std::io::Error` `Display`: the `strerror` text, then the raw
+  /// errno in parentheses. Matches the host's `format_file`, which reports
+  /// `error.to_string()` directly rather than a fixed message.
+  function ioErrorDisplay(error: &Io::IoError): String {
+    let mut message: String = String::create(error.errorMessage());
+    let rawCode: i32 = error.rawCode();
+    let rawCodeText: String = rawCode.toString();
+    message.pushStr(" (os error ");
+    message.push(&rawCodeText);
+    message.pushStr(")");
+    return message;
+  }
+
   function formatFile(
     path: &Path::PathBuf,
     options: &Format::FormatOptions
   ): Result<Format::FormatOutcome, FormatError> {
-    let Result::OK(source) = Fs::readToString(path) else {
-      return Result::ERROR(FormatError::io("could not read file"));
+    let source: String = match (Fs::readToString(path)) {
+      Result::OK(value) -> value,
+      Result::ERROR(readError) -> {
+        let message: String = Format::ioErrorDisplay(&readError);
+        return Result::ERROR(FormatError::io(message.toStr()));
+      },
     };
 
     let formatted: String = Format::formatSource(&source, &options.config)!;
     let changed: boolean = !formatted.equals(&source);
 
     if (changed && !options.check) {
-      let Result::OK(_) = Fs::writeString(path, &formatted) else {
-        return Result::ERROR(FormatError::io("could not write file"));
+      match (Fs::writeString(path, &formatted)) {
+        Result::OK(_) -> {},
+        Result::ERROR(writeError) -> {
+          let message: String = Format::ioErrorDisplay(&writeError);
+          return Result::ERROR(FormatError::io(message.toStr()));
+        },
       };
     }
 
@@ -279,194 +541,795 @@ export namespace Format {
     public error: String;
   }
 
-  /// Reads one NDJSON request line. Only the two string fields the protocol
-  /// defines are recognised; anything else in the object is skipped.
-  function parseStdinRequest(line: &String): Result<Format::StdinRequest, FormatError> {
-    let mut path: Option<String> = Option::NONE;
-    let mut text: Option<String> = Option::NONE;
-    let mut cursor: u64 = 0;
+  /// Wraps a bare message with the prefix every NDJSON parse failure carries.
+  function ndjsonParseError(message: &String): String {
+    let mut result: String = String::create("failed to parse NDJSON record: ");
+    result.push(message);
+    return result;
+  }
+
+  /// Same as `ndjsonParseError`, taking its message by value: every call
+  /// site below builds the message as a temporary (a fresh `String` or the
+  /// direct result of a `jsonXxxMessage` call), which cannot be borrowed.
+  function ndjsonParseErrorOwned(message: String): String {
+    return Format::ndjsonParseError(&message);
+  }
+
+  function ndjsonInvalidType(kindDescription: &String, column: u64): String {
+    let columnText: String = column.toString();
+
+    let mut message: String = String::create("invalid type: ");
+    message.push(kindDescription);
+    message.pushStr(", expected struct StdinRecord at line 1 column ");
+    message.push(&columnText);
+    return Format::ndjsonParseErrorOwned(message);
+  }
+
+  function ndjsonInvalidFieldType(kindDescription: &String, column: u64): String {
+    let columnText: String = column.toString();
+
+    let mut message: String = String::create("invalid type: ");
+    message.push(kindDescription);
+    message.pushStr(", expected a string at line 1 column ");
+    message.push(&columnText);
+    return Format::ndjsonParseErrorOwned(message);
+  }
+
+  function ndjsonInvalidLength(itemCount: u64, column: u64): String {
+    let countText: String = itemCount.toString();
+    let columnText: String = column.toString();
+
+    let mut message: String = String::create("invalid length ");
+    message.push(&countText);
+    message.pushStr(", expected struct StdinRecord with 2 elements at line 1 column ");
+    message.push(&columnText);
+    return Format::ndjsonParseErrorOwned(message);
+  }
+
+  /// `serde` reports the first missing field in the struct's declared order,
+  /// which is `path` then `text`, at the position where the whole object
+  /// finished parsing.
+  function ndjsonMissingField(name: str, column: u64): String {
+    let columnText: String = column.toString();
+
+    let mut message: String = String::create("missing field `");
+    message.pushStr(name);
+    message.pushStr("` at line 1 column ");
+    message.push(&columnText);
+    return Format::ndjsonParseErrorOwned(message);
+  }
+
+  /// `serde` detects a repeated field the moment the second occurrence's key
+  /// finishes parsing, before it even looks at that occurrence's value: a
+  /// second `"path"` with a valid string value reports the same column as one
+  /// with an invalid one.
+  function ndjsonDuplicateField(name: str, column: u64): String {
+    let columnText: String = column.toString();
+
+    let mut message: String = String::create("duplicate field `");
+    message.pushStr(name);
+    message.pushStr("` at line 1 column ");
+    message.push(&columnText);
+    return Format::ndjsonParseError(&message);
+  }
+
+  function ndjsonTrailingCharacters(column: u64): String {
+    let columnText: String = column.toString();
+
+    let mut message: String = String::create("trailing characters at line 1 column ");
+    message.push(&columnText);
+    return Format::ndjsonParseError(&message);
+  }
+
+  /// `serde` reports this once it tries to interpret a syntactically valid
+  /// but too-large number (`1e400`, `-1e999`) as an `f64` and gets an
+  /// infinite result, at the column right after the number's own token
+  /// (`endOffset` used directly, not `endOffset + 1`, matching `serde`'s
+  /// "token already fully consumed" convention).
+  function ndjsonNumberOutOfRange(column: u64): String {
+    let columnText: String = column.toString();
+
+    let mut message: String = String::create("number out of range at line 1 column ");
+    message.push(&columnText);
+    return Format::ndjsonParseError(&message);
+  }
+
+  /// `f64::MAX`: any number literal that parses to a magnitude past this
+  /// overflowed to infinity, since `f64` cannot represent anything larger.
+  function numberOverflowsF64(text: &String): boolean {
+    let rawText: str = text.toStr();
+    let parsed: CType::CDouble = LibC::Conversion::atof(rawText as CType::CConstStr);
+    let magnitude: f64 = parsed < 0.0 ? -parsed : parsed;
+    let f64Max: CType::CDouble = LibC::Conversion::atof("1.7976931348623157e308" as CType::CConstStr);
+    return magnitude > f64Max;
+  }
+
+  function describeBool(value: boolean): String {
+    if (value) {
+      return String::create("boolean `true`");
+    }
+
+    return String::create("boolean `false`");
+  }
+
+  /// `text` is at most 20 ASCII digits (`u64::MAX` is 20 digits), so a plain
+  /// length-then-lexical comparison against `limit`'s digits is exact: JSON
+  /// integers never carry a leading zero (the number grammar in
+  /// `std::json::scanNumber` already rejects one), so two digit strings of
+  /// the same length compare the same way their numeric values do.
+  function digitsFitLimit(digits: &String, limit: str): boolean {
+    let limitText: String = String::create(limit);
+
+    if (digits.length() < limitText.length()) {
+      return true;
+    }
+
+    if (digits.length() > limitText.length()) {
+      return false;
+    }
+
+    return digits.compare(&limitText) <= 0;
+  }
+
+  /// `serde_json` classifies a JSON number the way its own value model does:
+  /// an integer that fits `u64` or `i64` keeps that classification and its
+  /// exact source text; anything else (a fraction, an exponent, an integer
+  /// too big for either 64-bit type, or the literal `-0`, which `serde_json`
+  /// always treats as `-0.0` to keep the sign bit no 64-bit integer type can
+  /// represent) is `f64`, described with Rust's `{}` `Display` for `f64`
+  /// (reproduced here by `rustFloatDisplay`, built on `snprintf`'s
+  /// shortest-round-tripping `%e` output rather than `f64::toString()`'s
+  /// fixed-precision `%g`).
+  function describeNumber(text: &String): String {
+    if (text.equals("-0")) {
+      return String::create("floating point `-0.0`");
+    }
+
+    let mut hasFraction: boolean = false;
+    let mut index: u64 = 0;
+
+    while (index < text.length()) {
+      let Option::SOME(byte) = text.byteAt(index) else {
+        break;
+      };
+
+      if (byte == '.' as u8 || byte == 'e' as u8 || byte == 'E' as u8) {
+        hasFraction = true;
+        break;
+      }
+
+      index += 1;
+    }
+
+    let mut isInteger: boolean = false;
+
+    if (!hasFraction) {
+      let Option::SOME(firstByte) = text.byteAt(0) else {
+        return String::create("integer `0`");
+      };
+
+      if (firstByte == '-' as u8) {
+        let digits: String = text.substringBytes(1, text.length());
+        isInteger = Format::digitsFitLimit(&digits, "9223372036854775808");
+      } else {
+        isInteger = Format::digitsFitLimit(text, "18446744073709551615");
+      }
+    }
+
+    if (isInteger) {
+      let mut message: String = String::create("integer `");
+      message.push(text);
+      message.pushStr("`");
+      return message;
+    }
+
+    let rawText: str = text.toStr();
+    let parsed: CType::CDouble = LibC::Conversion::atof(rawText as CType::CConstStr);
+    let valueText: String = rustFloatDisplay(parsed);
+
+    let mut message: String = String::create("floating point `");
+    message.push(&valueText);
+    message.pushStr("`");
+    return message;
+  }
+
+  /// Rust's `{:?}` (`Debug`) escaping for `str`, which is what `serde`'s
+  /// `Unexpected::Str` uses: `"` and `\` are backslash-escaped, `\n`/`\r`/`\t`
+  /// keep their short escapes, and every other control byte (including `\b`,
+  /// `\f`, and DEL) becomes `\u{<hex>}` with no leading zeros — unlike this
+  /// module's own `escapeJsonString`, which is JSON escaping (`\b`, `\f`,
+  /// `\u00XX`) for the `--stdin-json` protocol's own output, not a
+  /// description of a value.
+  function describeString(text: &String): String {
+    let mut quoted: String = String::new();
+    quoted.pushChar('"');
+
+    let mut index: u64 = 0;
+
+    while (index < text.length()) {
+      let mut endByte: u64 = index;
+      let Option::SOME(character) = text.charAt(index, &mut endByte) else {
+        break;
+      };
+
+      let codepoint: u32 = character as u32;
+
+      if (character == '"') {
+        quoted.pushStr("\\\"");
+      } else if (character == '\\') {
+        quoted.pushStr("\\\\");
+      } else if (character == '\n') {
+        quoted.pushStr("\\n");
+      } else if (character == '\r') {
+        quoted.pushStr("\\r");
+      } else if (character == '\t') {
+        quoted.pushStr("\\t");
+      } else if (codepoint == 0) {
+        quoted.pushStr("\\0");
+      } else if (codepoint < 32 || codepoint == 127 || Format::isNonPrintableAboveAscii(codepoint)) {
+        let hexDigits: String = Format::hexNoLeadingZeros(codepoint);
+        quoted.pushStr("\\u{");
+        quoted.push(&hexDigits);
+        quoted.pushStr("}");
+      } else {
+        quoted.pushChar(character);
+      }
+
+      index = endByte;
+    }
+
+    quoted.pushChar('"');
+
+    let mut message: String = String::create("string ");
+    message.push(&quoted);
+    return message;
+  }
+
+  function hexNoLeadingZeros(value: u32): String {
+    if (value == 0) {
+      return String::create("0");
+    }
+
+    let mut digits: Vector<u8> = Vector::new<u8>();
+    let mut remaining: u32 = value;
+
+    while (remaining > 0) {
+      let digit: u8 = (remaining % 16) as u8;
+      digits.push(Format::hexDigitByte(digit));
+      remaining = remaining / 16;
+    }
+
+    let mut result: String = String::new();
+    let mut index: i64 = digits.length() as i64 - 1;
+
+    while (index >= 0) {
+      let Option::SOME(digitByte) = digits.get(index as u64) else {
+        break;
+      };
+
+      result.pushByte(*digitByte);
+      index -= 1;
+    }
+
+    return result;
+  }
+
+  /// A narrow approximation of Rust's `char::escape_debug` "is this scalar
+  /// printable" rule for non-ASCII scalars: it does not implement the full
+  /// Unicode `Grapheme_Extend`/`Cc`/`Cf`/`Cs`/`Co`/`Cn` classification Rust
+  /// uses, only the specific ranges verified against the host (C1 controls,
+  /// the general combining-diacritical block, and the soft hyphen). A
+  /// non-printable scalar outside these ranges is not escaped here even
+  /// though Rust's `{:?}` would escape it.
+  function isNonPrintableAboveAscii(codepoint: u32): boolean {
+    if (codepoint >= 0x80 && codepoint <= 0x9F) {
+      return true;
+    }
+
+    if (codepoint == 0xAD) {
+      return true;
+    }
+
+    if (codepoint >= 0x300 && codepoint <= 0x36F) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /// A JSON scalar's kind, carrying its own decoded payload (the string, or
+  /// the raw number literal) directly rather than alongside it in a
+  /// separate field.
+  enum ShallowScalarKind {
+    STRING(String),
+    NUMBER(String),
+    BOOL_TRUE,
+    BOOL_FALSE,
+    NULL,
+  }
+
+  /// A JSON scalar (string, number, `true`/`false`/`null`) fully consumed at
+  /// `valueStart`. A container (`{`/`[`) never reaches this: a caller checks
+  /// for one with `Json::classifyContainerStart` first, since `serde`
+  /// classifies a container by peeking its opening bracket without
+  /// consuming it (a different column convention than every scalar here,
+  /// which is fully read before it is described).
+  record ShallowScalarRead {
+    public kind: ShallowScalarKind;
+    public endOffset: u64;
+  }
+
+  /// Builds the actual `serde`-`Unexpected`-shaped description lazily,
+  /// rather than eagerly for every scalar `readShallowScalar` reads: this
+  /// matters concretely for `NUMBER`, whose description does a `snprintf`
+  /// round-trip search that is wasted work for every valid `path`/`text`
+  /// string.
+  function describeShallowScalarKind(kind: &Format::ShallowScalarKind): String {
+    return match (kind) {
+      Format::ShallowScalarKind::STRING(text) -> Format::describeString(&text),
+      Format::ShallowScalarKind::NUMBER(text) -> Format::describeNumber(&text),
+      Format::ShallowScalarKind::BOOL_TRUE -> Format::describeBool(true),
+      Format::ShallowScalarKind::BOOL_FALSE -> Format::describeBool(false),
+      Format::ShallowScalarKind::NULL -> String::create("null"),
+    };
+  }
+
+  /// Reads exactly one JSON scalar (string, number, `true`, `false`, or
+  /// `null`) starting at `valueStart`, without descending into a container:
+  /// a caller checks for `{`/`[` with `classifyContainerStart` first, since
+  /// a container is classified by peeking its opening bracket rather than
+  /// being read here. A string is fully decoded (escapes, surrogate pairs)
+  /// via `readString`; a number is validated against the JSON number
+  /// grammar via `scanNumber` and rejected with `number out of range` if it
+  /// overflows `f64`; `true`/`false`/`null` are matched exactly via
+  /// `matchKeywordOrIdentError`, which also covers a partially-matched
+  /// keyword. Any other byte is `expected value`.
+  function readShallowScalar(
+    line: &String,
+    valueStart: u64
+  ): Result<Format::ShallowScalarRead, String> {
+    let Option::SOME(byte) = line.byteAt(valueStart) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a value")));
+    };
+
+    if (byte == '"' as u8) {
+      let read: JsonStringRead = match (readString(line, valueStart)) {
+        Result::OK(value) -> value,
+        Result::ERROR(message) -> {
+          return Result::ERROR(Format::ndjsonParseErrorOwned(message));
+        },
+      };
+
+      return Result::OK(Format::ShallowScalarRead {
+        kind: Format::ShallowScalarKind::STRING(read.value),
+        endOffset: read.nextIndex,
+      });
+    }
+
+    if (byte == 't' as u8) {
+      let endOffset: u64 = match (matchKeywordOrIdentError(line, valueStart, "true")) {
+        Result::OK(value) -> value,
+        Result::ERROR(message) -> {
+          return Result::ERROR(Format::ndjsonParseErrorOwned(message));
+        },
+      };
+
+      return Result::OK(Format::ShallowScalarRead { kind: Format::ShallowScalarKind::BOOL_TRUE, endOffset: endOffset });
+    }
+
+    if (byte == 'f' as u8) {
+      let endOffset: u64 = match (matchKeywordOrIdentError(line, valueStart, "false")) {
+        Result::OK(value) -> value,
+        Result::ERROR(message) -> {
+          return Result::ERROR(Format::ndjsonParseErrorOwned(message));
+        },
+      };
+
+      return Result::OK(Format::ShallowScalarRead {
+        kind: Format::ShallowScalarKind::BOOL_FALSE,
+        endOffset: endOffset,
+      });
+    }
+
+    if (byte == 'n' as u8) {
+      let endOffset: u64 = match (matchKeywordOrIdentError(line, valueStart, "null")) {
+        Result::OK(value) -> value,
+        Result::ERROR(message) -> {
+          return Result::ERROR(Format::ndjsonParseErrorOwned(message));
+        },
+      };
+
+      return Result::OK(Format::ShallowScalarRead { kind: Format::ShallowScalarKind::NULL, endOffset: endOffset });
+    }
+
+    let isNumberStart: boolean = byte == '-' as u8 || (byte >= '0' as u8 && byte <= '9' as u8);
+
+    if (isNumberStart) {
+      let numberRead: JsonNumberRead = match (scanNumber(line, valueStart)) {
+        Result::OK(value) -> value,
+        Result::ERROR(message) -> {
+          return Result::ERROR(Format::ndjsonParseErrorOwned(message));
+        },
+      };
+
+      if (Format::numberOverflowsF64(&numberRead.text)) {
+        return Result::ERROR(Format::ndjsonNumberOutOfRange(numberRead.endOffset));
+      }
+
+      return Result::OK(Format::ShallowScalarRead {
+        kind: Format::ShallowScalarKind::NUMBER(numberRead.text),
+        endOffset: numberRead.endOffset,
+      });
+    }
+
+    return Result::ERROR(Format::ndjsonParseErrorOwned(jsonExpectedValueMessage(valueStart)));
+  }
+
+  function containerKindName(kind: JsonContainerKind): String {
+    return match (kind) {
+      JsonContainerKind::OBJECT -> String::create("map"),
+      JsonContainerKind::ARRAY -> String::create("sequence"),
+    };
+  }
+
+  record FieldValueRead {
+    public value: String;
+    public endOffset: u64;
+  }
+
+  /// Reads one `path`/`text` value: a `serde`-derived struct's field
+  /// deserializer inspects a field's value shallowly, so a container is
+  /// rejected the moment its opening bracket is seen, never building the
+  /// tree inside it (this is what keeps a `path` set to 50000 nested arrays
+  /// from recursing at all, let alone overflowing the stack, and what makes
+  /// `{"path":[1,2],...}` fail with `invalid type: sequence`, not `invalid
+  /// length`, at any depth).
+  function readObjectFieldValue(
+    line: &String,
+    valueStart: u64
+  ): Result<Format::FieldValueRead, String> {
+    if (let Option::SOME(container) = classifyContainerStart(line, valueStart)) {
+      let kindName: String = Format::containerKindName(container);
+      return Result::ERROR(Format::ndjsonInvalidFieldType(&kindName, valueStart));
+    }
+
+    let scalar: Format::ShallowScalarRead = Format::readShallowScalar(line, valueStart)!;
+    let endOffset: u64 = scalar.endOffset;
+
+    match (scalar.kind) {
+      Format::ShallowScalarKind::STRING(value) -> {
+        return Result::OK(Format::FieldValueRead { value: value, endOffset: endOffset });
+      },
+      Format::ShallowScalarKind::NUMBER(text) -> {
+        let description: String = Format::describeNumber(&text);
+        return Result::ERROR(Format::ndjsonInvalidFieldType(&description, endOffset));
+      },
+      Format::ShallowScalarKind::BOOL_TRUE -> {
+        let description: String = Format::describeBool(true);
+        return Result::ERROR(Format::ndjsonInvalidFieldType(&description, endOffset));
+      },
+      Format::ShallowScalarKind::BOOL_FALSE -> {
+        let description: String = Format::describeBool(false);
+        return Result::ERROR(Format::ndjsonInvalidFieldType(&description, endOffset));
+      },
+      Format::ShallowScalarKind::NULL -> {
+        let description: String = String::create("null");
+        return Result::ERROR(Format::ndjsonInvalidFieldType(&description, endOffset));
+      },
+    };
+  }
+
+  function skipAsciiWhitespaceFrom(line: &String, start: u64): u64 {
+    let mut cursor: u64 = start;
 
     while (cursor < line.length()) {
       let Option::SOME(byte) = line.byteAt(cursor) else {
         break;
       };
 
-      if (byte != '"' as u8) {
-        cursor += 1;
-        continue;
-      }
-
-      let Option::SOME(key) = Format::readJsonString(line, cursor) else {
-        return Result::ERROR(FormatError::model("failed to parse NDJSON record: unterminated key"));
-      };
-
-      cursor = key.nextIndex;
-
-      while (cursor < line.length()) {
-        let Option::SOME(candidate) = line.byteAt(cursor) else {
-          break;
-        };
-
-        if (candidate == ':' as u8) {
-          cursor += 1;
-          break;
-        }
-
-        if (candidate == ' ' as u8 || candidate == '\t' as u8) {
-          cursor += 1;
-          continue;
-        }
-
+      if (byte != ' ' as u8 && byte != '\t' as u8 && byte != '\n' as u8 && byte != '\r' as u8) {
         break;
       }
 
-      while (cursor < line.length()) {
-        let Option::SOME(candidate) = line.byteAt(cursor) else {
-          break;
-        };
-
-        if (candidate == ' ' as u8 || candidate == '\t' as u8) {
-          cursor += 1;
-          continue;
-        }
-
-        break;
-      }
-
-      let Option::SOME(nextByte) = line.byteAt(cursor) else {
-        break;
-      };
-
-      if (nextByte != '"' as u8) {
-        continue;
-      }
-
-      let Option::SOME(value) = Format::readJsonString(line, cursor) else {
-        return Result::ERROR(FormatError::model("failed to parse NDJSON record: unterminated value"));
-      };
-
-      cursor = value.nextIndex;
-
-      if (key.value.equals("path")) {
-        path = Option::SOME(value.value.clone());
-      } else if (key.value.equals("text")) {
-        text = Option::SOME(value.value.clone());
-      }
+      cursor += 1;
     }
 
-    let Option::SOME(pathValue) = path else {
-      return Result::ERROR(FormatError::model("failed to parse NDJSON record: missing 'path'"));
+    return cursor;
+  }
+
+  /// `stdinRequestFromObjectScan`'s working state: the scan position and
+  /// whichever of `path`/`text` have been seen so far.
+  record ObjectScanState {
+    public cursor: u64;
+    public path: Option<String>;
+    public text: Option<String>;
+  }
+
+  /// Reads one `"key": value` entry of the top-level object, updating
+  /// `state` in place: a known field (`path`/`text`) is read and stored, an
+  /// unknown one is skipped without being parsed into a tree. Returns
+  /// `Option::SOME(finalCursor)` once `}` closes the object, or
+  /// `Option::NONE` to keep scanning entries.
+  function stdinRequestFromObjectScanEntry(
+    line: &String,
+    state: &mut ObjectScanState
+  ): Result<Option<u64>, String> {
+    let mut stateRef: &mut ObjectScanState = state;
+    stateRef.cursor = Format::skipAsciiWhitespaceFrom(line, stateRef.cursor);
+
+    let Option::SOME(keyByte) = line.byteAt(stateRef.cursor) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "an object")));
     };
 
-    let Option::SOME(textValue) = text else {
-      return Result::ERROR(FormatError::model("failed to parse NDJSON record: missing 'text'"));
+    if (keyByte != '"' as u8) {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonKeyMustBeStringMessage(stateRef.cursor)));
+    }
+
+    let key: JsonStringRead = match (readString(line, stateRef.cursor)) {
+      Result::OK(value) -> value,
+      Result::ERROR(message) -> {
+        return Result::ERROR(Format::ndjsonParseErrorOwned(message));
+      },
     };
+
+    let keyText: String = key.value;
+    let keyEndOffset: u64 = key.nextIndex;
+    stateRef.cursor = Format::skipAsciiWhitespaceFrom(line, keyEndOffset);
+
+    let Option::SOME(colon) = line.byteAt(stateRef.cursor) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "an object")));
+    };
+
+    if (colon != ':' as u8) {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonExpectedColonMessage(stateRef.cursor)));
+    }
+
+    stateRef.cursor = Format::skipAsciiWhitespaceFrom(line, stateRef.cursor + 1);
+
+    let isPathKey: boolean = keyText.equals("path");
+    let isTextKey: boolean = keyText.equals("text");
+
+    if (isPathKey || isTextKey) {
+      let alreadySeen: boolean = isPathKey ? stateRef.path.isSome() : stateRef.text.isSome();
+
+      if (alreadySeen) {
+        let fieldName: str = isPathKey ? "path" : "text";
+        return Result::ERROR(Format::ndjsonDuplicateField(fieldName, keyEndOffset));
+      }
+
+      let fieldRead: Format::FieldValueRead = Format::readObjectFieldValue(line, stateRef.cursor)!;
+
+      if (isPathKey) {
+        stateRef.path = Option::SOME(fieldRead.value);
+      } else {
+        stateRef.text = Option::SOME(fieldRead.value);
+      }
+
+      stateRef.cursor = fieldRead.endOffset;
+    } else {
+      stateRef.cursor = match (skipValue(line, stateRef.cursor)) {
+        Result::OK(value) -> value,
+        Result::ERROR(message) -> {
+          return Result::ERROR(Format::ndjsonParseErrorOwned(message));
+        },
+      };
+    }
+
+    stateRef.cursor = Format::skipAsciiWhitespaceFrom(line, stateRef.cursor);
+
+    let Option::SOME(next) = line.byteAt(stateRef.cursor) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "an object")));
+    };
+
+    if (next == ',' as u8) {
+      stateRef.cursor = Format::skipAsciiWhitespaceFrom(line, stateRef.cursor + 1);
+
+      // Past the comma, `serde` reads the next key through the same
+      // generic value dispatch a colon's value uses (there is no
+      // dedicated "read a map key" token check), so running off the end
+      // of the source here is `EOF while parsing a value`, not `an
+      // object`, unlike every other EOF check in this scan.
+      let Option::SOME(afterComma) = line.byteAt(stateRef.cursor) else {
+        return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a value")));
+      };
+
+      if (afterComma == '}' as u8) {
+        return Result::ERROR(Format::ndjsonParseErrorOwned(jsonTrailingCommaMessage(stateRef.cursor)));
+      }
+
+      return Result::OK(Option::NONE);
+    }
+
+    if (next == '}' as u8) {
+      stateRef.cursor += 1;
+      return Result::OK(Option::SOME(stateRef.cursor));
+    }
+
+    return Result::ERROR(Format::ndjsonParseErrorOwned(jsonExpectedCommaOrBraceMessage(stateRef.cursor)));
+  }
+
+  /// Maps a parsed top-level JSON object onto the two fields the protocol
+  /// defines, matching a `serde`-derived struct's field visitor: fields are
+  /// read in JSON order, a repeated key is a `duplicate field` error the
+  /// moment its own string finishes parsing (before its value is even looked
+  /// at), a wrong-typed occurrence errors immediately, and an unknown key
+  /// (including one nested inside another object, like
+  /// `"meta":{"path":"evil.ign"}`) is skipped without being parsed into a
+  /// tree — the same way an unknown field is ignored for a struct without
+  /// `deny_unknown_fields`, and with the same no-recursion-limit iterative
+  /// skip `serde_json`'s `IgnoredAny` uses (`Json::skipValue`), confirmed
+  /// against the host up to 200000 levels of nesting in an ignored field.
+  function stdinRequestFromObjectScan(
+    line: &String,
+    openBraceIndex: u64
+  ): Result<Format::StdinRequest, String> {
+    let mut state: ObjectScanState = ObjectScanState {
+      cursor: Format::skipAsciiWhitespaceFrom(line, openBraceIndex + 1),
+      path: Option::NONE,
+      text: Option::NONE,
+    };
+
+    let Option::SOME(firstByte) = line.byteAt(state.cursor) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "an object")));
+    };
+
+    if (firstByte != '}' as u8) {
+      while (true) {
+        let Option::SOME(finalCursor) = stdinRequestFromObjectScanEntry(line, &mut state)! else {
+          continue;
+        };
+
+        state.cursor = finalCursor;
+        break;
+      }
+    } else {
+      state.cursor += 1;
+    }
+
+    let Option::SOME(pathValue) = state.path else {
+      return Result::ERROR(Format::ndjsonMissingField("path", state.cursor));
+    };
+
+    let Option::SOME(textValue) = state.text else {
+      return Result::ERROR(Format::ndjsonMissingField("text", state.cursor));
+    };
+
+    let afterObject: u64 = Format::skipAsciiWhitespaceFrom(line, state.cursor);
+    let lineLength: u64 = line.length();
+
+    if (afterObject != lineLength) {
+      return Result::ERROR(Format::ndjsonTrailingCharacters(afterObject + 1));
+    }
 
     return Result::OK(Format::StdinRequest { path: pathValue, text: textValue });
   }
 
-  record JsonStringRead {
-    public value: String;
-    public nextIndex: u64;
-  }
+  /// Maps a parsed top-level JSON array onto the two fields the protocol
+  /// defines. A derived `serde` struct accepts a sequence positionally (index
+  /// 0 is the first declared field, `path`; index 1 is `text`) as well as a
+  /// map, so a 2-element array is not an `invalid length` error the way any
+  /// other length is: confirmed against the host with `["a","b"]`, which
+  /// succeeds with `path: "a"`, `text: "b"`. Element type mismatches are
+  /// inferred to use the same `expected a string` wording object fields do;
+  /// this has not been checked against the host for an array element
+  /// specifically.
+  function stdinRequestFromArrayScan(
+    line: &String,
+    openBracketIndex: u64
+  ): Result<Format::StdinRequest, String> {
+    let mut cursor: u64 = Format::skipAsciiWhitespaceFrom(line, openBracketIndex + 1);
 
-  /// Decodes the JSON string starting at the `"` on `startIndex`.
-  function readJsonString(line: &String, startIndex: u64): Option<Format::JsonStringRead> {
-    let Option::SOME(openQuote) = line.byteAt(startIndex) else {
-      return Option::NONE;
+    let Option::SOME(firstByte) = line.byteAt(cursor) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a list")));
     };
 
-    if (openQuote != '"' as u8) {
-      return Option::NONE;
+    if (firstByte == ']' as u8) {
+      return Result::ERROR(Format::ndjsonInvalidLength(0, cursor + 1));
     }
 
-    let mut value: String = String::new();
-    let mut cursor: u64 = startIndex + 1;
+    let firstElement: Format::FieldValueRead = Format::readObjectFieldValue(line, cursor)!;
+    cursor = Format::skipAsciiWhitespaceFrom(line, firstElement.endOffset);
 
-    while (cursor < line.length()) {
-      let Option::SOME(byte) = line.byteAt(cursor) else {
-        return Option::NONE;
-      };
+    let Option::SOME(afterFirst) = line.byteAt(cursor) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a list")));
+    };
 
-      if (byte == '"' as u8) {
-        return Option::SOME(Format::JsonStringRead { value: value, nextIndex: cursor + 1 });
-      }
-
-      if (byte != '\\' as u8) {
-        value.pushByte(byte);
-        cursor += 1;
-        continue;
-      }
-
-      let Option::SOME(escaped) = line.byteAt(cursor + 1) else {
-        return Option::NONE;
-      };
-
-      if (escaped == 'n' as u8) {
-        value.pushByte('\n' as u8);
-      } else if (escaped == 't' as u8) {
-        value.pushByte('\t' as u8);
-      } else if (escaped == 'r' as u8) {
-        value.pushByte('\r' as u8);
-      } else if (escaped == 'b' as u8) {
-        value.pushByte(8);
-      } else if (escaped == 'f' as u8) {
-        value.pushByte(12);
-      } else if (escaped == 'u' as u8) {
-        let Option::SOME(decoded) = Format::readJsonUnicodeEscape(line, cursor + 2) else {
-          return Option::NONE;
-        };
-
-        value.pushChar(decoded);
-        cursor += 6;
-        continue;
-      } else {
-        value.pushByte(escaped);
-      }
-
-      cursor += 2;
+    if (afterFirst == ']' as u8) {
+      return Result::ERROR(Format::ndjsonInvalidLength(1, cursor + 1));
     }
 
-    return Option::NONE;
+    if (afterFirst != ',' as u8) {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(Format::ndjsonExpectedCommaOrBracketAt(cursor)));
+    }
+
+    cursor = Format::skipAsciiWhitespaceFrom(line, cursor + 1);
+
+    let Option::SOME(afterFirstComma) = line.byteAt(cursor) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a value")));
+    };
+
+    if (afterFirstComma == ']' as u8) {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonTrailingCommaMessage(cursor)));
+    }
+
+    let secondElement: Format::FieldValueRead = Format::readObjectFieldValue(line, cursor)!;
+    cursor = Format::skipAsciiWhitespaceFrom(line, secondElement.endOffset);
+
+    let Option::SOME(afterSecond) = line.byteAt(cursor) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a list")));
+    };
+
+    if (afterSecond == ']' as u8) {
+      let afterArray: u64 = Format::skipAsciiWhitespaceFrom(line, cursor + 1);
+      let lineLength: u64 = line.length();
+
+      if (afterArray != lineLength) {
+        return Result::ERROR(Format::ndjsonTrailingCharacters(afterArray + 1));
+      }
+
+      return Result::OK(Format::StdinRequest { path: firstElement.value, text: secondElement.value });
+    }
+
+    // The struct backing a positional record only ever reads 2 elements: a
+    // 3rd is never requested, so `serde`'s `SeqAccess` never validates
+    // anything past the 2nd element, including whether a comma introduces
+    // it. Once the top-level value is "done" (2 elements read), any
+    // non-whitespace byte here other than `]` is unconsumed input, reported
+    // by the same generic "trailing characters" check regardless of what it
+    // is, except for one special case: a comma immediately followed (after
+    // whitespace) by `]`, which is `serde`'s own "trailing comma" wording.
+    if (afterSecond != ',' as u8) {
+      return Result::ERROR(Format::ndjsonTrailingCharacters(cursor + 1));
+    }
+
+    // Running off the end of the source with nothing but whitespace after
+    // the comma reports at the comma's own position instead of wherever the
+    // whitespace skip lands.
+    let commaIndex: u64 = cursor;
+    let afterCommaSkip: u64 = Format::skipAsciiWhitespaceFrom(line, cursor + 1);
+
+    let Option::SOME(afterComma) = line.byteAt(afterCommaSkip) else {
+      return Result::ERROR(Format::ndjsonTrailingCharacters(commaIndex + 1));
+    };
+
+    if (afterComma == ']' as u8) {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonTrailingCommaMessage(afterCommaSkip)));
+    }
+
+    return Result::ERROR(Format::ndjsonTrailingCharacters(afterCommaSkip + 1));
   }
 
-  /// Decodes the four hex digits of a `\uXXXX` escape. Surrogate pairs are not
-  /// recombined: the protocol's producer emits plain UTF-8 for anything above
-  /// the basic plane.
-  function readJsonUnicodeEscape(line: &String, startIndex: u64): Option<char> {
-    let mut value: u32 = 0;
-    let mut index: u64 = 0;
+  function ndjsonExpectedCommaOrBracketAt(index: u64): String {
+    let columnValue: u64 = index + 1;
+    let column: String = columnValue.toString();
 
-    while (index < 4) {
-      let Option::SOME(byte) = line.byteAt(startIndex + index) else {
-        return Option::NONE;
-      };
-
-      let Option::SOME(digit) = Format::hexDigitValue(byte) else {
-        return Option::NONE;
-      };
-
-      value = value * 16 + digit;
-      index += 1;
-    }
-
-    return Option::SOME(value as char);
+    let mut message: String = String::create("expected `,` or `]` at line 1 column ");
+    message.push(&column);
+    return message;
   }
 
-  function hexDigitValue(byte: u8): Option<u32> {
-    if (byte >= '0' as u8 && byte <= '9' as u8) {
-      return Option::SOME((byte - ('0' as u8)) as u32);
+  /// Reads one NDJSON request line, matching `serde_json::from_str::<StdinRecord>`'s
+  /// exact wording and, just as importantly, its exact *ordering*: a field's
+  /// value is inspected shallowly rather than parsed into a tree first (see
+  /// `readObjectFieldValue`'s doc comment), so this never builds a
+  /// `std::json` `JsonValue` tree for its own top-level scan, unlike this
+  /// module's other JSON handling.
+  function parseStdinRequest(line: &String): Result<Format::StdinRequest, String> {
+    let Option::SOME(firstByte) = line.byteAt(0) else {
+      return Result::ERROR(Format::ndjsonParseErrorOwned(jsonEofMessage(line, "a value")));
+    };
+
+    if (firstByte == '{' as u8) {
+      return Format::stdinRequestFromObjectScan(line, 0);
     }
 
-    if (byte >= 'a' as u8 && byte <= 'f' as u8) {
-      return Option::SOME((byte - ('a' as u8)) as u32 + 10);
+    if (firstByte == '[' as u8) {
+      return Format::stdinRequestFromArrayScan(line, 0);
     }
 
-    if (byte >= 'A' as u8 && byte <= 'F' as u8) {
-      return Option::SOME((byte - ('A' as u8)) as u32 + 10);
-    }
-
-    return Option::NONE;
+    let scalar: Format::ShallowScalarRead = Format::readShallowScalar(line, 0)!;
+    let description: String = Format::describeShallowScalarKind(&scalar.kind);
+    return Result::ERROR(Format::ndjsonInvalidType(&description, scalar.endOffset));
   }
 
   function escapeJsonString(value: &String, output: &mut String): void {
@@ -558,8 +1421,9 @@ export namespace Format {
     config: &FormatterConfig,
     emitDiff: boolean
   ): Format::StdinResponse {
-    let Result::OK(formatted) = Format::formatSource(&request.text, config) else {
-      let Result::ERROR(error) = Format::formatSource(&request.text, config) else {
+    let formatted: String = match (Format::formatSource(&request.text, config)) {
+      Result::OK(value) -> value,
+      Result::ERROR(error) -> {
         return Format::StdinResponse {
           path: request.path.clone(),
           hasFormatted: false,
@@ -568,20 +1432,9 @@ export namespace Format {
           hasDiff: false,
           diff: String::new(),
           hasError: true,
-          error: String::create("formatter failed"),
+          error: error.describe(),
         };
-      };
-
-      return Format::StdinResponse {
-        path: request.path.clone(),
-        hasFormatted: false,
-        formatted: String::new(),
-        changed: false,
-        hasDiff: false,
-        diff: String::new(),
-        hasError: true,
-        error: error.describe(),
-      };
+      },
     };
 
     let changed: boolean = !formatted.equals(&request.text);

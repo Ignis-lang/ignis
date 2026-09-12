@@ -1,0 +1,34 @@
+//! The value tree `Json::parse` builds, and nothing else: this module has no
+//! opinion on how a caller maps a `JsonValue` onto its own record types.
+
+/// One parsed JSON value, together with the byte offset immediately after its
+/// own token in the source text `Json::parse` read it from.
+///
+/// `endOffset` is 0-based and points at the first byte *after* this value:
+/// for `"a"` at the start of the source it is `3`, for `[]` it is `2`. A
+/// caller reporting a `serde_json`-shaped column adds one to it.
+export record JsonValue {
+  public kind: JsonValueKind;
+  public endOffset: u64;
+}
+
+export enum JsonValueKind {
+  NULL,
+  BOOL(boolean),
+  /// The raw JSON number text, unparsed: callers that only need to describe
+  /// the value (as `Format::parseStdinRequest`'s error messages do) don't
+  /// need it as an `f64`, and keeping the source text avoids reformatting
+  /// differences from whatever numeric type a caller would parse it into.
+  NUMBER(String),
+  STRING(String),
+  ARRAY(Vector<JsonValue>),
+  /// Entries in source order, duplicates included: a caller that cares about
+  /// "last write wins" (the way a `serde` struct's field visitor behaves)
+  /// walks them in order itself.
+  OBJECT(Vector<JsonObjectEntry>),
+}
+
+export record JsonObjectEntry {
+  public key: String;
+  public value: JsonValue;
+}

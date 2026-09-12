@@ -1,0 +1,208 @@
+import Path from "std::path";
+import String from "std::string";
+import Test from "std::test";
+
+import DiagnosticBag from "@compiler::diagnostics";
+
+import Format from "./format/api";
+import FormatterCliOverrides, FormatterConfig, FormatterConfigPaths from "./format/config";
+import
+  comparePathComponents,
+  fmtConfigErrorMessage,
+  fmtConfigErrorMessageForPath,
+  fmtStdinJsonValidateAndProcessLine,
+  validateUtf8From,
+from "./main";
+
+function invalidIndentWidthBag(): DiagnosticBag {
+  let paths: FormatterConfigPaths = FormatterConfigPaths {
+    projectRoot: Path::PathBuf::create("."),
+    ignisToml: Option::NONE,
+    dedicatedConfig: Option::NONE,
+    explicitConfig: Option::NONE,
+  };
+
+  let overrides: FormatterCliOverrides = FormatterCliOverrides {
+    indentWidth: Option::SOME(0),
+    lineWidth: Option::NONE,
+    useTabs: Option::NONE,
+    sortImports: Option::NONE,
+  };
+
+  let Result::ERROR(bag) = Format::Config::load(&paths, &overrides) else {
+    Test::fail();
+    @unreachable();
+  };
+
+  return bag;
+}
+
+/// The host CLI prefixes a formatter configuration failure with `formatter
+/// configuration failed: `; `printFmtConfigError` used to drop that prefix
+/// entirely.
+@test
+function fmtConfigErrorMessageAddsTheHostsPrefix(): void {
+  let bag: DiagnosticBag = invalidIndentWidthBag();
+  let message: String = fmtConfigErrorMessage(&bag);
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "formatter configuration failed: formatter config '<cli>' has invalid 'indent_width': expected 0 to be within 1..=8"
+  );
+}
+
+/// The per-file variant additionally prefixes the file path, the way the
+/// host CLI's per-file config resolution does.
+@test
+function fmtConfigErrorMessageForPathAddsThePathAndThePrefix(): void {
+  let bag: DiagnosticBag = invalidIndentWidthBag();
+  let path: Path::PathBuf = Path::PathBuf::create("src/main.ign");
+  let message: String = fmtConfigErrorMessageForPath(&path, &bag);
+
+  Test::assertEq<str>(
+    message.toStr(),
+    "src/main.ign: formatter configuration failed: formatter config '<cli>' has invalid 'indent_width': expected 0 to be within 1..=8"
+  );
+}
+
+/// A raw control byte and an ASCII run are both valid UTF-8: the whole
+/// buffer validates in one pass regardless of where `reachedEnd` sits.
+@test
+function validateUtf8FromAcceptsPlainAsciiBytes(): void {
+  let text: String = String::create("hello");
+  let Option::SOME(validatedUpTo) = validateUtf8From(&text, 0, true) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(validatedUpTo, text.length());
+}
+
+/// A complete multi-byte scalar (`é`, `C3 A9`) validates fully once it is
+/// entirely present, whether or not more input might still follow.
+@test
+function validateUtf8FromAcceptsACompleteMultiByteScalar(): void {
+  let text: String = String::create("cafe\u{e9}");
+  let Option::SOME(validatedUpTo) = validateUtf8From(&text, 0, false) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(validatedUpTo, text.length());
+}
+
+/// A multi-byte sequence cut short by the end of the bytes read so far is
+/// left unvalidated (not an error yet) while more input might still
+/// complete it.
+@test
+function validateUtf8FromLeavesATruncatedSequenceForMoreInput(): void {
+  let mut text: String = String::create("a");
+  text.pushByte(0xC3);
+
+  let Option::SOME(validatedUpTo) = validateUtf8From(&text, 0, false) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<u64>(validatedUpTo, 1);
+}
+
+/// The same truncated sequence is a genuine error once no more input will
+/// arrive (`reachedEnd` true).
+@test
+function validateUtf8FromRejectsATruncatedSequenceAtTrueEof(): void {
+  let mut text: String = String::create("a");
+  text.pushByte(0xC3);
+
+  let Option::SOME(_) = validateUtf8From(&text, 0, true) else {
+    return;
+  };
+
+  Test::fail();
+}
+
+/// `0xFF` cannot start any UTF-8 sequence: rejected immediately regardless
+/// of `reachedEnd`.
+@test
+function validateUtf8FromRejectsAnInvalidLeadingByte(): void {
+  let mut text: String = String::create("a");
+  text.pushByte(0xFF);
+  text.pushByte(0xFE);
+
+  let Option::SOME(_) = validateUtf8From(&text, 0, false) else {
+    return;
+  };
+
+  Test::fail();
+}
+
+/// A blank (whitespace-only) line is a valid line: it validates and is
+/// skipped, not treated as an error.
+@test
+function fmtStdinJsonValidateAndProcessLineAcceptsABlankLine(): void {
+  let line: String = String::create("   ");
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Option::SOME(result) = fmtStdinJsonValidateAndProcessLine(&line, &config, false) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(result.changed, false);
+  Test::assertEq<boolean>(result.hadError, false);
+}
+
+/// A line carrying an invalid UTF-8 byte reports the fatal stream-level
+/// failure (`Option::NONE`). Validation runs against this line's own bytes
+/// only: this is the contract `runFmtStdinJson` relies on to finish printing
+/// every earlier complete line's response before a later line's invalid
+/// byte aborts the batch, instead of validating the whole growing buffer
+/// (and discarding already-buffered valid lines) the moment any invalid
+/// byte arrives.
+@test
+function fmtStdinJsonValidateAndProcessLineRejectsAnInvalidUtf8Byte(): void {
+  let mut line: String = String::create("{\"path\":\"a\",\"text\":\"");
+  line.pushByte(0xFF);
+  line.pushStr("\"}");
+  let config: FormatterConfig = FormatterConfig::default();
+
+  let Option::SOME(_) = fmtStdinJsonValidateAndProcessLine(&line, &config, false) else {
+    return;
+  };
+
+  Test::fail();
+}
+
+/// `a/b.ign` sorts before `a-b.ign`: the first path component `a` sorts
+/// before the whole second component `a-b.ign`, even though `-` (0x2D)
+/// sorts before `/` (0x2F) byte for byte. Matches Rust's `PathBuf`/`Path`
+/// `Ord`, which project-mode `fmt` has to reproduce (host reference:
+/// `crates/ignis_driver`'s file collection sorts `Vec<PathBuf>` directly).
+@test
+function comparePathComponentsOrdersASlashBeforeADash(): void {
+  let slashPath: String = String::create("a/b.ign");
+  let dashPath: String = String::create("a-b.ign");
+
+  Test::assert(comparePathComponents(&slashPath, &dashPath) < 0);
+  Test::assert(comparePathComponents(&dashPath, &slashPath) > 0);
+}
+
+/// At the second component, `b` (a whole component of `a/b/c.ign`) is a
+/// prefix of `b.ign` (a whole component of `a/b.ign`), so the shorter
+/// component sorts first — the same rule `comparePathComponentsOrdersASlashBeforeADash`
+/// exercises one level up, applied within a single component.
+@test
+function comparePathComponentsOrdersAShorterComponentFirst(): void {
+  let threeComponentPath: String = String::create("a/b/c.ign");
+  let twoComponentPath: String = String::create("a/b.ign");
+
+  Test::assert(comparePathComponents(&threeComponentPath, &twoComponentPath) < 0);
+}
+
+@test
+function comparePathComponentsIsEqualForIdenticalPaths(): void {
+  let left: String = String::create("a/b/c.ign");
+  let right: String = String::create("a/b/c.ign");
+
+  Test::assertEq<i32>(comparePathComponents(&left, &right), 0);
+}
