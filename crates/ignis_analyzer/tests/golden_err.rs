@@ -3603,3 +3603,74 @@ function main(): i32 {
     common::format_diagnostics(&result.output.diagnostics)
   );
 }
+
+/// A namespace's own name is a normal declaration on its FIRST occurrence at
+/// a scope (IGN-230 only bypasses the duplicate-name check when REOPENING a
+/// namespace already seen there): it collides with an unrelated declaration
+/// of the same name exactly like a second record or enum would, but the
+/// host's diagnostic for the collision depends on which one binds the scope
+/// slot first.
+///
+/// `namespace Foo` then `record Foo` collides at the record's own
+/// declaration, so the host reports the ordinary duplicate-type error
+/// (`A0052`) there — this order is also covered by the e2e fixture
+/// `test_cases/e2e/err/namespace_then_record_same_name_is_duplicate.ign`.
+///
+/// `record Foo` then `namespace Foo` is NOT symmetric: the host's namespace
+/// predeclaration never itself reports a duplicate (it silently keeps
+/// whatever already occupies the scope slot), so nothing fails until
+/// `Foo::a()` tries to resolve through the record it actually bound and
+/// fails as an undeclared identifier (`A0035`) instead. The selfhost
+/// analyzer's duplicate-name check (mirroring `predeclareTypeDecl`) reports
+/// `A0052` for both orders, which was already true before IGN-230 rather
+/// than a regression this change introduced. Kept host-only (not an e2e
+/// fixture) so this pre-existing, unrelated mismatch does not fail selfhost
+/// parity gate G5.
+#[test]
+fn namespace_then_record_vs_record_then_namespace_duplicate_name() {
+  let namespace_first = common::analyze(
+    r#"
+namespace Foo {
+    function a(): i32 {
+        return 1;
+    }
+}
+
+record Foo {
+    public x: i32;
+}
+
+function main(): i32 {
+    return Foo::a();
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "namespace_then_record_same_name_is_duplicate",
+    common::format_diagnostics(&namespace_first.output.diagnostics)
+  );
+
+  let record_first = common::analyze(
+    r#"
+record Foo {
+    public x: i32;
+}
+
+namespace Foo {
+    function a(): i32 {
+        return 1;
+    }
+}
+
+function main(): i32 {
+    return Foo::a();
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "record_then_namespace_same_name_is_duplicate",
+    common::format_diagnostics(&record_first.output.diagnostics)
+  );
+}

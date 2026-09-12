@@ -410,6 +410,17 @@ export namespace Analyzer {
         if (sameDef) {
           if (let Option::SOME(existingQualified) = direct.qualifiedNames.get(index)) {
             if (existingQualified.equals(qualifiedName.toStr())) {
+              // A reopened namespace (IGN-230) publishes its own root item once
+              // per block, all sharing the namespace's `DefinitionId` and
+              // qualified name: the duplicate entry below is that same
+              // namespace seen again through a later block. The host exports
+              // a merged namespace when ANY block carries `export`, order
+              // independent, so OR the new block's flag into the existing
+              // entry instead of keeping only the first block's value.
+              if (exported) {
+                let mut directRef: &mut Analyzer::Imports::DirectDeclarationIndex = direct;
+                let _wasSet: boolean = directRef.exported.set(index, true);
+              }
               return;
             }
           }

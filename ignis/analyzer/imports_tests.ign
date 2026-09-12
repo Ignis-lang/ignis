@@ -1550,3 +1550,41 @@ function analyzeProgramExpandsOnlyPublishedNamespaceMembers(): void {
   Test::assertEq<u64>(keptImporter.imports.syms.length(), 0);
   Test::assertEq<str>(diagnostic.code, DiagnosticCode::SYMBOL_NOT_EXPORTED);
 }
+
+/// Scenario: a namespace is reopened across two blocks (IGN-230) and only ONE
+/// of the two blocks carries `export`. The host merges both blocks into one
+/// namespace and exports it — order independent — as soon as any block does,
+/// so an importer must see every member regardless of which block declared
+/// which member. This is a regression test for a bug where the direct
+/// declaration index deduped the namespace's two root-item entries (same
+/// `DefinitionId`, same qualified name) and kept only the FIRST block's
+/// `exported` flag, silently losing the export when the exported block came
+/// second.
+@test
+function analyzeProgramExportsReopenedNamespaceMembersFromEitherBlock(): void {
+  let exportFirstSource: str = "export namespace Foo {\n  function a(): i32 {\n    return 1;\n  }\n}\n\nnamespace Foo {\n  function b(): i32 {\n    return 2;\n  }\n}\n";
+  let exportSecondSource: str = "namespace Foo {\n  function a(): i32 {\n    return 1;\n  }\n}\n\nexport namespace Foo {\n  function b(): i32 {\n    return 2;\n  }\n}\n";
+  let importerSource: str = "import Foo from \"a.ign\";\n\nexport function useFoo(): i32 {\n  return Foo::a() + Foo::b();\n}\n";
+
+  let exportFirstRecords: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoSources(
+    "a.ign",
+    exportFirstSource,
+    "b.ign",
+    importerSource,
+  );
+  let Option::SOME(exportFirstImporter) = exportFirstRecords.get(1) else {
+    @panic("missing importing record (export on first block)");
+  };
+  Test::assertEq<str>(importsDiagnosticCodes(exportFirstImporter).toStr(), "");
+
+  let exportSecondRecords: Vector<Analyzer::ModuleAnalysisRecord> = importsAnalyzeTwoSources(
+    "a.ign",
+    exportSecondSource,
+    "b.ign",
+    importerSource,
+  );
+  let Option::SOME(exportSecondImporter) = exportSecondRecords.get(1) else {
+    @panic("missing importing record (export on second block)");
+  };
+  Test::assertEq<str>(importsDiagnosticCodes(exportSecondImporter).toStr(), "");
+}

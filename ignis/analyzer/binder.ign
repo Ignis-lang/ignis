@@ -72,15 +72,51 @@ export namespace Analyzer {
       /// two C definitions of it.
       public exportedSymbols: Vector<String>;
       public exportedSymbolSpans: Vector<SourceSpan>;
-      /// Namespace declarations seen so far, keyed by `(scopeKey, sym)` and
-      /// co-indexed with `namespaceDefIds` (IGN-230). A second
-      /// `namespace X { ... }` block at the same scope reopens the namespace
-      /// named by the first block instead of redefining it: this table is how
-      /// `predeclareNamespaceDecl` finds that first block's `DefinitionId` to
-      /// reuse, mirroring the reference compiler's `NamespaceStore::get_or_create`.
-      public namespaceScopeKeys: Vector<u64>;
-      public namespaceSyms: Vector<Analyzer::SymbolId>;
-      public namespaceDefIds: Vector<Analyzer::DefinitionId>;
+    }
+
+    /// Namespace blocks seen so far during pass-1 predeclaration, keyed by
+    /// `(scopeKey, sym)` and co-indexed with `defIds` (IGN-230).
+    ///
+    /// A second `namespace X { ... }` block at the same scope reopens the
+    /// namespace named by the first block instead of redefining it:
+    /// `predeclareNamespaceDecl` uses this table to find that first block's
+    /// `DefinitionId` to reuse, mirroring the reference compiler's
+    /// `NamespaceStore::get_or_create`.
+    ///
+    /// The reuse key is `scopeKey` — the LEXICAL scope the `namespace` item
+    /// itself sits in, computed once per enclosing block from that block's
+    /// own `itemId` (see `childScopeKey` in `predeclareItem`'s `Namespace`
+    /// arm and `completeItem`'s mirror of it). It is not a canonical
+    /// namespace-path identity: two `namespace Inner { ... }` blocks nested
+    /// in two DIFFERENT `namespace Outer { ... }` blocks get two different
+    /// scope keys (each `Outer` occurrence has its own `itemId`) even when
+    /// those two `Outer` blocks are themselves a reopened pair that share one
+    /// `DefinitionId`. Reopening one `Inner` still resolves to `Outer::Inner`
+    /// correctly, but through the separate, string-keyed qualified-name index
+    /// built by `Analyzer::qualifiedNameForItemRaw` (which walks the raw AST
+    /// and does not consult this table at all) — NOT because this table
+    /// unified the two `Inner` occurrences into one `DefinitionId`. Anything
+    /// that instead needs one canonical `DefinitionId` per namespace PATH
+    /// (not per lexically-adjacent reopening) cannot rely on this table as-is.
+    ///
+    /// This table lives outside `BinderState` (rather than as fields on it,
+    /// as an earlier revision did) because only pass-1 (`predeclareRoots` /
+    /// `predeclareItem` / `predeclareNamespaceDecl`) ever reads or writes it;
+    /// pass-2 (`completeRoots` / `completeItem`) has no use for it, and a
+    /// shared `BinderState` field would sit permanently empty there.
+    record NamespaceReopenTable {
+      public scopeKeys: Vector<u64>;
+      public syms: Vector<Analyzer::SymbolId>;
+      public defIds: Vector<Analyzer::DefinitionId>;
+    }
+
+    /// An empty `NamespaceReopenTable` for a fresh pass-1 walk.
+    function emptyNamespaceReopenTable(): Analyzer::Binder::NamespaceReopenTable {
+      return Analyzer::Binder::NamespaceReopenTable {
+        scopeKeys: Vector::new<u64>(),
+        syms: Vector::new<Analyzer::SymbolId>(),
+        defIds: Vector::new<Analyzer::DefinitionId>(),
+      };
     }
 
     /// Output produced by `predeclareRoots`.
@@ -190,22 +226,22 @@ export namespace Analyzer {
     }
 
     /// Look up a previously predeclared namespace's `DefinitionId` by
-    /// `(scopeKey, sym)` (IGN-230). Returns `NONE` on the first occurrence of
-    /// a namespace name at this scope.
+    /// `(scopeKey, sym)` in `reopen` (IGN-230). Returns `NONE` on the first
+    /// occurrence of a namespace name at this scope.
     function findExistingNamespaceDefId(
-      state: &mut Analyzer::Binder::BinderState,
+      reopen: &mut Analyzer::Binder::NamespaceReopenTable,
       scopeKey: u64,
       sym: Analyzer::SymbolId,
     ): Option<Analyzer::DefinitionId> {
       let mut index: u64 = 0;
-      let count: u64 = state.namespaceScopeKeys.length();
+      let count: u64 = reopen.scopeKeys.length();
       let mut result: Option<Analyzer::DefinitionId> = Option::NONE;
 
       while (index < count) {
-        if (let Option::SOME(sk) = state.namespaceScopeKeys.get(index)) {
-          if (let Option::SOME(ss) = state.namespaceSyms.get(index)) {
+        if (let Option::SOME(sk) = reopen.scopeKeys.get(index)) {
+          if (let Option::SOME(ss) = reopen.syms.get(index)) {
             if (*sk == scopeKey && ss.raw() == sym.raw()) {
-              if (let Option::SOME(defId) = state.namespaceDefIds.get(index)) {
+              if (let Option::SOME(defId) = reopen.defIds.get(index)) {
                 result = Option::SOME(*defId);
               }
             }
@@ -217,18 +253,18 @@ export namespace Analyzer {
       return result;
     }
 
-    /// Record a first-seen `(scopeKey, sym) -> defId` namespace mapping so a
-    /// later block reopening the same namespace can find it.
+    /// Record a first-seen `(scopeKey, sym) -> defId` namespace mapping in
+    /// `reopen` so a later block reopening the same namespace can find it.
     function recordNamespaceEntry(
-      state: &mut Analyzer::Binder::BinderState,
+      reopen: &mut Analyzer::Binder::NamespaceReopenTable,
       scopeKey: u64,
       sym: Analyzer::SymbolId,
       defId: Analyzer::DefinitionId,
     ): void {
-      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
-      stateRef.namespaceScopeKeys.push(scopeKey);
-      stateRef.namespaceSyms.push(sym);
-      stateRef.namespaceDefIds.push(defId);
+      let mut reopenRef: &mut Analyzer::Binder::NamespaceReopenTable = reopen;
+      reopenRef.scopeKeys.push(scopeKey);
+      reopenRef.syms.push(sym);
+      reopenRef.defIds.push(defId);
     }
 
     /// Record (scopeKey, sym, span) into the scope-tracking tables.
@@ -279,32 +315,57 @@ export namespace Analyzer {
 
     /// Predeclare a `namespace X { ... }` block's own name.
     ///
-    /// Unlike `predeclareTypeDecl`, a repeated namespace name at the same
-    /// scope is never a duplicate-name error (spec IGN-230, matching the
-    /// reference compiler's `NamespaceStore::get_or_create` + fire-and-forget
-    /// `scopes.define`): it reopens the namespace, reusing the `DefinitionId`
+    /// A repeated namespace name at the same scope reopens the namespace
+    /// (spec IGN-230, matching the reference compiler's
+    /// `NamespaceStore::get_or_create`): it reuses the `DefinitionId`
     /// allocated for the first block so both blocks' members publish under
-    /// the same qualified path. This intentionally does not consult
-    /// `findDuplicateSpan` — a namespace name never collides, even with an
-    /// unrelated declaration (record, enum, ...) of the same name at this
-    /// scope, mirroring the host's permissive namespace predeclaration.
+    /// the same qualified path, and — because it is the SAME namespace, not a
+    /// new declaration — it consults neither `findDuplicateSpan` nor
+    /// `recordScopeEntry`.
+    ///
+    /// This bypass is specific to namespace-vs-namespace reopening. A
+    /// namespace's FIRST occurrence at a scope still goes through the normal
+    /// duplicate-name check and still registers itself in the shared scope
+    /// table, exactly like `predeclareTypeDecl` does for a record/enum/alias/
+    /// trait: `namespace Foo {}` colliding with an existing `record Foo {}`
+    /// (or vice versa, whichever is bound first) is still flagged, matching
+    /// the host (`A0052`/`A0035` depending on order). An earlier revision of
+    /// this function skipped `recordScopeEntry` unconditionally, which was a
+    /// regression — see the IGN-230 follow-up review.
     function predeclareNamespaceDecl(
       state: &mut Analyzer::Binder::BinderState,
+      reopen: &mut Analyzer::Binder::NamespaceReopenTable,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
       symbols: &mut Analyzer::SymbolTable,
       itemId: Ast::ItemId,
       name: &String,
+      span: SourceSpan,
       scopeKey: u64,
     ): void {
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let sym: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
 
-      if (let Option::SOME(existingDefId) = findExistingNamespaceDefId(state, scopeKey, sym)) {
+      if (let Option::SOME(existingDefId) = findExistingNamespaceDefId(reopen, scopeKey, sym)) {
         let mut stateRef: &mut Analyzer::Binder::BinderState = state;
         stateRef.nodeIds.push(itemId.raw());
         stateRef.defIds.push(existingDefId);
         stateRef.declScopeKeys.push(scopeKey);
+        return;
+      }
+
+      let duplicateOpt: Option<SourceSpan> = findDuplicateSpan(state, scopeKey, sym);
+      if (let Option::SOME(_firstSpan) = duplicateOpt) {
+        let message: String = `Type '${name.toStr()}' is already defined`;
+        let mut diag: Diagnostic = Diagnostic::new(
+          Severity::ERROR,
+          DiagnosticCode::TYPE_ALREADY_DEFINED,
+          message.toStr(),
+          span,
+        );
+        diag.addLabel(LabelKind::PRIMARY, span, "second declaration here");
+        let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+        stateRef.diagnostics.push(diag);
         return;
       }
 
@@ -314,7 +375,8 @@ export namespace Analyzer {
       stateRef.defIds.push(defId);
       stateRef.declScopeKeys.push(scopeKey);
 
-      recordNamespaceEntry(state, scopeKey, sym, defId);
+      recordScopeEntry(state, scopeKey, sym, span);
+      recordNamespaceEntry(reopen, scopeKey, sym, defId);
     }
 
     /// Allocate a placeholder `Definition::Enum`.
@@ -460,6 +522,7 @@ export namespace Analyzer {
     /// `items` field (unlike the Rust reference). Known gap — see future slice.
     function predeclareItem(
       state: &mut Analyzer::Binder::BinderState,
+      reopen: &mut Analyzer::Binder::NamespaceReopenTable,
       defStore: &mut Analyzer::DefinitionStore,
       typeStore: &mut Analyzer::TypeStore,
       symbols: &mut Analyzer::SymbolTable,
@@ -529,7 +592,7 @@ export namespace Analyzer {
             // Allocate a placeholder for the namespace node itself (spec §namespace-recursion),
             // reopening a previous block of the same name at this scope instead of
             // redefining it (spec IGN-230).
-            predeclareNamespaceDecl(state, defStore, typeStore, symbols, itemId, &ns.name, scopeKey);
+            predeclareNamespaceDecl(state, reopen, defStore, typeStore, symbols, itemId, &ns.name, ns.span, scopeKey);
 
             // Child scope key is itemId.raw() + 1: 0 stays the top-level
             // sentinel even when the namespace itself is ItemId 0.
@@ -538,7 +601,7 @@ export namespace Analyzer {
 
             while (childIndex < ns.items.length()) {
               if (let Option::SOME(childId) = ns.items.get(childIndex)) {
-                predeclareItem(state, defStore, typeStore, symbols, ast, *childId, childScopeKey);
+                predeclareItem(state, reopen, defStore, typeStore, symbols, ast, *childId, childScopeKey);
               }
               childIndex += 1;
             }
@@ -547,7 +610,7 @@ export namespace Analyzer {
             // Export wrapper: predeclare the inner declaration if present.
             // The export node itself does NOT receive a DefinitionId (spec §export-unwrapping).
             if (let Option::SOME(innerItemId) = ex.declaration) {
-              predeclareItem(state, defStore, typeStore, symbols, ast, innerItemId, scopeKey);
+              predeclareItem(state, reopen, defStore, typeStore, symbols, ast, innerItemId, scopeKey);
             }
           },
           Ast::Item::Node::Extern(ex) -> {
@@ -560,7 +623,7 @@ export namespace Analyzer {
 
             while (childIndex < ex.items.length()) {
               if (let Option::SOME(childId) = ex.items.get(childIndex)) {
-                predeclareItem(state, defStore, typeStore, symbols, ast, *childId, childScopeKey);
+                predeclareItem(state, reopen, defStore, typeStore, symbols, ast, *childId, childScopeKey);
               }
               childIndex += 1;
             }
@@ -2775,17 +2838,15 @@ export namespace Analyzer {
         insideExtern: false,
         exportedSymbols: Vector::new<String>(),
         exportedSymbolSpans: Vector::new<SourceSpan>(),
-        namespaceScopeKeys: Vector::new<u64>(),
-        namespaceSyms: Vector::new<Analyzer::SymbolId>(),
-        namespaceDefIds: Vector::new<Analyzer::DefinitionId>(),
       };
+      let mut reopen: Analyzer::Binder::NamespaceReopenTable = Analyzer::Binder::emptyNamespaceReopenTable();
 
       let typeStoreLengthBefore: u64 = typeStore.length();
       let mut index: u64 = 0;
 
       while (index < roots.length()) {
         if (let Option::SOME(itemId) = roots.get(index)) {
-          predeclareItem(&mut state, defStore, typeStore, symbols, ast, *itemId, 0);
+          predeclareItem(&mut state, &mut reopen, defStore, typeStore, symbols, ast, *itemId, 0);
         }
         index += 1;
       }
@@ -2850,9 +2911,6 @@ export namespace Analyzer {
         insideExtern: false,
         exportedSymbols: Vector::new<String>(),
         exportedSymbolSpans: Vector::new<SourceSpan>(),
-        namespaceScopeKeys: Vector::new<u64>(),
-        namespaceSyms: Vector::new<Analyzer::SymbolId>(),
-        namespaceDefIds: Vector::new<Analyzer::DefinitionId>(),
       };
 
       let mut index: u64 = 0;
