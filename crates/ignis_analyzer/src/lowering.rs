@@ -113,6 +113,14 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  /// Whether this declaration name is the discard `_`. See [`SymbolTable::is_discard`].
+  fn is_discard_name(
+    &self,
+    name: ignis_type::symbol::SymbolId,
+  ) -> bool {
+    self.symbols.borrow().is_discard(&name)
+  }
+
   fn callable_return_type(
     &self,
     def_id: &DefinitionId,
@@ -151,6 +159,29 @@ impl<'a> Analyzer<'a> {
   ) -> HIRId {
     match stmt {
       ASTStatement::Variable(var) => {
+        // `let _ = value;` binds nothing: the initializer runs for its effects and the
+        // value it produces belongs to the statement, which drops it. Lowering it to the
+        // same HIR as the expression statement `value;` is what keeps a discard out of the
+        // scope's owned locals and out of the drop schedules, so the two compiler front
+        // ends describe it the same way.
+        if self.is_discard_name(var.name) {
+          let init = var
+            .value
+            .as_ref()
+            .map(|value_id| self.lower_node_to_hir(value_id, hir, scope_kind));
+
+          let kind = match init {
+            Some(init_id) => HIRKind::ExpressionStatement(init_id),
+            None => HIRKind::Unit,
+          };
+
+          return hir.alloc(HIRNode {
+            kind,
+            span: var.span.clone(),
+            type_id: self.types.void(),
+          });
+        }
+
         let def_id = match self.lookup_def(node_id).cloned() {
           Some(id) => id,
           None => match self.scopes.lookup_def(&var.name).cloned() {
