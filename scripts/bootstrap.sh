@@ -22,6 +22,8 @@
 #   G4  resource budget: stage2 within 1.25x of the host
 #   G5  diagnostics: stage2's messages equal or better than the host's
 #   G6  syntax: stage2 accepts and rejects exactly what the host parser does
+#   G7  drop schedules: stage2's --dump-drop-schedule matches the host's
+#       (informational: reported, but not part of the promotion verdict)
 #
 # `gates` runs all of them and then `report`, which turns the gate files into
 # build/bootstrap/report.md and build/bootstrap/promotion.json. The nightly
@@ -48,7 +50,10 @@ SELF="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 
 # Gate identifiers in report order. G4, G5 and G6 have their own subcommands;
 # when those are absent `gates` still records a result for them.
-GATE_IDS=(G1 G2 G3 G4 G5 G6)
+# The gates a run is expected to produce. G7 is listed so that `seal-gates`
+# records a skipped placeholder for it, not because it gates promotion:
+# scripts/bootstrap_report.py keeps it out of the `candidate` verdict.
+GATE_IDS=(G1 G2 G3 G4 G5 G6 G7)
 
 # The selfhost test suite runs a full analysis of `ignis/` before it links, and
 # a hung run still has to leave a gate result behind.
@@ -72,6 +77,7 @@ Commands:
   gate-g5  Run the host error corpus through stage2 and write gates/G5.json.
   gate-g6  Compare stage2's parse verdicts with the host's and write gates/G6.json.
   gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
+  gate-g7  Diff stage2's drop schedules against the host's -> gates/G7.json (informational).
   gates    Run every stage and gate in order, then write the promotion report.
   seal-gates  Record a skipped result for every gate that produced no file.
   report   Turn build/bootstrap/gates/*.json into report.md and promotion.json.
@@ -693,7 +699,7 @@ run_gates() {
   mkdir -p "$GATES_DIR"
 
   local step
-  for step in stage1 stage2 parity stage3 gate-g4 gate-g5 gate-g6 gate-g3; do
+  for step in stage1 stage2 parity stage3 gate-g4 gate-g5 gate-g6 gate-g7 gate-g3; do
     info "gates: ${step}"
     "$SELF" "$step" || info "gates: ${step} exited non-zero, continuing"
   done
@@ -796,6 +802,37 @@ run_gate_g6() {
   info "gate-g6: result -> ${gate_file} (report ${report})"
 }
 
+run_gate_g7() {
+  ensure_stage stage2
+
+  local report="${BOOTSTRAP_ROOT}/parity-drops.md"
+  local counts="${BOOTSTRAP_ROOT}/parity-drops.json"
+  local gate_file="${GATES_DIR}/G7.json"
+
+  mkdir -p "$GATES_DIR"
+  rm -f "$gate_file"
+
+  info "gate-g7: diffing the drop schedules of $(stage_bin stage2) against ${STAGE0}'s"
+
+  # Informational gate: a divergence is the product, never a failure of the run.
+  python3 "${SCRIPT_DIR}/selfhost_drop_schedule_parity.py" \
+    --compiler "$(stage_bin stage2)" \
+    --host "$STAGE0" \
+    --std "${PROJECT_ROOT}/std" \
+    --project . \
+    --counts-json "$counts" \
+    --report "$report" \
+    --gate-json "$gate_file" || true
+
+  if [[ ! -f "$gate_file" ]]; then
+    write_gate G7 fail "the drop-schedule parity run produced no gate result" \
+      "$(json_object report "$report")"
+    return 0
+  fi
+
+  info "gate-g7: result -> ${gate_file} (report ${report})"
+}
+
 # G4: the selfhost-built compiler (stage2) compiling the selfhost corpus must
 # stay within G4_THRESHOLD of the host-built compiler (stage1) in peak RSS and
 # wall time.
@@ -890,6 +927,7 @@ main() {
     gate-g5) run_gate_g5 ;;
     gate-g6) run_gate_g6 ;;
     gate-g4) run_gate_g4 ;;
+    gate-g7) run_gate_g7 ;;
     gate-g3) run_gate_g3 ;;
     gate-g3-stage2) run_gate_g3_stage2 ;;
     gate-g3-host) run_gate_g3_host ;;
