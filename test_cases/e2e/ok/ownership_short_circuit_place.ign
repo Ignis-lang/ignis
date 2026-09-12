@@ -1,0 +1,129 @@
+// e2e: std
+//
+// A `let` condition behind a `&&`. The conjunct in front of it decides whether
+// the `let` runs at all, so the place it would consume is moved only on the path
+// that reaches it: when the conjunct is false the value is still live, scope end
+// has already written it off as moved, and the short-circuit's false path is the
+// only site left that can free it.
+//
+// The exit code is the construction/drop imbalance plus the difference between
+// what each case read and what it had to read, so 0 means every Tracked was
+// dropped exactly once.
+
+record Counters {
+  static mut MADE: i32 = 0;
+  static mut DROPPED: i32 = 0;
+}
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Counters::DROPPED += 1;
+    return;
+  }
+}
+
+enum Kind {
+  ONE(Tracked),
+  EMPTY,
+}
+
+function tracked(id: i32): Tracked {
+  Counters::MADE += 1;
+  return Tracked { id: id };
+}
+
+function one(id: i32): Kind {
+  return Kind::ONE(tracked(id));
+}
+
+/// One boolean in front of the `let`. A false boolean never reaches the `let`,
+/// so `value` is dropped on the short-circuit path; a true one hands the payload
+/// to `payload`, which the guarded branch drops.
+function booleanThenLet(flag: boolean): i32 {
+  let mut seen: i32 = 0;
+  let value: Kind = one(1);
+
+  if (flag && let Kind::ONE(payload) = value) {
+    seen = payload.id;
+  }
+
+  return seen;
+}
+
+/// Two booleans in front of the `let`. The chain is left-associated, so the
+/// `let` hangs off the outermost `&&` and one false conjunct anywhere in front
+/// of it skips the same move.
+function twoBooleansThenLet(first: boolean, second: boolean): i32 {
+  let mut seen: i32 = 0;
+  let value: Kind = one(2);
+
+  if (first && second && let Kind::ONE(payload) = value) {
+    seen = payload.id;
+  }
+
+  return seen;
+}
+
+/// The `else` branch runs on exactly the path that skipped the move, so it must
+/// not free the value a second time.
+function booleanThenLetWithElse(flag: boolean): i32 {
+  let mut seen: i32 = 0;
+  let value: Kind = one(4);
+
+  if (flag && let Kind::ONE(payload) = value) {
+    seen = payload.id;
+  } else {
+    seen = 100;
+  }
+
+  return seen;
+}
+
+/// A boolean between two `let`s, both over places. A false boolean owes two
+/// drops on one path: the binding the first `let` already made, and the place
+/// the second `let` never got to.
+function letBooleanLet(flag: boolean): i32 {
+  let mut seen: i32 = 0;
+  let first: Kind = one(8);
+  let second: Kind = one(16);
+
+  if (let Kind::ONE(left) = first && flag && let Kind::ONE(right) = second) {
+    seen = left.id + right.id;
+  }
+
+  return seen;
+}
+
+/// The guarded branch leaves through a `return`, which owes the binding's drop
+/// like any other exit out of it.
+function booleanThenLetReturns(flag: boolean): i32 {
+  let value: Kind = one(32);
+
+  if (flag && let Kind::ONE(payload) = value) {
+    return payload.id;
+  }
+
+  return 0;
+}
+
+function main(): i32 {
+  let mut observed: i32 = 0;
+
+  observed += booleanThenLet(false);
+  observed += booleanThenLet(true) - 1;
+  observed += twoBooleansThenLet(false, false);
+  observed += twoBooleansThenLet(false, true);
+  observed += twoBooleansThenLet(true, false);
+  observed += twoBooleansThenLet(true, true) - 2;
+  observed += booleanThenLetWithElse(false) - 100;
+  observed += booleanThenLetWithElse(true) - 4;
+  observed += letBooleanLet(false);
+  observed += letBooleanLet(true) - 24;
+  observed += booleanThenLetReturns(false);
+  observed += booleanThenLetReturns(true) - 32;
+
+  return Counters::MADE - Counters::DROPPED + observed;
+}

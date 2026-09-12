@@ -1,0 +1,92 @@
+// e2e: std
+//
+// The counterpart of `ownership_short_circuit_place`: the same shapes with a
+// call for a scrutinee instead of a place. A skipped `let` never calls it, so
+// there is no value to account for on the short-circuit path — only a place
+// that was already built owes a drop there.
+//
+// The exit code is the construction/drop imbalance plus the difference between
+// what each case read and what it had to read, so 0 means every Tracked was
+// dropped exactly once.
+
+record Counters {
+  static mut MADE: i32 = 0;
+  static mut DROPPED: i32 = 0;
+}
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Counters::DROPPED += 1;
+    return;
+  }
+}
+
+enum Kind {
+  ONE(Tracked),
+  EMPTY,
+}
+
+function tracked(id: i32): Tracked {
+  Counters::MADE += 1;
+  return Tracked { id: id };
+}
+
+function one(id: i32): Kind {
+  return Kind::ONE(tracked(id));
+}
+
+function empty(): Kind {
+  return Kind::EMPTY;
+}
+
+/// A false boolean skips the call, so nothing is made and nothing is owed.
+function booleanThenTemporary(flag: boolean): i32 {
+  let mut seen: i32 = 0;
+
+  if (flag && let Kind::ONE(payload) = one(1)) {
+    seen = payload.id;
+  }
+
+  return seen;
+}
+
+/// The call runs and the pattern fails: the match is the only holder of what it
+/// produced, and it frees the payload the pattern did not take.
+function booleanThenFailingTemporary(flag: boolean): i32 {
+  let mut seen: i32 = 0;
+
+  if (flag && let Kind::ONE(payload) = empty()) {
+    seen = payload.id;
+  }
+
+  return seen;
+}
+
+/// A place and a call behind the same boolean. Only the place is owed on the
+/// skipped path.
+function booleanThenPlaceAndTemporary(flag: boolean): i32 {
+  let mut seen: i32 = 0;
+  let value: Kind = one(2);
+
+  if (flag && let Kind::ONE(left) = value && let Kind::ONE(right) = one(4)) {
+    seen = left.id + right.id;
+  }
+
+  return seen;
+}
+
+function main(): i32 {
+  let mut observed: i32 = 0;
+
+  observed += booleanThenTemporary(false);
+  observed += booleanThenTemporary(true) - 1;
+  observed += booleanThenFailingTemporary(false);
+  observed += booleanThenFailingTemporary(true);
+  observed += booleanThenPlaceAndTemporary(false);
+  observed += booleanThenPlaceAndTemporary(true) - 6;
+
+  return Counters::MADE - Counters::DROPPED + observed;
+}
