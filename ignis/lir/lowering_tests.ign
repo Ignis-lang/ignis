@@ -652,11 +652,13 @@ function lirLoweringEmitsScheduledDrops(): void {
 }
 
 /// Scenario: values of an owning type produced by an expression and bound to
-/// nothing — discarded at block end, discarded inside a loop that then
-/// continues, and discarded before an early return. The last function reads a
-/// named local as a statement, which owns nothing new and must not add a
-/// second drop.
-/// Spec: IGN-39 — owned temporaries reach the LIR as unnamed dropped locals.
+/// nothing — discarded in a straight-line block, discarded inside a loop that
+/// then continues, and discarded before an early return. The last function
+/// reads a named local as a statement, which owns nothing new and must not add
+/// a second drop.
+/// Spec: IGN-39, IGN-244 — an owned temporary reaches the LIR as an unnamed
+/// local dropped at the end of its own statement, so no exit out of the block
+/// has to carry it and no exit can drop it twice.
 @test
 function lirLoweringDropsOwnedTemporaries(): void {
   let rendered: String = lirRenderLoweredDrops(

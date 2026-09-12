@@ -46,6 +46,19 @@ impl SymbolTable {
     &self.symbols.get(id).name
   }
 
+  /// Whether this symbol is the discard name `_`, which never names a binding.
+  ///
+  /// `let _ = value;` and `import _ from "..."` both spell "evaluate this and keep
+  /// nothing", so `_` must not reach a scope as a variable: doing so would make a
+  /// discard own its value until the scope ends and would make a second discard in
+  /// the same scope a redefinition.
+  pub fn is_discard(
+    &self,
+    id: &SymbolId,
+  ) -> bool {
+    self.get(id) == "_"
+  }
+
   pub fn get_or_intern(
     &mut self,
     name: &str,

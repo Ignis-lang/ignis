@@ -754,6 +754,12 @@ impl<'a> Analyzer<'a> {
     };
     let name = self.defs.get(&def_id).name;
 
+    // A discard declaration names no binding, so `_` stays out of every scope. See
+    // `SymbolTable::is_discard`.
+    if self.symbols.borrow().is_discard(&name) {
+      return Some(def_id);
+    }
+
     // Only functions are overloadable - records, types, etc. are not
     let is_overloadable = matches!(
       self.defs.get(&def_id).kind,

@@ -1,0 +1,40 @@
+// `let _ = <call>;` keeps nothing, so the value the call produced belongs to the
+// statement and is dropped there — before the next statement runs, not at the end of
+// the scope. The exit code is the construction/drop imbalance plus the difference
+// between what the scope observed and what it had to observe, so 0 means the value was
+// dropped exactly once and dropped at the statement.
+
+record Counters {
+  static mut MADE: i32 = 0;
+  static mut DROPPED: i32 = 0;
+}
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Counters::DROPPED += 1;
+    return;
+  }
+}
+
+function tracked(id: i32): Tracked {
+  Counters::MADE += 1;
+  return Tracked { id: id };
+}
+
+/// Drops counted across the discard statement alone: 1 once the discarded value dies
+/// with its statement.
+function run(): i32 {
+  let before: i32 = Counters::DROPPED;
+  let _ = tracked(1);
+
+  return Counters::DROPPED - before;
+}
+
+function main(): i32 {
+  let atStatement: i32 = run();
+
+  return Counters::MADE - Counters::DROPPED + atStatement - 1;
+}

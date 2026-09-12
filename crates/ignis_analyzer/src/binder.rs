@@ -1340,6 +1340,18 @@ impl<'a> Analyzer<'a> {
     let def_id = &self.defs.alloc(def);
     self.set_def(node_id, def_id);
 
+    // `let _ = value;` keeps nothing, so `_` never enters the scope: lowering turns the
+    // declaration into the expression statement `value;` and no later phase resolves the
+    // name. Registering it would make `let _ = a(); let _ = b();` a redefinition of a
+    // binding neither statement created.
+    if self.symbols.borrow().is_discard(&var.name) {
+      if let Some(value_id) = &var.value {
+        self.bind_complete(value_id, ScopeKind::Block);
+      }
+
+      return;
+    }
+
     if let Err(existing) = &self.scopes.define(&var.name, def_id, false) {
       let existing_def = self.defs.get(existing);
       let symbol = self.get_symbol_name(&existing_def.name);

@@ -1,0 +1,41 @@
+// `let _ = &x;` discards a reference, which owns nothing: the statement drops nothing
+// and `x` keeps the one drop it always owed, at the end of its own scope. The exit code
+// folds the construction/drop imbalance together with what the scope observed, so 0
+// means the discard neither dropped the referent early nor left it alive.
+
+record Counters {
+  static mut MADE: i32 = 0;
+  static mut DROPPED: i32 = 0;
+}
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Counters::DROPPED += 1;
+    return;
+  }
+}
+
+function tracked(id: i32): Tracked {
+  Counters::MADE += 1;
+  return Tracked { id: id };
+}
+
+/// Drops counted across the discard statement alone: 0, and the referent is still
+/// readable after it.
+function run(): i32 {
+  let x: Tracked = tracked(1);
+  let before: i32 = Counters::DROPPED;
+  let _ = &x;
+  let atStatement: i32 = Counters::DROPPED - before;
+
+  return atStatement + x.id;
+}
+
+function main(): i32 {
+  let observed: i32 = run();
+
+  return Counters::MADE - Counters::DROPPED + observed - 1;
+}

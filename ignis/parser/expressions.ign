@@ -1672,6 +1672,19 @@ export namespace ParserExpressions {
   function parseInlineBindingPattern(parser: &mut ParserShared::State): Option<Ast::PatternId> {
     let mut parserRef: &mut ParserShared::State = parser;
     let nameToken = parserRef.expectIdentifier("expected binding name")!;
+
+    // `_` names nothing, here as everywhere else: a `let _ = value;` written
+    // inside a block expression is the same discard as one written at
+    // statement level, and parsing it as a binding called `_` would give it an
+    // owned local and a scheduled drop that no discard has. The annotation, if
+    // there is one, is left for the caller to read, exactly as
+    // `ParserPatterns::parsePathOrBindingPattern` leaves it.
+    if (nameToken.lexemeString().equals("_")) {
+      return Option::SOME(parserRef.module.addPattern(Ast::Pattern::Node::Wildcard(Ast::Pattern::Wildcard {
+        span: nameToken.span,
+      })));
+    }
+
     let mut annotation: Option<Ast::TypeId> = Option::NONE;
     let mut endSpan: SourceSpan = nameToken.span;
 

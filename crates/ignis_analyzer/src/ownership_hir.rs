@@ -802,6 +802,10 @@ impl<'a> HirOwnershipChecker<'a> {
         self.check_use(def_id, span);
       },
 
+      // Also the shape a discard takes: `let _ = value;` lowers to the expression
+      // statement `value;`, so it declares no owned binding, owes no scheduled drop and
+      // moves nothing out of a place it read. LIR lowering drops the value the statement
+      // produced at the end of that statement.
       HIRKind::ExpressionStatement(expr) => {
         self.check_node(expr);
       },

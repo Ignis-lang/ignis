@@ -1,0 +1,46 @@
+// `let _ = <call returning a copy type>;` owns nothing to drop: the call still runs for
+// its effects, and nothing is scheduled or torn down. The exit code folds the
+// construction/drop imbalance together with what the scope observed, so 0 means the
+// call ran exactly once and the discard added no drop of its own.
+
+record Counters {
+  static mut CALLED: i32 = 0;
+  static mut MADE: i32 = 0;
+  static mut DROPPED: i32 = 0;
+}
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Counters::DROPPED += 1;
+    return;
+  }
+}
+
+function tracked(id: i32): Tracked {
+  Counters::MADE += 1;
+  return Tracked { id: id };
+}
+
+/// A copy-typed result, so the discard has nothing to own.
+function counted(): i32 {
+  Counters::CALLED += 1;
+  return 7;
+}
+
+/// One owning value lives alongside the discard so the counters still describe a scope
+/// that had something to drop.
+function run(): i32 {
+  let x: Tracked = tracked(1);
+  let _ = counted();
+
+  return Counters::CALLED + x.id;
+}
+
+function main(): i32 {
+  let observed: i32 = run();
+
+  return Counters::MADE - Counters::DROPPED + observed - 2;
+}
