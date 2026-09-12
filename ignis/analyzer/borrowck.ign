@@ -1327,9 +1327,13 @@ export namespace Borrowck {
   // --- manual drop queries -----------------------------------------------------------
 
   /// Whether `methodDefId` is the `drop` method of a type that declares
-  /// `@implements(Drop)`. Mirrors `is_drop_method`; the oracle also accepts a
-  /// `__drop` name suffix, which only its monomorphizer produces and which no
-  /// selfhost phase spells.
+  /// `@implements(Drop)`. Mirrors `is_drop_method`, including its allowance for
+  /// the monomorphized spelling of the name: the oracle mangles a method as
+  /// `Owner__args__drop`, so it tests a `__drop` suffix, while `mangleName`
+  /// here mangles the same method as `drop__args`, so the selfhost tests the
+  /// matching `drop__` prefix. Without it a `.drop()` on any generic receiver
+  /// reads as an ordinary call and the receiver stays scheduled for a second,
+  /// automatic teardown.
   function isDropMethod(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
@@ -1358,7 +1362,9 @@ export namespace Borrowck {
     let mut named: boolean = false;
 
     if (let Option::SOME(text) = symbols.resolve(name)) {
-      named = String::create(text).equals("drop");
+      let spelled: String = String::create(text);
+
+      named = spelled.equals("drop") || spelled.startsWith("drop__");
     }
 
     if (!named) {
@@ -3474,7 +3480,16 @@ export namespace Borrowck {
           "assignment happens while a borrow is live",
         );
       }
+    }
 
+    // Ownership, unlike borrowing, follows no place chain into the target: only
+    // a bare local names a value this assignment replaces. `holder.entry = 5`
+    // overwrites one field, so scheduling a drop of `holder` there would tear
+    // down the whole record — a double free once `holder` is moved, and a drop
+    // of live fields even when it is not. Mirrors `get_assign_target_def`,
+    // which answers for a `Variable` target and nothing else; dropping the old
+    // field value is not scheduled by either compiler.
+    if (let Option::SOME(target) = Borrowck::variableOf(hir, assign.target)) {
       if (Borrowck::definitionNeedsDrop(defStore, typeStore, target)) {
         // Overwriting a local that still holds a value leaks it unless the old
         // value is dropped first. Mirrors the `on_overwrite` arm of
