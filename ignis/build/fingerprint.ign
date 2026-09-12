@@ -1,7 +1,9 @@
 import Env from "std::env";
 import Fs from "std::fs";
 import Hasher from "std::hash";
+import Io from "std::io";
 import Path from "std::path";
+import Process from "std::process";
 import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
@@ -26,6 +28,12 @@ export record SourceHash {
 /// per-source hashes, and a transitive hash over the full source graph.
 export record BuildFingerprint {
   public compilerVersion: String;
+
+  /// Content identity of the running compiler executable, combined with
+  /// `compilerVersion`. See `fingerprintCompilerIdentity`. A rebuilt compiler
+  /// binary invalidates every stamp it produced even when `compilerVersion`
+  /// did not change (the common case during local development).
+  public compilerIdentity: String;
   public abiVersion: u32;
   public targetTriple: String;
   public backend: String;
@@ -55,6 +63,7 @@ export record BuildFingerprint {
   ): BuildFingerprint {
     return BuildFingerprint {
       compilerVersion: String::create(compilerVersion),
+      compilerIdentity: fingerprintCompilerIdentity(compilerVersion),
       abiVersion: abiVersion,
       targetTriple: String::create(targetTriple),
       backend: String::create(backend),
@@ -83,6 +92,7 @@ export record BuildFingerprint {
   ): BuildFingerprint {
     return BuildFingerprint {
       compilerVersion: String::create(compilerVersion),
+      compilerIdentity: fingerprintCompilerIdentity(compilerVersion),
       abiVersion: abiVersion,
       targetTriple: String::create(targetTriple),
       backend: String::create(backend),
@@ -93,6 +103,146 @@ export record BuildFingerprint {
       transitiveHash: transitiveHash,
     };
   }
+}
+
+/// Resolves the path of the currently running compiler executable.
+///
+/// Tries the Linux `/proc/self/exe` magic symlink first (works regardless of
+/// how `argv[0]` was spelled); falls back to `argv[0]` for hosts without
+/// `/proc` (e.g. macOS), but only when it contains a path separator. A bare
+/// command name (e.g. `ignis`, found via `PATH`) would canonicalize relative
+/// to the current working directory instead of the actual binary location --
+/// in this repo, that resolves to a file under `ignis/` instead of the
+/// running executable -- so that case is treated as unresolvable rather than
+/// silently identifying the wrong file.
+function fingerprintCurrentExePath(): Option<Path::PathBuf> {
+  if (let Result::OK(resolved) = Fs::canonicalize("/proc/self/exe")) {
+    return Option::SOME(resolved);
+  }
+
+  let argv: Vector<String> = Process::args();
+  let Option::SOME(arg0) = argv.get(0) else {
+    return Option::NONE;
+  };
+
+  if (arg0.indexOfCharFrom('/', 0).isNone()) {
+    return Option::NONE;
+  }
+
+  return match (Fs::canonicalize(arg0)) {
+    Result::OK(resolved) -> Option::SOME(resolved),
+    Result::ERROR(_) -> Option::NONE,
+  };
+}
+
+/// Per-process memoization for `fingerprintCurrentExeKey`. Only the exe-side
+/// key (and whether computing it failed) is cached; `compilerVersion` is
+/// appended fresh at each `fingerprintCompilerIdentity` call, so the cache
+/// cannot go stale relative to whatever version string a caller passes in.
+///
+/// `failed` is tracked separately from `key` rather than using a sentinel
+/// numeric value: a real hash can legitimately land on any `u64`, including
+/// what might look like an obvious sentinel, so only an explicit flag can
+/// disambiguate "identity unknown" from "identity computed to this value".
+record CompilerExeIdentityCache {
+  static mut initialized: boolean = false;
+  static mut failed: boolean = false;
+  static mut key: u64 = 0;
+}
+
+/// Cheap, stable identity key for the currently running compiler executable:
+/// a 64-bit hash of its resolved path, size, mtime and inode. Computed once
+/// per process and cached in `CompilerExeIdentityCache`.
+///
+/// Deliberately avoids hashing the executable's contents: doing that over a
+/// debug binary of a couple hundred megabytes costs well over a hundred
+/// milliseconds, which is unacceptable on what should be a near-instant
+/// cache-hit path. Path + size + mtime + inode stays fixed for an unchanged
+/// binary, and at least one of size or mtime changes on essentially every
+/// rebuild a linker produces; inode reuse alone (e.g. a tool that replaces
+/// the binary via `cp`/`install`, rewriting the same inode in place rather
+/// than unlink-and-recreate) is exactly the case size and mtime are there to
+/// catch.
+///
+/// Returns `Option::NONE` if the executable cannot be located or `stat`-ed
+/// (e.g. it was deleted after the process started or `argv[0]` could not be
+/// trusted), after printing a warning exactly once per process.
+function fingerprintCurrentExeKey(): Option<u64> {
+  if (CompilerExeIdentityCache::initialized) {
+    if (CompilerExeIdentityCache::failed) {
+      return Option::NONE;
+    }
+
+    return Option::SOME(CompilerExeIdentityCache::key);
+  }
+
+  match (fingerprintComputeCurrentExeKey()) {
+    Option::SOME(value) -> {
+      CompilerExeIdentityCache::key = value;
+    },
+    Option::NONE -> {
+      Io::eprintln("Warning: could not determine the running compiler's identity; build caching may be imprecise until the process restarts");
+      CompilerExeIdentityCache::failed = true;
+    },
+  };
+
+  CompilerExeIdentityCache::initialized = true;
+
+  if (CompilerExeIdentityCache::failed) {
+    return Option::NONE;
+  }
+
+  return Option::SOME(CompilerExeIdentityCache::key);
+}
+
+function fingerprintComputeCurrentExeKey(): Option<u64> {
+  let Option::SOME(exePath) = fingerprintCurrentExePath() else {
+    return Option::NONE;
+  };
+
+  let Result::OK(stat) = Fs::Sys::stat(exePath.asStr()) else {
+    return Option::NONE;
+  };
+
+  let mut hasher: Hasher = Hasher::new();
+  hasher.writeStr(exePath.asStr());
+  hasher.writeI64(stat.size);
+  hasher.writeI64(stat.mtime);
+  hasher.writeI64(stat.mtimeNsec);
+  hasher.writeU64(stat.ino);
+  return Option::SOME(hasher.finish());
+}
+
+/// Stable identity of the currently running compiler binary: a cheap
+/// metadata-based key (see `fingerprintCurrentExeKey`) combined with its
+/// declared version string. Falls back to the literal `"unknown"` in place
+/// of the key when the key could not be computed, mirroring the Rust host's
+/// `"unknown-<version>"` fallback -- a value disjoint from every real key,
+/// since a real key is always ASCII digits.
+///
+/// Full-precision `mtime` (`Fs::Sys::Stat.mtimeNsec`, alongside its
+/// second-granularity `mtime`) matches the nanosecond `mtime` the Rust host's
+/// `compiler_identity()` (`crates/ignis_driver/src/build_layout.rs`) reads
+/// from `std::fs::Metadata::modified()`, so a stamp's `compiler_identity`
+/// field always distinguishes "a different compiler binary ran" from "the
+/// same compiler, same declared version" -- even across a local rebuild that
+/// landed in the same second and did not bump the version string.
+export function fingerprintCompilerIdentity(compilerVersion: str): String {
+  let mut identity: String = String::new();
+
+  match (fingerprintCurrentExeKey()) {
+    Option::SOME(key) -> {
+      let keyText: String = key.toString();
+      identity.push(&keyText);
+    },
+    Option::NONE -> {
+      identity.pushStr("unknown");
+    },
+  };
+
+  identity.pushChar('-');
+  identity.pushStr(compilerVersion);
+  return identity;
 }
 
 /// Compute a deterministic FNV-1a fingerprint hash for a string value.
@@ -163,6 +313,10 @@ export function fingerprintSerialize(fp: &BuildFingerprint): String {
 
   out.pushStr("cflags_hash=");
   out.push(&fp.cflagsHash);
+  out.pushChar('\n');
+
+  out.pushStr("compiler_identity=");
+  out.push(&fp.compilerIdentity);
   out.pushChar('\n');
 
   out.pushStr("compiler_version=");
@@ -328,12 +482,16 @@ export function fingerprintDeserialize(text: &String): Option<BuildFingerprint> 
   let backend: String = fingerprintLookupKey(&lines, "backend");
   let cc: String = fingerprintLookupKey(&lines, "cc");
   let cflagsHash: String = fingerprintLookupKey(&lines, "cflags_hash");
+  let compilerIdentity: String = fingerprintLookupKey(&lines, "compiler_identity");
   let compilerVersion: String = fingerprintLookupKey(&lines, "compiler_version");
   let stdManifestHash: String = fingerprintLookupKey(&lines, "std_manifest_hash");
   let targetTriple: String = fingerprintLookupKey(&lines, "target_triple");
   let transitiveHash: String = fingerprintLookupKey(&lines, "transitive_hash");
 
-  if (compilerVersion.length() == 0 || backend.length() == 0 || cc.length() == 0) {
+  // A stamp missing `compiler_identity` was written by a pre-this-change
+  // compiler; treating it as invalid invalidates every such cache exactly
+  // once, the same way the Rust host's stamp-version bump does.
+  if (compilerVersion.length() == 0 || compilerIdentity.length() == 0 || backend.length() == 0 || cc.length() == 0) {
     return Option::NONE;
   }
 
@@ -341,6 +499,7 @@ export function fingerprintDeserialize(text: &String): Option<BuildFingerprint> 
 
   return Option::SOME(BuildFingerprint {
     compilerVersion: compilerVersion,
+    compilerIdentity: compilerIdentity,
     abiVersion: abiVersion,
     targetTriple: targetTriple,
     backend: backend,
@@ -446,6 +605,74 @@ function fingerprintStdManifestHashChangeInvalidates(): void {
     actual = String::create("invalidated");
   }
   Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function fingerprintComputesNonEmptyCompilerIdentity(): void {
+  let fp: BuildFingerprint = fingerprintBaseline();
+  Test::assertEq<boolean>(fp.compilerIdentity.length() > 0, true);
+}
+
+@test
+function fingerprintCompilerIdentityRoundtrips(): void {
+  let fp: BuildFingerprint = fingerprintBaseline();
+  let serialized: String = fingerprintSerialize(&fp);
+  let Option::SOME(deserialized) = fingerprintDeserialize(&serialized) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(fp.compilerIdentity.toStr(), deserialized.compilerIdentity.toStr());
+}
+
+@test
+function fingerprintCompilerIdentityChangeInvalidatesEvenWithSameVersion(): void {
+  // Same declared compilerVersion, different compilerIdentity -- simulates a
+  // rebuilt dev binary that did not bump its version string. Constructed
+  // directly (bypassing the auto-computed identity) since both fingerprints
+  // must share every other field.
+  let fp1: BuildFingerprint = BuildFingerprint {
+    compilerVersion: String::create("0.1.0"),
+    compilerIdentity: String::create("exe-hash-aaaa-0.1.0"),
+    abiVersion: 1,
+    targetTriple: String::create("x86_64-linux"),
+    backend: String::create("c"),
+    cc: String::create("gcc"),
+    cflagsHash: String::create("cflags-hash-abc"),
+    stdManifestHash: String::create("manifest-hash-xyz"),
+    perSourceHashes: Vector::new<SourceHash>(),
+    transitiveHash: String::new(),
+  };
+  let fp2: BuildFingerprint = BuildFingerprint {
+    compilerVersion: String::create("0.1.0"),
+    compilerIdentity: String::create("exe-hash-bbbb-0.1.0"),
+    abiVersion: 1,
+    targetTriple: String::create("x86_64-linux"),
+    backend: String::create("c"),
+    cc: String::create("gcc"),
+    cflagsHash: String::create("cflags-hash-abc"),
+    stdManifestHash: String::create("manifest-hash-xyz"),
+    perSourceHashes: Vector::new<SourceHash>(),
+    transitiveHash: String::new(),
+  };
+
+  let expected: String = fingerprintReadExpected("expected_invalidated.txt");
+  let mut actual: String = String::create("stable");
+  if (!fingerprintEquals(&fp1, &fp2)) {
+    actual = String::create("invalidated");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function fingerprintLegacyStampMissingCompilerIdentityIsRejected(): void {
+  // A stamp written before this change has no `compiler_identity` line; it
+  // must fail to deserialize so every pre-change cache is invalidated once.
+  let legacy: String = String::create(
+    "abi_version=1\nbackend=c\ncc=gcc\ncflags_hash=cflags-hash-abc\ncompiler_version=0.1.0\nper_source_count=0\nstd_manifest_hash=manifest-hash-xyz\ntarget_triple=x86_64-linux\ntransitive_hash=",
+  );
+
+  Test::assertEq<boolean>(fingerprintDeserialize(&legacy).isSome(), false);
 }
 
 @test

@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use colored::Colorize;
 
 /// Build output directory structure.
 ///
@@ -286,12 +289,13 @@ impl BuildLayout {
 }
 
 // =============================================================================
-// Stamp v2: content-hash based cache invalidation
+// Stamp v3: content-hash based cache invalidation
 // =============================================================================
 //
 // Format (key=value, sorted):
-//   version=2
+//   version=3
 //   compiler_version=0.1.0
+//   compiler_identity=<exe path:size:mtime_ns:inode>-<compiler_version>
 //   codegen_abi_version=1
 //   target=
 //   file_count=N
@@ -300,8 +304,9 @@ impl BuildLayout {
 //   ...
 //
 // For per-module stamps (user modules with deps):
-//   version=2
+//   version=3
 //   compiler_version=...
+//   compiler_identity=...
 //   codegen_abi_version=...
 //   target=
 //   self_path=...
@@ -310,13 +315,82 @@ impl BuildLayout {
 //   dep.0.path=...
 //   dep.0.hash=...
 //   ...
+//
+// `compiler_identity` bundles a cheap identity of the running compiler
+// executable with its declared version, so a rebuilt binary (even one that
+// keeps the same `CARGO_PKG_VERSION`, e.g. during local development) always
+// invalidates every cached C/object/archive it produced. Bumping
+// `STAMP_VERSION` invalidates every stamp written by a compiler older than
+// this change, one time, regardless of identity.
 
-const STAMP_VERSION: &str = "2";
+const STAMP_VERSION: &str = "3";
+
+static COMPILER_EXE_KEY: OnceLock<String> = OnceLock::new();
+
+/// Stable identity of the currently running compiler binary, combined with
+/// its version string. The exe-side key (path + size + mtime + inode) is
+/// computed once per process and cached; `compiler_version` is appended at
+/// each call so this function is honest about what varies per caller.
+///
+/// Deliberately avoids hashing the executable's contents: that costs over a
+/// hundred milliseconds for a debug binary of a couple hundred megabytes,
+/// which is unacceptable on a cache-hit path that should stay near-instant.
+/// Path + size + mtime + inode is unaffected for an unchanged binary, and at
+/// least one of size or mtime changes on essentially every rebuild a linker
+/// produces. Inode reuse alone (e.g. a tool that replaces the binary via
+/// `cp`/`install`, truncating and rewriting the same inode in place rather
+/// than unlink-and-recreate) is exactly the case size and mtime are there to
+/// catch; the key holds through that because it does not depend on the inode
+/// changing too.
+pub fn compiler_identity(compiler_version: &str) -> String {
+  let exe_key = COMPILER_EXE_KEY.get_or_init(compute_exe_key);
+  format!("{}-{}", exe_key, compiler_version)
+}
+
+fn compute_exe_key() -> String {
+  match current_exe_key() {
+    Ok(key) => key,
+    Err(e) => {
+      eprintln!(
+        "{} could not determine the running compiler's identity ({}); build caching may be imprecise until the process restarts",
+        "Warning:".yellow().bold(),
+        e
+      );
+      "unknown".to_string()
+    },
+  }
+}
+
+fn current_exe_key() -> io::Result<String> {
+  let exe_path = std::env::current_exe()?;
+  let exe_path = std::fs::canonicalize(&exe_path).unwrap_or(exe_path);
+  let metadata = std::fs::metadata(&exe_path)?;
+
+  let size = metadata.len();
+  let mtime_ns = metadata
+    .modified()?
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_nanos())
+    .unwrap_or(0);
+
+  #[cfg(unix)]
+  let inode = {
+    use std::os::unix::fs::MetadataExt;
+    metadata.ino()
+  };
+  #[cfg(not(unix))]
+  let inode: u64 = 0;
+
+  Ok(format!("{}:{}:{}:{}", exe_path.display(), size, mtime_ns, inode))
+}
 
 /// Build configuration that affects output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildFingerprint {
   pub compiler_version: String,
+  /// Content identity of the compiler binary that produced this stamp. See
+  /// `compiler_identity()`.
+  pub compiler_identity: String,
   pub codegen_abi_version: u32,
   pub target: String,
 }
@@ -329,6 +403,7 @@ impl BuildFingerprint {
   ) -> Self {
     Self {
       compiler_version: compiler_version.to_string(),
+      compiler_identity: compiler_identity(compiler_version),
       codegen_abi_version,
       target: String::new(), // placeholder for future target triple
     }
@@ -408,6 +483,7 @@ impl StdStamp {
     let mut out = String::new();
     writeln!(out, "version={}", STAMP_VERSION).unwrap();
     writeln!(out, "compiler_version={}", self.fingerprint.compiler_version).unwrap();
+    writeln!(out, "compiler_identity={}", self.fingerprint.compiler_identity).unwrap();
     writeln!(out, "codegen_abi_version={}", self.fingerprint.codegen_abi_version).unwrap();
     writeln!(out, "target={}", self.fingerprint.target).unwrap();
     writeln!(out, "file_count={}", self.files.len()).unwrap();
@@ -427,6 +503,7 @@ impl StdStamp {
 
     let fingerprint = BuildFingerprint {
       compiler_version: map.get("compiler_version")?.to_string(),
+      compiler_identity: map.get("compiler_identity")?.to_string(),
       codegen_abi_version: map.get("codegen_abi_version")?.parse().ok()?,
       target: map.get("target").map(|s| s.to_string()).unwrap_or_default(),
     };
@@ -526,6 +603,7 @@ impl ModuleStamp {
     let mut out = String::new();
     writeln!(out, "version={}", STAMP_VERSION).unwrap();
     writeln!(out, "compiler_version={}", self.fingerprint.compiler_version).unwrap();
+    writeln!(out, "compiler_identity={}", self.fingerprint.compiler_identity).unwrap();
     writeln!(out, "codegen_abi_version={}", self.fingerprint.codegen_abi_version).unwrap();
     writeln!(out, "target={}", self.fingerprint.target).unwrap();
     writeln!(out, "self_path={}", self.self_path.display()).unwrap();
@@ -547,6 +625,7 @@ impl ModuleStamp {
 
     let fingerprint = BuildFingerprint {
       compiler_version: map.get("compiler_version")?.to_string(),
+      compiler_identity: map.get("compiler_identity")?.to_string(),
       codegen_abi_version: map.get("codegen_abi_version")?.parse().ok()?,
       target: map.get("target").map(|s| s.to_string()).unwrap_or_default(),
     };
@@ -918,6 +997,94 @@ mod tests {
     assert!(!is_module_stamp_valid(&stamp_path, &fp2, "hash", &[]));
 
     std::fs::remove_dir_all(&temp_dir).unwrap();
+  }
+
+  #[test]
+  fn test_module_stamp_validity_compiler_identity_changed() {
+    // Same declared compiler_version, different compiler_identity (e.g. a
+    // rebuilt dev binary that did not bump CARGO_PKG_VERSION) must still
+    // invalidate the stamp.
+    let fp_old = BuildFingerprint {
+      compiler_version: "0.1.0".to_string(),
+      compiler_identity: "exe-hash-aaaa-0.1.0".to_string(),
+      codegen_abi_version: 1,
+      target: String::new(),
+    };
+    let fp_new = BuildFingerprint {
+      compiler_version: "0.1.0".to_string(),
+      compiler_identity: "exe-hash-bbbb-0.1.0".to_string(),
+      codegen_abi_version: 1,
+      target: String::new(),
+    };
+    let stamp = ModuleStamp::new(fp_old.clone(), PathBuf::from("main.ign"), "hash".to_string(), vec![]);
+
+    let temp_dir = std::env::temp_dir().join("ignis_stamp_v3_identity_test");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let stamp_path = temp_dir.join("main.stamp");
+    std::fs::write(&stamp_path, stamp.serialize()).unwrap();
+
+    // Same identity -> valid
+    assert!(is_module_stamp_valid(&stamp_path, &fp_old, "hash", &[]));
+
+    // Different compiler binary identity (same declared version) -> invalid
+    assert!(!is_module_stamp_valid(&stamp_path, &fp_new, "hash", &[]));
+
+    std::fs::remove_dir_all(&temp_dir).unwrap();
+  }
+
+  #[test]
+  fn test_compiler_identity_exe_key_is_stable_but_version_is_honest() {
+    // Only the exe-side key is memoized per process (OnceLock); the version
+    // string is appended fresh at every call, so compiler_identity(version)
+    // must reflect whatever version is actually passed in.
+    let first = compiler_identity("0.1.0");
+    let second = compiler_identity("9.9.9");
+    assert_ne!(first, second);
+    assert!(first.ends_with("-0.1.0"));
+    assert!(second.ends_with("-9.9.9"));
+
+    // The exe-side prefix (everything before the trailing "-<version>") must
+    // be identical, since it depends only on the running executable.
+    let first_prefix = first.strip_suffix("-0.1.0").unwrap();
+    let second_prefix = second.strip_suffix("-9.9.9").unwrap();
+    assert_eq!(first_prefix, second_prefix);
+
+    // Calling with the same version repeatedly must be perfectly stable.
+    assert_eq!(compiler_identity("0.1.0"), first);
+  }
+
+  #[test]
+  fn test_std_stamp_compiler_identity_roundtrip() {
+    let fp = BuildFingerprint {
+      compiler_version: "0.1.0".to_string(),
+      compiler_identity: "some-identity-0.1.0".to_string(),
+      codegen_abi_version: 1,
+      target: String::new(),
+    };
+    let stamp = StdStamp {
+      fingerprint: fp,
+      files: vec![],
+    };
+
+    let serialized = stamp.serialize();
+    assert!(serialized.contains("compiler_identity=some-identity-0.1.0"));
+
+    let deserialized = StdStamp::deserialize(&serialized).unwrap();
+    assert_eq!(stamp, deserialized);
+  }
+
+  #[test]
+  fn test_old_v2_stamp_is_rejected() {
+    // A stamp written by a pre-v3 compiler (no compiler_identity field, and
+    // an older version marker) must be treated as invalid so caches from
+    // before this change are invalidated exactly once.
+    let legacy = "version=2\ncompiler_version=0.1.0\ncodegen_abi_version=1\ntarget=\nfile_count=0\n";
+    assert!(StdStamp::deserialize(legacy).is_none());
+
+    let legacy_module = "version=2\ncompiler_version=0.1.0\ncodegen_abi_version=1\ntarget=\nself_path=main.ign\nself_hash=abc\ndep_count=0\n";
+    assert!(ModuleStamp::deserialize(legacy_module).is_none());
   }
 
   #[test]

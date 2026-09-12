@@ -1583,6 +1583,41 @@ function cliRejectsUnknownFlags(): void {
   Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: unknown argument: --nope");
 }
 
+/// This compiler's build path never checks a stamp before recompiling, so
+/// there is no cache for a `--force` flag to bypass; it is rejected like any
+/// other flag this compiler does not answer, on every command, matching the
+/// host CLI rejecting `-f`/`--force` on `ignis check`/`ignis test`.
+@test
+function cliRejectsForceFlagAndItsAliasesOnBuild(): void {
+  let mut shortFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut shortFlag, "build");
+  cliPush(&mut shortFlag, "-f");
+  Test::assertEq<str>(cliParseError(&shortFlag).toStr(), "error: unknown argument: -f");
+
+  let mut longFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut longFlag, "build");
+  cliPush(&mut longFlag, "--force");
+  Test::assertEq<str>(cliParseError(&longFlag).toStr(), "error: unknown argument: --force");
+
+  let mut aliasFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut aliasFlag, "build");
+  cliPush(&mut aliasFlag, "--rebuild");
+  Test::assertEq<str>(cliParseError(&aliasFlag).toStr(), "error: unknown argument: --rebuild");
+}
+
+@test
+function cliRejectsForceFlagOnCheckAndTest(): void {
+  let mut checkFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut checkFlag, "check");
+  cliPush(&mut checkFlag, "-f");
+  Test::assertEq<str>(cliParseError(&checkFlag).toStr(), "error: unknown argument: -f");
+
+  let mut testFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut testFlag, "test");
+  cliPush(&mut testFlag, "-f");
+  Test::assertEq<str>(cliParseError(&testFlag).toStr(), "error: unknown argument: -f");
+}
+
 /// A first argument that is neither a subcommand nor a path is a typo.
 @test
 function cliRejectsUnknownSubcommands(): void {

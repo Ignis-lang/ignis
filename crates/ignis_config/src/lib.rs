@@ -294,6 +294,8 @@ pub struct IgnisBuildConfig {
   pub lib: bool,
   pub check_mode: bool,
   pub analyze_only: bool,
+  /// Force a full rebuild, ignoring cached C/objects/archives (`ignis build --force`).
+  pub force_rebuild: bool,
 }
 
 impl IgnisBuildConfig {
@@ -313,6 +315,7 @@ impl IgnisBuildConfig {
     lib: bool,
     check_mode: bool,
     analyze_only: bool,
+    force_rebuild: bool,
   ) -> Self {
     Self {
       file,
@@ -330,6 +333,7 @@ impl IgnisBuildConfig {
       lib,
       check_mode,
       analyze_only,
+      force_rebuild,
     }
   }
 }

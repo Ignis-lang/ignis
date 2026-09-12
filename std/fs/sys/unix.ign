@@ -279,6 +279,12 @@ export namespace Fs::Sys {
     public size: i64;
     public atime: i64;
     public mtime: i64;
+
+    /// Nanosecond remainder of `mtime`, i.e. `mtime * 1_000_000_000 + mtimeNsec`
+    /// is the full-precision modification time. Exposed because a compiler
+    /// rebuild can land inside the same second as the previous build, where
+    /// second-granularity `mtime` alone cannot tell the two apart.
+    public mtimeNsec: i64;
     public ctime: i64;
     public blksize: i64;
     public blocks: i64;
@@ -534,8 +540,9 @@ export namespace Fs::Sys {
 
   /// Projects a filled `RawStat` onto the portable `Stat` this module returns.
   ///
-  /// Sub-second timestamp precision is dropped here, as it was when these
-  /// fields were extracted in C.
+  /// `atime` and `ctime` are truncated to whole seconds; `mtime` keeps its
+  /// nanosecond remainder in `mtimeNsec` since full-precision modification
+  /// time distinguishes a same-second rebuild from an unchanged file.
   function statFromRaw(raw: &RawStat): Stat {
     return Stat {
       dev: raw.dev,
@@ -547,6 +554,7 @@ export namespace Fs::Sys {
       size: raw.size,
       atime: raw.atimeSec,
       mtime: raw.mtimeSec,
+      mtimeNsec: raw.mtimeNsec,
       ctime: raw.ctimeSec,
       blksize: raw.blksize,
       blocks: raw.blocks,

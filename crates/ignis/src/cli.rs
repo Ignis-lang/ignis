@@ -148,6 +148,11 @@ pub struct BuildCommand {
   /// Enable multiple features separated by commas
   #[arg(long = "features", value_delimiter = ',')]
   pub features: Vec<String>,
+
+  /// Force a full rebuild, ignoring cached C/objects/archives from a
+  /// previous build, including the precompiled standard library.
+  #[arg(long = "force", short = 'f', visible_alias = "rebuild")]
+  pub force: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -677,5 +682,55 @@ mod tests {
       },
       other => panic!("expected fmt subcommand, got {:?}", other),
     }
+  }
+
+  #[test]
+  fn parses_build_subcommand_force_flag_and_its_aliases() {
+    let cli = Cli::parse_from(["ignis", "build", "--force"]);
+    match cli.subcommand {
+      SubCommand::Build(cmd) => assert!(cmd.force),
+      other => panic!("expected build subcommand, got {:?}", other),
+    }
+
+    let cli = Cli::parse_from(["ignis", "build", "-f"]);
+    match cli.subcommand {
+      SubCommand::Build(cmd) => assert!(cmd.force),
+      other => panic!("expected build subcommand, got {:?}", other),
+    }
+
+    let cli = Cli::parse_from(["ignis", "build", "--rebuild"]);
+    match cli.subcommand {
+      SubCommand::Build(cmd) => assert!(cmd.force),
+      other => panic!("expected build subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn build_subcommand_defaults_force_to_false() {
+    let cli = Cli::parse_from(["ignis", "build"]);
+    match cli.subcommand {
+      SubCommand::Build(cmd) => assert!(!cmd.force),
+      other => panic!("expected build subcommand, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn check_and_test_subcommands_reject_the_force_flag() {
+    assert!(
+      Cli::try_parse_from(["ignis", "check", "-f"]).is_err(),
+      "`ignis check -f` must be rejected: --force is a build-only flag"
+    );
+    assert!(
+      Cli::try_parse_from(["ignis", "check", "--force"]).is_err(),
+      "`ignis check --force` must be rejected: --force is a build-only flag"
+    );
+    assert!(
+      Cli::try_parse_from(["ignis", "test", "-f"]).is_err(),
+      "`ignis test -f` must be rejected: --force is a build-only flag"
+    );
+    assert!(
+      Cli::try_parse_from(["ignis", "test", "--force"]).is_err(),
+      "`ignis test --force` must be rejected: --force is a build-only flag"
+    );
   }
 }
