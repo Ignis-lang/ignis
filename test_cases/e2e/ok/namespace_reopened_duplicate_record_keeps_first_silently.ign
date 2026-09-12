@@ -1,0 +1,24 @@
+// A non-overloadable member (a record) declared under the same name in both
+// blocks of a reopened namespace is not diagnosed as a duplicate: the host
+// silently keeps the first declaration and the second is inert (IGN-230).
+// This differs from a duplicate *function*, which the overload resolver
+// reports as an ambiguous call (see
+// `namespace_reopened_duplicate_function_is_ambiguous_overload` in
+// `crates/ignis_analyzer/tests/golden_err.rs` — a host-only test, not an
+// e2e fixture, because of an unrelated selfhost parity gap noted there).
+namespace Foo {
+  record Bar {
+    public x: i32;
+  }
+}
+
+namespace Foo {
+  record Bar {
+    public y: i32;
+  }
+}
+
+function main(): i32 {
+  let b: Foo::Bar = Foo::Bar { x: 7 };
+  return b.x;
+}

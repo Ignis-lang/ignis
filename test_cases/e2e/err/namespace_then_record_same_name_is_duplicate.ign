@@ -1,0 +1,28 @@
+// e2e: err
+// A namespace's own name still goes through the normal duplicate-name check
+// on its first occurrence (IGN-230 only bypasses that check when REOPENING a
+// namespace already seen at this scope): `namespace Foo` binds "Foo" in
+// scope, and a later `record Foo` collides with it just like two records
+// would.
+//
+// The opposite order (`record Foo` then `namespace Foo`) is NOT a mirror of
+// this fixture: the host reports it differently (`Undeclared identifier
+// 'Foo::a'`, not a duplicate-name error), and the selfhost analyzer's
+// duplicate-name diagnostic for that order is a pre-existing mismatch with
+// the host predating IGN-230 (unrelated to this change). See
+// `namespace_then_record_vs_record_then_namespace_duplicate_name` in
+// `crates/ignis_analyzer/tests/golden_err.rs` for both host baselines side
+// by side.
+namespace Foo {
+  function a(): i32 {
+    return 1;
+  }
+}
+
+record Foo {
+  public x: i32;
+}
+
+function main(): i32 {
+  return Foo::a();
+}

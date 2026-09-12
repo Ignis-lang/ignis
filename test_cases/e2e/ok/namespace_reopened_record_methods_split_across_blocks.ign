@@ -1,0 +1,29 @@
+// A record's own methods live in the block that declares it, and a helper
+// that builds instances of it lives in a second block reopening the same
+// namespace. The merge (IGN-230) keeps the record and the helper both
+// reachable as `Foo::*`.
+namespace Foo {
+  record Bar {
+    x: i32;
+
+    getX(&self): i32 {
+      return self.x;
+    }
+
+    setX(&mut self, v: i32): void {
+      self.x = v;
+    }
+  }
+}
+
+namespace Foo {
+  function makeBar(v: i32): Bar {
+    return Bar { x: v };
+  }
+}
+
+function main(): i32 {
+  let mut b: Foo::Bar = Foo::makeBar(1);
+  b.setX(5);
+  return b.getX();
+}
