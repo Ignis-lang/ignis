@@ -3,6 +3,7 @@ import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnost
 import Env from "std::env";
 import Fs from "std::fs";
 import Path from "std::path";
+import Process from "std::process";
 import Sort from "std::sort";
 import String from "std::string";
 import Test from "std::test";
@@ -465,11 +466,14 @@ function pipelineReadExpected(fixture: str, filename: str): String {
   };
 }
 
-/// Produce a test `BuildLayout` rooted at `/tmp/ignis_pipeline_{tag}`.
+/// Produce a test `BuildLayout` rooted at `/tmp/ignis_pipeline_{tag}_{pid}`.
+///
+/// Tests run in a parallel pool, so a fixed name under `/tmp` would let two
+/// runs (or two tests) overwrite each other's stamps and archives mid-build;
+/// mirrors `linkerTestPath` in `linker.ign`.
 function pipelineTestLayout(tag: str): BuildLayout {
-  let basePath: Path::PathBuf = Path::PathBuf::create("/tmp").join(
-    String::create("ignis_pipeline_").concat(tag).toStr()
-  );
+  let name: String = `ignis_pipeline_${tag}_${Process::id()}`;
+  let basePath: Path::PathBuf = Path::PathBuf::create("/tmp").join(name.toStr());
   return BuildLayout::new("ignis_std_test", &basePath);
 }
 
@@ -556,7 +560,8 @@ function pipelineBuildStdSuccessEmitsHeaderAndArchive(): void {
   let layout: BuildLayout = pipelineTestLayout("success_v2");
 
   // Set up the std src directory and write a minimal manifest.
-  let stdFakeRoot: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_pipeline_std_root_v2");
+  let stdFakeRootNameV2: String = `/tmp/ignis_pipeline_std_root_v2_${Process::id()}`;
+  let stdFakeRoot: Path::PathBuf = Path::PathBuf::fromString(&stdFakeRootNameV2);
   pipelineEnsureDir(&stdFakeRoot);
   pipelineWriteMinimalManifest(&stdFakeRoot, "rt", "rt.ign");
 
@@ -646,7 +651,8 @@ function pipelineBuildStdCacheHitSkipsRecompile(): void {
   let layout: BuildLayout = pipelineTestLayout("cache_hit");
 
   // Set up the std src directory and write a minimal manifest.
-  let stdFakeRoot: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_pipeline_std_root_cache");
+  let stdFakeRootNameCache: String = `/tmp/ignis_pipeline_std_root_cache_${Process::id()}`;
+  let stdFakeRoot: Path::PathBuf = Path::PathBuf::fromString(&stdFakeRootNameCache);
   pipelineEnsureDir(&stdFakeRoot);
   pipelineWriteMinimalManifest(&stdFakeRoot, "rt", "rt.ign");
 

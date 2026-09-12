@@ -170,7 +170,7 @@ fn changed_compiler_identity_forces_std_archive_rebuild() {
 }
 
 #[test]
-fn force_rebuild_recompiles_a_module_with_an_otherwise_valid_cache() {
+fn force_rebuild_recompiles_module_and_std_with_an_otherwise_valid_cache() {
   let temp_dir = TempDir::new().expect("failed to create temp dir");
   let source_path = temp_dir.path().join("main.ign");
   let output_dir = temp_dir.path().join("build");
@@ -184,10 +184,20 @@ fn force_rebuild_recompiles_a_module_with_an_otherwise_valid_cache() {
   assert!(obj_path.exists(), "expected an object at {}", obj_path.display());
   let obj_mtime_before = std::fs::metadata(&obj_path).unwrap().modified().unwrap();
 
+  let std_archive_path = output_dir.join("std").join("lib").join("libignis_std.a");
+  assert!(
+    std_archive_path.exists(),
+    "expected a std archive at {}",
+    std_archive_path.display()
+  );
+  let std_archive_mtime_before = std::fs::metadata(&std_archive_path).unwrap().modified().unwrap();
+
   std::thread::sleep(std::time::Duration::from_millis(1100));
 
-  // Nothing changed -- source, stamp and compiler identity are all still
+  // Nothing changed -- source, stamps and compiler identity are all still
   // valid -- so only `--force` (`force_rebuild`) should cause a rebuild here.
+  // `--force` is documented as a full rebuild, so it must cover the
+  // precompiled std archive too, not just the user module.
   compile_workspace_std_project_in_with_force(&source_path, &output_dir, TargetBackend::C)
     .expect("forced rebuild should succeed");
 
@@ -195,5 +205,11 @@ fn force_rebuild_recompiles_a_module_with_an_otherwise_valid_cache() {
   assert!(
     obj_mtime_after > obj_mtime_before,
     "--force must recompile the module even though its cache is otherwise valid"
+  );
+
+  let std_archive_mtime_after = std::fs::metadata(&std_archive_path).unwrap().modified().unwrap();
+  assert!(
+    std_archive_mtime_after > std_archive_mtime_before,
+    "--force must also rebuild the std archive even though its cache is otherwise valid"
   );
 }
