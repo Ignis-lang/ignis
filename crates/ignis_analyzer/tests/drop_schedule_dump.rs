@@ -92,6 +92,45 @@ function take at test.ign:19:22
 }
 
 #[test]
+fn a_short_circuited_let_condition_lists_the_skipped_move_drop() {
+  let source = format!(
+    "{RESOURCE}
+enum Slot {{
+  Filled(Resource),
+  Empty,
+}}
+
+function take(flag: boolean): i32 {{
+  let mut seen: i32 = 0;
+  let slot: Slot = Slot::Filled(Resource {{ value: 1 }});
+
+  if (flag && let Slot::Filled(inner) = slot) {{
+    seen = inner.value;
+  }}
+
+  return seen;
+}}
+"
+  );
+
+  // `slot` is moved by the `let`, but only on the path where `flag` was true. The other
+  // path skips the `let` altogether and is the only site left that can free it.
+  assert_eq!(
+    dump(&source),
+    "drop-schedule v1
+function drop at test.ign:5:25
+  <no owned values>
+function take at test.ign:15:35
+  value slot kind=local declared at test.ign:17:3
+    drop at test.ign:19:7 reason=condition-skip
+    moved at test.ign:19:15
+  value inner kind=binding declared at test.ign:19:15
+    drop at test.ign:19:47 reason=scope-end
+"
+  );
+}
+
+#[test]
 fn chained_let_conditions_list_the_short_circuit_drop() {
   let source = format!(
     "{RESOURCE}

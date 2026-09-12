@@ -852,6 +852,28 @@ impl<'a> LoweringContext<'a> {
       value: left_op.clone(),
     });
 
+    // A `let` condition behind this `&&` never runs when the left operand is false, so
+    // the place it would have consumed is still live on this edge and its move never
+    // happened: scope end wrote it off, and nothing else frees it. The drops go in their
+    // own block on the false edge, which is the only path that skips the right operand.
+    let condition_skip_drops = match op {
+      BinaryOperation::And => self
+        .drop_schedules
+        .on_condition_skip
+        .get(&hir_id)
+        .cloned()
+        .unwrap_or_default(),
+      // A `let` condition inside `||` is rejected in typechecking, so nothing is ever
+      // scheduled here and the polarity below would be the wrong way round.
+      _ => Vec::new(),
+    };
+
+    let skip_block = if condition_skip_drops.is_empty() {
+      None
+    } else {
+      Some(self.fn_builder().create_block("sc_condition_skip"))
+    };
+
     // Branch based on operation
     match op {
       BinaryOperation::And => {
@@ -859,7 +881,7 @@ impl<'a> LoweringContext<'a> {
         self.fn_builder().terminate(Terminator::Branch {
           condition: left_op,
           then_block: eval_right_block,
-          else_block: merge_block,
+          else_block: skip_block.unwrap_or(merge_block),
         });
       },
       BinaryOperation::Or => {
@@ -871,6 +893,14 @@ impl<'a> LoweringContext<'a> {
         });
       },
       _ => unreachable!(),
+    }
+
+    if let Some(skip_block) = skip_block {
+      self.fn_builder().switch_to_block(skip_block);
+      for def_id in condition_skip_drops {
+        self.emit_drop_for_def(def_id);
+      }
+      self.fn_builder().terminate(Terminator::Goto(merge_block));
     }
 
     // Evaluate right
