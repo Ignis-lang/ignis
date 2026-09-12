@@ -127,6 +127,16 @@ pub struct HirOwnershipChecker<'a> {
   /// runs when everything to its left was true. `take_condition_bindings` reads this map
   /// to give the short-circuit's false path the drop the skipped move left owing.
   let_condition_scrutinees: HashMap<HIRId, DefinitionId>,
+
+  /// The places the enclosing loops' `let` conditions consume, innermost last.
+  ///
+  /// A loop condition takes its scrutinee apart on every round, so the place is only
+  /// refilled by a body that assigns to it, and the condition that ends the loop is what
+  /// frees whatever the last round put there. A `break` never reaches that condition: it
+  /// leaves with the place live and with no later site that frees it. This stack is what
+  /// `check_break` reads to pay that drop, and it holds one frame per enclosing loop so a
+  /// `break` out of an inner loop pays only for its own condition.
+  loop_condition_scrutinees: Vec<Vec<DefinitionId>>,
 }
 
 impl<'a> HirOwnershipChecker<'a> {
@@ -157,6 +167,7 @@ impl<'a> HirOwnershipChecker<'a> {
       summaries: HashMap::new(),
       let_condition_bindings: HashMap::new(),
       let_condition_scrutinees: HashMap::new(),
+      loop_condition_scrutinees: Vec::new(),
     }
   }
 
@@ -608,6 +619,7 @@ impl<'a> HirOwnershipChecker<'a> {
     self.next_alias_set = 0;
     self.reachable = true;
     self.loop_continue_stack.clear();
+    self.loop_condition_scrutinees.clear();
     self.borrowed_pattern_bindings.clear();
     self.current_fn = Some(fn_def_id);
 
@@ -1268,6 +1280,18 @@ impl<'a> HirOwnershipChecker<'a> {
     }
   }
 
+  /// Check a `break`, which owes every drop leaving the loop would otherwise skip.
+  ///
+  /// On top of the scopes it unwinds, a `break` owes the place its loop's `let` condition
+  /// consumes. That condition is the place's only other drop site — it takes the value
+  /// apart on the round that ends the loop — and a `break` leaves without reaching it, so
+  /// a body that refilled the place before breaking would otherwise leak what it put
+  /// there. Only the innermost loop's condition is paid: an inner `break` returns to the
+  /// outer body, whose own exits still owe the outer place.
+  ///
+  /// A place the body did not refill is already moved and drops nothing here, and the
+  /// `return` path needs no entry of its own: it unwinds every scope down to the function
+  /// root, and the place is an ordinary local of one of them.
   fn check_break(
     &mut self,
     hir_id: HIRId,
@@ -1275,7 +1299,18 @@ impl<'a> HirOwnershipChecker<'a> {
     // Find loop scope
     if let Some(loop_idx) = self.find_loop_scope_idx() {
       // Calculate drops for scopes being exited (not including loop scope)
-      let drops = self.calculate_exit_drops(loop_idx + 1);
+      let mut drops = self.calculate_exit_drops(loop_idx + 1);
+
+      if let Some(scrutinees) = self.loop_condition_scrutinees.last() {
+        for def in scrutinees.iter().rev() {
+          // A place declared outside the loop is in none of the scopes unwound above;
+          // the guard keeps the one shape that could be in both from dropping twice.
+          if self.is_valid(def) && !drops.contains(def) {
+            drops.push(*def);
+          }
+        }
+      }
+
       if !drops.is_empty() {
         self.schedules.on_exit.insert(ExitKey::Break(hir_id), drops);
       }
@@ -1754,12 +1789,14 @@ impl<'a> HirOwnershipChecker<'a> {
     // Extract for-loop update to analyze after body (matching runtime execution order:
     // init → cond → body → update → cond → ...).
     let mut condition_bindings = Vec::new();
+    let mut condition_scrutinees = Vec::new();
 
     let for_update = match &condition {
       LoopKind::Infinite => None,
 
       LoopKind::While { condition: cond_id } => {
         self.check_node(*cond_id);
+        condition_scrutinees = self.condition_scrutinee_places(*cond_id);
         condition_bindings = self.take_condition_bindings(*cond_id);
         None
       },
@@ -1774,6 +1811,7 @@ impl<'a> HirOwnershipChecker<'a> {
         }
         if let Some(cond_id) = cond {
           self.check_node(*cond_id);
+          condition_scrutinees = self.condition_scrutinee_places(*cond_id);
         }
         *update
       },
@@ -1793,6 +1831,11 @@ impl<'a> HirOwnershipChecker<'a> {
 
     // Push continue tracking for this loop
     self.loop_continue_stack.push(false);
+
+    // The places this loop's condition consumes, so a `break` anywhere in the body can
+    // pay for the round that refilled them. One frame per loop keeps an inner `break`
+    // off an outer condition's place.
+    self.loop_condition_scrutinees.push(condition_scrutinees);
 
     // === First pass: analyze body and update ===
     let pre_body_reachable = self.reachable;
@@ -1860,6 +1903,7 @@ impl<'a> HirOwnershipChecker<'a> {
 
     // Pop continue tracking
     self.loop_continue_stack.pop();
+    self.loop_condition_scrutinees.pop();
 
     self.scope_stack.pop();
 

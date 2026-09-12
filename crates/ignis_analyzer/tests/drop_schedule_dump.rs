@@ -176,6 +176,117 @@ function take at test.ign:19:22
 }
 
 #[test]
+fn a_break_lists_the_drop_its_loop_condition_will_not_reach() {
+  let source = format!(
+    "{RESOURCE}
+enum Slot {{
+  Filled(Resource),
+  Empty,
+}}
+
+function make(): Slot {{
+  return Slot::Filled(Resource {{ value: 1 }});
+}}
+
+function drain(): i32 {{
+  let mut seen: i32 = 0;
+  let mut slot: Slot = make();
+
+  while (let Slot::Filled(inner) = slot) {{
+    seen += inner.value;
+    slot = make();
+
+    if (seen >= 2) {{
+      break;
+    }}
+  }}
+
+  return seen;
+}}
+"
+  );
+
+  // The condition consumes `slot` on every round and frees whatever the last round put
+  // back — on the round that ends the loop. A `break` never reaches that round, so it
+  // owes the value the body just assigned, alongside the binding it leaves behind.
+  assert_eq!(
+    dump(&source),
+    "drop-schedule v1
+function drop at test.ign:5:25
+  <no owned values>
+function make at test.ign:15:23
+  <no owned values>
+function drain at test.ign:19:23
+  value slot kind=local declared at test.ign:21:3
+    drop at test.ign:28:7 reason=break
+    moved at test.ign:23:10
+  value inner kind=binding declared at test.ign:23:10
+    drop at test.ign:23:42 reason=scope-end
+    drop at test.ign:28:7 reason=break
+"
+  );
+}
+
+#[test]
+fn an_inner_break_leaves_the_outer_loop_condition_alone() {
+  let source = format!(
+    "{RESOURCE}
+enum Slot {{
+  Filled(Resource),
+  Empty,
+}}
+
+function make(): Slot {{
+  return Slot::Filled(Resource {{ value: 1 }});
+}}
+
+function drain(): i32 {{
+  let mut seen: i32 = 0;
+  let mut outer: Slot = make();
+
+  while (let Slot::Filled(outerInner) = outer) {{
+    seen += outerInner.value;
+    outer = make();
+
+    let mut inner: Slot = make();
+
+    while (let Slot::Filled(innerInner) = inner) {{
+      seen += innerInner.value;
+      inner = make();
+      break;
+    }}
+  }}
+
+  return seen;
+}}
+"
+  );
+
+  // The inner `break` returns to the outer body, where `outer` is still live and still
+  // the outer condition's to free, so only `inner` is listed against it.
+  assert_eq!(
+    dump(&source),
+    "drop-schedule v1
+function drop at test.ign:5:25
+  <no owned values>
+function make at test.ign:15:23
+  <no owned values>
+function drain at test.ign:19:23
+  value outer kind=local declared at test.ign:21:3
+    moved at test.ign:23:10
+  value outerInner kind=binding declared at test.ign:23:10
+    drop at test.ign:23:48 reason=scope-end
+  value inner kind=local declared at test.ign:27:5
+    drop at test.ign:32:7 reason=break
+    moved at test.ign:29:12
+  value innerInner kind=binding declared at test.ign:29:12
+    drop at test.ign:29:50 reason=scope-end
+    drop at test.ign:32:7 reason=break
+"
+  );
+}
+
+#[test]
 fn a_partially_moved_field_keeps_its_owner_scheduled() {
   let source = format!(
     "{RESOURCE}

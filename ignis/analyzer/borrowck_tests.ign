@@ -948,6 +948,32 @@ function borrowckSchedulesShortCircuitedLetConditionSkip(): void {
   Test::assertEq<str>(rendered.toStr(), "scope-end: first\ncondition-skip: slot\n");
 }
 
+/// Scenario: a loop whose `let` condition consumes a place the body refills.
+/// The condition frees that place on the round that ends the loop, and a `break`
+/// never reaches that round, so the `break` owes the value the body put back.
+/// Spec: IGN-253 — a `break` pays its loop condition's scrutinee.
+@test
+function borrowckSchedulesBreakPaysLoopConditionPlace(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Slot {\n  FILLED(Owned),\n  EMPTY,\n}\n\nfunction make(): Slot {\n  return Slot::FILLED(Owned { id: 1 });\n}\n\nfunction run(): u32 {\n  let mut seen: u32 = 0;\n  let mut slot: Slot = make();\n\n  while (let Slot::FILLED(first) = slot) {\n    seen = seen + first.id;\n    slot = make();\n\n    if (seen >= 2) {\n      break;\n    }\n  }\n\n  return seen;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: first\nexit break: first, slot\n");
+}
+
+/// Scenario: nested loops, each over a place, left by a `break` in the inner
+/// body. The outer place is still live there, but the outer condition is still
+/// its drop site, so only the inner place is owed.
+/// Spec: IGN-253 — a `break` pays one condition, not every enclosing one.
+@test
+function borrowckSchedulesInnerBreakLeavesOuterLoopConditionPlace(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Slot {\n  FILLED(Owned),\n  EMPTY,\n}\n\nfunction make(): Slot {\n  return Slot::FILLED(Owned { id: 1 });\n}\n\nfunction run(): u32 {\n  let mut seen: u32 = 0;\n  let mut outer: Slot = make();\n\n  while (let Slot::FILLED(first) = outer) {\n    seen = seen + first.id;\n    outer = make();\n\n    let mut inner: Slot = make();\n\n    while (let Slot::FILLED(second) = inner) {\n      seen = seen + second.id;\n      inner = make();\n      break;\n    }\n  }\n\n  return seen;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: second\nscope-end: first\nexit break: second, inner\n");
+}
+
 /// Scenario: overwriting a local that still holds a value schedules a drop of
 /// the old value before the store.
 /// Spec: IGN-39 — `on_overwrite`.
