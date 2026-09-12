@@ -1105,11 +1105,99 @@ impl<'a> HirOwnershipChecker<'a> {
       }
     }
 
+    self.schedule_field_overwrite_drop(hir_id, target);
+
     self.reject_move_out_of_borrow(value);
 
     // If assigning from an owned variable, mark source as moved
     if let Some(source_def) = self.get_moved_var(value) {
       self.try_consume(source_def, span);
+    }
+  }
+
+  /// Writing a field replaces the value that field holds, which leaks unless the old
+  /// one is dropped first. Only that field is dropped: the record around it keeps every
+  /// other field it still owes a drop for, and it is itself still live afterwards, so
+  /// scheduling the owner here would tear down live fields and free a moved-away record
+  /// twice.
+  ///
+  /// A Copy-typed field owns nothing and schedules nothing. A field that was moved out
+  /// of holds nothing either, but the compile-time state machine tracks locals rather
+  /// than fields; the runtime drop flag carries that answer instead, and the field drop
+  /// this schedules honours it exactly as a scope-end drop of the owner would.
+  fn schedule_field_overwrite_drop(
+    &mut self,
+    hir_id: HIRId,
+    target: HIRId,
+  ) {
+    let HIRKind::FieldAccess { base, field_index } = self.hir.get(target).kind else {
+      return;
+    };
+
+    let field_ty = self.hir.get(target).type_id;
+
+    if !self.types.needs_drop_with_defs(&field_ty, self.defs) {
+      return;
+    }
+
+    // A root local that no longer holds a value has nothing to overwrite, and writing
+    // into one is reported elsewhere; scheduling a drop for it would free what the
+    // move or the earlier drop already freed.
+    if let Some(root) = self.assign_target_root_local(target)
+      && !self.is_valid(&root)
+    {
+      return;
+    }
+
+    let Some(field_def) = self.field_definition(base, field_index) else {
+      return;
+    };
+
+    self
+      .schedules
+      .on_field_overwrite
+      .entry(hir_id)
+      .or_default()
+      .push(field_def);
+  }
+
+  /// The field a `base.field` place names, as its own definition.
+  fn field_definition(
+    &self,
+    base: HIRId,
+    field_index: u32,
+  ) -> Option<DefinitionId> {
+    let mut base_ty = self.hir.get(base).type_id;
+
+    while let Type::Reference { inner, .. } | Type::Pointer { inner, .. } = self.types.get(&base_ty) {
+      base_ty = *inner;
+    }
+
+    let Type::Record(record_def) = self.types.get(&base_ty) else {
+      return None;
+    };
+
+    match &self.defs.get(record_def).kind {
+      DefinitionKind::Record(definition) => definition
+        .fields
+        .iter()
+        .find(|field| field.index == field_index)
+        .map(|field| field.def_id),
+      _ => None,
+    }
+  }
+
+  /// The local an assignment target bottoms out at, when it bottoms out at one at all.
+  fn assign_target_root_local(
+    &self,
+    target: HIRId,
+  ) -> Option<DefinitionId> {
+    match &self.hir.get(target).kind {
+      HIRKind::Variable(def_id) => Some(*def_id),
+      HIRKind::FieldAccess { base, .. } => self.assign_target_root_local(*base),
+      HIRKind::Index { base, .. } => self.assign_target_root_local(*base),
+      HIRKind::Dereference(_) => None,
+      _ => None,
     }
   }
 

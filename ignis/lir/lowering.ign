@@ -887,6 +887,32 @@ export namespace LirLowering {
     LirLowering::emitDropList(function_, state, &drops);
   }
 
+  /// Drops the value a field still holds, just before the store that replaces
+  /// it. The drop runs through the place pointer the store is about to use, so
+  /// it frees that field and nothing else; `DropInPlace` expands to the same
+  /// per-field teardown a scope-end drop of the owner would emit, runtime drop
+  /// flags included, so a field that was moved out of is skipped. Mirrors
+  /// `emit_field_overwrite_drop`.
+  function emitFieldOverwriteDrop(
+    dropSchedules: &Hir::DropSchedules,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    assign: Hir::HirId,
+    fieldPtr: &Lir::Operand,
+    fieldType: Analyzer::TypeId,
+  ): void {
+    let drops: Vector<Analyzer::DefinitionId> = dropSchedules.fieldOverwriteDrops(assign);
+
+    if (drops.isEmpty()) {
+      return;
+    }
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::DropInPlace(Lir::InstrDropInPlace {
+      ptr: Lir::copyOperand(fieldPtr),
+      ty: fieldType,
+    }));
+  }
+
   function emitExitDrops(
     dropSchedules: &Hir::DropSchedules,
     function_: &mut Lir::FunctionLir,
@@ -2747,6 +2773,10 @@ export namespace LirLowering {
         right: rhs,
       }));
 
+      let dropPtr: Lir::Operand = Lir::Operand::Temp(ptrTemp);
+
+      LirLowering::emitFieldOverwriteDrop(dropSchedules, function_, state, assignId, &dropPtr, targetType);
+
       LirLowering::pushInstr(function_, state, Lir::Instr::StorePtr(Lir::InstrStorePtr {
         ptr: Lir::Operand::Temp(ptrTemp),
         value: Lir::Operand::Temp(result),
@@ -2758,6 +2788,8 @@ export namespace LirLowering {
     let Option::SOME(value) = LirLowering::lowerStoredValue(defStore, typeStore, hirStore, dropSchedules, function_, state, assignNode.value) else {
       return;
     };
+
+    LirLowering::emitFieldOverwriteDrop(dropSchedules, function_, state, assignId, &targetPtr, targetType);
 
     LirLowering::pushInstr(function_, state, Lir::Instr::StorePtr(Lir::InstrStorePtr {
       ptr: targetPtr,

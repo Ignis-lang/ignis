@@ -1448,6 +1448,147 @@ export namespace Borrowck {
     };
   }
 
+  /// Writing a field replaces the value that field holds, which leaks unless the
+  /// old one is dropped first. Only that field is dropped: the record around it
+  /// keeps every other field it still owes a drop for, and it is itself still
+  /// live afterwards, so scheduling the owner here would tear down live fields
+  /// and free a moved-away record twice. Mirrors `schedule_field_overwrite_drop`.
+  ///
+  /// A Copy-typed field owns nothing and schedules nothing. A field that was
+  /// moved out of holds nothing either, but the compile-time state machine
+  /// tracks locals rather than fields; the runtime drop flag carries that answer
+  /// instead, and the field drop this schedules honours it exactly as a
+  /// scope-end drop of the owner would.
+  function scheduleFieldOverwriteDrop(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    schedules: &mut Hir::DropSchedules,
+    target: Hir::HirId,
+    nodeId: Hir::HirId,
+  ): void {
+    let Option::SOME(node) = hir.get(target) else {
+      return;
+    };
+
+    let mut baseOpt: Option<Hir::HirId> = Option::NONE;
+    let mut fieldIndex: u32 = 0;
+
+    match (&node.kind) {
+      Hir::HirKind::FieldAccess(access) -> {
+        baseOpt = Option::SOME(access.base);
+        fieldIndex = access.fieldIndex;
+      },
+      _ -> {},
+    };
+
+    let Option::SOME(base) = baseOpt else {
+      return;
+    };
+
+    if (!Borrowck::needsDropType(defStore, typeStore, node.typeId)) {
+      return;
+    }
+
+    // A root local that no longer holds a value has nothing to overwrite, and
+    // writing into one is reported elsewhere; scheduling a drop for it would
+    // free what the move or the earlier drop already freed.
+    if (let Option::SOME(root) = Borrowck::assignTargetRootLocal(hir, target)) {
+      if (!state.isMoveValid(root.raw())) {
+        return;
+      }
+    }
+
+    let Option::SOME(fieldDef) = Borrowck::fieldDefinitionAt(defStore, typeStore, hir, base, fieldIndex) else {
+      return;
+    };
+
+    let mut schedulesRef: &mut Hir::DropSchedules = schedules;
+    schedulesRef.appendFieldOverwrite(nodeId, fieldDef);
+  }
+
+  /// The field a `base.field` place names, as its own definition. Mirrors
+  /// `field_definition`, including its walk through references and pointers.
+  function fieldDefinitionAt(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    hir: &Hir::HirStore,
+    base: Hir::HirId,
+    fieldIndex: u32,
+  ): Option<Analyzer::DefinitionId> {
+    let Option::SOME(baseNode) = hir.get(base) else {
+      return Option::NONE;
+    };
+
+    let mut baseType: Analyzer::TypeId = baseNode.typeId;
+
+    while (true) {
+      let Option::SOME(type_) = typeStore.get(baseType) else {
+        return Option::NONE;
+      };
+
+      let mut inner: Option<Analyzer::TypeId> = Option::NONE;
+
+      match (type_) {
+        Analyzer::Type::Reference(reference) -> {
+          inner = Option::SOME(reference.referent);
+        },
+        Analyzer::Type::Pointer(pointer) -> {
+          inner = Option::SOME(pointer.pointee);
+        },
+        _ -> {},
+      };
+
+      let Option::SOME(next) = inner else {
+        break;
+      };
+
+      baseType = next;
+    }
+
+    let Option::SOME(resolved) = typeStore.get(baseType) else {
+      return Option::NONE;
+    };
+
+    let Analyzer::Type::Record(recordDefId) = resolved else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(definition) = defStore.get(recordDefId) else {
+      return Option::NONE;
+    };
+
+    let Analyzer::Definition::Record(recordDef) = definition else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(fieldDefId) = recordDef.fields.get(fieldIndex as u64) else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(*fieldDefId);
+  }
+
+  /// The local an assignment target bottoms out at, when it bottoms out at one
+  /// at all. Mirrors `assign_target_root_local`: a dereference reaches storage
+  /// this function does not own, so it names no local.
+  function assignTargetRootLocal(
+    hir: &Hir::HirStore,
+    target: Hir::HirId,
+  ): Option<Analyzer::DefinitionId> {
+    let Option::SOME(node) = hir.get(target) else {
+      return Option::NONE;
+    };
+
+    return match (&node.kind) {
+      Hir::HirKind::Variable(defId) -> Option::SOME(defId),
+      Hir::HirKind::FieldAccess(access) -> Borrowck::assignTargetRootLocal(hir, access.base),
+      Hir::HirKind::Index(indexNode) -> Borrowck::assignTargetRootLocal(hir, indexNode.base),
+      _ -> Option::NONE,
+    };
+  }
+
   /// The local a node names when it is a bare variable, without following any
   /// place chain.
   function variableOf(hir: &Hir::HirStore, nodeId: Hir::HirId): Option<Analyzer::DefinitionId> {
@@ -3510,6 +3651,8 @@ export namespace Borrowck {
         }
       }
     }
+
+    Borrowck::scheduleFieldOverwriteDrop(defStore, typeStore, hir, state, schedules, assign.target, nodeId);
 
     Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, assign.value);
 

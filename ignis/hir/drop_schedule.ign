@@ -151,6 +151,14 @@ export namespace Hir {
     public onMatchArmEnd: Vector<Hir::NodeDropEntry>;
     public onExit: Vector<Hir::ExitDropEntry>;
     public onOverwrite: Vector<Hir::NodeDropEntry>;
+
+    /// Drops before overwriting one field of an owned value, keyed by the
+    /// assignment and carrying the field's definition. Separate from
+    /// `onOverwrite` because the two name different things: an entry there is a
+    /// local, dropped through its local slot, while an entry here is a field,
+    /// dropped through the field pointer the store already computed.
+    public onFieldOverwrite: Vector<Hir::NodeDropEntry>;
+
     public onScopeEndDefers: Vector<Hir::NodeDeferEntry>;
     public onExitDefers: Vector<Hir::ExitDeferEntry>;
 
@@ -165,6 +173,7 @@ export namespace Hir {
         onMatchArmEnd: Vector::new<Hir::NodeDropEntry>(),
         onExit: Vector::new<Hir::ExitDropEntry>(),
         onOverwrite: Vector::new<Hir::NodeDropEntry>(),
+        onFieldOverwrite: Vector::new<Hir::NodeDropEntry>(),
         onScopeEndDefers: Vector::new<Hir::NodeDeferEntry>(),
         onExitDefers: Vector::new<Hir::ExitDeferEntry>(),
         moves: Vector::new<Hir::MoveEntry>(),
@@ -172,7 +181,7 @@ export namespace Hir {
     }
 
     public isEmpty(&self): boolean {
-      return self.onScopeEnd.isEmpty() && self.onMatchArmEnd.isEmpty() && self.onExit.isEmpty() && self.onOverwrite.isEmpty() && self.onScopeEndDefers.isEmpty() && self.onExitDefers.isEmpty();
+      return self.onScopeEnd.isEmpty() && self.onMatchArmEnd.isEmpty() && self.onExit.isEmpty() && self.onOverwrite.isEmpty() && self.onFieldOverwrite.isEmpty() && self.onScopeEndDefers.isEmpty() && self.onExitDefers.isEmpty();
     }
 
     /// Replaces the drop list of a block, mirroring the Rust `HashMap::insert`
@@ -235,6 +244,29 @@ export namespace Hir {
       defs.push(defId);
 
       self.onOverwrite.push(Hir::NodeDropEntry { node: assign, defs: defs });
+    }
+
+    /// Appends one field to the drop-before-overwrite list of an assignment
+    /// whose target is a field, mirroring `on_field_overwrite`.
+    public appendFieldOverwrite(
+      &mut self,
+      assign: Hir::HirId,
+      defId: Analyzer::DefinitionId
+    ): void {
+      let existing: Option<u64> = Hir::findNodeEntry(&self.onFieldOverwrite, assign);
+
+      if (let Option::SOME(index) = existing) {
+        let mut merged: Vector<Analyzer::DefinitionId> = self.fieldOverwriteDrops(assign);
+        merged.push(defId);
+
+        self.onFieldOverwrite.set(index, Hir::NodeDropEntry { node: assign, defs: merged });
+        return;
+      }
+
+      let mut defs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      defs.push(defId);
+
+      self.onFieldOverwrite.push(Hir::NodeDropEntry { node: assign, defs: defs });
     }
 
     public setExit(&mut self, key: Hir::ExitKey, defs: Vector<Analyzer::DefinitionId>): void {
@@ -336,6 +368,10 @@ export namespace Hir {
 
     public overwriteDrops(&self, assign: Hir::HirId): Vector<Analyzer::DefinitionId> {
       return Hir::nodeEntryDrops(&self.onOverwrite, assign);
+    }
+
+    public fieldOverwriteDrops(&self, assign: Hir::HirId): Vector<Analyzer::DefinitionId> {
+      return Hir::nodeEntryDrops(&self.onFieldOverwrite, assign);
     }
 
     public exitDrops(&self, key: &Hir::ExitKey): Vector<Analyzer::DefinitionId> {
