@@ -539,8 +539,7 @@ impl<'a> LoweringContext<'a> {
         let expr_node = self.hir.get(*expr);
         let expr_ty = expr_node.type_id;
         if let Some(op) = self.lower_hir_node(*expr) {
-          // Spill owned temps so they get dropped at block end
-          self.spill_if_owned_temp(op, expr_ty);
+          self.drop_statement_value(op, expr_ty);
         }
         None
       },
@@ -3592,6 +3591,45 @@ impl<'a> LoweringContext<'a> {
     }
 
     Operand::Local(local)
+  }
+
+  /// Drop the value an expression statement produced, at the end of that statement.
+  ///
+  /// A statement's value has no name and no later reader, so the statement is the last
+  /// point at which anything can own it. `let _ = value;` lowers to exactly this
+  /// statement, which is what gives a discard the same drop point in both compiler front
+  /// ends without inventing a schedule entry for a binding that does not exist.
+  ///
+  /// The conditions are [`Self::spill_if_owned_temp`]'s, which this replaces for a
+  /// statement: a value loaded out of a local (`x;`, `let _ = x;`) is an alias of storage
+  /// that already owes its own drop, so it is left alone.
+  fn drop_statement_value(
+    &mut self,
+    operand: Operand,
+    ty: TypeId,
+  ) {
+    let Operand::Temp(temp_id) = operand else {
+      return;
+    };
+
+    if !self.types.needs_drop_with_defs(&ty, self.defs) || self.load_alias_temps.contains(&temp_id) {
+      return;
+    }
+
+    let local = self.fn_builder().alloc_local(LocalData {
+      def_id: None,
+      ty,
+      mutable: false,
+      name: None,
+      borrowed_alias: false,
+    });
+
+    self.fn_builder().emit(Instr::Store {
+      dest: local,
+      value: operand,
+    });
+
+    self.fn_builder().emit(Instr::Drop { local });
   }
 
   /// Allocate a synthetic local, registering for drop if owned.
