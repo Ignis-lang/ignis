@@ -21,6 +21,7 @@ use ignis_type::{
 };
 
 use crate::classify::{DefKind, EmitTarget};
+use crate::reserved::mangle_reserved_c_name;
 use crate::EmitInput;
 
 const USER_MAIN_SYMBOL: &str = "__ignis_user_main";
@@ -4351,7 +4352,11 @@ impl<'a> CEmitter<'a> {
 
     let test_suffix = test_module_discriminator(def);
 
-    match def.owner_namespace {
+    // The reserved-name guard runs on the final name, so it can only fire for a
+    // bare one: every namespaced or overloaded name already carries a prefix or
+    // a type suffix. `@externName`, `extern` declarations and the entry point
+    // return before reaching here, in `def_name`.
+    mangle_reserved_c_name(match def.owner_namespace {
       Some(ns_id) => {
         let ns_path = self.namespaces.full_path(ns_id);
         let mut parts: Vec<String> = ns_path
@@ -4386,7 +4391,7 @@ impl<'a> CEmitter<'a> {
         }
         name
       },
-    }
+    })
   }
 
   fn has_overloads(
@@ -5980,7 +5985,9 @@ fn build_mangled_name_standalone(
 
   let test_suffix = test_module_discriminator(def);
 
-  match def.owner_namespace {
+  // Mirrors `CEmitter::build_mangled_name`: the reserved-name guard runs on the
+  // final name, after every prefix and suffix.
+  mangle_reserved_c_name(match def.owner_namespace {
     Some(ns_id) => {
       let ns_path = namespaces.full_path(ns_id);
       let mut parts: Vec<String> = ns_path.iter().map(|s| escape_ident(symbols.get(s))).collect();
@@ -6016,7 +6023,7 @@ fn build_mangled_name_standalone(
         name_with_suffix
       }
     },
-  }
+  })
 }
 
 fn has_overloads_standalone(

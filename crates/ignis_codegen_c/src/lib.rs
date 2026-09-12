@@ -1,5 +1,6 @@
 mod classify;
 mod emit;
+mod reserved;
 
 use ignis_lir::LirProgram;
 use ignis_type::definition::DefinitionStore;
