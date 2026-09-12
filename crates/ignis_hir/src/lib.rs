@@ -1,12 +1,13 @@
 pub mod display;
 pub mod drop_schedule;
+pub mod drop_schedule_dump;
 pub mod operation;
 pub mod pattern;
 pub mod statement;
 
 pub use pattern::HIRPattern;
 
-pub use drop_schedule::{DropSchedules, ExitKey};
+pub use drop_schedule::{DropSchedules, ExitKey, MoveSite};
 
 use std::collections::HashMap;
 
@@ -226,6 +227,113 @@ pub struct HIRMatchArm {
 
 impl HIRKind {
   /// Offset all HIRIds in this HIRKind by the given amount.
+  /// Every direct child node of this kind, in a stable order.
+  ///
+  /// Mirrors the `HIRId` fields walked by [`HIRKind::offset_ids`]; a new variant that
+  /// carries `HIRId`s must be added to both.
+  pub fn child_ids(&self) -> Vec<HIRId> {
+    let mut children = Vec::new();
+
+    match self {
+      HIRKind::Literal(_)
+      | HIRKind::Unit
+      | HIRKind::Variable(_)
+      | HIRKind::Break
+      | HIRKind::Continue
+      | HIRKind::Error
+      | HIRKind::SizeOf(_)
+      | HIRKind::AlignOf(_)
+      | HIRKind::MaxOf(_)
+      | HIRKind::MinOf(_)
+      | HIRKind::StaticAccess { .. }
+      | HIRKind::Trap
+      | HIRKind::BuiltinUnreachable
+      | HIRKind::BuiltinDropGlue { .. } => {},
+      HIRKind::Panic(id) | HIRKind::TypeOf(id) | HIRKind::Dereference(id) | HIRKind::ExpressionStatement(id) => {
+        children.push(*id)
+      },
+      HIRKind::BuiltinLoad { ptr, .. } | HIRKind::BuiltinDropInPlace { ptr, .. } => children.push(*ptr),
+      HIRKind::BuiltinStore { ptr, value, .. } => {
+        children.push(*ptr);
+        children.push(*value);
+      },
+      HIRKind::BuiltinHash { value, hasher, .. } => {
+        children.push(*value);
+        children.push(*hasher);
+      },
+      HIRKind::BuiltinEq { left, right, .. } | HIRKind::Binary { left, right, .. } => {
+        children.push(*left);
+        children.push(*right);
+      },
+      HIRKind::Unary { operand, .. } => children.push(*operand),
+      HIRKind::Call { args, .. } => children.extend(args.iter().copied()),
+      HIRKind::CallClosure { callee, args } => {
+        children.push(*callee);
+        children.extend(args.iter().copied());
+      },
+      HIRKind::Cast { expression, .. }
+      | HIRKind::BitCast { expression, .. }
+      | HIRKind::Reference { expression, .. } => children.push(*expression),
+      HIRKind::Index { base, index } => {
+        children.push(*base);
+        children.push(*index);
+      },
+      HIRKind::VectorLiteral { elements } | HIRKind::TupleLiteral { elements } => {
+        children.extend(elements.iter().copied())
+      },
+      HIRKind::MakeSlice { data, len, .. } => {
+        children.push(*data);
+        children.push(*len);
+      },
+      HIRKind::FieldAccess { base, .. } => children.push(*base),
+      HIRKind::RecordInit { fields, .. } => children.extend(fields.iter().map(|(_, value)| *value)),
+      HIRKind::MethodCall { receiver, args, .. } => {
+        if let Some(receiver) = receiver {
+          children.push(*receiver);
+        }
+        children.extend(args.iter().copied());
+      },
+      HIRKind::EnumVariant { payload, .. } => children.extend(payload.iter().copied()),
+      HIRKind::Let { value, .. } => children.extend(value.iter().copied()),
+      HIRKind::Assign { target, value, .. } => {
+        children.push(*target);
+        children.push(*value);
+      },
+      HIRKind::Block { statements, expression } => {
+        children.extend(statements.iter().copied());
+        children.extend(expression.iter().copied());
+      },
+      HIRKind::If {
+        condition,
+        then_branch,
+        else_branch,
+      } => {
+        children.push(*condition);
+        children.push(*then_branch);
+        children.extend(else_branch.iter().copied());
+      },
+      HIRKind::LetElse { value, else_block, .. } => {
+        children.push(*value);
+        children.push(*else_block);
+      },
+      HIRKind::Loop { condition, body } => {
+        children.extend(condition.child_ids());
+        children.push(*body);
+      },
+      HIRKind::Return(value) => children.extend(value.iter().copied()),
+      HIRKind::Defer { body } | HIRKind::Closure { body, .. } => children.push(*body),
+      HIRKind::Match { scrutinee, arms } => {
+        children.push(*scrutinee);
+        for arm in arms {
+          children.extend(arm.guard.iter().copied());
+          children.push(arm.body);
+        }
+      },
+    }
+
+    children
+  }
+
   pub fn offset_ids(
     &mut self,
     offset: u32,

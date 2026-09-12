@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use ignis_type::definition::DefinitionId;
+use ignis_type::{definition::DefinitionId, span::Span};
 
 use crate::HIRId;
 
@@ -20,6 +20,20 @@ pub enum ExitKey {
 
   /// Synthetic return at function end (ensure_return, no explicit return HIRId)
   FnEnd(DefinitionId),
+}
+
+/// A point where a binding's ownership was transferred away.
+///
+/// Recorded for debugging only (`--dump-drop-schedule`): a binding that is marked moved
+/// is deliberately *not* dropped at the end of its scope, so the move site is the missing
+/// half of the story when a drop is absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveSite {
+  /// Function whose body contains the move.
+  pub function: DefinitionId,
+
+  /// Span of the expression that consumed the binding.
+  pub span: Span,
 }
 
 /// Drop schedules produced by ownership analysis.
@@ -48,6 +62,10 @@ pub struct DropSchedules {
 
   /// Deferred expression bodies at early exits.
   pub on_exit_defers: HashMap<ExitKey, Vec<HIRId>>,
+
+  /// Where each binding was marked moved. Debug metadata only: nothing in lowering
+  /// reads it, and it is deliberately excluded from [`DropSchedules::is_empty`].
+  pub moves: HashMap<DefinitionId, Vec<MoveSite>>,
 }
 
 impl DropSchedules {
