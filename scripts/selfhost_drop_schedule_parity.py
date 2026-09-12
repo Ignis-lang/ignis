@@ -120,6 +120,16 @@ def collect_cases(
   return cases
 
 
+def relative_to(
+  path: Path,
+  root: Path,
+) -> str:
+  try:
+    return path.resolve().relative_to(root.resolve()).as_posix()
+  except ValueError:
+    return str(path)
+
+
 def run_dump(
   compiler: Path,
   case: DropCase,
@@ -144,7 +154,10 @@ def run_dump(
   ]
 
   if case.project_root is None:
-    command.append(str(case.path))
+    # The path must stay relative to the working directory: given an absolute
+    # path while a project root is in scope, the selfhost compiler ignores the
+    # argument and compiles the project instead.
+    command.append(relative_to(case.path, repository_root))
 
   try:
     completed = subprocess.run(
