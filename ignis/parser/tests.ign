@@ -4036,23 +4036,30 @@ function parserParsesCStyleForStatements(): void {
   };
 }
 
-/// The boolean a `@configFlag(...)` expression statement folded to.
+/// The boolean the `@configFlag(...)` initializer of a `let` folded to.
+///
+/// A statement that *starts* with `@configFlag` is the annotation form, which
+/// gates the declaration after it, so a folded value is read from a binding
+/// rather than from a bare expression statement.
 function configFlagLiteralValue(module: &Ast::Module, statementId: Ast::StatementId): boolean {
-  match (expectStatement(module, statementId)) {
-    Ast::Statement::Node::Expression(expressionStatement) -> {
-      match (expectExpression(module, expressionStatement.expression)) {
-        Ast::Expression::Node::Literal(literal) -> {
-          match (&literal.value) {
-            Ast::Expression::LiteralValue::Boolean(value) -> {
-              return value;
-            },
-            _ -> @panic("expected @configFlag to fold to a boolean literal"),
-          };
+  let valueId: Ast::ExpressionId = match (expectStatement(module, statementId)) {
+    Ast::Statement::Node::Let(binding) -> match (binding.value) {
+      Option::SOME(value) -> value,
+      Option::NONE -> @panic("expected the @configFlag binding to carry an initializer"),
+    },
+    _ -> @panic("expected a @configFlag let statement"),
+  };
+
+  match (expectExpression(module, valueId)) {
+    Ast::Expression::Node::Literal(literal) -> {
+      match (&literal.value) {
+        Ast::Expression::LiteralValue::Boolean(value) -> {
+          return value;
         },
-        _ -> @panic("expected @configFlag to fold to a literal expression"),
+        _ -> @panic("expected @configFlag to fold to a boolean literal"),
       };
     },
-    _ -> @panic("expected a @configFlag expression statement"),
+    _ -> @panic("expected @configFlag to fold to a literal expression"),
   };
 
   @panic("unreachable: configFlagLiteralValue did not return");
@@ -4066,7 +4073,7 @@ function configFlagLiteralValue(module: &Ast::Module, statementId: Ast::Statemen
 function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_config_flag.ign",
-    "function main(): void { @configFlag(@platform(\"Linux\")); @configFlag(@debug()); @configFlag(!@release()); @configFlag(@feature(\"nonexistent\") || @arch(\"x86_64\")); @configFlag(@target(\"x86_64-unknown-linux-gnu\") && @abi(\"gnu\")); }"
+    "function main(): void { let a: boolean = @configFlag(@platform(\"Linux\")); let b: boolean = @configFlag(@debug()); let c: boolean = @configFlag(!@release()); let d: boolean = @configFlag(@feature(\"nonexistent\") || @arch(\"x86_64\")); let e: boolean = @configFlag(@target(\"x86_64-unknown-linux-gnu\") && @abi(\"gnu\")); }"
   );
   let mut module: Ast::Module = Ast::Module::init();
   let mut diagnostics = DiagnosticBag::init();
@@ -4112,6 +4119,186 @@ function parserFoldsConfigFlagDirectivesToBooleanLiterals(): void {
     },
     _ -> @panic("expected function root for the configFlag test"),
   };
+}
+
+/// The name of the single item a source parsed to, for the annotation-form
+/// `@configFlag` tests below.
+function parseSingleItemName(path: str, source: str): String {
+  let file: SourceFile = SourceFile::create(path, source);
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&file, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let itemId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing the item a @configFlag pair selected"),
+  };
+
+  match (expectItem(&module, itemId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      return functionItem.name.clone();
+    },
+    _ -> @panic("expected a function item from the selected @configFlag half"),
+  };
+
+  @panic("unreachable: parseSingleItemName did not return");
+}
+
+/// `@configFlag(<condition>)` in annotation position gates the one item after
+/// it. A `P` / `!P` pair therefore leaves exactly one declaration behind, for
+/// a negated predicate as much as for a positive one. The flags the parser
+/// stands in with describe a release build on a glibc x86_64 Linux host.
+@test
+function parserSelectsConfigFlagHalfAtItemPosition(): void {
+  let negatedFalse: String = parseSingleItemName(
+    "fixtures/parser_config_flag_negated.ign",
+    "@configFlag(!@platform(\"linux\")) function dropped(): void {} @configFlag(@platform(\"linux\")) function kept(): void {}"
+  );
+  Test::assertEq<str>(negatedFalse.toStr(), "kept");
+
+  let negatedTrue: String = parseSingleItemName(
+    "fixtures/parser_config_flag_negated_true.ign",
+    "@configFlag(!@platform(\"windows\")) function kept(): void {} @configFlag(@platform(\"windows\")) function dropped(): void {}"
+  );
+  Test::assertEq<str>(negatedTrue.toStr(), "kept");
+
+  let negatedConjunction: String = parseSingleItemName(
+    "fixtures/parser_config_flag_negated_and.ign",
+    "@configFlag(!(@platform(\"linux\") && @arch(\"x86_64\"))) function dropped(): void {} @configFlag(@platform(\"linux\") && @arch(\"x86_64\")) function kept(): void {}"
+  );
+  Test::assertEq<str>(negatedConjunction.toStr(), "kept");
+
+  let negatedDisjunction: String = parseSingleItemName(
+    "fixtures/parser_config_flag_negated_or.ign",
+    "@configFlag(!(@platform(\"windows\") || @platform(\"macos\"))) function kept(): void {} @configFlag(@platform(\"windows\") || @platform(\"macos\")) function dropped(): void {}"
+  );
+  Test::assertEq<str>(negatedDisjunction.toStr(), "kept");
+
+  let doubleNegation: String = parseSingleItemName(
+    "fixtures/parser_config_flag_double_negation.ign",
+    "@configFlag(!!@platform(\"linux\")) function kept(): void {} @configFlag(!@platform(\"linux\")) function dropped(): void {}"
+  );
+  Test::assertEq<str>(doubleNegation.toStr(), "kept");
+}
+
+/// A dropped half is skipped whole: the attributes written on it, its body and
+/// the braces inside that body never reach the AST.
+@test
+function parserSkipsTheWholeGatedDeclaration(): void {
+  let attributed: String = parseSingleItemName(
+    "fixtures/parser_config_flag_attributed.ign",
+    "@configFlag(!@platform(\"linux\")) @externName(\"dropped\") function dropped(): void { if (true) { return; } } @configFlag(@platform(\"linux\")) function kept(): void {}"
+  );
+  Test::assertEq<str>(attributed.toStr(), "kept");
+
+  let externBlock: String = parseSingleItemName(
+    "fixtures/parser_config_flag_extern.ign",
+    "@configFlag(!@platform(\"linux\")) extern __dropped { function absent(): i32; } @configFlag(@platform(\"linux\")) function kept(): void {}"
+  );
+  Test::assertEq<str>(externBlock.toStr(), "kept");
+
+  let alias: String = parseSingleItemName(
+    "fixtures/parser_config_flag_alias.ign",
+    "@configFlag(!@platform(\"linux\")) type Dropped = u64; @configFlag(@platform(\"linux\")) function kept(): void {}"
+  );
+  Test::assertEq<str>(alias.toStr(), "kept");
+}
+
+/// A namespace member and a block statement are gated the same way an item is.
+@test
+function parserSelectsConfigFlagHalfInsideNamespaceAndBlock(): void {
+  let namespaceSource: SourceFile = SourceFile::create(
+    "fixtures/parser_config_flag_namespace.ign",
+    "namespace Gated { @configFlag(!@platform(\"linux\")) const VALUE: u64 = 2; @configFlag(@platform(\"linux\")) const VALUE: u64 = 1; }"
+  );
+  let mut namespaceModule: Ast::Module = Ast::Module::init();
+  let mut namespaceDiagnostics = DiagnosticBag::init();
+  Parser::parseInto(&namespaceSource, &mut namespaceModule, &mut namespaceDiagnostics);
+
+  Test::assertEq<u64>(namespaceDiagnostics.length(), 0);
+
+  let namespaceId: Ast::ItemId = match (namespaceModule.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing the gated namespace root"),
+  };
+
+  match (expectItem(&namespaceModule, namespaceId)) {
+    Ast::Item::Node::Namespace(namespaceItem) -> Test::assertEq<u64>(namespaceItem.items.length(), 1),
+    _ -> @panic("expected a namespace root for the gated member test"),
+  };
+
+  let blockSource: SourceFile = SourceFile::create(
+    "fixtures/parser_config_flag_block.ign",
+    "function main(): void { @configFlag(!@platform(\"linux\")) let value: u64 = 2; @configFlag(@platform(\"linux\")) let value: u64 = 1; }"
+  );
+  let mut blockModule: Ast::Module = Ast::Module::init();
+  let mut blockDiagnostics = DiagnosticBag::init();
+  Parser::parseInto(&blockSource, &mut blockModule, &mut blockDiagnostics);
+
+  Test::assertEq<u64>(blockDiagnostics.length(), 0);
+
+  let functionId: Ast::ItemId = match (blockModule.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing the gated block's function root"),
+  };
+
+  match (expectItem(&blockModule, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> {
+      match (expectStatement(&blockModule, functionItem.body)) {
+        Ast::Statement::Node::Block(block) -> Test::assertEq<u64>(block.statements.length(), 1),
+        _ -> @panic("expected a block body for the gated statement test"),
+      };
+    },
+    _ -> @panic("expected a function root for the gated statement test"),
+  };
+}
+
+/// A condition that is not a predicate expression is reported where it is
+/// written, with the code and wording the reference compiler uses.
+@test
+function parserRejectsMalformedConfigFlagPredicate(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_config_flag_malformed.ign",
+    "@configFlag(!) function gated(): void {}"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<boolean>(diagnostics.length() > 0, true);
+
+  let diagnostic: &Diagnostic = match (diagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing the malformed @configFlag diagnostic"),
+  };
+
+  Test::assertEq<str>(diagnostic.code, "A0111");
+  Test::assertEq<str>(diagnostic.messageText(), "Invalid compile-time condition expression");
+}
+
+/// An unknown predicate inside a negation is named rather than folded.
+@test
+function parserRejectsUnknownConfigFlagPredicate(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_config_flag_unknown_predicate.ign",
+    "@configFlag(!@bogus(\"x\")) function gated(): void {}"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<boolean>(diagnostics.length() > 0, true);
+
+  let diagnostic: &Diagnostic = match (diagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing the unknown predicate diagnostic"),
+  };
+
+  Test::assertEq<str>(diagnostic.code, "A0111");
+  Test::assertEq<str>(diagnostic.messageText(), "Unknown compile-time predicate '@bogus'");
 }
 
 /// `@if(<condition>)` is answered while parsing: the selected branch's items

@@ -1728,24 +1728,9 @@ export namespace ParserDeclarations {
     let mut itemsRef: &mut Vector<Ast::ItemId> = items;
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
-      if (ParserExpressions::isCompileIfDirectiveStart(parserRef)) {
-        if (!ParserDeclarations::parseCompileDirectiveItems(parserRef, itemsRef)) {
-          return false;
-        }
-
-        continue;
-      }
-
-      if (ParserExpressions::isCompileElseDirectiveStart(parserRef)) {
-        ParserExpressions::rejectUnmatchedCompileElse(parserRef);
+      if (!ParserDeclarations::parseItemListEntry(parserRef, itemsRef)) {
         return false;
       }
-
-      let Option::SOME(itemId) = ParserDeclarations::parseTopLevelItem(parserRef) else {
-        return false;
-      };
-
-      itemsRef.push(itemId);
     }
 
     return parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' to close the compile-time directive branch").isSome();
@@ -1792,6 +1777,34 @@ export namespace ParserDeclarations {
     return false;
   }
 
+  /// `@configFlag(<cond>) <item>` in item position: the condition folds while
+  /// parsing, a true one keeps the single item that follows, and a false one
+  /// drops it whole, so a `P` / `!P` pair leaves exactly one declaration
+  /// behind.
+  function parseConfigFlagItem(
+    parser: &mut ParserShared::State,
+    items: &mut Vector<Ast::ItemId>
+  ): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(selected) = ParserExpressions::parseConfigFlagDirectiveHeader(parserRef) else {
+      return false;
+    };
+
+    if (!selected) {
+      return ParserExpressions::skipGatedDeclaration(parserRef);
+    }
+
+    let mut itemsRef: &mut Vector<Ast::ItemId> = items;
+
+    let Option::SOME(itemId) = ParserDeclarations::parseTopLevelItem(parserRef) else {
+      return false;
+    };
+
+    itemsRef.push(itemId);
+    return true;
+  }
+
   /// Collects one item list entry: a compile-time directive expands to zero or
   /// more items, anything else parses as a single item.
   function parseItemListEntry(
@@ -1802,6 +1815,10 @@ export namespace ParserDeclarations {
 
     if (ParserExpressions::isCompileIfDirectiveStart(parserRef)) {
       return ParserDeclarations::parseCompileDirectiveItems(parserRef, items);
+    }
+
+    if (ParserExpressions::isConfigFlagDirectiveStart(parserRef)) {
+      return ParserDeclarations::parseConfigFlagItem(parserRef, items);
     }
 
     if (ParserExpressions::isCompileElseDirectiveStart(parserRef)) {

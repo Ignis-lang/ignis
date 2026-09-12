@@ -364,27 +364,31 @@ export namespace Fs::Sys {
   // character array at 19.
   //
   // Any target whose layout has not been checked has to fail at compile time
-  // rather than read the wrong bytes. These constants exist only for the
-  // target they were checked against, so on any other one the module fails to
-  // compile with the offsets reported undeclared.
-  //
-  // A second definition under the negated condition would say so in a
-  // sentence instead, but `@configFlag` with a negated predicate is not
-  // honored by the selfhost compiler: it keeps the declaration and reports the
-  // pair as a redefinition. See
-  // `test_cases/repro/configflag_negated_predicate.ign`.
+  // rather than read the wrong bytes. Each offset is therefore defined twice:
+  // once for the target its layout was checked against, and once under the
+  // negated condition, where it fails the build with a sentence naming the
+  // missing layout instead of with the offset reported undeclared.
 
   /// Byte offset of `d_ino` inside the host `struct dirent`.
   @configFlag(@platform("linux") && @arch("x86_64"))
   const DIRENT_INO_OFFSET: u64 = 0;
 
+  @configFlag(!(@platform("linux") && @arch("x86_64")))
+  const DIRENT_INO_OFFSET: u64 = @compileError("std::fs: the host `struct dirent` layout is only known for x86_64 Linux");
+
   /// Byte offset of `d_type` inside the host `struct dirent`.
   @configFlag(@platform("linux") && @arch("x86_64"))
   const DIRENT_TYPE_OFFSET: u64 = 18;
 
+  @configFlag(!(@platform("linux") && @arch("x86_64")))
+  const DIRENT_TYPE_OFFSET: u64 = @compileError("std::fs: the host `struct dirent` layout is only known for x86_64 Linux");
+
   /// Byte offset of the inline `d_name` array inside the host `struct dirent`.
   @configFlag(@platform("linux") && @arch("x86_64"))
   const DIRENT_NAME_OFFSET: u64 = 19;
+
+  @configFlag(!(@platform("linux") && @arch("x86_64")))
+  const DIRENT_NAME_OFFSET: u64 = @compileError("std::fs: the host `struct dirent` layout is only known for x86_64 Linux");
 
   /// Returns the `d_name` array address inside a host `dirent`.
   ///
@@ -514,9 +518,13 @@ export namespace Fs::Sys {
   ///
   /// Nothing allocates against this value; it exists so `RawStat` can be
   /// pinned to the size the kernel writes. Like the `DIRENT_*` offsets it is
-  /// defined only for the target it was checked against.
+  /// defined only for the target it was checked against, and its negated half
+  /// names the missing layout.
   @configFlag(@platform("linux") && @arch("x86_64"))
   const STAT_STRUCT_SIZE: u64 = 144;
+
+  @configFlag(!(@platform("linux") && @arch("x86_64")))
+  const STAT_STRUCT_SIZE: u64 = @compileError("std::fs: the host `struct stat` layout is only known for x86_64 Linux");
 
   /// True when the compiled `RawStat` is the size of the host `struct stat`.
   ///

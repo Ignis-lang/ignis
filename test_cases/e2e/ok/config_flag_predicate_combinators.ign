@@ -1,0 +1,79 @@
+// Every shape the compile-time condition grammar accepts, each one written as
+// a `P` / `!(P)` pair so the surviving half reports the value the condition
+// folded to: 1 for true, 2 for false. `@platform("plan9")` is false on every
+// target the corpus runs on.
+
+namespace Shape {
+  @configFlag(!@platform("plan9"))
+  const NEGATION: u64 = 1;
+  @configFlag(!(!@platform("plan9")))
+  const NEGATION: u64 = 2;
+
+  @configFlag(!!@platform("linux"))
+  const DOUBLE_NEGATION: u64 = 1;
+  @configFlag(!(!!@platform("linux")))
+  const DOUBLE_NEGATION: u64 = 2;
+
+  @configFlag(@platform("linux") && !@platform("plan9"))
+  const AND_WITH_NEGATION: u64 = 1;
+  @configFlag(!(@platform("linux") && !@platform("plan9")))
+  const AND_WITH_NEGATION: u64 = 2;
+
+  @configFlag(!(@platform("plan9") || @platform("windows")))
+  const NEGATED_DISJUNCTION: u64 = 1;
+  @configFlag(!(!(@platform("plan9") || @platform("windows"))))
+  const NEGATED_DISJUNCTION: u64 = 2;
+
+  @configFlag(!(@platform("plan9") || !(@arch("x86_64") && !@platform("plan9"))))
+  const NESTED: u64 = 1;
+  @configFlag(!(!(@platform("plan9") || !(@arch("x86_64") && !@platform("plan9")))))
+  const NESTED: u64 = 2;
+
+  @configFlag((!@platform("plan9")))
+  const PARENTHESIZED: u64 = 1;
+  @configFlag(!((!@platform("plan9"))))
+  const PARENTHESIZED: u64 = 2;
+
+  @configFlag(!@release())
+  const NEGATED_RELEASE: u64 = 1;
+  @configFlag(!(!@release()))
+  const NEGATED_RELEASE: u64 = 2;
+}
+
+// Each true shape contributes 0 and each false one contributes its weight, so
+// the exit code names the shapes that folded the wrong way.
+function main(): i32 {
+  let mut code: u64 = 0;
+
+  if (Shape::NEGATION != 1) {
+    code += 1;
+  }
+
+  if (Shape::DOUBLE_NEGATION != 1) {
+    code += 2;
+  }
+
+  if (Shape::AND_WITH_NEGATION != 1) {
+    code += 4;
+  }
+
+  if (Shape::NEGATED_DISJUNCTION != 1) {
+    code += 8;
+  }
+
+  if (Shape::NESTED != 1) {
+    code += 16;
+  }
+
+  if (Shape::PARENTHESIZED != 1) {
+    code += 32;
+  }
+
+  // A release build folds `!@release()` to false, so this shape is expected to
+  // keep its negated half.
+  if (Shape::NEGATED_RELEASE != 2) {
+    code += 64;
+  }
+
+  return code as i32;
+}

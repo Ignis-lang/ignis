@@ -1,0 +1,83 @@
+// A negated `@configFlag` gates the same positions a positive one does: a
+// top-level item, an item carrying further attributes and a namespace member.
+// Statement position is covered by the parser's own tests instead, because the
+// formatter model does not yet accept a brace-less directive inside a block.
+
+@configFlag(!@platform("plan9"))
+function selected(): u64 {
+  return 1;
+}
+
+@configFlag(@platform("plan9"))
+function selected(): u64 {
+  return 2;
+}
+
+@configFlag(!@platform("plan9"))
+@externName("config_flag_attributed")
+function attributed(): u64 {
+  return 1;
+}
+
+@configFlag(@platform("plan9"))
+@externName("config_flag_attributed")
+function attributed(): u64 {
+  return 2;
+}
+
+@configFlag(!@platform("plan9"))
+record Selected {
+  public value: u64;
+}
+
+@configFlag(@platform("plan9"))
+record Selected {
+  public value: u64;
+  public unusedOnThisTarget: u64;
+}
+
+@configFlag(@platform("plan9"))
+extern __config_flag_absent {
+  function absentOnThisTarget(): i32;
+}
+
+@configFlag(!@platform("plan9"))
+type Selection = u64;
+
+@configFlag(@platform("plan9"))
+type Selection = i8;
+
+namespace Member {
+  @configFlag(!@platform("plan9"))
+  const VALUE: u64 = 1;
+
+  @configFlag(@platform("plan9"))
+  const VALUE: u64 = 2;
+}
+
+function main(): i32 {
+  let instance: Selected = Selected { value: 1 };
+  let selection: Selection = 1;
+
+  if (selected() != 1) {
+    return 1;
+  }
+
+  if (attributed() != 1) {
+    return 2;
+  }
+
+  if (Member::VALUE != 1) {
+    return 3;
+  }
+
+  if (instance.value != 1) {
+    return 5;
+  }
+
+  if (selection != 1) {
+    return 6;
+  }
+
+  return 0;
+}

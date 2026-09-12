@@ -1052,9 +1052,9 @@ export namespace ParserExpressions {
     let span: SourceSpan = parserRef.current().span;
     parserRef.emitDiagnostic(
       span,
-      DiagnosticCode::EXPECTED_EXPRESSION,
-      "Expected expression",
-      "invalid compile-time condition expression",
+      DiagnosticCode::COMPILE_ERROR,
+      "Invalid compile-time condition expression",
+      "expected a compile-time predicate, '!', or '('",
     );
     return Option::NONE;
   }
@@ -1126,8 +1126,13 @@ export namespace ParserExpressions {
     // name outside it.
     if (name.equals("feature")) {
       if (!parserRef.flags.isKnownFeature(&argument)) {
-        let unknownDetail: String = `unknown feature \`${argument.toStr()}\` in compile-time condition`;
-        parserRef.emitDiagnostic(argumentToken.span, DiagnosticCode::EXPECTED_EXPRESSION, "Expected expression", unknownDetail.toStr());
+        let unknownMessage: String = `Unknown feature '${argument.toStr()}' in compile-time condition`;
+        parserRef.emitDiagnostic(
+          argumentToken.span,
+          DiagnosticCode::COMPILE_ERROR,
+          unknownMessage.toStr(),
+          "not a feature this project declares",
+        );
         return Option::NONE;
       }
 
@@ -1135,8 +1140,8 @@ export namespace ParserExpressions {
     }
 
     let span: SourceSpan = ParserShared::mergeSpans(atToken.span, nameToken.span);
-    let detail: String = `unknown compile-time predicate \`@${name.toStr()}\``;
-    parserRef.emitDiagnostic(span, DiagnosticCode::EXPECTED_EXPRESSION, "Expected expression", detail.toStr());
+    let message: String = `Unknown compile-time predicate '@${name.toStr()}'`;
+    parserRef.emitDiagnostic(span, DiagnosticCode::COMPILE_ERROR, message.toStr(), "not a compile-time predicate");
     return Option::NONE;
   }
 
@@ -1180,6 +1185,230 @@ export namespace ParserExpressions {
 
     let next: Token = ParserShared::nextSignificantToken(parserRef, 1);
     return next.kindValue() == TokenKind::KEYWORD && next.keywordValue() == Keyword::ELSE;
+  }
+
+  /// `@configFlag(<condition>)` in annotation position gates the one item or
+  /// statement that follows it. The lookahead keeps it apart from an ordinary
+  /// attribute, which also starts with `@`.
+  function isConfigFlagDirectiveStart(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (!parserRef.atPunctuation(Punctuation::AT)) {
+      return false;
+    }
+
+    let next: Token = ParserShared::nextSignificantToken(parserRef, 1);
+    return next.kindValue() == TokenKind::IDENTIFIER && next.lexemeString().equals("configFlag");
+  }
+
+  /// Consumes the `@configFlag(<condition>)` annotation and folds its
+  /// condition. `true` keeps the gated declaration, `false` drops it, so the
+  /// directive never reaches the AST as an attribute and no later phase has to
+  /// re-read it.
+  function parseConfigFlagDirectiveHeader(parser: &mut ParserShared::State): Option<boolean> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(_) = parserRef.consumePunctuation(Punctuation::AT) else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(_) = parserRef.consumeIdentifier() else {
+      return Option::NONE;
+    };
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::LEFT_PAREN, "expected '(' after 'configFlag'") else {
+      return Option::NONE;
+    };
+
+    let condition: boolean = ParserExpressions::parseCompileConditionOr(parserRef)!;
+
+    let Option::SOME(_) = parserRef.expectPunctuation(Punctuation::RIGHT_PAREN, "expected ')' after compile-time condition") else {
+      return Option::NONE;
+    };
+
+    return Option::SOME(condition);
+  }
+
+  /// Skips the single declaration or statement a false `@configFlag(...)`
+  /// gated off, token by token, so nothing inside it is parsed or reaches the
+  /// AST. A braced item ends with its body; anything else ends at its `;`.
+  function skipGatedDeclaration(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    // Attributes written between the directive and the declaration belong to
+    // the declaration being dropped.
+    while (ParserExpressions::atSkippableAttribute(parserRef)) {
+      parserRef.bump();
+      parserRef.skipTrivia();
+      parserRef.bump();
+
+      if (parserRef.atPunctuation(Punctuation::LEFT_PAREN)) {
+        if (!ParserExpressions::skipBalancedParens(parserRef)) {
+          return false;
+        }
+      }
+    }
+
+    // `export` is a prefix: what it exports is the declaration to skip.
+    if (parserRef.atKeyword(Keyword::EXPORT)) {
+      parserRef.bump();
+
+      // `export X from "...";` and `export X;` carry no inner declaration.
+      parserRef.skipTrivia();
+
+      if (parserRef.current().kindValue() == TokenKind::IDENTIFIER) {
+        return ParserExpressions::skipToSemicolon(parserRef);
+      }
+
+      return ParserExpressions::skipGatedDeclaration(parserRef);
+    }
+
+    if (ParserExpressions::gatedDeclarationHasBody(parserRef)) {
+      while (!parserRef.atPunctuation(Punctuation::LEFT_BRACE) && !parserRef.atEof()) {
+        parserRef.bump();
+      }
+
+      return ParserExpressions::skipBracedBlock(parserRef);
+    }
+
+    return ParserExpressions::skipToSemicolon(parserRef);
+  }
+
+  /// Whether the parser is at an ordinary attribute on the declaration being
+  /// skipped, rather than at another directive.
+  function atSkippableAttribute(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (!parserRef.atPunctuation(Punctuation::AT)) {
+      return false;
+    }
+
+    if (ParserExpressions::isConfigFlagDirectiveStart(parserRef)) {
+      return false;
+    }
+
+    return !ParserExpressions::isCompileIfDirectiveStart(parserRef);
+  }
+
+  /// Whether the declaration about to be skipped ends with a braced body
+  /// rather than a `;`.
+  function gatedDeclarationHasBody(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    if (parserRef.atKeyword(Keyword::EXTERN) || parserRef.atKeyword(Keyword::NAMESPACE)) {
+      return true;
+    }
+
+    if (parserRef.atKeyword(Keyword::FUNCTION) || parserRef.atKeyword(Keyword::RECORD)) {
+      return true;
+    }
+
+    return parserRef.atKeyword(Keyword::ENUM) || parserRef.atKeyword(Keyword::TRAIT);
+  }
+
+  /// Skips tokens through the next top-level `;`, stepping over any braced
+  /// group on the way so a `;` inside it does not end the skip early.
+  function skipToSemicolon(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    while (!parserRef.atPunctuation(Punctuation::SEMICOLON) && !parserRef.atEof()) {
+      if (parserRef.atPunctuation(Punctuation::LEFT_BRACE)) {
+        if (!ParserExpressions::skipBracedBlock(parserRef)) {
+          return false;
+        }
+
+        continue;
+      }
+
+      parserRef.bump();
+    }
+
+    if (parserRef.atPunctuation(Punctuation::SEMICOLON)) {
+      parserRef.bump();
+      return true;
+    }
+
+    parserRef.emitDiagnostic(
+      parserRef.current().span,
+      DiagnosticCode::EXPECTED_DELIMITER,
+      "Expected ',' or '}'",
+      "gated declaration must close before end of file",
+    );
+    return false;
+  }
+
+  /// Skips a balanced `{ ... }` group, nested braces included.
+  function skipBracedBlock(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(openBrace) = parserRef.consumePunctuation(Punctuation::LEFT_BRACE) else {
+      return true;
+    };
+
+    let mut depth: u64 = 1;
+
+    while (depth > 0) {
+      if (parserRef.atEof()) {
+        parserRef.emitDiagnostic(
+          openBrace.span,
+          DiagnosticCode::EXPECTED_DELIMITER,
+          "Expected ',' or '}'",
+          "gated declaration must close before end of file",
+        );
+        return false;
+      }
+
+      let token: Token = parserRef.bump();
+
+      if (token.kindValue() != TokenKind::PUNCTUATION) {
+        continue;
+      }
+
+      if (token.punctuationValue() == Punctuation::LEFT_BRACE) {
+        depth += 1;
+      } else if (token.punctuationValue() == Punctuation::RIGHT_BRACE) {
+        depth -= 1;
+      }
+    }
+
+    return true;
+  }
+
+  /// Skips a balanced `( ... )` group, nested parentheses included.
+  function skipBalancedParens(parser: &mut ParserShared::State): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(openParen) = parserRef.consumePunctuation(Punctuation::LEFT_PAREN) else {
+      return true;
+    };
+
+    let mut depth: u64 = 1;
+
+    while (depth > 0) {
+      if (parserRef.atEof()) {
+        parserRef.emitDiagnostic(
+          openParen.span,
+          DiagnosticCode::EXPECTED_TOKEN,
+          "Expected RightParen",
+          "attribute arguments must close before end of file",
+        );
+        return false;
+      }
+
+      let token: Token = parserRef.bump();
+
+      if (token.kindValue() != TokenKind::PUNCTUATION) {
+        continue;
+      }
+
+      if (token.punctuationValue() == Punctuation::LEFT_PAREN) {
+        depth += 1;
+      } else if (token.punctuationValue() == Punctuation::RIGHT_PAREN) {
+        depth -= 1;
+      }
+    }
+
+    return true;
   }
 
   /// Consumes the `@if(<condition>)` or `@ifelse(<condition>)` head and folds
