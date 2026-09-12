@@ -1278,12 +1278,18 @@ function discoverFixtureGraph(
 ///
 /// Returns an empty string when the fixture passed and the failure text
 /// otherwise.
+///
+/// `compareBaseline` is false for a skipped fixture: it still compiles,
+/// links and runs exactly as its mode dictates, but the exit code alone
+/// decides the outcome and stdout/stderr are never compared against the
+/// baseline, mirroring the host's `run_program_fixture`.
 function runProgramFixture(
   fixture: &FixtureCase,
   projectStart: &Path::PathBuf,
   discovery: &DiscoveryResult,
   options: &CliOptions,
   timeoutSeconds: u64,
+  compareBaseline: boolean,
 ): String {
   if (fixture.mode.forceStd && !discovery.stdEnabled) {
     return String::create("fixture requires the standard library but the project has std disabled");
@@ -1378,6 +1384,14 @@ function runProgramFixture(
     return `LeakSanitizer detected a memory leak\n${split.leak.toStr()}`;
   }
 
+  if (!compareBaseline) {
+    if (outcome.exitCode == 0) {
+      return String::new();
+    }
+
+    return `expected exit code 0, got ${outcome.exitCode}`;
+  }
+
   let body: String = FixtureTests::formatProgramSnapshot(outcome.exitCode, &outcome.stdout, &split.program);
   let snapshotPath: Path::PathBuf = fixture.snapshotPath();
 
@@ -1386,13 +1400,22 @@ function runProgramFixture(
 
 /// Compiles a fixture that is expected to fail and compares the errors it
 /// reported against its baseline.
+///
+/// `compareBaseline` is false for a skipped fixture: the contract is judged
+/// on the failure alone, without reading or writing the baseline, so a
+/// skipped fixture's snapshot is never touched.
 function runDiagnosticsFixture(
   fixture: &FixtureCase,
   projectStart: &Path::PathBuf,
   options: &CliOptions,
+  compareBaseline: boolean,
 ): String {
   let mut discoveryErrors: Vector<String> = Vector::new<String>();
   let Option::SOME(fixtureDiscovery) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
+    if (!compareBaseline) {
+      return String::new();
+    }
+
     let snapshotPath: Path::PathBuf = fixture.snapshotPath();
     let body: String = joinDiagnosticMessages(&discoveryErrors);
 
@@ -1407,6 +1430,10 @@ function runDiagnosticsFixture(
     return String::create("expected the fixture to fail compilation, but it compiled cleanly");
   }
 
+  if (!compareBaseline) {
+    return String::new();
+  }
+
   let snapshotPath: Path::PathBuf = fixture.snapshotPath();
   let body: String = joinDiagnosticMessages(&compiled.errorMessages);
 
@@ -1415,10 +1442,13 @@ function runDiagnosticsFixture(
 
 /// Compiles a fixture that is expected to build cleanly and compares the
 /// warnings it reported against its baseline.
+///
+/// See `runDiagnosticsFixture` for what `compareBaseline` skips.
 function runWarningsFixture(
   fixture: &FixtureCase,
   projectStart: &Path::PathBuf,
   options: &CliOptions,
+  compareBaseline: boolean,
 ): String {
   let mut discoveryErrors: Vector<String> = Vector::new<String>();
   let Option::SOME(fixtureDiscovery) = discoverFixtureGraph(fixture, projectStart, options, &mut discoveryErrors) else {
@@ -1439,13 +1469,30 @@ function runWarningsFixture(
     return String::create("expected the fixture to report warnings, but it compiled without any");
   }
 
+  if (!compareBaseline) {
+    return String::new();
+  }
+
   let snapshotPath: Path::PathBuf = fixture.snapshotPath();
   let body: String = joinDiagnosticMessages(&compiled.warningMessages);
 
   return FixtureTests::compareSnapshot(&snapshotPath, &body, options.updateSnapshots);
 }
 
-/// Runs one fixture and reports it as an ordinary plan entry.
+/// Runs one fixture and reports it as an ordinary plan entry, honoring its
+/// skip header if it has one.
+///
+/// A skipped fixture still compiles and runs exactly as its mode dictates
+/// (see `runProgramFixture`/`runDiagnosticsFixture`/`runWarningsFixture`),
+/// but its baseline is never touched and the verdict is inverted: the
+/// mode's contract failing is reported as a skip so the run stays green,
+/// while the contract passing fails the run outright, because a skip
+/// header whose fixture now passes is stale. Mirrors the host's
+/// `run_single_fixture`.
+///
+/// A malformed header (`fixture.modeError` non-empty) always fails, skip
+/// header or not: the fixture's mode was never established, so there is no
+/// contract to judge it against.
 function runFixture(
   fixture: &FixtureCase,
   projectStart: &Path::PathBuf,
@@ -1453,15 +1500,44 @@ function runFixture(
   options: &CliOptions,
   timeoutSeconds: u64,
 ): TestOutcome {
-  let mut failure: String = String::new();
-
   if (fixture.modeError.length() > 0) {
-    failure = fixture.modeError.clone();
-  } else {
-    failure = match (fixture.mode.kind) {
-      FixtureKind::DIAGNOSTICS -> runDiagnosticsFixture(fixture, projectStart, options),
-      FixtureKind::WARNINGS -> runWarningsFixture(fixture, projectStart, options),
-      FixtureKind::PROGRAM -> runProgramFixture(fixture, projectStart, discovery, options, timeoutSeconds),
+    return TestOutcome {
+      fqName: fixture.name.clone(),
+      success: false,
+      exitCode: 1,
+      stdout: String::new(),
+      stderr: fixture.modeError.clone(),
+      skipped: String::new(),
+    };
+  }
+
+  let compareBaseline: boolean = fixture.skipReason.length() == 0;
+
+  let failure: String = match (fixture.mode.kind) {
+    FixtureKind::DIAGNOSTICS -> runDiagnosticsFixture(fixture, projectStart, options, compareBaseline),
+    FixtureKind::WARNINGS -> runWarningsFixture(fixture, projectStart, options, compareBaseline),
+    FixtureKind::PROGRAM -> runProgramFixture(fixture, projectStart, discovery, options, timeoutSeconds, compareBaseline),
+  };
+
+  if (!compareBaseline) {
+    if (failure.length() == 0) {
+      return TestOutcome {
+        fqName: fixture.name.clone(),
+        success: false,
+        exitCode: 1,
+        stdout: String::new(),
+        stderr: `this fixture is marked '// e2e: skip ${fixture.skipReason.toStr()}' but now passes; remove the skip header and record its baseline`,
+        skipped: String::new(),
+      };
+    }
+
+    return TestOutcome {
+      fqName: fixture.name.clone(),
+      success: true,
+      exitCode: 0,
+      stdout: String::new(),
+      stderr: String::new(),
+      skipped: fixture.skipReason.clone(),
     };
   }
 
@@ -1472,6 +1548,7 @@ function runFixture(
       exitCode: 0,
       stdout: String::new(),
       stderr: String::new(),
+      skipped: String::new(),
     };
   }
 
@@ -1481,6 +1558,7 @@ function runFixture(
     exitCode: 1,
     stdout: String::new(),
     stderr: failure,
+    skipped: String::new(),
   };
 }
 

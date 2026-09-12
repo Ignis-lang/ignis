@@ -50,6 +50,14 @@ export record TestOutcome {
   public exitCode: i32;
   public stdout: String;
   public stderr: String;
+
+  /// Reason from a `// e2e: skip <reason>` header line whose contract held,
+  /// empty otherwise. Mirrors the host's `TestExecutionResult::skipped`
+  /// `Option<String>`: `success` stays `true` for a skipped outcome, so
+  /// existing pass/fail arithmetic keeps treating the run as green, and this
+  /// field only adds the separate `skipped` count and status label reporting
+  /// sites carry.
+  public skipped: String;
 }
 
 /// Longest failure stream excerpt reported per stream, in characters.
@@ -643,6 +651,7 @@ export namespace TestRunner {
               exitCode: outcome.exitCode,
               stdout: outcome.stdout.clone(),
               stderr: reportedError,
+              skipped: String::new(),
             });
 
             failed = false;
@@ -657,6 +666,7 @@ export namespace TestRunner {
           exitCode: 1,
           stdout: String::new(),
           stderr: `failed to run test '${testCase.fqName.toStr()}'`,
+          skipped: String::new(),
         });
       }
 
@@ -1078,21 +1088,53 @@ export namespace TestRunner {
     return passed;
   }
 
+  /// `passed` already includes a skipped outcome (its `success` stays
+  /// `true`), so this is the separate, informational count layered on top,
+  /// mirroring the host's `TestRunCounts::skipped`.
+  function countSkipped(outcomes: &Vector<TestOutcome>): u64 {
+    let mut skipped: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < outcomes.length()) {
+      if (let Option::SOME(outcome) = outcomes.get(index) && outcome.skipped.length() > 0) {
+        skipped += 1;
+      }
+
+      index += 1;
+    }
+
+    return skipped;
+  }
+
+  /// Plain-text status word for one outcome's plan line, mirroring the
+  /// host's `test_run_status_text`. A skipped case reports `skip (reason)`
+  /// rather than `ok`, even though `success` is `true`, so a reader scanning
+  /// the plan can tell a genuinely green case from one that only passed
+  /// because its contract failed as expected.
+  function statusText(outcome: &TestOutcome): String {
+    if (outcome.skipped.length() > 0) {
+      return `skip (${outcome.skipped.toStr()})`;
+    }
+
+    return outcome.success ? String::create("ok") : String::create("FAILED");
+  }
+
   /// Print the run in the host's shape: one line per test, a failure section,
   /// then the totals. Returns the number of failures.
   function report(outcomes: &Vector<TestOutcome>, binaryPath: &Path::PathBuf): u64 {
     let total: u64 = outcomes.length();
     let passed: u64 = TestRunner::countPassed(outcomes);
     let failed: u64 = total - passed;
+    let skipped: u64 = TestRunner::countSkipped(outcomes);
     let mut index: u64 = 0;
 
     while (index < outcomes.length()) {
       let Option::SOME(outcome) = outcomes.get(index) else {
         break;
       };
-      let status: str = outcome.success ? "ok" : "FAILED";
+      let status: String = TestRunner::statusText(outcome);
 
-      Io::eprintln(`  - ${outcome.fqName.toStr()} ... ${status}`);
+      Io::eprintln(`  - ${outcome.fqName.toStr()} ... ${status.toStr()}`);
       index += 1;
     }
 
@@ -1132,6 +1174,11 @@ export namespace TestRunner {
     Io::eprintln(`  - ${total} total`);
     Io::eprintln(`  - ${passed} passed`);
     Io::eprintln(`  - ${failed} failed`);
+
+    if (skipped > 0) {
+      Io::eprintln(`  - ${skipped} skipped`);
+    }
+
     Io::eprintln(`  Test binary: ${binaryPath.asStr()}`);
 
     return failed;
@@ -1418,6 +1465,7 @@ function testRunnerFailureDetailsIndentEachStreamUnderItsLabel(): void {
     exitCode: 101,
     stdout: String::new(),
     stderr: String::create("panic: boom\nat line 3\n"),
+    skipped: String::new(),
   };
 
   let detailLines: Vector<String> = TestRunner::formatFailedTestDetails(&outcome);
@@ -1443,4 +1491,77 @@ function testRunnerFailureDetailsIndentEachStreamUnderItsLabel(): void {
     .concat("    at line 3");
 
   Test::assertEq<str>(joined.toStr(), expected.toStr());
+}
+
+/// A plain passing outcome reports `ok`, mirroring the host's
+/// `test_run_status_text`.
+@test
+function testRunnerStatusTextReportsOkForAPlainPass(): void {
+  let outcome: TestOutcome = TestOutcome {
+    fqName: String::create("main::passes"),
+    success: true,
+    exitCode: 0,
+    stdout: String::new(),
+    stderr: String::new(),
+    skipped: String::new(),
+  };
+
+  Test::assertEq<str>(TestRunner::statusText(&outcome).toStr(), "ok");
+}
+
+/// A plain failing outcome reports `FAILED`.
+@test
+function testRunnerStatusTextReportsFailedForAPlainFailure(): void {
+  let outcome: TestOutcome = TestOutcome {
+    fqName: String::create("main::fails"),
+    success: false,
+    exitCode: 101,
+    stdout: String::new(),
+    stderr: String::create("panic: boom\n"),
+    skipped: String::new(),
+  };
+
+  Test::assertEq<str>(TestRunner::statusText(&outcome).toStr(), "FAILED");
+}
+
+/// A skipped outcome reports `skip (reason)` even though `success` is
+/// `true`, so a reader scanning the plan can tell a genuinely green case
+/// from one that only passed because its contract failed as expected.
+@test
+function testRunnerStatusTextReportsSkipWithItsReason(): void {
+  let outcome: TestOutcome = TestOutcome {
+    fqName: String::create("e2e::flaky"),
+    success: true,
+    exitCode: 0,
+    stdout: String::new(),
+    stderr: String::new(),
+    skipped: String::create("flaky on CI"),
+  };
+
+  Test::assertEq<str>(TestRunner::statusText(&outcome).toStr(), "skip (flaky on CI)");
+}
+
+function testRunnerOutcomeNamed(name: str, success: boolean, skipped: str): TestOutcome {
+  return TestOutcome {
+    fqName: String::create(name),
+    success: success,
+    exitCode: success ? 0 : 1,
+    stdout: String::new(),
+    stderr: String::new(),
+    skipped: String::create(skipped),
+  };
+}
+
+/// `countPassed` counts a skipped outcome as passing (its `success` stays
+/// `true`), while `countSkipped` reports it separately, mirroring the
+/// host's `TestRunCounts` where `passed` already includes `skipped`.
+@test
+function testRunnerCountsTreatASkippedOutcomeAsPassedAndSkipped(): void {
+  let mut outcomes: Vector<TestOutcome> = Vector::new<TestOutcome>();
+  outcomes.push(testRunnerOutcomeNamed("main::passes", true, ""));
+  outcomes.push(testRunnerOutcomeNamed("e2e::flaky", true, "flaky on CI"));
+  outcomes.push(testRunnerOutcomeNamed("main::fails", false, ""));
+
+  Test::assertEq<u64>(TestRunner::countPassed(&outcomes), 2);
+  Test::assertEq<u64>(TestRunner::countSkipped(&outcomes), 1);
 }
