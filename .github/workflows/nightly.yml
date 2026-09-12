@@ -244,6 +244,14 @@ jobs:
   # not a candidate resets the streak to zero and uploads no selfhost binary,
   # which leaves the last published one in place.
   #
+  # A run whose stage0 fell back from official to host (scripts/bootstrap.sh's
+  # build_stage1, `promotion.json`'s `stage0.fallback: true`) proves the host
+  # still passes the ladder, which every run already assumes — it says nothing
+  # about the official asset itself. Such a run leaves the streak exactly as it
+  # found it (neither incremented nor reset) and publishes no selfhost binary,
+  # so a stale official asset can neither promote itself nor get demoted by the
+  # very failure the fallback exists to survive.
+  #
   # Supersede
   # ---------
   # The ladder holds the `nightly` concurrency group for as long as it runs, so a
@@ -326,8 +334,14 @@ jobs:
           mkdir -p build/bootstrap
           STAGE0_JSON="build/bootstrap/stage0.json"
 
+          # `mode` records the workflow_dispatch input (auto/host/official) so
+          # `scripts/bootstrap.sh stages` can tell an explicit `stage0=official`
+          # (must fail outright if the asset cannot build stage1) apart from an
+          # `auto` resolution that landed on official (may fall back to the
+          # host — see build_stage1's stage0_explicit_official()).
           write_host_stage0() {
-            printf '{"kind": "host", "source": "target/ci/ignis", "sha256": ""}\n' >"$STAGE0_JSON"
+            jq -n --arg mode "$STAGE0_MODE" \
+              '{kind: "host", source: "target/ci/ignis", sha256: "", mode: $mode}' >"$STAGE0_JSON"
           }
 
           if [ "$STAGE0_MODE" = "host" ]; then
@@ -386,8 +400,8 @@ jobs:
 
           echo "IGNIS_STAGE0=${WORKDIR}/ignis-selfhost-linux-amd64" >>"$GITHUB_ENV"
 
-          jq -n --arg source "${WORKDIR}/ignis-selfhost-linux-amd64" --arg sha256 "$SHA256" \
-            '{kind: "official", source: $source, sha256: $sha256}' >"$STAGE0_JSON"
+          jq -n --arg source "${WORKDIR}/ignis-selfhost-linux-amd64" --arg sha256 "$SHA256" --arg mode "$STAGE0_MODE" \
+            '{kind: "official", source: $source, sha256: $sha256, mode: $mode}' >"$STAGE0_JSON"
 
           echo "stage0: official (sha ${SHA256})"
 
@@ -481,6 +495,7 @@ jobs:
           path: |
             build/bootstrap/stage0.json
             build/bootstrap/stage1/ignis
+            build/bootstrap/stage1/log-stage0-official.txt
             build/bootstrap/stage2/ignis
             build/bootstrap/stage2/selfhost_emit.c
             build/bootstrap/*/measure.json
@@ -693,6 +708,7 @@ jobs:
             build/bootstrap/gates/
             build/bootstrap/*/log.txt
             build/bootstrap/*/log-host.txt
+            build/bootstrap/stage1/log-stage0-official.txt
             build/bootstrap/stage2/ignis
           if-no-files-found: ignore
 
@@ -732,6 +748,17 @@ jobs:
 
           CANDIDATE=$(jq -r '.candidate' build/bootstrap/promotion.json)
           COMMIT=$(jq -r '.commit' build/bootstrap/promotion.json)
+          STAGE0_FALLBACK=$(jq -r '.stage0.fallback // false' build/bootstrap/promotion.json)
+
+          # See the "Promotion flow" comment on the `stages` job: a fallback
+          # run proves the host, not the official asset, so it must not move
+          # the streak in either direction and must not publish a binary.
+          if [ "$STAGE0_FALLBACK" = "true" ]; then
+            REASON=$(jq -r '.stage0.fallback_reason // "no reason recorded"' build/bootstrap/promotion.json)
+            echo "::warning::stage0 fell back to the host: ${REASON}"
+            echo "stage0 fell back to the host; the promotion streak stays at ${PREVIOUS_STREAK:-0} and no selfhost binary is published."
+            exit 0
+          fi
 
           if [ "$CANDIDATE" = "true" ]; then
             STREAK=$(( ${PREVIOUS_STREAK:-0} + 1 ))
@@ -778,6 +805,10 @@ jobs:
 
           jq -r '.gates | to_entries[] | "\(.key): \(.value.status) — \(.value.summary)"' \
             build/bootstrap/promotion.json
+
+          if [ "$(jq -r '.stage0.fallback // false' build/bootstrap/promotion.json)" = "true" ]; then
+            echo "stage0: fell back to the host — $(jq -r '.stage0.fallback_reason // "no reason recorded"' build/bootstrap/promotion.json)"
+          fi
 
           if [ "$(jq -r '.candidate' build/bootstrap/promotion.json)" != "true" ]; then
             echo "Not a promotion candidate: at least one gate did not pass."

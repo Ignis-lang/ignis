@@ -321,6 +321,17 @@ def read_stage0(bootstrap_root: Path) -> dict:
 
 
 def format_stage0_line(stage0: dict) -> str:
+  # Checked first: a fallback keeps `kind` as the resolved stage0 kind
+  # (`official`, usually), since scripts/bootstrap.sh's stage0_is_selfhost
+  # reads it back on a later build_stage1 call. What actually built stage1
+  # this run is `used_kind`, so the fallback has to be read off that before
+  # `kind` is read as if nothing had happened.
+  if stage0.get("fallback"):
+    reason = stage0.get("fallback_reason") or "the official stage0 compiler could not build stage1"
+    used_kind = stage0.get("used_kind", "host")
+    original_kind = stage0.get("original_kind", stage0.get("kind", "official"))
+    return f"stage0: {used_kind} (fallback from {original_kind} — {reason})"
+
   if stage0.get("kind") == "official":
     sha256 = stage0.get("sha256") or "unknown"
     return f"stage0: official (sha {sha256})"
