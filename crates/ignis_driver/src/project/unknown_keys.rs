@@ -184,13 +184,24 @@ fn locate_key(
         return (offset + pos as u32, offset + pos as u32 + key.len() as u32);
       }
     } else if in_section {
-      let candidate = format!("{key} ");
-      let candidate_eq = format!("{key}=");
+      // A bare key (`key = ...`) spans just the key text; a quoted key
+      // (`"key" = ...`, needed for a key TOML's bare-key syntax can't spell,
+      // such as a non-ASCII one) spans the whole quoted token including its
+      // quotes, matching the selfhost's own lexer-token-based key span.
+      let bare = format!("{key} ");
+      let bare_eq = format!("{key}=");
+      let quoted = format!("\"{key}\"");
 
-      if (trimmed.starts_with(&candidate) || trimmed.starts_with(&candidate_eq))
+      if (trimmed.starts_with(&bare) || trimmed.starts_with(&bare_eq))
         && let Some(pos) = line.find(key)
       {
         return (offset + pos as u32, offset + pos as u32 + key.len() as u32);
+      }
+
+      if trimmed.starts_with(&quoted)
+        && let Some(pos) = line.find(&quoted)
+      {
+        return (offset + pos as u32, offset + pos as u32 + quoted.len() as u32);
       }
     }
 
@@ -209,7 +220,7 @@ fn table_label(table_path: &str) -> String {
 }
 
 /// Builds the "unknown key" warning message shared by both compilers.
-pub fn unknown_key_message(
+fn unknown_key_message(
   table_path: &str,
   key: &str,
   suggestion: Option<&str>,
@@ -304,6 +315,11 @@ pub fn warn_unknown_manifest_keys(
     MANIFEST_UNKNOWN_KEY_CODE,
     &mut diagnostics,
   );
+
+  // See the matching sort in `project::find::warn_unknown_keys`: it keeps
+  // the host's `BTreeMap`-ordered walk in file order, matching the
+  // selfhost's line-scanning loader.
+  diagnostics.sort_by_key(|diagnostic| diagnostic.primary_span.start);
 
   ignis_diagnostics::render_batch_to_stderr(&diagnostics, &sm);
 }
@@ -451,5 +467,56 @@ modules = ["compile"]
 "#;
     let diags = diagnostics_for(source, &MANIFEST_SCHEMA, MANIFEST_UNKNOWN_KEY_CODE);
     assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+  }
+
+  /// IGN-239 review #7: edit distance compares codepoints, not bytes, so a
+  /// non-ASCII key within codepoint distance 2 of a known key still gets a
+  /// suggestion (a byte-based distance would place a multi-byte substitution
+  /// too far away). Also exercises the quoted-key span (TOML's bare-key
+  /// syntax cannot spell a non-ASCII key), which `locate_key` finds and
+  /// spans by the whole quoted token, matching the selfhost's key span.
+  #[test]
+  fn non_ascii_key_gets_a_suggestion_and_a_quoted_span() {
+    let source = "[package]\nname = \"test\"\nversion = \"0.1.0\"\n\n[build]\n\"\u{e7}\u{e7}\" = \"clang\"\n";
+    let diags = diagnostics_for(source, &PROJECT_SCHEMA, PROJECT_UNKNOWN_KEY_CODE);
+
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].message, "unknown key '\u{e7}\u{e7}' in [build]; did you mean 'cc'?");
+    // The span covers the whole quoted token `"çç"` (4 codepoints), not just
+    // the 2 codepoints of the bare key text.
+    assert_eq!(diags[0].primary_span.end.0 - diags[0].primary_span.start.0, 6);
+  }
+
+  /// IGN-239 review #1: `toml::Value`'s table is a `BTreeMap`, so it visits
+  /// keys alphabetically ("build" before "package" before "zzz_unknown"),
+  /// not in file order. Production sorts by `primary_span.start` after
+  /// calling `check_unknown_keys` (see `warn_unknown_keys`); this pins that
+  /// exact sort against the raw, unsorted walk order regressing.
+  #[test]
+  fn warnings_sort_into_file_order_despite_the_btreemap_walk() {
+    let source = r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[zzz_unknown_table]
+x = 1
+
+[ignis]
+std = true
+alpha_unknown_in_ignis = 1
+
+[build]
+source_dir = "src"
+entry = "main.ign"
+beta_unknown_in_build = 1
+"#;
+    let mut diags = diagnostics_for(source, &PROJECT_SCHEMA, PROJECT_UNKNOWN_KEY_CODE);
+    diags.sort_by_key(|d| d.primary_span.start);
+
+    assert_eq!(diags.len(), 3);
+    assert_eq!(diags[0].message, "unknown key 'zzz_unknown_table' in [top-level]");
+    assert_eq!(diags[1].message, "unknown key 'alpha_unknown_in_ignis' in [ignis]");
+    assert_eq!(diags[2].message, "unknown key 'beta_unknown_in_build' in [build]");
   }
 }

@@ -31,6 +31,6 @@ pub use errors::ProjectError;
 pub use find::{find_project_root, load_project_toml, PROJECT_FILE};
 pub use resolve::{resolve_project, CliOverrides, EmitSet, Project};
 pub use unknown_keys::{
-  check_unknown_keys, unknown_key_message, warn_unknown_manifest_keys, KeySchema, MANIFEST_SCHEMA,
-  MANIFEST_UNKNOWN_KEY_CODE, PROJECT_SCHEMA, PROJECT_UNKNOWN_KEY_CODE,
+  check_unknown_keys, warn_unknown_manifest_keys, KeySchema, MANIFEST_SCHEMA, MANIFEST_UNKNOWN_KEY_CODE,
+  PROJECT_SCHEMA, PROJECT_UNKNOWN_KEY_CODE,
 };

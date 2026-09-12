@@ -509,6 +509,256 @@ function main(): void {
   );
 }
 
+/// Strips ANSI color escapes (`\x1b[...m`), the way `scripts/selfhost_e2e_parity.py`
+/// already does when comparing host and selfhost diagnostic text.
+fn strip_ansi(text: &str) -> String {
+  let mut out = String::with_capacity(text.len());
+  let mut chars = text.chars().peekable();
+
+  while let Some(c) = chars.next() {
+    if c == '\u{1b}' && chars.peek() == Some(&'[') {
+      chars.next();
+      for next in chars.by_ref() {
+        if next.is_ascii_alphabetic() {
+          break;
+        }
+      }
+      continue;
+    }
+    out.push(c);
+  }
+
+  out
+}
+
+/// Pulls out, in emitted order, each diagnostic's `Warning[CODE]: message`
+/// summary line paired with its `--> path:line:col` location line.
+///
+/// This is deliberately not a raw full-stderr comparison: the host's
+/// `ignis_log` macros write every progress banner and phase line to stderr,
+/// while the selfhost writes that same progress to stdout and only
+/// diagnostics to stderr (verified directly — a host `stderr` for these
+/// fixtures contains "Checking ..."/"Building std ..." noise a stage1
+/// `stderr` never does). Comparing whole streams would fail on that
+/// architecture difference regardless of whether the diagnostics themselves
+/// agree, so this extracts exactly the part of stderr both compilers are
+/// making a wording/ordering/position promise about instead.
+fn extract_unknown_key_summaries(stderr: &str) -> Vec<String> {
+  let plain = strip_ansi(stderr);
+  let lines: Vec<&str> = plain.lines().collect();
+  let mut summaries = Vec::new();
+  let mut index = 0;
+
+  while index < lines.len() {
+    let line = lines[index].trim();
+
+    if line.starts_with("Warning[") && line.contains("unknown key") {
+      let location = lines
+        .get(index + 1)
+        .map(|l| l.trim())
+        .filter(|l| l.starts_with("-->"))
+        .unwrap_or("<missing location>");
+      summaries.push(format!("{line} {location}"));
+    }
+
+    index += 1;
+  }
+
+  summaries
+}
+
+struct UnknownKeyParityFixture {
+  label: &'static str,
+  write: fn(&Path),
+}
+
+fn write_unknown_key_project_toml(
+  project_dir: &Path,
+  ignis_section_extra: &str,
+  build_section_extra: &str,
+  extra_top_level_table: &str,
+) {
+  fs::write(project_dir.join("src/main.ign"), NO_TESTS_MAIN).expect("write main module");
+
+  fs::write(
+    project_dir.join("ignis.toml"),
+    format!(
+      "[package]\nname = \"config_unknown_key_parity\"\nversion = \"0.1.0\"\n\n{extra_top_level_table}[ignis]\nstd_path = \"{std_path}\"\n{ignis_section_extra}\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\n{build_section_extra}",
+      std_path = workspace_std_path().display(),
+    ),
+  )
+  .expect("write ignis.toml");
+}
+
+/// Multiple unknown keys spread across different tables, in an order a
+/// `BTreeMap`-driven walk (alphabetical by key) would not reproduce: the
+/// unknown top-level table sorts last alphabetically ("zzz_unknown_table")
+/// but appears first in the file, so this only stays in file order if both
+/// compilers sort their warnings by source position (IGN-239 review #1).
+/// Also carries one non-ASCII key ("çç", two 2-byte UTF-8 scalars) a
+/// byte-by-byte edit distance would place too far from "cc" to suggest
+/// (IGN-239 review #7): counted as codepoints, it is a two-substitution,
+/// distance-2 match.
+fn write_project_multi_key_and_non_ascii(project_dir: &Path) {
+  write_unknown_key_project_toml(
+    project_dir,
+    "alpha_unknown_in_ignis = 1\n",
+    "beta_unknown_in_build = 1\n\"çç\" = \"clang\"\n",
+    "[zzz_unknown_table]\nx = 1\n\n",
+  );
+}
+
+fn write_manifest_fixture(
+  project_dir: &Path,
+  manifest_prefix: &str,
+  manifest_suffix: &str,
+) {
+  fs::write(project_dir.join("src/main.ign"), NO_TESTS_MAIN).expect("write main module");
+
+  let std_dir = copy_workspace_std(project_dir);
+  let manifest_path = std_dir.join("manifest.toml");
+  let original = fs::read_to_string(&manifest_path).expect("read copied manifest.toml");
+  fs::write(&manifest_path, format!("{manifest_prefix}{original}{manifest_suffix}")).expect("rewrite manifest.toml");
+
+  fs::write(
+    project_dir.join("ignis.toml"),
+    "[package]\nname = \"config_unknown_key_parity\"\nversion = \"0.1.0\"\n\n[ignis]\nstd_path = \"std\"\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\n",
+  )
+  .expect("write ignis.toml");
+}
+
+/// A stray key before any `[section]` header belongs to the manifest's
+/// implicit root table; the host warns `unknown key 'x' in [top-level]`
+/// there, which `buildManifestCheckAssignmentKey` used to miss entirely
+/// because it returned early whenever `currentSection` was still empty
+/// (IGN-239 review #3).
+fn write_manifest_root_key(project_dir: &Path) {
+  write_manifest_fixture(project_dir, "runtime_stray = \"x\"\n\n", "");
+}
+
+/// `[toolchan.sub]` is a dotted header for an unrecognized root key. TOML
+/// itself decomposes this into root key `toolchan` holding a nested table
+/// `sub`, so the host warns about `toolchan` (suggesting `toolchain`) — never
+/// about the literal string `toolchan.sub`. The selfhost's hand-rolled
+/// section scanner used to report the whole dotted text as one key and lose
+/// the suggestion (IGN-239 review #2).
+fn write_manifest_dotted_unknown_section(project_dir: &Path) {
+  write_manifest_fixture(project_dir, "", "\n[toolchan.sub]\nopt = 1\n");
+}
+
+/// A typo'd key inside `[linking.<module>]` against the six field names the
+/// host accepts there. The selfhost loader does not consume `[linking.*]`
+/// content at all, so it used to skip validating it completely — the whole
+/// namespace was (and, for its module name, still is) treated as recognized
+/// without checking field names (IGN-239 review #4).
+fn write_manifest_linking_typo(project_dir: &Path) {
+  write_manifest_fixture(project_dir, "", "\n[linking.io]\nobjct = \"runtime/libio.o\"\n");
+}
+
+/// Several unknown manifest keys in file order, spanning sections a
+/// `BTreeMap` walk would reorder alphabetically (IGN-239 review #1, mirrored
+/// for `std/manifest.toml`).
+fn write_manifest_multi_key_ordering(project_dir: &Path) {
+  // "aaa_unknown_section" sorts alphabetically before "zzz_root_stray", but
+  // this only stays in file order (root stray key first, then the appended
+  // section) if the walk is sorted by source position rather than by a
+  // `BTreeMap`'s key order. Appending a brand-new table name (rather than
+  // reopening `[toolchain]`/`[auto_load]`, which the real manifest already
+  // declares) avoids a duplicate-table TOML parse error that would silently
+  // produce zero warnings instead of exercising the ordering.
+  write_manifest_fixture(
+    project_dir,
+    "zzz_root_stray = \"x\"\n\n",
+    "\n[aaa_unknown_section]\nsomething = 1\n",
+  );
+}
+
+fn unknown_key_parity_fixtures() -> Vec<UnknownKeyParityFixture> {
+  vec![
+    UnknownKeyParityFixture {
+      label: "project-multi-key-and-non-ascii",
+      write: write_project_multi_key_and_non_ascii,
+    },
+    UnknownKeyParityFixture {
+      label: "manifest-root-key",
+      write: write_manifest_root_key,
+    },
+    UnknownKeyParityFixture {
+      label: "manifest-dotted-unknown-section",
+      write: write_manifest_dotted_unknown_section,
+    },
+    UnknownKeyParityFixture {
+      label: "manifest-linking-typo",
+      write: write_manifest_linking_typo,
+    },
+    UnknownKeyParityFixture {
+      label: "manifest-multi-key-ordering",
+      write: write_manifest_multi_key_ordering,
+    },
+  ]
+}
+
+/// IGN-239: the host and the selfhost (stage1) compiler must warn
+/// identically — same wording, same diagnostic codes, same order, same
+/// source position — on an unknown `ignis.toml`/`std/manifest.toml` key,
+/// across every case the PR #197 review reproduced a divergence on: multi-key
+/// file ordering, a dotted unknown manifest section, a stray manifest
+/// root-level key, a `[linking.<module>]` typo, and a non-ASCII key. See
+/// `extract_unknown_key_summaries` for why this compares extracted
+/// diagnostic summaries rather than raw stderr.
+#[test]
+fn selfhost_adapter_config_unknown_key_parity() {
+  let stage1 = selfhost_compiler();
+
+  for fixture in unknown_key_parity_fixtures() {
+    let project_dir = make_temp_project_dir(&format!("config-unknown-key-{}", fixture.label));
+    (fixture.write)(&project_dir);
+
+    let host_output = Command::new(env!("CARGO_BIN_EXE_ignis"))
+      .current_dir(&project_dir)
+      .arg("check")
+      .arg("--project")
+      .arg(".")
+      .output()
+      .expect("run host ignis check");
+
+    let stage1_output = Command::new(stage1)
+      .current_dir(&project_dir)
+      .arg("check")
+      .output()
+      .expect("run stage1 ignis check");
+
+    let host_stderr = String::from_utf8_lossy(&host_output.stderr).into_owned();
+    let stage1_stderr = String::from_utf8_lossy(&stage1_output.stderr).into_owned();
+    cleanup_project_dir(&project_dir);
+
+    assert!(
+      host_output.status.success(),
+      "expected the host to succeed on fixture '{}' despite the unknown key(s)\nstderr:\n{host_stderr}",
+      fixture.label
+    );
+    assert!(
+      stage1_output.status.success(),
+      "expected stage1 to succeed on fixture '{}' despite the unknown key(s)\nstderr:\n{stage1_stderr}",
+      fixture.label
+    );
+
+    let host_summaries = extract_unknown_key_summaries(&host_stderr);
+    let stage1_summaries = extract_unknown_key_summaries(&stage1_stderr);
+
+    assert!(
+      !host_summaries.is_empty(),
+      "expected fixture '{}' to exercise at least one unknown-key warning on the host\nstderr:\n{host_stderr}",
+      fixture.label
+    );
+    assert_eq!(
+      host_summaries, stage1_summaries,
+      "host and stage1 diverged on fixture '{}'\nhost stderr:\n{host_stderr}\nstage1 stderr:\n{stage1_stderr}",
+      fixture.label
+    );
+  }
+}
+
 #[test]
 fn ignis_test_keeps_top_level_test_discovery_with_directive_functions_via_cli() {
   let project_dir = make_temp_project_dir("directive-test-compat");

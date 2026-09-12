@@ -660,13 +660,43 @@ function requireStdManifest(project: ResolvedProject): Result<ResolvedProject, D
   return Result::OK(project);
 }
 
-/// Levenshtein edit distance between two byte strings.
+/// Collects the Unicode scalar values of `text` in order.
 ///
-/// Config keys are ASCII identifiers, so byte-level distance is exact here.
-/// Mirrors the host's `ignis_driver::project::unknown_keys::edit_distance`.
-function editDistance(a: str, b: str): u64 {
-  let left: String = String::create(a);
-  let right: String = String::create(b);
+/// Used so edit distance compares codepoints rather than bytes: a
+/// multi-byte UTF-8 scalar must count as one substitution/insertion/deletion,
+/// not as however many bytes it happens to encode to.
+export function configCollectChars(text: str): Vector<char> {
+  let owned: String = String::create(text);
+  let mut characters: Vector<char> = Vector::new<char>();
+  let mut offset: u64 = 0;
+
+  while (offset < owned.length()) {
+    let mut endByte: u64 = offset;
+    let Option::SOME(character) = owned.charAt(offset, &mut endByte) else {
+      break;
+    };
+
+    characters.push(character);
+    offset = endByte;
+  }
+
+  return characters;
+}
+
+/// Reads one cell of a flattened Levenshtein DP table.
+export function configEditDistanceCellAt(row: &Vector<u64>, index: u64): u64 {
+  return match (row.get(index)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> 0,
+  };
+}
+
+/// Levenshtein edit distance between two strings, compared codepoint by
+/// codepoint (not byte by byte), matching the host's
+/// `ignis_driver::project::unknown_keys::edit_distance`.
+export function configEditDistance(a: str, b: str): u64 {
+  let left: Vector<char> = configCollectChars(a);
+  let right: Vector<char> = configCollectChars(b);
   let n: u64 = left.length();
   let m: u64 = right.length();
   let width: u64 = m + 1;
@@ -694,13 +724,19 @@ function editDistance(a: str, b: str): u64 {
   while (i <= n) {
     j = 1;
     while (j <= m) {
-      let leftByte: u8 = left.byteAt(i - 1).unwrapOr(0);
-      let rightByte: u8 = right.byteAt(j - 1).unwrapOr(0);
-      let cost: u64 = leftByte == rightByte ? 0 : 1;
+      let leftChar: char = match (left.get(i - 1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> ' ',
+      };
+      let rightChar: char = match (right.get(j - 1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> ' ',
+      };
+      let cost: u64 = leftChar == rightChar ? 0 : 1;
 
-      let deletion: u64 = dpAt(&row, (i - 1) * width + j) + 1;
-      let insertion: u64 = dpAt(&row, i * width + (j - 1)) + 1;
-      let substitution: u64 = dpAt(&row, (i - 1) * width + (j - 1)) + cost;
+      let deletion: u64 = configEditDistanceCellAt(&row, (i - 1) * width + j) + 1;
+      let insertion: u64 = configEditDistanceCellAt(&row, i * width + (j - 1)) + 1;
+      let substitution: u64 = configEditDistanceCellAt(&row, (i - 1) * width + (j - 1)) + cost;
 
       let mut best: u64 = deletion;
       if (insertion < best) {
@@ -716,22 +752,15 @@ function editDistance(a: str, b: str): u64 {
     i += 1;
   }
 
-  return dpAt(&row, n * width + m);
-}
-
-/// Reads one cell of the flattened Levenshtein DP table.
-function dpAt(row: &Vector<u64>, index: u64): u64 {
-  return match (row.get(index)) {
-    Option::SOME(value) -> *value,
-    Option::NONE -> 0,
-  };
+  return configEditDistanceCellAt(&row, n * width + m);
 }
 
 /// Closest key to `key` among `known` within edit distance 2, if any.
 ///
 /// Ties break on declaration order in `known` (first minimal-distance match
-/// wins), matching the host's `suggest`.
-function suggestKey(key: str, known: &Vector<String>): Option<String> {
+/// wins), matching the host's `suggest`. Shared with `ignis/build/manifest.ign`
+/// so both loaders suggest identically.
+export function configSuggestKey(key: str, known: &Vector<String>): Option<String> {
   let mut bestName: Option<String> = Option::NONE;
   let mut bestDistance: u64 = 3;
   let mut index: u64 = 0;
@@ -742,7 +771,7 @@ function suggestKey(key: str, known: &Vector<String>): Option<String> {
       continue;
     };
 
-    let distance: u64 = editDistance(key, candidate.toStr());
+    let distance: u64 = configEditDistance(key, candidate.toStr());
 
     if (distance <= 2 && distance < bestDistance) {
       bestDistance = distance;
@@ -790,7 +819,7 @@ function unknownKeysInTable(
     }
 
     if (!isKnown) {
-      let suggestion: Option<String> = suggestKey(entry.key, known);
+      let suggestion: Option<String> = configSuggestKey(entry.key, known);
       outRef.push(ConfigDiagnostics::unknownKey(
         configPath,
         tableLabel,
@@ -894,7 +923,7 @@ export function checkUnknownProjectKeys(
     }
 
     if (!matched) {
-      let suggestion: Option<String> = suggestKey(entry.key, &topLevel);
+      let suggestion: Option<String> = configSuggestKey(entry.key, &topLevel);
       warnings.push(ConfigDiagnostics::unknownKey(
         configPath,
         "top-level",

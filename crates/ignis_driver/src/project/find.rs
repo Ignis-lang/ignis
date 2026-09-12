@@ -87,6 +87,13 @@ fn warn_unknown_keys(
     &mut diagnostics,
   );
 
+  // `toml::Value`'s table is a `BTreeMap` (alphabetical by key), so a walk
+  // order that followed it directly would warn out of file order. The
+  // selfhost's hand-rolled loaders walk their tables in source order instead,
+  // so both compilers are brought back in line here by sorting on the
+  // (already-computed) source position of each warning.
+  diagnostics.sort_by_key(|diagnostic| diagnostic.primary_span.start);
+
   ignis_diagnostics::render_batch_to_stderr(&diagnostics, &sm);
 }
 
