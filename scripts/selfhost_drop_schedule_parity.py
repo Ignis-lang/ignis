@@ -35,6 +35,17 @@ GATE_ID = "G7"
 
 DUMP_HEADER = "drop-schedule v1"
 
+# Every line shape the renderer can emit after its header. A line that starts
+# with none of these ends the dump.
+DUMP_LINE_PREFIXES = (
+  "function ",
+  "  value ",
+  "    drop at ",
+  "    moved at ",
+  "  defer ",
+  "  <no owned values>",
+)
+
 HOST_TIMEOUT_SECONDS = 180
 SELFHOST_TIMEOUT_SECONDS = 300
 
@@ -118,14 +129,16 @@ def run_dump(
 ) -> tuple[list[str] | None, str]:
   """Run one compiler over one case and return the dump's lines.
 
-  Both compilers print the dump on stdout after everything else they log, so
-  the dump is whatever follows the last `drop-schedule v1` header line.
+  The dump starts at the last `drop-schedule v1` header on stdout and ends at
+  the first line that is not part of the dump grammar, so whatever either
+  compiler logs around it — the host's `- Scanning & parsing`, the selfhost's
+  phase lines, a trailing `No errors found` — stays out of the comparison.
+  `--quiet` is deliberately not passed: the selfhost CLI has no such flag.
   """
   command = [
     str(compiler),
     "check",
     "--dump-drop-schedule",
-    "--quiet",
     "--std-path",
     str(std_path),
   ]
@@ -153,8 +166,14 @@ def run_dump(
     return None, f"no dump on stdout (exit {completed.returncode}){': ' + tail if tail else ''}"
 
   start = len(lines) - 1 - lines[::-1].index(DUMP_HEADER)
+  dump = [DUMP_HEADER]
 
-  return lines[start:], ""
+  for line in lines[start + 1 :]:
+    if not line.startswith(DUMP_LINE_PREFIXES):
+      break
+    dump.append(line)
+
+  return dump, ""
 
 
 def compare(
