@@ -2666,6 +2666,10 @@ export namespace ParserExpressions {
       return ParserExpressions::parseMatchExpression(parserRef);
     }
 
+    if (token.kindValue() == TokenKind::KEYWORD && token.keywordValue() == Keyword::LET) {
+      return ParserExpressions::parseLetConditionExpression(parserRef);
+    }
+
     if (token.kindValue() == TokenKind::PUNCTUATION && token.punctuationValue() == Punctuation::LEFT_BRACKET) {
       return ParserExpressions::parseVectorLiteralExpression(parserRef);
     }
@@ -2684,6 +2688,41 @@ export namespace ParserExpressions {
 
     parserRef.emitDiagnostic(token.span, DiagnosticCode::EXPECTED_EXPRESSION, "Expected expression", "expected literal or path expression");
     return Option::NONE;
+  }
+
+  /// Parses `let <pattern> = <value>` in expression position into a
+  /// `LetCondition`, mirroring the host's `parse_let_condition_expression`.
+  ///
+  /// The host reaches a `let` condition through its ordinary prefix table, which
+  /// is what makes `if (flag && let P = e)` parse there: the `let` is simply the
+  /// primary of the `&&`'s right operand. Placing it here rather than in the
+  /// condition parser is what gives both compilers one grammar for it.
+  ///
+  /// The value stops before `&&` and `||` (binding power 31 sits just above
+  /// them), so the conjuncts that follow stay outside the scrutinee — their
+  /// bindings only exist past the pattern.
+  function parseLetConditionExpression(parser: &mut ParserShared::State): Option<ParsedExpression> {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let letKeyword = parserRef.expectKeyword(Keyword::LET, "expected 'let' in condition")!;
+    let patternResult: Option<Ast::PatternId> = ParserPatterns::parsePattern(parserRef);
+    let pattern = patternResult!;
+    parserRef.expectPunctuation(Punctuation::EQUAL, "expected '=' in let condition")!;
+
+    let valueResult: Option<ParsedExpression> = ParserExpressions::parseExpressionWithMinBindingPower(parserRef, 31);
+    let value = valueResult!;
+
+    let valueId: Ast::ExpressionId = value.id;
+    let span: SourceSpan = ParserShared::mergeSpans(letKeyword.span, value.span);
+
+    return Option::SOME(ParsedExpression {
+      id: parserRef.module.addExpression(Ast::Expression::Node::LetCondition(Ast::Expression::LetCondition {
+        span: span,
+        pattern: pattern,
+        value: valueId,
+      })),
+      span: span,
+    });
   }
 
   function parseCallSuffix(
