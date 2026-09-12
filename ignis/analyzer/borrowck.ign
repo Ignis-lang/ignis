@@ -3798,6 +3798,84 @@ export namespace Borrowck {
     }
   }
 
+  /// Collects the bindings every `let` condition in a condition expression
+  /// produced, in declaration order, and schedules the drops a short-circuited
+  /// `&&` owes. Mirrors `take_condition_bindings`.
+  ///
+  /// A single `let` condition *is* the match node the bindings were registered
+  /// under, but `let A = f() && let B = g()` is a `&&` whose operands are those
+  /// match nodes, so the enclosing `if`/`while` has to walk the chain to find
+  /// them. Each `&&` also gets an `onConditionFail` entry for whatever its left
+  /// side bound: when its right operand evaluates to false the guarded branch
+  /// never runs, and that branch is the only other place those bindings are
+  /// dropped.
+  ///
+  /// Only `&&` is walked. A `let` condition inside `||` is rejected in
+  /// typechecking, so no other operator can hold one, and a chain is
+  /// left-associated: the left side of a `&&` being true means every `let` in it
+  /// succeeded and every binding it names is live.
+  function takeConditionBindings(
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    schedules: &mut Hir::DropSchedules,
+    condition: Hir::HirId,
+  ): Vector<u32> {
+    let Option::SOME(node) = hir.get(condition) else {
+      let mut plainRef: &mut Borrowck::State = state;
+      return plainRef.takeLetConditionBindings(condition.raw());
+    };
+
+    let Hir::HirKind::Binary(binaryNode) = &node.kind else {
+      let mut plainRef: &mut Borrowck::State = state;
+      return plainRef.takeLetConditionBindings(condition.raw());
+    };
+
+    let isAnd: boolean = match (binaryNode.operation) {
+      Hir::BinaryOperation::And -> true,
+      _ -> false,
+    };
+
+    if (!isAnd) {
+      let mut plainRef: &mut Borrowck::State = state;
+      return plainRef.takeLetConditionBindings(condition.raw());
+    }
+
+    let leftId: Hir::HirId = binaryNode.left;
+    let rightId: Hir::HirId = binaryNode.right;
+
+    let mut bindings: Vector<u32> = Borrowck::takeConditionBindings(hir, state, schedules, leftId);
+
+    if (!bindings.isEmpty()) {
+      // Drop order is the reverse of declaration order, like any other scope.
+      let mut owed: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut owedIndex: u64 = bindings.length();
+
+      while (owedIndex > 0) {
+        owedIndex -= 1;
+
+        if (let Option::SOME(defRaw) = bindings.get(owedIndex)) {
+          owed.push(Id::fromRaw<Analyzer::DefinitionTag>(*defRaw));
+        }
+      }
+
+      let mut scheduleRef: &mut Hir::DropSchedules = schedules;
+      scheduleRef.setConditionFail(condition, owed);
+    }
+
+    let rightBindings: Vector<u32> = Borrowck::takeConditionBindings(hir, state, schedules, rightId);
+    let mut rightIndex: u64 = 0;
+
+    while (rightIndex < rightBindings.length()) {
+      if (let Option::SOME(defRaw) = rightBindings.get(rightIndex)) {
+        bindings.push(*defRaw);
+      }
+
+      rightIndex += 1;
+    }
+
+    return bindings;
+  }
+
   function checkIf(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3811,8 +3889,7 @@ export namespace Borrowck {
   ): void {
     Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, ifNode.condition);
 
-    let mut conditionRef: &mut Borrowck::State = state;
-    let conditionBindings: Vector<u32> = conditionRef.takeLetConditionBindings(ifNode.condition.raw());
+    let conditionBindings: Vector<u32> = Borrowck::takeConditionBindings(hir, state, schedules, ifNode.condition);
 
     let preReachable: boolean = state.reachable;
     let preMoves: Borrowck::MoveSnapshot = state.snapshotMoves();
@@ -4207,8 +4284,7 @@ export namespace Borrowck {
       Hir::LoopKind::While(condition) -> {
         Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, condition);
 
-        let mut conditionRef: &mut Borrowck::State = state;
-        conditionBindings = conditionRef.takeLetConditionBindings(condition.raw());
+        conditionBindings = Borrowck::takeConditionBindings(hir, state, schedules, condition);
       },
       Hir::LoopKind::For(forLoop) -> {
         if (let Option::SOME(init) = forLoop.init) {

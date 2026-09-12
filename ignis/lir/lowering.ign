@@ -1326,6 +1326,7 @@ export namespace LirLowering {
             function_,
             state,
             binaryNode.operation,
+            hirId,
             binaryNode.left,
             binaryNode.right,
             nodeType,
@@ -3463,6 +3464,7 @@ export namespace LirLowering {
     function_: &mut Lir::FunctionLir,
     state: &mut LirLowering::LowerState,
     operation: Hir::BinaryOperation,
+    nodeId: Hir::HirId,
     leftId: Hir::HirId,
     rightId: Hir::HirId,
     nodeType: Analyzer::TypeId,
@@ -3510,8 +3512,46 @@ export namespace LirLowering {
 
     LirLowering::storeResult(function_, state, rightLive, resultSlot, right);
 
-    if (rightLive) {
+    // A `&&` chain of `let` conditions hands its bindings to the branch it
+    // guards, so a false right operand leaves whatever the left side bound with
+    // no owner: this path is their only drop site. The drops go behind their own
+    // branch rather than in `rightBlock`, because the right operand being true
+    // means the guarded branch runs and takes them over. Mirrors the oracle's
+    // `sc_condition_fail` block.
+    //
+    // A `let` condition inside `||` is rejected in typechecking, so nothing is
+    // ever scheduled for one and the polarity here stays that of `&&`.
+    let mut conditionFailDrops: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Hir::BinaryOperation::And = operation) {
+      conditionFailDrops = dropSchedules.conditionFailDrops(nodeId);
+    }
+
+    if (rightLive && !conditionFailDrops.isEmpty()) {
+      let dropBlock: Lir::BlockId = LirLowering::createBlock(function_, "sc_condition_fail");
+
+      // The branch reads the slot the right operand was just stored into, so
+      // that value is spelled once no matter how it was produced.
+      let rightCondition: Lir::TempId = LirLowering::freshTemp(function_, nodeType, nodeSpan);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+        dest: rightCondition,
+        source: resultSlot,
+      }));
+
+      LirLowering::terminate(function_, state, Lir::Terminator::Branch(Lir::TerminatorBranch {
+        condition: Lir::Operand::Temp(rightCondition),
+        thenBlock: mergeBlock,
+        elseBlock: dropBlock,
+      }));
+
+      LirLowering::switchToBlock(state, dropBlock);
+      LirLowering::emitDropList(function_, state, &conditionFailDrops);
       LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
+    } else {
+      if (rightLive) {
+        LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
+      }
     }
 
     LirLowering::switchToBlock(state, mergeBlock);

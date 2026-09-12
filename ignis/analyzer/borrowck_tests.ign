@@ -542,6 +542,20 @@ function borrowckRenderSchedules(
     exitIndex += 1;
   }
 
+  let mut conditionFailIndex: u64 = 0;
+
+  while (conditionFailIndex < schedules.onConditionFail.length()) {
+    if (let Option::SOME(entry) = schedules.onConditionFail.get(conditionFailIndex)) {
+      let defs: String = borrowckRenderDefs(defStore, symbols, &entry.defs);
+
+      rendered.pushStr("condition-fail: ");
+      rendered.pushStr(defs.toStr());
+      rendered.pushStr("\n");
+    }
+
+    conditionFailIndex += 1;
+  }
+
   let mut overwriteIndex: u64 = 0;
 
   while (overwriteIndex < schedules.onOverwrite.length()) {
@@ -890,6 +904,19 @@ function borrowckSchedulesKeepsFieldOwnerDropForCopyPayload(): void {
   );
 
   Test::assertEq<str>(rendered.toStr(), "exit return: holder\nexit fn-end run: holder\n");
+}
+
+/// Scenario: two `let` conditions joined by `&&`. The guarded branch owns both
+/// bindings, and the `&&` owes a drop of the first one when the second `let`
+/// fails, because the branch that would free it never runs.
+/// Spec: IGN-225 — `on_condition_fail`.
+@test
+function borrowckSchedulesChainedLetConditionFail(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Slot {\n  FILLED(Owned),\n  EMPTY,\n}\n\nfunction make(): Slot {\n  return Slot::FILLED(Owned { id: 1 });\n}\n\nfunction run(): u32 {\n  let mut seen: u32 = 0;\n\n  if (let Slot::FILLED(first) = make() && let Slot::FILLED(second) = make()) {\n    seen = first.id + second.id;\n  }\n\n  return seen;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: second, first\ncondition-fail: first\n");
 }
 
 /// Scenario: overwriting a local that still holds a value schedules a drop of
