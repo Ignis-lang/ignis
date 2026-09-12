@@ -469,7 +469,7 @@ impl<'a> LoweringContext<'a> {
       HIRKind::Unit => None,
       HIRKind::Variable(def_id) => self.lower_variable(*def_id, node.type_id),
       HIRKind::Binary { operation, left, right } => {
-        self.lower_binary(operation.clone(), *left, *right, node.type_id, node.span)
+        self.lower_binary(hir_id, operation.clone(), *left, *right, node.type_id, node.span)
       },
       HIRKind::Unary { operation, operand } => self.lower_unary(operation.clone(), *operand, node.type_id, node.span),
       HIRKind::Call {
@@ -787,6 +787,7 @@ impl<'a> LoweringContext<'a> {
 
   fn lower_binary(
     &mut self,
+    hir_id: HIRId,
     op: ignis_hir::operation::BinaryOperation,
     left: HIRId,
     right: HIRId,
@@ -797,7 +798,7 @@ impl<'a> LoweringContext<'a> {
 
     // Short-circuit evaluation for && and ||
     if matches!(op, BinaryOperation::And | BinaryOperation::Or) {
-      return self.lower_short_circuit(op, left, right, result_ty, span);
+      return self.lower_short_circuit(hir_id, op, left, right, result_ty, span);
     }
 
     let left_op = self.lower_hir_node(left);
@@ -822,6 +823,7 @@ impl<'a> LoweringContext<'a> {
 
   fn lower_short_circuit(
     &mut self,
+    hir_id: HIRId,
     op: ignis_hir::operation::BinaryOperation,
     left: HIRId,
     right: HIRId,
@@ -873,14 +875,51 @@ impl<'a> LoweringContext<'a> {
 
     // Evaluate right
     self.fn_builder().switch_to_block(eval_right_block);
-    if let Some(right_op) = self.lower_hir_node(right) {
+    let right_op = self.lower_hir_node(right);
+    if let Some(right_op) = right_op.clone() {
       self.fn_builder().emit(Instr::Store {
         dest: result_local,
         value: right_op,
       });
     }
-    if !self.fn_builder().is_terminated() {
-      self.fn_builder().terminate(Terminator::Goto(merge_block));
+
+    // A `&&` chain of `let` conditions hands its bindings to the branch it guards, so a
+    // false right operand leaves whatever the left side bound with no owner: this path is
+    // their only drop site. The drops go behind their own branch rather than in
+    // `eval_right_block`, because the right operand being true means the guarded branch
+    // runs and takes them over.
+    let condition_fail_drops = match op {
+      BinaryOperation::And => self
+        .drop_schedules
+        .on_condition_fail
+        .get(&hir_id)
+        .cloned()
+        .unwrap_or_default(),
+      // A `let` condition inside `||` is rejected in typechecking, so nothing is ever
+      // scheduled here and the polarity below would be the wrong way round.
+      _ => Vec::new(),
+    };
+
+    match (right_op, condition_fail_drops.is_empty(), self.fn_builder().is_terminated()) {
+      (Some(right_op), false, false) => {
+        let drop_block = self.fn_builder().create_block("sc_condition_fail");
+
+        self.fn_builder().terminate(Terminator::Branch {
+          condition: right_op,
+          then_block: merge_block,
+          else_block: drop_block,
+        });
+
+        self.fn_builder().switch_to_block(drop_block);
+        for def_id in condition_fail_drops {
+          self.emit_drop_for_def(def_id);
+        }
+        self.fn_builder().terminate(Terminator::Goto(merge_block));
+      },
+      (_, _, false) => {
+        self.fn_builder().terminate(Terminator::Goto(merge_block));
+      },
+      _ => {},
     }
 
     // Merge block: load result

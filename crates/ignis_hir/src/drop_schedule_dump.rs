@@ -105,6 +105,9 @@ pub enum DropReason {
   FnEnd,
   /// The value was overwritten by an assignment.
   Overwrite,
+  /// A later link of a `&&` chain of `let` conditions evaluated to false, so the branch
+  /// that owned the earlier bindings never ran.
+  ConditionFail,
 }
 
 impl DropReason {
@@ -117,6 +120,7 @@ impl DropReason {
       DropReason::Continue => "continue",
       DropReason::FnEnd => "fn-end",
       DropReason::Overwrite => "overwrite",
+      DropReason::ConditionFail => "condition-fail",
     }
   }
 }
@@ -484,6 +488,12 @@ impl<'a> DropScheduleDumper<'a> {
     for (arm, dropped) in &self.schedules.on_match_arm_end {
       if nodes.contains(arm) {
         record_drops(self, &mut values, &self.span_of(*arm), DropReason::ArmEnd, dropped);
+      }
+    }
+
+    for (condition, dropped) in &self.schedules.on_condition_fail {
+      if nodes.contains(condition) {
+        record_drops(self, &mut values, &self.span_of(*condition), DropReason::ConditionFail, dropped);
       }
     }
 
