@@ -1,0 +1,2126 @@
+import Vector from "std::vector";
+
+import Id from "@compiler::ids";
+import SourceFile, SourceLocation, SourceSpan from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+
+import _ from "./ids";
+import _ from "./node";
+import _ from "./drop_schedule";
+import _ from "./pattern";
+
+/// Textual rendering of `Hir::DropSchedules` for `--dump-drop-schedule`,
+/// mirroring `ignis_hir::drop_schedule_dump::DropScheduleDumper` byte for
+/// byte. Read that module's doc comment first: it is the specification this
+/// file follows.
+///
+/// # Format
+///
+/// ```text
+/// drop-schedule v1
+/// function main at example/a.ign:3:20
+///   value handle kind=local declared at example/a.ign:4:3
+///     drop at example/a.ign:8:3 reason=scope-end
+///     moved at example/a.ign:6:10
+///   defer declared at example/a.ign:5:3 runs at example/a.ign:8:3 reason=scope-end
+/// function empty at example/a.ign:11:20
+///   <no owned values>
+/// ```
+///
+/// Every position is `<path>:<line>:<column>`, 1-based, with `<column>`
+/// counting bytes from the start of the line, matching the host's
+/// `byte_line_col`. `<path>` is normalized relative to the working
+/// directory and stripped of a leading `./`, exactly like the host. A span
+/// whose file path is empty (the selfhost's synthetic-span convention,
+/// `SourceSpan::new("", 0, 0)`) renders as `<synthetic>:0:0`.
+///
+/// # Ordering
+///
+/// Nothing here depends on the order schedule entries were recorded in:
+/// functions are sorted by body position, then name, then definition index;
+/// values are sorted by declaration position, then name, then definition
+/// index; drop sites are sorted by position then reason, and always print
+/// before move sites for the same value (mirroring the host's derived `Ord`
+/// on its `Site` enum, where the `Drop` variant sorts before `Move`
+/// regardless of position); duplicate sites are collapsed.
+///
+/// # Attribution and normalization
+///
+/// Positions and value kinds are read only from the HIR, never from the
+/// selfhost `Analyzer::Definition` (which carries no span and has no
+/// `Parameter` variant), for exactly the reasons `drop_schedule_dump.rs`
+/// documents. Move sites carry the function they were recorded against, so
+/// (like the host) they need no separate attribution walk.
+///
+/// A synthesized closure thunk is positioned at the **closure expression**
+/// that produced it rather than at its own body: capture analysis hands the
+/// thunk whatever node the front end had to hand, and the two compilers do not
+/// agree on that node (the host keeps the closure's body expression, this
+/// compiler a node starting at the parameter list's `)`). The closure
+/// expression is the same source construct in both.
+///
+/// # Residue: what this renderer cannot normalize
+///
+/// Monomorphized names arrive already mangled into a single symbol, so no
+/// rendering rule can reconcile them with the host's: the host qualifies a
+/// specialized method by its owner (`Pair__i32__fold__i32`) where this
+/// compiler does not (`fold__i32__i32`), and this compiler still prints a
+/// placeholder (`total__<record:DefId(1679)>`) where the host prints the
+/// record's name. Fixing those means changing what the monomorphizers write,
+/// not what this file prints, so gate G7 reports them instead.
+///
+/// # Deviations from the host renderer
+///
+/// - `DropReason` and the `Site` enum are represented here as a numeric
+///   rank plus a static `str` label instead of real enums, because copying
+///   an enum value out of a borrow needs an explicit rebuild function in
+///   this language (see `Hir::copyExitKey`) and every reader here only
+///   needs the label and a sort key. The rank values reproduce the Rust
+///   enums' declaration order exactly, so sorting is identical.
+/// - Interned/normalized path text is retained in a caller-owned
+///   `Vector<String>` "storage" arena for the lifetime of one `render`
+///   call, mirroring `diagnostics/source.ign`'s `storeSourceSpanPath`; this
+///   keeps `RenderedPosition.path` a trivially-copyable `str` instead of an
+///   owned `String`.
+/// - Every value/defer/function ordering below is a hand-written selection
+///   sort over a named comparator, never `Vector<T>::sort` with a lambda:
+///   the selfhost C backend miscompiles a monomorphized `Vector<T>::sort`
+///   for a record `T` declared in this file (the closure thunk's forward-
+///   declared parameter struct becomes a distinct, incompatible C type from
+///   the record's real definition), reproduced by building this file
+///   through `scripts/bootstrap.sh stage1`. `Vector<u32>::sort` (a
+///   primitive element type) is unaffected and still used for the node-id
+///   ordering in `collectDeclarations`.
+///
+/// # A known non-divergence: unreached standard-library functions
+///
+/// `--dump-drop-schedule` on the same program lists strictly more functions
+/// through the selfhost than through the host, all of them std-library
+/// wrappers around an `extern` block (for example `LibC::Conversion::atoi`)
+/// that the program compiled never calls. The host's dump walks
+/// `mono_output.hir`, which only carries what monomorphization actually
+/// reached from the entry point; the selfhost's `HirStore::items` is not
+/// pruned to reachable definitions the same way, so unreached library
+/// functions still get a HIR body and appear here. Every function BOTH
+/// front ends list renders byte-for-byte identically (verified by hand for
+/// `test_cases`-sized programs); only the extra, unreached std entries on
+/// the selfhost side differ, and this is a reachability/monomorphization
+/// difference upstream of this renderer, not a rendering bug — mirrored
+/// here rather than "fixed" per this task's normalize-in-the-renderer rule.
+export namespace Hir {
+  namespace DropScheduleDump {
+    const REASON_SCOPE_END: u32 = 0;
+    const REASON_ARM_END: u32 = 1;
+    const REASON_RETURN: u32 = 2;
+    const REASON_BREAK: u32 = 3;
+    const REASON_CONTINUE: u32 = 4;
+    const REASON_FN_END: u32 = 5;
+    const REASON_OVERWRITE: u32 = 6;
+
+    const KIND_LOCAL: str = "local";
+    const KIND_BINDING: str = "binding";
+    const KIND_PARAMETER: str = "parameter";
+    const KIND_VALUE: str = "value";
+
+    /// A rendered source position, pre-resolved so sorting is textual and
+    /// total. `path` is a view into the caller's storage arena (or a `'static`
+    /// literal like `<synthetic>`), never an owned buffer.
+    record RenderedPosition {
+      public path: str;
+      public line: u32;
+      public column: u32;
+    }
+
+    /// Where and how a value entered the function it is listed under.
+    record Declaration {
+      public position: Hir::DropScheduleDump::RenderedPosition;
+      public kind: str;
+    }
+
+    record DropSiteEntry {
+      public position: Hir::DropScheduleDump::RenderedPosition;
+      public reasonRank: u32;
+      public reasonText: str;
+    }
+
+    record ValueEntry {
+      public defRaw: u32;
+      public declaration: Hir::DropScheduleDump::Declaration;
+      public name: str;
+      public dropSites: Vector<Hir::DropScheduleDump::DropSiteEntry>;
+      public moveSites: Vector<Hir::DropScheduleDump::RenderedPosition>;
+    }
+
+    record DeferEntry {
+      public declared: Hir::DropScheduleDump::RenderedPosition;
+      public runs: Hir::DropScheduleDump::RenderedPosition;
+      public reasonRank: u32;
+      public reasonText: str;
+    }
+
+    record FunctionEntry {
+      public defId: Analyzer::DefinitionId;
+      public bodyId: Hir::HirId;
+      public position: Hir::DropScheduleDump::RenderedPosition;
+      public name: str;
+    }
+
+    record DeclarationEntry {
+      public defRaw: u32;
+      public declaration: Hir::DropScheduleDump::Declaration;
+    }
+
+    /// Outcome of resolving one `Hir::ExitKey` against the function currently
+    /// being rendered, mirroring the host's `exit_site`.
+    record ExitSiteResult {
+      public found: boolean;
+      public span: SourceSpan;
+      public reasonRank: u32;
+      public reasonText: str;
+    }
+
+    // --- small primitive helpers -------------------------------------------------
+
+    function compareU32(a: u32, b: u32): i32 {
+      if (a < b) {
+        return -1;
+      }
+
+      if (a > b) {
+        return 1;
+      }
+
+      return 0;
+    }
+
+    function compareStr(a: str, b: str): i32 {
+      let leftString: String = a.toString();
+      let rightString: String = b.toString();
+
+      return leftString.compare(&rightString);
+    }
+
+    function copyRaws(values: &Vector<u32>): Vector<u32> {
+      let mut result: Vector<u32> = Vector::new<u32>();
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (let Option::SOME(value) = values.get(index)) {
+          result.push(*value);
+        }
+
+        index += 1;
+      }
+
+      return result;
+    }
+
+    // --- position resolution -------------------------------------------------
+
+    function stripLeadingDotSlash(value: String): String {
+      if (value.startsWith("./")) {
+        return value.substringBytes(2, value.length());
+      }
+
+      return value;
+    }
+
+    /// Renders the path the way both front ends agree on: relative to the
+    /// working directory when it lies under it, and without a leading `./`.
+    /// Mirrors `drop_schedule_dump.rs::normalize_path`.
+    function normalizePath(path: str, workingDirectory: str): String {
+      let pathString: String = path.toString();
+      let workingDirString: String = workingDirectory.toString();
+
+      if (workingDirString.length() == 0) {
+        return Hir::DropScheduleDump::stripLeadingDotSlash(pathString);
+      }
+
+      if (pathString.startsWith(workingDirString.toStr())) {
+        let rest: String = pathString.substringBytes(workingDirString.length(), pathString.length());
+
+        if (rest.startsWith("/")) {
+          let stripped: String = rest.substringBytes(1, rest.length());
+
+          return Hir::DropScheduleDump::stripLeadingDotSlash(stripped);
+        }
+      }
+
+      return Hir::DropScheduleDump::stripLeadingDotSlash(pathString);
+    }
+
+    /// Appends `value` to the storage arena and returns a stable `str` view
+    /// into it, mirroring `diagnostics/source.ign::storeSourceSpanPath`.
+    function internPath(storage: &mut Vector<String>, value: String): str {
+      let mut storageRef: &mut Vector<String> = storage;
+      storageRef.push(value);
+
+      let Option::SOME(storedValue) = storageRef.get(storageRef.length() - 1) else {
+        @panic("failed to retain a rendered drop-schedule path");
+      };
+
+      return storedValue.toStr();
+    }
+
+    function findSourceFile(files: &Vector<SourceFile>, path: str): Option<&SourceFile> {
+      let mut index: u64 = 0;
+
+      while (index < files.length()) {
+        if (let Option::SOME(file) = files.get(index)) {
+          let filePath: String = file.path.toString();
+
+          if (filePath.equals(path)) {
+            return Option::SOME(file);
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    function syntheticPosition(): Hir::DropScheduleDump::RenderedPosition {
+      return Hir::DropScheduleDump::RenderedPosition { path: "<synthetic>", line: 0, column: 0 };
+    }
+
+    /// Resolves a span to a rendered position, or `<synthetic>:0:0` when the
+    /// span carries no real file (an empty `filePath`, the selfhost's
+    /// synthetic-span convention) or when no source file was found for it.
+    function resolvePosition(
+      span: &SourceSpan,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      storage: &mut Vector<String>,
+    ): Hir::DropScheduleDump::RenderedPosition {
+      let filePathString: String = span.filePath.toString();
+
+      if (filePathString.length() == 0) {
+        return Hir::DropScheduleDump::syntheticPosition();
+      }
+
+      let Option::SOME(file) = Hir::DropScheduleDump::findSourceFile(files, span.filePath) else {
+        return Hir::DropScheduleDump::syntheticPosition();
+      };
+
+      let location: SourceLocation = file.byteLineCol(span.start);
+      let normalized: String = Hir::DropScheduleDump::normalizePath(span.filePath, workingDirectory);
+      let internedPath: str = Hir::DropScheduleDump::internPath(storage, normalized);
+
+      return Hir::DropScheduleDump::RenderedPosition {
+        path: internedPath,
+        line: location.line,
+        column: location.byteColumn,
+      };
+    }
+
+    function positionsEqual(
+      a: &Hir::DropScheduleDump::RenderedPosition,
+      b: &Hir::DropScheduleDump::RenderedPosition,
+    ): boolean {
+      if (a.line != b.line || a.column != b.column) {
+        return false;
+      }
+
+      let leftPath: str = a.path;
+      let rightPath: str = b.path;
+
+      return @eq<str>(&leftPath, &rightPath);
+    }
+
+    function comparePositions(
+      a: &Hir::DropScheduleDump::RenderedPosition,
+      b: &Hir::DropScheduleDump::RenderedPosition,
+    ): i32 {
+      let pathCompare: i32 = Hir::DropScheduleDump::compareStr(a.path, b.path);
+
+      if (pathCompare != 0) {
+        return pathCompare;
+      }
+
+      if (a.line != b.line) {
+        return Hir::DropScheduleDump::compareU32(a.line, b.line);
+      }
+
+      return Hir::DropScheduleDump::compareU32(a.column, b.column);
+    }
+
+    function copyPositions(
+      positions: &Vector<Hir::DropScheduleDump::RenderedPosition>,
+    ): Vector<Hir::DropScheduleDump::RenderedPosition> {
+      let mut result: Vector<Hir::DropScheduleDump::RenderedPosition> = Vector::new<Hir::DropScheduleDump::RenderedPosition>();
+      let mut index: u64 = 0;
+
+      while (index < positions.length()) {
+        if (let Option::SOME(position) = positions.get(index)) {
+          result.push(Hir::DropScheduleDump::RenderedPosition {
+          path: position.path,
+          line: position.line,
+          column: position.column,
+        });
+        }
+
+        index += 1;
+      }
+
+      return result;
+    }
+
+    function renderPosition(position: &Hir::DropScheduleDump::RenderedPosition): String {
+      return `${position.path}:${position.line}:${position.column}`;
+    }
+
+    // --- HIR traversal -------------------------------------------------
+
+    /// One closure thunk and the span of the closure expression that made it.
+    record ThunkSpan {
+      public thunkRaw: u32;
+      public span: SourceSpan;
+    }
+
+    /// Every closure thunk in the program, positioned at its closure
+    /// expression.
+    ///
+    /// A thunk is synthesized by capture analysis, so the span of its body is
+    /// whatever node the front end handed it, and the two compilers do not
+    /// agree on that node: the host keeps the closure's body expression while
+    /// this compiler keeps a node starting at the parameter list's `)`. The
+    /// closure expression itself is the same source construct in both, so both
+    /// dumps position a thunk there instead. Built once per `render` call.
+    function collectClosureThunks(hir: &Hir::HirStore): Vector<Hir::DropScheduleDump::ThunkSpan> {
+      let mut entries: Vector<Hir::DropScheduleDump::ThunkSpan> = Vector::new<Hir::DropScheduleDump::ThunkSpan>();
+      let mut index: u64 = 0;
+
+      while (index < hir.nodes.length()) {
+        let Option::SOME(node) = hir.nodes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        match (&node.kind) {
+          Hir::HirKind::Closure(closure) -> {
+            if (let Option::SOME(thunk) = closure.thunkDef) {
+              entries = Hir::DropScheduleDump::rememberThunkSpan(entries, thunk.raw(), node.span);
+            }
+          },
+          _ -> {},
+        };
+
+        index += 1;
+      }
+
+      return entries;
+    }
+
+    /// Keeps the earliest span recorded for one thunk, so a repeated lowering
+    /// of the same closure cannot make the result depend on visit order.
+    function rememberThunkSpan(
+      entries: Vector<Hir::DropScheduleDump::ThunkSpan>,
+      thunkRaw: u32,
+      span: SourceSpan,
+    ): Vector<Hir::DropScheduleDump::ThunkSpan> {
+      let mut result: Vector<Hir::DropScheduleDump::ThunkSpan> = entries;
+      let mut index: u64 = 0;
+
+      while (index < result.length()) {
+        if (let Option::SOME(entry) = result.get(index)) {
+          if (entry.thunkRaw == thunkRaw) {
+            if (span.start < entry.span.start) {
+              result.set(index, Hir::DropScheduleDump::ThunkSpan { thunkRaw: thunkRaw, span: span });
+            }
+
+            return result;
+          }
+        }
+
+        index += 1;
+      }
+
+      result.push(Hir::DropScheduleDump::ThunkSpan { thunkRaw: thunkRaw, span: span });
+
+      return result;
+    }
+
+    /// The span a function is positioned at: its closure expression when it is
+    /// a closure thunk, its body otherwise.
+    function functionSpan(
+      hir: &Hir::HirStore,
+      thunks: &Vector<Hir::DropScheduleDump::ThunkSpan>,
+      defId: Analyzer::DefinitionId,
+      bodyId: Hir::HirId,
+    ): SourceSpan {
+      let mut index: u64 = 0;
+
+      while (index < thunks.length()) {
+        if (let Option::SOME(entry) = thunks.get(index)) {
+          if (entry.thunkRaw == defId.raw()) {
+            return entry.span;
+          }
+        }
+
+        index += 1;
+      }
+
+      return Hir::DropScheduleDump::spanOf(hir, bodyId);
+    }
+
+    function spanOf(hir: &Hir::HirStore, id: Hir::HirId): SourceSpan {
+      let Option::SOME(node) = hir.get(id) else {
+        return SourceSpan::new("", 0, 0);
+      };
+
+      return node.span;
+    }
+
+    /// A body's reachable node set: the raw ids in discovery order (used to
+    /// walk `collectDeclarations` in ascending order and to un-mark
+    /// `member` once this function is done), plus an O(1) membership
+    /// array over every `HirId` the whole program allocated. `member` is
+    /// allocated once per `render` call and threaded function to function
+    /// (see `newMembership`/`clearMembership`) instead of once per function,
+    /// because a fresh `Vector<boolean>` sized to the whole program for
+    /// every function would itself be quadratic in the number of functions.
+    record BodyNodes {
+      public raw: Vector<u32>;
+      public member: Vector<boolean>;
+    }
+
+    /// A `member` vector with `size` entries, all unset. Mirrors a bitset
+    /// sized to `HirStore::length()`.
+    function newMembership(size: u64): Vector<boolean> {
+      let mut member: Vector<boolean> = Vector::new<boolean>();
+      let mut index: u64 = 0;
+
+      while (index < size) {
+        member.push(false);
+        index += 1;
+      }
+
+      return member;
+    }
+
+    /// O(1) membership test against a `member` vector, mirroring
+    /// `HashSet::contains` without needing `Hash`/`Eq` on `u32`.
+    function isMember(member: &Vector<boolean>, raw: u32): boolean {
+      if (let Option::SOME(flag) = member.get(raw as u64)) {
+        return *flag;
+      }
+
+      return false;
+    }
+
+    /// Un-marks every raw id `bodyNodes` marked for one function, so the
+    /// same `member` vector can be reused for the next one without paying
+    /// for a full-size reset.
+    function clearMembership(member: Vector<boolean>, raw: &Vector<u32>): Vector<boolean> {
+      let mut result: Vector<boolean> = member;
+      let mut index: u64 = 0;
+
+      while (index < raw.length()) {
+        if (let Option::SOME(rawId) = raw.get(index)) {
+          result.set(*rawId as u64, false);
+        }
+
+        index += 1;
+      }
+
+      return result;
+    }
+
+    /// Every HIR node reachable from a function body, mirroring
+    /// `DropScheduleDumper::body_nodes`. `member` is consumed and returned
+    /// marked for the nodes discovered, so the caller can use it for O(1)
+    /// membership checks and must `clearMembership` it before reusing it
+    /// for another function.
+    function bodyNodes(
+      hir: &Hir::HirStore,
+      body: Hir::HirId,
+      member: Vector<boolean>
+    ): Hir::DropScheduleDump::BodyNodes {
+      let mut markedMember: Vector<boolean> = member;
+      let mut raw: Vector<u32> = Vector::new<u32>();
+      let mut pending: Vector<u32> = Vector::new<u32>();
+      pending.push(body.raw());
+
+      while (pending.length() > 0) {
+        let Option::SOME(current) = pending.pop() else {
+          break;
+        };
+
+        if (Hir::DropScheduleDump::isMember(&markedMember, current)) {
+          continue;
+        }
+
+        markedMember.set(current as u64, true);
+        raw.push(current);
+
+        let id: Hir::HirId = Id::fromRaw<Hir::NodeTag>(current);
+        let Option::SOME(node) = hir.get(id) else {
+          continue;
+        };
+
+        let children: Vector<Hir::HirId> = Hir::childIds(&node.kind);
+        let mut childIndex: u64 = 0;
+
+        while (childIndex < children.length()) {
+          if (let Option::SOME(child) = children.get(childIndex)) {
+            pending.push(child.raw());
+          }
+
+          childIndex += 1;
+        }
+      }
+
+      return Hir::DropScheduleDump::BodyNodes { raw: raw, member: markedMember };
+    }
+
+    // --- definitions -------------------------------------------------
+
+    function resolveSymbol(symbols: &Analyzer::SymbolTable, symbol: Analyzer::SymbolId): str {
+      return match (symbols.resolve(symbol)) {
+      Option::SOME(name) -> name,
+      Option::NONE -> "<unknown-symbol>",
+    };
+    }
+
+    function valueName(
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      defId: Analyzer::DefinitionId
+    ): str {
+      let Option::SOME(definition) = defs.get(defId) else {
+        return "<unknown-def>";
+      };
+
+      return Hir::DropScheduleDump::resolveSymbol(symbols, definition.name());
+    }
+
+    /// Parameters of a function or method definition, in declaration order.
+    /// Every other definition kind (this walk never sees one here) has none.
+    function parametersOf(
+      defs: &Analyzer::DefinitionStore,
+      functionId: Analyzer::DefinitionId
+    ): Vector<Analyzer::DefinitionId> {
+      let mut result: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+      let Option::SOME(definition) = defs.get(functionId) else {
+        return result;
+      };
+
+      match (definition) {
+      Analyzer::Definition::Function(functionDef) -> {
+        let mut index: u64 = 0;
+
+        while (index < functionDef.params.length()) {
+          if (let Option::SOME(paramId) = functionDef.params.get(index)) {
+            result.push(*paramId);
+          }
+
+          index += 1;
+        }
+      },
+      Analyzer::Definition::Method(methodDef) -> {
+        let mut index: u64 = 0;
+
+        while (index < methodDef.params.length()) {
+          if (let Option::SOME(paramId) = methodDef.params.get(index)) {
+            result.push(*paramId);
+          }
+
+          index += 1;
+        }
+      },
+      _ -> {},
+    };
+
+      return result;
+    }
+
+    // --- pattern bindings -------------------------------------------------
+
+    /// Every binding a pattern introduces, in pattern order, mirroring
+    /// `pattern_bindings`.
+    function patternBindings(pattern: &Hir::HirPattern): Vector<u32> {
+      let mut result: Vector<u32> = Vector::new<u32>();
+
+      match (pattern) {
+      Hir::HirPattern::Wildcard -> {},
+      Hir::HirPattern::Literal(_) -> {},
+      Hir::HirPattern::Constant(_) -> {},
+      Hir::HirPattern::Binding(defId) -> {
+        result.push(defId.raw());
+      },
+      Hir::HirPattern::Variant(variant) -> {
+        let mut index: u64 = 0;
+
+        while (index < variant.args.length()) {
+          if (let Option::SOME(argument) = variant.args.get(index)) {
+            let nested: Vector<u32> = Hir::DropScheduleDump::patternBindings(argument);
+            let mut nestedIndex: u64 = 0;
+
+            while (nestedIndex < nested.length()) {
+              if (let Option::SOME(raw) = nested.get(nestedIndex)) {
+                result.push(*raw);
+              }
+
+              nestedIndex += 1;
+            }
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Tuple(elements) -> {
+        let mut index: u64 = 0;
+
+        while (index < elements.length()) {
+          if (let Option::SOME(element) = elements.get(index)) {
+            let nested: Vector<u32> = Hir::DropScheduleDump::patternBindings(element);
+            let mut nestedIndex: u64 = 0;
+
+            while (nestedIndex < nested.length()) {
+              if (let Option::SOME(raw) = nested.get(nestedIndex)) {
+                result.push(*raw);
+              }
+
+              nestedIndex += 1;
+            }
+          }
+
+          index += 1;
+        }
+      },
+      Hir::HirPattern::Or(patterns) -> {
+        let mut index: u64 = 0;
+
+        while (index < patterns.length()) {
+          if (let Option::SOME(innerPattern) = patterns.get(index)) {
+            let nested: Vector<u32> = Hir::DropScheduleDump::patternBindings(innerPattern);
+            let mut nestedIndex: u64 = 0;
+
+            while (nestedIndex < nested.length()) {
+              if (let Option::SOME(raw) = nested.get(nestedIndex)) {
+                result.push(*raw);
+              }
+
+              nestedIndex += 1;
+            }
+          }
+
+          index += 1;
+        }
+      },
+    };
+
+      return result;
+    }
+
+    // --- declarations -------------------------------------------------
+
+    function findDeclarationIndex(
+      declarations: &Vector<Hir::DropScheduleDump::DeclarationEntry>,
+      defRaw: u32,
+    ): Option<u64> {
+      let mut index: u64 = 0;
+
+      while (index < declarations.length()) {
+        if (let Option::SOME(entry) = declarations.get(index)) {
+          if (entry.defRaw == defRaw) {
+            return Option::SOME(index);
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    function declarationLess(
+      a: &Hir::DropScheduleDump::Declaration,
+      b: &Hir::DropScheduleDump::Declaration,
+    ): boolean {
+      let positionCompare: i32 = Hir::DropScheduleDump::comparePositions(&a.position, &b.position);
+
+      if (positionCompare != 0) {
+        return positionCompare < 0;
+      }
+
+      return Hir::DropScheduleDump::compareStr(a.kind, b.kind) < 0;
+    }
+
+    /// Inserts or updates one definition's declaration, keeping the earliest
+    /// one on a re-declaration, mirroring the host's `declare` closure.
+    function declareInto(
+      declarations: Vector<Hir::DropScheduleDump::DeclarationEntry>,
+      defRaw: u32,
+      declaration: Hir::DropScheduleDump::Declaration,
+    ): Vector<Hir::DropScheduleDump::DeclarationEntry> {
+      let mut result: Vector<Hir::DropScheduleDump::DeclarationEntry> = declarations;
+      let existing: Option<u64> = Hir::DropScheduleDump::findDeclarationIndex(&result, defRaw);
+
+      if (let Option::SOME(index) = existing) {
+        if (let Option::SOME(entry) = result.get(index)) {
+          if (Hir::DropScheduleDump::declarationLess(&declaration, &entry.declaration)) {
+            result.set(index, Hir::DropScheduleDump::DeclarationEntry { defRaw: defRaw, declaration: declaration });
+          }
+        }
+
+        return result;
+      }
+
+      result.push(Hir::DropScheduleDump::DeclarationEntry { defRaw: defRaw, declaration: declaration });
+
+      return result;
+    }
+
+    /// Declarations one HIR node introduces (`Let`, `LetElse`, `Match` arms,
+    /// `Closure` parameters), mirroring the per-node arm of `declarations`.
+    function declareFromNode(
+      declarations: Vector<Hir::DropScheduleDump::DeclarationEntry>,
+      hir: &Hir::HirStore,
+      kind: &Hir::HirKind,
+      span: &SourceSpan,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      storage: &mut Vector<String>,
+    ): Vector<Hir::DropScheduleDump::DeclarationEntry> {
+      let mut result: Vector<Hir::DropScheduleDump::DeclarationEntry> = declarations;
+
+      match (kind) {
+      Hir::HirKind::Let(letNode) -> {
+        let position: Hir::DropScheduleDump::RenderedPosition =
+          Hir::DropScheduleDump::resolvePosition(span, files, workingDirectory, storage);
+
+        result = Hir::DropScheduleDump::declareInto(
+          result,
+          letNode.name.raw(),
+          Hir::DropScheduleDump::Declaration { position: position, kind: Hir::DropScheduleDump::KIND_LOCAL },
+        );
+      },
+      Hir::HirKind::LetElse(letElse) -> {
+        let position: Hir::DropScheduleDump::RenderedPosition =
+          Hir::DropScheduleDump::resolvePosition(span, files, workingDirectory, storage);
+        let bindings: Vector<u32> = Hir::DropScheduleDump::patternBindings(&letElse.pattern);
+        let mut bindingIndex: u64 = 0;
+
+        while (bindingIndex < bindings.length()) {
+          if (let Option::SOME(defRaw) = bindings.get(bindingIndex)) {
+            result = Hir::DropScheduleDump::declareInto(
+              result,
+              *defRaw,
+              Hir::DropScheduleDump::Declaration { position: position, kind: Hir::DropScheduleDump::KIND_BINDING },
+            );
+          }
+
+          bindingIndex += 1;
+        }
+      },
+      Hir::HirKind::Match(matchNode) -> {
+        let mut armIndex: u64 = 0;
+
+        while (armIndex < matchNode.arms.length()) {
+          if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+            let armSpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, arm.body);
+            let position: Hir::DropScheduleDump::RenderedPosition =
+              Hir::DropScheduleDump::resolvePosition(&armSpan, files, workingDirectory, storage);
+            let bindings: Vector<u32> = Hir::DropScheduleDump::patternBindings(&arm.pattern);
+            let mut bindingIndex: u64 = 0;
+
+            while (bindingIndex < bindings.length()) {
+              if (let Option::SOME(defRaw) = bindings.get(bindingIndex)) {
+                result = Hir::DropScheduleDump::declareInto(
+                  result,
+                  *defRaw,
+                  Hir::DropScheduleDump::Declaration { position: position, kind: Hir::DropScheduleDump::KIND_BINDING },
+                );
+              }
+
+              bindingIndex += 1;
+            }
+          }
+
+          armIndex += 1;
+        }
+      },
+      Hir::HirKind::Closure(closure) -> {
+        let position: Hir::DropScheduleDump::RenderedPosition =
+          Hir::DropScheduleDump::resolvePosition(span, files, workingDirectory, storage);
+        let mut paramIndex: u64 = 0;
+
+        while (paramIndex < closure.params.length()) {
+          if (let Option::SOME(paramId) = closure.params.get(paramIndex)) {
+            result = Hir::DropScheduleDump::declareInto(
+              result,
+              paramId.raw(),
+              Hir::DropScheduleDump::Declaration { position: position, kind: Hir::DropScheduleDump::KIND_PARAMETER },
+            );
+          }
+
+          paramIndex += 1;
+        }
+      },
+      _ -> {},
+    };
+
+      return result;
+    }
+
+    /// Where every owned value of a function was introduced, keyed by
+    /// definition. Parameters are declared first (at the body position),
+    /// then every reachable node is walked in ascending id order, mirroring
+    /// `DropScheduleDumper::declarations`.
+    function collectDeclarations(
+      hir: &Hir::HirStore,
+      defs: &Analyzer::DefinitionStore,
+      functionId: Analyzer::DefinitionId,
+      bodyId: Hir::HirId,
+      nodes: &Vector<u32>,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      storage: &mut Vector<String>,
+    ): Vector<Hir::DropScheduleDump::DeclarationEntry> {
+      let mut declarations: Vector<Hir::DropScheduleDump::DeclarationEntry> = Vector::new<Hir::DropScheduleDump::DeclarationEntry>();
+
+      let bodySpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, bodyId);
+      let bodyPosition: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&bodySpan, files, workingDirectory, storage);
+
+      let parameters: Vector<Analyzer::DefinitionId> = Hir::DropScheduleDump::parametersOf(defs, functionId);
+      let mut paramIndex: u64 = 0;
+
+      while (paramIndex < parameters.length()) {
+        if (let Option::SOME(paramId) = parameters.get(paramIndex)) {
+          declarations = Hir::DropScheduleDump::declareInto(
+          declarations,
+          paramId.raw(),
+          Hir::DropScheduleDump::Declaration { position: bodyPosition, kind: Hir::DropScheduleDump::KIND_PARAMETER },
+        );
+        }
+
+        paramIndex += 1;
+      }
+
+      let mut orderedNodes: Vector<u32> = Hir::DropScheduleDump::copyRaws(nodes);
+
+      orderedNodes.sort((a: &u32, b: &u32): i32 -> {
+      return Hir::DropScheduleDump::compareU32(*a, *b);
+    });
+
+      let mut nodeIndex: u64 = 0;
+
+      while (nodeIndex < orderedNodes.length()) {
+        if (let Option::SOME(raw) = orderedNodes.get(nodeIndex)) {
+          let id: Hir::HirId = Id::fromRaw<Hir::NodeTag>(*raw);
+
+          if (let Option::SOME(node) = hir.get(id)) {
+            declarations = Hir::DropScheduleDump::declareFromNode(
+            declarations, hir, &node.kind, &node.span, files, workingDirectory, storage,
+          );
+          }
+        }
+
+        nodeIndex += 1;
+      }
+
+      return declarations;
+    }
+
+    function declarationFor(
+      declarations: &Vector<Hir::DropScheduleDump::DeclarationEntry>,
+      defRaw: u32,
+      fallbackPosition: &Hir::DropScheduleDump::RenderedPosition,
+    ): Hir::DropScheduleDump::Declaration {
+      let mut index: u64 = 0;
+
+      while (index < declarations.length()) {
+        if (let Option::SOME(entry) = declarations.get(index)) {
+          if (entry.defRaw == defRaw) {
+            return Hir::DropScheduleDump::Declaration {
+              position: entry.declaration.position,
+              kind: entry.declaration.kind,
+            };
+          }
+        }
+
+        index += 1;
+      }
+
+      return Hir::DropScheduleDump::Declaration {
+        position: Hir::DropScheduleDump::RenderedPosition {
+          path: fallbackPosition.path,
+          line: fallbackPosition.line,
+          column: fallbackPosition.column,
+        },
+        kind: Hir::DropScheduleDump::KIND_VALUE,
+      };
+    }
+
+    // --- values (drop and move sites) -------------------------------------------------
+
+    function dropSitesEqual(
+      a: &Hir::DropScheduleDump::DropSiteEntry,
+      b: &Hir::DropScheduleDump::DropSiteEntry,
+    ): boolean {
+      return Hir::DropScheduleDump::positionsEqual(&a.position, &b.position) && a.reasonRank == b.reasonRank;
+    }
+
+    function hasDropSite(
+      sites: &Vector<Hir::DropScheduleDump::DropSiteEntry>,
+      candidate: &Hir::DropScheduleDump::DropSiteEntry,
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < sites.length()) {
+        if (let Option::SOME(site) = sites.get(index)) {
+          if (Hir::DropScheduleDump::dropSitesEqual(site, candidate)) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    function hasPosition(
+      positions: &Vector<Hir::DropScheduleDump::RenderedPosition>,
+      candidate: &Hir::DropScheduleDump::RenderedPosition,
+    ): boolean {
+      let mut index: u64 = 0;
+
+      while (index < positions.length()) {
+        if (let Option::SOME(position) = positions.get(index)) {
+          if (Hir::DropScheduleDump::positionsEqual(position, candidate)) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    function copyDropSites(
+      sites: &Vector<Hir::DropScheduleDump::DropSiteEntry>,
+    ): Vector<Hir::DropScheduleDump::DropSiteEntry> {
+      let mut result: Vector<Hir::DropScheduleDump::DropSiteEntry> = Vector::new<Hir::DropScheduleDump::DropSiteEntry>();
+      let mut index: u64 = 0;
+
+      while (index < sites.length()) {
+        if (let Option::SOME(site) = sites.get(index)) {
+          result.push(Hir::DropScheduleDump::DropSiteEntry {
+          position: site.position,
+          reasonRank: site.reasonRank,
+          reasonText: site.reasonText,
+        });
+        }
+
+        index += 1;
+      }
+
+      return result;
+    }
+
+    function findValueIndex(
+      values: &Vector<Hir::DropScheduleDump::ValueEntry>,
+      defRaw: u32
+    ): Option<u64> {
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (let Option::SOME(entry) = values.get(index)) {
+          if (entry.defRaw == defRaw) {
+            return Option::SOME(index);
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
+    }
+
+    /// Records one drop site for `defId`, creating its `ValueEntry` on first
+    /// sight, mirroring the host's `record_drops`/`record` closures.
+    function recordDropSite(
+      values: Vector<Hir::DropScheduleDump::ValueEntry>,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      declarations: &Vector<Hir::DropScheduleDump::DeclarationEntry>,
+      fallbackPosition: &Hir::DropScheduleDump::RenderedPosition,
+      defId: Analyzer::DefinitionId,
+      position: Hir::DropScheduleDump::RenderedPosition,
+      reasonRank: u32,
+      reasonText: str,
+    ): Vector<Hir::DropScheduleDump::ValueEntry> {
+      let mut result: Vector<Hir::DropScheduleDump::ValueEntry> = values;
+      let defRaw: u32 = defId.raw();
+      let site: Hir::DropScheduleDump::DropSiteEntry = Hir::DropScheduleDump::DropSiteEntry {
+        position: position,
+        reasonRank: reasonRank,
+        reasonText: reasonText,
+      };
+
+      let existing: Option<u64> = Hir::DropScheduleDump::findValueIndex(&result, defRaw);
+
+      if (let Option::SOME(index) = existing) {
+        if (let Option::SOME(entry) = result.get(index)) {
+          if (!Hir::DropScheduleDump::hasDropSite(&entry.dropSites, &site)) {
+            let mut newDropSites: Vector<Hir::DropScheduleDump::DropSiteEntry> = Hir::DropScheduleDump::copyDropSites(&entry.dropSites);
+            newDropSites.push(site);
+
+            let newMoveSites: Vector<Hir::DropScheduleDump::RenderedPosition> = Hir::DropScheduleDump::copyPositions(&entry.moveSites);
+
+            result.set(index, Hir::DropScheduleDump::ValueEntry {
+            defRaw: defRaw,
+            declaration: entry.declaration,
+            name: entry.name,
+            dropSites: newDropSites,
+            moveSites: newMoveSites,
+          });
+          }
+        }
+
+        return result;
+      }
+
+      let declaration: Hir::DropScheduleDump::Declaration = Hir::DropScheduleDump::declarationFor(declarations, defRaw, fallbackPosition);
+      let name: str = Hir::DropScheduleDump::valueName(defs, symbols, defId);
+
+      let mut dropSites: Vector<Hir::DropScheduleDump::DropSiteEntry> = Vector::new<Hir::DropScheduleDump::DropSiteEntry>();
+      dropSites.push(site);
+
+      result.push(Hir::DropScheduleDump::ValueEntry {
+      defRaw: defRaw,
+      declaration: declaration,
+      name: name,
+      dropSites: dropSites,
+      moveSites: Vector::new<Hir::DropScheduleDump::RenderedPosition>(),
+    });
+
+      return result;
+    }
+
+    /// Records one move site for `defId`, mirroring the host's `moves` arm of
+    /// `values`.
+    function recordMoveSite(
+      values: Vector<Hir::DropScheduleDump::ValueEntry>,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      declarations: &Vector<Hir::DropScheduleDump::DeclarationEntry>,
+      fallbackPosition: &Hir::DropScheduleDump::RenderedPosition,
+      defId: Analyzer::DefinitionId,
+      position: Hir::DropScheduleDump::RenderedPosition,
+    ): Vector<Hir::DropScheduleDump::ValueEntry> {
+      let mut result: Vector<Hir::DropScheduleDump::ValueEntry> = values;
+      let defRaw: u32 = defId.raw();
+
+      let existing: Option<u64> = Hir::DropScheduleDump::findValueIndex(&result, defRaw);
+
+      if (let Option::SOME(index) = existing) {
+        if (let Option::SOME(entry) = result.get(index)) {
+          if (!Hir::DropScheduleDump::hasPosition(&entry.moveSites, &position)) {
+            let dropSites: Vector<Hir::DropScheduleDump::DropSiteEntry> = Hir::DropScheduleDump::copyDropSites(&entry.dropSites);
+            let mut moveSites: Vector<Hir::DropScheduleDump::RenderedPosition> = Hir::DropScheduleDump::copyPositions(&entry.moveSites);
+            moveSites.push(position);
+
+            result.set(index, Hir::DropScheduleDump::ValueEntry {
+            defRaw: defRaw,
+            declaration: entry.declaration,
+            name: entry.name,
+            dropSites: dropSites,
+            moveSites: moveSites,
+          });
+          }
+        }
+
+        return result;
+      }
+
+      let declaration: Hir::DropScheduleDump::Declaration = Hir::DropScheduleDump::declarationFor(declarations, defRaw, fallbackPosition);
+      let name: str = Hir::DropScheduleDump::valueName(defs, symbols, defId);
+
+      let mut moveSites: Vector<Hir::DropScheduleDump::RenderedPosition> = Vector::new<Hir::DropScheduleDump::RenderedPosition>();
+      moveSites.push(position);
+
+      result.push(Hir::DropScheduleDump::ValueEntry {
+      defRaw: defRaw,
+      declaration: declaration,
+      name: name,
+      dropSites: Vector::new<Hir::DropScheduleDump::DropSiteEntry>(),
+      moveSites: moveSites,
+    });
+
+      return result;
+    }
+
+    /// Where an early-exit schedule fires for this function, or `found: false`
+    /// when it belongs to another function or an unreached node. Mirrors
+    /// `DropScheduleDumper::exit_site`.
+    function exitSite(
+      hir: &Hir::HirStore,
+      key: &Hir::ExitKey,
+      functionId: Analyzer::DefinitionId,
+      bodyId: Hir::HirId,
+      member: &Vector<boolean>,
+    ): Hir::DropScheduleDump::ExitSiteResult {
+      let mut found: boolean = false;
+      let mut span: SourceSpan = SourceSpan::new("", 0, 0);
+      let mut reasonRank: u32 = 0;
+      let mut reasonText: str = "";
+
+      match (key) {
+      Hir::ExitKey::Return(nodeId) -> {
+        if (Hir::DropScheduleDump::isMember(member, nodeId.raw())) {
+          found = true;
+          span = Hir::DropScheduleDump::spanOf(hir, nodeId);
+          reasonRank = Hir::DropScheduleDump::REASON_RETURN;
+          reasonText = "return";
+        }
+      },
+      Hir::ExitKey::Break(nodeId) -> {
+        if (Hir::DropScheduleDump::isMember(member, nodeId.raw())) {
+          found = true;
+          span = Hir::DropScheduleDump::spanOf(hir, nodeId);
+          reasonRank = Hir::DropScheduleDump::REASON_BREAK;
+          reasonText = "break";
+        }
+      },
+      Hir::ExitKey::Continue(nodeId) -> {
+        if (Hir::DropScheduleDump::isMember(member, nodeId.raw())) {
+          found = true;
+          span = Hir::DropScheduleDump::spanOf(hir, nodeId);
+          reasonRank = Hir::DropScheduleDump::REASON_CONTINUE;
+          reasonText = "continue";
+        }
+      },
+      Hir::ExitKey::FnEnd(owner) -> {
+        if (owner.equals(&functionId)) {
+          found = true;
+          span = Hir::DropScheduleDump::spanOf(hir, bodyId);
+          reasonRank = Hir::DropScheduleDump::REASON_FN_END;
+          reasonText = "fn-end";
+        }
+      },
+    };
+
+      return Hir::DropScheduleDump::ExitSiteResult {
+        found: found,
+        span: span,
+        reasonRank: reasonRank,
+        reasonText: reasonText,
+      };
+    }
+
+    // A generic-looking `Vector<T>::sort(closure)` call miscompiles for a
+    // locally-defined record `T` in the selfhost's C backend: the closure
+    // thunk's forward-declared parameter struct is a distinct, incompatible
+    // C type from the record's real definition (`-Wincompatible-pointer-types`,
+    // reproduced building this very file through `scripts/bootstrap.sh
+    // stage1`). Every ordering below is therefore a hand-written selection
+    // sort that calls a named comparator directly, never `Vector::sort`,
+    // mirroring the existing `format/safety.ign::sortedStrings` workaround.
+
+    function compareDropSiteEntries(
+      a: &Hir::DropScheduleDump::DropSiteEntry,
+      b: &Hir::DropScheduleDump::DropSiteEntry,
+    ): i32 {
+      let positionCompare: i32 = Hir::DropScheduleDump::comparePositions(&a.position, &b.position);
+
+      if (positionCompare != 0) {
+        return positionCompare;
+      }
+
+      return Hir::DropScheduleDump::compareU32(a.reasonRank, b.reasonRank);
+    }
+
+    function sortDropSites(
+      items: Vector<Hir::DropScheduleDump::DropSiteEntry>,
+    ): Vector<Hir::DropScheduleDump::DropSiteEntry> {
+      let remaining: Vector<Hir::DropScheduleDump::DropSiteEntry> = items;
+      let mut sorted: Vector<Hir::DropScheduleDump::DropSiteEntry> = Vector::new<Hir::DropScheduleDump::DropSiteEntry>();
+      let mut used: Vector<boolean> = Vector::new<boolean>();
+      let total: u64 = remaining.length();
+      let mut initIndex: u64 = 0;
+
+      while (initIndex < total) {
+        used.push(false);
+        initIndex += 1;
+      }
+
+      let mut picked: u64 = 0;
+
+      while (picked < total) {
+        let mut bestIndex: u64 = 0;
+        let mut haveBest: boolean = false;
+        let mut scan: u64 = 0;
+
+        while (scan < total) {
+          if (let Option::SOME(alreadyUsed) = used.get(scan)) {
+            if (!*alreadyUsed) {
+              let mut isBetter: boolean = !haveBest;
+
+              if (haveBest) {
+                if (let Option::SOME(candidate) = remaining.get(scan)) {
+                  if (let Option::SOME(currentBest) = remaining.get(bestIndex)) {
+                    if (Hir::DropScheduleDump::compareDropSiteEntries(candidate, currentBest) < 0) {
+                      isBetter = true;
+                    }
+                  }
+                }
+              }
+
+              if (isBetter) {
+                bestIndex = scan;
+                haveBest = true;
+              }
+            }
+          }
+
+          scan += 1;
+        }
+
+        if (haveBest) {
+          if (let Option::SOME(chosen) = remaining.get(bestIndex)) {
+            sorted.push(Hir::DropScheduleDump::DropSiteEntry {
+              position: chosen.position,
+              reasonRank: chosen.reasonRank,
+              reasonText: chosen.reasonText,
+            });
+          }
+
+          used.set(bestIndex, true);
+        }
+
+        picked += 1;
+      }
+
+      return sorted;
+    }
+
+    function sortPositions(
+      items: Vector<Hir::DropScheduleDump::RenderedPosition>,
+    ): Vector<Hir::DropScheduleDump::RenderedPosition> {
+      let remaining: Vector<Hir::DropScheduleDump::RenderedPosition> = items;
+      let mut sorted: Vector<Hir::DropScheduleDump::RenderedPosition> = Vector::new<Hir::DropScheduleDump::RenderedPosition>();
+      let mut used: Vector<boolean> = Vector::new<boolean>();
+      let total: u64 = remaining.length();
+      let mut initIndex: u64 = 0;
+
+      while (initIndex < total) {
+        used.push(false);
+        initIndex += 1;
+      }
+
+      let mut picked: u64 = 0;
+
+      while (picked < total) {
+        let mut bestIndex: u64 = 0;
+        let mut haveBest: boolean = false;
+        let mut scan: u64 = 0;
+
+        while (scan < total) {
+          if (let Option::SOME(alreadyUsed) = used.get(scan)) {
+            if (!*alreadyUsed) {
+              let mut isBetter: boolean = !haveBest;
+
+              if (haveBest) {
+                if (let Option::SOME(candidate) = remaining.get(scan)) {
+                  if (let Option::SOME(currentBest) = remaining.get(bestIndex)) {
+                    if (Hir::DropScheduleDump::comparePositions(candidate, currentBest) < 0) {
+                      isBetter = true;
+                    }
+                  }
+                }
+              }
+
+              if (isBetter) {
+                bestIndex = scan;
+                haveBest = true;
+              }
+            }
+          }
+
+          scan += 1;
+        }
+
+        if (haveBest) {
+          if (let Option::SOME(chosen) = remaining.get(bestIndex)) {
+            sorted.push(Hir::DropScheduleDump::RenderedPosition {
+              path: chosen.path,
+              line: chosen.line,
+              column: chosen.column,
+            });
+          }
+
+          used.set(bestIndex, true);
+        }
+
+        picked += 1;
+      }
+
+      return sorted;
+    }
+
+    /// Rebuilds every `ValueEntry` with its drop and move sites sorted
+    /// (drops before moves, mirroring the host's derived `Ord` on `Site`) and
+    /// deduplicated.
+    function sortAllValueSites(
+      values: Vector<Hir::DropScheduleDump::ValueEntry>,
+    ): Vector<Hir::DropScheduleDump::ValueEntry> {
+      let mut result: Vector<Hir::DropScheduleDump::ValueEntry> = Vector::new<Hir::DropScheduleDump::ValueEntry>();
+      let mut index: u64 = 0;
+
+      while (index < values.length()) {
+        if (let Option::SOME(entry) = values.get(index)) {
+          let dropSites: Vector<Hir::DropScheduleDump::DropSiteEntry> = Hir::DropScheduleDump::sortDropSites(Hir::DropScheduleDump::copyDropSites(&entry.dropSites));
+          let moveSites: Vector<Hir::DropScheduleDump::RenderedPosition> = Hir::DropScheduleDump::sortPositions(Hir::DropScheduleDump::copyPositions(&entry.moveSites));
+
+          result.push(Hir::DropScheduleDump::ValueEntry {
+            defRaw: entry.defRaw,
+            declaration: entry.declaration,
+            name: entry.name,
+            dropSites: dropSites,
+            moveSites: moveSites,
+          });
+        }
+
+        index += 1;
+      }
+
+      return result;
+    }
+
+    function compareDeclarations(
+      a: &Hir::DropScheduleDump::Declaration,
+      b: &Hir::DropScheduleDump::Declaration,
+    ): i32 {
+      let positionCompare: i32 = Hir::DropScheduleDump::comparePositions(&a.position, &b.position);
+
+      if (positionCompare != 0) {
+        return positionCompare;
+      }
+
+      return Hir::DropScheduleDump::compareStr(a.kind, b.kind);
+    }
+
+    /// All owned values of one function, sorted in print order, mirroring
+    /// `DropScheduleDumper::values`.
+    function collectValues(
+      hir: &Hir::HirStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      schedules: &Hir::DropSchedules,
+      functionId: Analyzer::DefinitionId,
+      bodyId: Hir::HirId,
+      member: &Vector<boolean>,
+      declarations: &Vector<Hir::DropScheduleDump::DeclarationEntry>,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      storage: &mut Vector<String>,
+    ): Vector<Hir::DropScheduleDump::ValueEntry> {
+      let mut values: Vector<Hir::DropScheduleDump::ValueEntry> = Vector::new<Hir::DropScheduleDump::ValueEntry>();
+
+      let bodySpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, bodyId);
+      let fallbackPosition: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&bodySpan, files, workingDirectory, storage);
+
+      let mut scopeIndex: u64 = 0;
+
+      while (scopeIndex < schedules.onScopeEnd.length()) {
+        if (let Option::SOME(entry) = schedules.onScopeEnd.get(scopeIndex)) {
+          if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
+            let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
+            let mut defIndex: u64 = 0;
+
+            while (defIndex < entry.defs.length()) {
+              if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
+                values = Hir::DropScheduleDump::recordDropSite(
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                Hir::DropScheduleDump::REASON_SCOPE_END, "scope-end",
+              );
+              }
+
+              defIndex += 1;
+            }
+          }
+        }
+
+        scopeIndex += 1;
+      }
+
+      let mut armIndex: u64 = 0;
+
+      while (armIndex < schedules.onMatchArmEnd.length()) {
+        if (let Option::SOME(entry) = schedules.onMatchArmEnd.get(armIndex)) {
+          if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
+            let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
+            let mut defIndex: u64 = 0;
+
+            while (defIndex < entry.defs.length()) {
+              if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
+                values = Hir::DropScheduleDump::recordDropSite(
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                Hir::DropScheduleDump::REASON_ARM_END, "arm-end",
+              );
+              }
+
+              defIndex += 1;
+            }
+          }
+        }
+
+        armIndex += 1;
+      }
+
+      let mut overwriteIndex: u64 = 0;
+
+      while (overwriteIndex < schedules.onOverwrite.length()) {
+        if (let Option::SOME(entry) = schedules.onOverwrite.get(overwriteIndex)) {
+          if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
+            let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
+            let mut defIndex: u64 = 0;
+
+            while (defIndex < entry.defs.length()) {
+              if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
+                values = Hir::DropScheduleDump::recordDropSite(
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                Hir::DropScheduleDump::REASON_OVERWRITE, "overwrite",
+              );
+              }
+
+              defIndex += 1;
+            }
+          }
+        }
+
+        overwriteIndex += 1;
+      }
+
+      let mut exitIndex: u64 = 0;
+
+      while (exitIndex < schedules.onExit.length()) {
+        if (let Option::SOME(entry) = schedules.onExit.get(exitIndex)) {
+          let site: Hir::DropScheduleDump::ExitSiteResult = Hir::DropScheduleDump::exitSite(hir, &entry.key, functionId, bodyId, member);
+
+          if (site.found) {
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&site.span, files, workingDirectory, storage);
+            let mut defIndex: u64 = 0;
+
+            while (defIndex < entry.defs.length()) {
+              if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
+                values = Hir::DropScheduleDump::recordDropSite(
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                site.reasonRank, site.reasonText,
+              );
+              }
+
+              defIndex += 1;
+            }
+          }
+        }
+
+        exitIndex += 1;
+      }
+
+      let mut moveEntryIndex: u64 = 0;
+
+      while (moveEntryIndex < schedules.moves.length()) {
+        if (let Option::SOME(moveEntry) = schedules.moves.get(moveEntryIndex)) {
+          let mut siteIndex: u64 = 0;
+
+          while (siteIndex < moveEntry.sites.length()) {
+            if (let Option::SOME(site) = moveEntry.sites.get(siteIndex)) {
+              if (site.functionId.equals(&functionId)) {
+                let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&site.span, files, workingDirectory, storage);
+
+                values = Hir::DropScheduleDump::recordMoveSite(
+                values, defs, symbols, declarations, &fallbackPosition, moveEntry.def, position,
+              );
+              }
+            }
+
+            siteIndex += 1;
+          }
+        }
+
+        moveEntryIndex += 1;
+      }
+
+      values = Hir::DropScheduleDump::sortAllValueSites(values);
+      values = Hir::DropScheduleDump::sortValueEntries(values);
+
+      return values;
+    }
+
+    function compareValueEntries(
+      a: &Hir::DropScheduleDump::ValueEntry,
+      b: &Hir::DropScheduleDump::ValueEntry,
+    ): i32 {
+      let declarationCompare: i32 = Hir::DropScheduleDump::compareDeclarations(&a.declaration, &b.declaration);
+
+      if (declarationCompare != 0) {
+        return declarationCompare;
+      }
+
+      let nameCompare: i32 = Hir::DropScheduleDump::compareStr(a.name, b.name);
+
+      if (nameCompare != 0) {
+        return nameCompare;
+      }
+
+      return Hir::DropScheduleDump::compareU32(a.defRaw, b.defRaw);
+    }
+
+    /// See `sortDropSites` for why this cannot be `Vector::sort`.
+    function sortValueEntries(
+      items: Vector<Hir::DropScheduleDump::ValueEntry>,
+    ): Vector<Hir::DropScheduleDump::ValueEntry> {
+      let remaining: Vector<Hir::DropScheduleDump::ValueEntry> = items;
+      let mut sorted: Vector<Hir::DropScheduleDump::ValueEntry> = Vector::new<Hir::DropScheduleDump::ValueEntry>();
+      let mut used: Vector<boolean> = Vector::new<boolean>();
+      let total: u64 = remaining.length();
+      let mut initIndex: u64 = 0;
+
+      while (initIndex < total) {
+        used.push(false);
+        initIndex += 1;
+      }
+
+      let mut picked: u64 = 0;
+
+      while (picked < total) {
+        let mut bestIndex: u64 = 0;
+        let mut haveBest: boolean = false;
+        let mut scan: u64 = 0;
+
+        while (scan < total) {
+          if (let Option::SOME(alreadyUsed) = used.get(scan)) {
+            if (!*alreadyUsed) {
+              let mut isBetter: boolean = !haveBest;
+
+              if (haveBest) {
+                if (let Option::SOME(candidate) = remaining.get(scan)) {
+                  if (let Option::SOME(currentBest) = remaining.get(bestIndex)) {
+                    if (Hir::DropScheduleDump::compareValueEntries(candidate, currentBest) < 0) {
+                      isBetter = true;
+                    }
+                  }
+                }
+              }
+
+              if (isBetter) {
+                bestIndex = scan;
+                haveBest = true;
+              }
+            }
+          }
+
+          scan += 1;
+        }
+
+        if (haveBest) {
+          if (let Option::SOME(chosen) = remaining.get(bestIndex)) {
+            sorted.push(Hir::DropScheduleDump::ValueEntry {
+              defRaw: chosen.defRaw,
+              declaration: chosen.declaration,
+              name: chosen.name,
+              dropSites: Hir::DropScheduleDump::copyDropSites(&chosen.dropSites),
+              moveSites: Hir::DropScheduleDump::copyPositions(&chosen.moveSites),
+            });
+          }
+
+          used.set(bestIndex, true);
+        }
+
+        picked += 1;
+      }
+
+      return sorted;
+    }
+
+    // --- defers -------------------------------------------------
+
+    function defersEqual(
+      a: &Hir::DropScheduleDump::DeferEntry,
+      b: &Hir::DropScheduleDump::DeferEntry,
+    ): boolean {
+      return Hir::DropScheduleDump::positionsEqual(&a.declared, &b.declared) && Hir::DropScheduleDump::positionsEqual(&a.runs, &b.runs) && a.reasonRank == b.reasonRank;
+    }
+
+    function insertDefer(
+      defers: Vector<Hir::DropScheduleDump::DeferEntry>,
+      declared: Hir::DropScheduleDump::RenderedPosition,
+      runs: Hir::DropScheduleDump::RenderedPosition,
+      reasonRank: u32,
+      reasonText: str,
+    ): Vector<Hir::DropScheduleDump::DeferEntry> {
+      let mut result: Vector<Hir::DropScheduleDump::DeferEntry> = defers;
+      let candidate: Hir::DropScheduleDump::DeferEntry = Hir::DropScheduleDump::DeferEntry {
+        declared: declared,
+        runs: runs,
+        reasonRank: reasonRank,
+        reasonText: reasonText,
+      };
+
+      let mut index: u64 = 0;
+      let mut alreadyPresent: boolean = false;
+
+      while (index < result.length()) {
+        if (let Option::SOME(entry) = result.get(index)) {
+          if (Hir::DropScheduleDump::defersEqual(entry, &candidate)) {
+            alreadyPresent = true;
+          }
+        }
+
+        index += 1;
+      }
+
+      if (!alreadyPresent) {
+        result.push(candidate);
+      }
+
+      return result;
+    }
+
+    /// Deferred bodies scheduled inside one function, sorted and deduplicated,
+    /// mirroring `DropScheduleDumper::defers`.
+    function collectDefers(
+      hir: &Hir::HirStore,
+      schedules: &Hir::DropSchedules,
+      member: &Vector<boolean>,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      storage: &mut Vector<String>,
+    ): Vector<Hir::DropScheduleDump::DeferEntry> {
+      let mut defers: Vector<Hir::DropScheduleDump::DeferEntry> = Vector::new<Hir::DropScheduleDump::DeferEntry>();
+
+      let mut scopeIndex: u64 = 0;
+
+      while (scopeIndex < schedules.onScopeEndDefers.length()) {
+        if (let Option::SOME(entry) = schedules.onScopeEndDefers.get(scopeIndex)) {
+          if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
+            let runsSpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
+            let runs: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&runsSpan, files, workingDirectory, storage);
+            let mut bodyIndex: u64 = 0;
+
+            while (bodyIndex < entry.bodies.length()) {
+              if (let Option::SOME(bodyId) = entry.bodies.get(bodyIndex)) {
+                let declaredSpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, *bodyId);
+                let declared: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&declaredSpan, files, workingDirectory, storage);
+
+                defers = Hir::DropScheduleDump::insertDefer(
+                defers, declared, runs, Hir::DropScheduleDump::REASON_SCOPE_END, "scope-end",
+              );
+              }
+
+              bodyIndex += 1;
+            }
+          }
+        }
+
+        scopeIndex += 1;
+      }
+
+      let mut exitIndex: u64 = 0;
+
+      while (exitIndex < schedules.onExitDefers.length()) {
+        if (let Option::SOME(entry) = schedules.onExitDefers.get(exitIndex)) {
+          let mut applicable: boolean = false;
+          let mut siteId: Hir::HirId = Id::fromRaw<Hir::NodeTag>(0);
+          let mut reasonRank: u32 = 0;
+          let mut reasonText: str = "";
+
+          match (&entry.key) {
+          Hir::ExitKey::Return(nodeId) -> {
+            applicable = true;
+            siteId = nodeId;
+            reasonRank = Hir::DropScheduleDump::REASON_RETURN;
+            reasonText = "return";
+          },
+          Hir::ExitKey::Break(nodeId) -> {
+            applicable = true;
+            siteId = nodeId;
+            reasonRank = Hir::DropScheduleDump::REASON_BREAK;
+            reasonText = "break";
+          },
+          Hir::ExitKey::Continue(nodeId) -> {
+            applicable = true;
+            siteId = nodeId;
+            reasonRank = Hir::DropScheduleDump::REASON_CONTINUE;
+            reasonText = "continue";
+          },
+          // A function-end defer is keyed by the function rather than a
+          // node; its body is already listed by the block that registered
+          // it. Mirrors the host's `ExitKey::FnEnd(_) => continue`.
+          Hir::ExitKey::FnEnd(_) -> {},
+        };
+
+          if (applicable && Hir::DropScheduleDump::isMember(member, siteId.raw())) {
+            let runsSpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, siteId);
+            let runs: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&runsSpan, files, workingDirectory, storage);
+            let mut bodyIndex: u64 = 0;
+
+            while (bodyIndex < entry.bodies.length()) {
+              if (let Option::SOME(bodyId) = entry.bodies.get(bodyIndex)) {
+                let declaredSpan: SourceSpan = Hir::DropScheduleDump::spanOf(hir, *bodyId);
+                let declared: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&declaredSpan, files, workingDirectory, storage);
+
+                defers = Hir::DropScheduleDump::insertDefer(defers, declared, runs, reasonRank, reasonText);
+              }
+
+              bodyIndex += 1;
+            }
+          }
+        }
+
+        exitIndex += 1;
+      }
+
+      return Hir::DropScheduleDump::sortDeferEntries(defers);
+    }
+
+    function compareDeferEntries(
+      a: &Hir::DropScheduleDump::DeferEntry,
+      b: &Hir::DropScheduleDump::DeferEntry,
+    ): i32 {
+      let declaredCompare: i32 = Hir::DropScheduleDump::comparePositions(&a.declared, &b.declared);
+
+      if (declaredCompare != 0) {
+        return declaredCompare;
+      }
+
+      let runsCompare: i32 = Hir::DropScheduleDump::comparePositions(&a.runs, &b.runs);
+
+      if (runsCompare != 0) {
+        return runsCompare;
+      }
+
+      return Hir::DropScheduleDump::compareU32(a.reasonRank, b.reasonRank);
+    }
+
+    /// See `sortDropSites` for why this cannot be `Vector::sort`.
+    function sortDeferEntries(
+      items: Vector<Hir::DropScheduleDump::DeferEntry>,
+    ): Vector<Hir::DropScheduleDump::DeferEntry> {
+      let remaining: Vector<Hir::DropScheduleDump::DeferEntry> = items;
+      let mut sorted: Vector<Hir::DropScheduleDump::DeferEntry> = Vector::new<Hir::DropScheduleDump::DeferEntry>();
+      let mut used: Vector<boolean> = Vector::new<boolean>();
+      let total: u64 = remaining.length();
+      let mut initIndex: u64 = 0;
+
+      while (initIndex < total) {
+        used.push(false);
+        initIndex += 1;
+      }
+
+      let mut picked: u64 = 0;
+
+      while (picked < total) {
+        let mut bestIndex: u64 = 0;
+        let mut haveBest: boolean = false;
+        let mut scan: u64 = 0;
+
+        while (scan < total) {
+          if (let Option::SOME(alreadyUsed) = used.get(scan)) {
+            if (!*alreadyUsed) {
+              let mut isBetter: boolean = !haveBest;
+
+              if (haveBest) {
+                if (let Option::SOME(candidate) = remaining.get(scan)) {
+                  if (let Option::SOME(currentBest) = remaining.get(bestIndex)) {
+                    if (Hir::DropScheduleDump::compareDeferEntries(candidate, currentBest) < 0) {
+                      isBetter = true;
+                    }
+                  }
+                }
+              }
+
+              if (isBetter) {
+                bestIndex = scan;
+                haveBest = true;
+              }
+            }
+          }
+
+          scan += 1;
+        }
+
+        if (haveBest) {
+          if (let Option::SOME(chosen) = remaining.get(bestIndex)) {
+            sorted.push(Hir::DropScheduleDump::DeferEntry {
+              declared: chosen.declared,
+              runs: chosen.runs,
+              reasonRank: chosen.reasonRank,
+              reasonText: chosen.reasonText,
+            });
+          }
+
+          used.set(bestIndex, true);
+        }
+
+        picked += 1;
+      }
+
+      return sorted;
+    }
+
+    // --- functions -------------------------------------------------
+
+    /// Functions with a body, sorted in print order, mirroring
+    /// `DropScheduleDumper::functions`.
+    function collectFunctions(
+      hir: &Hir::HirStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      storage: &mut Vector<String>,
+      thunks: &Vector<Hir::DropScheduleDump::ThunkSpan>,
+    ): Vector<Hir::DropScheduleDump::FunctionEntry> {
+      let mut entries: Vector<Hir::DropScheduleDump::FunctionEntry> = Vector::new<Hir::DropScheduleDump::FunctionEntry>();
+      let mut index: u64 = 0;
+
+      while (index < hir.items.length()) {
+        let Option::SOME(itemId) = hir.items.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let Option::SOME(definition) = defs.get(*itemId) else {
+          index += 1;
+          continue;
+        };
+
+        // An extern function has no body to walk in the host: its HIR carries
+        // no bodied lowering, so `functions()` there never lists it. Mirror
+        // that by excluding it here too, even though the selfhost still
+        // allocates it a (empty) body id.
+        let isFunctionLike: boolean = match (definition) {
+        Analyzer::Definition::Function(functionDef) -> !functionDef.isExtern,
+        Analyzer::Definition::Method(_) -> true,
+        _ -> false,
+      };
+
+        if (!isFunctionLike) {
+          index += 1;
+          continue;
+        }
+
+        let Option::SOME(bodyId) = hir.functionBody(*itemId) else {
+          index += 1;
+          continue;
+        };
+
+        let span: SourceSpan = Hir::DropScheduleDump::functionSpan(hir, thunks, *itemId, bodyId);
+        let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
+        let name: str = Hir::DropScheduleDump::resolveSymbol(symbols, definition.name());
+
+        entries.push(Hir::DropScheduleDump::FunctionEntry {
+        defId: *itemId,
+        bodyId: bodyId,
+        position: position,
+        name: name,
+      });
+
+        index += 1;
+      }
+
+      return Hir::DropScheduleDump::sortFunctionEntries(entries);
+    }
+
+    function compareFunctionEntries(
+      a: &Hir::DropScheduleDump::FunctionEntry,
+      b: &Hir::DropScheduleDump::FunctionEntry,
+    ): i32 {
+      let positionCompare: i32 = Hir::DropScheduleDump::comparePositions(&a.position, &b.position);
+
+      if (positionCompare != 0) {
+        return positionCompare;
+      }
+
+      let nameCompare: i32 = Hir::DropScheduleDump::compareStr(a.name, b.name);
+
+      if (nameCompare != 0) {
+        return nameCompare;
+      }
+
+      return Hir::DropScheduleDump::compareU32(a.defId.raw(), b.defId.raw());
+    }
+
+    /// See `sortDropSites` for why this cannot be `Vector::sort`.
+    function sortFunctionEntries(
+      items: Vector<Hir::DropScheduleDump::FunctionEntry>,
+    ): Vector<Hir::DropScheduleDump::FunctionEntry> {
+      let remaining: Vector<Hir::DropScheduleDump::FunctionEntry> = items;
+      let mut sorted: Vector<Hir::DropScheduleDump::FunctionEntry> = Vector::new<Hir::DropScheduleDump::FunctionEntry>();
+      let mut used: Vector<boolean> = Vector::new<boolean>();
+      let total: u64 = remaining.length();
+      let mut initIndex: u64 = 0;
+
+      while (initIndex < total) {
+        used.push(false);
+        initIndex += 1;
+      }
+
+      let mut picked: u64 = 0;
+
+      while (picked < total) {
+        let mut bestIndex: u64 = 0;
+        let mut haveBest: boolean = false;
+        let mut scan: u64 = 0;
+
+        while (scan < total) {
+          if (let Option::SOME(alreadyUsed) = used.get(scan)) {
+            if (!*alreadyUsed) {
+              let mut isBetter: boolean = !haveBest;
+
+              if (haveBest) {
+                if (let Option::SOME(candidate) = remaining.get(scan)) {
+                  if (let Option::SOME(currentBest) = remaining.get(bestIndex)) {
+                    if (Hir::DropScheduleDump::compareFunctionEntries(candidate, currentBest) < 0) {
+                      isBetter = true;
+                    }
+                  }
+                }
+              }
+
+              if (isBetter) {
+                bestIndex = scan;
+                haveBest = true;
+              }
+            }
+          }
+
+          scan += 1;
+        }
+
+        if (haveBest) {
+          if (let Option::SOME(chosen) = remaining.get(bestIndex)) {
+            sorted.push(Hir::DropScheduleDump::FunctionEntry {
+              defId: chosen.defId,
+              bodyId: chosen.bodyId,
+              position: chosen.position,
+              name: chosen.name,
+            });
+          }
+
+          used.set(bestIndex, true);
+        }
+
+        picked += 1;
+      }
+
+      return sorted;
+    }
+
+    // --- top-level render -------------------------------------------------
+
+    /// Renders the drop schedules of a whole program, byte for byte
+    /// equivalent to `ignis_hir::drop_schedule_dump::DropScheduleDumper` for
+    /// every construct both front ends model. `workingDirectory` is the
+    /// process working directory (the caller's `Env::currentDir()`), used to
+    /// normalize rendered paths exactly like the host.
+    function render(
+      hir: &Hir::HirStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      schedules: &Hir::DropSchedules,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+    ): String {
+      let mut storage: Vector<String> = Vector::new<String>();
+      let mut output: String = String::create("drop-schedule v1\n");
+
+      let thunks: Vector<Hir::DropScheduleDump::ThunkSpan> = Hir::DropScheduleDump::collectClosureThunks(hir);
+      let functions: Vector<Hir::DropScheduleDump::FunctionEntry> = Hir::DropScheduleDump::collectFunctions(hir, defs, symbols, files, workingDirectory, &mut storage, &thunks);
+
+      // Allocated once for the whole program and reused function to
+      // function (`clearMembership` below), so membership checks stay O(1)
+      // without paying an O(program size) reset per function.
+      let mut member: Vector<boolean> = Hir::DropScheduleDump::newMembership(hir.length());
+
+      let mut functionIndex: u64 = 0;
+
+      while (functionIndex < functions.length()) {
+        let Option::SOME(entry) = functions.get(functionIndex) else {
+          functionIndex += 1;
+          continue;
+        };
+
+        output.pushStr(`function ${entry.name} at ${Hir::DropScheduleDump::renderPosition(&entry.position)}\n`.toStr());
+
+        let bodyNodesResult: Hir::DropScheduleDump::BodyNodes = Hir::DropScheduleDump::bodyNodes(hir, entry.bodyId, member);
+        let nodes: Vector<u32> = bodyNodesResult.raw;
+        member = bodyNodesResult.member;
+
+        let declarations: Vector<Hir::DropScheduleDump::DeclarationEntry> = Hir::DropScheduleDump::collectDeclarations(
+        hir, defs, entry.defId, entry.bodyId, &nodes, files, workingDirectory, &mut storage,
+      );
+        let values: Vector<Hir::DropScheduleDump::ValueEntry> = Hir::DropScheduleDump::collectValues(
+        hir, defs, symbols, schedules, entry.defId, entry.bodyId, &member, &declarations, files, workingDirectory,
+        &mut storage,
+      );
+        let defers: Vector<Hir::DropScheduleDump::DeferEntry> = Hir::DropScheduleDump::collectDefers(
+        hir, schedules, &member, files, workingDirectory, &mut storage,
+      );
+
+        if (values.isEmpty() && defers.isEmpty()) {
+          output.pushStr("  <no owned values>\n");
+          member = Hir::DropScheduleDump::clearMembership(member, &nodes);
+          functionIndex += 1;
+          continue;
+        }
+
+        let mut valueIndex: u64 = 0;
+
+        while (valueIndex < values.length()) {
+          if (let Option::SOME(value) = values.get(valueIndex)) {
+            output.pushStr(`  value ${value.name} kind=${value.declaration.kind} declared at ${Hir::DropScheduleDump::renderPosition(&value.declaration.position)}\n`.toStr());
+
+            let mut dropIndex: u64 = 0;
+
+            while (dropIndex < value.dropSites.length()) {
+              if (let Option::SOME(site) = value.dropSites.get(dropIndex)) {
+                output.pushStr(`    drop at ${Hir::DropScheduleDump::renderPosition(&site.position)} reason=${site.reasonText}\n`.toStr());
+              }
+
+              dropIndex += 1;
+            }
+
+            let mut moveIndex: u64 = 0;
+
+            while (moveIndex < value.moveSites.length()) {
+              if (let Option::SOME(position) = value.moveSites.get(moveIndex)) {
+                output.pushStr(`    moved at ${Hir::DropScheduleDump::renderPosition(position)}\n`.toStr());
+              }
+
+              moveIndex += 1;
+            }
+          }
+
+          valueIndex += 1;
+        }
+
+        let mut deferIndex: u64 = 0;
+
+        while (deferIndex < defers.length()) {
+          if (let Option::SOME(deferEntry) = defers.get(deferIndex)) {
+            output.pushStr(`  defer declared at ${Hir::DropScheduleDump::renderPosition(&deferEntry.declared)} runs at ${Hir::DropScheduleDump::renderPosition(&deferEntry.runs)} reason=${deferEntry.reasonText}\n`.toStr());
+          }
+
+          deferIndex += 1;
+        }
+
+        member = Hir::DropScheduleDump::clearMembership(member, &nodes);
+        functionIndex += 1;
+      }
+
+      return output;
+    }
+  }
+}

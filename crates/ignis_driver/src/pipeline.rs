@@ -59,6 +59,14 @@ fn dump_requested(
     .unwrap_or(false)
 }
 
+fn dump_drop_schedule_requested(config: &IgnisConfig) -> bool {
+  config
+    .build_config
+    .as_ref()
+    .map(|build_config| build_config.dump_drop_schedule)
+    .unwrap_or(false)
+}
+
 fn warn_unsupported_dumps(config: &IgnisConfig) {
   if dump_requested(config, DumpKind::Ir) {
     eprintln!("{} Dump kind 'ir' is not supported yet.", "Warning:".yellow().bold());
@@ -695,6 +703,22 @@ pub fn compile_project(
 
         (drop_schedules, ownership_diagnostics, borrow_diagnostics)
       };
+
+      if dump_drop_schedule_requested(&config) {
+        let dump = {
+          let sym_table = semantic.symbols.borrow();
+          ignis_hir::drop_schedule_dump::DropScheduleDumper::new(
+            &mono_output.hir,
+            &mono_output.defs,
+            &sym_table,
+            &drop_schedules,
+          )
+          .with_source_map(&ctx.source_map)
+          .render()
+        };
+
+        write_dump_output(&config, "dump-drop-schedule.txt", &dump)?;
+      }
 
       let mut post_mono_diagnostics = ownership_diagnostics;
       post_mono_diagnostics.extend(borrow_diagnostics);

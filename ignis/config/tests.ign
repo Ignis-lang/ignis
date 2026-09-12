@@ -1,4 +1,5 @@
 import Env from "std::env";
+import Fs from "std::fs";
 import Path from "std::path";
 import String from "std::string";
 import Test from "std::test";
@@ -173,4 +174,53 @@ function projectLoaderReportsInvalidFieldTypes(): void {
 function projectLoaderReportsMissingEntryPath(): void {
   let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/missing_entry/ignis.toml");
   expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::PATH_NOT_FOUND);
+}
+
+/// Regression guard for a known defect, found while building gate G7.
+///
+/// `ignis check <file>` given an **absolute** path to a source file that some
+/// `ignis.toml` governs compiles the whole project instead of that file: the
+/// CLI parses the argument, `resolveTarget` correctly reports a file rather
+/// than a directory, and then `Resolver::discover` asks
+/// `Config::findProjectFile` for a governing project and loads it entry and
+/// all, dropping the path the user named. A relative path escapes the bug only
+/// because the upward walk runs out of components before it reaches the
+/// workspace root, which is luck rather than design.
+///
+/// The test pins today's behaviour so the defect is visible and cannot change
+/// unnoticed; it is not an endorsement of it. When `discover` learns to keep a
+/// named file as its entry under the governing project's settings, this test
+/// must flip: `entryText()` becomes the named file, and the name should lose
+/// its `IsAKnownDefect` suffix.
+///
+/// The runner's skip mechanism is the `// e2e: skip <reason>` fixture header,
+/// which covers `.ign` program fixtures and fails the run once a skipped
+/// fixture starts passing. This defect is about how the compiler is invoked
+/// rather than about a program, so it has no fixture to carry that header and
+/// `@test` functions cannot. An unmet precondition therefore returns quietly
+/// instead of failing a suite that ran somewhere unexpected.
+@test
+function projectLoaderIgnoresANamedSourceFileIsAKnownDefect(): void {
+  let namedFile: Path::PathBuf = fixturePath("test_cases/e2e/ok/drop_basic.ign");
+
+  if (!Fs::exists(namedFile.asStr())) {
+    return;
+  }
+
+  let Option::SOME(configPath) = Config::findProjectFile(&namedFile) else {
+    // Nothing governs the file here, so the defect cannot show itself.
+    return;
+  };
+
+  let configText: String = configPath.toString();
+  assertEndsWith(&configText, "/ignis.toml");
+
+  match (Config::loadProject(&namedFile)) {
+    Result::OK(project) -> {
+      // The defect: the project's own entry wins over the file that was named.
+      let entryText: String = project.entryText();
+      assertEndsWith(&entryText, "/ignis/main.ign");
+    },
+    Result::ERROR(_) -> Test::fail(),
+  };
 }

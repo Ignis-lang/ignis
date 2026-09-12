@@ -438,6 +438,9 @@ record CompileOptions {
   public quiet: boolean;
   /// Stop after the analysis phase, which is as far as a warning fixture looks.
   public stopAfterAnalyze: boolean;
+  /// Print the ownership checker's drop schedules to stdout right after
+  /// `Borrowck::checkModule`, mirroring the host's `--dump-drop-schedule`.
+  public dumpDropSchedule: boolean;
 
   public static build(emitCode: boolean): CompileOptions {
     return CompileOptions {
@@ -446,6 +449,7 @@ record CompileOptions {
       exportAll: false,
       quiet: false,
       stopAfterAnalyze: false,
+      dumpDropSchedule: false,
     };
   }
 }
@@ -570,6 +574,7 @@ function compileDiscovered(
   let collectTests: boolean = options.collectTests;
   let exportAll: boolean = options.exportAll;
   let quiet: boolean = options.quiet;
+  let dumpDropSchedule: boolean = options.dumpDropSchedule;
   let emitCode: boolean = options.emitCode && !options.stopAfterAnalyze;
 
   let mut errorMessages: Vector<String> = Vector::new<String>();
@@ -871,6 +876,24 @@ function compileDiscovered(
     &monoResult.hir,
   );
 
+  if (dumpDropSchedule) {
+    let workingDirectory: String = match (Env::currentDir()) {
+      Result::OK(path) -> path.toString(),
+      Result::ERROR(_) -> String::new(),
+    };
+
+    let dump: String = Hir::DropScheduleDump::render(
+      &monoResult.hir,
+      &defStore,
+      &symbols,
+      &checked.dropSchedules,
+      &files,
+      workingDirectory.toStr(),
+    );
+
+    Io::println(`\n${dump}`);
+  }
+
   let ownershipErrors: u64 = countBySeverity(&checked.diagnostics, Severity::ERROR);
   let ownershipWarnings: u64 = countBySeverity(&checked.diagnostics, Severity::WARNING);
 
@@ -1070,7 +1093,8 @@ function runCompile(
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
-  let compileOptions: CompileOptions = CompileOptions::build(!checkOnly);
+  let mut compileOptions: CompileOptions = CompileOptions::build(!checkOnly);
+  compileOptions.dumpDropSchedule = options.dumpDropSchedule;
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
   let mut linkErrors: u64 = 0;
 

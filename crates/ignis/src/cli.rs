@@ -442,6 +442,10 @@ pub struct Cli {
   #[arg(long, global = true)]
   pub dump_hir: Option<String>,
 
+  /// Print every function's drop schedule after ownership analysis
+  #[arg(long, default_value = "false", global = true)]
+  pub dump_drop_schedule: bool,
+
   /// Number of parallel workers for C compilation and test execution
   ///
   /// Defaults to the host's available parallelism. `IGNIS_TEST_JOBS` is used

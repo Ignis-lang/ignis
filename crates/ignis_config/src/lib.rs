@@ -296,6 +296,8 @@ pub struct IgnisBuildConfig {
   pub analyze_only: bool,
   /// Force a full rebuild, ignoring cached C/objects/archives (`ignis build --force`).
   pub force_rebuild: bool,
+  /// Print the drop schedule of every function after ownership analysis.
+  pub dump_drop_schedule: bool,
 }
 
 impl IgnisBuildConfig {
@@ -334,7 +336,16 @@ impl IgnisBuildConfig {
       check_mode,
       analyze_only,
       force_rebuild,
+      dump_drop_schedule: false,
     }
+  }
+
+  pub fn with_dump_drop_schedule(
+    mut self,
+    dump_drop_schedule: bool,
+  ) -> Self {
+    self.dump_drop_schedule = dump_drop_schedule;
+    self
   }
 }
 
