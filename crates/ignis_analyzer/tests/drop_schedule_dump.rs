@@ -74,8 +74,8 @@ function take(): i32 {{
 "
   );
 
-  // The arm binding is dropped at the end of the arm, and the `return` inside the arm
-  // schedules nothing of its own: that asymmetry is exactly what the dump is for.
+  // The arm binding is dropped both at the end of the arm and on the arm's early
+  // return: two sites for one binding, which is what the dump makes readable.
   assert_eq!(
     dump(&source),
     "drop-schedule v1
@@ -86,6 +86,7 @@ function make at test.ign:15:23
 function take at test.ign:19:22
   value inner kind=binding declared at test.ign:21:28
     drop at test.ign:21:28 reason=arm-end
+    drop at test.ign:22:7 reason=return
 "
   );
 }
