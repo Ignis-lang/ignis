@@ -336,6 +336,48 @@ function parserRejectsUnsupportedIntersectionTypeSyntaxWithTargetedDiagnostic():
 }
 
 @test
+function parserRejectsTupleTypeSyntaxWithTargetedDiagnostic(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_tuple_type_unsupported.ign",
+    "function f(): (i32, i32) { return 0; } function recovered(): void {}"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  let diagnostic: &Diagnostic = match (diagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing unsupported tuple type diagnostic"),
+  };
+
+  Test::assertEq<str>(diagnostic.code, "I0001");
+  Test::assertEq<str>(diagnostic.messageText(), "Expected Arrow");
+  Test::assertEq<u64>(diagnostic.primarySpan.start, 25);
+  Test::assertEq<u64>(diagnostic.primarySpan.end, 26);
+}
+
+@test
+function parserRejectsTupleTypeSyntaxAsParameterWithTargetedDiagnostic(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_tuple_type_param_unsupported.ign",
+    "function f(x: (i32, i32)): void { return; } function recovered(): void {}"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  let diagnostic: &Diagnostic = match (diagnostics.get(0)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> @panic("missing unsupported tuple type diagnostic"),
+  };
+
+  Test::assertEq<str>(diagnostic.code, "I0001");
+  Test::assertEq<str>(diagnostic.messageText(), "Expected Arrow");
+  Test::assertEq<u64>(diagnostic.primarySpan.start, 24);
+  Test::assertEq<u64>(diagnostic.primarySpan.end, 25);
+}
+
+@test
 function parserRecoversToNextTopLevelItemAfterMalformedTypeAlias(): void {
   let source: SourceFile = SourceFile::create(
     "fixtures/parser_recovery.ign",
