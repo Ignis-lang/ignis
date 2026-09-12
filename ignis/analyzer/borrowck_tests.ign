@@ -556,6 +556,22 @@ function borrowckRenderSchedules(
     conditionFailIndex += 1;
   }
 
+  let mut conditionSkipIndex: u64 = 0;
+
+  while (conditionSkipIndex < schedules.onConditionSkip.length()) {
+    if (let Option::SOME(entry) = schedules.onConditionSkip.get(conditionSkipIndex)) {
+      if (!entry.defs.isEmpty()) {
+        let defs: String = borrowckRenderDefs(defStore, symbols, &entry.defs);
+
+        rendered.pushStr("condition-skip: ");
+        rendered.pushStr(defs.toStr());
+        rendered.pushStr("\n");
+      }
+    }
+
+    conditionSkipIndex += 1;
+  }
+
   let mut overwriteIndex: u64 = 0;
 
   while (overwriteIndex < schedules.onOverwrite.length()) {
@@ -917,6 +933,19 @@ function borrowckSchedulesChainedLetConditionFail(): void {
   );
 
   Test::assertEq<str>(rendered.toStr(), "scope-end: second, first\ncondition-fail: first\n");
+}
+
+/// Scenario: a boolean in front of a `let` condition. The `let` consumes its
+/// place only on the path that reaches it, so the short-circuit's false path is
+/// where that place is still live and owed a drop.
+/// Spec: IGN-249 — `on_condition_skip`.
+@test
+function borrowckSchedulesShortCircuitedLetConditionSkip(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Slot {\n  FILLED(Owned),\n  EMPTY,\n}\n\nfunction make(): Slot {\n  return Slot::FILLED(Owned { id: 1 });\n}\n\nfunction run(flag: boolean): u32 {\n  let mut seen: u32 = 0;\n  let slot: Slot = make();\n\n  if (flag && let Slot::FILLED(first) = slot) {\n    seen = first.id;\n  }\n\n  return seen;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "scope-end: first\ncondition-skip: slot\n");
 }
 
 /// Scenario: overwriting a local that still holds a value schedules a drop of

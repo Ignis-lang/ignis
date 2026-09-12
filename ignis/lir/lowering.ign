@@ -3491,8 +3491,33 @@ export namespace LirLowering {
       source: resultSlot,
     }));
 
+    // A `let` condition behind this `&&` never runs when the left operand is
+    // false, so the place it would have consumed is still live on that edge and
+    // its move never happened: scope end wrote it off, and nothing else frees
+    // it. The drops go in their own block on the false edge, which is the only
+    // path that skips the right operand. Mirrors the oracle's
+    // `sc_condition_skip` block.
+    //
+    // A `let` condition inside `||` is rejected in typechecking, so nothing is
+    // ever scheduled for one and the polarity here stays that of `&&`.
+    let mut conditionSkipDrops: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+
+    if (let Hir::BinaryOperation::And = operation) {
+      conditionSkipDrops = dropSchedules.conditionSkipDrops(nodeId);
+    }
+
+    let mut skipBlock: Option<Lir::BlockId> = Option::NONE;
+
+    if (!conditionSkipDrops.isEmpty()) {
+      skipBlock = Option::SOME(LirLowering::createBlock(function_, "sc_condition_skip"));
+    }
+
     let mut thenBlock: Lir::BlockId = rightBlock;
     let mut elseBlock: Lir::BlockId = mergeBlock;
+
+    if (let Option::SOME(block) = skipBlock) {
+      elseBlock = block;
+    }
 
     if (let Hir::BinaryOperation::Or = operation) {
       thenBlock = mergeBlock;
@@ -3504,6 +3529,12 @@ export namespace LirLowering {
       thenBlock: thenBlock,
       elseBlock: elseBlock,
     }));
+
+    if (let Option::SOME(block) = skipBlock) {
+      LirLowering::switchToBlock(state, block);
+      LirLowering::emitDropList(function_, state, &conditionSkipDrops);
+      LirLowering::terminate(function_, state, Lir::Terminator::Goto(mergeBlock));
+    }
 
     LirLowering::switchToBlock(state, rightBlock);
 

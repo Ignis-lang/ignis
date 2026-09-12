@@ -165,6 +165,21 @@ export namespace Hir {
     /// succeeded, so exactly the bindings listed here hold a value.
     public onConditionFail: Vector<Hir::NodeDropEntry>;
 
+    /// Drops owed by a `&&` whose *left* operand evaluated to false, keyed by
+    /// that `Binary` node. Mirrors `on_condition_skip`.
+    ///
+    /// A `let` condition consumes its scrutinee, and the ownership walk records
+    /// that move once for the whole condition. Behind a short-circuit the move
+    /// is conditional: with `if (before && let P = value)` a false `before`
+    /// skips the `let` entirely, so `value` was never moved and no later site
+    /// frees it — scope end already skipped it. This path is where it is still
+    /// live and unowned, and the only place its drop can go.
+    ///
+    /// Only a scrutinee that is a *place* is listed: a call temporary the
+    /// skipped operand would have produced was never created, so nothing is
+    /// owed for it.
+    public onConditionSkip: Vector<Hir::NodeDropEntry>;
+
     public onOverwrite: Vector<Hir::NodeDropEntry>;
 
     /// Drops before overwriting one field of an owned value, keyed by the
@@ -188,6 +203,7 @@ export namespace Hir {
         onMatchArmEnd: Vector::new<Hir::NodeDropEntry>(),
         onExit: Vector::new<Hir::ExitDropEntry>(),
         onConditionFail: Vector::new<Hir::NodeDropEntry>(),
+        onConditionSkip: Vector::new<Hir::NodeDropEntry>(),
         onOverwrite: Vector::new<Hir::NodeDropEntry>(),
         onFieldOverwrite: Vector::new<Hir::NodeDropEntry>(),
         onScopeEndDefers: Vector::new<Hir::NodeDeferEntry>(),
@@ -197,7 +213,7 @@ export namespace Hir {
     }
 
     public isEmpty(&self): boolean {
-      return self.onScopeEnd.isEmpty() && self.onMatchArmEnd.isEmpty() && self.onExit.isEmpty() && self.onConditionFail.isEmpty() && self.onOverwrite.isEmpty() && self.onFieldOverwrite.isEmpty() && self.onScopeEndDefers.isEmpty() && self.onExitDefers.isEmpty();
+      return self.onScopeEnd.isEmpty() && self.onMatchArmEnd.isEmpty() && self.onExit.isEmpty() && self.onConditionFail.isEmpty() && self.onConditionSkip.isEmpty() && self.onOverwrite.isEmpty() && self.onFieldOverwrite.isEmpty() && self.onScopeEndDefers.isEmpty() && self.onExitDefers.isEmpty();
     }
 
     /// Replaces the drop list of a block, mirroring the Rust `HashMap::insert`
@@ -260,6 +276,40 @@ export namespace Hir {
       }
 
       self.onConditionFail.push(Hir::NodeDropEntry { node: condition, defs: defs });
+    }
+
+    /// Replaces the drop list a short-circuited `&&` owes on its skipped path,
+    /// mirroring the Rust `HashMap::insert` on `on_condition_skip`. A loop
+    /// condition is walked once, but replacing rather than appending keeps a
+    /// second walk from doubling the list.
+    public setConditionSkip(
+      &mut self,
+      condition: Hir::HirId,
+      defs: Vector<Analyzer::DefinitionId>
+    ): void {
+      let existing: Option<u64> = Hir::findNodeEntry(&self.onConditionSkip, condition);
+
+      if (let Option::SOME(index) = existing) {
+        self.onConditionSkip.set(index, Hir::NodeDropEntry { node: condition, defs: defs });
+        return;
+      }
+
+      self.onConditionSkip.push(Hir::NodeDropEntry { node: condition, defs: defs });
+    }
+
+    /// Forgets the drop list a short-circuited `&&` owed on its skipped path,
+    /// mirroring the Rust `HashMap::remove` on `on_condition_skip`.
+    public clearConditionSkip(&mut self, condition: Hir::HirId): void {
+      let existing: Option<u64> = Hir::findNodeEntry(&self.onConditionSkip, condition);
+
+      if (let Option::SOME(index) = existing) {
+        self.onConditionSkip.set(index, Hir::NodeDropEntry {
+          node: condition,
+          defs: Vector::new<Analyzer::DefinitionId>(),
+        });
+      }
+
+      return;
     }
 
     /// Appends one local to the drop-before-overwrite list of an assignment,
@@ -403,6 +453,10 @@ export namespace Hir {
 
     public conditionFailDrops(&self, condition: Hir::HirId): Vector<Analyzer::DefinitionId> {
       return Hir::nodeEntryDrops(&self.onConditionFail, condition);
+    }
+
+    public conditionSkipDrops(&self, condition: Hir::HirId): Vector<Analyzer::DefinitionId> {
+      return Hir::nodeEntryDrops(&self.onConditionSkip, condition);
     }
 
     public overwriteDrops(&self, assign: Hir::HirId): Vector<Analyzer::DefinitionId> {
