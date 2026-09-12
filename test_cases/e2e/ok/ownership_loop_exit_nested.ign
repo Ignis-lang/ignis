@@ -1,0 +1,157 @@
+// e2e: std
+//
+// Nested loops, each with a `let` condition over a place. A `break` leaves one
+// loop, so it owes one condition's place: the inner `break` returns to the outer
+// body, where the outer place is still live and still the outer loop's to free.
+// A `return` leaves every loop at once and owes both.
+//
+// The exit code is the construction/drop imbalance plus the difference between
+// what each case read and what it had to read, so 0 means every Tracked was
+// dropped exactly once.
+
+record Counters {
+  static mut MADE: i32 = 0;
+  static mut DROPPED: i32 = 0;
+}
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Counters::DROPPED += 1;
+    return;
+  }
+}
+
+enum Kind {
+  ONE(Tracked),
+  EMPTY,
+}
+
+function tracked(id: i32): Tracked {
+  Counters::MADE += 1;
+  return Tracked { id: id };
+}
+
+function one(id: i32): Kind {
+  return Kind::ONE(tracked(id));
+}
+
+/// The outer place is refilled before the inner loop starts, so it holds a value
+/// at the inner `break`. That `break` must leave it alone: the outer body carries
+/// on, and the outer condition consumes it on the next round.
+function innerBreakLeavesOuterPlace(): i32 {
+  let mut rounds: i32 = 0;
+  let mut outer: Kind = one(1);
+
+  while (let Kind::ONE(outerItem) = outer) {
+    rounds += outerItem.id;
+    outer = one(1);
+
+    let mut inner: Kind = one(1);
+
+    while (let Kind::ONE(innerItem) = inner) {
+      rounds += innerItem.id;
+      inner = one(1);
+      break;
+    }
+
+    if (rounds >= 4) {
+      outer = Kind::EMPTY;
+    }
+  }
+
+  return rounds;
+}
+
+/// Both loops are left by a `break`. Each one frees the place its own condition
+/// consumes, and neither pays for the other's.
+function bothLoopsBreak(): i32 {
+  let mut rounds: i32 = 0;
+  let mut outer: Kind = one(1);
+
+  while (let Kind::ONE(outerItem) = outer) {
+    rounds += outerItem.id;
+    outer = one(1);
+
+    let mut inner: Kind = one(1);
+
+    while (let Kind::ONE(innerItem) = inner) {
+      rounds += innerItem.id;
+      inner = one(1);
+
+      if (rounds >= 2) {
+        break;
+      }
+    }
+
+    if (rounds >= 2) {
+      break;
+    }
+  }
+
+  return rounds;
+}
+
+/// A `return` out of the inner loop leaves both, and both places are live.
+function innerReturnLeavesBoth(): i32 {
+  let mut rounds: i32 = 0;
+  let mut outer: Kind = one(1);
+
+  while (let Kind::ONE(outerItem) = outer) {
+    rounds += outerItem.id;
+    outer = one(1);
+
+    let mut inner: Kind = one(1);
+
+    while (let Kind::ONE(innerItem) = inner) {
+      rounds += innerItem.id;
+      inner = one(1);
+
+      return rounds;
+    }
+  }
+
+  return rounds;
+}
+
+/// A `continue` in the outer body, reached from under the inner loop. It goes
+/// back to the outer condition, which is where the refilled outer place is
+/// freed, so the `continue` owes nothing for it.
+function innerBreakThenOuterContinue(): i32 {
+  let mut rounds: i32 = 0;
+  let mut outer: Kind = one(1);
+
+  while (let Kind::ONE(outerItem) = outer) {
+    rounds += outerItem.id;
+
+    let mut inner: Kind = one(1);
+
+    while (let Kind::ONE(innerItem) = inner) {
+      rounds += innerItem.id;
+      inner = one(1);
+      break;
+    }
+
+    if (rounds >= 4) {
+      outer = Kind::EMPTY;
+      continue;
+    }
+
+    outer = one(1);
+  }
+
+  return rounds;
+}
+
+function main(): i32 {
+  let mut observed: i32 = 0;
+
+  observed += innerBreakLeavesOuterPlace() - 4;
+  observed += bothLoopsBreak() - 2;
+  observed += innerReturnLeavesBoth() - 2;
+  observed += innerBreakThenOuterContinue() - 4;
+
+  return Counters::MADE - Counters::DROPPED + observed;
+}
