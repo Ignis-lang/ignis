@@ -60,6 +60,10 @@ pub struct LoweringContext<'a> {
   /// Drop schedules from ownership analysis.
   drop_schedules: &'a DropSchedules,
 
+  /// Set while lowering a match scrutinee that no arm takes a payload out of, so the
+  /// field read does not mark the field moved. See `lower_field_access`.
+  reading_field_scrutinee_by_copy: bool,
+
   /// Optional set of modules to emit. If None, emit all.
   /// If Some, only emit functions from modules in the set;
   /// functions from other modules are created as extern declarations.
@@ -111,6 +115,7 @@ impl<'a> LoweringContext<'a> {
       def_to_local: HashMap::new(),
       loop_stack: Vec::new(),
       drop_schedules,
+      reading_field_scrutinee_by_copy: false,
       emit_modules,
       synthetic_owned_stack: Vec::new(),
       load_alias_temps: HashSet::new(),
@@ -1667,6 +1672,48 @@ impl<'a> LoweringContext<'a> {
     }
 
     self.fn_builder().switch_to_block(continue_block);
+
+    // `let Kind::PAIR(left, _) = kind else { ... }` binds `left` and leaves the second
+    // payload with no owner, exactly as the matching arm of a `match` does. Free it on
+    // entry to the success path, where the pattern is known to have matched.
+    // Gated exactly as the matching arm of a `match` is: the pattern has to take an
+    // owning payload out of the scrutinee, which is also what makes the HIR ownership
+    // checker consume the source place (see `ownership_hir`'s `HIRKind::LetElse` arm).
+    // Without that, the source is still dropped where it was declared and freeing a
+    // payload here frees it twice.
+    if self.pattern_moves_owned_value(value_ty, pattern) && self.match_owns_scrutinee_bytes(value) {
+      let payload_temp = self.fn_builder().alloc_temp(value_ty, span.clone());
+      self.fn_builder().emit(Instr::Load {
+        dest: payload_temp,
+        source: scrutinee_local,
+      });
+      self.emit_unbound_payload_drops(Operand::Temp(payload_temp), value_ty, pattern, span);
+    }
+  }
+
+  /// Whether a match-like construct owns the bytes it reads its scrutinee out of, and so
+  /// owes a drop for every part of them no binding takes.
+  ///
+  /// A temporary or a variable has no other holder — the HIR ownership checker consumes
+  /// the variable in `check_match`. A field read by value out of storage this function
+  /// owns is a partial move: `lower_field_access` marks it moved, so the owner's drop
+  /// skips it. Elements, dereferences, statics and anything behind a reference are the
+  /// opposite case: the place they were read from still owns and still frees them.
+  fn match_owns_scrutinee_bytes(
+    &mut self,
+    scrutinee: HIRId,
+  ) -> bool {
+    let scrutinee_ty = self.hir.get(scrutinee).type_id;
+
+    if !self.types.needs_drop_with_defs(&scrutinee_ty, self.defs) {
+      return false;
+    }
+
+    if !Self::hir_aliases_external_storage(self.hir.get(scrutinee)) {
+      return true;
+    }
+
+    matches!(self.hir.get(scrutinee).kind, HIRKind::FieldAccess { .. }) && !self.base_is_behind_reference(scrutinee)
   }
 
   fn lower_assign(
@@ -2192,7 +2239,19 @@ impl<'a> LoweringContext<'a> {
       return self.lower_tuple_match(&elements, arms, result_ty, span);
     }
 
+    // Whether the scrutinee is a field of storage this function owns that no arm takes a
+    // payload out of. Reading it by value would mark the field moved — a partial move
+    // performed for nothing, since the owner is the only holder either way and every arm
+    // just tests the copy. Reading it as a plain copy leaves the drop where it belongs.
+    let reads_owned_field_without_taking_payload = matches!(self.hir.get(scrutinee).kind, HIRKind::FieldAccess { .. })
+      && !self.base_is_behind_reference(scrutinee)
+      && !arms
+        .iter()
+        .any(|arm| self.pattern_moves_owned_value(self.hir.get(scrutinee).type_id, &arm.pattern));
+
+    self.reading_field_scrutinee_by_copy = reads_owned_field_without_taking_payload;
     let scrutinee_val = self.lower_hir_node(scrutinee)?;
+    self.reading_field_scrutinee_by_copy = false;
     let scrutinee_ty = self.hir.get(scrutinee).type_id;
 
     // A scrutinee that aliases storage owned by another place (e.g. a record
@@ -2211,29 +2270,21 @@ impl<'a> LoweringContext<'a> {
       .iter()
       .any(|arm| self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern));
 
-    // Reading a droppable field by value out of storage this function owns is a partial
-    // move: `lower_field_access` marks the field moved, so the owner's own drop skips it
-    // and this match holds the only live copy. A field reached through a reference is the
-    // opposite case — the referent still owns and drops it — and so are elements,
-    // dereferences and statics, which are never marked moved.
-    let scrutinee_is_partial_move = matches!(self.hir.get(scrutinee).kind, HIRKind::FieldAccess { .. })
-      && !self.base_is_behind_reference(scrutinee)
-      && scrutinee_needs_drop;
-
-    // Whether the value in the synthetic match local is this match's to free once an arm
-    // has taken the payload. A temporary has no other holder, a `Variable` is consumed by
-    // the ownership checker (see `ownership_hir::check_match`), and a partial move takes
-    // the field's bytes out of their owner. Anything else still belongs to the place it
-    // was read from.
-    let match_owns_scrutinee = !scrutinee_aliases_external_storage || scrutinee_is_partial_move;
+    // Whether the bytes in the synthetic match local are this match's to free.
+    let match_owns_scrutinee = self.match_owns_scrutinee_bytes(scrutinee);
 
     let track_scrutinee_drop = !scrutinee_aliases_external_storage && scrutinee_needs_drop && !some_arm_moves_payload;
 
-    // When one arm takes the payload the whole scrutinee is left untracked above, so
-    // every arm that does *not* take the payload would drop nothing: those arms — a
-    // wildcard, a payload-less variant, a variant destructured into wildcards — drop the
-    // scrutinee themselves, at the end of the arm.
-    let drop_scrutinee_per_arm = match_owns_scrutinee && scrutinee_needs_drop && some_arm_moves_payload;
+    // Whenever the synthetic local is not drop-tracked above, every arm that does not
+    // take the payload would drop nothing: those arms — a wildcard, a payload-less
+    // variant, a variant destructured into wildcards — drop the scrutinee themselves, on
+    // arm entry. That covers two shapes. One arm takes the payload and leaves the rest
+    // untracked; or the scrutinee is a partial move out of a field this function owns,
+    // which `lower_field_access` marks moved, so the owner's drop skips it and this match
+    // holds the only live copy no matter what the arms bind. Keying off
+    // `track_scrutinee_drop` rather than repeating its inputs is what keeps the two drops
+    // mutually exclusive: exactly one of them owns the scrutinee.
+    let drop_scrutinee_per_arm = match_owns_scrutinee && some_arm_moves_payload;
 
     let scrut_local = if track_scrutinee_drop {
       self.alloc_synthetic_local(scrutinee_ty, false)
@@ -2343,6 +2394,22 @@ impl<'a> LoweringContext<'a> {
       }
 
       self.fn_builder().switch_to_block(arm_blocks[i]);
+
+      // Whatever this arm's pattern leaves without an owner is freed on arm entry. An arm
+      // that takes a payload owes the slots it discards; an arm that takes none owes the
+      // whole scrutinee. Neither is nameable from the body — bindings are what a body
+      // reaches the scrutinee through, and these are precisely the parts no binding took
+      // — and arm entry is the one point every path out of the arm (fall-through,
+      // `return`, `break`, `continue`) passes through exactly once.
+      if drop_scrutinee_per_arm && self.pattern_moves_owned_value(scrutinee_ty, &arm.pattern) {
+        let payload_temp = self.fn_builder().alloc_temp(scrutinee_ty, span.clone());
+        self.fn_builder().emit(Instr::Load {
+          dest: payload_temp,
+          source: scrut_local,
+        });
+        self.emit_unbound_payload_drops(Operand::Temp(payload_temp), scrutinee_ty, &arm.pattern, span.clone());
+      }
+
       let body_val = self.lower_hir_node(arm.body);
 
       if !self.fn_builder().is_terminated() {
@@ -2842,6 +2909,88 @@ impl<'a> LoweringContext<'a> {
         });
         Operand::Temp(tuple_temp)
       },
+    }
+  }
+
+  /// Drop the payload slots of a matched variant that no binding takes.
+  ///
+  /// `Kind::PAIR(left, _)` hands the first payload to `left`, whose drop the arm-end
+  /// schedule owns, and leaves the second with no owner at all: the arm-end schedule only
+  /// covers bindings, and the whole-scrutinee drop skips exactly the arms that take a
+  /// payload. Every payload a pattern discards is freed here, once, so the rule holds
+  /// uniformly — bindings own what they bind, the match frees the rest.
+  ///
+  /// Only called where the match owns the scrutinee's bytes, so a payload read out of it
+  /// has no other holder. `Or` is left alone: its alternatives can bind different slots of
+  /// different variants, and which one matched is not known at this point.
+  fn emit_unbound_payload_drops(
+    &mut self,
+    value: Operand,
+    value_ty: TypeId,
+    pattern: &HIRPattern,
+    span: Span,
+  ) {
+    let HIRPattern::Variant {
+      enum_def,
+      variant_tag,
+      args,
+    } = pattern
+    else {
+      return;
+    };
+
+    let Some(payload_types) = self.variant_payload_types(value_ty, *enum_def, *variant_tag) else {
+      return;
+    };
+
+    let mut runtime_field_index: u32 = 0;
+
+    for (index, arg) in args.iter().enumerate() {
+      let Some(&field_ty) = payload_types.get(index) else {
+        break;
+      };
+
+      // A void payload has no runtime slot, exactly as in `lower_pattern_check`.
+      if matches!(self.types.get(&field_ty), Type::Void) {
+        continue;
+      }
+
+      let field_index = runtime_field_index;
+      runtime_field_index += 1;
+
+      if !self.types.needs_drop_with_defs(&field_ty, self.defs) {
+        continue;
+      }
+
+      let field_temp = self.fn_builder().alloc_temp(field_ty, span.clone());
+      self.fn_builder().emit(Instr::EnumGetPayloadField {
+        dest: field_temp,
+        source: value.clone(),
+        variant_tag: *variant_tag,
+        field_index,
+      });
+
+      // A slot some binding reaches into keeps its own owner; only the parts of it that
+      // nothing binds are this match's to free.
+      if self.pattern_moves_owned_value(field_ty, arg) {
+        self.emit_unbound_payload_drops(Operand::Temp(field_temp), field_ty, arg, span.clone());
+        continue;
+      }
+
+      let slot = self.fn_builder().alloc_local(LocalData {
+        def_id: None,
+        ty: field_ty,
+        mutable: false,
+        name: Some("match_unbound_payload".to_string()),
+        borrowed_alias: false,
+      });
+
+      self.fn_builder().emit(Instr::Store {
+        dest: slot,
+        value: Operand::Temp(field_temp),
+      });
+
+      self.fn_builder().emit(Instr::Drop { local: slot });
     }
   }
 
@@ -3530,8 +3679,15 @@ impl<'a> LoweringContext<'a> {
     // only the function's own storage when the base is reached without going through a
     // reference: a borrowed base names storage someone else still owns and still drops,
     // and marking it there would make the owner skip a drop it is responsible for.
-    let should_mark_field_moved =
-      !self.base_is_behind_reference(base) && self.types.needs_drop_with_defs(&field_ty, self.defs);
+    //
+    // A match scrutinee that no arm takes a payload out of is the other exception: it is
+    // read, tested and discarded, so taking the field's bytes out of their owner buys
+    // nothing and leaves them with no owner at all. `lower_match` sets the flag for
+    // exactly that read; taking it here keeps it from reaching the base's own accesses.
+    let reading_scrutinee_by_copy = std::mem::take(&mut self.reading_field_scrutinee_by_copy);
+    let should_mark_field_moved = !reading_scrutinee_by_copy
+      && !self.base_is_behind_reference(base)
+      && self.types.needs_drop_with_defs(&field_ty, self.defs);
 
     let base_ptr_ty = self.types.pointer(base_ty, false);
     let base_ptr = if base_is_ptr {
