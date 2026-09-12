@@ -1119,13 +1119,33 @@ export namespace TestRunner {
     return outcome.success ? String::create("ok") : String::create("FAILED");
   }
 
+  /// Builds the `Summary` block's count lines exactly as `report` prints
+  /// them, as pure data so the `skipped` line's presence can be tested
+  /// without capturing stderr. Mirrors the host's `format_test_summary_snapshot`.
+  function summaryLines(outcomes: &Vector<TestOutcome>): Vector<String> {
+    let total: u64 = outcomes.length();
+    let passed: u64 = TestRunner::countPassed(outcomes);
+    let failed: u64 = total - passed;
+    let skipped: u64 = TestRunner::countSkipped(outcomes);
+
+    let mut lines: Vector<String> = Vector::new<String>();
+    lines.push(`${total} total`);
+    lines.push(`${passed} passed`);
+    lines.push(`${failed} failed`);
+
+    if (skipped > 0) {
+      lines.push(`${skipped} skipped`);
+    }
+
+    return lines;
+  }
+
   /// Print the run in the host's shape: one line per test, a failure section,
   /// then the totals. Returns the number of failures.
   function report(outcomes: &Vector<TestOutcome>, binaryPath: &Path::PathBuf): u64 {
     let total: u64 = outcomes.length();
     let passed: u64 = TestRunner::countPassed(outcomes);
     let failed: u64 = total - passed;
-    let skipped: u64 = TestRunner::countSkipped(outcomes);
     let mut index: u64 = 0;
 
     while (index < outcomes.length()) {
@@ -1171,12 +1191,16 @@ export namespace TestRunner {
     }
 
     Io::eprintln(TestRunner::sectionHeader("Summary"));
-    Io::eprintln(`  - ${total} total`);
-    Io::eprintln(`  - ${passed} passed`);
-    Io::eprintln(`  - ${failed} failed`);
 
-    if (skipped > 0) {
-      Io::eprintln(`  - ${skipped} skipped`);
+    let summary: Vector<String> = TestRunner::summaryLines(outcomes);
+    let mut summaryIndex: u64 = 0;
+
+    while (summaryIndex < summary.length()) {
+      if (let Option::SOME(line) = summary.get(summaryIndex)) {
+        Io::eprintln(`  - ${line.toStr()}`);
+      }
+
+      summaryIndex += 1;
     }
 
     Io::eprintln(`  Test binary: ${binaryPath.asStr()}`);
@@ -1564,4 +1588,49 @@ function testRunnerCountsTreatASkippedOutcomeAsPassedAndSkipped(): void {
 
   Test::assertEq<u64>(TestRunner::countPassed(&outcomes), 2);
   Test::assertEq<u64>(TestRunner::countSkipped(&outcomes), 1);
+}
+
+function testRunnerJoinLines(lines: &Vector<String>): String {
+  let mut joined: String = String::new();
+  let mut index: u64 = 0;
+
+  while (index < lines.length()) {
+    if (let Option::SOME(line) = lines.get(index)) {
+      if (index > 0) {
+        joined.pushStr("\n");
+      }
+
+      joined.push(line);
+    }
+
+    index += 1;
+  }
+
+  return joined;
+}
+
+/// No skip in the run means no `skipped` line, mirroring the host's
+/// `test_summary_snapshot_reports_project_results`.
+@test
+function testRunnerSummaryLinesOmitSkippedWhenThereIsNone(): void {
+  let mut outcomes: Vector<TestOutcome> = Vector::new<TestOutcome>();
+  outcomes.push(testRunnerOutcomeNamed("main::passes", true, ""));
+  outcomes.push(testRunnerOutcomeNamed("main::fails", false, ""));
+
+  let lines: Vector<String> = TestRunner::summaryLines(&outcomes);
+
+  Test::assertEq<str>(testRunnerJoinLines(&lines).toStr(), "2 total\n1 passed\n1 failed");
+}
+
+/// A skipped outcome adds a trailing `N skipped` line to the summary,
+/// mirroring the host's `test_summary_snapshot_reports_a_skipped_fixture`.
+@test
+function testRunnerSummaryLinesReportsASkippedFixture(): void {
+  let mut outcomes: Vector<TestOutcome> = Vector::new<TestOutcome>();
+  outcomes.push(testRunnerOutcomeNamed("main::passes", true, ""));
+  outcomes.push(testRunnerOutcomeNamed("e2e::flaky", true, "flaky on CI"));
+
+  let lines: Vector<String> = TestRunner::summaryLines(&outcomes);
+
+  Test::assertEq<str>(testRunnerJoinLines(&lines).toStr(), "2 total\n2 passed\n0 failed\n1 skipped");
 }

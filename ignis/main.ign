@@ -6,6 +6,7 @@ import Memory from "std::memory";
 import Path from "std::path";
 import Process from "std::process";
 import Sort from "std::sort";
+import Test from "std::test";
 
 import DiagnosticBag, DiagnosticRenderer, Severity, SourceFile from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
@@ -43,7 +44,13 @@ import ArchiveTool from "./build/archive";
 import CCompiler from "./build/c_compiler";
 import Linker from "./build/linker";
 import BuildOverrides, DiscoveryResult, Resolver from "./build/resolver";
-import FixtureCase, FixtureKind, FixtureLeakSplit, FixtureTests from "./build/fixture_tests";
+import
+  FixtureCase,
+  FixtureKind,
+  FixtureLeakSplit,
+  FixtureMode,
+  FixtureTests,
+from "./build/fixture_tests";
 
 // Pulled in so `ignis check` analyzes them and `ignis test build::fingerprint`
 // and `ignis test build::pipeline` can select their `@test`s: nothing else in
@@ -1479,6 +1486,30 @@ function runWarningsFixture(
   return FixtureTests::compareSnapshot(&snapshotPath, &body, options.updateSnapshots);
 }
 
+/// Builds one fixture's `TestOutcome`, mirroring the host's
+/// `fixture_execution_result`. `skipped` is empty for every outcome but a
+/// held skip contract.
+///
+/// The failure text is named `stderrText`, not `stderr`: a bare `stderr`
+/// local or parameter shadows the C runtime's `stderr` global that the
+/// codegen's own use-after-drop panic guard writes through, breaking the
+/// build the moment such a guard is emitted in the same function.
+function fixtureOutcome(
+  fixture: &FixtureCase,
+  success: boolean,
+  stderrText: String,
+  skipped: String
+): TestOutcome {
+  return TestOutcome {
+    fqName: fixture.name.clone(),
+    success: success,
+    exitCode: success ? 0 : 1,
+    stdout: String::new(),
+    stderr: stderrText,
+    skipped: skipped,
+  };
+}
+
 /// Runs one fixture and reports it as an ordinary plan entry, honoring its
 /// skip header if it has one.
 ///
@@ -1501,14 +1532,7 @@ function runFixture(
   timeoutSeconds: u64,
 ): TestOutcome {
   if (fixture.modeError.length() > 0) {
-    return TestOutcome {
-      fqName: fixture.name.clone(),
-      success: false,
-      exitCode: 1,
-      stdout: String::new(),
-      stderr: fixture.modeError.clone(),
-      skipped: String::new(),
-    };
+    return fixtureOutcome(fixture, false, fixture.modeError.clone(), String::new());
   }
 
   let compareBaseline: boolean = fixture.skipReason.length() == 0;
@@ -1521,45 +1545,60 @@ function runFixture(
 
   if (!compareBaseline) {
     if (failure.length() == 0) {
-      return TestOutcome {
-        fqName: fixture.name.clone(),
-        success: false,
-        exitCode: 1,
-        stdout: String::new(),
-        stderr: `this fixture is marked '// e2e: skip ${fixture.skipReason.toStr()}' but now passes; remove the skip header and record its baseline`,
-        skipped: String::new(),
-      };
+      let staleSkip: String = `this fixture is marked '// e2e: skip ${fixture.skipReason.toStr()}' but now passes; remove the skip header and record its baseline`;
+
+      return fixtureOutcome(fixture, false, staleSkip, String::new());
     }
 
-    return TestOutcome {
-      fqName: fixture.name.clone(),
-      success: true,
-      exitCode: 0,
-      stdout: String::new(),
-      stderr: String::new(),
-      skipped: fixture.skipReason.clone(),
-    };
+    return fixtureOutcome(fixture, true, String::new(), fixture.skipReason.clone());
   }
 
   if (failure.length() == 0) {
-    return TestOutcome {
-      fqName: fixture.name.clone(),
-      success: true,
-      exitCode: 0,
-      stdout: String::new(),
-      stderr: String::new(),
-      skipped: String::new(),
-    };
+    return fixtureOutcome(fixture, true, String::new(), String::new());
   }
 
-  return TestOutcome {
-    fqName: fixture.name.clone(),
-    success: false,
-    exitCode: 1,
-    stdout: String::new(),
-    stderr: failure,
-    skipped: String::new(),
+  return fixtureOutcome(fixture, false, failure, String::new());
+}
+
+function mainSampleFixtureNamed(name: str): FixtureCase {
+  return FixtureCase {
+    name: String::create(name),
+    path: Path::PathBuf::create("/corpus/ok/case.ign"),
+    mode: FixtureMode::program(),
+    modeError: String::new(),
+    skipReason: String::new(),
   };
+}
+
+/// `fixtureOutcome`'s held-skip shape: a mode contract that still fails is
+/// reported as `success: true` with a non-empty `skipped` reason, mirroring
+/// the host's `fixture_execution_result(case, true, String::new(), Some(reason))`
+/// path in `run_single_fixture`.
+@test
+function mainFixtureOutcomeReportsAHeldSkipContractAsPassing(): void {
+  let fixture: FixtureCase = mainSampleFixtureNamed("e2e::ownership::stillUnimplemented");
+  let reason: String = String::create("ownership not yet implemented in selfhost");
+  let outcome: TestOutcome = fixtureOutcome(&fixture, true, String::new(), reason);
+
+  Test::assertEq<boolean>(outcome.success, true);
+  Test::assertEq<i32>(outcome.exitCode, 0);
+  Test::assertEq<str>(outcome.skipped.toStr(), "ownership not yet implemented in selfhost");
+}
+
+/// `fixtureOutcome`'s stale-skip shape: a skip header whose fixture now
+/// passes hard-fails (`success: false`, `skipped` empty) instead of
+/// silently going green.
+@test
+function mainFixtureOutcomeReportsAStaleSkipAsFailing(): void {
+  let fixture: FixtureCase = mainSampleFixtureNamed("e2e::ownership::nowFixed");
+  let staleMessage: String = String::create(
+    "this fixture is marked '// e2e: skip ownership not yet implemented in selfhost' but now passes; remove the skip header and record its baseline",
+  );
+  let outcome: TestOutcome = fixtureOutcome(&fixture, false, staleMessage, String::new());
+
+  Test::assertEq<boolean>(outcome.success, false);
+  Test::assertEq<i32>(outcome.exitCode, 1);
+  Test::assertEq<u64>(outcome.skipped.length(), 0);
 }
 
 /// Build the project's test harness and run every selected test in its own

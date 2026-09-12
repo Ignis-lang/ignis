@@ -59,9 +59,10 @@ def strip_ansi(text: str) -> str:
 def parse_test_log(text: str) -> dict:
   """Extract the per-test lines and the `• Summary` block from a test run.
 
-  Only the lines the runner prints for each test and the three summary counts
-  are read. Everything else (phase reports, failure details, timings) differs
-  between two runs of the same suite and says nothing about the result.
+  Only the lines the runner prints for each test and the four summary counts
+  (total, passed, failed, skipped) are read. Everything else (phase reports,
+  failure details, timings) differs between two runs of the same suite and
+  says nothing about the result.
   """
   results: dict[str, str] = {}
   summary: dict[str, int] = {}
@@ -234,7 +235,7 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
   if (
     stage2_failing != host_failing
     or stage2_skipped != host_skipped
-    or set(stage2["tests"]) != set(host["tests"])
+    or stage2["tests"] != host["tests"]
   ):
     return {
       "gate": "G3",
