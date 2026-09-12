@@ -522,24 +522,9 @@ export namespace ParserStatements {
     let mut statementsRef: &mut Vector<Ast::StatementId> = statements;
 
     while (!parserRef.atPunctuation(Punctuation::RIGHT_BRACE) && !parserRef.atEof()) {
-      if (ParserExpressions::isCompileIfDirectiveStart(parserRef)) {
-        if (!ParserStatements::parseCompileDirectiveStatements(parserRef, statementsRef)) {
-          return false;
-        }
-
-        continue;
-      }
-
-      if (ParserExpressions::isCompileElseDirectiveStart(parserRef)) {
-        ParserExpressions::rejectUnmatchedCompileElse(parserRef);
+      if (!ParserStatements::parseBlockEntry(parserRef, statementsRef)) {
         return false;
       }
-
-      let Option::SOME(statementId) = ParserStatements::parseStatement(parserRef) else {
-        return false;
-      };
-
-      statementsRef.push(statementId);
     }
 
     return parserRef.expectPunctuation(Punctuation::RIGHT_BRACE, "expected '}' to close the compile-time directive branch").isSome();
@@ -587,6 +572,38 @@ export namespace ParserStatements {
     return false;
   }
 
+  /// `@configFlag(<cond>) <statement>` in statement position: the condition
+  /// folds while parsing, a true one keeps the single statement that follows,
+  /// and a false one drops it whole.
+  function parseConfigFlagStatement(
+    parser: &mut ParserShared::State,
+    statements: &mut Vector<Ast::StatementId>
+  ): boolean {
+    let mut parserRef: &mut ParserShared::State = parser;
+
+    let Option::SOME(selected) = ParserExpressions::parseConfigFlagDirectiveHeader(parserRef) else {
+      // The reference compiler reports the broken condition and then reads the
+      // tokens it stopped at as a statement, which reports what they are
+      // missing as well. Reading them here keeps that second diagnostic, and
+      // with it the parse verdict the two compilers are compared on.
+      ParserStatements::parseStatement(parserRef);
+      return false;
+    };
+
+    if (!selected) {
+      return ParserExpressions::skipGatedDeclaration(parserRef);
+    }
+
+    let mut statementsRef: &mut Vector<Ast::StatementId> = statements;
+
+    let Option::SOME(statementId) = ParserStatements::parseStatement(parserRef) else {
+      return false;
+    };
+
+    statementsRef.push(statementId);
+    return true;
+  }
+
   /// Collects one block entry: a compile-time directive expands to zero or more
   /// statements, anything else parses as a single statement.
   function parseBlockEntry(
@@ -597,6 +614,10 @@ export namespace ParserStatements {
 
     if (ParserExpressions::isCompileIfDirectiveStart(parserRef)) {
       return ParserStatements::parseCompileDirectiveStatements(parserRef, statements);
+    }
+
+    if (ParserExpressions::isConfigFlagDirectiveStart(parserRef)) {
+      return ParserStatements::parseConfigFlagStatement(parserRef, statements);
     }
 
     if (ParserExpressions::isCompileElseDirectiveStart(parserRef)) {
