@@ -1,0 +1,58 @@
+// e2e: std
+//
+// Every name here would be a C keyword, a libc symbol the emitted code calls,
+// or a global the runtime prelude makes visible. A parameter is the only place
+// a user name reaches C unprefixed, so those are what the reserved-name rule
+// renames; locals are `l<n>` and fields `field_<n>` and were already safe.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+record Holder {
+  public free: i32;
+  public main: i32;
+  public default: i32;
+  public int: i32;
+  public tracked: Tracked;
+}
+
+function sum(stderr: i32, errno: i32, exit: i32, int: i32, free: i32): i32 {
+  return stderr + errno + exit + int + free;
+}
+
+// The emitter guards a read through a droppable base with
+// `fprintf(stderr, ...)`, so this body needs the C `stderr` at the same time as
+// it holds a parameter written `stderr`.
+function trackedId(stderr: i32, holder: &Holder): i32 {
+  return stderr + holder.tracked.id;
+}
+
+function main(): i32 {
+  let free: i32 = 1;
+  let default: i32 = 2;
+  let exit: i32 = 4;
+  let errno: i32 = 8;
+  let int: i32 = 16;
+
+  let holder: Holder = Holder {
+    free: 32,
+    main: 64,
+    default: 128,
+    int: 256,
+    tracked: Tracked { id: 512 },
+  };
+
+  Io::println(`locals ${free} ${default} ${exit} ${errno} ${int}`.toStr());
+  Io::println(`fields ${holder.free} ${holder.main} ${holder.default} ${holder.int}`.toStr());
+  Io::println(`sum ${sum(free, default, exit, int, errno)}`.toStr());
+  Io::println(`tracked ${trackedId(0, &holder)}`.toStr());
+
+  return 0;
+}

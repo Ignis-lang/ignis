@@ -1,0 +1,201 @@
+/// The C identifiers a user name may not become.
+///
+/// Port of `crates/ignis_codegen_c/src/reserved.rs`. The set has to stay
+/// identical to that one: a name one compiler mangles and the other does not is
+/// a bootstrap fixed-point failure. Each table below is the space-separated
+/// spelling of the Rust array of the same name, in the same order.
+///
+/// The rule runs on the *final* C name, after every prefix and suffix the
+/// emitter adds. That is why it almost never fires here: `CodegenC::mangledName`
+/// and `CodegenC::structName` already append `_<definitionId>` to every
+/// non-extern name, and the selfhost spells locals, temporaries, parameters and
+/// fields by index (`l3`, `t7`, `field_2`) rather than by the user's identifier.
+/// The guard sits at the same place in both compilers regardless, so the
+/// contract does not depend on that scheme staying as it is. An `extern`
+/// declaration or an `@externName` override never reaches here: those name a
+/// symbol the C side owns, and renaming one would break the link.
+export namespace CodegenReserved {
+  /// Appended to a user name whose emitted C spelling would be reserved.
+  function suffix(): str {
+    return "__ign";
+  }
+
+  /// C11 keywords, plus the alternative spellings and common extensions a C
+  /// compiler also refuses as an identifier.
+  function cKeywords(): str {
+    return "_Alignas _Alignof _Atomic _Bool _Complex _Generic _Imaginary _Noreturn _Static_assert _Thread_local alignas alignof asm auto bool break case char complex const continue default do double else enum extern false float for goto if imaginary inline int long noreturn register restrict return short signed sizeof static static_assert struct switch thread_local true typedef typeof union unsigned void volatile while";
+  }
+
+  /// Every name the runtime type prelude defines. Both compilers emit that block
+  /// into every translation unit, so all of it is visible everywhere.
+  ///
+  /// Mirrors `std/runtime/ignis_rt.h` and `CodegenC::emitTypePrelude`.
+  function runtimePreludeNames(): str {
+    return "FALSE IGNIS_RT_TYPES_H IGNIS_TYPE_BOOL_ID IGNIS_TYPE_CHAR_ID IGNIS_TYPE_F32_ID IGNIS_TYPE_F64_ID IGNIS_TYPE_I16_ID IGNIS_TYPE_I32_ID IGNIS_TYPE_I64_ID IGNIS_TYPE_I8_ID IGNIS_TYPE_PTR_ID IGNIS_TYPE_STRING_ID IGNIS_TYPE_U16_ID IGNIS_TYPE_U32_ID IGNIS_TYPE_U64_ID IGNIS_TYPE_U8_ID IgnisString IgnisTypeId Pointer TRUE boolean f32 f64 i16 i32 i64 i8 ignis_atom_t ignis_char_t u16 u32 u64 u8";
+  }
+
+  /// Typedefs and object-like macros the headers the emitted code includes make
+  /// visible in every scope. A user name that spells one of these either
+  /// redeclares a type, which is a hard syntax error in a declaration, or is
+  /// textually replaced by the preprocessor.
+  function systemHeaderNames(): str {
+    return "EOF EXIT_FAILURE EXIT_SUCCESS FILE NULL errno int16_t int32_t int64_t int8_t intmax_t intptr_t max_align_t offsetof ptrdiff_t size_t ssize_t stderr stdin stdout uint16_t uint32_t uint64_t uint8_t uintmax_t uintptr_t wchar_t";
+  }
+
+  /// The libc and compiler-builtin functions the emitted bodies call by name. A
+  /// user name that shadows one of these turns a generated call into a call
+  /// through the user's value.
+  function emittedCallNames(): str {
+    return "__builtin_memset __builtin_trap __builtin_unreachable abort calloc exit fprintf fputs free malloc memcmp memcpy memmove memset pow printf putchar puts realloc snprintf sprintf strcmp strcpy strlen strncmp";
+  }
+
+  /// Identifiers the emitters invent inside generated bodies, plus the program
+  /// entry symbol.
+  ///
+  /// Exact names only, not the `__ignis` / `__closure` / `__env` prefixes those
+  /// names share. This emitter's own synthesized definitions are *in* that
+  /// namespace by construction -- a closure thunk is written
+  /// `__closure_thunk_<n>` and then mangled like any other definition -- so a
+  /// prefix rule renames the emitter's own symbols instead of protecting them.
+  /// C reserves leading double underscores to the implementation anyway.
+  ///
+  /// The C `main` wrapper's own `argc`/`argv` and a method's `self` receiver are
+  /// absent for a different reason: the emitter owns those names in scopes no
+  /// user name can enter, so reserving them would rename every method signature
+  /// without closing a collision.
+  function emitterOwnedNames(): str {
+    return "__dip __ignis_drop_state __ignis_main_result __ignis_user_main ignis_runtime_init main";
+  }
+
+  /// Whether `name` matches the whole of the `table` token starting at `start`.
+  function tokenEquals(table: &String, start: u64, length: u64, name: &String): boolean {
+    if (length != name.length()) {
+      return false;
+    }
+
+    let mut offset: u64 = 0;
+
+    while (offset < length) {
+      let Option::SOME(left) = table.byteAt(start + offset) else {
+        return false;
+      };
+
+      let Option::SOME(right) = name.byteAt(offset) else {
+        return false;
+      };
+
+      if (left != right) {
+        return false;
+      }
+
+      offset += 1;
+    }
+
+    return true;
+  }
+
+  /// Whether `name` is one of the space-separated tokens of `table`.
+  function tableContains(table: str, name: &String): boolean {
+    let tableText: String = String::create(table);
+    let length: u64 = tableText.length();
+    let mut start: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index <= length) {
+      let mut atBoundary: boolean = index == length;
+
+      if (!atBoundary) {
+        let Option::SOME(byte) = tableText.byteAt(index) else {
+          return false;
+        };
+
+        // 32 is the space that separates two tokens.
+        atBoundary = byte == 32;
+      }
+
+      if (atBoundary) {
+        if (CodegenReserved::tokenEquals(&tableText, start, index - start, name)) {
+          return true;
+        }
+
+        start = index + 1;
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// `l3` is the fourth local of whatever function the name lands in, and `t7`
+  /// its eighth temporary. A name spelled that way is a silent rebinding rather
+  /// than a build break, which is the worse of the two.
+  function isIndexedSlotName(name: &String): boolean {
+    if (name.length() < 2) {
+      return false;
+    }
+
+    let Option::SOME(first) = name.byteAt(0) else {
+      return false;
+    };
+
+    // 108 is `l`, 116 is `t`.
+    if (first != 108 && first != 116) {
+      return false;
+    }
+
+    let mut index: u64 = 1;
+
+    while (index < name.length()) {
+      let Option::SOME(byte) = name.byteAt(index) else {
+        return false;
+      };
+
+      if (byte < 48 || byte > 57) {
+        return false;
+      }
+
+      index += 1;
+    }
+
+    return true;
+  }
+
+  /// Is `name` an identifier the emitted translation unit already means?
+  function isReservedCName(name: &String): boolean {
+    if (CodegenReserved::tableContains(CodegenReserved::cKeywords(), name)) {
+      return true;
+    }
+
+    if (CodegenReserved::tableContains(CodegenReserved::runtimePreludeNames(), name)) {
+      return true;
+    }
+
+    if (CodegenReserved::tableContains(CodegenReserved::systemHeaderNames(), name)) {
+      return true;
+    }
+
+    if (CodegenReserved::tableContains(CodegenReserved::emittedCallNames(), name)) {
+      return true;
+    }
+
+    if (CodegenReserved::tableContains(CodegenReserved::emitterOwnedNames(), name)) {
+      return true;
+    }
+
+    return CodegenReserved::isIndexedSlotName(name);
+  }
+
+  /// The C identifier to emit for `name`: `name` itself, or `name` with the
+  /// reserved suffix appended when emitting it bare would collide.
+  function mangleReservedCName(name: String): String {
+    if (!CodegenReserved::isReservedCName(&name)) {
+      return name;
+    }
+
+    let mut mangled: String = name;
+    mangled.pushStr(CodegenReserved::suffix());
+
+    return mangled;
+  }
+}
