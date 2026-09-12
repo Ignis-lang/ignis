@@ -1,0 +1,99 @@
+// e2e: std
+//
+// The second `let` of a chain fails. The branch the chain guards never runs, so
+// the binding the first `let` produced has no scope to fall out of: the drop
+// belongs to the path the short-circuit takes instead.
+//
+// The exit code is the construction/drop imbalance plus the difference between
+// what each case read and what it had to read, so 0 means every Tracked was
+// dropped exactly once.
+
+record Counters {
+  static mut MADE: i32 = 0;
+  static mut DROPPED: i32 = 0;
+}
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Counters::DROPPED += 1;
+    return;
+  }
+}
+
+enum Kind {
+  ONE(Tracked),
+  PAIR(Tracked, Tracked),
+  EMPTY,
+}
+
+function tracked(id: i32): Tracked {
+  Counters::MADE += 1;
+  return Tracked { id: id };
+}
+
+function one(id: i32): Kind {
+  return Kind::ONE(tracked(id));
+}
+
+function pair(left: i32, right: i32): Kind {
+  return Kind::PAIR(tracked(left), tracked(right));
+}
+
+function empty(): Kind {
+  return Kind::EMPTY;
+}
+
+/// The first `let` binds, the second does not.
+function oneBinding(): i32 {
+  let mut seen: i32 = 0;
+  let first: Kind = one(1);
+  let second: Kind = empty();
+
+  if (let Kind::ONE(left) = first && let Kind::ONE(right) = second) {
+    seen = left.id + right.id;
+  }
+
+  return seen;
+}
+
+/// The first `let` binds two payloads, and both owe the same drop.
+function twoBindings(): i32 {
+  let mut seen: i32 = 0;
+  let first: Kind = pair(2, 4);
+  let second: Kind = empty();
+
+  if (let Kind::PAIR(left, right) = first && let Kind::ONE(extra) = second) {
+    seen = left.id + right.id + extra.id;
+  }
+
+  return seen;
+}
+
+/// An `else` branch runs on the same path the drop is emitted on, and must not
+/// see, or free, what the failed chain left behind.
+function withElse(): i32 {
+  let mut seen: i32 = 0;
+  let first: Kind = one(8);
+  let second: Kind = empty();
+
+  if (let Kind::ONE(left) = first && let Kind::ONE(right) = second) {
+    seen = left.id + right.id;
+  } else {
+    seen = 16;
+  }
+
+  return seen;
+}
+
+function main(): i32 {
+  let mut observed: i32 = 0;
+
+  observed += oneBinding();
+  observed += twoBindings();
+  observed += withElse() - 16;
+
+  return Counters::MADE - Counters::DROPPED + observed;
+}

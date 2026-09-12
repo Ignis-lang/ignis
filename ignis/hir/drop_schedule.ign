@@ -134,7 +134,7 @@ export namespace Hir {
   /// ownership walk produces alongside its diagnostics and that LIR lowering
   /// reads to place drop and defer emissions.
   ///
-  /// The Rust type is six `HashMap`s; here each one is a vector of entries,
+  /// The Rust type is a set of `HashMap`s; here each one is a vector of entries,
   /// following the selfhost convention of avoiding hashing for small maps.
   /// Lookup is linear and keyed structurally, which is what the Rust `Eq`
   /// derives amount to.
@@ -150,6 +150,21 @@ export namespace Hir {
     public onScopeEnd: Vector<Hir::NodeDropEntry>;
     public onMatchArmEnd: Vector<Hir::NodeDropEntry>;
     public onExit: Vector<Hir::ExitDropEntry>;
+
+    /// Drops owed by a `&&` whose right operand evaluated to false, keyed by
+    /// that `Binary` node. Mirrors `on_condition_fail`.
+    ///
+    /// A chain of `let` conditions (`if (let A = f() && let B = g())`) hands
+    /// its bindings to the branch it guards, and the branch is the only place
+    /// they are dropped. When a later link of the chain fails, that branch
+    /// never runs, yet everything the earlier links bound is already
+    /// initialized: the short-circuit false path is the only site where those
+    /// bindings are live and unowned. Keying on the `&&` node — rather than on
+    /// the `if` — is what keeps the drop precise: reaching this node's false
+    /// path with the right operand evaluated means every `let` on the left
+    /// succeeded, so exactly the bindings listed here hold a value.
+    public onConditionFail: Vector<Hir::NodeDropEntry>;
+
     public onOverwrite: Vector<Hir::NodeDropEntry>;
 
     /// Drops before overwriting one field of an owned value, keyed by the
@@ -172,6 +187,7 @@ export namespace Hir {
         onScopeEnd: Vector::new<Hir::NodeDropEntry>(),
         onMatchArmEnd: Vector::new<Hir::NodeDropEntry>(),
         onExit: Vector::new<Hir::ExitDropEntry>(),
+        onConditionFail: Vector::new<Hir::NodeDropEntry>(),
         onOverwrite: Vector::new<Hir::NodeDropEntry>(),
         onFieldOverwrite: Vector::new<Hir::NodeDropEntry>(),
         onScopeEndDefers: Vector::new<Hir::NodeDeferEntry>(),
@@ -181,7 +197,7 @@ export namespace Hir {
     }
 
     public isEmpty(&self): boolean {
-      return self.onScopeEnd.isEmpty() && self.onMatchArmEnd.isEmpty() && self.onExit.isEmpty() && self.onOverwrite.isEmpty() && self.onFieldOverwrite.isEmpty() && self.onScopeEndDefers.isEmpty() && self.onExitDefers.isEmpty();
+      return self.onScopeEnd.isEmpty() && self.onMatchArmEnd.isEmpty() && self.onExit.isEmpty() && self.onConditionFail.isEmpty() && self.onOverwrite.isEmpty() && self.onFieldOverwrite.isEmpty() && self.onScopeEndDefers.isEmpty() && self.onExitDefers.isEmpty();
     }
 
     /// Replaces the drop list of a block, mirroring the Rust `HashMap::insert`
@@ -225,6 +241,25 @@ export namespace Hir {
       }
 
       self.onMatchArmEnd.push(Hir::NodeDropEntry { node: body, defs: defs });
+    }
+
+    /// Replaces the drop list a short-circuited `&&` owes, mirroring the Rust
+    /// `HashMap::insert` on `on_condition_fail`. A loop condition is walked
+    /// once, but replacing rather than appending keeps a second walk from
+    /// doubling the list.
+    public setConditionFail(
+      &mut self,
+      condition: Hir::HirId,
+      defs: Vector<Analyzer::DefinitionId>
+    ): void {
+      let existing: Option<u64> = Hir::findNodeEntry(&self.onConditionFail, condition);
+
+      if (let Option::SOME(index) = existing) {
+        self.onConditionFail.set(index, Hir::NodeDropEntry { node: condition, defs: defs });
+        return;
+      }
+
+      self.onConditionFail.push(Hir::NodeDropEntry { node: condition, defs: defs });
     }
 
     /// Appends one local to the drop-before-overwrite list of an assignment,
@@ -364,6 +399,10 @@ export namespace Hir {
 
     public matchArmDrops(&self, body: Hir::HirId): Vector<Analyzer::DefinitionId> {
       return Hir::nodeEntryDrops(&self.onMatchArmEnd, body);
+    }
+
+    public conditionFailDrops(&self, condition: Hir::HirId): Vector<Analyzer::DefinitionId> {
+      return Hir::nodeEntryDrops(&self.onConditionFail, condition);
     }
 
     public overwriteDrops(&self, assign: Hir::HirId): Vector<Analyzer::DefinitionId> {

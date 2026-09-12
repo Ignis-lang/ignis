@@ -1,0 +1,40 @@
+// e2e: err
+//
+// A binding produced by a chained `let` condition belongs to the branch that
+// chain guards, so moving it out inside that branch consumes it there like any
+// other local: reading it afterwards is a use of a moved value.
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    return;
+  }
+}
+
+enum Kind {
+  ONE(Tracked),
+  EMPTY,
+}
+
+function one(id: i32): Kind {
+  return Kind::ONE(Tracked { id: id });
+}
+
+function take(payload: Tracked): i32 {
+  return payload.id;
+}
+
+function main(): i32 {
+  let first: Kind = one(1);
+  let second: Kind = one(2);
+  let mut seen: i32 = 0;
+
+  if (let Kind::ONE(left) = first && let Kind::ONE(right) = second) {
+    seen = take(left);
+    seen += left.id;
+    seen += right.id;
+  }
+
+  return seen;
+}

@@ -92,6 +92,51 @@ function take at test.ign:19:22
 }
 
 #[test]
+fn chained_let_conditions_list_the_short_circuit_drop() {
+  let source = format!(
+    "{RESOURCE}
+enum Slot {{
+  Filled(Resource),
+  Empty,
+}}
+
+function make(): Slot {{
+  return Slot::Filled(Resource {{ value: 1 }});
+}}
+
+function take(): i32 {{
+  let mut seen: i32 = 0;
+
+  if (let Slot::Filled(first) = make() && let Slot::Filled(second) = make()) {{
+    seen = first.value + second.value;
+  }}
+
+  return seen;
+}}
+"
+  );
+
+  // `first` is bound before the second `let` runs, so a failure there has to free it:
+  // the guarded branch that would otherwise own it never runs. `second` is bound last,
+  // so nothing can fail after it and it only ever falls out of the branch.
+  assert_eq!(
+    dump(&source),
+    "drop-schedule v1
+function drop at test.ign:5:25
+  <no owned values>
+function make at test.ign:15:23
+  <no owned values>
+function take at test.ign:19:22
+  value first kind=binding declared at test.ign:22:7
+    drop at test.ign:22:7 reason=condition-fail
+    drop at test.ign:22:78 reason=scope-end
+  value second kind=binding declared at test.ign:22:43
+    drop at test.ign:22:78 reason=scope-end
+"
+  );
+}
+
+#[test]
 fn a_partially_moved_field_keeps_its_owner_scheduled() {
   let source = format!(
     "{RESOURCE}

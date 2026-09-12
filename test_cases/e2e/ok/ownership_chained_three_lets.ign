@@ -1,0 +1,97 @@
+// e2e: std
+//
+// A two-level `&&` chain of `let` conditions. The chain is left-associated, so
+// the outer `&&` has to reach through the inner one to find the bindings the
+// guarded branch owns, and each link owes a drop for everything its left side
+// bound when its own right side fails.
+//
+// The exit code is the construction/drop imbalance plus the difference between
+// what each case read and what it had to read, so 0 means every Tracked was
+// dropped exactly once.
+
+record Counters {
+  static mut MADE: i32 = 0;
+  static mut DROPPED: i32 = 0;
+}
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Counters::DROPPED += 1;
+    return;
+  }
+}
+
+enum Kind {
+  ONE(Tracked),
+  EMPTY,
+}
+
+function tracked(id: i32): Tracked {
+  Counters::MADE += 1;
+  return Tracked { id: id };
+}
+
+function one(id: i32): Kind {
+  return Kind::ONE(tracked(id));
+}
+
+function empty(): Kind {
+  return Kind::EMPTY;
+}
+
+/// Every link succeeds: all three bindings reach the branch and drop at its end.
+function allBind(): i32 {
+  let mut seen: i32 = 0;
+  let first: Kind = one(1);
+  let second: Kind = one(2);
+  let third: Kind = one(4);
+
+  if (let Kind::ONE(left) = first && let Kind::ONE(middle) = second && let Kind::ONE(right) = third) {
+    seen = left.id + middle.id + right.id;
+  }
+
+  return seen;
+}
+
+/// The last link fails: the branch never runs, and the two bindings the inner
+/// links produced are dropped on the short-circuit path instead.
+function lastFails(): i32 {
+  let mut seen: i32 = 0;
+  let first: Kind = one(8);
+  let second: Kind = one(16);
+  let third: Kind = empty();
+
+  if (let Kind::ONE(left) = first && let Kind::ONE(middle) = second && let Kind::ONE(right) = third) {
+    seen = left.id + middle.id + right.id;
+  }
+
+  return seen;
+}
+
+/// The middle link fails: the last link is never evaluated, so only the first
+/// binding exists and only it is dropped. Its scrutinee is a call so that the
+/// value the last link would have matched is never built either.
+function middleFails(): i32 {
+  let mut seen: i32 = 0;
+  let first: Kind = one(32);
+  let second: Kind = empty();
+
+  if (let Kind::ONE(left) = first && let Kind::ONE(middle) = second && let Kind::ONE(right) = one(64)) {
+    seen = left.id + middle.id + right.id;
+  }
+
+  return seen;
+}
+
+function main(): i32 {
+  let mut observed: i32 = 0;
+
+  observed += allBind() - 7;
+  observed += lastFails();
+  observed += middleFails();
+
+  return Counters::MADE - Counters::DROPPED + observed;
+}

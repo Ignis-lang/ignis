@@ -54,6 +54,19 @@ pub struct DropSchedules {
   /// Drops at early exits (return/break/continue/FnEnd).
   pub on_exit: HashMap<ExitKey, Vec<DefinitionId>>,
 
+  /// Drops owed by a `&&` whose right operand evaluated to false, keyed by that
+  /// `Binary` HIRId.
+  ///
+  /// A chain of `let` conditions (`if (let A = f() && let B = g())`) hands its bindings
+  /// to the branch it guards, and the branch is the only place they are dropped. When a
+  /// later link of the chain fails, that branch never runs, yet everything the earlier
+  /// links bound is already initialized: the short-circuit false path is the only site
+  /// where those bindings are live and unowned. Keying on the `&&` node — rather than on
+  /// the `if` — is what keeps the drop precise: reaching this node's false path with the
+  /// right operand evaluated means every `let` on the left succeeded, so exactly the
+  /// bindings listed here hold a value.
+  pub on_condition_fail: HashMap<HIRId, Vec<DefinitionId>>,
+
   /// Drops before overwriting an owned variable, keyed by Assign HIRId.
   pub on_overwrite: HashMap<HIRId, Vec<DefinitionId>>,
 
@@ -87,6 +100,7 @@ impl DropSchedules {
   pub fn is_empty(&self) -> bool {
     self.on_scope_end.is_empty()
       && self.on_exit.is_empty()
+      && self.on_condition_fail.is_empty()
       && self.on_overwrite.is_empty()
       && self.on_field_overwrite.is_empty()
       && self.on_scope_end_defers.is_empty()

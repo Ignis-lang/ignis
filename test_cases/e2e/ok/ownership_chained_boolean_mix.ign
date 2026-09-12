@@ -1,0 +1,96 @@
+// e2e: std
+//
+// A `let` condition joined by `&&` to a plain boolean. The boolean has no
+// binding of its own, but it decides whether the guarded branch runs, so when
+// it is false the `let`'s binding is dropped on the short-circuit path — the
+// same site a failing later `let` uses.
+//
+// The exit code is the construction/drop imbalance plus the difference between
+// what each case read and what it had to read, so 0 means every Tracked was
+// dropped exactly once.
+
+record Counters {
+  static mut MADE: i32 = 0;
+  static mut DROPPED: i32 = 0;
+}
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Counters::DROPPED += 1;
+    return;
+  }
+}
+
+enum Kind {
+  ONE(Tracked),
+  EMPTY,
+}
+
+function tracked(id: i32): Tracked {
+  Counters::MADE += 1;
+  return Tracked { id: id };
+}
+
+function one(id: i32): Kind {
+  return Kind::ONE(tracked(id));
+}
+
+/// `let` first, boolean second: the boolean decides the branch.
+function letThenBoolean(flag: boolean): i32 {
+  let mut seen: i32 = 0;
+  let value: Kind = one(1);
+
+  if (let Kind::ONE(payload) = value && flag) {
+    seen = payload.id;
+  }
+
+  return seen;
+}
+
+/// Two booleans after the `let`. Each `&&` is a separate link, so each owes the
+/// binding its own drop when its right side is what turns the chain false.
+///
+/// A boolean *before* the `let` is deliberately not covered: the selfhost
+/// condition parser only enters chain mode when the condition starts with
+/// `let`, so `if (flag && let P = e)` is a host-only parse and cannot be a
+/// parity fixture.
+function letThenTwoBooleans(first: boolean, second: boolean): i32 {
+  let mut seen: i32 = 0;
+  let value: Kind = one(2);
+
+  if (let Kind::ONE(payload) = value && first && second) {
+    seen = payload.id;
+  }
+
+  return seen;
+}
+
+/// A boolean between two `let` links. The second `let`'s scrutinee is a call, so
+/// a false boolean in the middle leaves no value behind to account for.
+function letBooleanLetBoolean(flag: boolean): i32 {
+  let mut seen: i32 = 0;
+  let first: Kind = one(4);
+
+  if (let Kind::ONE(left) = first && flag && let Kind::ONE(right) = one(8)) {
+    seen = left.id + right.id;
+  }
+
+  return seen;
+}
+
+function main(): i32 {
+  let mut observed: i32 = 0;
+
+  observed += letThenBoolean(false);
+  observed += letThenBoolean(true) - 1;
+  observed += letThenTwoBooleans(false, false);
+  observed += letThenTwoBooleans(true, false);
+  observed += letThenTwoBooleans(true, true) - 2;
+  observed += letBooleanLetBoolean(false);
+  observed += letBooleanLetBoolean(true) - 12;
+
+  return Counters::MADE - Counters::DROPPED + observed;
+}

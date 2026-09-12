@@ -6,7 +6,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ignis_diagnostics::{diagnostic_report::Diagnostic, message::DiagnosticMessage};
-use ignis_hir::{CaptureMode, DropSchedules, ExitKey, HIR, HIRId, HIRKind, MoveSite, statement::LoopKind};
+use ignis_hir::{
+  CaptureMode, DropSchedules, ExitKey, HIR, HIRId, HIRKind, MoveSite, operation::BinaryOperation, statement::LoopKind,
+};
 use ignis_type::{
   attribute::ParamAttr,
   definition::{DefinitionId, DefinitionKind, DefinitionStore, ParameterDefinition},
@@ -1320,6 +1322,46 @@ impl<'a> HirOwnershipChecker<'a> {
     }
   }
 
+  /// Collects the bindings every `let` condition in a condition expression produced, in
+  /// declaration order, and schedules the drops a short-circuited `&&` owes.
+  ///
+  /// A single `let` condition *is* the match node the bindings were registered under, but
+  /// `let A = f() && let B = g()` is a `&&` whose operands are those match nodes, so the
+  /// enclosing `if`/`while` has to walk the chain to find them. Each `&&` also gets an
+  /// `on_condition_fail` entry for whatever its left side bound: when its right operand
+  /// evaluates to false the guarded branch never runs, and that branch is the only other
+  /// place those bindings are dropped.
+  ///
+  /// Only `&&` is walked. A `let` condition inside `||` is rejected in typechecking, so no
+  /// other operator can hold one, and a chain is left-associated: the left side of a `&&`
+  /// being true means every `let` in it succeeded and every binding it names is live.
+  fn take_condition_bindings(
+    &mut self,
+    condition: HIRId,
+  ) -> Vec<DefinitionId> {
+    let HIRKind::Binary {
+      operation: BinaryOperation::And,
+      left,
+      right,
+    } = self.hir.get(condition).kind.clone()
+    else {
+      return self.let_condition_bindings.remove(&condition).unwrap_or_default();
+    };
+
+    let mut bindings = self.take_condition_bindings(left);
+
+    if !bindings.is_empty() {
+      // Drop order is the reverse of declaration order, like any other scope.
+      self
+        .schedules
+        .on_condition_fail
+        .insert(condition, bindings.iter().rev().copied().collect());
+    }
+
+    bindings.extend(self.take_condition_bindings(right));
+    bindings
+  }
+
   fn check_if(
     &mut self,
     condition: HIRId,
@@ -1330,7 +1372,7 @@ impl<'a> HirOwnershipChecker<'a> {
     // Check condition
     self.check_node(condition);
 
-    let condition_bindings = self.let_condition_bindings.remove(&condition).unwrap_or_default();
+    let condition_bindings = self.take_condition_bindings(condition);
 
     // Save reachability before branches
     let pre_if_reachable = self.reachable;
@@ -1620,7 +1662,7 @@ impl<'a> HirOwnershipChecker<'a> {
 
       LoopKind::While { condition: cond_id } => {
         self.check_node(*cond_id);
-        condition_bindings = self.let_condition_bindings.remove(cond_id).unwrap_or_default();
+        condition_bindings = self.take_condition_bindings(*cond_id);
         None
       },
 
