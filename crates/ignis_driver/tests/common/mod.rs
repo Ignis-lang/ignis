@@ -89,6 +89,7 @@ fn build_driver_test_config(
     false,
     false,
     false,
+    false, // force_rebuild
   ));
 
   Arc::new(config)
@@ -127,6 +128,7 @@ fn build_workspace_std_driver_test_config(
     false,
     false,
     false,
+    false, // force_rebuild
   ));
 
   Ok(Arc::new(config))
@@ -134,6 +136,19 @@ fn build_workspace_std_driver_test_config(
 
 fn workspace_std_path() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../std")
+}
+
+/// Like `compile_project_single_file_with_workspace_std`, but the caller
+/// controls `source_path`/`output_dir` directly instead of getting a fresh
+/// `TempDir` per call. This lets a test build the same project twice into
+/// the same output directory to observe cache behavior across builds.
+pub fn compile_workspace_std_project_in(
+  source_path: &Path,
+  output_dir: &Path,
+  target: TargetBackend,
+) -> Result<(), String> {
+  let config = build_workspace_std_driver_test_config(source_path, output_dir, target, Vec::new())?;
+  compile_project(config, source_path.to_string_lossy().as_ref()).map_err(|_| "compile_project failed".to_string())
 }
 
 fn load_std_manifest(std_path: &Path) -> Result<IgnisSTDManifest, String> {
@@ -175,6 +190,7 @@ fn build_std_test_config(
     false,
     false,
     false,
+    false, // force_rebuild
   ));
 
   Ok(Arc::new(config))

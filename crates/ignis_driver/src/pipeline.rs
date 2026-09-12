@@ -26,8 +26,8 @@ use crate::backend::{
   emit_text, select_backend, BackendRequest, HeaderBackendRequest, LoweredBackendRequest, SelectedBackend,
 };
 use crate::build_layout::{
-  hash_file, is_module_stamp_valid, is_std_stamp_valid, write_if_changed, write_module_stamp, write_std_stamp,
-  BuildFingerprint, BuildLayout, FileEntry, ModuleStamp, StdStamp,
+  compiler_identity, hash_file, is_module_stamp_valid, is_std_stamp_valid, write_if_changed, write_module_stamp,
+  write_std_stamp, BuildFingerprint, BuildLayout, FileEntry, ModuleStamp, StdStamp,
 };
 use crate::context::CompilationContext;
 use crate::link::{compile_to_object, format_tool_error, link_executable, link_executable_multi, LinkPlan};
@@ -386,6 +386,7 @@ pub fn compile_project(
 ) -> Result<(), ()> {
   let start = Instant::now();
   let is_check_mode = config.build_config.as_ref().map(|bc| bc.check_mode).unwrap_or(false);
+  let force_rebuild = config.build_config.as_ref().map(|bc| bc.force_rebuild).unwrap_or(false);
   let cmd_label = if is_check_mode { "Checking" } else { "Building" };
 
   cmd_header!(&config, cmd_label, entry_path);
@@ -908,6 +909,7 @@ pub fn compile_project(
           // Create build fingerprint for stamp validation
           let fingerprint = BuildFingerprint {
             compiler_version: COMPILER_VERSION.to_string(),
+            compiler_identity: compiler_identity(COMPILER_VERSION),
             codegen_abi_version: ignis_codegen_c::CODEGEN_ABI_VERSION,
             target: String::new(), // TODO: add target triple when cross-compilation is supported
           };
@@ -1025,9 +1027,12 @@ pub fn compile_project(
               })
               .collect();
 
-            // Check if this module's stamp is still valid
+            // Check if this module's stamp is still valid. `--force` always
+            // treats the stamp as stale so a rebuild re-emits C/objects even
+            // when nothing about the sources or compiler changed.
             let stamp_path = layout.user_module_stamp_path(&source_path);
-            let stamp_valid = is_module_stamp_valid(&stamp_path, &fingerprint, &self_hash, &current_stamp_sources);
+            let stamp_valid =
+              !force_rebuild && is_module_stamp_valid(&stamp_path, &fingerprint, &self_hash, &current_stamp_sources);
             let obj_exists = obj_path.exists();
 
             if stamp_valid && obj_exists {
@@ -1377,6 +1382,7 @@ fn build_test_driver_config(project_root: &Path) -> Result<(Arc<IgnisConfig>, cr
     false,
     true,
     true,
+    false, // force_rebuild
   ));
 
   Ok((Arc::new(config), project))
@@ -1529,6 +1535,7 @@ fn build_single_file_test_driver_input(
     false,
     true,
     true,
+    false, // force_rebuild
   ));
 
   let layout = BuildLayout::with_project_root(stem, &out_dir, &source_dir);
@@ -1598,6 +1605,7 @@ fn build_std_test_driver_input(
     false,
     true,
     true,
+    false, // force_rebuild
   ));
 
   let layout = BuildLayout::with_project_root("std", &out_dir, &std_root);
@@ -2072,6 +2080,7 @@ fn fixture_compile_config(
     false,
     bin_path.is_none(),
     false,
+    false, // force_rebuild
   ));
 
   Ok(Arc::new(config))
@@ -4674,6 +4683,7 @@ pub fn build_std(
   let stamp_path = layout.std_stamp_path();
   let fingerprint = BuildFingerprint {
     compiler_version: COMPILER_VERSION.to_string(),
+    compiler_identity: compiler_identity(COMPILER_VERSION),
     codegen_abi_version: ignis_codegen_c::CODEGEN_ABI_VERSION,
     target: String::new(),
   };
@@ -4952,16 +4962,21 @@ fn ensure_std_built(
 
   let fingerprint = BuildFingerprint {
     compiler_version: COMPILER_VERSION.to_string(),
+    compiler_identity: compiler_identity(COMPILER_VERSION),
     codegen_abi_version: ignis_codegen_c::CODEGEN_ABI_VERSION,
     target: String::new(),
   };
 
+  let force_rebuild = config.build_config.as_ref().map(|bc| bc.force_rebuild).unwrap_or(false);
+
   // Check if archive exists AND stamp is valid
-  if archive_path.exists() {
+  if archive_path.exists() && !force_rebuild {
     if is_std_stamp_valid(&stamp_path, std_path, &fingerprint) {
       return Ok(());
     }
     phase_warn!(config, "std library outdated, rebuilding...");
+  } else if force_rebuild {
+    phase_warn!(config, "forcing full rebuild (--force)...");
   } else {
     phase_warn!(config, "std library not found, building...");
   }

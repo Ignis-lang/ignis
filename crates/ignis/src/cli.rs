@@ -148,6 +148,10 @@ pub struct BuildCommand {
   /// Enable multiple features separated by commas
   #[arg(long = "features", value_delimiter = ',')]
   pub features: Vec<String>,
+
+  /// Force a full rebuild, ignoring cached C/objects/archives from a previous build
+  #[arg(long = "force", short = 'f', visible_alias = "rebuild")]
+  pub force: bool,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]

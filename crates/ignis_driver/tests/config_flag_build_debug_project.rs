@@ -87,6 +87,7 @@ fn build_config(project: &Project) -> Arc<IgnisConfig> {
     false,
     false,
     false,
+    false,
   ));
 
   Arc::new(config)

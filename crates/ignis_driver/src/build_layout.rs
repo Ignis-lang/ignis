@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// Build output directory structure.
 ///
@@ -286,12 +287,13 @@ impl BuildLayout {
 }
 
 // =============================================================================
-// Stamp v2: content-hash based cache invalidation
+// Stamp v3: content-hash based cache invalidation
 // =============================================================================
 //
 // Format (key=value, sorted):
-//   version=2
+//   version=3
 //   compiler_version=0.1.0
+//   compiler_identity=<blake3 of running exe bytes>-<compiler_version>
 //   codegen_abi_version=1
 //   target=
 //   file_count=N
@@ -300,8 +302,9 @@ impl BuildLayout {
 //   ...
 //
 // For per-module stamps (user modules with deps):
-//   version=2
+//   version=3
 //   compiler_version=...
+//   compiler_identity=...
 //   codegen_abi_version=...
 //   target=
 //   self_path=...
@@ -310,13 +313,49 @@ impl BuildLayout {
 //   dep.0.path=...
 //   dep.0.hash=...
 //   ...
+//
+// `compiler_identity` bundles a content hash of the running compiler
+// executable with its declared version, so a rebuilt binary (even one that
+// keeps the same `CARGO_PKG_VERSION`, e.g. during local development) always
+// invalidates every cached C/object/archive it produced. Bumping
+// `STAMP_VERSION` invalidates every stamp written by a compiler older than
+// this change, one time, regardless of identity.
 
-const STAMP_VERSION: &str = "2";
+const STAMP_VERSION: &str = "3";
+
+static COMPILER_IDENTITY: OnceLock<String> = OnceLock::new();
+
+/// Stable identity of the currently running compiler binary: a content hash
+/// of the executable bytes combined with its version string. Computed once
+/// per process and cached, since `current_exe()` and hashing a multi-MB
+/// binary are both too costly to repeat per module.
+///
+/// Falls back to `"unknown-<version>"` if the running executable cannot be
+/// located or read (e.g. it was deleted after the process started); this
+/// still yields a stable-for-the-process value, it just cannot distinguish
+/// between different such compilers.
+pub fn compiler_identity(compiler_version: &str) -> String {
+  COMPILER_IDENTITY
+    .get_or_init(|| {
+      let exe_hash = current_exe_hash().unwrap_or_else(|_| "unknown".to_string());
+      format!("{}-{}", exe_hash, compiler_version)
+    })
+    .clone()
+}
+
+fn current_exe_hash() -> io::Result<String> {
+  let exe_path = std::env::current_exe()?;
+  let exe_path = std::fs::canonicalize(&exe_path).unwrap_or(exe_path);
+  hash_file(&exe_path)
+}
 
 /// Build configuration that affects output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildFingerprint {
   pub compiler_version: String,
+  /// Content identity of the compiler binary that produced this stamp. See
+  /// `compiler_identity()`.
+  pub compiler_identity: String,
   pub codegen_abi_version: u32,
   pub target: String,
 }
@@ -329,6 +368,7 @@ impl BuildFingerprint {
   ) -> Self {
     Self {
       compiler_version: compiler_version.to_string(),
+      compiler_identity: compiler_identity(compiler_version),
       codegen_abi_version,
       target: String::new(), // placeholder for future target triple
     }
@@ -408,6 +448,7 @@ impl StdStamp {
     let mut out = String::new();
     writeln!(out, "version={}", STAMP_VERSION).unwrap();
     writeln!(out, "compiler_version={}", self.fingerprint.compiler_version).unwrap();
+    writeln!(out, "compiler_identity={}", self.fingerprint.compiler_identity).unwrap();
     writeln!(out, "codegen_abi_version={}", self.fingerprint.codegen_abi_version).unwrap();
     writeln!(out, "target={}", self.fingerprint.target).unwrap();
     writeln!(out, "file_count={}", self.files.len()).unwrap();
@@ -427,6 +468,7 @@ impl StdStamp {
 
     let fingerprint = BuildFingerprint {
       compiler_version: map.get("compiler_version")?.to_string(),
+      compiler_identity: map.get("compiler_identity")?.to_string(),
       codegen_abi_version: map.get("codegen_abi_version")?.parse().ok()?,
       target: map.get("target").map(|s| s.to_string()).unwrap_or_default(),
     };
@@ -526,6 +568,7 @@ impl ModuleStamp {
     let mut out = String::new();
     writeln!(out, "version={}", STAMP_VERSION).unwrap();
     writeln!(out, "compiler_version={}", self.fingerprint.compiler_version).unwrap();
+    writeln!(out, "compiler_identity={}", self.fingerprint.compiler_identity).unwrap();
     writeln!(out, "codegen_abi_version={}", self.fingerprint.codegen_abi_version).unwrap();
     writeln!(out, "target={}", self.fingerprint.target).unwrap();
     writeln!(out, "self_path={}", self.self_path.display()).unwrap();
@@ -547,6 +590,7 @@ impl ModuleStamp {
 
     let fingerprint = BuildFingerprint {
       compiler_version: map.get("compiler_version")?.to_string(),
+      compiler_identity: map.get("compiler_identity")?.to_string(),
       codegen_abi_version: map.get("codegen_abi_version")?.parse().ok()?,
       target: map.get("target").map(|s| s.to_string()).unwrap_or_default(),
     };
@@ -918,6 +962,83 @@ mod tests {
     assert!(!is_module_stamp_valid(&stamp_path, &fp2, "hash", &[]));
 
     std::fs::remove_dir_all(&temp_dir).unwrap();
+  }
+
+  #[test]
+  fn test_module_stamp_validity_compiler_identity_changed() {
+    // Same declared compiler_version, different compiler_identity (e.g. a
+    // rebuilt dev binary that did not bump CARGO_PKG_VERSION) must still
+    // invalidate the stamp.
+    let fp_old = BuildFingerprint {
+      compiler_version: "0.1.0".to_string(),
+      compiler_identity: "exe-hash-aaaa-0.1.0".to_string(),
+      codegen_abi_version: 1,
+      target: String::new(),
+    };
+    let fp_new = BuildFingerprint {
+      compiler_version: "0.1.0".to_string(),
+      compiler_identity: "exe-hash-bbbb-0.1.0".to_string(),
+      codegen_abi_version: 1,
+      target: String::new(),
+    };
+    let stamp = ModuleStamp::new(fp_old.clone(), PathBuf::from("main.ign"), "hash".to_string(), vec![]);
+
+    let temp_dir = std::env::temp_dir().join("ignis_stamp_v3_identity_test");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let stamp_path = temp_dir.join("main.stamp");
+    std::fs::write(&stamp_path, stamp.serialize()).unwrap();
+
+    // Same identity -> valid
+    assert!(is_module_stamp_valid(&stamp_path, &fp_old, "hash", &[]));
+
+    // Different compiler binary identity (same declared version) -> invalid
+    assert!(!is_module_stamp_valid(&stamp_path, &fp_new, "hash", &[]));
+
+    std::fs::remove_dir_all(&temp_dir).unwrap();
+  }
+
+  #[test]
+  fn test_compiler_identity_is_stable_within_process() {
+    // compiler_identity() is cached per process (OnceLock): repeated calls
+    // must return the same value even if a different version string is
+    // passed in later.
+    let first = compiler_identity("0.1.0");
+    let second = compiler_identity("9.9.9");
+    assert_eq!(first, second);
+  }
+
+  #[test]
+  fn test_std_stamp_compiler_identity_roundtrip() {
+    let fp = BuildFingerprint {
+      compiler_version: "0.1.0".to_string(),
+      compiler_identity: "some-identity-0.1.0".to_string(),
+      codegen_abi_version: 1,
+      target: String::new(),
+    };
+    let stamp = StdStamp {
+      fingerprint: fp,
+      files: vec![],
+    };
+
+    let serialized = stamp.serialize();
+    assert!(serialized.contains("compiler_identity=some-identity-0.1.0"));
+
+    let deserialized = StdStamp::deserialize(&serialized).unwrap();
+    assert_eq!(stamp, deserialized);
+  }
+
+  #[test]
+  fn test_old_v2_stamp_is_rejected() {
+    // A stamp written by a pre-v3 compiler (no compiler_identity field, and
+    // an older version marker) must be treated as invalid so caches from
+    // before this change are invalidated exactly once.
+    let legacy = "version=2\ncompiler_version=0.1.0\ncodegen_abi_version=1\ntarget=\nfile_count=0\n";
+    assert!(StdStamp::deserialize(legacy).is_none());
+
+    let legacy_module = "version=2\ncompiler_version=0.1.0\ncodegen_abi_version=1\ntarget=\nself_path=main.ign\nself_hash=abc\ndep_count=0\n";
+    assert!(ModuleStamp::deserialize(legacy_module).is_none());
   }
 
   #[test]

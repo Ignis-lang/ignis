@@ -39,6 +39,8 @@ export record CliOptions {
   public targetTriple: Option<String>;
   public optLevel: Option<u64>;
   public debug: Option<boolean>;
+  /// `--force`/`--rebuild`: ignore cached C/objects/archives from a previous build.
+  public force: boolean;
   public features: Vector<String>;
   public filter: String;
   public updateSnapshots: boolean;
@@ -60,6 +62,7 @@ export record CliOptions {
       targetTriple: Option::NONE,
       optLevel: Option::NONE,
       debug: Option::NONE,
+      force: false,
       features: Vector::new<String>(),
       filter: String::new(),
       updateSnapshots: false,
@@ -353,6 +356,12 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    if (argument.equals("-f") || argument.equals("--force") || argument.equals("--rebuild")) {
+      options.force = true;
+      index += 1;
+      continue;
+    }
+
     if (argument.equals("--feature")) {
       let Option::SOME(value) = arguments.get(index + 1) else {
         return Result::ERROR(cliMissingValue("--feature", "a name"));
@@ -475,6 +484,7 @@ export function helpText(): String {
   text.pushStr("  -O, --opt-level <0-3>     Override [build] opt_level\n");
   text.pushStr("      --debug               Build with debug information\n");
   text.pushStr("      --no-debug            Build without debug information\n");
+  text.pushStr("  -f, --force, --rebuild    Force a full rebuild, ignoring cached C/objects/archives\n");
   text.pushStr("      --feature <NAME>      Enable one feature (can be repeated)\n");
   text.pushStr("      --features <LIST>     Enable features separated by commas\n");
   text.pushStr("      --filter <SUBSTRING>  Select tests whose name contains it (test only)\n");

@@ -772,6 +772,7 @@ fn build_config_from_project(
     cmd.lib,
     check_mode,
     false, // analyze_only
+    cmd.force,
   ));
 
   Arc::new(config)
@@ -829,6 +830,7 @@ fn build_config_for_single_file(
     cmd.lib,
     check_mode,
     false,
+    cmd.force,
   ));
 
   Arc::new(config)
@@ -937,6 +939,7 @@ fn check_config_from_project(
     cmd.lib,
     true, // check_mode
     cmd.analyze_only,
+    false, // force_rebuild (no --force flag on `ignis check`)
   ));
 
   Arc::new(config)
@@ -981,6 +984,7 @@ fn check_config_for_single_file(
     cmd.lib,
     true,
     cmd.analyze_only,
+    false, // force_rebuild (no --force flag on `ignis check`)
   ));
 
   Arc::new(config)

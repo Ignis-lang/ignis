@@ -2,6 +2,7 @@ import Env from "std::env";
 import Fs from "std::fs";
 import Hasher from "std::hash";
 import Path from "std::path";
+import Process from "std::process";
 import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
@@ -26,6 +27,12 @@ export record SourceHash {
 /// per-source hashes, and a transitive hash over the full source graph.
 export record BuildFingerprint {
   public compilerVersion: String;
+
+  /// Content identity of the running compiler executable, combined with
+  /// `compilerVersion`. See `fingerprintCompilerIdentity`. A rebuilt compiler
+  /// binary invalidates every stamp it produced even when `compilerVersion`
+  /// did not change (the common case during local development).
+  public compilerIdentity: String;
   public abiVersion: u32;
   public targetTriple: String;
   public backend: String;
@@ -55,6 +62,7 @@ export record BuildFingerprint {
   ): BuildFingerprint {
     return BuildFingerprint {
       compilerVersion: String::create(compilerVersion),
+      compilerIdentity: fingerprintCompilerIdentity(compilerVersion),
       abiVersion: abiVersion,
       targetTriple: String::create(targetTriple),
       backend: String::create(backend),
@@ -83,6 +91,7 @@ export record BuildFingerprint {
   ): BuildFingerprint {
     return BuildFingerprint {
       compilerVersion: String::create(compilerVersion),
+      compilerIdentity: fingerprintCompilerIdentity(compilerVersion),
       abiVersion: abiVersion,
       targetTriple: String::create(targetTriple),
       backend: String::create(backend),
@@ -93,6 +102,79 @@ export record BuildFingerprint {
       transitiveHash: transitiveHash,
     };
   }
+}
+
+/// Resolves the path of the currently running compiler executable.
+///
+/// Tries the Linux `/proc/self/exe` magic symlink first (works regardless of
+/// how `argv[0]` was spelled); falls back to canonicalizing `argv[0]` for
+/// hosts without `/proc` (e.g. macOS). Returns `Option::NONE` if neither
+/// resolves to a readable path.
+function fingerprintCurrentExePath(): Option<Path::PathBuf> {
+  if (let Result::OK(resolved) = Fs::canonicalize("/proc/self/exe")) {
+    return Option::SOME(resolved);
+  }
+
+  let argv: Vector<String> = Process::args();
+  let Option::SOME(arg0) = argv.get(0) else {
+    return Option::NONE;
+  };
+
+  return match (Fs::canonicalize(arg0)) {
+    Result::OK(resolved) -> Option::SOME(resolved),
+    Result::ERROR(_) -> Option::NONE,
+  };
+}
+
+/// Hashes the bytes of the currently running compiler executable with the
+/// same FNV-1a hasher used elsewhere in this module.
+///
+/// Returns `"unknown"` if the executable cannot be located or read (e.g. it
+/// was deleted after the process started); this still yields a
+/// stable-for-the-process value, it just cannot distinguish between
+/// different such compilers.
+function fingerprintCurrentExeHash(): String {
+  let Option::SOME(exePath) = fingerprintCurrentExePath() else {
+    return String::create("unknown");
+  };
+
+  return match (Fs::readToBytes(&exePath)) {
+    Result::OK(bytes) -> fingerprintHashBytes(&bytes),
+    Result::ERROR(_) -> String::create("unknown"),
+  };
+}
+
+/// Computes an FNV-1a hash over a byte buffer, returned as a decimal string.
+function fingerprintHashBytes(bytes: &Vector<u8>): String {
+  let mut hasher: Hasher = Hasher::new();
+  let ptr: *mut u8 = bytes.asPtr() as *mut u8;
+  let length: u64 = bytes.length();
+  let mut index: u64 = 0;
+
+  while (index < length) {
+    hasher.writeByte(@read<u8>(ptr + index));
+    index += 1;
+  }
+
+  let value: u64 = hasher.finish();
+  return value.toString();
+}
+
+/// Stable identity of the currently running compiler binary: a content hash
+/// of the executable bytes combined with its declared version string.
+///
+/// Mirrors the Rust `compiler_identity()` in
+/// `crates/ignis_driver/src/build_layout.rs`, so a stamp's `compiler_identity`
+/// field always distinguishes "a different compiler binary ran" from "the
+/// same compiler, same declared version" -- even across a local rebuild that
+/// did not bump the version string.
+export function fingerprintCompilerIdentity(compilerVersion: str): String {
+  let exeHash: String = fingerprintCurrentExeHash();
+  let mut identity: String = String::new();
+  identity.push(&exeHash);
+  identity.pushChar('-');
+  identity.pushStr(compilerVersion);
+  return identity;
 }
 
 /// Compute a deterministic FNV-1a fingerprint hash for a string value.
@@ -163,6 +245,10 @@ export function fingerprintSerialize(fp: &BuildFingerprint): String {
 
   out.pushStr("cflags_hash=");
   out.push(&fp.cflagsHash);
+  out.pushChar('\n');
+
+  out.pushStr("compiler_identity=");
+  out.push(&fp.compilerIdentity);
   out.pushChar('\n');
 
   out.pushStr("compiler_version=");
@@ -328,12 +414,16 @@ export function fingerprintDeserialize(text: &String): Option<BuildFingerprint> 
   let backend: String = fingerprintLookupKey(&lines, "backend");
   let cc: String = fingerprintLookupKey(&lines, "cc");
   let cflagsHash: String = fingerprintLookupKey(&lines, "cflags_hash");
+  let compilerIdentity: String = fingerprintLookupKey(&lines, "compiler_identity");
   let compilerVersion: String = fingerprintLookupKey(&lines, "compiler_version");
   let stdManifestHash: String = fingerprintLookupKey(&lines, "std_manifest_hash");
   let targetTriple: String = fingerprintLookupKey(&lines, "target_triple");
   let transitiveHash: String = fingerprintLookupKey(&lines, "transitive_hash");
 
-  if (compilerVersion.length() == 0 || backend.length() == 0 || cc.length() == 0) {
+  // A stamp missing `compiler_identity` was written by a pre-this-change
+  // compiler; treating it as invalid invalidates every such cache exactly
+  // once, the same way the Rust host's stamp-version bump does.
+  if (compilerVersion.length() == 0 || compilerIdentity.length() == 0 || backend.length() == 0 || cc.length() == 0) {
     return Option::NONE;
   }
 
@@ -341,6 +431,7 @@ export function fingerprintDeserialize(text: &String): Option<BuildFingerprint> 
 
   return Option::SOME(BuildFingerprint {
     compilerVersion: compilerVersion,
+    compilerIdentity: compilerIdentity,
     abiVersion: abiVersion,
     targetTriple: targetTriple,
     backend: backend,
@@ -446,6 +537,74 @@ function fingerprintStdManifestHashChangeInvalidates(): void {
     actual = String::create("invalidated");
   }
   Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function fingerprintComputesNonEmptyCompilerIdentity(): void {
+  let fp: BuildFingerprint = fingerprintBaseline();
+  Test::assertEq<boolean>(fp.compilerIdentity.length() > 0, true);
+}
+
+@test
+function fingerprintCompilerIdentityRoundtrips(): void {
+  let fp: BuildFingerprint = fingerprintBaseline();
+  let serialized: String = fingerprintSerialize(&fp);
+  let Option::SOME(deserialized) = fingerprintDeserialize(&serialized) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(fp.compilerIdentity.toStr(), deserialized.compilerIdentity.toStr());
+}
+
+@test
+function fingerprintCompilerIdentityChangeInvalidatesEvenWithSameVersion(): void {
+  // Same declared compilerVersion, different compilerIdentity -- simulates a
+  // rebuilt dev binary that did not bump its version string. Constructed
+  // directly (bypassing the auto-computed identity) since both fingerprints
+  // must share every other field.
+  let fp1: BuildFingerprint = BuildFingerprint {
+    compilerVersion: String::create("0.1.0"),
+    compilerIdentity: String::create("exe-hash-aaaa-0.1.0"),
+    abiVersion: 1,
+    targetTriple: String::create("x86_64-linux"),
+    backend: String::create("c"),
+    cc: String::create("gcc"),
+    cflagsHash: String::create("cflags-hash-abc"),
+    stdManifestHash: String::create("manifest-hash-xyz"),
+    perSourceHashes: Vector::new<SourceHash>(),
+    transitiveHash: String::new(),
+  };
+  let fp2: BuildFingerprint = BuildFingerprint {
+    compilerVersion: String::create("0.1.0"),
+    compilerIdentity: String::create("exe-hash-bbbb-0.1.0"),
+    abiVersion: 1,
+    targetTriple: String::create("x86_64-linux"),
+    backend: String::create("c"),
+    cc: String::create("gcc"),
+    cflagsHash: String::create("cflags-hash-abc"),
+    stdManifestHash: String::create("manifest-hash-xyz"),
+    perSourceHashes: Vector::new<SourceHash>(),
+    transitiveHash: String::new(),
+  };
+
+  let expected: String = fingerprintReadExpected("expected_invalidated.txt");
+  let mut actual: String = String::create("stable");
+  if (!fingerprintEquals(&fp1, &fp2)) {
+    actual = String::create("invalidated");
+  }
+  Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+@test
+function fingerprintLegacyStampMissingCompilerIdentityIsRejected(): void {
+  // A stamp written before this change has no `compiler_identity` line; it
+  // must fail to deserialize so every pre-change cache is invalidated once.
+  let legacy: String = String::create(
+    "abi_version=1\nbackend=c\ncc=gcc\ncflags_hash=cflags-hash-abc\ncompiler_version=0.1.0\nper_source_count=0\nstd_manifest_hash=manifest-hash-xyz\ntarget_triple=x86_64-linux\ntransitive_hash=",
+  );
+
+  Test::assertEq<boolean>(fingerprintDeserialize(&legacy).isSome(), false);
 }
 
 @test
