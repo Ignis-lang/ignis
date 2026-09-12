@@ -1772,7 +1772,7 @@ impl<'a> LoweringContext<'a> {
       }
     } else {
       // Complex assignment (dereference, index)
-      self.lower_complex_assign(target, value, operation);
+      self.lower_complex_assign(hir_id, target, value, operation);
     }
   }
 
@@ -1848,6 +1848,7 @@ impl<'a> LoweringContext<'a> {
 
   fn lower_complex_assign(
     &mut self,
+    hir_id: HIRId,
     target: HIRId,
     value: HIRId,
     operation: Option<ignis_hir::operation::BinaryOperation>,
@@ -2069,12 +2070,16 @@ impl<'a> LoweringContext<'a> {
               left: Operand::Temp(current),
               right: rhs,
             });
+            self.emit_field_overwrite_drop(hir_id, field_ptr, field_ty);
+
             self.fn_builder().emit(Instr::StorePtr {
               ptr: Operand::Temp(field_ptr),
               value: Operand::Temp(result),
             });
           }
         } else if let Some(val) = self.lower_hir_node(value) {
+          self.emit_field_overwrite_drop(hir_id, field_ptr, field_ty);
+
           self.fn_builder().emit(Instr::StorePtr {
             ptr: Operand::Temp(field_ptr),
             value: val,
@@ -3485,6 +3490,28 @@ impl<'a> LoweringContext<'a> {
         self.emit_drop_for_def(*def_id);
       }
     }
+  }
+
+  /// Drop the value a field still holds, just before the store that replaces it.
+  ///
+  /// The drop runs through the field pointer the store is about to use, so it frees
+  /// that field and nothing else; `DropInPlace` expands to the same per-field teardown
+  /// a scope-end drop of the owner would emit, runtime drop flags included, so a field
+  /// that was moved out of is skipped.
+  fn emit_field_overwrite_drop(
+    &mut self,
+    assign_hir_id: HIRId,
+    field_ptr: TempId,
+    field_type: TypeId,
+  ) {
+    if !self.drop_schedules.on_field_overwrite.contains_key(&assign_hir_id) {
+      return;
+    }
+
+    self.fn_builder().emit(Instr::DropInPlace {
+      ptr: Operand::Temp(field_ptr),
+      ty: field_type,
+    });
   }
 
   fn emit_drop_for_def(
