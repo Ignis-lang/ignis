@@ -1,14 +1,15 @@
 import Env from "std::env";
 import Fs from "std::fs";
+import Io from "std::io";
 import Path from "std::path";
 import String from "std::string";
 import Test from "std::test";
-import Toml, TomlDocument, TomlValue, TomlValueKind from "std::toml";
+import Toml, TomlDocument, TomlTable, TomlValue, TomlValueKind from "std::toml";
 import TomlToken, TomlTokenKind from "std::toml::token";
 import Vector from "std::vector";
 
 import ConfigDiagnosticCode, ConfigDiagnostics from "./diagnostics";
-import DiagnosticBag from "@compiler::diagnostics";
+import DiagnosticBag, DiagnosticRenderer, SourceFile from "@compiler::diagnostics";
 
 const PROJECT_FILE: str = "ignis.toml";
 const DEFAULT_SOURCE_DIR: str = "src";
@@ -659,6 +660,301 @@ function requireStdManifest(project: ResolvedProject): Result<ResolvedProject, D
   return Result::OK(project);
 }
 
+/// Levenshtein edit distance between two byte strings.
+///
+/// Config keys are ASCII identifiers, so byte-level distance is exact here.
+/// Mirrors the host's `ignis_driver::project::unknown_keys::edit_distance`.
+function editDistance(a: str, b: str): u64 {
+  let left: String = String::create(a);
+  let right: String = String::create(b);
+  let n: u64 = left.length();
+  let m: u64 = right.length();
+  let width: u64 = m + 1;
+
+  let mut row: Vector<u64> = Vector::new<u64>((n + 1) * width);
+  let mut fillIndex: u64 = 0;
+  while (fillIndex < (n + 1) * width) {
+    row.push(0);
+    fillIndex += 1;
+  }
+
+  let mut i: u64 = 0;
+  while (i <= n) {
+    row.set(i * width, i);
+    i += 1;
+  }
+
+  let mut j: u64 = 0;
+  while (j <= m) {
+    row.set(j, j);
+    j += 1;
+  }
+
+  i = 1;
+  while (i <= n) {
+    j = 1;
+    while (j <= m) {
+      let leftByte: u8 = left.byteAt(i - 1).unwrapOr(0);
+      let rightByte: u8 = right.byteAt(j - 1).unwrapOr(0);
+      let cost: u64 = leftByte == rightByte ? 0 : 1;
+
+      let deletion: u64 = dpAt(&row, (i - 1) * width + j) + 1;
+      let insertion: u64 = dpAt(&row, i * width + (j - 1)) + 1;
+      let substitution: u64 = dpAt(&row, (i - 1) * width + (j - 1)) + cost;
+
+      let mut best: u64 = deletion;
+      if (insertion < best) {
+        best = insertion;
+      }
+      if (substitution < best) {
+        best = substitution;
+      }
+
+      row.set(i * width + j, best);
+      j += 1;
+    }
+    i += 1;
+  }
+
+  return dpAt(&row, n * width + m);
+}
+
+/// Reads one cell of the flattened Levenshtein DP table.
+function dpAt(row: &Vector<u64>, index: u64): u64 {
+  return match (row.get(index)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> 0,
+  };
+}
+
+/// Closest key to `key` among `known` within edit distance 2, if any.
+///
+/// Ties break on declaration order in `known` (first minimal-distance match
+/// wins), matching the host's `suggest`.
+function suggestKey(key: str, known: &Vector<String>): Option<String> {
+  let mut bestName: Option<String> = Option::NONE;
+  let mut bestDistance: u64 = 3;
+  let mut index: u64 = 0;
+
+  while (index < known.length()) {
+    let Option::SOME(candidate) = known.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    let distance: u64 = editDistance(key, candidate.toStr());
+
+    if (distance <= 2 && distance < bestDistance) {
+      bestDistance = distance;
+      bestName = Option::SOME(candidate.clone());
+    }
+
+    index += 1;
+  }
+
+  return bestName;
+}
+
+/// Pushes one warning per key in `table` that is not in `known`, labeling the
+/// table as `tableLabel` in the warning text.
+function unknownKeysInTable(
+  table: &TomlTable,
+  known: &Vector<String>,
+  tableLabel: str,
+  configPath: &Path::PathBuf,
+  out: &mut DiagnosticBag,
+): void {
+  let mut outRef: &mut DiagnosticBag = out;
+  let mut index: u64 = 0;
+
+  while (index < table.length()) {
+    let Option::SOME(entry) = table.entryAt(index) else {
+      index += 1;
+      continue;
+    };
+
+    let mut isKnown: boolean = false;
+    let mut knownIndex: u64 = 0;
+
+    while (knownIndex < known.length()) {
+      let Option::SOME(candidate) = known.get(knownIndex) else {
+        knownIndex += 1;
+        continue;
+      };
+
+      if (candidate.equals(entry.key)) {
+        isKnown = true;
+      }
+
+      knownIndex += 1;
+    }
+
+    if (!isKnown) {
+      let suggestion: Option<String> = suggestKey(entry.key, known);
+      outRef.push(ConfigDiagnostics::unknownKey(
+        configPath,
+        tableLabel,
+        entry.key,
+        suggestion,
+        entry.keySpan.start,
+        entry.keySpan.end,
+      ));
+    }
+
+    index += 1;
+  }
+}
+
+function knownPackageKeys(): Vector<String> {
+  let mut keys: Vector<String> = Vector::new<String>();
+  keys.push(String::create("name"));
+  keys.push(String::create("version"));
+  keys.push(String::create("authors"));
+  keys.push(String::create("description"));
+  keys.push(String::create("keywords"));
+  keys.push(String::create("license"));
+  keys.push(String::create("repository"));
+  return keys;
+}
+
+function knownIgnisKeys(): Vector<String> {
+  let mut keys: Vector<String> = Vector::new<String>();
+  keys.push(String::create("std"));
+  keys.push(String::create("std_path"));
+  return keys;
+}
+
+function knownBuildKeys(): Vector<String> {
+  let mut keys: Vector<String> = Vector::new<String>();
+  keys.push(String::create("bin"));
+  keys.push(String::create("source_dir"));
+  keys.push(String::create("entry"));
+  keys.push(String::create("out_dir"));
+  keys.push(String::create("opt_level"));
+  keys.push(String::create("debug"));
+  keys.push(String::create("target"));
+  keys.push(String::create("target_triple"));
+  keys.push(String::create("known_features"));
+  keys.push(String::create("default_features"));
+  keys.push(String::create("cc"));
+  keys.push(String::create("cflags"));
+  keys.push(String::create("emit"));
+  return keys;
+}
+
+function knownTestKeys(): Vector<String> {
+  let mut keys: Vector<String> = Vector::new<String>();
+  keys.push(String::create("fixtures"));
+  return keys;
+}
+
+function knownTopLevelKeys(): Vector<String> {
+  let mut keys: Vector<String> = Vector::new<String>();
+  keys.push(String::create("package"));
+  keys.push(String::create("ignis"));
+  keys.push(String::create("build"));
+  keys.push(String::create("test"));
+  keys.push(String::create("aliases"));
+  return keys;
+}
+
+/// Warns on every key or table `ignis.toml` does not recognize.
+///
+/// This mirrors the host's schema in `ignis_driver::project::unknown_keys`
+/// exactly: the same tables, the same keys, the same wording. `aliases` is a
+/// free-form map (alias name -> path), so its keys are never checked.
+export function checkUnknownProjectKeys(
+  document: &TomlDocument,
+  configPath: &Path::PathBuf
+): DiagnosticBag {
+  let mut warnings: DiagnosticBag = DiagnosticBag::init();
+  let root: TomlTable = document.root();
+  let topLevel: Vector<String> = knownTopLevelKeys();
+
+  let mut index: u64 = 0;
+  while (index < root.length()) {
+    let Option::SOME(entry) = root.entryAt(index) else {
+      index += 1;
+      continue;
+    };
+
+    let mut matched: boolean = false;
+    let mut topLevelIndex: u64 = 0;
+    while (topLevelIndex < topLevel.length()) {
+      let Option::SOME(candidate) = topLevel.get(topLevelIndex) else {
+        topLevelIndex += 1;
+        continue;
+      };
+
+      if (candidate.equals(entry.key)) {
+        matched = true;
+      }
+
+      topLevelIndex += 1;
+    }
+
+    if (!matched) {
+      let suggestion: Option<String> = suggestKey(entry.key, &topLevel);
+      warnings.push(ConfigDiagnostics::unknownKey(
+        configPath,
+        "top-level",
+        entry.key,
+        suggestion,
+        entry.keySpan.start,
+        entry.keySpan.end,
+      ));
+      index += 1;
+      continue;
+    }
+
+    let keyName: String = String::create(entry.key);
+
+    if (keyName.equals("package")) {
+      if (let Option::SOME(table) = entry.value.asTable()) {
+        let keys: Vector<String> = knownPackageKeys();
+        unknownKeysInTable(&table, &keys, "package", configPath, &mut warnings);
+      }
+    } else if (keyName.equals("ignis")) {
+      if (let Option::SOME(table) = entry.value.asTable()) {
+        let keys: Vector<String> = knownIgnisKeys();
+        unknownKeysInTable(&table, &keys, "ignis", configPath, &mut warnings);
+      }
+    } else if (keyName.equals("build")) {
+      if (let Option::SOME(table) = entry.value.asTable()) {
+        let keys: Vector<String> = knownBuildKeys();
+        unknownKeysInTable(&table, &keys, "build", configPath, &mut warnings);
+      }
+    } else if (keyName.equals("test")) {
+      if (let Option::SOME(table) = entry.value.asTable()) {
+        let keys: Vector<String> = knownTestKeys();
+        unknownKeysInTable(&table, &keys, "test", configPath, &mut warnings);
+      }
+    }
+
+    index += 1;
+  }
+
+  return warnings;
+}
+
+/// Renders `warnings` through the normal diagnostics renderer and prints them
+/// to stderr. Never fails the load: an unknown key is a warning, not an
+/// error.
+function reportUnknownKeyWarnings(
+  warnings: &DiagnosticBag,
+  configPath: &Path::PathBuf,
+  source: &String
+): void {
+  if (warnings.isEmpty()) {
+    return;
+  }
+
+  let pathText: String = configPath.toString();
+  let sourceFile: SourceFile = SourceFile::create(pathText.toStr(), source.toStr());
+  let rendered: String = DiagnosticRenderer::renderBag(warnings, &sourceFile, true);
+  Io::eprintln(rendered);
+}
+
 export namespace Config {
   function findProjectFile(startPath: &Path::PathBuf): Option<Path::PathBuf> {
     let mut current: Path::PathBuf = startPath.clone();
@@ -714,6 +1010,9 @@ export namespace Config {
         return Result::ERROR(ConfigDiagnostics::malformedToml(configPath, error.message, error.span.start, error.span.end));
       },
     };
+
+    let unknownKeyWarnings: DiagnosticBag = checkUnknownProjectKeys(&document, configPath);
+    reportUnknownKeyWarnings(&unknownKeyWarnings, configPath, &source);
 
     let Option::SOME(rawRoot) = configPath.parent() else {
       return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, "project.root", configPath));

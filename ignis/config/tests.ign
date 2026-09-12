@@ -3,11 +3,13 @@ import Fs from "std::fs";
 import Path from "std::path";
 import String from "std::string";
 import Test from "std::test";
+import Toml, TomlDocument from "std::toml";
 import Vector from "std::vector";
 
 import
   AliasBinding,
   BuildMode,
+  checkUnknownProjectKeys,
   Config,
   ConfigDiagnosticCode,
   ResolvedProject,
@@ -223,4 +225,107 @@ function projectLoaderIgnoresANamedSourceFileIsAKnownDefect(): void {
     },
     Result::ERROR(_) -> Test::fail(),
   };
+}
+
+/// IGN-239: a key `ignis.toml` does not recognize warns with a table path and,
+/// when a known key is within edit distance 2, a suggestion. Wording is
+/// shared byte-for-byte with the host's `ignis_driver::project::unknown_keys`.
+@test
+function unknownProjectKeyWarnsWithSuggestion(): void {
+  let source: String = String::create(
+    "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[ignis]\nstd_pth = \"../std\"\n"
+  );
+  let document: TomlDocument = match (Toml::parse(&source)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+
+  Test::assertEq<u64>(warnings.length(), 1);
+  let Option::SOME(diagnostic) = warnings.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code, ConfigDiagnosticCode::UNKNOWN_KEY);
+  Test::assertEq<str>(
+    diagnostic.messageText(),
+    "unknown key 'std_pth' in [ignis]; did you mean 'std_path'?"
+  );
+}
+
+/// A key with no known key within edit distance 2 warns without a suggestion.
+@test
+function unknownProjectKeyWarnsWithoutSuggestionWhenNothingIsClose(): void {
+  let source: String = String::create(
+    "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[build]\ntotally_unrelated_garbage = 1\n"
+  );
+  let document: TomlDocument = match (Toml::parse(&source)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+
+  Test::assertEq<u64>(warnings.length(), 1);
+  let Option::SOME(diagnostic) = warnings.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.messageText(), "unknown key 'totally_unrelated_garbage' in [build]");
+}
+
+/// An unrecognized top-level table warns too, labeled "top-level".
+@test
+function unknownTopLevelTableWarns(): void {
+  let source: String = String::create("[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[buld]\nopt_level = 2\n");
+  let document: TomlDocument = match (Toml::parse(&source)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+
+  Test::assertEq<u64>(warnings.length(), 1);
+  let Option::SOME(diagnostic) = warnings.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.messageText(), "unknown key 'buld' in [top-level]; did you mean 'build'?");
+}
+
+/// Every known key across every known table produces no warnings, and
+/// `aliases` (a free-form map) is never checked.
+@test
+function everyKnownProjectKeyStaysSilent(): void {
+  let source: String = String::create(
+    "[package]\nname = \"t\"\nversion = \"0.1.0\"\nauthors = [\"me\"]\ndescription = \"d\"\nkeywords = [\"k\"]\nlicense = \"MIT\"\nrepository = \"https://example.com\"\n\n[ignis]\nstd = true\nstd_path = \"../std\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 2\ndebug = true\ntarget = \"c\"\ntarget_triple = \"x86_64-unknown-linux-gnu\"\nknown_features = [\"a\"]\ndefault_features = [\"a\"]\ncc = \"gcc\"\ncflags = [\"-Wall\"]\nemit = [\"c\"]\n\n[test]\nfixtures = [\"fixtures\"]\n\n[aliases]\nmylib = \"libs/mylib\"\n"
+  );
+  let document: TomlDocument = match (Toml::parse(&source)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+
+  Test::assertEq<u64>(warnings.length(), 0);
 }

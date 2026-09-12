@@ -1133,7 +1133,10 @@ fn load_manifest(std_path: &str) -> IgnisSTDManifest {
   }
 
   match std::fs::read_to_string(&manifest_path) {
-    Ok(content) => toml::from_str(&content).unwrap_or_default(),
+    Ok(content) => {
+      ignis_driver::project::warn_unknown_manifest_keys(&content, &manifest_path);
+      toml::from_str(&content).unwrap_or_default()
+    },
     Err(_) => IgnisSTDManifest::default(),
   }
 }

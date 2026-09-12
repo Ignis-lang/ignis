@@ -18,6 +18,7 @@ export namespace BuildDiagnosticCode {
   const MISSING_STD_MANIFEST: str = "B1001";
   const MALFORMED_STD_MANIFEST: str = "B1002";
   const INVALID_STD_MANIFEST_FIELD_TYPE: str = "B1003";
+  const UNKNOWN_KEY: str = "B1004";
 }
 
 export namespace BuildDiagnostics {
@@ -39,6 +40,31 @@ export namespace BuildDiagnostics {
     }
 
     return buildDiagSingleDiagnostic(diagnostic);
+  }
+
+  /// A key or table `std/manifest.toml` does not recognize. Warning, not an
+  /// error: see `ConfigDiagnostics::unknownKey` (`ignis/config/diagnostics.ign`)
+  /// for why, and for the wording this mirrors byte-for-byte with the host's
+  /// `ignis_driver::project::unknown_keys`.
+  function unknownKey(
+    path: &Path::PathBuf,
+    tableLabel: str,
+    key: str,
+    suggestion: Option<String>,
+    start: u64,
+    end: u64
+  ): Diagnostic {
+    let message: String = match (suggestion) {
+      Option::SOME(name) -> `unknown key '${key}' in [${tableLabel}]; did you mean '${name}'?`,
+      Option::NONE -> `unknown key '${key}' in [${tableLabel}]`,
+    };
+
+    return Diagnostic::new(
+      Severity::WARNING,
+      BuildDiagnosticCode::UNKNOWN_KEY,
+      message.toStr(),
+      manifestPathSpan(path, start, end),
+    );
   }
 
   function malformedStdManifest(

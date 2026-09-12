@@ -1,11 +1,12 @@
 import Env from "std::env";
 import Fs from "std::fs";
+import Io from "std::io";
 import Path from "std::path";
 import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
 
-import DiagnosticBag from "@compiler::diagnostics";
+import DiagnosticBag, DiagnosticRenderer, SourceFile from "@compiler::diagnostics";
 
 import BuildDiagnosticCode, BuildDiagnostics from "./diagnostics";
 
@@ -226,6 +227,273 @@ export record StdManifest {
   }
 }
 
+/// Levenshtein edit distance between two byte strings. Duplicated from
+/// `ignis/config/project.ign` rather than shared across modules, matching how
+/// this file already duplicates its own diagnostic-bag helpers.
+function buildManifestEditDistance(a: str, b: str): u64 {
+  let left: String = String::create(a);
+  let right: String = String::create(b);
+  let n: u64 = left.length();
+  let m: u64 = right.length();
+  let width: u64 = m + 1;
+
+  let mut row: Vector<u64> = Vector::new<u64>((n + 1) * width);
+  let mut fillIndex: u64 = 0;
+  while (fillIndex < (n + 1) * width) {
+    row.push(0);
+    fillIndex += 1;
+  }
+
+  let mut i: u64 = 0;
+  while (i <= n) {
+    row.set(i * width, i);
+    i += 1;
+  }
+
+  let mut j: u64 = 0;
+  while (j <= m) {
+    row.set(j, j);
+    j += 1;
+  }
+
+  i = 1;
+  while (i <= n) {
+    j = 1;
+    while (j <= m) {
+      let leftByte: u8 = left.byteAt(i - 1).unwrapOr(0);
+      let rightByte: u8 = right.byteAt(j - 1).unwrapOr(0);
+      let cost: u64 = leftByte == rightByte ? 0 : 1;
+
+      let deletion: u64 = buildManifestDpAt(&row, (i - 1) * width + j) + 1;
+      let insertion: u64 = buildManifestDpAt(&row, i * width + (j - 1)) + 1;
+      let substitution: u64 = buildManifestDpAt(&row, (i - 1) * width + (j - 1)) + cost;
+
+      let mut best: u64 = deletion;
+      if (insertion < best) {
+        best = insertion;
+      }
+      if (substitution < best) {
+        best = substitution;
+      }
+
+      row.set(i * width + j, best);
+      j += 1;
+    }
+    i += 1;
+  }
+
+  return buildManifestDpAt(&row, n * width + m);
+}
+
+function buildManifestDpAt(row: &Vector<u64>, index: u64): u64 {
+  return match (row.get(index)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> 0,
+  };
+}
+
+/// Closest key to `key` among `known` within edit distance 2, if any. Ties
+/// break on declaration order in `known`.
+function buildManifestSuggestKey(key: str, known: &Vector<String>): Option<String> {
+  let mut bestName: Option<String> = Option::NONE;
+  let mut bestDistance: u64 = 3;
+  let mut index: u64 = 0;
+
+  while (index < known.length()) {
+    let Option::SOME(candidate) = known.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    let distance: u64 = buildManifestEditDistance(key, candidate.toStr());
+
+    if (distance <= 2 && distance < bestDistance) {
+      bestDistance = distance;
+      bestName = Option::SOME(candidate.clone());
+    }
+
+    index += 1;
+  }
+
+  return bestName;
+}
+
+function buildManifestKeyKnown(key: &String, known: &Vector<String>): boolean {
+  let mut index: u64 = 0;
+
+  while (index < known.length()) {
+    let Option::SOME(candidate) = known.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (candidate.equals(key)) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
+function buildManifestKnownToolchainKeys(): Vector<String> {
+  let mut keys: Vector<String> = Vector::new<String>();
+  keys.push(String::create("include_dirs"));
+  return keys;
+}
+
+function buildManifestKnownModulesListKeys(): Vector<String> {
+  let mut keys: Vector<String> = Vector::new<String>();
+  keys.push(String::create("modules"));
+  return keys;
+}
+
+/// True for a section the loader recognizes but does not otherwise validate
+/// key-by-key: `linking` and every `linking.<module>` sub-table.
+///
+/// The host accepts a fixed key set inside each `[linking.<module>]` table
+/// (`header`, `headers`, `header_quoted`, `object`, `archive`, `lib`); this
+/// loader does not parse `[linking.*]` at all yet, so it cannot validate
+/// those keys without first adding that support. Treating the whole
+/// namespace as recognized avoids warning on every legitimate linking entry
+/// in the meantime.
+function buildManifestIsLinkingSection(section: &String): boolean {
+  if (section.equals("linking")) {
+    return true;
+  }
+
+  return section.startsWith("linking.");
+}
+
+/// Warns for a `[section]` header the loader does not recognize.
+function buildManifestCheckSectionName(
+  section: &String,
+  configPath: &Path::PathBuf,
+  start: u64,
+  end: u64,
+  out: &mut DiagnosticBag,
+): void {
+  if (buildManifestIsLinkingSection(section)) {
+    return;
+  }
+
+  let mut known: Vector<String> = Vector::new<String>();
+  known.push(String::create("toolchain"));
+  known.push(String::create("modules"));
+  known.push(String::create("linking"));
+  known.push(String::create("auto_load"));
+  known.push(String::create("compile_only"));
+
+  if (buildManifestKeyKnown(section, &known)) {
+    return;
+  }
+
+  let mut outRef: &mut DiagnosticBag = out;
+  let suggestion: Option<String> = buildManifestSuggestKey(section.toStr(), &known);
+  outRef.push(BuildDiagnostics::unknownKey(configPath, "top-level", section.toStr(), suggestion, start, end));
+}
+
+/// Warns for an assignment key inside a known, fixed-key section
+/// (`toolchain`, `auto_load`, `compile_only`). `modules` and every
+/// `linking.*` table are free-form or not yet validated; see
+/// `buildManifestIsLinkingSection`.
+function buildManifestCheckAssignmentKey(
+  currentSection: &String,
+  assignment: &ManifestAssignment,
+  configPath: &Path::PathBuf,
+  start: u64,
+  end: u64,
+  out: &mut DiagnosticBag,
+): void {
+  if (buildManifestIsLinkingSection(currentSection) || currentSection.equals("modules")) {
+    return;
+  }
+
+  let mut known: Vector<String> = Vector::new<String>();
+
+  if (currentSection.equals("toolchain")) {
+    known = buildManifestKnownToolchainKeys();
+  } else if (currentSection.equals("auto_load") || currentSection.equals("compile_only")) {
+    known = buildManifestKnownModulesListKeys();
+  } else {
+    return;
+  }
+
+  if (buildManifestKeyKnown(&assignment.key, &known)) {
+    return;
+  }
+
+  let mut outRef: &mut DiagnosticBag = out;
+  let sectionLabel: String = currentSection.clone();
+  let suggestion: Option<String> = buildManifestSuggestKey(assignment.key.toStr(), &known);
+  outRef.push(BuildDiagnostics::unknownKey(configPath, sectionLabel.toStr(), assignment.key.toStr(), suggestion, start, end));
+}
+
+/// Warns for every key or table `source` (the raw text of `std/manifest.toml`)
+/// does not recognize. Pure and side-effect free, kept separate from
+/// `Manifest::loadFile` so it can be tested directly.
+export function checkUnknownManifestKeys(source: &String, manifestPath: &Path::PathBuf): DiagnosticBag {
+  let mut warnings: DiagnosticBag = DiagnosticBag::init();
+  let lines: Vector<String> = source.lines();
+  let mut currentSection: String = String::new();
+  let mut lineOffset: u64 = 0;
+
+  let mut index: u64 = 0;
+  while (index < lines.length()) {
+    let Option::SOME(line) = lines.get(index) else {
+      break;
+    };
+    let trimmed: String = line.trimAsciiWhitespace();
+    let lineStart: u64 = lineOffset;
+    let lineEnd: u64 = lineOffset + line.length();
+
+    if (trimmed.length() == 0 || trimmed.startsWith("#")) {
+      lineOffset += line.length() + 1;
+      index += 1;
+      continue;
+    }
+
+    if (let Option::SOME(sectionName) = buildManifestSectionName(&trimmed)) {
+      currentSection = sectionName.clone();
+      buildManifestCheckSectionName(&currentSection, manifestPath, lineStart, lineEnd, &mut warnings);
+      lineOffset += line.length() + 1;
+      index += 1;
+      continue;
+    }
+
+    let Option::SOME(assignment) = buildManifestAssignmentFromLine(&trimmed) else {
+      lineOffset += line.length() + 1;
+      index += 1;
+      continue;
+    };
+
+    buildManifestCheckAssignmentKey(&currentSection, &assignment, manifestPath, lineStart, lineEnd, &mut warnings);
+
+    lineOffset += line.length() + 1;
+    index += 1;
+  }
+
+  return warnings;
+}
+
+/// Renders `warnings` through the normal diagnostics renderer and prints
+/// them to stderr. Never fails the load.
+function buildManifestReportUnknownKeyWarnings(
+  warnings: &DiagnosticBag,
+  manifestPath: &Path::PathBuf,
+  source: &String
+): void {
+  if (warnings.isEmpty()) {
+    return;
+  }
+
+  let pathText: String = manifestPath.toString();
+  let sourceFile: SourceFile = SourceFile::create(pathText.toStr(), source.toStr());
+  let rendered: String = DiagnosticRenderer::renderBag(warnings, &sourceFile, true);
+  Io::eprintln(rendered);
+}
+
 export namespace Manifest {
   function loadFile(manifestPath: &Path::PathBuf): Result<StdManifest, DiagnosticBag> {
     if (!Fs::exists(manifestPath.asStr())) {
@@ -244,6 +512,7 @@ export namespace Manifest {
     let mut modules: Vector<StdManifestModule> = Vector::new<StdManifestModule>();
     let mut autoLoadModules: Vector<String> = Vector::new<String>();
     let mut compileOnlyModules: Vector<String> = Vector::new<String>();
+    let unknownKeyWarnings: DiagnosticBag = checkUnknownManifestKeys(&source, manifestPath);
 
     let mut index: u64 = 0;
     while (index < lines.length()) {
@@ -304,6 +573,8 @@ export namespace Manifest {
     if (includeDirs.length() == 0) {
       includeDirs.push(String::create("."));
     }
+
+    buildManifestReportUnknownKeyWarnings(&unknownKeyWarnings, manifestPath, &source);
 
     return Result::OK(StdManifest {
       path: manifestPath.clone(),
@@ -379,4 +650,58 @@ function manifestLoaderReadsFixtureManifestData(): void {
 function manifestLoaderReportsInvalidFieldTypes(): void {
   let manifestPath: Path::PathBuf = buildManifestFixturePath("test_cases/selfhost/build/manifest_invalid/manifest.toml");
   buildManifestExpectSingleDiagnosticCode(Manifest::loadFile(&manifestPath), BuildDiagnosticCode::INVALID_STD_MANIFEST_FIELD_TYPE);
+}
+
+/// IGN-239: a key `std/manifest.toml` does not recognize warns with a table
+/// path and, when a known key is within edit distance 2, a suggestion.
+/// Wording is shared byte-for-byte with the host's
+/// `ignis_driver::project::unknown_keys`.
+@test
+function unknownManifestKeyWarnsWithSuggestion(): void {
+  let source: String = String::create("[toolchain]\ninclude_dirz = [\".\"]\n");
+  let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+
+  Test::assertEq<u64>(warnings.length(), 1);
+  let Option::SOME(diagnostic) = warnings.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.code, BuildDiagnosticCode::UNKNOWN_KEY);
+  Test::assertEq<str>(
+    diagnostic.messageText(),
+    "unknown key 'include_dirz' in [toolchain]; did you mean 'include_dirs'?"
+  );
+}
+
+/// An unrecognized top-level table warns, labeled "top-level".
+@test
+function unknownManifestTopLevelTableWarns(): void {
+  let source: String = String::create("[toolchan]\ninclude_dirs = [\".\"]\n");
+  let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+
+  Test::assertEq<u64>(warnings.length(), 1);
+  let Option::SOME(diagnostic) = warnings.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.messageText(), "unknown key 'toolchan' in [top-level]; did you mean 'toolchain'?");
+}
+
+/// `[linking.<module>]` tables are recognized but not yet key-checked (the
+/// loader does not parse their contents at all today), `modules` is a
+/// free-form module-name map, and every other known section with every known
+/// key stays silent.
+@test
+function knownManifestSectionsAndLinkingSubtablesStaySilent(): void {
+  let source: String = String::create(
+    "[toolchain]\ninclude_dirs = [\".\"]\n\n[modules]\nio = \"io/mod.ign\"\nanything_at_all = \"x/mod.ign\"\n\n[linking.io]\nheader = \"runtime/io.h\"\nobjct = \"runtime/libio.o\"\n\n[auto_load]\nmodules = [\"string\"]\n\n[compile_only]\nmodules = [\"compile\"]\n"
+  );
+  let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+
+  Test::assertEq<u64>(warnings.length(), 0);
 }
