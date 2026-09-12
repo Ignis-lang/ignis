@@ -786,6 +786,33 @@ function borrowckSchedulesArmBindingOwningMovedFieldPayload(): void {
   Test::assertEq<str>(rendered.toStr(), "match-arm-end: payload\nexit return: holder\nexit fn-end run: holder\n");
 }
 
+/// Scenario: an arm that leaves through its own `return`. The binding is live
+/// on that path too, so the exit owes its drop; scheduling it only at the arm's
+/// end would leave the payload behind whenever the arm returned. The arm-end
+/// entry stays for the fall-through path, which LIR lowering skips once the
+/// arm's block is terminated.
+/// Spec: IGN-39 — an arm binding is dropped on every exit path of the arm.
+@test
+function borrowckSchedulesArmBindingOnEarlyReturn(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nrecord Holder {\n  public first: Maybe;\n}\n\nfunction look(value: &Owned): u32 {\n  return value.id;\n}\n\nfunction run(holder: Holder): u32 {\n  match (holder.first) {\n    Maybe::SOME(payload) -> {\n      return look(&payload);\n    },\n    Maybe::NONE -> {},\n  };\n\n  return 0;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "match-arm-end: payload\nexit return: payload, holder\nexit return: holder\nexit fn-end run: holder\n");
+}
+
+/// Scenario: the same arm, but it hands the binding on before returning. The
+/// exit path must owe nothing for it, or the payload is freed twice.
+/// Spec: IGN-39 — a moved binding leaves no drop behind on the exit path.
+@test
+function borrowckSchedulesNoArmBindingDropWhenMovedBeforeReturn(): void {
+  let rendered: String = borrowckSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Maybe {\n  SOME(Owned),\n  NONE,\n}\n\nrecord Holder {\n  public first: Maybe;\n}\n\nfunction take(value: Owned): u32 {\n  return value.id;\n}\n\nfunction run(holder: Holder): u32 {\n  match (holder.first) {\n    Maybe::SOME(payload) -> {\n      return take(payload);\n    },\n    Maybe::NONE -> {},\n  };\n\n  return 0;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "exit return: value\nexit fn-end take: value\nexit return: holder\nexit return: holder\nexit fn-end run: holder\n");
+}
+
 /// Scenario: a catch-all arm over the same moved field binds the whole enum,
 /// payload and all, so it owes the drop at the arm's end just like a variant
 /// arm that bound the payload directly.

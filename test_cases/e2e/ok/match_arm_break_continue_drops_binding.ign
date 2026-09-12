@@ -1,0 +1,104 @@
+// e2e: std
+// `break` and `continue` leave a payload-binding arm the same way `return` does, and owe
+// the binding's drop on the way out. The loop runs twice so a missed drop on the
+// `continue` path shows up as a second leak rather than one.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+enum Kind {
+  FIRST(Tracked),
+  SECOND(Tracked),
+  EMPTY,
+}
+
+record Holder {
+  public kind: Kind;
+  public tag: i32;
+}
+
+function describe(tracked: &Tracked): i32 {
+  return tracked.id;
+}
+
+function makeKind(id: i32): Kind {
+  return Kind::SECOND(Tracked { id: id });
+}
+
+/// `break` out of an arm over an owned record's field.
+function fieldBreak(holder: Holder): i32 {
+  let mut total: i32 = 0;
+
+  while (true) {
+    match (holder.kind) {
+      Kind::SECOND(payload) -> {
+        total = describe(&payload);
+        break;
+      },
+      _ -> {
+        break;
+      },
+    };
+  }
+
+  return total;
+}
+
+/// `break` out of an arm over a plain local.
+function localBreak(kind: Kind): i32 {
+  let mut total: i32 = 0;
+
+  while (true) {
+    match (kind) {
+      Kind::SECOND(payload) -> {
+        total = describe(&payload);
+        break;
+      },
+      _ -> {
+        break;
+      },
+    };
+  }
+
+  return total;
+}
+
+/// `continue` out of an arm over a call temporary, on every iteration.
+function temporaryContinue(id: i32): i32 {
+  let mut total: i32 = 0;
+  let mut rounds: i32 = 0;
+
+  while (rounds < 2) {
+    rounds += 1;
+
+    match (makeKind(id + rounds)) {
+      Kind::SECOND(payload) -> {
+        total = describe(&payload);
+        continue;
+      },
+      _ -> {},
+    };
+  }
+
+  return total;
+}
+
+function main(): i32 {
+  Io::println("field break");
+  Io::println(`${fieldBreak(Holder { kind: Kind::SECOND(Tracked { id: 1 }), tag: 10 })}`.toStr());
+
+  Io::println("local break");
+  Io::println(`${localBreak(Kind::SECOND(Tracked { id: 2 }))}`.toStr());
+
+  Io::println("temporary continue");
+  Io::println(`${temporaryContinue(30)}`.toStr());
+
+  return 0;
+}

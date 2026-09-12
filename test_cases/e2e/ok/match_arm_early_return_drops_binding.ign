@@ -1,0 +1,86 @@
+// e2e: std
+// An arm binding is live for the whole arm, including the paths that leave it early. A
+// `return` out of a payload-binding arm has to free the binding just like the arm's own
+// end does, over every kind of scrutinee the match can own.
+import Io from "std::io";
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Io::println(`drop ${self.id}`.toStr());
+  }
+}
+
+enum Kind {
+  FIRST(Tracked),
+  SECOND(Tracked),
+  EMPTY,
+}
+
+record Holder {
+  public kind: Kind;
+  public tag: i32;
+}
+
+function describe(tracked: &Tracked): i32 {
+  return tracked.id;
+}
+
+function makeKind(id: i32): Kind {
+  return Kind::SECOND(Tracked { id: id });
+}
+
+/// Over an owned record's field: matching it by value is a partial move, so the binding
+/// is the only holder of the payload when the arm returns.
+function fieldReturn(holder: Holder): i32 {
+  match (holder.kind) {
+    Kind::SECOND(payload) -> {
+      let described: i32 = describe(&payload);
+      return described;
+    },
+    _ -> {},
+  };
+
+  return holder.tag;
+}
+
+/// Over a plain local, which the match consumes.
+function localReturn(kind: Kind): i32 {
+  match (kind) {
+    Kind::SECOND(payload) -> {
+      let described: i32 = describe(&payload);
+      return described;
+    },
+    _ -> {},
+  };
+
+  return 0;
+}
+
+/// Over a call temporary, which nothing else ever held.
+function temporaryReturn(id: i32): i32 {
+  match (makeKind(id)) {
+    Kind::SECOND(payload) -> {
+      let described: i32 = describe(&payload);
+      return described;
+    },
+    _ -> {},
+  };
+
+  return 0;
+}
+
+function main(): i32 {
+  Io::println("field return");
+  Io::println(`${fieldReturn(Holder { kind: Kind::SECOND(Tracked { id: 1 }), tag: 10 })}`.toStr());
+
+  Io::println("local return");
+  Io::println(`${localReturn(Kind::SECOND(Tracked { id: 2 }))}`.toStr());
+
+  Io::println("temporary return");
+  Io::println(`${temporaryReturn(3)}`.toStr());
+
+  return 0;
+}
