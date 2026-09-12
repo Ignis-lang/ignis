@@ -47,6 +47,10 @@ export namespace LirLowering {
     public closureLocalDefRaws: Vector<u32>;
     public closureLocalTypeRaws: Vector<u32>;
     public closureLocalHeap: Vector<boolean>;
+    /// Set while lowering a match scrutinee that no arm takes a payload out of,
+    /// so the field read does not mark the field moved. See the `FieldAccess`
+    /// lowering. Mirrors `reading_field_scrutinee_by_copy`.
+    public readingFieldScrutineeByCopy: boolean;
     /// Evaluated module constants, so a reference to one folds into a LIR
     /// constant instead of naming a global the emitter has no definition for.
     public constValues: Analyzer::ConstEval::ConstValueMap;
@@ -68,6 +72,7 @@ export namespace LirLowering {
         closureLocalDefRaws: Vector::new<u32>(),
         closureLocalTypeRaws: Vector::new<u32>(),
         closureLocalHeap: Vector::new<boolean>(),
+        readingFieldScrutineeByCopy: false,
         constValues: LirLowering::copyConstValueMap(constValues),
       };
     }
@@ -1732,8 +1737,18 @@ export namespace LirLowering {
         // reached without going through a reference; a borrowed base names storage
         // someone else still owns and still drops. Mirrors the oracle's
         // `should_mark_field_moved`.
+        //
+        // A match scrutinee that no arm takes a payload out of is the other
+        // exception: it is read, tested and discarded, so taking the field's
+        // bytes out of their owner buys nothing and leaves them with no owner at
+        // all. `lowerMatch` sets the flag for exactly that read; clearing it here
+        // keeps it from reaching the base's own accesses.
+        let readingScrutineeByCopy: boolean = state.readingFieldScrutineeByCopy;
+        state.readingFieldScrutineeByCopy = false;
+
         let baseIsBorrowed: boolean = LirLowering::baseIsBehindReference(typeStore, hirStore, fieldNode.base);
-        let marksFieldMoved: boolean = !baseIsBorrowed && Borrowck::needsDropType(defStore, typeStore, nodeType);
+        let fieldNeedsDrop: boolean = Borrowck::needsDropType(defStore, typeStore, nodeType);
+        let marksFieldMoved: boolean = !readingScrutineeByCopy && !baseIsBorrowed && fieldNeedsDrop;
 
         let basePtr: Lir::Operand = LirLowering::lowerBasePtr(defStore, typeStore, hirStore, dropSchedules, function_, state, fieldNode.base);
 
@@ -3509,11 +3524,32 @@ export namespace LirLowering {
         elementIndex += 1;
       }
     } else {
-      let scrutineeValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, matchNode.scrutinee);
+      // Whether the scrutinee is a field of storage this function owns that no arm
+      // takes a payload out of. Reading it by value would mark the field moved —
+      // a partial move performed for nothing, since the owner is the only holder
+      // either way and every arm just tests the copy. Reading it as a plain copy
+      // leaves the drop where it belongs.
+      let mut readsOwnedFieldWithoutTakingPayload: boolean = false;
 
       if (let Option::SOME(scrutineeNode) = hirStore.get(matchNode.scrutinee)) {
         scrutineeType = scrutineeNode.typeId;
+
+        if (let Hir::HirKind::FieldAccess(_) = &scrutineeNode.kind) {
+          let behindReference: boolean = LirLowering::baseIsBehindReference(typeStore, hirStore, matchNode.scrutinee);
+          let takesPayload: boolean = Borrowck::armsMoveScrutineePayload(
+            defStore,
+            typeStore,
+            scrutineeType,
+            &matchNode.arms,
+          );
+
+          readsOwnedFieldWithoutTakingPayload = !behindReference && !takesPayload;
+        }
       }
+
+      state.readingFieldScrutineeByCopy = readsOwnedFieldWithoutTakingPayload;
+      let scrutineeValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, matchNode.scrutinee);
+      state.readingFieldScrutineeByCopy = false;
 
       scrutineeSlot = LirLowering::allocSyntheticLocal(function_, scrutineeType);
 
@@ -3539,14 +3575,13 @@ export namespace LirLowering {
       );
       let ownsScrutinee: boolean = LirLowering::matchOwnsScrutinee(typeStore, hirStore, matchNode.scrutinee);
 
-      dropScrutineePerArm = ownsScrutinee && scrutineeNeedsDrop && someArmMovesPayload;
-
       // When no arm takes the payload the scrutinee leaves the match whole, so
       // the block that opened it owns the drop, exactly as it would for any
       // other unnamed temporary. A scrutinee that aliases storage it does not
       // own is left alone: the owner's schedule already frees it. Mirrors
       // `track_scrutinee_drop`.
       let aliasesExternalStorage: boolean = Borrowck::aliasesExternalStorage(hirStore, matchNode.scrutinee);
+      dropScrutineePerArm = ownsScrutinee && scrutineeNeedsDrop && someArmMovesPayload;
 
       if (scrutineeNeedsDrop && !someArmMovesPayload && !aliasesExternalStorage) {
         LirLowering::registerSyntheticLocal(state, scrutineeSlot);
@@ -3688,6 +3723,38 @@ export namespace LirLowering {
 
       LirLowering::switchToBlock(state, armBlock);
 
+      // An arm that takes a payload is skipped by the whole-scrutinee drop below,
+      // so the payload slots its pattern does not bind have no owner at all. Free
+      // them here, before the body runs: the discarded slots are unnameable from
+      // the body, and arm entry is the one point every path out of the arm —
+      // fall-through, `return`, `break`, `continue` — passes through exactly once.
+      let mut armTakesPayload: boolean = false;
+
+      if (!isTupleScrutinee) {
+        armTakesPayload = Borrowck::patternMovesOwnedValue(defStore, typeStore, scrutineeType, &arm.pattern);
+      }
+
+      if (dropScrutineePerArm && armTakesPayload) {
+        let payloadTemp: Lir::TempId = LirLowering::freshTemp(function_, scrutineeType, nodeSpan);
+
+        LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+          dest: payloadTemp,
+          source: scrutineeSlot,
+        }));
+
+        let payloadOperand: Lir::Operand = Lir::Operand::Temp(payloadTemp);
+        LirLowering::emitUnboundPayloadDrops(
+          defStore,
+          typeStore,
+          function_,
+          state,
+          &payloadOperand,
+          scrutineeType,
+          &arm.pattern,
+          nodeSpan,
+        );
+      }
+
       let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, arm.body);
 
       let bodyLive: boolean = !state.terminated;
@@ -3698,8 +3765,6 @@ export namespace LirLowering {
         // handed it over, and ownership analysis leaves such a binding out of
         // this list.
         LirLowering::emitMatchArmDrops(dropSchedules, function_, state, arm.body);
-
-        let armTakesPayload: boolean = Borrowck::patternMovesOwnedValue(defStore, typeStore, scrutineeType, &arm.pattern);
 
         if (dropScrutineePerArm && !armTakesPayload) {
           LirLowering::pushInstr(function_, state, Lir::Instr::Drop(Lir::InstrDrop {
@@ -3793,6 +3858,139 @@ export namespace LirLowering {
     }
 
     LirLowering::switchToBlock(state, continueBlock);
+
+    // `let Kind::PAIR(left, _) = kind else { ... }` binds `left` and leaves the
+    // second payload with no owner, exactly as a matching `match` arm does. Free
+    // it on entry to the success path, where the pattern is known to have
+    // matched.
+    // Gated exactly as the matching arm of a `match` is: the pattern has to take
+    // an owning payload out of the scrutinee, which is also what makes the
+    // borrow checker consume the source place. Without that, the source is still
+    // dropped where it was declared and freeing a payload here frees it twice.
+    let takesPayload: boolean = Borrowck::patternMovesOwnedValue(defStore, typeStore, valueType, &letElseNode.pattern);
+    let ownsValue: boolean = LirLowering::matchOwnsScrutinee(typeStore, hirStore, letElseNode.value);
+    let valueNeedsDrop: boolean = Borrowck::needsDropType(defStore, typeStore, valueType);
+
+    if (takesPayload && ownsValue && valueNeedsDrop) {
+      let payloadTemp: Lir::TempId = LirLowering::freshTemp(function_, valueType, nodeSpan);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Load(Lir::InstrLoad {
+        dest: payloadTemp,
+        source: scrutineeSlot,
+      }));
+
+      let payloadOperand: Lir::Operand = Lir::Operand::Temp(payloadTemp);
+      LirLowering::emitUnboundPayloadDrops(
+        defStore,
+        typeStore,
+        function_,
+        state,
+        &payloadOperand,
+        valueType,
+        &letElseNode.pattern,
+        nodeSpan,
+      );
+    }
+  }
+
+  /// Drop the payload slots of a matched variant that no binding takes.
+  ///
+  /// `Kind::PAIR(left, _)` hands the first payload to `left`, whose drop the
+  /// arm-end schedule owns, and leaves the second with no owner at all. Every
+  /// payload a pattern discards is freed here, once, so the rule holds
+  /// uniformly: bindings own what they bind, the match frees the rest.
+  ///
+  /// Only called where the construct owns the scrutinee's bytes, so a payload
+  /// read out of them has no other holder. `Or` is left alone: its alternatives
+  /// can bind different slots of different variants, and which one matched is
+  /// not known here. Mirrors `emit_unbound_payload_drops`.
+  function emitUnboundPayloadDrops(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    value: &Lir::Operand,
+    valueType: Analyzer::TypeId,
+    pattern: &Hir::HirPattern,
+    span: SourceSpan,
+  ): void {
+    let Hir::HirPattern::Variant(variantPattern) = pattern else {
+      return;
+    };
+
+    let Option::SOME(payloadTypes) = LirLowering::enumVariantPayloadTypes(
+      defStore,
+      typeStore,
+      valueType,
+      variantPattern.variantTag,
+    ) else {
+      return;
+    };
+
+    let mut index: u64 = 0;
+    let mut runtimeFieldIndex: u32 = 0;
+
+    while (index < variantPattern.args.length() && index < payloadTypes.length()) {
+      let Option::SOME(argPattern) = variantPattern.args.get(index) else {
+        index += 1;
+        continue;
+      };
+      let Option::SOME(fieldType) = payloadTypes.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      index += 1;
+
+      // A void payload has no runtime slot, exactly as in `lowerPatternCheck`.
+      if (LirLowering::isVoidType(typeStore, *fieldType)) {
+        continue;
+      }
+
+      let fieldIndex: u32 = runtimeFieldIndex;
+      runtimeFieldIndex += 1;
+
+      if (!Borrowck::needsDropType(defStore, typeStore, *fieldType)) {
+        continue;
+      }
+
+      let fieldTemp: Lir::TempId = LirLowering::freshTemp(function_, *fieldType, span);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::EnumGetPayloadField(Lir::InstrEnumGetPayloadField {
+        dest: fieldTemp,
+        source: Lir::copyOperand(value),
+        variantTag: variantPattern.variantTag,
+        fieldIndex: fieldIndex,
+      }));
+
+      // A slot some binding reaches into keeps its own owner; only the parts of
+      // it that nothing binds are this construct's to free.
+      if (Borrowck::patternMovesOwnedValue(defStore, typeStore, *fieldType, argPattern)) {
+        let fieldOperand: Lir::Operand = Lir::Operand::Temp(fieldTemp);
+        LirLowering::emitUnboundPayloadDrops(
+          defStore,
+          typeStore,
+          function_,
+          state,
+          &fieldOperand,
+          *fieldType,
+          argPattern,
+          span,
+        );
+        continue;
+      }
+
+      let slot: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, *fieldType);
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+        dest: slot,
+        value: Lir::Operand::Temp(fieldTemp),
+      }));
+
+      LirLowering::pushInstr(function_, state, Lir::Instr::Drop(Lir::InstrDrop {
+        local: slot,
+      }));
+    }
   }
 
   /// Consumes `value`, storing it into `slot` only when `wanted`. Split out
