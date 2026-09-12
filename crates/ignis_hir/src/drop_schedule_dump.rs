@@ -493,6 +493,12 @@ impl<'a> DropScheduleDumper<'a> {
       }
     }
 
+    for (assign, dropped) in &self.schedules.on_field_overwrite {
+      if nodes.contains(assign) {
+        record_drops(self, &mut values, &self.span_of(*assign), DropReason::Overwrite, dropped);
+      }
+    }
+
     for (exit, dropped) in &self.schedules.on_exit {
       let Some((span, reason)) = self.exit_site(exit, function, body, nodes) else {
         continue;

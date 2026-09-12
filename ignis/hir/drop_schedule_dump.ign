@@ -1501,6 +1501,31 @@ export namespace Hir {
         overwriteIndex += 1;
       }
 
+      let mut fieldOverwriteIndex: u64 = 0;
+
+      while (fieldOverwriteIndex < schedules.onFieldOverwrite.length()) {
+        if (let Option::SOME(entry) = schedules.onFieldOverwrite.get(fieldOverwriteIndex)) {
+          if (Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
+            let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
+            let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
+            let mut defIndex: u64 = 0;
+
+            while (defIndex < entry.defs.length()) {
+              if (let Option::SOME(defId) = entry.defs.get(defIndex)) {
+                values = Hir::DropScheduleDump::recordDropSite(
+                values, defs, symbols, declarations, &fallbackPosition, *defId, position,
+                Hir::DropScheduleDump::REASON_OVERWRITE, "overwrite",
+              );
+              }
+
+              defIndex += 1;
+            }
+          }
+        }
+
+        fieldOverwriteIndex += 1;
+      }
+
       let mut exitIndex: u64 = 0;
 
       while (exitIndex < schedules.onExit.length()) {

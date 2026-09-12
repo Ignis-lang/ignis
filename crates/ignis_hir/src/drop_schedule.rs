@@ -57,6 +57,16 @@ pub struct DropSchedules {
   /// Drops before overwriting an owned variable, keyed by Assign HIRId.
   pub on_overwrite: HashMap<HIRId, Vec<DefinitionId>>,
 
+  /// Drops before overwriting one field of an owned value, keyed by Assign HIRId
+  /// and carrying the field's definition.
+  ///
+  /// Separate from `on_overwrite` because the two name different things: an entry
+  /// there is a local, which lowering drops through its `LocalId`, while an entry
+  /// here is a field, which lowering drops through the field pointer it already
+  /// computed for the store. Writing a field replaces that field and nothing else,
+  /// so the record around it must keep every drop it still owes.
+  pub on_field_overwrite: HashMap<HIRId, Vec<DefinitionId>>,
+
   /// Deferred expression bodies at block end, keyed by Block HIRId.
   pub on_scope_end_defers: HashMap<HIRId, Vec<HIRId>>,
 
@@ -78,6 +88,7 @@ impl DropSchedules {
     self.on_scope_end.is_empty()
       && self.on_exit.is_empty()
       && self.on_overwrite.is_empty()
+      && self.on_field_overwrite.is_empty()
       && self.on_scope_end_defers.is_empty()
       && self.on_exit_defers.is_empty()
   }
