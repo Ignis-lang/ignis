@@ -43,6 +43,9 @@ export record CliOptions {
   public features: Vector<String>;
   public filter: String;
   public updateSnapshots: boolean;
+  /// Print the ownership checker's drop schedules after analysis, mirroring
+  /// the host's `--dump-drop-schedule`.
+  public dumpDropSchedule: boolean;
   /// Fixture directories added to the ones the project file declares.
   public fixtureDirs: Vector<String>;
   /// The shard a run executes, absent when the command line named none.
@@ -80,6 +83,7 @@ export record CliOptions {
       features: Vector::new<String>(),
       filter: String::new(),
       updateSnapshots: false,
+      dumpDropSchedule: false,
       fixtureDirs: Vector::new<String>(),
       partition: Option::NONE,
       testTimeout: Option::NONE,
@@ -1101,6 +1105,12 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    if (argument.equals("--dump-drop-schedule")) {
+      options.dumpDropSchedule = true;
+      index += 1;
+      continue;
+    }
+
     if (argument.equals("--feature")) {
       let Option::SOME(value) = arguments.get(index + 1) else {
         return Result::ERROR(cliMissingValue("--feature", "a name"));
@@ -1250,6 +1260,7 @@ export function helpText(): String {
   text.pushStr("  -O, --opt-level <0-3>     Override [build] opt_level\n");
   text.pushStr("      --debug               Build with debug information\n");
   text.pushStr("      --no-debug            Build without debug information\n");
+  text.pushStr("      --dump-drop-schedule  Print ownership drop schedules after analysis\n");
   text.pushStr("      --feature <NAME>      Enable one feature (can be repeated)\n");
   text.pushStr("      --features <LIST>     Enable features separated by commas\n");
   text.pushStr("      --filter <SUBSTRING>  Select tests whose name contains it (test only)\n");

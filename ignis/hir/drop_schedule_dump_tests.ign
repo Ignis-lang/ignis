@@ -1,0 +1,131 @@
+import Vector from "std::vector";
+import Test from "std::test";
+
+import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import ParseOutput, Parser from "@compiler::parser";
+import Lowering from "../analyzer/lowering";
+import Capture from "../analyzer/capture";
+import Borrowck from "../analyzer/borrowck";
+
+/// Pins the exact text of `--dump-drop-schedule`, mirroring
+/// `crates/ignis_analyzer/tests/drop_schedule_dump.rs`. The dump is a
+/// debugging aid for ownership bugs, so its value is in being stable enough
+/// to diff: between two runs, between the two compilers, and between two
+/// commits. These tests therefore compare whole renderings, not fragments.
+
+function dropScheduleDumpCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// Parses, analyzes, lowers and ownership-checks `source`, then renders its
+/// drop schedules exactly as `--dump-drop-schedule` would for a single file
+/// named `test.ign`.
+function dumpDropSchedule(source: str): String {
+  let file: SourceFile = SourceFile::create("test.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(dropScheduleDumpCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(dropScheduleDumpCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(dropScheduleDumpCountErrors(&output.diagnostics), 0);
+
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let captureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &mut hir,
+  );
+
+  Test::assertEq<u64>(dropScheduleDumpCountErrors(&captureDiagnostics), 0);
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &hir,
+  );
+
+  Test::assertEq<u64>(dropScheduleDumpCountErrors(&checked.diagnostics), 0);
+
+  let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
+  files.push(SourceFile::create("test.ign", source));
+
+  return Hir::DropScheduleDump::render(&hir, &defStore, &symbols, &checked.dropSchedules, &files, "");
+}
+
+const RESOURCE: str = "@implements(Drop)\nrecord Resource {\n  public value: i32;\n\n  drop(&mut self): void {\n    return;\n  }\n}\n";
+
+/// Scenario: a `match` over a temporary consumes an early return inside one
+/// arm without scheduling anything of its own, while the arm binding is
+/// dropped at the end of the arm. That asymmetry is exactly what the dump is
+/// for.
+/// Mirrors the host's `match_over_a_temporary_with_an_early_return_in_an_arm`.
+@test
+function dropScheduleDumpMatchOverTemporaryWithEarlyReturnInArm(): void {
+  let mut source: String = String::create(RESOURCE);
+  source.pushStr("\nenum Slot {\n  Filled(Resource),\n  Empty,\n}\n\nfunction make(): Slot {\n  return Slot::Filled(Resource { value: 1 });\n}\n\nfunction take(): i32 {\n  match (make()) {\n    Slot::Filled(inner) -> {\n      return inner.value;\n    },\n    Slot::Empty -> {\n      return 0;\n    },\n  };\n\n  return -1;\n}\n");
+
+  let expected: String = String::create("drop-schedule v1\nfunction drop at test.ign:5:25\n  <no owned values>\nfunction make at test.ign:15:23\n  <no owned values>\nfunction take at test.ign:19:22\n  value inner kind=binding declared at test.ign:21:28\n    drop at test.ign:21:28 reason=arm-end\n");
+
+  Test::assertEq<str>(dumpDropSchedule(source.toStr()).toStr(), expected.toStr());
+}
+
+/// Scenario: reading a field out of a local by value leaves the owner
+/// scheduled for its remaining fields while the moved-out local itself keeps
+/// no drop, only a move site.
+/// Mirrors the host's `a_partially_moved_field_keeps_its_owner_scheduled`.
+@test
+function dropScheduleDumpPartiallyMovedFieldKeepsOwnerScheduled(): void {
+  let mut source: String = String::create(RESOURCE);
+  source.pushStr("\nrecord Pair {\n  public left: Resource;\n  public right: i32;\n}\n\nfunction consume(resource: Resource): i32 {\n  return resource.value;\n}\n\nfunction main(): i32 {\n  let pair: Pair = Pair { left: Resource { value: 1 }, right: 2 };\n  let moved: Resource = pair.left;\n  return consume(moved) + pair.right;\n}\n");
+
+  let expected: String = String::create("drop-schedule v1\nfunction drop at test.ign:5:25\n  <no owned values>\nfunction consume at test.ign:15:43\n  value resource kind=parameter declared at test.ign:15:43\n    drop at test.ign:15:43 reason=fn-end\n    drop at test.ign:16:3 reason=return\nfunction main at test.ign:19:22\n  value pair kind=local declared at test.ign:20:3\n    drop at test.ign:19:22 reason=scope-end\n    drop at test.ign:22:3 reason=return\n  value moved kind=local declared at test.ign:21:3\n    moved at test.ign:22:10\n");
+
+  Test::assertEq<str>(dumpDropSchedule(source.toStr()).toStr(), expected.toStr());
+}
+
+/// Scenario: a program with no owned values still lists its one function.
+/// Mirrors the host's `a_program_without_owned_values_still_lists_every_function`.
+@test
+function dropScheduleDumpProgramWithoutOwnedValuesStillListsFunction(): void {
+  let expected: String = String::create("drop-schedule v1\nfunction main at test.ign:1:22\n  <no owned values>\n");
+
+  Test::assertEq<str>(dumpDropSchedule("function main(): i32 {\n  return 0;\n}\n").toStr(), expected.toStr());
+}
