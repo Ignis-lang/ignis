@@ -59,6 +59,21 @@
 //!
 //! When a definition is reached more than once the earliest position wins, so the result
 //! does not depend on traversal order.
+//!
+//! A synthesized closure thunk is positioned at the **closure expression** that produced
+//! it rather than at its own body, because capture analysis hands the thunk whatever node
+//! the front end had to hand and the two compilers do not agree on that choice. The
+//! closure expression is the same source construct in both.
+//!
+//! # Residue: what the renderer cannot normalize
+//!
+//! Monomorphized names are mangled by each compiler's monomorphizer and reach the renderer
+//! already flattened into one symbol, so no rendering rule can reconcile them: the host
+//! qualifies a specialized method by its owner (`Pair__i32__fold__i32`) where the selfhost
+//! does not (`fold__i32__i32`), and the selfhost still prints a placeholder
+//! (`total__<record:DefId(1679)>`) where the host prints the record's name. Making those
+//! agree means changing what the monomorphizers write, not what this file prints, so gate
+//! G7 reports them rather than hiding them.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
@@ -181,12 +196,14 @@ impl<'a> DropScheduleDumper<'a> {
     let mut output = String::new();
     writeln!(output, "drop-schedule v1").unwrap();
 
-    for (function, body) in self.functions() {
+    let thunks = self.closure_thunks();
+
+    for (function, body) in self.functions(&thunks) {
       writeln!(
         output,
         "function {} at {}",
         self.symbols.get(&self.defs.get(&function).name),
-        self.position(&self.span_of(body)).render()
+        self.function_position(function, body, &thunks).render()
       )
       .unwrap();
 
@@ -235,8 +252,55 @@ impl<'a> DropScheduleDumper<'a> {
     output
   }
 
+  /// Where each closure thunk's closure expression sits, keyed by the thunk.
+  ///
+  /// A thunk is synthesized by capture analysis, so the span of its body is
+  /// whatever node the front end handed it, and the two compilers do not agree on
+  /// that node. The closure expression that produced the thunk is the same source
+  /// construct in both, so the dump positions a thunk there instead.
+  fn closure_thunks(&self) -> HashMap<DefinitionId, Span> {
+    let mut thunks: HashMap<DefinitionId, Span> = HashMap::new();
+
+    for (id, node) in self.hir.nodes.iter() {
+      let HIRKind::Closure {
+        thunk_def: Some(thunk), ..
+      } = &node.kind
+      else {
+        continue;
+      };
+
+      let span = self.span_of(id);
+
+      thunks
+        .entry(*thunk)
+        .and_modify(|current| {
+          if span.start < current.start {
+            *current = span.clone();
+          }
+        })
+        .or_insert(span);
+    }
+
+    thunks
+  }
+
+  fn function_position(
+    &self,
+    function: DefinitionId,
+    body: HIRId,
+    thunks: &HashMap<DefinitionId, Span>,
+  ) -> Position {
+    match thunks.get(&function) {
+      Some(span) => self.position(span),
+      None => self.position(&self.span_of(body)),
+    }
+  }
+
   /// Functions with a body, in the order they are printed.
-  fn functions(&self) -> Vec<(DefinitionId, HIRId)> {
+  fn functions(
+    &self,
+    thunks: &HashMap<DefinitionId, Span>,
+  ) -> Vec<(DefinitionId, HIRId)> {
     let mut functions: Vec<(Position, String, u32, DefinitionId, HIRId)> = self
       .hir
       .items
@@ -250,7 +314,7 @@ impl<'a> DropScheduleDumper<'a> {
       .filter_map(|item| self.hir.function_bodies.get(item).map(|body| (*item, *body)))
       .map(|(item, body)| {
         (
-          self.position(&self.span_of(body)),
+          self.function_position(item, body, thunks),
           self.symbols.get(&self.defs.get(&item).name).to_string(),
           item.index(),
           item,

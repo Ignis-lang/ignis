@@ -52,6 +52,23 @@ import _ from "./pattern";
 /// documents. Move sites carry the function they were recorded against, so
 /// (like the host) they need no separate attribution walk.
 ///
+/// A synthesized closure thunk is positioned at the **closure expression**
+/// that produced it rather than at its own body: capture analysis hands the
+/// thunk whatever node the front end had to hand, and the two compilers do not
+/// agree on that node (the host keeps the closure's body expression, this
+/// compiler a node starting at the parameter list's `)`). The closure
+/// expression is the same source construct in both.
+///
+/// # Residue: what this renderer cannot normalize
+///
+/// Monomorphized names arrive already mangled into a single symbol, so no
+/// rendering rule can reconcile them with the host's: the host qualifies a
+/// specialized method by its owner (`Pair__i32__fold__i32`) where this
+/// compiler does not (`fold__i32__i32`), and this compiler still prints a
+/// placeholder (`total__<record:DefId(1679)>`) where the host prints the
+/// record's name. Fixing those means changing what the monomorphizers write,
+/// not what this file prints, so gate G7 reports them instead.
+///
 /// # Deviations from the host renderer
 ///
 /// - `DropReason` and the `Site` enum are represented here as a numeric
@@ -354,6 +371,98 @@ export namespace Hir {
     }
 
     // --- HIR traversal -------------------------------------------------
+
+    /// One closure thunk and the span of the closure expression that made it.
+    record ThunkSpan {
+      public thunkRaw: u32;
+      public span: SourceSpan;
+    }
+
+    /// Every closure thunk in the program, positioned at its closure
+    /// expression.
+    ///
+    /// A thunk is synthesized by capture analysis, so the span of its body is
+    /// whatever node the front end handed it, and the two compilers do not
+    /// agree on that node: the host keeps the closure's body expression while
+    /// this compiler keeps a node starting at the parameter list's `)`. The
+    /// closure expression itself is the same source construct in both, so both
+    /// dumps position a thunk there instead. Built once per `render` call.
+    function collectClosureThunks(hir: &Hir::HirStore): Vector<Hir::DropScheduleDump::ThunkSpan> {
+      let mut entries: Vector<Hir::DropScheduleDump::ThunkSpan> = Vector::new<Hir::DropScheduleDump::ThunkSpan>();
+      let mut index: u64 = 0;
+
+      while (index < hir.nodes.length()) {
+        let Option::SOME(node) = hir.nodes.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        match (&node.kind) {
+          Hir::HirKind::Closure(closure) -> {
+            if (let Option::SOME(thunk) = closure.thunkDef) {
+              entries = Hir::DropScheduleDump::rememberThunkSpan(entries, thunk.raw(), node.span);
+            }
+          },
+          _ -> {},
+        };
+
+        index += 1;
+      }
+
+      return entries;
+    }
+
+    /// Keeps the earliest span recorded for one thunk, so a repeated lowering
+    /// of the same closure cannot make the result depend on visit order.
+    function rememberThunkSpan(
+      entries: Vector<Hir::DropScheduleDump::ThunkSpan>,
+      thunkRaw: u32,
+      span: SourceSpan,
+    ): Vector<Hir::DropScheduleDump::ThunkSpan> {
+      let mut result: Vector<Hir::DropScheduleDump::ThunkSpan> = entries;
+      let mut index: u64 = 0;
+
+      while (index < result.length()) {
+        if (let Option::SOME(entry) = result.get(index)) {
+          if (entry.thunkRaw == thunkRaw) {
+            if (span.start < entry.span.start) {
+              result.set(index, Hir::DropScheduleDump::ThunkSpan { thunkRaw: thunkRaw, span: span });
+            }
+
+            return result;
+          }
+        }
+
+        index += 1;
+      }
+
+      result.push(Hir::DropScheduleDump::ThunkSpan { thunkRaw: thunkRaw, span: span });
+
+      return result;
+    }
+
+    /// The span a function is positioned at: its closure expression when it is
+    /// a closure thunk, its body otherwise.
+    function functionSpan(
+      hir: &Hir::HirStore,
+      thunks: &Vector<Hir::DropScheduleDump::ThunkSpan>,
+      defId: Analyzer::DefinitionId,
+      bodyId: Hir::HirId,
+    ): SourceSpan {
+      let mut index: u64 = 0;
+
+      while (index < thunks.length()) {
+        if (let Option::SOME(entry) = thunks.get(index)) {
+          if (entry.thunkRaw == defId.raw()) {
+            return entry.span;
+          }
+        }
+
+        index += 1;
+      }
+
+      return Hir::DropScheduleDump::spanOf(hir, bodyId);
+    }
 
     function spanOf(hir: &Hir::HirStore, id: Hir::HirId): SourceSpan {
       let Option::SOME(node) = hir.get(id) else {
@@ -1771,6 +1880,7 @@ export namespace Hir {
       files: &Vector<SourceFile>,
       workingDirectory: str,
       storage: &mut Vector<String>,
+      thunks: &Vector<Hir::DropScheduleDump::ThunkSpan>,
     ): Vector<Hir::DropScheduleDump::FunctionEntry> {
       let mut entries: Vector<Hir::DropScheduleDump::FunctionEntry> = Vector::new<Hir::DropScheduleDump::FunctionEntry>();
       let mut index: u64 = 0;
@@ -1806,7 +1916,7 @@ export namespace Hir {
           continue;
         };
 
-        let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, bodyId);
+        let span: SourceSpan = Hir::DropScheduleDump::functionSpan(hir, thunks, *itemId, bodyId);
         let position: Hir::DropScheduleDump::RenderedPosition = Hir::DropScheduleDump::resolvePosition(&span, files, workingDirectory, storage);
         let name: str = Hir::DropScheduleDump::resolveSymbol(symbols, definition.name());
 
@@ -1926,7 +2036,8 @@ export namespace Hir {
       let mut storage: Vector<String> = Vector::new<String>();
       let mut output: String = String::create("drop-schedule v1\n");
 
-      let functions: Vector<Hir::DropScheduleDump::FunctionEntry> = Hir::DropScheduleDump::collectFunctions(hir, defs, symbols, files, workingDirectory, &mut storage);
+      let thunks: Vector<Hir::DropScheduleDump::ThunkSpan> = Hir::DropScheduleDump::collectClosureThunks(hir);
+      let functions: Vector<Hir::DropScheduleDump::FunctionEntry> = Hir::DropScheduleDump::collectFunctions(hir, defs, symbols, files, workingDirectory, &mut storage, &thunks);
 
       // Allocated once for the whole program and reused function to
       // function (`clearMembership` below), so membership checks stay O(1)
