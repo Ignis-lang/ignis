@@ -10,6 +10,14 @@ and this harness turns that into a gate: it runs the host and the selfhost over
 the `ok` end-to-end corpus plus the selfhost compiler's own entry point, diffs
 the two dumps per case, and reports the first differing lines.
 
+By default only the code under test is compared: every function the two
+compilers place in the **standard library** is dropped from both dumps first.
+The two monomorphizers keep a different set of std functions alive, which
+desynchronises the whole-program listings on the very first std entry and
+buries the ownership answer the dump exists to give. That difference is real
+but it is not a drop question, so it is reported as a count of its own instead
+of failing every case. `--all` compares the whole dump, std included.
+
 The gate is **informational**. It does not feed the promotion `candidate`
 verdict — a drop-schedule divergence is a lead to follow, not a release
 blocker, and until the selfhost's ownership analysis is finished a non-zero
@@ -90,6 +98,10 @@ class DropResult:
   selfhost_lines: int = 0
   first_difference: int | None = None
   diff_lines: list[str] = field(default_factory=list)
+  # Observed on the whole dump even when the comparison is scoped, so the
+  # report can say how far apart the two standard-library sets are.
+  host_std_functions: int = 0
+  selfhost_std_functions: int = 0
 
 
 def collect_cases(
@@ -218,12 +230,56 @@ def compare(
   return None, []
 
 
+def split_functions(lines: list[str]) -> list[tuple[str, list[str]]]:
+  """The dump's body as (function line, its indented lines) pairs."""
+  functions: list[tuple[str, list[str]]] = []
+
+  for line in lines:
+    if line.startswith("function "):
+      functions.append((line, []))
+    elif functions:
+      functions[-1][1].append(line)
+
+  return functions
+
+
+def function_path(function_line: str) -> str:
+  """The path out of `function <name> at <path>:<line>:<column>`."""
+  position = function_line.rsplit(" at ", 1)[-1]
+
+  return position.rsplit(":", 2)[0]
+
+
+def scope_to_own_code(
+  lines: list[str],
+  std_prefix: str,
+) -> tuple[list[str], int]:
+  """Drop every standard-library function, and count what was dropped.
+
+  What remains is the code the case is actually about: the fixture's own
+  functions, or the compiler's own functions for a project case.
+  """
+  scoped = [DUMP_HEADER]
+  dropped = 0
+
+  for function_line, body in split_functions(lines[1:]):
+    if function_path(function_line).startswith(std_prefix):
+      dropped += 1
+      continue
+
+    scoped.append(function_line)
+    scoped.extend(body)
+
+  return scoped, dropped
+
+
 def run_case(
   case: DropCase,
   host: Path,
   compiler: Path,
   std_path: Path,
   repository_root: Path,
+  compare_everything: bool,
 ) -> DropResult:
   if not case.path.is_file():
     return DropResult(case, CLASS_HOST_NO_DUMP, reason=f"{case.path} does not exist")
@@ -251,15 +307,24 @@ def run_case(
       host_lines=len(host_lines),
     )
 
-  first_difference, diff_lines = compare(host_lines, selfhost_lines)
+  std_prefix = f"{relative_to(std_path, repository_root)}/"
+  host_scoped, host_std = scope_to_own_code(host_lines, std_prefix)
+  selfhost_scoped, selfhost_std = scope_to_own_code(selfhost_lines, std_prefix)
+
+  if compare_everything:
+    host_scoped, selfhost_scoped = host_lines, selfhost_lines
+
+  first_difference, diff_lines = compare(host_scoped, selfhost_scoped)
 
   return DropResult(
     case,
     CLASS_PASS if first_difference is None else CLASS_DIFFERS,
-    host_lines=len(host_lines),
-    selfhost_lines=len(selfhost_lines),
+    host_lines=len(host_scoped),
+    selfhost_lines=len(selfhost_scoped),
     first_difference=first_difference,
     diff_lines=diff_lines,
+    host_std_functions=host_std,
+    selfhost_std_functions=selfhost_std,
   )
 
 
@@ -268,8 +333,14 @@ def build_report(
   counts: dict[str, int],
   compiler: Path,
   host: Path,
+  compare_everything: bool,
 ) -> str:
   total = len(results)
+  scope = (
+    "the whole dump, standard library included (`--all`)"
+    if compare_everything
+    else "the code under test; standard-library functions are dropped from both dumps first"
+  )
   lines = [
     "# Drop-schedule parity (gate G7)",
     "",
@@ -283,6 +354,7 @@ def build_report(
     f"- host: `{host}`",
     f"- selfhost: `{compiler}`",
     f"- cases: {total}",
+    f"- compared: {scope}",
     "",
     "## Summary",
     "",
@@ -292,6 +364,8 @@ def build_report(
 
   for classification in CLASS_ORDER:
     lines.append(f"| {classification} | {counts.get(classification, 0)} |")
+
+  lines.extend(build_std_section(results, compare_everything))
 
   diverging = [result for result in results if result.classification != CLASS_PASS]
 
@@ -329,20 +403,65 @@ def build_report(
   return "\n".join(lines) + "\n"
 
 
+def build_std_section(
+  results: list[DropResult],
+  compare_everything: bool,
+) -> list[str]:
+  """How far apart the two standard-library sets are — reported, not gated."""
+  if compare_everything:
+    return []
+
+  comparable = [result for result in results if result.host_std_functions or result.selfhost_std_functions]
+
+  if not comparable:
+    return []
+
+  disagreeing = [
+    result for result in comparable if result.host_std_functions != result.selfhost_std_functions
+  ]
+  widest = max(comparable, key=lambda result: abs(result.selfhost_std_functions - result.host_std_functions))
+
+  return [
+    "",
+    "## Standard-library functions (informational, not compared)",
+    "",
+    "The two monomorphizers keep a different set of standard-library functions",
+    "alive, which is a mono question rather than a drop question. Those",
+    "functions are dropped from both dumps before comparing; the size of the",
+    "disagreement is recorded here instead.",
+    "",
+    f"- cases where the two counts differ: {len(disagreeing)}/{len(comparable)}",
+    f"- widest gap: `{widest.case.name}`, host {widest.host_std_functions} vs "
+    f"selfhost {widest.selfhost_std_functions}",
+    "",
+  ]
+
+
 def build_gate(
   results: list[DropResult],
   counts: dict[str, int],
+  compare_everything: bool,
 ) -> dict:
   total = len(results)
   passed = counts.get(CLASS_PASS, 0)
+  scope = "whole-dump" if compare_everything else "own-code"
 
   return {
     "gate": GATE_ID,
     "status": "pass" if total > 0 and passed == total else "fail",
     "informational": True,
-    "summary": f"drop-schedule parity {passed}/{total} (informational: does not gate promotion)",
+    "summary": f"drop-schedule parity {passed}/{total} {scope} (informational: does not gate promotion)",
     "details": {
       "informational": True,
+      "scope": scope,
+      "std_function_counts": {
+        result.case.name: {
+          "host": result.host_std_functions,
+          "selfhost": result.selfhost_std_functions,
+        }
+        for result in results
+        if result.host_std_functions != result.selfhost_std_functions
+      },
       "total": total,
       "counts": {classification: counts.get(classification, 0) for classification in CLASS_ORDER},
       "diverging": [
@@ -381,6 +500,12 @@ def main() -> int:
     help="project root to check as a whole, repeatable (e.g. `.` for the selfhost compiler)",
   )
   parser.add_argument("--filter", help="only run cases whose name contains this substring")
+  parser.add_argument(
+    "--all",
+    dest="compare_everything",
+    action="store_true",
+    help="compare the whole dump, standard library included, instead of just the code under test",
+  )
   parser.add_argument("--jobs", type=int, default=None, help="parallel cases (default: cpu count)")
   parser.add_argument("--report", type=Path, help="markdown report path")
   parser.add_argument("--counts-json", type=Path, help="per-class counts JSON path")
@@ -403,10 +528,37 @@ def main() -> int:
   with ThreadPoolExecutor(max_workers=arguments.jobs) as executor:
     results = list(
       executor.map(
-        lambda case: run_case(case, arguments.host, arguments.compiler, arguments.std, repository_root),
+        lambda case: run_case(
+          case,
+          arguments.host,
+          arguments.compiler,
+          arguments.std,
+          repository_root,
+          arguments.compare_everything,
+        ),
         cases,
       )
     )
+
+  # A case that produced no dump usually lost a race for the shared `build/std`
+  # directory against another worker, so it is retried once with the pool idle
+  # rather than reported as a divergence it is not.
+  retryable = [
+    result
+    for result in results
+    if result.classification in (CLASS_HOST_NO_DUMP, CLASS_SELFHOST_NO_DUMP, CLASS_TIMEOUT)
+  ]
+
+  for stale in retryable:
+    retried = run_case(
+      stale.case,
+      arguments.host,
+      arguments.compiler,
+      arguments.std,
+      repository_root,
+      arguments.compare_everything,
+    )
+    results[results.index(stale)] = retried
 
   results.sort(key=lambda result: result.case.name)
 
@@ -414,11 +566,14 @@ def main() -> int:
   for result in results:
     counts[result.classification] = counts.get(result.classification, 0) + 1
 
-  gate = build_gate(results, counts)
+  gate = build_gate(results, counts, arguments.compare_everything)
 
   if arguments.report:
     arguments.report.parent.mkdir(parents=True, exist_ok=True)
-    arguments.report.write_text(build_report(results, counts, arguments.compiler, arguments.host), encoding="utf-8")
+    arguments.report.write_text(
+      build_report(results, counts, arguments.compiler, arguments.host, arguments.compare_everything),
+      encoding="utf-8",
+    )
 
   if arguments.counts_json:
     arguments.counts_json.parent.mkdir(parents=True, exist_ok=True)
