@@ -630,6 +630,60 @@ export namespace LirLowering {
     return Lir::Operand::Local(local);
   }
 
+  /// Drops the value an expression statement produced, at the end of that
+  /// statement.
+  ///
+  /// A statement's value has no name and no later reader, so the statement is
+  /// the last point at which anything can own it. `let _ = value;` lowers to
+  /// exactly this statement, which is what gives a discard the same drop point
+  /// in both compiler front ends without inventing a schedule entry for a
+  /// binding that does not exist. Mirrors `drop_statement_value`.
+  ///
+  /// The conditions are `spillIfOwnedTemp`'s, which this replaces for a
+  /// statement: a value loaded out of a local (`x;`, `let _ = x;`) is an alias
+  /// of storage that already owes its own drop, so it is left alone.
+  function dropStatementValue(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    function_: &mut Lir::FunctionLir,
+    state: &mut LirLowering::LowerState,
+    operand: Lir::Operand,
+    ty: Analyzer::TypeId,
+  ): void {
+    let mut tempRaw: u32 = 0;
+    let mut isTemp: boolean = false;
+
+    if (let Lir::Operand::Temp(tempId) = &operand) {
+      tempRaw = tempId.raw();
+      isTemp = true;
+    }
+
+    if (!isTemp) {
+      return;
+    }
+
+    if (!Borrowck::needsDropType(defStore, typeStore, ty)) {
+      return;
+    }
+
+    if (LirLowering::isLoadAliasTemp(state, Id::fromRaw<Lir::TempTag>(tempRaw))) {
+      return;
+    }
+
+    let local: Lir::LocalId = LirLowering::allocSyntheticLocal(function_, ty);
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+      dest: local,
+      value: operand,
+    }));
+
+    LirLowering::pushInstr(function_, state, Lir::Instr::Drop(Lir::InstrDrop {
+      local: local,
+    }));
+
+    return;
+  }
+
   /// An extern callee never takes ownership of what it is handed, so an owned
   /// argument stays this frame's to drop. A call into Ignis code moves it.
   function spillOwnedCallArgument(
@@ -1419,10 +1473,10 @@ export namespace LirLowering {
           innerType = innerNode.typeId;
         }
 
-        // A discarded value of an owning type is nobody else's to free, so it
-        // becomes a temporary this block drops.
+        // A discarded value of an owning type is nobody else's to free, and the
+        // statement is the last point at which anything can own it.
         let innerValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, function_, state, innerId);
-        let _ = LirLowering::spillIfOwnedTemp(defStore, typeStore, function_, state, innerValue, innerType);
+        LirLowering::dropStatementValue(defStore, typeStore, function_, state, innerValue, innerType);
 
         return Lir::Operand::Const(Lir::ConstValue::Undef(nodeType));
       },
