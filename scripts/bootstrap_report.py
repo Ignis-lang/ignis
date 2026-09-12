@@ -48,8 +48,8 @@ STATUS_FAIL = "fail"
 STATUS_SKIPPED = "skipped"
 
 ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-TEST_LINE_PATTERN = re.compile(r"^\s*-\s+(?P<name>\S+)\s+\.\.\.\s+(?P<status>ok|FAILED)\s*$")
-SUMMARY_COUNT_PATTERN = re.compile(r"^\s*-\s+(?P<count>\d+)\s+(?P<label>total|passed|failed)\s*$")
+TEST_LINE_PATTERN = re.compile(r"^\s*-\s+(?P<name>\S+)\s+\.\.\.\s+(?P<status>ok|FAILED|skip \(.*\))\s*$")
+SUMMARY_COUNT_PATTERN = re.compile(r"^\s*-\s+(?P<count>\d+)\s+(?P<label>total|passed|failed|skipped)\s*$")
 SUMMARY_HEADER = "Summary"
 
 ERROR_LINE_PATTERN = re.compile(r"^(Error\[|Error:|error(\[|:))")
@@ -70,9 +70,10 @@ def strip_ansi(text: str) -> str:
 def parse_test_log(text: str) -> dict:
   """Extract the per-test lines and the `• Summary` block from a test run.
 
-  Only the lines the runner prints for each test and the three summary counts
-  are read. Everything else (phase reports, failure details, timings) differs
-  between two runs of the same suite and says nothing about the result.
+  Only the lines the runner prints for each test and the four summary counts
+  (total, passed, failed, skipped) are read. Everything else (phase reports,
+  failure details, timings) differs between two runs of the same suite and
+  says nothing about the result.
   """
   results: dict[str, str] = {}
   summary: dict[str, int] = {}
@@ -136,6 +137,10 @@ def failing_names(parsed: dict) -> set[str]:
   return {name for name, status in parsed["tests"].items() if status == "FAILED"}
 
 
+def skipped_names(parsed: dict) -> set[str]:
+  return {name for name, status in parsed["tests"].items() if status.startswith("skip (")}
+
+
 def has_summary(parsed: dict) -> bool:
   return {"total", "passed", "failed"}.issubset(parsed["summary"])
 
@@ -155,6 +160,8 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
 
   stage2_failing = failing_names(stage2)
   host_failing = failing_names(host)
+  stage2_skipped = skipped_names(stage2)
+  host_skipped = skipped_names(host)
 
   details = {
     "stage2": {
@@ -173,6 +180,8 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
     "failing_only_under_host": sorted(host_failing - stage2_failing),
     "missing_from_stage2": sorted(set(host["tests"]) - set(stage2["tests"])),
     "missing_from_host": sorted(set(stage2["tests"]) - set(host["tests"])),
+    "skipped_only_under_stage2": sorted(stage2_skipped - host_skipped),
+    "skipped_only_under_host": sorted(host_skipped - stage2_skipped),
     "timeout_seconds": arguments.timeout_seconds,
   }
 
@@ -209,32 +218,50 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
 
     return {"gate": "G3", "status": STATUS_FAIL, "summary": reason, "details": details}
 
-  stage2_counts = (stage2["summary"]["total"], stage2["summary"]["passed"], stage2["summary"]["failed"])
-  host_counts = (host["summary"]["total"], host["summary"]["passed"], host["summary"]["failed"])
+  stage2_counts = (
+    stage2["summary"]["total"],
+    stage2["summary"]["passed"],
+    stage2["summary"]["failed"],
+    stage2["summary"].get("skipped", 0),
+  )
+  host_counts = (
+    host["summary"]["total"],
+    host["summary"]["passed"],
+    host["summary"]["failed"],
+    host["summary"].get("skipped", 0),
+  )
 
   if stage2_counts != host_counts:
     return {
       "gate": "G3",
       "status": STATUS_FAIL,
       "summary": (
-        f"stage2 reported {stage2_counts[1]}/{stage2_counts[0]} passing, "
-        f"the host {host_counts[1]}/{host_counts[0]}"
+        f"stage2 reported {stage2_counts[1]}/{stage2_counts[0]} passing "
+        f"({stage2_counts[3]} skipped), "
+        f"the host {host_counts[1]}/{host_counts[0]} ({host_counts[3]} skipped)"
       ),
       "details": details,
     }
 
-  if stage2_failing != host_failing or set(stage2["tests"]) != set(host["tests"]):
+  if (
+    stage2_failing != host_failing
+    or stage2_skipped != host_skipped
+    or stage2["tests"] != host["tests"]
+  ):
     return {
       "gate": "G3",
       "status": STATUS_FAIL,
-      "summary": "stage2 and the host disagree on which tests fail",
+      "summary": "stage2 and the host disagree on which tests fail or are skipped",
       "details": details,
     }
 
   return {
     "gate": "G3",
     "status": STATUS_PASS,
-    "summary": f"stage2 matches the host: {stage2_counts[1]}/{stage2_counts[0]} passing",
+    "summary": (
+      f"stage2 matches the host: {stage2_counts[1]}/{stage2_counts[0]} passing "
+      f"({stage2_counts[3]} skipped)"
+    ),
     "details": details,
   }
 
