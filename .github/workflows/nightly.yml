@@ -247,10 +247,22 @@ jobs:
   # A run whose stage0 fell back from official to host (scripts/bootstrap.sh's
   # build_stage1, `promotion.json`'s `stage0.fallback: true`) proves the host
   # still passes the ladder, which every run already assumes — it says nothing
-  # about the official asset itself. Such a run leaves the streak exactly as it
-  # found it (neither incremented nor reset) and publishes no selfhost binary,
-  # so a stale official asset can neither promote itself nor get demoted by the
-  # very failure the fallback exists to survive.
+  # about the official asset itself, *unless* the run is also a promotion
+  # candidate: every gate still passed against a stage2 built the same way a
+  # manual `workflow_dispatch stage0=host` seed would build it. That case is
+  # treated exactly like such a manual seed: stage2 is published as the new
+  # official asset and the streak is reset to 1, re-seeding the official
+  # lineage instead of leaving every following nightly to repeat the same
+  # fallback until a maintainer notices and runs `workflow_dispatch
+  # stage0=host` by hand. A fallback run with a failing gate proves nothing
+  # about the official asset, so it keeps the old behavior: the streak is
+  # left exactly as it found it (neither incremented nor reset) and no
+  # selfhost binary is published. Either way an explicit `stage0=official`
+  # dispatch still fails outright on the same fallback trigger (Resolve
+  # stage0's `fall_back_or_fail`) rather than reaching this job at all. The
+  # decision itself (streak value, whether to publish, whether to re-seed) is
+  # `scripts/bootstrap.sh promotion-decide`, so it can be unit-tested without
+  # a real gh/release round trip — see scripts/tests/test_stage0_fallback.sh.
   #
   # Supersede
   # ---------
@@ -755,23 +767,34 @@ jobs:
           COMMIT=$(jq -r '.commit' build/bootstrap/promotion.json)
           STAGE0_FALLBACK=$(jq -r '.stage0.fallback // false' build/bootstrap/promotion.json)
 
-          # See the "Promotion flow" comment on the `stages` job: a fallback
-          # run proves the host, not the official asset, so it must not move
-          # the streak in either direction and must not publish a binary.
+          # See the "Promotion flow" comment on the `stages` job: the streak
+          # value, whether to publish a binary, and whether this is a
+          # fallback re-seed are all decided by one pure, unit-tested
+          # function rather than inline here.
+          DECISION=$(scripts/bootstrap.sh promotion-decide "$CANDIDATE" "$STAGE0_FALLBACK" "${PREVIOUS_STREAK:-0}")
+
+          STREAK=$(jq -r '.streak' <<<"$DECISION")
+          WRITE_STREAK=$(jq -r '.write_streak' <<<"$DECISION")
+          PUBLISH_BINARY=$(jq -r '.publish_binary' <<<"$DECISION")
+          RESEED=$(jq -r '.reseed' <<<"$DECISION")
+
           if [ "$STAGE0_FALLBACK" = "true" ]; then
             REASON=$(jq -r '.stage0.fallback_reason // "no reason recorded"' build/bootstrap/promotion.json)
             echo "::warning::stage0 fell back to the host: ${REASON}"
-            echo "stage0 fell back to the host; the promotion streak stays at ${PREVIOUS_STREAK:-0} and no selfhost binary is published."
-            exit 0
-          fi
 
-          if [ "$CANDIDATE" = "true" ]; then
-            STREAK=$(( ${PREVIOUS_STREAK:-0} + 1 ))
-          else
-            STREAK=0
+            if [ "$RESEED" = "true" ]; then
+              echo "stage0 fell back to the host, but every gate still passed: re-seeding the official lineage — stage2 is published as the new official asset and the promotion streak is reset to 1, the same as a manual workflow_dispatch stage0=host seed."
+            else
+              echo "stage0 fell back to the host; the promotion streak stays at ${PREVIOUS_STREAK:-0} and no selfhost binary is published."
+              exit 0
+            fi
           fi
 
           echo "candidate=${CANDIDATE} streak=${STREAK}"
+
+          if [ "$WRITE_STREAK" != "true" ]; then
+            exit 0
+          fi
 
           jq -n --arg commit "$COMMIT" --argjson streak "$STREAK" \
             '{commit: $commit, streak: $streak}' > promotion-streak.json
@@ -784,7 +807,7 @@ jobs:
           # Uploaded even on a reset: the streak file is state, not a promotion.
           gh release upload nightly promotion-streak.json --clobber
 
-          if [ "$STREAK" -lt 3 ]; then
+          if [ "$PUBLISH_BINARY" != "true" ]; then
             echo "Not official yet; the published selfhost binary is left as it is."
             exit 0
           fi

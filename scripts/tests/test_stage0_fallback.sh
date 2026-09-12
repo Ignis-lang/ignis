@@ -12,6 +12,13 @@
 # repository's build/ directory. Wired into ci.yml's selfhost job — it takes
 # a few seconds.
 #
+# The last test, test_promotion_decide, covers a different piece: the
+# nightly's "Publish the promotion state" step's streak/publish decision
+# (`scripts/bootstrap.sh promotion-decide`, IGN-248's fallback-candidate
+# re-seed). It is a pure function with no filesystem or gh/release side
+# effects, so it runs straight against the real scripts/bootstrap.sh rather
+# than a sandbox copy.
+#
 # Usage: scripts/tests/test_stage0_fallback.sh
 
 set -euo pipefail
@@ -360,11 +367,69 @@ test_fallback_and_host_both_fail() {
   rm -rf "$root"
 }
 
+# Test 6: `scripts/bootstrap.sh promotion-decide` is the nightly's "Publish
+# the promotion state" step's decision logic (see the "Promotion flow"
+# comment in .github/workflows/nightly.yml), factored into a pure function so
+# it can be exercised directly here without a gh/release round trip.
+test_promotion_decide() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: promotion-decide covers the fallback re-seed and the ordinary streak"
+
+  local out
+
+  # A fallback run where every gate still passed re-seeds the official
+  # lineage: publish stage2 and reset the streak to 1, same as a manual
+  # workflow_dispatch stage0=host seed (IGN-248).
+  out="$("$BOOTSTRAP_SH" promotion-decide true true 2)"
+  [[ "$(jq -r '.streak' <<<"$out")" == "1" ]] && pass "fallback+candidate: streak resets to 1" \
+    || fail_test "fallback+candidate: streak is $(jq -r '.streak' <<<"$out"), expected 1"
+  [[ "$(jq -r '.write_streak' <<<"$out")" == "true" ]] && pass "fallback+candidate: writes the streak file" \
+    || fail_test "fallback+candidate: write_streak is $(jq -r '.write_streak' <<<"$out"), expected true"
+  [[ "$(jq -r '.publish_binary' <<<"$out")" == "true" ]] && pass "fallback+candidate: publishes the binary" \
+    || fail_test "fallback+candidate: publish_binary is $(jq -r '.publish_binary' <<<"$out"), expected true"
+  [[ "$(jq -r '.reseed' <<<"$out")" == "true" ]] && pass "fallback+candidate: reseed is true" \
+    || fail_test "fallback+candidate: reseed is $(jq -r '.reseed' <<<"$out"), expected true"
+
+  # A fallback run with a failing gate keeps the old behavior: the streak
+  # stays untouched (not even rewritten) and nothing is published.
+  out="$("$BOOTSTRAP_SH" promotion-decide false true 2)"
+  [[ "$(jq -r '.streak' <<<"$out")" == "2" ]] && pass "fallback+not-candidate: streak stays at the previous value" \
+    || fail_test "fallback+not-candidate: streak is $(jq -r '.streak' <<<"$out"), expected 2"
+  [[ "$(jq -r '.write_streak' <<<"$out")" == "false" ]] && pass "fallback+not-candidate: does not rewrite the streak file" \
+    || fail_test "fallback+not-candidate: write_streak is $(jq -r '.write_streak' <<<"$out"), expected false"
+  [[ "$(jq -r '.publish_binary' <<<"$out")" == "false" ]] && pass "fallback+not-candidate: publishes nothing" \
+    || fail_test "fallback+not-candidate: publish_binary is $(jq -r '.publish_binary' <<<"$out"), expected false"
+  [[ "$(jq -r '.reseed' <<<"$out")" == "false" ]] && pass "fallback+not-candidate: reseed is false" \
+    || fail_test "fallback+not-candidate: reseed is $(jq -r '.reseed' <<<"$out"), expected false"
+
+  # No fallback: the ordinary streak increment, publishing only once it
+  # reaches 3, is unaffected by this change.
+  out="$("$BOOTSTRAP_SH" promotion-decide true false 2)"
+  [[ "$(jq -r '.streak' <<<"$out")" == "3" ]] && pass "no fallback, candidate: streak increments to 3" \
+    || fail_test "no fallback, candidate: streak is $(jq -r '.streak' <<<"$out"), expected 3"
+  [[ "$(jq -r '.publish_binary' <<<"$out")" == "true" ]] && pass "no fallback, candidate: publishes at streak 3" \
+    || fail_test "no fallback, candidate: publish_binary is $(jq -r '.publish_binary' <<<"$out"), expected true"
+  [[ "$(jq -r '.reseed' <<<"$out")" == "false" ]] && pass "no fallback, candidate: reseed is false" \
+    || fail_test "no fallback, candidate: reseed is $(jq -r '.reseed' <<<"$out"), expected false"
+
+  out="$("$BOOTSTRAP_SH" promotion-decide true false 1)"
+  [[ "$(jq -r '.publish_binary' <<<"$out")" == "false" ]] && pass "no fallback, candidate: does not publish below streak 3" \
+    || fail_test "no fallback, candidate: publish_binary is $(jq -r '.publish_binary' <<<"$out"), expected false"
+
+  # No fallback, not a candidate: the streak resets to zero.
+  out="$("$BOOTSTRAP_SH" promotion-decide false false 5)"
+  [[ "$(jq -r '.streak' <<<"$out")" == "0" ]] && pass "no fallback, not candidate: streak resets to 0" \
+    || fail_test "no fallback, not candidate: streak is $(jq -r '.streak' <<<"$out"), expected 0"
+  [[ "$(jq -r '.write_streak' <<<"$out")" == "true" ]] && pass "no fallback, not candidate: still writes the reset streak file" \
+    || fail_test "no fallback, not candidate: write_streak is $(jq -r '.write_streak' <<<"$out"), expected true"
+}
+
 test_auto_falls_back_on_official_failure
 test_explicit_official_does_not_fall_back
 test_host_stage0_is_unaffected
 test_repeated_stage1_falls_back_every_time
 test_fallback_and_host_both_fail
+test_promotion_decide
 
 echo
 echo "${TESTS_RUN} test(s) run, ${FAILURES} failure(s)"

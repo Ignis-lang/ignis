@@ -81,6 +81,10 @@ Commands:
   gates    Run every stage and gate in order, then write the promotion report.
   seal-gates  Record a skipped result for every gate that produced no file.
   report   Turn build/bootstrap/gates/*.json into report.md and promotion.json.
+  promotion-decide <candidate> <fallback> [previous-streak]
+           Print the nightly's publish-step decision as JSON: whether to
+           write promotion-streak.json, publish stage2, and re-seed the
+           official lineage after a fallback candidate run.
   status   Show which stage artifacts exist.
   clean    Remove build/bootstrap.
 
@@ -664,6 +668,56 @@ run_report() {
     --project-root "$PROJECT_ROOT"
 }
 
+# The nightly's "Publish the promotion state" step's decision logic, factored
+# out so it can be exercised without gh/network calls (see
+# scripts/tests/test_stage0_fallback.sh). Pure function of the promotion
+# verdict: prints one JSON line, never touches the filesystem or a release.
+#
+# Args: $1 candidate ("true"/"false"), $2 stage0 fallback ("true"/"false"),
+#       $3 previous streak (integer, defaults to 0).
+#
+# Output: {"streak": N, "write_streak": bool, "publish_binary": bool, "reseed": bool}
+#   streak         the streak value to persist (only meaningful when write_streak)
+#   write_streak   whether promotion-streak.json should be (re)written/uploaded
+#   publish_binary whether stage2 should be published as the official asset
+#   reseed         whether this is a fallback run re-seeding the official
+#                  lineage (for the log/::warning:: wording), never true
+#                  together with publish_binary=false
+#
+# A run whose stage0 fell back from official to host proves the host still
+# passes the ladder, which every run already assumes — it says nothing about
+# the official asset itself, *unless* the run is a promotion candidate: every
+# gate still passed against stage2 built the same way a manual
+# `workflow_dispatch stage0=host` seed would build it. Treating that the same
+# as a manual seed (publish stage2, reset the streak to 1) stops a stale
+# official asset from wedging every following nightly into the same fallback
+# until a maintainer notices and re-seeds it by hand. A fallback run with a
+# failing gate proves nothing, so it keeps today's behavior: the streak is
+# left exactly where it was and nothing is published.
+promotion_decide() {
+  local candidate="$1" fallback="$2" previous_streak="${3:-0}"
+
+  if [[ "$fallback" == "true" ]]; then
+    if [[ "$candidate" == "true" ]]; then
+      jq -n '{streak: 1, write_streak: true, publish_binary: true, reseed: true}'
+    else
+      jq -n --argjson streak "$previous_streak" \
+        '{streak: $streak, write_streak: false, publish_binary: false, reseed: false}'
+    fi
+    return
+  fi
+
+  if [[ "$candidate" == "true" ]]; then
+    local streak=$((previous_streak + 1))
+    local publish="false"
+    [[ "$streak" -ge 3 ]] && publish="true"
+    jq -n --argjson streak "$streak" --argjson publish "$publish" \
+      '{streak: $streak, write_streak: true, publish_binary: $publish, reseed: false}'
+  else
+    jq -n '{streak: 0, write_streak: true, publish_binary: false, reseed: false}'
+  fi
+}
+
 # A gate that produced no file at all is neither a pass nor a failure, and the
 # report only decides a candidate from results it can read.
 seal_missing_gates() {
@@ -935,6 +989,7 @@ main() {
     gates) run_gates ;;
     seal-gates) seal_missing_gates ;;
     report) run_report ;;
+    promotion-decide) promotion_decide "${2-}" "${3-}" "${4-0}" ;;
     status) show_status ;;
     clean) rm -rf "$BOOTSTRAP_ROOT"; info "removed ${BOOTSTRAP_ROOT}" ;;
     -h|--help|help|"") usage ;;
