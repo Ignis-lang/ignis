@@ -294,6 +294,8 @@ pub struct IgnisBuildConfig {
   pub lib: bool,
   pub check_mode: bool,
   pub analyze_only: bool,
+  /// Print the drop schedule of every function after ownership analysis.
+  pub dump_drop_schedule: bool,
 }
 
 impl IgnisBuildConfig {
@@ -330,7 +332,16 @@ impl IgnisBuildConfig {
       lib,
       check_mode,
       analyze_only,
+      dump_drop_schedule: false,
     }
+  }
+
+  pub fn with_dump_drop_schedule(
+    mut self,
+    dump_drop_schedule: bool,
+  ) -> Self {
+    self.dump_drop_schedule = dump_drop_schedule;
+    self
   }
 }
 

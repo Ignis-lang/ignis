@@ -14,6 +14,24 @@ pub enum LoopKind {
 }
 
 impl LoopKind {
+  /// Every direct child node of this loop header, in a stable order.
+  pub fn child_ids(&self) -> Vec<HIRId> {
+    match self {
+      LoopKind::Infinite => Vec::new(),
+      LoopKind::While { condition } => vec![*condition],
+      LoopKind::For {
+        init,
+        condition,
+        update,
+      } => init
+        .iter()
+        .chain(condition.iter())
+        .chain(update.iter())
+        .copied()
+        .collect(),
+    }
+  }
+
   /// Offset all HIRIds in this LoopKind by the given amount.
   pub fn offset_ids(
     &mut self,

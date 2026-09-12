@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ignis_diagnostics::{diagnostic_report::Diagnostic, message::DiagnosticMessage};
-use ignis_hir::{CaptureMode, DropSchedules, ExitKey, HIR, HIRId, HIRKind, statement::LoopKind};
+use ignis_hir::{CaptureMode, DropSchedules, ExitKey, HIR, HIRId, HIRKind, MoveSite, statement::LoopKind};
 use ignis_type::{
   attribute::ParamAttr,
   definition::{DefinitionId, DefinitionKind, DefinitionStore, ParameterDefinition},
@@ -2059,7 +2059,7 @@ impl<'a> HirOwnershipChecker<'a> {
   fn try_consume(
     &mut self,
     def_id: DefinitionId,
-    _span: Span,
+    span: Span,
   ) {
     match self.states.get(&def_id) {
       Some(OwnershipState::Moved | OwnershipState::Dropped | OwnershipState::Freed) => {
@@ -2067,8 +2067,31 @@ impl<'a> HirOwnershipChecker<'a> {
       },
       _ => {
         self.states.insert(def_id, OwnershipState::Moved);
+        self.record_move(def_id, span);
       },
     }
+  }
+
+  /// Remember where a binding was marked moved, for `--dump-drop-schedule`.
+  ///
+  /// Pure bookkeeping: a move site never changes what is dropped, it explains why a drop
+  /// the reader expected is missing. Analysis may revisit a body (branch merging, the
+  /// summary pre-pass), so the renderer deduplicates rather than this recorder.
+  fn record_move(
+    &mut self,
+    def_id: DefinitionId,
+    span: Span,
+  ) {
+    let Some(function) = self.current_fn else {
+      return;
+    };
+
+    self
+      .schedules
+      .moves
+      .entry(def_id)
+      .or_default()
+      .push(MoveSite { function, span });
   }
 
   fn merge_branch_states(

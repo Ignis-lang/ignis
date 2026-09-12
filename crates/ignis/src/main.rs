@@ -756,23 +756,26 @@ fn build_config_from_project(
   }
 
   config.build = true;
-  config.build_config = Some(IgnisBuildConfig::new(
-    Some(project.entry.to_string_lossy().to_string()),
-    project.target,
-    true, // is_project
-    project.opt_level > 0,
-    project.out_dir.to_string_lossy().to_string(),
-    cli.dump.iter().copied().map(Into::into).collect(),
-    cli.dump_dir.clone(),
-    cli.dump_hir.clone(),
-    emit_c,
-    emit_obj,
-    emit_bin,
-    project.bin,
-    cmd.lib,
-    check_mode,
-    false, // analyze_only
-  ));
+  config.build_config = Some(
+    IgnisBuildConfig::new(
+      Some(project.entry.to_string_lossy().to_string()),
+      project.target,
+      true, // is_project
+      project.opt_level > 0,
+      project.out_dir.to_string_lossy().to_string(),
+      cli.dump.iter().copied().map(Into::into).collect(),
+      cli.dump_dir.clone(),
+      cli.dump_hir.clone(),
+      emit_c,
+      emit_obj,
+      emit_bin,
+      project.bin,
+      cmd.lib,
+      check_mode,
+      false, // analyze_only
+    )
+    .with_dump_drop_schedule(cli.dump_drop_schedule),
+  );
 
   Arc::new(config)
 }
@@ -813,23 +816,26 @@ fn build_config_for_single_file(
   config.enabled_features = collect_cli_features(&cmd.feature, &cmd.features);
 
   config.build = true;
-  config.build_config = Some(IgnisBuildConfig::new(
-    Some(file_path.to_string_lossy().to_string()),
-    cmd.target.clone().into(),
-    false, // is_project
-    cmd.opt_level.unwrap_or(0) > 0,
-    out_dir.to_string(),
-    cli.dump.iter().copied().map(Into::into).collect(),
-    cli.dump_dir.clone(),
-    cli.dump_hir.clone(),
-    None, // emit_c
-    None, // emit_obj
-    emit_bin,
-    cmd.bin,
-    cmd.lib,
-    check_mode,
-    false,
-  ));
+  config.build_config = Some(
+    IgnisBuildConfig::new(
+      Some(file_path.to_string_lossy().to_string()),
+      cmd.target.clone().into(),
+      false, // is_project
+      cmd.opt_level.unwrap_or(0) > 0,
+      out_dir.to_string(),
+      cli.dump.iter().copied().map(Into::into).collect(),
+      cli.dump_dir.clone(),
+      cli.dump_hir.clone(),
+      None, // emit_c
+      None, // emit_obj
+      emit_bin,
+      cmd.bin,
+      cmd.lib,
+      check_mode,
+      false,
+    )
+    .with_dump_drop_schedule(cli.dump_drop_schedule),
+  );
 
   Arc::new(config)
 }
@@ -921,23 +927,26 @@ fn check_config_from_project(
   }
 
   config.build = true;
-  config.build_config = Some(IgnisBuildConfig::new(
-    Some(project.entry.to_string_lossy().to_string()),
-    project.target,
-    true,
-    false, // optimize
-    project.out_dir.to_string_lossy().to_string(),
-    cli.dump.iter().copied().map(Into::into).collect(),
-    cli.dump_dir.clone(),
-    cli.dump_hir.clone(),
-    emit_c,
-    None, // emit_obj (not in check mode)
-    None, // emit_bin (not in check mode)
-    cmd.bin,
-    cmd.lib,
-    true, // check_mode
-    cmd.analyze_only,
-  ));
+  config.build_config = Some(
+    IgnisBuildConfig::new(
+      Some(project.entry.to_string_lossy().to_string()),
+      project.target,
+      true,
+      false, // optimize
+      project.out_dir.to_string_lossy().to_string(),
+      cli.dump.iter().copied().map(Into::into).collect(),
+      cli.dump_dir.clone(),
+      cli.dump_hir.clone(),
+      emit_c,
+      None, // emit_obj (not in check mode)
+      None, // emit_bin (not in check mode)
+      cmd.bin,
+      cmd.lib,
+      true, // check_mode
+      cmd.analyze_only,
+    )
+    .with_dump_drop_schedule(cli.dump_drop_schedule),
+  );
 
   Arc::new(config)
 }
@@ -965,23 +974,26 @@ fn check_config_for_single_file(
   config.enabled_features = collect_cli_features(&cmd.feature, &cmd.features);
 
   config.build = true;
-  config.build_config = Some(IgnisBuildConfig::new(
-    Some(file_path.to_string_lossy().to_string()),
-    cmd.target.clone().into(),
-    false,
-    false,
-    out_dir.to_string(),
-    cli.dump.iter().copied().map(Into::into).collect(),
-    cli.dump_dir.clone(),
-    cli.dump_hir.clone(),
-    None,
-    None,
-    None,
-    cmd.bin,
-    cmd.lib,
-    true,
-    cmd.analyze_only,
-  ));
+  config.build_config = Some(
+    IgnisBuildConfig::new(
+      Some(file_path.to_string_lossy().to_string()),
+      cmd.target.clone().into(),
+      false,
+      false,
+      out_dir.to_string(),
+      cli.dump.iter().copied().map(Into::into).collect(),
+      cli.dump_dir.clone(),
+      cli.dump_hir.clone(),
+      None,
+      None,
+      None,
+      cmd.bin,
+      cmd.lib,
+      true,
+      cmd.analyze_only,
+    )
+    .with_dump_drop_schedule(cli.dump_drop_schedule),
+  );
 
   Arc::new(config)
 }
