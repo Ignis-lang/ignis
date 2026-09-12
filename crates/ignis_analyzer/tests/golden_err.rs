@@ -3564,3 +3564,42 @@ function main(): void {
 "#,
   );
 }
+
+/// Two blocks reopening the same namespace (IGN-230) merge their members, so
+/// two same-named, same-signature functions collide as overloads rather than
+/// as separate namespaces: the call becomes ambiguous and the second
+/// declaration is flagged as a duplicate overload signature.
+///
+/// This case intentionally stays a host-only golden test rather than an
+/// `test_cases/e2e/err` fixture: the selfhost analyzer does not yet emit the
+/// `DuplicateOverload` (A0103) diagnostic for *any* duplicate function
+/// overload, namespaced or not (a pre-existing gap unrelated to IGN-230), so
+/// an e2e fixture recording both host diagnostics would fail selfhost
+/// parity (gate G5) for a reason outside this change's scope.
+#[test]
+fn namespace_reopened_duplicate_function_is_ambiguous_overload() {
+  let result = common::analyze(
+    r#"
+namespace Foo {
+    function a(): i32 {
+        return 1;
+    }
+}
+
+namespace Foo {
+    function a(): i32 {
+        return 2;
+    }
+}
+
+function main(): i32 {
+    return Foo::a();
+}
+"#,
+  );
+
+  assert_snapshot!(
+    "namespace_reopened_duplicate_function_is_ambiguous_overload",
+    common::format_diagnostics(&result.output.diagnostics)
+  );
+}

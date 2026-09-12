@@ -311,6 +311,180 @@ function binderSameNameInDifferentNamespacesIsNotDuplicate(): void {
   assertItemPredeclared(&output, nodeInBId.raw());
 }
 
+/// Scenario: Two root-level `namespace Foo { ... }` blocks with the same name
+/// merge into one namespace (IGN-230), matching the reference compiler's
+/// `NamespaceStore::get_or_create`. Reopening the namespace is not a
+/// duplicate-name error, and both blocks resolve to the same `DefinitionId`.
+@test
+function binderReopenedNamespaceReusesDefinitionId(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  // First block: namespace Foo { record A {} }
+  let recordAId: Ast::ItemId = module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("A"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut nsItemsFirst: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItemsFirst.push(recordAId);
+
+  let nsFirstId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: dummySpan(),
+    name: String::create("Foo"),
+    items: nsItemsFirst,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  // Second block: namespace Foo { record B {} } — reopens the same namespace.
+  let recordBId: Ast::ItemId = module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("B"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let mut nsItemsSecond: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItemsSecond.push(recordBId);
+
+  let nsSecondId: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: dummySpan(),
+    name: String::create("Foo"),
+    items: nsItemsSecond,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // 3 definitions: one shared Foo namespace + record A + record B — no
+  // separate definition for the second `namespace Foo` block.
+  Test::assertEq<u64>(defStore.length(), 3);
+
+  // No duplicate-name diagnostic for the reopened namespace.
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  // Both blocks and both inner records are predeclared.
+  assertItemPredeclared(&output, nsFirstId.raw());
+  assertItemPredeclared(&output, nsSecondId.raw());
+  assertItemPredeclared(&output, recordAId.raw());
+  assertItemPredeclared(&output, recordBId.raw());
+
+  // Both namespace blocks resolve to the SAME DefinitionId — the second
+  // block reopens the first's namespace rather than allocating its own.
+  let firstNsDefId: Analyzer::DefinitionId = match (Analyzer::Binder::findDef(&output, nsFirstId.raw())) {
+    Option::SOME(defId) -> defId,
+    Option::NONE -> @panic("expected first namespace block to be predeclared"),
+  };
+  let secondNsDefId: Analyzer::DefinitionId = match (Analyzer::Binder::findDef(&output, nsSecondId.raw())) {
+    Option::SOME(defId) -> defId,
+    Option::NONE -> @panic("expected second namespace block to be predeclared"),
+  };
+  Test::assertEq<u64>(firstNsDefId.raw(), secondNsDefId.raw());
+}
+
+/// Scenario: A namespace reopened three times still shares one `DefinitionId`
+/// and all three blocks' members are predeclared (IGN-230 — nested namespace
+/// blocks split across more than two occurrences merge the same way as two).
+@test
+function binderReopenedNamespaceThreeTimesSharesDefinitionId(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut module: Ast::Module = Ast::Module::init();
+
+  let recordAId: Ast::ItemId = module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("A"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+  let mut nsItems1: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItems1.push(recordAId);
+  let ns1Id: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: dummySpan(),
+    name: String::create("Foo"),
+    items: nsItems1,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recordBId: Ast::ItemId = module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("B"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+  let mut nsItems2: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItems2.push(recordBId);
+  let ns2Id: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: dummySpan(),
+    name: String::create("Foo"),
+    items: nsItems2,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let recordCId: Ast::ItemId = module.addItem(Ast::Item::Node::Record(Ast::Item::Record {
+    span: dummySpan(),
+    name: String::create("C"),
+    genericParameters: Vector::new<Ast::GenericParam>(),
+    fields: Vector::new<Ast::PatternId>(),
+    methods: Vector::new<Ast::ItemId>(),
+    metadata: Ast::emptyMetadata(),
+  }));
+  let mut nsItems3: Vector<Ast::ItemId> = Vector::new<Ast::ItemId>();
+  nsItems3.push(recordCId);
+  let ns3Id: Ast::ItemId = module.addRootItem(Ast::Item::Node::Namespace(Ast::Item::Namespace {
+    span: dummySpan(),
+    name: String::create("Foo"),
+    items: nsItems3,
+    metadata: Ast::emptyMetadata(),
+  }));
+
+  let output: Analyzer::Binder::BinderOutput = Analyzer::Binder::predeclareRoots(
+    &module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &module,
+  );
+
+  // 4 definitions: one shared Foo namespace + records A, B, C.
+  Test::assertEq<u64>(defStore.length(), 4);
+  Test::assertEq<u64>(output.diagnostics.length(), 0);
+
+  let ns1DefId: Analyzer::DefinitionId = match (Analyzer::Binder::findDef(&output, ns1Id.raw())) {
+    Option::SOME(defId) -> defId,
+    Option::NONE -> @panic("expected first namespace block to be predeclared"),
+  };
+  let ns2DefId: Analyzer::DefinitionId = match (Analyzer::Binder::findDef(&output, ns2Id.raw())) {
+    Option::SOME(defId) -> defId,
+    Option::NONE -> @panic("expected second namespace block to be predeclared"),
+  };
+  let ns3DefId: Analyzer::DefinitionId = match (Analyzer::Binder::findDef(&output, ns3Id.raw())) {
+    Option::SOME(defId) -> defId,
+    Option::NONE -> @panic("expected third namespace block to be predeclared"),
+  };
+  Test::assertEq<u64>(ns1DefId.raw(), ns2DefId.raw());
+  Test::assertEq<u64>(ns1DefId.raw(), ns3DefId.raw());
+}
+
 /// Scenario: Two runs over identical input produce identical DefinitionIds.
 /// Spec: deterministic output — same push-order ids in both runs, verified element-wise.
 @test

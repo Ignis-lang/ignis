@@ -72,6 +72,15 @@ export namespace Analyzer {
       /// two C definitions of it.
       public exportedSymbols: Vector<String>;
       public exportedSymbolSpans: Vector<SourceSpan>;
+      /// Namespace declarations seen so far, keyed by `(scopeKey, sym)` and
+      /// co-indexed with `namespaceDefIds` (IGN-230). A second
+      /// `namespace X { ... }` block at the same scope reopens the namespace
+      /// named by the first block instead of redefining it: this table is how
+      /// `predeclareNamespaceDecl` finds that first block's `DefinitionId` to
+      /// reuse, mirroring the reference compiler's `NamespaceStore::get_or_create`.
+      public namespaceScopeKeys: Vector<u64>;
+      public namespaceSyms: Vector<Analyzer::SymbolId>;
+      public namespaceDefIds: Vector<Analyzer::DefinitionId>;
     }
 
     /// Output produced by `predeclareRoots`.
@@ -180,6 +189,48 @@ export namespace Analyzer {
       return result;
     }
 
+    /// Look up a previously predeclared namespace's `DefinitionId` by
+    /// `(scopeKey, sym)` (IGN-230). Returns `NONE` on the first occurrence of
+    /// a namespace name at this scope.
+    function findExistingNamespaceDefId(
+      state: &mut Analyzer::Binder::BinderState,
+      scopeKey: u64,
+      sym: Analyzer::SymbolId,
+    ): Option<Analyzer::DefinitionId> {
+      let mut index: u64 = 0;
+      let count: u64 = state.namespaceScopeKeys.length();
+      let mut result: Option<Analyzer::DefinitionId> = Option::NONE;
+
+      while (index < count) {
+        if (let Option::SOME(sk) = state.namespaceScopeKeys.get(index)) {
+          if (let Option::SOME(ss) = state.namespaceSyms.get(index)) {
+            if (*sk == scopeKey && ss.raw() == sym.raw()) {
+              if (let Option::SOME(defId) = state.namespaceDefIds.get(index)) {
+                result = Option::SOME(*defId);
+              }
+            }
+          }
+        }
+        index += 1;
+      }
+
+      return result;
+    }
+
+    /// Record a first-seen `(scopeKey, sym) -> defId` namespace mapping so a
+    /// later block reopening the same namespace can find it.
+    function recordNamespaceEntry(
+      state: &mut Analyzer::Binder::BinderState,
+      scopeKey: u64,
+      sym: Analyzer::SymbolId,
+      defId: Analyzer::DefinitionId,
+    ): void {
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.namespaceScopeKeys.push(scopeKey);
+      stateRef.namespaceSyms.push(sym);
+      stateRef.namespaceDefIds.push(defId);
+    }
+
     /// Record (scopeKey, sym, span) into the scope-tracking tables.
     function recordScopeEntry(
       state: &mut Analyzer::Binder::BinderState,
@@ -224,6 +275,46 @@ export namespace Analyzer {
         alignment: Option::NONE,
       };
       return defsRef.push(Analyzer::Definition::Record(placeholder));
+    }
+
+    /// Predeclare a `namespace X { ... }` block's own name.
+    ///
+    /// Unlike `predeclareTypeDecl`, a repeated namespace name at the same
+    /// scope is never a duplicate-name error (spec IGN-230, matching the
+    /// reference compiler's `NamespaceStore::get_or_create` + fire-and-forget
+    /// `scopes.define`): it reopens the namespace, reusing the `DefinitionId`
+    /// allocated for the first block so both blocks' members publish under
+    /// the same qualified path. This intentionally does not consult
+    /// `findDuplicateSpan` — a namespace name never collides, even with an
+    /// unrelated declaration (record, enum, ...) of the same name at this
+    /// scope, mirroring the host's permissive namespace predeclaration.
+    function predeclareNamespaceDecl(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      symbols: &mut Analyzer::SymbolTable,
+      itemId: Ast::ItemId,
+      name: &String,
+      scopeKey: u64,
+    ): void {
+      let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+      let sym: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
+
+      if (let Option::SOME(existingDefId) = findExistingNamespaceDefId(state, scopeKey, sym)) {
+        let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+        stateRef.nodeIds.push(itemId.raw());
+        stateRef.defIds.push(existingDefId);
+        stateRef.declScopeKeys.push(scopeKey);
+        return;
+      }
+
+      let defId: Analyzer::DefinitionId = allocateRecordPlaceholder(defStore, typeStore, sym);
+      let mut stateRef: &mut Analyzer::Binder::BinderState = state;
+      stateRef.nodeIds.push(itemId.raw());
+      stateRef.defIds.push(defId);
+      stateRef.declScopeKeys.push(scopeKey);
+
+      recordNamespaceEntry(state, scopeKey, sym, defId);
     }
 
     /// Allocate a placeholder `Definition::Enum`.
@@ -435,8 +526,10 @@ export namespace Analyzer {
             }
           },
           Ast::Item::Node::Namespace(ns) -> {
-            // Allocate a placeholder for the namespace node itself (spec §namespace-recursion).
-            predeclareTypeDecl(state, defStore, typeStore, symbols, itemId, &ns.name, ns.span, scopeKey, false);
+            // Allocate a placeholder for the namespace node itself (spec §namespace-recursion),
+            // reopening a previous block of the same name at this scope instead of
+            // redefining it (spec IGN-230).
+            predeclareNamespaceDecl(state, defStore, typeStore, symbols, itemId, &ns.name, scopeKey);
 
             // Child scope key is itemId.raw() + 1: 0 stays the top-level
             // sentinel even when the namespace itself is ItemId 0.
@@ -2682,6 +2775,9 @@ export namespace Analyzer {
         insideExtern: false,
         exportedSymbols: Vector::new<String>(),
         exportedSymbolSpans: Vector::new<SourceSpan>(),
+        namespaceScopeKeys: Vector::new<u64>(),
+        namespaceSyms: Vector::new<Analyzer::SymbolId>(),
+        namespaceDefIds: Vector::new<Analyzer::DefinitionId>(),
       };
 
       let typeStoreLengthBefore: u64 = typeStore.length();
@@ -2754,6 +2850,9 @@ export namespace Analyzer {
         insideExtern: false,
         exportedSymbols: Vector::new<String>(),
         exportedSymbolSpans: Vector::new<SourceSpan>(),
+        namespaceScopeKeys: Vector::new<u64>(),
+        namespaceSyms: Vector::new<Analyzer::SymbolId>(),
+        namespaceDefIds: Vector::new<Analyzer::DefinitionId>(),
       };
 
       let mut index: u64 = 0;
