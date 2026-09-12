@@ -6,6 +6,7 @@ import Analyzer from "@compiler::analyzer";
 import Borrowck from "@compiler::analyzer::borrowck";
 import Hir from "@compiler::hir";
 import Lir from "@compiler::lir";
+import CodegenReserved from "./reserved";
 
 /// LIR -> C emission for the Ignis selfhost compiler.
 ///
@@ -155,7 +156,10 @@ export namespace CodegenC {
       return base;
     }
 
-    return `${base.toStr()}_${defId.raw()}`;
+    // The reserved-name guard runs on the final name, after the id suffix, so it
+    // can only fire for a bare one. `@externName` and `extern` returned above:
+    // those name a symbol the C side owns.
+    return CodegenReserved::mangleReservedCName(`${base.toStr()}_${defId.raw()}`);
   }
 
   function structName(
@@ -165,7 +169,7 @@ export namespace CodegenC {
   ): String {
     let base: String = CodegenC::definitionName(defStore, symbols, defId);
 
-    return `${base.toStr()}_${defId.raw()}`;
+    return CodegenReserved::mangleReservedCName(`${base.toStr()}_${defId.raw()}`);
   }
 
   /// The C spelling of a type.

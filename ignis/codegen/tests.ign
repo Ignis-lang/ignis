@@ -11,6 +11,7 @@ import Lowering from "@compiler::analyzer::lowering";
 import Mono from "@compiler::analyzer::mono";
 import LirLowering from "@compiler::lir::lowering";
 import CodegenC from "./mod";
+import CodegenReserved from "./reserved";
 
 function codegenCountErrors(bag: &DiagnosticBag): u64 {
   let mut count: u64 = 0;
@@ -508,4 +509,75 @@ function codegenLeavesNonDroppableAccessUnguarded(): void {
   );
 
   Test::assert(!codegenContains(&emission.source, "panic: use of dropped value"));
+}
+
+/// The reserved-name table is the contract both compilers share, so it is
+/// asserted directly rather than through an emission: a divergence here is a
+/// bootstrap fixed-point failure, not a wrong-looking function body.
+@test
+function codegenReservesCIdentifiers(): void {
+  let mut reserved: Vector<String> = Vector::new<String>();
+  reserved.push(String::create("int"));
+  reserved.push(String::create("default"));
+  reserved.push(String::create("stderr"));
+  reserved.push(String::create("errno"));
+  reserved.push(String::create("exit"));
+  reserved.push(String::create("free"));
+  reserved.push(String::create("main"));
+  reserved.push(String::create("NULL"));
+  reserved.push(String::create("size_t"));
+  reserved.push(String::create("boolean"));
+  reserved.push(String::create("l0"));
+  reserved.push(String::create("t7"));
+  reserved.push(String::create("__dip"));
+  reserved.push(String::create("__ignis_drop_state"));
+  reserved.push(String::create("ignis_runtime_init"));
+
+  let mut index: u64 = 0;
+
+  while (index < reserved.length()) {
+    let Option::SOME(name) = reserved.get(index) else {
+      @panic("the reserved-name table lost an entry");
+    };
+
+    Test::assert(CodegenReserved::isReservedCName(name));
+
+    index += 1;
+  }
+}
+
+/// A name the emitted unit does not already mean is emitted as written, and the
+/// suffix is what a reserved one gains. `stderr__ign` is itself unreserved, so
+/// the rule cannot compound. The emitter's own mangled thunk and glue names are
+/// unreserved too: matching their prefix would rename the emitter's own symbols.
+@test
+function codegenLeavesOrdinaryCIdentifiersAlone(): void {
+  let mut ordinary: Vector<String> = Vector::new<String>();
+  ordinary.push(String::create("value"));
+  ordinary.push(String::create("length"));
+  ordinary.push(String::create("show_i32_i32"));
+  ordinary.push(String::create("Holder"));
+  ordinary.push(String::create("stderr__ign"));
+  ordinary.push(String::create("local0"));
+  ordinary.push(String::create("t1a"));
+  ordinary.push(String::create("__closure_thunk_0_34538"));
+  ordinary.push(String::create("ignis_drop_glue_t9"));
+
+  let mut index: u64 = 0;
+
+  while (index < ordinary.length()) {
+    let Option::SOME(name) = ordinary.get(index) else {
+      @panic("the ordinary-name table lost an entry");
+    };
+
+    Test::assert(!CodegenReserved::isReservedCName(name));
+
+    index += 1;
+  }
+
+  let mangled: String = CodegenReserved::mangleReservedCName(String::create("stderr"));
+  Test::assert(mangled.equals("stderr__ign"));
+
+  let untouched: String = CodegenReserved::mangleReservedCName(String::create("value"));
+  Test::assert(untouched.equals("value"));
 }
