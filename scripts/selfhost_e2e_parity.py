@@ -84,6 +84,11 @@ CLASS_COMPILED = "compiled"
 CLASS_COMPILE_ERROR = "compile-error"
 CLASS_COMPILE_TIMEOUT = "compile-timeout"
 CLASS_RUN_TIMEOUT = "run-timeout"
+# A case whose header declares `// e2e: skip <reason>`: a deliberate, reviewed
+# exclusion. Distinct from `CLASS_SKIPPED` below, which is a case with no
+# recorded baseline at all — an unverified case that must keep failing the
+# gate, not a case anyone decided to exempt.
+CLASS_DECLARED_SKIP = "declared-skip"
 CLASS_SKIPPED = "skipped"
 
 CLASS_ORDER = {
@@ -94,6 +99,7 @@ CLASS_ORDER = {
     CLASS_COMPILE_ERROR,
     CLASS_COMPILE_TIMEOUT,
     CLASS_RUN_TIMEOUT,
+    CLASS_DECLARED_SKIP,
     CLASS_SKIPPED,
   ),
   CORPUS_ERR: (
@@ -102,6 +108,7 @@ CLASS_ORDER = {
     CLASS_MISSING,
     CLASS_COMPILED,
     CLASS_COMPILE_TIMEOUT,
+    CLASS_DECLARED_SKIP,
     CLASS_SKIPPED,
   ),
 }
@@ -112,6 +119,7 @@ class Case:
   name: str
   helper: str
   source: str | None
+  path: Path
   kind: str = KIND_RUN
   snapshot: str | None = None
   skip_reason: str | None = None
@@ -131,17 +139,25 @@ class CaseResult:
   leak_report: str = ""
 
 
-def parse_fixture_header(source: str) -> tuple[str, str]:
+def parse_fixture_header(source: str) -> tuple[str, str, str | None]:
   """Reads a fixture's mode from its leading `// e2e: <option>` comment lines.
 
   Mirrors `crates/ignis_driver/src/fixture_tests.rs::parse_fixture_header`:
   scanning stops at the first line that is neither blank nor a comment.
-  Returns `(kind, helper)`, where `helper` is `"allow-leak"` for a program
-  fixture that opted out of leak checking, and `""` otherwise.
+  Returns `(kind, helper, skip_reason)`, where `helper` is `"allow-leak"` for
+  a program fixture that opted out of leak checking (and `""` otherwise), and
+  `skip_reason` is the reason from a `// e2e: skip <reason>` header line, or
+  `None` when the header carries no skip.
+
+  A header line whose trimmed option text starts with the word `skip`
+  followed by whitespace is a skip line: the entire remainder of the line is
+  the reason, taken verbatim without splitting on commas, mirroring the Rust
+  function's handling of a reason that itself contains a comma.
   """
   is_err = False
   is_warn = False
   allow_leak = False
+  skip_reason: str | None = None
 
   for line in source.splitlines():
     trimmed = line.strip()
@@ -155,9 +171,17 @@ def parse_fixture_header(source: str) -> tuple[str, str]:
     if not trimmed.startswith(FIXTURE_HEADER_MARKER):
       continue
 
-    options = trimmed[len(FIXTURE_HEADER_MARKER):]
+    option_text = trimmed[len(FIXTURE_HEADER_MARKER):].strip()
 
-    for option in options.split(","):
+    if option_text == "skip" or option_text.startswith(("skip ", "skip\t")):
+      reason = option_text[len("skip"):].strip()
+
+      if reason != "" and skip_reason is None:
+        skip_reason = reason
+
+      continue
+
+    for option in option_text.split(","):
       option = option.strip()
 
       if option == "err":
@@ -168,12 +192,12 @@ def parse_fixture_header(source: str) -> tuple[str, str]:
         allow_leak = True
 
   if is_err:
-    return KIND_ERROR, ""
+    return KIND_ERROR, "", skip_reason
 
   if is_warn:
-    return KIND_WARNING, ""
+    return KIND_WARNING, "", skip_reason
 
-  return KIND_RUN, ("allow-leak" if allow_leak else "")
+  return KIND_RUN, ("allow-leak" if allow_leak else ""), skip_reason
 
 
 def extract_fixture_cases(corpus: str, repository_root: Path) -> list[Case]:
@@ -184,11 +208,22 @@ def extract_fixture_cases(corpus: str, repository_root: Path) -> list[Case]:
   for fixture_path in sorted(fixture_dir.rglob("*.ign")):
     name = fixture_path.relative_to(fixture_dir).with_suffix("").as_posix()
     source = fixture_path.read_text(encoding="utf-8")
-    kind, helper = parse_fixture_header(source)
+    kind, helper, skip_reason = parse_fixture_header(source)
 
-    cases.append(Case(name, helper, source, kind))
+    cases.append(Case(name, helper, source, fixture_path, kind, skip_reason=skip_reason))
 
   return cases
+
+
+def fixture_snapshot_path(case: Case) -> Path:
+  """Baseline path for `case`, mirroring `FixtureCase::snapshot_path` in
+  `crates/ignis_driver/src/fixture_tests.rs`: `__snapshots__` sits next to the
+  fixture itself, not at the corpus root, so a nested fixture's baseline
+  lives under its own directory (`ownership/__snapshots__/foo.snap`, not
+  `__snapshots__/ownership/foo.snap`). For a flat fixture the two spellings
+  coincide.
+  """
+  return case.path.parent / "__snapshots__" / f"{case.path.stem}.snap"
 
 
 def read_fixture_snapshot(snapshot_path: Path) -> str | None:
@@ -348,7 +383,7 @@ def run_case(
   leak_check: bool,
 ) -> CaseResult:
   if case.skip_reason is not None:
-    return CaseResult(case, CLASS_SKIPPED, case.skip_reason)
+    return CaseResult(case, CLASS_DECLARED_SKIP, case.skip_reason)
 
   if case.snapshot is None:
     return CaseResult(case, CLASS_SKIPPED, "no snapshot recorded")
@@ -762,26 +797,36 @@ def build_report(results: list[CaseResult], counts: dict[str, int], corpus: str)
   return "\n".join(lines) + "\n"
 
 
-def build_gate(results: list[CaseResult], counts: dict[str, int]) -> dict:
-  """Describe the corpus run as a bootstrap gate result (G2)."""
-  failing = [result for result in results if result.classification not in (CLASS_PASS, CLASS_SKIPPED)]
-  skipped = [result for result in results if result.classification == CLASS_SKIPPED]
+def build_gate(results: list[CaseResult], counts: dict[str, int], class_order: tuple[str, ...]) -> dict:
+  """Describe the corpus run as a bootstrap gate result (G2).
+
+  A case skipped because its header declares `// e2e: skip <reason>`
+  (`CLASS_DECLARED_SKIP`) is a deliberate, reviewed exclusion and never fails
+  the gate. A case skipped because it has no recorded baseline at all
+  (`CLASS_SKIPPED`) is unverified, not exempted, and keeps failing the gate:
+  the status is "pass" only when there are no failing cases and no such
+  undeclared skips.
+  """
+  failing = [result for result in results if result.classification not in (CLASS_PASS, CLASS_DECLARED_SKIP)]
+  declared_skipped = [result for result in results if result.classification == CLASS_DECLARED_SKIP]
+  undeclared_skipped = [result for result in results if result.classification == CLASS_SKIPPED]
   total = len(results)
   passed = counts.get(CLASS_PASS, 0)
-  status = "pass" if total > 0 and passed == total else "fail"
+  status = "pass" if total > 0 and not failing else "fail"
 
   return {
     "gate": "G2",
     "status": status,
     "summary": f"e2e parity {passed}/{total}",
     "details": {
-      "counts": {classification: counts.get(classification, 0) for classification in CLASS_ORDER},
+      "counts": {classification: counts.get(classification, 0) for classification in class_order},
       "total": total,
       "failing": [
         {"case": result.case.name, "classification": result.classification, "reason": result.reason}
         for result in failing
       ],
-      "skipped": [{"case": result.case.name, "reason": result.reason} for result in skipped],
+      "skipped": [{"case": result.case.name, "reason": result.reason} for result in undeclared_skipped],
+      "declared_skipped": [{"case": result.case.name, "reason": result.reason} for result in declared_skipped],
     },
   }
 
@@ -834,7 +879,7 @@ def main() -> int:
     cases = [case for case in cases if arguments.filter in case.name]
 
   for case in cases:
-    case.snapshot = read_fixture_snapshot(corpus_dir / "__snapshots__" / f"{case.name}.snap")
+    case.snapshot = read_fixture_snapshot(fixture_snapshot_path(case))
 
   work_dir = Path(arguments.work_dir).resolve() if arguments.work_dir else repository_root / f"build/parity-{corpus}"
   work_dir.mkdir(parents=True, exist_ok=True)
@@ -868,9 +913,14 @@ def main() -> int:
 
   print(f"{'total':<16} {len(results)}")
 
-  # A skipped err case is a diagnostic that was never compared, which a
-  # promotion gate must not read as parity.
-  passing_classes = (CLASS_PASS,) if corpus == CORPUS_ERR else (CLASS_PASS, CLASS_SKIPPED)
+  # A declared skip (the fixture's header asked for it) is a deliberate,
+  # reviewed exclusion and is never treated as non-passing, in either corpus.
+  # An undeclared skip (no baseline recorded at all) is a diagnostic or
+  # program that was never compared, which a promotion gate must not read as
+  # parity — this repo only tolerates that for the `ok` corpus, not `err`.
+  passing_classes = (
+    (CLASS_PASS, CLASS_DECLARED_SKIP) if corpus == CORPUS_ERR else (CLASS_PASS, CLASS_DECLARED_SKIP, CLASS_SKIPPED)
+  )
   failing = [result for result in results if result.classification not in passing_classes]
 
   if failing:
@@ -910,7 +960,7 @@ def main() -> int:
   if arguments.gate_json:
     gate_path = Path(arguments.gate_json).resolve()
     gate_path.parent.mkdir(parents=True, exist_ok=True)
-    gate_path.write_text(json.dumps(build_gate(results, counts), indent=2) + "\n", encoding="utf-8")
+    gate_path.write_text(json.dumps(build_gate(results, counts, class_order), indent=2) + "\n", encoding="utf-8")
     print(f"[parity] gate result written to {gate_path}")
 
   return 0 if not failing else 1

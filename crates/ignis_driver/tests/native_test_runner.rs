@@ -1265,6 +1265,49 @@ fn fixture_program_fails_when_its_snapshot_is_missing() {
 }
 
 #[test]
+fn fixture_skip_header_keeps_the_run_green_when_the_fixture_still_fails() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/ok/still_broken.ign",
+    "// e2e: skip known regression\nfunction main(): i32 {\n  return 7;\n}\n",
+  );
+  let snapshot_path = fixture_snapshot_path(project.path(), "corpus/ok/still_broken.ign");
+
+  let result = run_project_tests_with_options(project.path(), &fixture_options());
+
+  assert!(
+    result.is_ok(),
+    "expected a skipped fixture that still fails its contract to leave the run green"
+  );
+  assert!(
+    !snapshot_path.exists(),
+    "expected a skipped fixture to never read or write its baseline"
+  );
+}
+
+#[test]
+fn fixture_skip_header_fails_the_run_when_the_fixture_now_passes() {
+  let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
+
+  write_fixture_file(
+    project.path(),
+    "corpus/ok/now_fixed.ign",
+    "// e2e: skip known regression\nfunction main(): i32 {\n  return 0;\n}\n",
+  );
+  let snapshot_path = fixture_snapshot_path(project.path(), "corpus/ok/now_fixed.ign");
+
+  let result = run_project_tests_with_options(project.path(), &fixture_options());
+
+  assert!(result.is_err(), "expected a stale skip header to fail the run");
+  assert!(
+    !snapshot_path.exists(),
+    "expected a skipped fixture to never write a baseline even when it now passes"
+  );
+}
+
+#[test]
 fn fixture_program_snapshot_is_written_in_update_mode() {
   let project = write_test_project_with_fixture_dirs(NO_TESTS_MAIN, &["corpus/ok"]);
 

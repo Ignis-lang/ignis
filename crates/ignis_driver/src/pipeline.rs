@@ -2169,15 +2169,25 @@ fn error_diagnostic_messages(
     .collect()
 }
 
+/// Runs a diagnostics fixture's contract: it must fail compilation.
+///
+/// `compare_baseline` is false for a skipped fixture: the contract is judged
+/// on the failure alone, without reading or writing the baseline, so a
+/// skipped fixture's snapshot is never touched.
 fn run_diagnostics_fixture(
   context: &FixtureRunContext,
   case: &crate::fixture_tests::FixtureCase,
+  compare_baseline: bool,
 ) -> Result<(), String> {
   let config = fixture_compile_config(context, case, None, false, false)?;
   let messages = fixture_error_diagnostics(&config, &case.path);
 
   if messages.is_empty() {
     return Err("expected the fixture to fail compilation, but it compiled cleanly".to_string());
+  }
+
+  if !compare_baseline {
+    return Ok(());
   }
 
   crate::fixture_tests::compare_snapshot(&case.snapshot_path(), &messages.join("\n"), context.update_snapshots)
@@ -2233,9 +2243,13 @@ fn warning_diagnostic_messages(diagnostics: &[ignis_diagnostics::diagnostic_repo
     .collect()
 }
 
+/// Runs a warnings fixture's contract: it must compile cleanly with warnings.
+///
+/// See `run_diagnostics_fixture` for what `compare_baseline` skips.
 fn run_warnings_fixture(
   context: &FixtureRunContext,
   case: &crate::fixture_tests::FixtureCase,
+  compare_baseline: bool,
 ) -> Result<(), String> {
   let config = fixture_compile_config(context, case, None, false, false)?;
   let (errors, warnings) = fixture_warning_diagnostics(&config, &case.path);
@@ -2251,14 +2265,25 @@ fn run_warnings_fixture(
     return Err("expected the fixture to report warnings, but it compiled without any".to_string());
   }
 
+  if !compare_baseline {
+    return Ok(());
+  }
+
   crate::fixture_tests::compare_snapshot(&case.snapshot_path(), &warnings.join("\n"), context.update_snapshots)
 }
 
+/// Runs a program fixture's contract: it must compile, link, run without
+/// timing out or leaking (unless `allow_leak`), and exit 0.
+///
+/// See `run_diagnostics_fixture` for what `compare_baseline` skips; with it
+/// false, the exit code alone decides the outcome and stdout/stderr are
+/// never compared against the baseline.
 fn run_program_fixture(
   context: &FixtureRunContext,
   case: &crate::fixture_tests::FixtureCase,
   force_std: bool,
   allow_leak: bool,
+  compare_baseline: bool,
 ) -> Result<(), String> {
   let work_dir = fixture_work_dir(context, case);
   let _ = std::fs::remove_dir_all(&work_dir);
@@ -2302,39 +2327,90 @@ fn run_program_fixture(
     return Err(format!("LeakSanitizer detected a memory leak\n{}", leak_report));
   }
 
+  if !compare_baseline {
+    if outcome.exit_code == 0 {
+      return Ok(());
+    }
+
+    return Err(format!("expected exit code 0, got {}", outcome.exit_code));
+  }
+
   let body = crate::fixture_tests::format_program_snapshot(outcome.exit_code, &outcome.stdout, &program_stderr);
 
   crate::fixture_tests::compare_snapshot(&case.snapshot_path(), &body, context.update_snapshots)
 }
 
+/// Runs one fixture's mode-specific contract, honoring `compare_baseline`.
+fn run_fixture_mode(
+  context: &FixtureRunContext,
+  case: &crate::fixture_tests::FixtureCase,
+  mode: crate::fixture_tests::FixtureMode,
+  compare_baseline: bool,
+) -> Result<(), String> {
+  match mode {
+    crate::fixture_tests::FixtureMode::Diagnostics => run_diagnostics_fixture(context, case, compare_baseline),
+    crate::fixture_tests::FixtureMode::Warnings => run_warnings_fixture(context, case, compare_baseline),
+    crate::fixture_tests::FixtureMode::Program { force_std, allow_leak } => {
+      run_program_fixture(context, case, force_std, allow_leak, compare_baseline)
+    },
+  }
+}
+
+/// Builds a `TestExecutionResult` for one fixture outcome.
+fn fixture_execution_result(
+  case: &crate::fixture_tests::FixtureCase,
+  success: bool,
+  stderr: String,
+  skipped: Option<String>,
+) -> TestExecutionResult {
+  TestExecutionResult {
+    fq_name: case.name.clone(),
+    success,
+    exit_code: if success { 0 } else { 1 },
+    stdout: String::new(),
+    stderr,
+    skipped,
+  }
+}
+
+/// Runs one fixture, honoring its skip header if it has one.
+///
+/// A skipped fixture still compiles and runs exactly as its mode dictates
+/// (see `run_fixture_mode`), but its baseline is never touched and the
+/// verdict is inverted: the mode's contract failing is reported as a `skip`
+/// so the run stays green, while the contract passing fails the run outright,
+/// because a skip header whose fixture now passes is stale.
+///
+/// A malformed header (`case.mode` is `Err`) always fails, skip header or
+/// not: the fixture's mode was never established, so there is no contract to
+/// judge it against.
 fn run_single_fixture(
   context: &FixtureRunContext,
   case: &crate::fixture_tests::FixtureCase,
 ) -> TestExecutionResult {
-  let outcome = match &case.mode {
-    Err(error) => Err(error.clone()),
-    Ok(crate::fixture_tests::FixtureMode::Diagnostics) => run_diagnostics_fixture(context, case),
-    Ok(crate::fixture_tests::FixtureMode::Warnings) => run_warnings_fixture(context, case),
-    Ok(crate::fixture_tests::FixtureMode::Program { force_std, allow_leak }) => {
-      run_program_fixture(context, case, *force_std, *allow_leak)
-    },
+  let mode = match &case.mode {
+    Err(error) => return fixture_execution_result(case, false, error.clone(), None),
+    Ok(mode) => *mode,
   };
 
-  match outcome {
-    Ok(()) => TestExecutionResult {
-      fq_name: case.name.clone(),
-      success: true,
-      exit_code: 0,
-      stdout: String::new(),
-      stderr: String::new(),
-    },
-    Err(error) => TestExecutionResult {
-      fq_name: case.name.clone(),
-      success: false,
-      exit_code: 1,
-      stdout: String::new(),
-      stderr: error,
-    },
+  let Some(skip_reason) = &case.skip else {
+    return match run_fixture_mode(context, case, mode, true) {
+      Ok(()) => fixture_execution_result(case, true, String::new(), None),
+      Err(error) => fixture_execution_result(case, false, error, None),
+    };
+  };
+
+  match run_fixture_mode(context, case, mode, false) {
+    Ok(()) => fixture_execution_result(
+      case,
+      false,
+      format!(
+        "this fixture is marked '// e2e: skip {}' but now passes; remove the skip header and record its baseline",
+        skip_reason
+      ),
+      None,
+    ),
+    Err(_) => fixture_execution_result(case, true, String::new(), Some(skip_reason.clone())),
   }
 }
 
@@ -2399,6 +2475,13 @@ struct TestExecutionResult {
   exit_code: i32,
   stdout: String,
   stderr: String,
+
+  /// Skip reason, for a fixture whose `// e2e: skip <reason>` contract held.
+  ///
+  /// `success` stays `true` for a skipped case, so existing pass/fail
+  /// arithmetic keeps treating the run as green; this field only adds the
+  /// separate `skipped` count and status label reporting sites carry.
+  skipped: Option<String>,
 }
 
 fn collect_test_mono_roots(plan: &crate::backend::TestHarnessPlan) -> Vec<DefinitionId> {
@@ -2480,6 +2563,7 @@ fn run_single_test(
     exit_code: outcome.exit_code,
     stdout: outcome.stdout,
     stderr,
+    skipped: None,
   })
 }
 
@@ -2580,12 +2664,16 @@ fn run_fixture_catching_panics(
 ) -> TestExecutionResult {
   match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_single_fixture(context, case))) {
     Ok(result) => result,
-    Err(payload) => TestExecutionResult {
-      fq_name: case.name.clone(),
-      success: false,
-      exit_code: 1,
-      stdout: String::new(),
-      stderr: format!("compiler panicked: {}", panic_payload_message(&*payload)),
+    // A panic is just another way the mode's contract failed, so a skipped
+    // fixture reports it as a skip like any other failure, not a hard error.
+    Err(payload) => match &case.skip {
+      Some(skip_reason) => fixture_execution_result(case, true, String::new(), Some(skip_reason.clone())),
+      None => fixture_execution_result(
+        case,
+        false,
+        format!("compiler panicked: {}", panic_payload_message(&*payload)),
+        None,
+      ),
     },
   }
 }
@@ -2619,6 +2707,7 @@ mod fixture_panic_isolation {
         exit_code: 0,
         stdout: String::new(),
         stderr: String::new(),
+        skipped: None,
       },
       Err(payload) => TestExecutionResult {
         fq_name: "fixture".to_string(),
@@ -2626,6 +2715,7 @@ mod fixture_panic_isolation {
         exit_code: 1,
         stdout: String::new(),
         stderr: format!("compiler panicked: {}", panic_payload_message(&*payload)),
+        skipped: None,
       },
     }
   }
@@ -2715,17 +2805,114 @@ fn format_failed_test_details(result: &TestExecutionResult) -> String {
   lines.join("\n")
 }
 
-#[cfg(test)]
-fn format_test_summary_snapshot(results: &[TestExecutionResult]) -> String {
+/// Totals shared by every test-run report. `passed` includes `skipped`,
+/// since a skipped case reports `success: true`; `skipped` is the additional,
+/// informational count layered on top.
+struct TestRunCounts {
+  total: usize,
+  passed: usize,
+  failed: usize,
+  skipped: usize,
+}
+
+fn test_run_counts(results: &[TestExecutionResult]) -> TestRunCounts {
   let total = results.len();
   let passed = results.iter().filter(|result| result.success).count();
+  let skipped = results.iter().filter(|result| result.skipped.is_some()).count();
   let failed = total - passed;
 
-  let mut lines = Vec::with_capacity(results.len() + 4);
+  TestRunCounts {
+    total,
+    passed,
+    failed,
+    skipped,
+  }
+}
+
+/// Plain-text status word for one result's plan line, shared by every report.
+///
+/// A skipped case reports `skip` with its reason rather than `ok`, even
+/// though `success` is `true`, so a reader scanning the plan can tell a
+/// genuinely green case from one that only passed because its contract
+/// failed as expected.
+fn test_run_status_text(result: &TestExecutionResult) -> String {
+  match &result.skipped {
+    Some(reason) => format!("skip ({})", reason),
+    None if result.success => "ok".to_string(),
+    None => "FAILED".to_string(),
+  }
+}
+
+/// Prints every result, the summary counts, and the pass/fail footer.
+///
+/// Shared by every live test-run entry point so the skip bucket is counted
+/// and rendered in exactly one place instead of once per call site.
+fn report_test_run(
+  config: &Arc<IgnisConfig>,
+  results: &[TestExecutionResult],
+  bin_path: &Path,
+  start: Instant,
+) -> Result<(), ()> {
+  for result in results {
+    let status_text = test_run_status_text(result);
+    let status = if result.skipped.is_some() {
+      status_text.yellow()
+    } else if result.success {
+      status_text.green()
+    } else {
+      status_text.red().bold()
+    };
+    section_item!(config, "{} ... {}", result.fq_name, status);
+  }
+
+  let failed_results: Vec<_> = results.iter().filter(|result| !result.success).collect();
+  if !failed_results.is_empty() {
+    section!(config, "Failures");
+
+    for result in failed_results {
+      for line in format_failed_test_details(result).lines() {
+        println!("  {}", line);
+      }
+
+      println!();
+    }
+  }
+
+  let counts = test_run_counts(results);
+
+  section!(config, "Summary");
+  section_item!(config, "{} total", counts.total);
+  section_item!(config, "{} passed", counts.passed);
+  section_item!(config, "{} failed", counts.failed);
+
+  if counts.skipped > 0 {
+    section_item!(config, "{} skipped", counts.skipped);
+  }
+
+  cmd_artifact!(config, "Test binary", bin_path.display());
+
+  if counts.failed == 0 {
+    cmd_ok!(config, "Tests passed", start.elapsed());
+    Ok(())
+  } else {
+    cmd_fail!(config, "Tests failed", start.elapsed());
+    Err(())
+  }
+}
+
+#[cfg(test)]
+fn format_test_summary_snapshot(results: &[TestExecutionResult]) -> String {
+  let counts = test_run_counts(results);
+
+  let mut lines = Vec::with_capacity(results.len() + 5);
 
   for result in results {
-    let status = if result.success { "ok" } else { "FAILED" };
-    lines.push(format!("- {} ... {} ({})", result.fq_name, status, result.exit_code));
+    lines.push(format!(
+      "- {} ... {} ({})",
+      result.fq_name,
+      test_run_status_text(result),
+      result.exit_code
+    ));
   }
 
   lines.push(String::new());
@@ -2741,9 +2928,13 @@ fn format_test_summary_snapshot(results: &[TestExecutionResult]) -> String {
     lines.push(String::new());
   }
 
-  lines.push(format!("total: {}", total));
-  lines.push(format!("passed: {}", passed));
-  lines.push(format!("failed: {}", failed));
+  lines.push(format!("total: {}", counts.total));
+  lines.push(format!("passed: {}", counts.passed));
+  lines.push(format!("failed: {}", counts.failed));
+
+  if counts.skipped > 0 {
+    lines.push(format!("skipped: {}", counts.skipped));
+  }
 
   lines.join("\n")
 }
@@ -3251,45 +3442,7 @@ pub fn run_project_tests_with_options(
 
   ignis_log::phase_time!("running tests", run_started.elapsed());
 
-  let passed = results.iter().filter(|result| result.success).count();
-  let total = results.len();
-  let failed = total - passed;
-
-  for result in &results {
-    let status = if result.success {
-      "ok".green()
-    } else {
-      "FAILED".red().bold()
-    };
-    section_item!(&config, "{} ... {}", result.fq_name, status);
-  }
-
-  let failed_results: Vec<_> = results.iter().filter(|result| !result.success).collect();
-  if !failed_results.is_empty() {
-    section!(&config, "Failures");
-
-    for result in failed_results {
-      for line in format_failed_test_details(result).lines() {
-        println!("  {}", line);
-      }
-
-      println!();
-    }
-  }
-
-  section!(&config, "Summary");
-  section_item!(&config, "{} total", total);
-  section_item!(&config, "{} passed", passed);
-  section_item!(&config, "{} failed", failed);
-  cmd_artifact!(&config, "Test binary", bin_path.display());
-
-  if failed == 0 {
-    cmd_ok!(&config, "Tests passed", start.elapsed());
-    Ok(())
-  } else {
-    cmd_fail!(&config, "Tests failed", start.elapsed());
-    Err(())
-  }
+  report_test_run(&config, &results, &bin_path, start)
 }
 
 pub fn run_single_file_tests(
@@ -3731,45 +3884,7 @@ pub fn run_single_file_tests_with_options(
     },
   };
 
-  let passed = results.iter().filter(|result| result.success).count();
-  let total = results.len();
-  let failed = total - passed;
-
-  for result in &results {
-    let status = if result.success {
-      "ok".green()
-    } else {
-      "FAILED".red().bold()
-    };
-    section_item!(&config, "{} ... {}", result.fq_name, status);
-  }
-
-  let failed_results: Vec<_> = results.iter().filter(|result| !result.success).collect();
-  if !failed_results.is_empty() {
-    section!(&config, "Failures");
-
-    for result in failed_results {
-      for line in format_failed_test_details(result).lines() {
-        println!("  {}", line);
-      }
-
-      println!();
-    }
-  }
-
-  section!(&config, "Summary");
-  section_item!(&config, "{} total", total);
-  section_item!(&config, "{} passed", passed);
-  section_item!(&config, "{} failed", failed);
-  cmd_artifact!(&config, "Test binary", input.bin_path.display());
-
-  if failed == 0 {
-    cmd_ok!(&config, "Tests passed", start.elapsed());
-    Ok(())
-  } else {
-    cmd_fail!(&config, "Tests failed", start.elapsed());
-    Err(())
-  }
+  report_test_run(&config, &results, &input.bin_path, start)
 }
 
 pub fn run_std_tests(
@@ -4226,45 +4341,7 @@ pub fn run_std_tests(
     },
   };
 
-  let passed = results.iter().filter(|result| result.success).count();
-  let total = results.len();
-  let failed = total - passed;
-
-  for result in &results {
-    let status = if result.success {
-      "ok".green()
-    } else {
-      "FAILED".red().bold()
-    };
-    section_item!(&config, "{} ... {}", result.fq_name, status);
-  }
-
-  let failed_results: Vec<_> = results.iter().filter(|result| !result.success).collect();
-  if !failed_results.is_empty() {
-    section!(&config, "Failures");
-
-    for result in failed_results {
-      for line in format_failed_test_details(result).lines() {
-        println!("  {}", line);
-      }
-
-      println!();
-    }
-  }
-
-  section!(&config, "Summary");
-  section_item!(&config, "{} total", total);
-  section_item!(&config, "{} passed", passed);
-  section_item!(&config, "{} failed", failed);
-  cmd_artifact!(&config, "Test binary", input.bin_path.display());
-
-  if failed == 0 {
-    cmd_ok!(&config, "Tests passed", start.elapsed());
-    Ok(())
-  } else {
-    cmd_fail!(&config, "Tests failed", start.elapsed());
-    Err(())
-  }
+  report_test_run(&config, &results, &input.bin_path, start)
 }
 
 /// Build the standard library into a static archive
@@ -5758,6 +5835,7 @@ function main(): i32 {
         exit_code: 0,
         stdout: String::new(),
         stderr: String::new(),
+        skipped: None,
       },
       super::TestExecutionResult {
         fq_name: "main::fails".to_string(),
@@ -5765,6 +5843,7 @@ function main(): i32 {
         exit_code: 101,
         stdout: "stdout before panic\n".to_string(),
         stderr: "panic: boom\n".to_string(),
+        skipped: None,
       },
       super::TestExecutionResult {
         fq_name: "main::laterPass".to_string(),
@@ -5772,10 +5851,38 @@ function main(): i32 {
         exit_code: 0,
         stdout: String::new(),
         stderr: String::new(),
+        skipped: None,
       },
     ];
 
     assert_snapshot!("native_test_runner_summary_snapshot", format_test_summary_snapshot(&results));
+  }
+
+  #[test]
+  fn test_summary_snapshot_reports_a_skipped_fixture() {
+    let results = vec![
+      super::TestExecutionResult {
+        fq_name: "main::passes".to_string(),
+        success: true,
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+        skipped: None,
+      },
+      super::TestExecutionResult {
+        fq_name: "e2e::flaky".to_string(),
+        success: true,
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+        skipped: Some("flaky on CI".to_string()),
+      },
+    ];
+
+    assert_snapshot!(
+      "native_test_runner_summary_snapshot_with_skip",
+      format_test_summary_snapshot(&results)
+    );
   }
 
   #[test]
@@ -5786,6 +5893,7 @@ function main(): i32 {
       exit_code: 101,
       stdout: "1234567890".repeat(20),
       stderr: "abcdefghijklmnopqrstuvwxyz".repeat(20),
+      skipped: None,
     };
 
     let details = format_failed_test_details(&result);
@@ -5816,6 +5924,7 @@ function main(): i32 {
       exit_code: 101,
       stdout: String::new(),
       stderr: "snapshot mismatch\nsnapshot: /tmp/project/src/__snapshots__/main__rendered.snap.txt\nexpected-bytes: 12\nactual-bytes: 16\npanic: snapshot assertion failed\n".to_string(),
+      skipped: None,
     };
 
     let details = format_failed_test_details(&result);

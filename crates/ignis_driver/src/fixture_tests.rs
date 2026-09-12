@@ -51,6 +51,12 @@ pub(crate) struct FixtureCase {
 
   /// Parsed header, or the reason the header could not be understood.
   pub mode: Result<FixtureMode, String>,
+
+  /// Reason from a `// e2e: skip <reason>` header line, when present.
+  ///
+  /// `None` whenever `mode` is `Err`: a malformed header never yields a
+  /// trustworthy skip reason.
+  pub skip: Option<String>,
 }
 
 impl FixtureCase {
@@ -83,15 +89,22 @@ pub(crate) fn discover_fixture_cases(fixture_dirs: &[PathBuf]) -> Vec<FixtureCas
         continue;
       };
 
-      let mode = match std::fs::read_to_string(&source_path) {
-        Ok(source) => parse_fixture_header(&source),
-        Err(error) => Err(format!("Failed to read fixture '{}': {}", source_path.display(), error)),
+      let (mode, skip) = match std::fs::read_to_string(&source_path) {
+        Ok(source) => match parse_fixture_header(&source) {
+          Ok((mode, skip)) => (Ok(mode), skip),
+          Err(error) => (Err(error), None),
+        },
+        Err(error) => (
+          Err(format!("Failed to read fixture '{}': {}", source_path.display(), error)),
+          None,
+        ),
       };
 
       cases.push(FixtureCase {
         name,
         path: source_path,
         mode,
+        skip,
       });
     }
   }
@@ -144,15 +157,29 @@ fn fixture_case_name(
   Some(segments.join("::"))
 }
 
-/// Reads the fixture mode from the leading `// e2e: <option>` comment lines.
+/// Word introducing a skip header line, kept in sync with its own length below.
+const SKIP_KEYWORD: &str = "skip";
+
+/// Reads the fixture mode and optional skip reason from the leading
+/// `// e2e: <option>` comment lines.
 ///
 /// Scanning stops at the first line that is neither blank nor a comment, so a
 /// fixture cannot change its mode from the middle of the file.
-pub(crate) fn parse_fixture_header(source: &str) -> Result<FixtureMode, String> {
+///
+/// A header line whose trimmed option text starts with the word `skip`
+/// followed by whitespace is a skip line: the entire remainder of the line
+/// becomes the skip reason verbatim, and is never split on commas, so a
+/// reason may itself contain commas. That form is only recognized at the
+/// start of the line's option text; a bare `skip` found while splitting a
+/// comma list (for example `std, skip`) is rejected the same way an
+/// empty-reason skip line is, since the comma split would otherwise mangle a
+/// reason that followed it.
+pub(crate) fn parse_fixture_header(source: &str) -> Result<(FixtureMode, Option<String>), String> {
   let mut force_std = false;
   let mut allow_leak = false;
   let mut diagnostics = false;
   let mut warnings = false;
+  let mut skip_reason: Option<String> = None;
 
   for line in source.lines() {
     let trimmed = line.trim();
@@ -169,13 +196,35 @@ pub(crate) fn parse_fixture_header(source: &str) -> Result<FixtureMode, String> 
       continue;
     };
 
-    for option in options.split(',') {
+    let option_text = options.trim();
+    let is_skip_line = option_text == SKIP_KEYWORD
+      || option_text
+        .strip_prefix(SKIP_KEYWORD)
+        .is_some_and(|rest| rest.starts_with(char::is_whitespace));
+
+    if is_skip_line {
+      let reason = option_text[SKIP_KEYWORD.len()..].trim();
+
+      if reason.is_empty() {
+        return Err("Fixture header option 'skip' needs a reason".to_string());
+      }
+
+      if skip_reason.is_some() {
+        return Err("Fixture header option 'skip' appears more than once".to_string());
+      }
+
+      skip_reason = Some(reason.to_string());
+      continue;
+    }
+
+    for option in option_text.split(',') {
       match option.trim() {
         "" => continue,
         "std" => force_std = true,
         "allow-leak" => allow_leak = true,
         "err" => diagnostics = true,
         "warn" => warnings = true,
+        SKIP_KEYWORD => return Err("Fixture header option 'skip' needs a reason".to_string()),
         unknown => return Err(format!("Unknown fixture header option '{}'", unknown)),
       }
     }
@@ -190,7 +239,7 @@ pub(crate) fn parse_fixture_header(source: &str) -> Result<FixtureMode, String> 
       return Err("Fixture header option 'err' cannot be combined with 'std' or 'allow-leak'".to_string());
     }
 
-    return Ok(FixtureMode::Diagnostics);
+    return Ok((FixtureMode::Diagnostics, skip_reason));
   }
 
   if warnings {
@@ -198,10 +247,10 @@ pub(crate) fn parse_fixture_header(source: &str) -> Result<FixtureMode, String> 
       return Err("Fixture header option 'warn' cannot be combined with 'std' or 'allow-leak'".to_string());
     }
 
-    return Ok(FixtureMode::Warnings);
+    return Ok((FixtureMode::Warnings, skip_reason));
   }
 
-  Ok(FixtureMode::Program { force_std, allow_leak })
+  Ok((FixtureMode::Program { force_std, allow_leak }, skip_reason))
 }
 
 /// Renders the baseline body of a program fixture.
@@ -464,6 +513,7 @@ mod tests {
         force_std: false,
         allow_leak: false,
       }),
+      skip: None,
     };
 
     assert_eq!(
@@ -474,7 +524,7 @@ mod tests {
 
   #[test]
   fn a_fixture_without_a_header_is_a_plain_program() {
-    let mode = parse_fixture_header("function main(): i32 { return 0; }").expect("header");
+    let (mode, skip) = parse_fixture_header("function main(): i32 { return 0; }").expect("header");
 
     assert_eq!(
       mode,
@@ -483,11 +533,13 @@ mod tests {
         allow_leak: false,
       }
     );
+    assert_eq!(skip, None);
   }
 
   #[test]
   fn header_options_accumulate_across_leading_comment_lines() {
-    let mode = parse_fixture_header("// e2e: std\n// e2e: allow-leak\nfunction main(): void {}").expect("header");
+    let (mode, skip) =
+      parse_fixture_header("// e2e: std\n// e2e: allow-leak\nfunction main(): void {}").expect("header");
 
     assert_eq!(
       mode,
@@ -496,20 +548,23 @@ mod tests {
         allow_leak: true,
       }
     );
+    assert_eq!(skip, None);
   }
 
   #[test]
   fn the_err_option_selects_diagnostics_mode() {
-    let mode = parse_fixture_header("// e2e: err\nfunction main(): i32 {}").expect("header");
+    let (mode, skip) = parse_fixture_header("// e2e: err\nfunction main(): i32 {}").expect("header");
 
     assert_eq!(mode, FixtureMode::Diagnostics);
+    assert_eq!(skip, None);
   }
 
   #[test]
   fn the_warn_option_selects_warnings_mode() {
-    let mode = parse_fixture_header("// e2e: warn\nfunction main(): void {}").expect("header");
+    let (mode, skip) = parse_fixture_header("// e2e: warn\nfunction main(): void {}").expect("header");
 
     assert_eq!(mode, FixtureMode::Warnings);
+    assert_eq!(skip, None);
   }
 
   #[test]
@@ -528,7 +583,7 @@ mod tests {
 
   #[test]
   fn a_header_after_the_first_code_line_is_ignored() {
-    let mode = parse_fixture_header("function main(): void {}\n// e2e: err").expect("header");
+    let (mode, skip) = parse_fixture_header("function main(): void {}\n// e2e: err").expect("header");
 
     assert_eq!(
       mode,
@@ -537,6 +592,21 @@ mod tests {
         allow_leak: false,
       }
     );
+    assert_eq!(skip, None);
+  }
+
+  #[test]
+  fn a_skip_header_after_the_first_code_line_is_ignored() {
+    let (mode, skip) = parse_fixture_header("function main(): void {}\n// e2e: skip too late").expect("header");
+
+    assert_eq!(
+      mode,
+      FixtureMode::Program {
+        force_std: false,
+        allow_leak: false,
+      }
+    );
+    assert_eq!(skip, None);
   }
 
   #[test]
@@ -544,6 +614,76 @@ mod tests {
     let error = parse_fixture_header("// e2e: nope\n").expect_err("unknown option");
 
     assert!(error.contains("nope"), "expected the option in the error, got: {}", error);
+  }
+
+  #[test]
+  fn the_skip_option_carries_its_reason() {
+    let (mode, skip) = parse_fixture_header("// e2e: skip flaky on CI\nfunction main(): void {}").expect("header");
+
+    assert_eq!(
+      mode,
+      FixtureMode::Program {
+        force_std: false,
+        allow_leak: false,
+      }
+    );
+    assert_eq!(skip, Some("flaky on CI".to_string()));
+  }
+
+  #[test]
+  fn the_skip_option_combines_with_std() {
+    let (mode, skip) =
+      parse_fixture_header("// e2e: std\n// e2e: skip needs a native dependency\nfunction main(): void {}")
+        .expect("header");
+
+    assert_eq!(
+      mode,
+      FixtureMode::Program {
+        force_std: true,
+        allow_leak: false,
+      }
+    );
+    assert_eq!(skip, Some("needs a native dependency".to_string()));
+  }
+
+  #[test]
+  fn the_skip_option_combines_with_err() {
+    let (mode, skip) =
+      parse_fixture_header("// e2e: err\n// e2e: skip diagnostic wording is still in flux\nfunction main(): i32 {}")
+        .expect("header");
+
+    assert_eq!(mode, FixtureMode::Diagnostics);
+    assert_eq!(skip, Some("diagnostic wording is still in flux".to_string()));
+  }
+
+  #[test]
+  fn a_bare_skip_option_is_rejected() {
+    let error = parse_fixture_header("// e2e: skip\nfunction main(): void {}").expect_err("empty reason");
+
+    assert_eq!(error, "Fixture header option 'skip' needs a reason");
+  }
+
+  #[test]
+  fn a_bare_skip_inside_a_comma_list_is_rejected() {
+    let error = parse_fixture_header("// e2e: std, skip\nfunction main(): void {}").expect_err("empty reason");
+
+    assert_eq!(error, "Fixture header option 'skip' needs a reason");
+  }
+
+  #[test]
+  fn a_duplicate_skip_option_is_rejected() {
+    let error = parse_fixture_header("// e2e: skip first reason\n// e2e: skip second reason\nfunction main(): void {}")
+      .expect_err("duplicate skip");
+
+    assert_eq!(error, "Fixture header option 'skip' appears more than once");
+  }
+
+  #[test]
+  fn a_skip_reason_containing_a_comma_survives_intact() {
+    let (_, skip) =
+      parse_fixture_header("// e2e: skip flaky, needs investigation\nfunction main(): void {}").expect("header");
+
+    assert_eq!(skip, Some("flaky, needs investigation".to_string()));
   }
 
   #[test]
