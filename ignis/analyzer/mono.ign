@@ -2768,9 +2768,20 @@ export namespace Mono {
   /// host builds the standard library in its own pass, where every function is
   /// a root; the selfhost emits one translation unit, so the same functions
   /// have to be rooted here or the link loses them.
+  ///
+  /// `externalRoots` holds the raw ids of definitions another translation unit
+  /// calls by symbol — the `@test` functions the harness unit dispatches to.
+  /// No Ignis call site names them either, so without them the reachable set
+  /// drops every test and the harness fails to link.
+  ///
+  /// `exportAll` is the standard-library build, which mirrors the driver's
+  /// `collect_mono_roots_for_std`: the archive it produces is linked by units
+  /// this build never sees, so every non-generic function and method is a root.
   function collectRoots(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
+    exportAll: boolean,
+    externalRoots: &Vector<u32>,
   ): Vector<Analyzer::DefinitionId> {
     let mut roots: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
     let mut rawId: u64 = 0;
@@ -2781,6 +2792,7 @@ export namespace Mono {
       let mut isEntryPoint: boolean = false;
       let mut isPublicExtern: boolean = false;
       let mut isCSymbol: boolean = false;
+      let mut isExported: boolean = false;
       let mut ownsMethods: boolean = false;
 
       if (let Option::SOME(definition) = defStore.get(defId)) {
@@ -2796,7 +2808,12 @@ export namespace Mono {
               if (functionDef.externName.isSome()) {
                 isCSymbol = true;
               }
+
+              isExported = exportAll && functionDef.typeParams.length() == 0;
             }
+          },
+          Analyzer::Definition::Method(methodDef) -> {
+            isExported = exportAll && methodDef.typeParams.length() == 0;
           },
           Analyzer::Definition::Record(recordDef) -> {
             ownsMethods = recordDef.typeParams.length() == 0;
@@ -2808,7 +2825,7 @@ export namespace Mono {
         };
       }
 
-      if (isEntryPoint || isPublicExtern || isCSymbol) {
+      if (isEntryPoint || isPublicExtern || isCSymbol || isExported) {
         roots.push(defId);
       }
 
@@ -2826,6 +2843,16 @@ export namespace Mono {
       }
 
       rawId += 1;
+    }
+
+    let mut externalIndex: u64 = 0;
+
+    while (externalIndex < externalRoots.length()) {
+      if (let Option::SOME(rawExternal) = externalRoots.get(externalIndex)) {
+        roots.push(Id::fromRaw<Analyzer::DefinitionTag>(*rawExternal));
+      }
+
+      externalIndex += 1;
     }
 
     return roots;
@@ -2909,11 +2936,27 @@ export namespace Mono {
     }
   }
 
+  /// Monomorphize a program whose only entry points are the ones Ignis code
+  /// names. A build another translation unit links against calls
+  /// `runWithRoots` instead.
   function run(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
     inputHir: &Hir::HirStore,
+  ): Mono::MonoOutput {
+    let externalRoots: Vector<u32> = Vector::new<u32>();
+
+    return Mono::runWithRoots(defStore, typeStore, symbols, inputHir, false, &externalRoots);
+  }
+
+  function runWithRoots(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    inputHir: &Hir::HirStore,
+    exportAll: boolean,
+    externalRoots: &Vector<u32>,
   ): Mono::MonoOutput {
     let mut outputHir: Hir::HirStore = Hir::HirStore::init();
     let mut state: Mono::MonoState = Mono::MonoState::init();
@@ -2924,7 +2967,7 @@ export namespace Mono {
     // C, and `--dump-drop-schedule` — disagreeing over a set of functions that
     // never runs.
     let emptyTable: Mono::SubstTable = Mono::emptySubst();
-    let roots: Vector<Analyzer::DefinitionId> = Mono::collectRoots(defStore, symbols);
+    let roots: Vector<Analyzer::DefinitionId> = Mono::collectRoots(defStore, symbols, exportAll, externalRoots);
     let mut rootIndex: u64 = 0;
 
     while (rootIndex < roots.length()) {
