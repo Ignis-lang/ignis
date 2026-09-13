@@ -6312,13 +6312,16 @@ function typecheckMatchExpressionWildcardCoversOpenDomain(): void {
 
 /// Scenario: the same shape as above but with no wildcard and a single
 /// literal arm — the `i32` scrutinee is an open domain, so a non-wildcard
-/// literal arm never guarantees coverage. Because the match sits in
-/// EXPRESSION position (`let` value), the non-exhaustive diagnostic is an
-/// ERROR, not a WARNING.
+/// literal arm never guarantees coverage. The reference compiler always
+/// reports a non-exhaustive match as a WARNING and continues compilation,
+/// regardless of whether the match sits in EXPRESSION or statement
+/// position (`ignis_analyzer::typeck`'s `NonExhaustiveMatch` diagnostic is
+/// `Severity::Warning` unconditionally); the selfhost mirrors that severity
+/// here rather than escalating to an error in value position.
 /// Spec: selfhost-match-exhaustiveness — open-domain requires catch-all,
-/// position-sensitive severity.
+/// position-independent severity (parity with the reference compiler).
 @test
-function typecheckMatchExpressionNonExhaustiveIsError(): void {
+function typecheckMatchExpressionNonExhaustiveIsWarning(): void {
   let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
   let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
   let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
@@ -6349,9 +6352,9 @@ function typecheckMatchExpressionNonExhaustiveIsError(): void {
   // (IGN-136), so the exhaustiveness verdict is the only diagnostic.
   Test::assertEq<u64>(output.typecheck.diagnostics.length(), 1);
   let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(0) else {
-    @panic("typecheckMatchExpressionNonExhaustiveIsError: missing exhaustiveness diagnostic");
+    @panic("typecheckMatchExpressionNonExhaustiveIsWarning: missing exhaustiveness diagnostic");
   };
-  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
   Test::assertEq<str>(exhaustivenessDiagnostic.code, DiagnosticCode::NON_EXHAUSTIVE_MATCH);
   Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match");
 }
@@ -6404,9 +6407,10 @@ function typecheckMatchStatementGuardedWildcardDoesNotCountAsCoverage(): void {
 /// `(match (n) { ... });` — arrives as `Node::Grouped` wrapping the match,
 /// not `Node::Match` directly. `checkStmt`'s statement-position guard only
 /// matches a *direct* `Node::Match`, so this takes the ordinary expression
-/// path (`checkExpr`, `valuePosition = true`) and gets the stricter ERROR
-/// severity even though it is syntactically a statement. This is the
-/// documented conservative edge case (design D2).
+/// path (`checkExpr`, `valuePosition = true`). Severity no longer depends on
+/// `valuePosition` — the reference compiler always warns — so this still
+/// reports the same WARNING as the direct-statement form; only the code
+/// path taken to get there differs (design D2).
 /// Spec: selfhost-expected-type-propagation — position mechanism.
 @test
 function typecheckGroupedMatchStatementTakesExpressionPositionPath(): void {
@@ -6442,7 +6446,7 @@ function typecheckGroupedMatchStatementTakesExpressionPositionPath(): void {
   let Option::SOME(exhaustivenessDiagnostic) = output.typecheck.diagnostics.get(0) else {
     @panic("typecheckGroupedMatchStatementTakesExpressionPositionPath: missing exhaustiveness diagnostic");
   };
-  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::ERROR);
+  Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
   Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match");
 }
 

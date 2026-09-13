@@ -5283,13 +5283,15 @@ export namespace Analyzer {
         index += 1;
       }
 
+      // The reference compiler always reports a non-exhaustive match as a
+      // warning and continues compilation, regardless of whether the match
+      // is used as an expression or a statement (see ignis_analyzer::typeck,
+      // DiagnosticMessage::NonExhaustiveMatch's Severity::Warning arm). The
+      // selfhost mirrors that severity here rather than escalating to an
+      // error in value position.
       let verdict: Analyzer::Typecheck::ExhaustiveVerdict = Analyzer::Typecheck::analyzeMatchExhaustiveness(defStore, typeStore, symbols, module, resolvedBodies, scrutineeTypeOpt, &value.arms);
       if (let Analyzer::Typecheck::ExhaustiveVerdict::Missing(reason) = verdict) {
-        if (valuePosition) {
-          Analyzer::Typecheck::emitDiagnosticLabeled(state, value.span, DiagnosticCode::NON_EXHAUSTIVE_MATCH, "non-exhaustive match", reason.toStr());
-        } else {
-          Analyzer::Typecheck::emitWarningLabeled(state, value.span, DiagnosticCode::NON_EXHAUSTIVE_MATCH, "non-exhaustive match", reason.toStr());
-        }
+        Analyzer::Typecheck::emitWarningLabeled(state, value.span, DiagnosticCode::NON_EXHAUSTIVE_MATCH, "non-exhaustive match", reason.toStr());
       }
 
       // Statement position discards the match's value: no cross-arm join is
@@ -8778,12 +8780,15 @@ export namespace Analyzer {
             return;
           };
 
-          // A statement-position match is checked directly here so its
-          // exhaustiveness diagnostic is a WARNING (`valuePosition = false`).
-          // Every other statement expression, including a parenthesised
-          // `(match ...)` (which arrives as `Node::Grouped`, not
-          // `Node::Match`), falls through to the ordinary expression path,
-          // where a nested match is always checked at `valuePosition = true`.
+          // A statement-position match is checked directly here
+          // (`valuePosition = false`) so its arm bodies are not forced to
+          // join to a common type. Every other statement expression,
+          // including a parenthesised `(match ...)` (which arrives as
+          // `Node::Grouped`, not `Node::Match`), falls through to the
+          // ordinary expression path, where a nested match is always checked
+          // at `valuePosition = true`. The non-exhaustive-match diagnostic's
+          // severity does not depend on `valuePosition` either way — it is
+          // always a WARNING, mirroring the reference compiler.
           if (let Ast::Expression::Node::Match(matchValue) = expressionNode) {
             let _matchType: Option<Analyzer::TypeId> = Analyzer::Typecheck::checkMatchExpr(
               state,
