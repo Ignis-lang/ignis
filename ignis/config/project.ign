@@ -665,7 +665,7 @@ function requireStdManifest(project: ResolvedProject): Result<ResolvedProject, D
 /// Used so edit distance compares codepoints rather than bytes: a
 /// multi-byte UTF-8 scalar must count as one substitution/insertion/deletion,
 /// not as however many bytes it happens to encode to.
-export function configCollectChars(text: str): Vector<char> {
+function configCollectChars(text: str): Vector<char> {
   let owned: String = String::create(text);
   let mut characters: Vector<char> = Vector::new<char>();
   let mut offset: u64 = 0;
@@ -684,7 +684,7 @@ export function configCollectChars(text: str): Vector<char> {
 }
 
 /// Reads one cell of a flattened Levenshtein DP table.
-export function configEditDistanceCellAt(row: &Vector<u64>, index: u64): u64 {
+function configEditDistanceCellAt(row: &Vector<u64>, index: u64): u64 {
   return match (row.get(index)) {
     Option::SOME(value) -> *value,
     Option::NONE -> 0,
@@ -694,7 +694,7 @@ export function configEditDistanceCellAt(row: &Vector<u64>, index: u64): u64 {
 /// Levenshtein edit distance between two strings, compared codepoint by
 /// codepoint (not byte by byte), matching the host's
 /// `ignis_driver::project::unknown_keys::edit_distance`.
-export function configEditDistance(a: str, b: str): u64 {
+function configEditDistance(a: str, b: str): u64 {
   let left: Vector<char> = configCollectChars(a);
   let right: Vector<char> = configCollectChars(b);
   let n: u64 = left.length();
@@ -784,16 +784,80 @@ export function configSuggestKey(key: str, known: &Vector<String>): Option<Strin
   return bestName;
 }
 
-/// Pushes one warning per key in `table` that is not in `known`, labeling the
-/// table as `tableLabel` in the warning text.
+/// A pending "unknown key" warning, not yet turned into a `Diagnostic`.
+///
+/// `Diagnostic` has no `clone()` and holds `@implements(Drop)` fields, so it
+/// cannot be safely reordered by a generic swap-based sort (see
+/// `Sort::stableVector`'s own caveat about non-`Copy` moves in
+/// `std/sort/mod.ign`). Collecting into this plain-data record instead, and
+/// sorting *that* clone-based (like `Sort::stableStrings` does for owned
+/// `String`s), lets every warning be found in tree order and then reordered
+/// into file order before any `Diagnostic` is built.
+record ProjectUnknownKeyWarning {
+  public start: u64;
+  public end: u64;
+  public tableLabel: String;
+  public key: String;
+  public suggestion: Option<String>;
+
+  public clone(&self): ProjectUnknownKeyWarning {
+    return ProjectUnknownKeyWarning {
+      start: self.start,
+      end: self.end,
+      tableLabel: self.tableLabel.clone(),
+      key: self.key.clone(),
+      suggestion: cloneOptionString(&self.suggestion),
+    };
+  }
+}
+
+/// Stable insertion sort of pending warnings by source position.
+///
+/// Mirrors `Sort::stableStrings`'s clone-based `get`/`set` shifting rather
+/// than a raw indexed move, for the same reason: `ProjectUnknownKeyWarning`
+/// owns `String`/`Option<String>` fields.
+function sortProjectUnknownKeyWarnings(values: &mut Vector<ProjectUnknownKeyWarning>): void {
+  let mut valuesRef: &mut Vector<ProjectUnknownKeyWarning> = values;
+  let mut index: u64 = 1;
+
+  while (index < valuesRef.length()) {
+    let Option::SOME(currentRef) = valuesRef.get(index) else {
+      break;
+    };
+    let current: ProjectUnknownKeyWarning = currentRef.clone();
+    let mut scan: i64 = index as i64 - 1;
+
+    while (scan >= 0) {
+      let Option::SOME(existing) = valuesRef.get(scan as u64) else {
+        break;
+      };
+
+      if (existing.start <= current.start) {
+        break;
+      }
+
+      let shifted: ProjectUnknownKeyWarning = existing.clone();
+      if (!valuesRef.set((scan + 1) as u64, shifted)) {
+        break;
+      }
+      scan -= 1;
+    }
+
+    let _inserted: boolean = valuesRef.set((scan + 1) as u64, current);
+    index += 1;
+  }
+}
+
+/// Records one warning per key in `table` that is not in `known`, labeling
+/// the table as `tableLabel`. Collected, not yet a `Diagnostic`: see
+/// `ProjectUnknownKeyWarning`.
 function unknownKeysInTable(
   table: &TomlTable,
   known: &Vector<String>,
   tableLabel: str,
-  configPath: &Path::PathBuf,
-  out: &mut DiagnosticBag,
+  out: &mut Vector<ProjectUnknownKeyWarning>,
 ): void {
-  let mut outRef: &mut DiagnosticBag = out;
+  let mut outRef: &mut Vector<ProjectUnknownKeyWarning> = out;
   let mut index: u64 = 0;
 
   while (index < table.length()) {
@@ -820,14 +884,13 @@ function unknownKeysInTable(
 
     if (!isKnown) {
       let suggestion: Option<String> = configSuggestKey(entry.key, known);
-      outRef.push(ConfigDiagnostics::unknownKey(
-        configPath,
-        tableLabel,
-        entry.key,
-        suggestion,
-        entry.keySpan.start,
-        entry.keySpan.end,
-      ));
+      outRef.push(ProjectUnknownKeyWarning {
+        start: entry.keySpan.start,
+        end: entry.keySpan.end,
+        tableLabel: String::create(tableLabel),
+        key: String::create(entry.key),
+        suggestion: suggestion,
+      });
     }
 
     index += 1;
@@ -896,7 +959,7 @@ export function checkUnknownProjectKeys(
   document: &TomlDocument,
   configPath: &Path::PathBuf
 ): DiagnosticBag {
-  let mut warnings: DiagnosticBag = DiagnosticBag::init();
+  let mut pending: Vector<ProjectUnknownKeyWarning> = Vector::new<ProjectUnknownKeyWarning>();
   let root: TomlTable = document.root();
   let topLevel: Vector<String> = knownTopLevelKeys();
 
@@ -924,14 +987,13 @@ export function checkUnknownProjectKeys(
 
     if (!matched) {
       let suggestion: Option<String> = configSuggestKey(entry.key, &topLevel);
-      warnings.push(ConfigDiagnostics::unknownKey(
-        configPath,
-        "top-level",
-        entry.key,
-        suggestion,
-        entry.keySpan.start,
-        entry.keySpan.end,
-      ));
+      pending.push(ProjectUnknownKeyWarning {
+        start: entry.keySpan.start,
+        end: entry.keySpan.end,
+        tableLabel: String::create("top-level"),
+        key: String::create(entry.key),
+        suggestion: suggestion,
+      });
       index += 1;
       continue;
     }
@@ -941,26 +1003,55 @@ export function checkUnknownProjectKeys(
     if (keyName.equals("package")) {
       if (let Option::SOME(table) = entry.value.asTable()) {
         let keys: Vector<String> = knownPackageKeys();
-        unknownKeysInTable(&table, &keys, "package", configPath, &mut warnings);
+        unknownKeysInTable(&table, &keys, "package", &mut pending);
       }
     } else if (keyName.equals("ignis")) {
       if (let Option::SOME(table) = entry.value.asTable()) {
         let keys: Vector<String> = knownIgnisKeys();
-        unknownKeysInTable(&table, &keys, "ignis", configPath, &mut warnings);
+        unknownKeysInTable(&table, &keys, "ignis", &mut pending);
       }
     } else if (keyName.equals("build")) {
       if (let Option::SOME(table) = entry.value.asTable()) {
         let keys: Vector<String> = knownBuildKeys();
-        unknownKeysInTable(&table, &keys, "build", configPath, &mut warnings);
+        unknownKeysInTable(&table, &keys, "build", &mut pending);
       }
     } else if (keyName.equals("test")) {
       if (let Option::SOME(table) = entry.value.asTable()) {
         let keys: Vector<String> = knownTestKeys();
-        unknownKeysInTable(&table, &keys, "test", configPath, &mut warnings);
+        unknownKeysInTable(&table, &keys, "test", &mut pending);
       }
     }
 
     index += 1;
+  }
+
+  // A reopened table (e.g. `[package.extra]` appearing after `[build]`) means
+  // recursing into a root entry's subtree does not visit warnings in file
+  // order: `package`'s own header comes first, but a key nested under a
+  // later reopening of it can sit after `build`'s content in the source.
+  // Sorting by position here, once, after the full walk, is what actually
+  // guarantees file order, matching the host's `diagnostics.sort_by_key`.
+  sortProjectUnknownKeyWarnings(&mut pending);
+
+  let mut warnings: DiagnosticBag = DiagnosticBag::init();
+  let mut warningIndex: u64 = 0;
+
+  while (warningIndex < pending.length()) {
+    let Option::SOME(warning) = pending.get(warningIndex) else {
+      warningIndex += 1;
+      continue;
+    };
+
+    let suggestion: Option<String> = cloneOptionString(&warning.suggestion);
+    warnings.push(ConfigDiagnostics::unknownKey(
+      configPath,
+      warning.tableLabel.toStr(),
+      warning.key.toStr(),
+      suggestion,
+      warning.start,
+      warning.end,
+    ));
+    warningIndex += 1;
   }
 
   return warnings;

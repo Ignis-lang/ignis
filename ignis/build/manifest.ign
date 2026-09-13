@@ -7,7 +7,7 @@ import Test from "std::test";
 import Vector from "std::vector";
 
 import configSuggestKey from "@compiler::config";
-import DiagnosticBag, DiagnosticRenderer, SourceFile from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, DiagnosticRenderer, SourceFile from "@compiler::diagnostics";
 
 import BuildDiagnosticCode, BuildDiagnostics from "./diagnostics";
 
@@ -328,6 +328,34 @@ function buildManifestOffsetsOf(line: &String, lineStart: u64, needle: &String):
   };
 }
 
+/// True when `bag` already carries a diagnostic with this exact message.
+///
+/// TOML merges a dotted header declared more than once (`[toolchan.a]` then
+/// `[toolchan.b]`) into one root key with two nested tables, so the host's
+/// schema walk visits that root key exactly once; this loader instead scans
+/// one header line at a time and would otherwise re-derive and re-report the
+/// same unknown root (or the same unknown `linking.<module>.<field>`) for
+/// every line that mentions it. Checking the bag before pushing collapses
+/// those back down to the one warning the host produces.
+function buildManifestBagHasMessage(bag: &mut DiagnosticBag, message: &String): boolean {
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(existing) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (message.equals(existing.messageText())) {
+      return true;
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
 /// Warns for a `[section]` header the loader does not recognize.
 ///
 /// A dotted header is truncated to its first (root) segment before the
@@ -361,45 +389,113 @@ function buildManifestCheckSectionName(
   if (!buildManifestKeyKnown(rootSegment, &topLevelKnown)) {
     let suggestion: Option<String> = configSuggestKey(rootSegment.toStr(), &topLevelKnown);
     let offsets: ManifestOffsets = buildManifestOffsetsOf(line, lineStart, rootSegment);
-    outRef.push(BuildDiagnostics::unknownKey(
+    let diagnostic: Diagnostic = BuildDiagnostics::unknownKey(
       configPath,
       "top-level",
       rootSegment.toStr(),
       suggestion,
       offsets.start,
       offsets.end,
-    ));
+    );
+    let message: String = String::create(diagnostic.messageText());
+
+    if (buildManifestBagHasMessage(outRef, &message)) {
+      return;
+    }
+
+    outRef.push(diagnostic);
     return;
   }
 
-  if (!rootSegment.equals("linking") || segments.length() <= 2) {
+  if (segments.length() <= 1) {
     return;
   }
 
-  let Option::SOME(moduleName) = segments.get(1) else {
+  if (rootSegment.equals("linking")) {
+    if (segments.length() <= 2) {
+      return;
+    }
+
+    let Option::SOME(moduleName) = segments.get(1) else {
+      return;
+    };
+    let Option::SOME(fieldSegment) = segments.get(2) else {
+      return;
+    };
+
+    let fieldsKnown: Vector<String> = buildManifestKnownLinkingFieldKeys();
+
+    if (buildManifestKeyKnown(fieldSegment, &fieldsKnown)) {
+      return;
+    }
+
+    let tableLabel: String = String::create("linking.").concat(moduleName);
+    let suggestion: Option<String> = configSuggestKey(fieldSegment.toStr(), &fieldsKnown);
+    let offsets: ManifestOffsets = buildManifestOffsetsOf(line, lineStart, fieldSegment);
+    let diagnostic: Diagnostic = BuildDiagnostics::unknownKey(
+      configPath,
+      tableLabel.toStr(),
+      fieldSegment.toStr(),
+      suggestion,
+      offsets.start,
+      offsets.end,
+    );
+    let message: String = String::create(diagnostic.messageText());
+
+    if (buildManifestBagHasMessage(outRef, &message)) {
+      return;
+    }
+
+    outRef.push(diagnostic);
+    return;
+  }
+
+  if (rootSegment.equals("modules")) {
+    // Free-form module-name map: any sub-segment is a module name, not a key.
+    return;
+  }
+
+  // `toolchain`, `auto_load`, `compile_only`: fixed-key roots. A second
+  // dotted segment (`[toolchain.sub]`) is TOML decomposing the header into
+  // root key `toolchain` holding nested table `sub`; the host's schema walk
+  // finds `sub` unknown against `toolchain`'s own key list and reports it
+  // there (never recursing past that first unknown segment, so a third or
+  // deeper segment is not separately inspected).
+  let mut known: Vector<String> = Vector::new<String>();
+
+  if (rootSegment.equals("toolchain")) {
+    known = buildManifestKnownToolchainKeys();
+  } else if (rootSegment.equals("auto_load") || rootSegment.equals("compile_only")) {
+    known = buildManifestKnownModulesListKeys();
+  } else {
+    return;
+  }
+
+  let Option::SOME(subSegment) = segments.get(1) else {
     return;
   };
-  let Option::SOME(fieldSegment) = segments.get(2) else {
-    return;
-  };
 
-  let fieldsKnown: Vector<String> = buildManifestKnownLinkingFieldKeys();
-
-  if (buildManifestKeyKnown(fieldSegment, &fieldsKnown)) {
+  if (buildManifestKeyKnown(subSegment, &known)) {
     return;
   }
 
-  let tableLabel: String = String::create("linking.").concat(moduleName);
-  let suggestion: Option<String> = configSuggestKey(fieldSegment.toStr(), &fieldsKnown);
-  let offsets: ManifestOffsets = buildManifestOffsetsOf(line, lineStart, fieldSegment);
-  outRef.push(BuildDiagnostics::unknownKey(
+  let suggestion: Option<String> = configSuggestKey(subSegment.toStr(), &known);
+  let offsets: ManifestOffsets = buildManifestOffsetsOf(line, lineStart, subSegment);
+  let diagnostic: Diagnostic = BuildDiagnostics::unknownKey(
     configPath,
-    tableLabel.toStr(),
-    fieldSegment.toStr(),
+    rootSegment.toStr(),
+    subSegment.toStr(),
     suggestion,
     offsets.start,
     offsets.end,
-  ));
+  );
+  let message: String = String::create(diagnostic.messageText());
+
+  if (buildManifestBagHasMessage(outRef, &message)) {
+    return;
+  }
+
+  outRef.push(diagnostic);
 }
 
 /// Warns for an assignment key: a root-level key (before any `[section]`
@@ -845,6 +941,45 @@ function unknownManifestKeysWarnInFileOrder(): void {
 @test
 function unknownManifestDottedSectionReportsRootSegment(): void {
   let source: String = String::create("[toolchan.sub]\nopt = 1\n");
+  let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+
+  Test::assertEq<u64>(warnings.length(), 1);
+  let Option::SOME(diagnostic) = warnings.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.messageText(), "unknown key 'toolchan' in [top-level]; did you mean 'toolchain'?");
+}
+
+/// IGN-239 review round 3 #3: `[toolchain.sub]` spells the root correctly
+/// but adds a second segment that is not one of `toolchain`'s own keys. TOML
+/// decomposes this into root key `toolchain` (recognized) holding nested
+/// table `sub`, so the host warns about `sub` inside `[toolchain]`, the same
+/// sub-segment check the `linking` branch already applied.
+@test
+function unknownManifestToolchainSubSegmentWarns(): void {
+  let source: String = String::create("[toolchain.sub]\nopt = 1\n");
+  let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
+  let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
+
+  Test::assertEq<u64>(warnings.length(), 1);
+  let Option::SOME(diagnostic) = warnings.get(0) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(diagnostic.messageText(), "unknown key 'sub' in [toolchain]");
+}
+
+/// IGN-239 review round 3 #4: two headers under the same misspelled root
+/// (`toolchan`) merge into one root key in real TOML, so the host warns once;
+/// this loader's line-by-line scanner must not re-report the same unknown
+/// root once per header line that mentions it.
+@test
+function unknownManifestRepeatedDottedRootWarnsOnce(): void {
+  let source: String = String::create("[toolchan.a]\nx = 1\n\n[toolchan.b]\ny = 1\n");
   let manifestPath: Path::PathBuf = Path::PathBuf::create("manifest.toml");
   let warnings: DiagnosticBag = checkUnknownManifestKeys(&source, &manifestPath);
 

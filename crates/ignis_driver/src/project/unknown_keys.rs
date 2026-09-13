@@ -519,4 +519,34 @@ beta_unknown_in_build = 1
     assert_eq!(diags[1].message, "unknown key 'alpha_unknown_in_ignis' in [ignis]");
     assert_eq!(diags[2].message, "unknown key 'beta_unknown_in_build' in [build]");
   }
+
+  /// IGN-239 review round 3 #1: a reopened table (`[package.extra]` does not
+  /// create a new root-level entry; TOML merges it into the already-declared
+  /// `package` table as a nested child) means a walk that recurses into each
+  /// root entry's subtree as soon as it is visited does not produce file
+  /// order: `package` was declared first, but its reopened issue sits later
+  /// in the file than `build`'s own. Sorting by position after the walk (as
+  /// `warn_unknown_keys` does) is what actually fixes this.
+  #[test]
+  fn warnings_sort_by_position_across_a_reopened_table() {
+    let source = r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[build]
+source_dir = "src"
+entry = "main.ign"
+zebra_unknown = 1
+
+[package.extra]
+x = 1
+"#;
+    let mut diags = diagnostics_for(source, &PROJECT_SCHEMA, PROJECT_UNKNOWN_KEY_CODE);
+    diags.sort_by_key(|d| d.primary_span.start);
+
+    assert_eq!(diags.len(), 2);
+    assert_eq!(diags[0].message, "unknown key 'zebra_unknown' in [build]");
+    assert_eq!(diags[1].message, "unknown key 'extra' in [package]");
+  }
 }

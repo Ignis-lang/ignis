@@ -543,6 +543,28 @@ fn strip_ansi(text: &str) -> String {
 /// architecture difference regardless of whether the diagnostics themselves
 /// agree, so this extracts exactly the part of stderr both compilers are
 /// making a wording/ordering/position promise about instead.
+/// Counts the `^` run in the first caret row found at or after `from`.
+///
+/// The two renderers pad and space the caret row completely differently
+/// (see `crates/ignis_diagnostics/src/lib.rs` vs `ignis/diagnostics/render.ign`),
+/// so comparing that row's raw text would fail on formatting alone. The
+/// caret *count* is the part that actually encodes the warning's span
+/// length, which is what a span-end divergence (a wrong `end` offset, or a
+/// wrong character-vs-byte width count) would change.
+fn caret_width(
+  lines: &[&str],
+  from: usize,
+) -> Option<usize> {
+  lines
+    .iter()
+    .skip(from)
+    .take(8)
+    .map(|line| line.trim())
+    .take_while(|line| !line.starts_with("Warning["))
+    .find(|line| line.contains('^'))
+    .map(|line| line.chars().filter(|&c| c == '^').count())
+}
+
 fn extract_unknown_key_summaries(stderr: &str) -> Vec<String> {
   let plain = strip_ansi(stderr);
   let lines: Vec<&str> = plain.lines().collect();
@@ -558,7 +580,10 @@ fn extract_unknown_key_summaries(stderr: &str) -> Vec<String> {
         .map(|l| l.trim())
         .filter(|l| l.starts_with("-->"))
         .unwrap_or("<missing location>");
-      summaries.push(format!("{line} {location}"));
+      let width = caret_width(&lines, index + 1)
+        .map(|w| w.to_string())
+        .unwrap_or_else(|| "<missing caret row>".to_string());
+      summaries.push(format!("{line} {location} ^{width}"));
     }
 
     index += 1;
@@ -608,6 +633,27 @@ fn write_project_multi_key_and_non_ascii(project_dir: &Path) {
   );
 }
 
+/// A reopened table: `[package.extra]` does not create a new root-level
+/// entry (TOML merges it into the already-declared `package` table as a
+/// nested child), but its offending key sits later in the file than
+/// `[build]`'s own. Recursing into each root entry's subtree as soon as it
+/// is visited would report `package`'s issue before `build`'s, because
+/// `package` was declared first — file order only comes out right if every
+/// warning is sorted by position after the full walk (IGN-239 review round 3
+/// #1), not by the order table entries happen to be visited in.
+fn write_project_reopened_table_ordering(project_dir: &Path) {
+  fs::write(project_dir.join("src/main.ign"), NO_TESTS_MAIN).expect("write main module");
+
+  fs::write(
+    project_dir.join("ignis.toml"),
+    format!(
+      "[package]\nname = \"config_unknown_key_parity\"\nversion = \"0.1.0\"\n\n[ignis]\nstd_path = \"{std_path}\"\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\nzebra_unknown = 1\n\n[package.extra]\nx = 1\n",
+      std_path = workspace_std_path().display(),
+    ),
+  )
+  .expect("write ignis.toml");
+}
+
 fn write_manifest_fixture(
   project_dir: &Path,
   manifest_prefix: &str,
@@ -646,6 +692,26 @@ fn write_manifest_dotted_unknown_section(project_dir: &Path) {
   write_manifest_fixture(project_dir, "", "\n[toolchan.sub]\nopt = 1\n");
 }
 
+/// `[toolchain.sub]` spells the root correctly but adds a second segment
+/// that isn't one of `toolchain`'s own keys. TOML decomposes this into root
+/// key `toolchain` (recognized) holding nested table `sub`, so the host
+/// warns `unknown key 'sub' in [toolchain]`; the selfhost's section checker
+/// used to return as soon as the root segment was known unless it was
+/// `linking`, leaving this silent (IGN-239 review round 3 #3).
+fn write_manifest_toolchain_sub_segment(project_dir: &Path) {
+  write_manifest_fixture(project_dir, "", "\n[toolchain.sub]\nopt = 1\n");
+}
+
+/// Two headers under the same misspelled root (`toolchan`, not `toolchain`):
+/// TOML merges `[toolchan.a]` and `[toolchan.b]` into one root key `toolchan`
+/// holding two nested tables, so the host's schema walk visits that root key
+/// exactly once and warns once. The selfhost's line-by-line section scanner
+/// used to re-derive and re-report the same unknown root once per header
+/// line (IGN-239 review round 3 #4).
+fn write_manifest_repeated_dotted_unknown_root(project_dir: &Path) {
+  write_manifest_fixture(project_dir, "", "\n[toolchan.a]\nx = 1\n\n[toolchan.b]\ny = 1\n");
+}
+
 /// A typo'd key inside `[linking.<module>]` against the six field names the
 /// host accepts there. The selfhost loader does not consume `[linking.*]`
 /// content at all, so it used to skip validating it completely — the whole
@@ -680,12 +746,24 @@ fn unknown_key_parity_fixtures() -> Vec<UnknownKeyParityFixture> {
       write: write_project_multi_key_and_non_ascii,
     },
     UnknownKeyParityFixture {
+      label: "project-reopened-table-ordering",
+      write: write_project_reopened_table_ordering,
+    },
+    UnknownKeyParityFixture {
       label: "manifest-root-key",
       write: write_manifest_root_key,
     },
     UnknownKeyParityFixture {
       label: "manifest-dotted-unknown-section",
       write: write_manifest_dotted_unknown_section,
+    },
+    UnknownKeyParityFixture {
+      label: "manifest-toolchain-sub-segment",
+      write: write_manifest_toolchain_sub_segment,
+    },
+    UnknownKeyParityFixture {
+      label: "manifest-repeated-dotted-unknown-root",
+      write: write_manifest_repeated_dotted_unknown_root,
     },
     UnknownKeyParityFixture {
       label: "manifest-linking-typo",

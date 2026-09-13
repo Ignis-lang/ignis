@@ -329,3 +329,40 @@ function everyKnownProjectKeyStaysSilent(): void {
 
   Test::assertEq<u64>(warnings.length(), 0);
 }
+
+/// IGN-239 review round 3 #1: a reopened table (`[package.extra]` does not
+/// create a new root-level entry; TOML merges it into the already-declared
+/// `package` table as a nested child) means recursing into each root entry's
+/// subtree as soon as it is visited does not produce file order: `package`
+/// was declared first, but its reopened issue sits later in the file than
+/// `build`'s own. Warnings must be sorted by position after the full walk.
+@test
+function unknownProjectKeyWarningsSortByPositionAcrossAReopenedTable(): void {
+  let source: String = String::create(
+    "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[build]\nsource_dir = \"src\"\nentry = \"main.ign\"\nzebra_unknown = 1\n\n[package.extra]\nx = 1\n"
+  );
+  let document: TomlDocument = match (Toml::parse(&source)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let configPath: Path::PathBuf = Path::PathBuf::create("ignis.toml");
+  let warnings: DiagnosticBag = checkUnknownProjectKeys(&document, &configPath);
+
+  Test::assertEq<u64>(warnings.length(), 2);
+
+  let Option::SOME(first) = warnings.get(0) else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(second) = warnings.get(1) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(first.messageText(), "unknown key 'zebra_unknown' in [build]");
+  Test::assertEq<str>(second.messageText(), "unknown key 'extra' in [package]");
+}
