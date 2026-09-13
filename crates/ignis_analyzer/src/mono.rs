@@ -117,6 +117,11 @@ pub struct Monomorphizer<'a> {
   reverse_cache: HashMap<DefinitionId, InstanceKey>,
   /// Instantiations discovered but not yet processed
   worklist: VecDeque<InstanceKey>,
+  /// Set while cloning a local `let` initializer for [`HIR::variables_inits`].
+  /// Those clones exist only so the borrow checker can look an initializer up
+  /// by its variable; they are not a reason to emit anything, and following
+  /// their calls would keep every function a dead function's locals mention.
+  suppress_reachability: bool,
   /// Instantiations whose bodies have been substituted
   processed: HashSet<InstanceKey>,
 
@@ -144,6 +149,7 @@ impl<'a> Monomorphizer<'a> {
       cache: HashMap::new(),
       reverse_cache: HashMap::new(),
       worklist: VecDeque::new(),
+      suppress_reachability: false,
       processed: HashSet::new(),
       current_def_remap: HashMap::new(),
       output_hir: HIR::new(),
@@ -420,11 +426,24 @@ impl<'a> Monomorphizer<'a> {
 
     // Copy variable/constant init expressions (e.g. module-level const bindings
     // whose values aren't compile-time evaluable, such as closures).
+    //
+    // A module-level constant is a real emission root: nothing else names the
+    // thunk behind `const f = lambda`. A local `let`'s initializer is not —
+    // the same expression was already cloned with its function's body, and this
+    // second copy exists only for the lookups `borrowck_hir` does by variable.
+    // Following its calls would keep every function reachable from a dead
+    // function's locals, which is how the two compilers ended up listing
+    // different sets of functions for the same program.
     let mut inits: Vec<_> = self.input_hir.variables_inits.iter().map(|(&k, &v)| (k, v)).collect();
     inits.sort_by_key(|(def_id, _)| def_id.index());
 
     for (def_id, init_hir_id) in inits {
+      let is_constant = matches!(self.input_defs.get(&def_id).kind, DefinitionKind::Constant(_));
+
+      self.suppress_reachability = !is_constant;
       let new_init = self.clone_hir_tree(init_hir_id);
+      self.suppress_reachability = false;
+
       self.output_hir.variables_inits.insert(def_id, new_init);
     }
   }
@@ -433,6 +452,10 @@ impl<'a> Monomorphizer<'a> {
     &mut self,
     def_id: DefinitionId,
   ) {
+    if self.suppress_reachability {
+      return;
+    }
+
     // Early exit if already in output (prevents infinite recursion for recursive calls)
     if self.output_hir.function_bodies.contains_key(&def_id) {
       return;
@@ -2755,6 +2778,13 @@ impl<'a> Monomorphizer<'a> {
     &mut self,
     key: &InstanceKey,
   ) -> DefinitionId {
+    // A local `let`'s initializer is cloned only so the borrow checker can look
+    // it up; it is not a reason to specialize a generic that nothing reachable
+    // calls. See `suppress_reachability`.
+    if self.suppress_reachability {
+      return key.primary_def();
+    }
+
     if let Some(&id) = self.cache.get(key) {
       if is_verbose() {
         eprintln!("[MONO] ensure_instantiated: cache hit for concrete_id={:?}", id);
