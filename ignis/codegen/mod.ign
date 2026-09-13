@@ -813,11 +813,24 @@ export namespace CodegenC {
     };
   }
 
+  /// Whether `name` is the monomorphized spelling of a `drop` method.
+  function nameEndsWithDrop(name: &String): boolean {
+    let suffix: String = String::create("__drop");
+
+    if (name.length() < suffix.length()) {
+      return false;
+    }
+
+    let tail: String = name.substringBytes(name.length() - suffix.length(), name.length());
+
+    return tail.equals(suffix.toStr());
+  }
+
   /// Scans every definition for the `drop` method `defId` owns.
   ///
-  /// Monomorphization names a specialized method after the method it came
-  /// from followed by the owner's type arguments, so `drop__i32` is the
-  /// destructor of one `Vector` instantiation.
+  /// Monomorphization names a specialized method after its owner and that
+  /// owner's type arguments, so `Vector__i32__drop` is the destructor of one
+  /// `Vector` instantiation.
   function findOwnedDropMethod(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
@@ -843,7 +856,7 @@ export namespace CodegenC {
         if (let Option::SOME(text) = symbols.resolve(methodName)) {
           let name: String = String::create(text);
 
-          if (name.equals("drop") || name.startsWith("drop__")) {
+          if (name.equals("drop") || CodegenC::nameEndsWithDrop(&name)) {
             return Option::SOME(candidateId);
           }
         }

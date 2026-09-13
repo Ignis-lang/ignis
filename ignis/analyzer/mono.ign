@@ -221,42 +221,427 @@ export namespace Mono {
     return Option::NONE;
   }
 
-  /// `Vector__i32`-style mangled name for one instantiation.
+  /// `_` separates the pieces of a mangled name, so a `_` written inside a
+  /// name is doubled up as `_0`. The oracle is `Monomorphizer::escape`.
+  function escapeManglePart(text: str): String {
+    let source: String = String::create(text);
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < source.length()) {
+      let Option::SOME(byte) = source.byteAt(index) else {
+        index += 1;
+        continue;
+      };
+
+      if (byte == 95) {
+        result = result.concat("_0");
+      } else {
+        result = result.concat(source.substring(index as i64, 1).toStr());
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// The declared name of `defId`, exactly as interned.
+  function rawDefName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): String {
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      let nameSym: Analyzer::SymbolId = definition.name();
+
+      if (let Option::SOME(text) = symbols.resolve(nameSym)) {
+        return String::create(text);
+      }
+    }
+
+    return String::create("anon");
+  }
+
+  /// Whether `defId` is a definition this monomorphization run created.
+  function isConcreteShell(state: &mut MonoState, defId: Analyzer::DefinitionId): boolean {
+    let mut index: u64 = 0;
+
+    while (index < state.cacheConcreteDefs.length()) {
+      if (let Option::SOME(concreteId) = state.cacheConcreteDefs.get(index)) {
+        if (concreteId.raw() == defId.raw()) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// The declared name of `defId`, unqualified and escaped.
+  function mangleDefName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): String {
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      let nameSym: Analyzer::SymbolId = definition.name();
+
+      if (let Option::SOME(text) = symbols.resolve(nameSym)) {
+        return Mono::escapeManglePart(text);
+      }
+    }
+
+    return String::create("anon");
+  }
+
+  /// The name a record or enum contributes to a mangled symbol: every
+  /// namespace segment of its written path plus its own name, each escaped
+  /// and joined with `_`, so `Ast::Item::Node` mangles to `Ast_Item_Node`.
+  /// `DefinitionStore::qualifiedNameOf` is what the selfhost carries in place
+  /// of the host's `NamespaceStore::full_path`.
+  function mangleTypeDefinitionName(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut MonoState,
+    defId: Analyzer::DefinitionId,
+  ): String {
+    // A shell this run created is already named by a mangled name, and the
+    // host reaches the same nesting through the `Instance` the shell stands
+    // for: `Holder<Holder<Leaf>>` is `Holder__Holder__Leaf`, not the escaped
+    // `Holder__Holder_0_0Leaf` a second pass over the shell's name would give.
+    if (Mono::isConcreteShell(state, defId)) {
+      return Mono::rawDefName(defStore, symbols, defId);
+    }
+
+    let mut path: String = String::new();
+
+    if (let Option::SOME(qualified) = defStore.qualifiedNameOf(defId)) {
+      path = qualified.clone();
+    }
+
+    if (path.length() == 0) {
+      return Mono::mangleDefName(defStore, symbols, defId);
+    }
+
+    let mut result: String = String::new();
+    let mut segmentStart: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index <= path.length()) {
+      let atEnd: boolean = index == path.length();
+      let mut atSeparator: boolean = false;
+
+      if (!atEnd) {
+        if (let Option::SOME(byte) = path.byteAt(index)) {
+          if (byte == 58) {
+            if (let Option::SOME(next) = path.byteAt(index + 1)) {
+              atSeparator = next == 58;
+            }
+          }
+        }
+      }
+
+      if (!atEnd && !atSeparator) {
+        index += 1;
+        continue;
+      }
+
+      let segment: String = path.substringBytes(segmentStart, index);
+
+      if (result.length() > 0) {
+        result = result.concat("_");
+      }
+
+      result = result.concat(Mono::escapeManglePart(segment.toStr()).toStr());
+      segmentStart = index + 2;
+      index += 2;
+    }
+
+    return result;
+  }
+
+  /// One type argument as `Monomorphizer::mangle_type` writes it. The
+  /// rendering `TypeStore::nameOf` produces is for diagnostics and says
+  /// `<record:DefId(7)>` where a mangled name needs the record's name, so the
+  /// two cannot share a renderer.
+  function mangleType(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut MonoState,
+    typeId: Analyzer::TypeId,
+  ): String {
+    let mut kind: u64 = 0;
+    let mut inner: Analyzer::TypeId = typeId;
+    let mut mutable: boolean = false;
+    let mut arraySize: u64 = 0;
+    let mut definition: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(0);
+    let mut parts: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut simple: String = String::new();
+
+    if (let Option::SOME(resolved) = typeStore.get(typeId)) {
+      match (resolved) {
+        Analyzer::Type::Pointer(pointer) -> {
+          kind = 1;
+          inner = pointer.pointee;
+          mutable = pointer.mutable;
+        },
+        Analyzer::Type::Reference(reference) -> {
+          kind = 2;
+          inner = reference.referent;
+          mutable = reference.mutable;
+        },
+        Analyzer::Type::Slice(element) -> {
+          kind = 3;
+          inner = element;
+        },
+        Analyzer::Type::FixedArray(element, size) -> {
+          kind = 4;
+          inner = element;
+          arraySize = size;
+        },
+        Analyzer::Type::Tuple(tuple) -> {
+          kind = 5;
+          parts = Mono::copyTypeIds(&tuple.elements);
+        },
+        Analyzer::Type::Function(signature) -> {
+          kind = 6;
+          parts = Mono::copyTypeIds(&signature.params);
+          inner = signature.returnType;
+        },
+        Analyzer::Type::Record(recordDef) -> {
+          kind = 7;
+          definition = recordDef;
+        },
+        Analyzer::Type::Enum(enumDef) -> {
+          kind = 7;
+          definition = enumDef;
+        },
+        Analyzer::Type::Instance(instance) -> {
+          kind = 8;
+          definition = instance.definition;
+          parts = Mono::copyTypeIds(&instance.typeArguments);
+        },
+        Analyzer::Type::Alias(aliasDef) -> {
+          kind = 9;
+          definition = aliasDef;
+        },
+        // A type parameter never survives into a concrete instantiation key,
+        // so nothing a mangled name can say about it is ever compared.
+        Analyzer::Type::Param(_) -> {
+          kind = 10;
+        },
+        _ -> {
+          kind = 0;
+          simple = String::create(resolved.name());
+        },
+      };
+    }
+
+    if (kind == 1) {
+      let prefix: str = mutable ? "ptrmut" : "ptr";
+
+      return String::create(prefix).concat("_").concat(Mono::mangleType(defStore, typeStore, symbols, state, inner).toStr());
+    }
+
+    if (kind == 2) {
+      let prefix: str = mutable ? "refmut" : "ref";
+
+      return String::create(prefix).concat("_").concat(Mono::mangleType(defStore, typeStore, symbols, state, inner).toStr());
+    }
+
+    if (kind == 3) {
+      return String::create("slice_").concat(Mono::mangleType(defStore, typeStore, symbols, state, inner).toStr());
+    }
+
+    if (kind == 4) {
+      return String::create("arr")
+        .concat(arraySize)
+        .concat("_")
+        .concat(Mono::mangleType(defStore, typeStore, symbols, state, inner).toStr());
+    }
+
+    if (kind == 5) {
+      return String::create("tuple_").concat(Mono::joinMangledTypes(defStore, typeStore, symbols, state, &parts, "_").toStr());
+    }
+
+    if (kind == 6) {
+      return String::create("fn_")
+        .concat(Mono::joinMangledTypes(defStore, typeStore, symbols, state, &parts, "_").toStr())
+        .concat("_")
+        .concat(Mono::mangleType(defStore, typeStore, symbols, state, inner).toStr());
+    }
+
+    if (kind == 7) {
+      return Mono::mangleTypeDefinitionName(defStore, symbols, state, definition);
+    }
+
+    if (kind == 8) {
+      return Mono::mangleTypeDefinitionName(defStore, symbols, state, definition)
+        .concat("__")
+        .concat(Mono::joinMangledTypes(defStore, typeStore, symbols, state, &parts, "__").toStr());
+    }
+
+    if (kind == 9) {
+      let mut aliased: Option<Analyzer::TypeId> = Option::NONE;
+
+      if (let Option::SOME(aliasDefinition) = defStore.get(definition)) {
+        if (let Analyzer::Definition::TypeAlias(aliasWrapper) = aliasDefinition) {
+          aliased = Option::SOME(aliasWrapper.aliasedType);
+        }
+      }
+
+      if (let Option::SOME(target) = aliased) {
+        if (target.raw() != typeId.raw()) {
+          return Mono::mangleType(defStore, typeStore, symbols, state, target);
+        }
+      }
+
+      return Mono::mangleTypeDefinitionName(defStore, symbols, state, definition);
+    }
+
+    if (kind == 10) {
+      return String::create("param");
+    }
+
+    return simple;
+  }
+
+  function joinMangledTypes(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    state: &mut MonoState,
+    types: &Vector<Analyzer::TypeId>,
+    separator: str,
+  ): String {
+    let mut result: String = String::new();
+    let mut index: u64 = 0;
+
+    while (index < types.length()) {
+      if (let Option::SOME(typeId) = types.get(index)) {
+        if (index > 0) {
+          result = result.concat(separator);
+        }
+
+        result = result.concat(Mono::mangleType(defStore, typeStore, symbols, state, *typeId).toStr());
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
+  /// `Vector__i32`-style mangled name for one instantiation, byte for byte
+  /// what `Monomorphizer::mangle_name` writes: a method reached through a
+  /// generic owner is qualified by that owner (`Pair__i32__fold__i32`), so
+  /// two owners specialising the same method name stay distinct.
   function mangleName(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
+    state: &mut MonoState,
     key: &Mono::InstanceKey,
   ): String {
-    let mut baseName: String = String::create("anon");
+    let mut ownerId: Option<Analyzer::DefinitionId> = key.ownerDef;
+    let mut ownerArgs: Vector<Analyzer::TypeId> = Mono::copyTypeIds(&key.ownerArgs);
+    let mut methodArgs: Vector<Analyzer::TypeId> = Mono::copyTypeIds(&key.methodArgs);
 
-    if (let Option::SOME(definition) = defStore.get(key.primaryDef)) {
-      let nameSym: Analyzer::SymbolId = definition.name();
+    // `keyForCallee` leaves the method form behind whenever the method
+    // declares type parameters of its own, and packs the owner's arguments
+    // in front of the method's in one list. The owner still qualifies the
+    // name, so split that list back apart the way the key would have.
+    if (ownerId.isNone()) {
+      if (let Option::SOME(ownerCandidate) = Mono::methodOwnerOf(defStore, key.primaryDef)) {
+        let ownerParams: u64 = Mono::typeParamCountOf(defStore, ownerCandidate);
 
-      if (let Option::SOME(text) = symbols.resolve(nameSym)) {
-        baseName = String::create(text);
+        if (ownerParams > 0 && methodArgs.length() >= ownerParams) {
+          ownerId = Option::SOME(ownerCandidate);
+          ownerArgs = Mono::takeTypeIds(&methodArgs, 0, ownerParams);
+          methodArgs = Mono::takeTypeIds(&methodArgs, ownerParams, methodArgs.length());
+        }
       }
     }
 
-    let mut mangled: String = baseName;
+    if (let Option::SOME(owner) = ownerId) {
+      let mut mangled: String = Mono::mangleDefName(defStore, symbols, owner)
+        .concat("__")
+        .concat(Mono::joinMangledTypes(defStore, typeStore, symbols, state, &ownerArgs, "__").toStr())
+        .concat("__")
+        .concat(Mono::mangleDefName(defStore, symbols, key.primaryDef).toStr());
 
-    let mut ownerIndex: u64 = 0;
-    while (ownerIndex < key.ownerArgs.length()) {
-      if (let Option::SOME(argType) = key.ownerArgs.get(ownerIndex)) {
-        mangled = mangled.concat("__").concat(typeStore.nameOf(*argType).toStr());
+      if (methodArgs.length() > 0) {
+        mangled = mangled
+          .concat("__")
+          .concat(Mono::joinMangledTypes(defStore, typeStore, symbols, state, &methodArgs, "__").toStr());
       }
-      ownerIndex += 1;
+
+      return mangled;
     }
 
-    let mut methodIndex: u64 = 0;
-    while (methodIndex < key.methodArgs.length()) {
-      if (let Option::SOME(argType) = key.methodArgs.get(methodIndex)) {
-        mangled = mangled.concat("__").concat(typeStore.nameOf(*argType).toStr());
+    return Mono::mangleDefName(defStore, symbols, key.primaryDef)
+      .concat("__")
+      .concat(Mono::joinMangledTypes(defStore, typeStore, symbols, state, &methodArgs, "__").toStr());
+  }
+
+  /// The record, enum or trait `defId` is declared on, for a method.
+  function methodOwnerOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): Option<Analyzer::DefinitionId> {
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      if (let Analyzer::Definition::Method(methodDef) = definition) {
+        return Option::SOME(methodDef.owner);
       }
-      methodIndex += 1;
     }
 
-    return mangled;
+    return Option::NONE;
+  }
+
+  /// How many type parameters a record or enum declares; `0` for anything else.
+  function typeParamCountOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): u64 {
+    let mut count: u64 = 0;
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      match (definition) {
+        Analyzer::Definition::Record(recordDef) -> {
+          count = recordDef.typeParams.length();
+        },
+        Analyzer::Definition::Enum(enumDef) -> {
+          count = enumDef.typeParams.length();
+        },
+        _ -> {},
+      };
+    }
+
+    return count;
+  }
+
+  /// `source[start..end]` as a fresh vector.
+  function takeTypeIds(
+    source: &Vector<Analyzer::TypeId>,
+    start: u64,
+    end: u64,
+  ): Vector<Analyzer::TypeId> {
+    let mut result: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+    let mut index: u64 = start;
+
+    while (index < end && index < source.length()) {
+      if (let Option::SOME(id) = source.get(index)) {
+        result.push(*id);
+      }
+
+      index += 1;
+    }
+
+    return result;
   }
 
   /// The `Param`-symbol/argument table for one key: owner generics first,
@@ -601,7 +986,7 @@ export namespace Mono {
     state: &mut MonoState,
     key: &Mono::InstanceKey,
   ): Analyzer::DefinitionId {
-    let mangled: String = Mono::mangleName(defStore, typeStore, symbols, key);
+    let mangled: String = Mono::mangleName(defStore, typeStore, symbols, state, key);
     let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
     let nameSym: Analyzer::SymbolId = symbolsRef.intern(mangled.toStr());
 
@@ -968,7 +1353,7 @@ export namespace Mono {
       // The empty shell is pushed and cached before the fields fill in, so a
       // self-referential generic (a record whose field points back at its
       // own instantiation) hits the cache instead of recursing forever.
-      let mangled: String = Mono::mangleName(defStore, typeStore, symbols, &key);
+      let mangled: String = Mono::mangleName(defStore, typeStore, symbols, state, &key);
       let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
       let nameSym: Analyzer::SymbolId = symbolsRef.intern(mangled.toStr());
 
@@ -1789,6 +2174,8 @@ export namespace Mono {
             } else {
               typeArgs = Mono::copyTypeIds(&callNode.typeArgs);
             }
+          } else {
+            Mono::copyIfNonGeneric(defStore, typeStore, symbols, inputHir, outputHir, state, callNode.callee);
           }
 
           clonedKind = Hir::HirKind::Call(Hir::HirCall {
@@ -1873,6 +2260,10 @@ export namespace Mono {
             typeArgs = Mono::copyTypeIds(&methodNode.typeArgs);
           }
 
+          if (!rewritten) {
+            Mono::copyIfNonGeneric(defStore, typeStore, symbols, inputHir, outputHir, state, method);
+          }
+
           clonedKind = Hir::HirKind::MethodCall(Hir::HirMethodCall {
             receiver: receiver,
             method: method,
@@ -1901,6 +2292,17 @@ export namespace Mono {
           }
 
           let body: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, subst, closureNode.body);
+
+          // The thunk and the drop glue capture synthesized are ordinary
+          // non-generic functions nothing calls by name, so the reachable
+          // walk only finds them through the closure that owns them.
+          if (let Option::SOME(thunkId) = closureNode.thunkDef) {
+            Mono::copyIfNonGeneric(defStore, typeStore, symbols, inputHir, outputHir, state, thunkId);
+          }
+
+          if (let Option::SOME(dropId) = closureNode.dropDef) {
+            Mono::copyIfNonGeneric(defStore, typeStore, symbols, inputHir, outputHir, state, dropId);
+          }
 
           clonedKind = Hir::HirKind::Closure(Hir::HirClosure {
             params: params,
@@ -2356,6 +2758,157 @@ export namespace Mono {
   /// Monomorphization entry point: copies every non-generic body into a
   /// fresh store while rewriting generic calls to their concrete clones,
   /// then substitutes the pending clones' bodies to a fixpoint.
+  /// The definitions monomorphization starts from, mirroring the driver's
+  /// `collect_mono_roots`: the entry point, and every method declared on a
+  /// non-generic record or enum. Everything else is reached through them.
+  ///
+  /// One addition the reference compiler does not need: a function `@externName`
+  /// gives a fixed C symbol is called by name from generated C — the entry
+  /// wrapper calls `ignis_runtime_init` — and no Ignis call site names it. The
+  /// host builds the standard library in its own pass, where every function is
+  /// a root; the selfhost emits one translation unit, so the same functions
+  /// have to be rooted here or the link loses them.
+  function collectRoots(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+  ): Vector<Analyzer::DefinitionId> {
+    let mut roots: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut rawId: u64 = 0;
+
+    while (rawId < defStore.length()) {
+      let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+
+      let mut isEntryPoint: boolean = false;
+      let mut isPublicExtern: boolean = false;
+      let mut isCSymbol: boolean = false;
+      let mut ownsMethods: boolean = false;
+
+      if (let Option::SOME(definition) = defStore.get(defId)) {
+        match (definition) {
+          Analyzer::Definition::Function(functionDef) -> {
+            if (functionDef.isExtern) {
+              isPublicExtern = functionDef.visibility.equals(&Analyzer::Visibility::PUBLIC);
+            } else {
+              if (let Option::SOME(text) = symbols.resolve(functionDef.name)) {
+                isEntryPoint = String::create(text).equals("main");
+              }
+
+              if (functionDef.externName.isSome()) {
+                isCSymbol = true;
+              }
+            }
+          },
+          Analyzer::Definition::Record(recordDef) -> {
+            ownsMethods = recordDef.typeParams.length() == 0;
+          },
+          Analyzer::Definition::Enum(enumDef) -> {
+            ownsMethods = enumDef.typeParams.length() == 0;
+          },
+          _ -> {},
+        };
+      }
+
+      if (isEntryPoint || isPublicExtern || isCSymbol) {
+        roots.push(defId);
+      }
+
+      if (ownsMethods) {
+        let methods: Vector<Analyzer::DefinitionId> = defStore.methodsOwnedBy(defId);
+        let mut methodIndex: u64 = 0;
+
+        while (methodIndex < methods.length()) {
+          if (let Option::SOME(methodId) = methods.get(methodIndex)) {
+            roots.push(*methodId);
+          }
+
+          methodIndex += 1;
+        }
+      }
+
+      rawId += 1;
+    }
+
+    return roots;
+  }
+
+  /// Copy one non-generic definition's body into the output, following what
+  /// it reaches. The output body map doubles as the visited set, so a
+  /// recursive call finds the placeholder already in place and stops.
+  function copyIfNonGeneric(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    inputHir: &Hir::HirStore,
+    outputHir: &mut Hir::HirStore,
+    state: &mut MonoState,
+    defId: Analyzer::DefinitionId,
+  ): void {
+    if (outputHir.functionBodies.get(defId).isSome()) {
+      return;
+    }
+
+    let mut isCallable: boolean = false;
+    let mut ownsMethods: boolean = false;
+
+    if (let Option::SOME(definition) = defStore.get(defId)) {
+      match (definition) {
+        Analyzer::Definition::Function(functionDef) -> {
+          isCallable = functionDef.typeParams.length() == 0;
+        },
+        Analyzer::Definition::Method(methodDef) -> {
+          isCallable = methodDef.typeParams.length() == 0;
+        },
+        Analyzer::Definition::Record(recordDef) -> {
+          ownsMethods = recordDef.typeParams.length() == 0;
+        },
+        Analyzer::Definition::Enum(enumDef) -> {
+          ownsMethods = enumDef.typeParams.length() == 0;
+        },
+        _ -> {},
+      };
+    }
+
+    if (ownsMethods) {
+      let methods: Vector<Analyzer::DefinitionId> = defStore.methodsOwnedBy(defId);
+      let mut methodIndex: u64 = 0;
+
+      while (methodIndex < methods.length()) {
+        if (let Option::SOME(methodId) = methods.get(methodIndex)) {
+          Mono::copyIfNonGeneric(defStore, typeStore, symbols, inputHir, outputHir, state, *methodId);
+        }
+
+        methodIndex += 1;
+      }
+
+      return;
+    }
+
+    if (!isCallable) {
+      return;
+    }
+
+    if (let Option::SOME(methodOwner) = Mono::methodOwnerOf(defStore, defId)) {
+      if (Mono::typeParamCountOf(defStore, methodOwner) > 0) {
+        return;
+      }
+    }
+
+    if (let Option::SOME(bodyId) = inputHir.functionBodies.get(defId)) {
+      // The input body id stands in until the clone exists, so a body that
+      // calls itself finds the entry and does not re-enter.
+      outputHir.functionBodies.set(defId, bodyId);
+
+      let emptyTable: Mono::SubstTable = Mono::emptySubst();
+      let clonedBody: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, outputHir, state, &emptyTable, bodyId);
+
+      outputHir.functionBodies.set(defId, clonedBody);
+    }
+
+    if (!outputHir.containsItem(defId)) {
+      outputHir.items.push(defId);
+    }
+  }
+
   function run(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -2365,36 +2918,21 @@ export namespace Mono {
     let mut outputHir: Hir::HirStore = Hir::HirStore::init();
     let mut state: Mono::MonoState = Mono::MonoState::init();
 
+    // Only what the roots reach is emitted, the way `copy_nongeneric_items`
+    // does it: a private function nothing calls is dead in both compilers, and
+    // copying it here would leave the two whole-program listings — the emitted
+    // C, and `--dump-drop-schedule` — disagreeing over a set of functions that
+    // never runs.
     let emptyTable: Mono::SubstTable = Mono::emptySubst();
+    let roots: Vector<Analyzer::DefinitionId> = Mono::collectRoots(defStore, symbols);
+    let mut rootIndex: u64 = 0;
 
-    let mut itemIndex: u64 = 0;
-
-    while (itemIndex < inputHir.items.length()) {
-      let Option::SOME(itemDef) = inputHir.items.get(itemIndex) else {
-        itemIndex += 1;
-        continue;
-      };
-
-      if (Mono::defIsGeneric(defStore, *itemDef)) {
-        itemIndex += 1;
-        continue;
+    while (rootIndex < roots.length()) {
+      if (let Option::SOME(rootDef) = roots.get(rootIndex)) {
+        Mono::copyIfNonGeneric(defStore, typeStore, symbols, inputHir, &mut outputHir, &mut state, *rootDef);
       }
 
-      let Option::SOME(bodyId) = inputHir.functionBodies.get(*itemDef) else {
-        itemIndex += 1;
-        continue;
-      };
-
-      let clonedBody: Hir::HirId = Mono::cloneHir(defStore, typeStore, symbols, inputHir, &mut outputHir, &mut state, &emptyTable, bodyId);
-
-      let mut outputHirRef: &mut Hir::HirStore = &mut outputHir;
-      outputHirRef.functionBodies.set(*itemDef, clonedBody);
-
-      if (!outputHirRef.containsItem(*itemDef)) {
-        outputHirRef.items.push(*itemDef);
-      }
-
-      itemIndex += 1;
+      rootIndex += 1;
     }
 
     // A use of a module constant const-eval could not fold lowers its
