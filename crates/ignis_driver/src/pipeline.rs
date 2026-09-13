@@ -1344,7 +1344,10 @@ fn load_manifest(std_path: &Path) -> IgnisSTDManifest {
 
   std::fs::read_to_string(&manifest_path)
     .ok()
-    .and_then(|content| toml::from_str(&content).ok())
+    .and_then(|content| {
+      crate::project::warn_unknown_manifest_keys(&content, &manifest_path);
+      toml::from_str(&content).ok()
+    })
     .unwrap_or_default()
 }
 

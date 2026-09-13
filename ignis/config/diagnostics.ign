@@ -22,6 +22,7 @@ export namespace ConfigDiagnosticCode {
   const RESERVED_ALIAS: str = "C1005";
   const PATH_NOT_FOUND: str = "C1006";
   const MISSING_STD_MANIFEST: str = "C1007";
+  const UNKNOWN_KEY: str = "C1008";
 }
 
 export namespace ConfigDiagnostics {
@@ -106,6 +107,36 @@ export namespace ConfigDiagnostics {
     let targetText: String = targetPath.toString();
     diagnostic.addNote(`resolved path: ${targetText}`.toStr());
     return singleDiagnostic(diagnostic);
+  }
+
+  /// A key or table `ignis.toml` does not recognize. This is a warning, not an
+  /// error: an unknown key (a leftover `runtime_path`, a typo) is silently
+  /// ignored by the loader either way, so this only makes that visible instead
+  /// of also failing the build.
+  ///
+  /// `tableLabel` is the dotted path of the enclosing table, or "top-level"
+  /// for a key or table at the document root. `suggestion` names the closest
+  /// known key within edit distance 2, if any. Wording is shared byte-for-byte
+  /// with the host compiler's equivalent warning (`ignis_driver::project::unknown_keys`).
+  function unknownKey(
+    path: &Path::PathBuf,
+    tableLabel: str,
+    key: str,
+    suggestion: Option<String>,
+    start: u64,
+    end: u64
+  ): Diagnostic {
+    let message: String = match (suggestion) {
+      Option::SOME(name) -> `unknown key '${key}' in [${tableLabel}]; did you mean '${name}'?`,
+      Option::NONE -> `unknown key '${key}' in [${tableLabel}]`,
+    };
+
+    return Diagnostic::new(
+      Severity::WARNING,
+      ConfigDiagnosticCode::UNKNOWN_KEY,
+      message.toStr(),
+      configPathSpan(path, start, end),
+    );
   }
 
   function missingStdManifest(path: &Path::PathBuf, stdRoot: &Path::PathBuf): DiagnosticBag {

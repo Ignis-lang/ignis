@@ -73,6 +73,7 @@ impl CompilationContext {
 
     let manifest_path = Path::new(&config.std_path).join("manifest.toml");
     let text = std::fs::read_to_string(&manifest_path).ok()?;
+    crate::project::warn_unknown_manifest_keys(&text, &manifest_path);
     toml::from_str(&text).ok()
   }
 

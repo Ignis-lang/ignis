@@ -1,14 +1,15 @@
 import Env from "std::env";
 import Fs from "std::fs";
+import Io from "std::io";
 import Path from "std::path";
 import String from "std::string";
 import Test from "std::test";
-import Toml, TomlDocument, TomlValue, TomlValueKind from "std::toml";
+import Toml, TomlDocument, TomlTable, TomlValue, TomlValueKind from "std::toml";
 import TomlToken, TomlTokenKind from "std::toml::token";
 import Vector from "std::vector";
 
 import ConfigDiagnosticCode, ConfigDiagnostics from "./diagnostics";
-import DiagnosticBag from "@compiler::diagnostics";
+import DiagnosticBag, DiagnosticRenderer, SourceFile from "@compiler::diagnostics";
 
 const PROJECT_FILE: str = "ignis.toml";
 const DEFAULT_SOURCE_DIR: str = "src";
@@ -659,6 +660,421 @@ function requireStdManifest(project: ResolvedProject): Result<ResolvedProject, D
   return Result::OK(project);
 }
 
+/// Collects the Unicode scalar values of `text` in order.
+///
+/// Used so edit distance compares codepoints rather than bytes: a
+/// multi-byte UTF-8 scalar must count as one substitution/insertion/deletion,
+/// not as however many bytes it happens to encode to.
+function configCollectChars(text: str): Vector<char> {
+  let owned: String = String::create(text);
+  let mut characters: Vector<char> = Vector::new<char>();
+  let mut offset: u64 = 0;
+
+  while (offset < owned.length()) {
+    let mut endByte: u64 = offset;
+    let Option::SOME(character) = owned.charAt(offset, &mut endByte) else {
+      break;
+    };
+
+    characters.push(character);
+    offset = endByte;
+  }
+
+  return characters;
+}
+
+/// Reads one cell of a flattened Levenshtein DP table.
+function configEditDistanceCellAt(row: &Vector<u64>, index: u64): u64 {
+  return match (row.get(index)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> 0,
+  };
+}
+
+/// Levenshtein edit distance between two strings, compared codepoint by
+/// codepoint (not byte by byte), matching the host's
+/// `ignis_driver::project::unknown_keys::edit_distance`.
+function configEditDistance(a: str, b: str): u64 {
+  let left: Vector<char> = configCollectChars(a);
+  let right: Vector<char> = configCollectChars(b);
+  let n: u64 = left.length();
+  let m: u64 = right.length();
+  let width: u64 = m + 1;
+
+  let mut row: Vector<u64> = Vector::new<u64>((n + 1) * width);
+  let mut fillIndex: u64 = 0;
+  while (fillIndex < (n + 1) * width) {
+    row.push(0);
+    fillIndex += 1;
+  }
+
+  let mut i: u64 = 0;
+  while (i <= n) {
+    row.set(i * width, i);
+    i += 1;
+  }
+
+  let mut j: u64 = 0;
+  while (j <= m) {
+    row.set(j, j);
+    j += 1;
+  }
+
+  i = 1;
+  while (i <= n) {
+    j = 1;
+    while (j <= m) {
+      let leftChar: char = match (left.get(i - 1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> ' ',
+      };
+      let rightChar: char = match (right.get(j - 1)) {
+        Option::SOME(value) -> *value,
+        Option::NONE -> ' ',
+      };
+      let cost: u64 = leftChar == rightChar ? 0 : 1;
+
+      let deletion: u64 = configEditDistanceCellAt(&row, (i - 1) * width + j) + 1;
+      let insertion: u64 = configEditDistanceCellAt(&row, i * width + (j - 1)) + 1;
+      let substitution: u64 = configEditDistanceCellAt(&row, (i - 1) * width + (j - 1)) + cost;
+
+      let mut best: u64 = deletion;
+      if (insertion < best) {
+        best = insertion;
+      }
+      if (substitution < best) {
+        best = substitution;
+      }
+
+      row.set(i * width + j, best);
+      j += 1;
+    }
+    i += 1;
+  }
+
+  return configEditDistanceCellAt(&row, n * width + m);
+}
+
+/// Closest key to `key` among `known` within edit distance 2, if any.
+///
+/// Ties break on declaration order in `known` (first minimal-distance match
+/// wins), matching the host's `suggest`. Shared with `ignis/build/manifest.ign`
+/// so both loaders suggest identically.
+export function configSuggestKey(key: str, known: &Vector<String>): Option<String> {
+  let mut bestName: Option<String> = Option::NONE;
+  let mut bestDistance: u64 = 3;
+  let mut index: u64 = 0;
+
+  while (index < known.length()) {
+    let Option::SOME(candidate) = known.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    let distance: u64 = configEditDistance(key, candidate.toStr());
+
+    if (distance <= 2 && distance < bestDistance) {
+      bestDistance = distance;
+      bestName = Option::SOME(candidate.clone());
+    }
+
+    index += 1;
+  }
+
+  return bestName;
+}
+
+/// A pending "unknown key" warning, not yet turned into a `Diagnostic`.
+///
+/// `Diagnostic` has no `clone()` and holds `@implements(Drop)` fields, so it
+/// cannot be safely reordered by a generic swap-based sort (see
+/// `Sort::stableVector`'s own caveat about non-`Copy` moves in
+/// `std/sort/mod.ign`). Collecting into this plain-data record instead, and
+/// sorting *that* clone-based (like `Sort::stableStrings` does for owned
+/// `String`s), lets every warning be found in tree order and then reordered
+/// into file order before any `Diagnostic` is built.
+record ProjectUnknownKeyWarning {
+  public start: u64;
+  public end: u64;
+  public tableLabel: String;
+  public key: String;
+  public suggestion: Option<String>;
+
+  public clone(&self): ProjectUnknownKeyWarning {
+    return ProjectUnknownKeyWarning {
+      start: self.start,
+      end: self.end,
+      tableLabel: self.tableLabel.clone(),
+      key: self.key.clone(),
+      suggestion: cloneOptionString(&self.suggestion),
+    };
+  }
+}
+
+/// Stable insertion sort of pending warnings by source position.
+///
+/// Mirrors `Sort::stableStrings`'s clone-based `get`/`set` shifting rather
+/// than a raw indexed move, for the same reason: `ProjectUnknownKeyWarning`
+/// owns `String`/`Option<String>` fields.
+function sortProjectUnknownKeyWarnings(values: &mut Vector<ProjectUnknownKeyWarning>): void {
+  let mut valuesRef: &mut Vector<ProjectUnknownKeyWarning> = values;
+  let mut index: u64 = 1;
+
+  while (index < valuesRef.length()) {
+    let Option::SOME(currentRef) = valuesRef.get(index) else {
+      break;
+    };
+    let current: ProjectUnknownKeyWarning = currentRef.clone();
+    let mut scan: i64 = index as i64 - 1;
+
+    while (scan >= 0) {
+      let Option::SOME(existing) = valuesRef.get(scan as u64) else {
+        break;
+      };
+
+      if (existing.start <= current.start) {
+        break;
+      }
+
+      let shifted: ProjectUnknownKeyWarning = existing.clone();
+      if (!valuesRef.set((scan + 1) as u64, shifted)) {
+        break;
+      }
+      scan -= 1;
+    }
+
+    let _inserted: boolean = valuesRef.set((scan + 1) as u64, current);
+    index += 1;
+  }
+}
+
+/// Records one warning per key in `table` that is not in `known`, labeling
+/// the table as `tableLabel`. Collected, not yet a `Diagnostic`: see
+/// `ProjectUnknownKeyWarning`.
+function unknownKeysInTable(
+  table: &TomlTable,
+  known: &Vector<String>,
+  tableLabel: str,
+  out: &mut Vector<ProjectUnknownKeyWarning>,
+): void {
+  let mut outRef: &mut Vector<ProjectUnknownKeyWarning> = out;
+  let mut index: u64 = 0;
+
+  while (index < table.length()) {
+    let Option::SOME(entry) = table.entryAt(index) else {
+      index += 1;
+      continue;
+    };
+
+    let mut isKnown: boolean = false;
+    let mut knownIndex: u64 = 0;
+
+    while (knownIndex < known.length()) {
+      let Option::SOME(candidate) = known.get(knownIndex) else {
+        knownIndex += 1;
+        continue;
+      };
+
+      if (candidate.equals(entry.key)) {
+        isKnown = true;
+      }
+
+      knownIndex += 1;
+    }
+
+    if (!isKnown) {
+      let suggestion: Option<String> = configSuggestKey(entry.key, known);
+      outRef.push(ProjectUnknownKeyWarning {
+        start: entry.keySpan.start,
+        end: entry.keySpan.end,
+        tableLabel: String::create(tableLabel),
+        key: String::create(entry.key),
+        suggestion: suggestion,
+      });
+    }
+
+    index += 1;
+  }
+}
+
+function knownPackageKeys(): Vector<String> {
+  let mut keys: Vector<String> = Vector::new<String>();
+  keys.push(String::create("name"));
+  keys.push(String::create("version"));
+  keys.push(String::create("authors"));
+  keys.push(String::create("description"));
+  keys.push(String::create("keywords"));
+  keys.push(String::create("license"));
+  keys.push(String::create("repository"));
+  return keys;
+}
+
+function knownIgnisKeys(): Vector<String> {
+  let mut keys: Vector<String> = Vector::new<String>();
+  keys.push(String::create("std"));
+  keys.push(String::create("std_path"));
+  return keys;
+}
+
+function knownBuildKeys(): Vector<String> {
+  let mut keys: Vector<String> = Vector::new<String>();
+  keys.push(String::create("bin"));
+  keys.push(String::create("source_dir"));
+  keys.push(String::create("entry"));
+  keys.push(String::create("out_dir"));
+  keys.push(String::create("opt_level"));
+  keys.push(String::create("debug"));
+  keys.push(String::create("target"));
+  keys.push(String::create("target_triple"));
+  keys.push(String::create("known_features"));
+  keys.push(String::create("default_features"));
+  keys.push(String::create("cc"));
+  keys.push(String::create("cflags"));
+  keys.push(String::create("emit"));
+  return keys;
+}
+
+function knownTestKeys(): Vector<String> {
+  let mut keys: Vector<String> = Vector::new<String>();
+  keys.push(String::create("fixtures"));
+  return keys;
+}
+
+function knownTopLevelKeys(): Vector<String> {
+  let mut keys: Vector<String> = Vector::new<String>();
+  keys.push(String::create("package"));
+  keys.push(String::create("ignis"));
+  keys.push(String::create("build"));
+  keys.push(String::create("test"));
+  keys.push(String::create("aliases"));
+  return keys;
+}
+
+/// Warns on every key or table `ignis.toml` does not recognize.
+///
+/// This mirrors the host's schema in `ignis_driver::project::unknown_keys`
+/// exactly: the same tables, the same keys, the same wording. `aliases` is a
+/// free-form map (alias name -> path), so its keys are never checked.
+export function checkUnknownProjectKeys(
+  document: &TomlDocument,
+  configPath: &Path::PathBuf
+): DiagnosticBag {
+  let mut pending: Vector<ProjectUnknownKeyWarning> = Vector::new<ProjectUnknownKeyWarning>();
+  let root: TomlTable = document.root();
+  let topLevel: Vector<String> = knownTopLevelKeys();
+
+  let mut index: u64 = 0;
+  while (index < root.length()) {
+    let Option::SOME(entry) = root.entryAt(index) else {
+      index += 1;
+      continue;
+    };
+
+    let mut matched: boolean = false;
+    let mut topLevelIndex: u64 = 0;
+    while (topLevelIndex < topLevel.length()) {
+      let Option::SOME(candidate) = topLevel.get(topLevelIndex) else {
+        topLevelIndex += 1;
+        continue;
+      };
+
+      if (candidate.equals(entry.key)) {
+        matched = true;
+      }
+
+      topLevelIndex += 1;
+    }
+
+    if (!matched) {
+      let suggestion: Option<String> = configSuggestKey(entry.key, &topLevel);
+      pending.push(ProjectUnknownKeyWarning {
+        start: entry.keySpan.start,
+        end: entry.keySpan.end,
+        tableLabel: String::create("top-level"),
+        key: String::create(entry.key),
+        suggestion: suggestion,
+      });
+      index += 1;
+      continue;
+    }
+
+    let keyName: String = String::create(entry.key);
+
+    if (keyName.equals("package")) {
+      if (let Option::SOME(table) = entry.value.asTable()) {
+        let keys: Vector<String> = knownPackageKeys();
+        unknownKeysInTable(&table, &keys, "package", &mut pending);
+      }
+    } else if (keyName.equals("ignis")) {
+      if (let Option::SOME(table) = entry.value.asTable()) {
+        let keys: Vector<String> = knownIgnisKeys();
+        unknownKeysInTable(&table, &keys, "ignis", &mut pending);
+      }
+    } else if (keyName.equals("build")) {
+      if (let Option::SOME(table) = entry.value.asTable()) {
+        let keys: Vector<String> = knownBuildKeys();
+        unknownKeysInTable(&table, &keys, "build", &mut pending);
+      }
+    } else if (keyName.equals("test")) {
+      if (let Option::SOME(table) = entry.value.asTable()) {
+        let keys: Vector<String> = knownTestKeys();
+        unknownKeysInTable(&table, &keys, "test", &mut pending);
+      }
+    }
+
+    index += 1;
+  }
+
+  // A reopened table (e.g. `[package.extra]` appearing after `[build]`) means
+  // recursing into a root entry's subtree does not visit warnings in file
+  // order: `package`'s own header comes first, but a key nested under a
+  // later reopening of it can sit after `build`'s content in the source.
+  // Sorting by position here, once, after the full walk, is what actually
+  // guarantees file order, matching the host's `diagnostics.sort_by_key`.
+  sortProjectUnknownKeyWarnings(&mut pending);
+
+  let mut warnings: DiagnosticBag = DiagnosticBag::init();
+  let mut warningIndex: u64 = 0;
+
+  while (warningIndex < pending.length()) {
+    let Option::SOME(warning) = pending.get(warningIndex) else {
+      warningIndex += 1;
+      continue;
+    };
+
+    let suggestion: Option<String> = cloneOptionString(&warning.suggestion);
+    warnings.push(ConfigDiagnostics::unknownKey(
+      configPath,
+      warning.tableLabel.toStr(),
+      warning.key.toStr(),
+      suggestion,
+      warning.start,
+      warning.end,
+    ));
+    warningIndex += 1;
+  }
+
+  return warnings;
+}
+
+/// Renders `warnings` through the normal diagnostics renderer and prints them
+/// to stderr. Never fails the load: an unknown key is a warning, not an
+/// error.
+function reportUnknownKeyWarnings(
+  warnings: &DiagnosticBag,
+  configPath: &Path::PathBuf,
+  source: &String
+): void {
+  if (warnings.isEmpty()) {
+    return;
+  }
+
+  let pathText: String = configPath.toString();
+  let sourceFile: SourceFile = SourceFile::create(pathText.toStr(), source.toStr());
+  let rendered: String = DiagnosticRenderer::renderBag(warnings, &sourceFile, true);
+  Io::eprintln(rendered);
+}
+
 export namespace Config {
   function findProjectFile(startPath: &Path::PathBuf): Option<Path::PathBuf> {
     let mut current: Path::PathBuf = startPath.clone();
@@ -714,6 +1130,9 @@ export namespace Config {
         return Result::ERROR(ConfigDiagnostics::malformedToml(configPath, error.message, error.span.start, error.span.end));
       },
     };
+
+    let unknownKeyWarnings: DiagnosticBag = checkUnknownProjectKeys(&document, configPath);
+    reportUnknownKeyWarnings(&unknownKeyWarnings, configPath, &source);
 
     let Option::SOME(rawRoot) = configPath.parent() else {
       return Result::ERROR(ConfigDiagnostics::pathNotFound(configPath, "project.root", configPath));

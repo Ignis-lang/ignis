@@ -2,8 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
+use ignis_type::file::SourceMap;
+
 use crate::project::config::ProjectToml;
 use crate::project::errors::ProjectError;
+use crate::project::unknown_keys::{check_unknown_keys, PROJECT_SCHEMA, PROJECT_UNKNOWN_KEY_CODE};
 
 /// The project manifest filename.
 pub const PROJECT_FILE: &str = "ignis.toml";
@@ -46,10 +49,52 @@ pub fn load_project_toml(toml_path: &Path) -> Result<ProjectToml, ProjectError> 
     source: e,
   })?;
 
-  toml::from_str(&content).map_err(|e| ProjectError::TomlParseError {
+  let parsed: ProjectToml = toml::from_str(&content).map_err(|e| ProjectError::TomlParseError {
     path: toml_path.to_path_buf(),
     message: e.to_string(),
-  })
+  })?;
+
+  warn_unknown_keys(&content, toml_path);
+
+  Ok(parsed)
+}
+
+/// Warns on stderr for every key or table `ignis.toml` does not recognize.
+///
+/// An unknown key is silently ignored by `serde`, so a stale or misspelled
+/// setting (e.g. a leftover `runtime_path`) would otherwise have no effect
+/// and no visible signal. This never fails the load: unknown keys are a
+/// warning, not an error.
+fn warn_unknown_keys(
+  content: &str,
+  toml_path: &Path,
+) {
+  let Ok(value) = toml::from_str::<toml::Value>(content) else {
+    return;
+  };
+
+  let mut sm = SourceMap::new();
+  let file = sm.add_file(toml_path.to_path_buf(), content.to_string());
+
+  let mut diagnostics = Vec::new();
+  check_unknown_keys(
+    &value,
+    &PROJECT_SCHEMA,
+    "",
+    content,
+    file,
+    PROJECT_UNKNOWN_KEY_CODE,
+    &mut diagnostics,
+  );
+
+  // `toml::Value`'s table is a `BTreeMap` (alphabetical by key), so a walk
+  // order that followed it directly would warn out of file order. The
+  // selfhost's hand-rolled loaders walk their tables in source order instead,
+  // so both compilers are brought back in line here by sorting on the
+  // (already-computed) source position of each warning.
+  diagnostics.sort_by_key(|diagnostic| diagnostic.primary_span.start);
+
+  ignis_diagnostics::render_batch_to_stderr(&diagnostics, &sm);
 }
 
 #[cfg(test)]
