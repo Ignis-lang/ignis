@@ -841,15 +841,10 @@ function compileDiscovered(
       &mut programHir,
     );
 
-    let mut captureDiagnosticIndex: u64 = 0;
-
-    while (captureDiagnosticIndex < moduleCaptureDiagnostics.length()) {
-      if (let Option::SOME(diagnostic) = moduleCaptureDiagnostics.get(captureDiagnosticIndex)) {
-        captureDiagnostics.push(*diagnostic);
-      }
-
-      captureDiagnosticIndex += 1;
-    }
+    // The module bag owns its diagnostics and frees them when this iteration
+    // ends, so the program bag needs its own copy of each one rather than a
+    // shallow duplicate of a value that is about to be dropped.
+    Analyzer::appendDiagnostics(&mut captureDiagnostics, &moduleCaptureDiagnostics);
 
     let mut nodeIndex: u64 = moduleNodeStart;
     while (nodeIndex < programHir.nodes.length()) {
