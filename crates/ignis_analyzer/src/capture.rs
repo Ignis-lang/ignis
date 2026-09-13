@@ -465,13 +465,24 @@ fn collect_closures_bottom_up(
   let mut result = Vec::new();
   let mut visited = HashSet::new();
 
-  for (&def_id, &body_id) in &hir.function_bodies {
+  // Both maps are `HashMap`s, so their iteration order varies between runs of
+  // the same binary. The visit order decides `closure_index`, which names the
+  // synthesized thunks (`__closure_thunk_N`), so it has to be sorted: an
+  // unsorted walk makes the emitted C — and gate G7's drop-schedule dump —
+  // differ from one run to the next.
+  let mut bodies: Vec<(DefinitionId, HIRId)> = hir.function_bodies.iter().map(|(&k, &v)| (k, v)).collect();
+  bodies.sort_by_key(|(def_id, _)| def_id.index());
+
+  for (def_id, body_id) in bodies {
     let owner_module = defs.get(&def_id).owner_module;
     collect_closures_postorder(hir, body_id, owner_module, &mut result, &mut visited);
   }
 
   // Also scan module-level variable/constant init expressions (e.g. `const f = lambda`).
-  for (&def_id, &init_id) in &hir.variables_inits {
+  let mut inits: Vec<(DefinitionId, HIRId)> = hir.variables_inits.iter().map(|(&k, &v)| (k, v)).collect();
+  inits.sort_by_key(|(def_id, _)| def_id.index());
+
+  for (def_id, init_id) in inits {
     let owner_module = defs.get(&def_id).owner_module;
     collect_closures_postorder(hir, init_id, owner_module, &mut result, &mut visited);
   }

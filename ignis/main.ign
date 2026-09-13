@@ -802,6 +802,7 @@ function compileDiscovered(
     }
   }
 
+  let mut captureDiagnostics: DiagnosticBag = DiagnosticBag::init();
   let mut loweredModules: u64 = 0;
   let mut hirErrorNodes: u64 = 0;
   let mut hirNodes: u64 = 0;
@@ -829,6 +830,22 @@ function compileDiscovered(
       &mut programHir,
     );
 
+    // Capture analysis runs per module, as it does in the reference compiler,
+    // which analyzes one module at a time: the counter behind
+    // `__closure_thunk_N` restarts with each module, and a thunk's name is
+    // part of what gate G7 compares.
+    let moduleCaptureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(
+      &mut defStore,
+      &mut typeStore,
+      &mut symbols,
+      &mut programHir,
+    );
+
+    // The module bag owns its diagnostics and frees them when this iteration
+    // ends, so the program bag needs its own copy of each one rather than a
+    // shallow duplicate of a value that is about to be dropped.
+    Analyzer::appendDiagnostics(&mut captureDiagnostics, &moduleCaptureDiagnostics);
+
     let mut nodeIndex: u64 = moduleNodeStart;
     while (nodeIndex < programHir.nodes.length()) {
       if (let Option::SOME(node) = programHir.nodes.get(nodeIndex)) {
@@ -845,16 +862,6 @@ function compileDiscovered(
     lowerIndex += 1;
   }
 
-  // Closures reach LIR with an environment layout and a thunk, so capture
-  // analysis has to run over the whole program before monomorphization
-  // clones any body.
-  let captureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(
-    &mut defStore,
-    &mut typeStore,
-    &mut symbols,
-    &mut programHir,
-  );
-
   let captureErrors: u64 = countBySeverity(&captureDiagnostics, Severity::ERROR);
   let captureWarnings: u64 = countBySeverity(&captureDiagnostics, Severity::WARNING);
 
@@ -866,7 +873,29 @@ function compileDiscovered(
     renderBagToStderr(&captureDiagnostics, file);
   }
 
-  let monoResult: Mono::MonoOutput = Mono::run(&mut defStore, &mut typeStore, &mut symbols, &programHir);
+  // A `@test` function is reached from the harness translation unit and from
+  // nowhere else, so monomorphization has to be told about it: the reachable
+  // set would otherwise drop every test and the harness would link against
+  // symbols the program unit never emitted.
+  let mut testRoots: Vector<u32> = Vector::new<u32>();
+  let mut testRootIndex: u64 = 0;
+
+  while (testRootIndex < tests.length()) {
+    if (let Option::SOME(testCase) = tests.get(testRootIndex)) {
+      testRoots.push(testCase.defIdRaw);
+    }
+
+    testRootIndex += 1;
+  }
+
+  let monoResult: Mono::MonoOutput = Mono::runWithRoots(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &programHir,
+    exportAll,
+    &testRoots,
+  );
   let monoGenericNodes: u64 = Mono::countRemainingGenerics(&mut typeStore, &monoResult.hir);
 
   if (!quiet) {
