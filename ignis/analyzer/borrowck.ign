@@ -1441,14 +1441,26 @@ export namespace Borrowck {
 
   // --- manual drop queries -----------------------------------------------------------
 
+  /// Whether `name` is the monomorphized spelling of a `drop` method, which
+  /// `Mono::mangleName` writes as `Owner__args__drop`.
+  function nameEndsWithDrop(name: &String): boolean {
+    let suffix: String = String::create("__drop");
+
+    if (name.length() < suffix.length()) {
+      return false;
+    }
+
+    let tail: String = name.substringBytes(name.length() - suffix.length(), name.length());
+
+    return tail.equals(suffix.toStr());
+  }
+
   /// Whether `methodDefId` is the `drop` method of a type that declares
   /// `@implements(Drop)`. Mirrors `is_drop_method`, including its allowance for
-  /// the monomorphized spelling of the name: the oracle mangles a method as
-  /// `Owner__args__drop`, so it tests a `__drop` suffix, while `mangleName`
-  /// here mangles the same method as `drop__args`, so the selfhost tests the
-  /// matching `drop__` prefix. Without it a `.drop()` on any generic receiver
-  /// reads as an ordinary call and the receiver stays scheduled for a second,
-  /// automatic teardown.
+  /// the monomorphized spelling of the name: both compilers mangle the method
+  /// as `Owner__args__drop`, so both test a `__drop` suffix. Without it a
+  /// `.drop()` on any generic receiver reads as an ordinary call and the
+  /// receiver stays scheduled for a second, automatic teardown.
   function isDropMethod(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
@@ -1479,7 +1491,10 @@ export namespace Borrowck {
     if (let Option::SOME(text) = symbols.resolve(name)) {
       let spelled: String = String::create(text);
 
-      named = spelled.equals("drop") || spelled.startsWith("drop__");
+      // A specialization is named after its owner first (`Rc__i32__drop`), so
+      // the mangled form is recognised by its suffix — the same test
+      // `ownership_hir` makes.
+      named = spelled.equals("drop") || Borrowck::nameEndsWithDrop(&spelled);
     }
 
     if (!named) {

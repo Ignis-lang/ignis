@@ -292,12 +292,12 @@ function codegenEmitsStaticMutFieldsAsWritableGlobals(): void {
 @test
 function codegenDropsAMonomorphizedNominal(): void {
   let mut emission: CodegenEmission = codegenEmit(
-    "@implements(Drop)\nrecord Box<T> {\n  public value: T;\n\n  public static create(value: T): Box<T> {\n    return Box { value: value };\n  }\n\n  public drop(&mut self): void {\n    return;\n  }\n}\n\nfunction useBox(): i32 {\n  let b: Box<i32> = Box::create<i32>(7);\n\n  return b.value;\n}\n",
+    "@implements(Drop)\nrecord Box<T> {\n  public value: T;\n\n  public static create(value: T): Box<T> {\n    return Box { value: value };\n  }\n\n  public drop(&mut self): void {\n    return;\n  }\n}\n\nfunction main(): i32 {\n  let b: Box<i32> = Box::create<i32>(7);\n\n  return b.value;\n}\n",
   );
 
-  Test::assert(codegenContains(&emission.source, "void drop__i32_"));
+  Test::assert(codegenContains(&emission.source, "void Box__i32__drop_"));
 
-  let Option::SOME(dropName) = codegenMangledMethodStartingWith(&mut emission, "drop__") else {
+  let Option::SOME(dropName) = codegenMangledMethodStartingWith(&mut emission, "Box__i32__drop") else {
     @panic("monomorphization produced no specialized drop method");
   };
 
