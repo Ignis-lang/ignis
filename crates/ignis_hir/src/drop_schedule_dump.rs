@@ -65,15 +65,14 @@
 //! the front end had to hand and the two compilers do not agree on that choice. The
 //! closure expression is the same source construct in both.
 //!
-//! # Residue: what the renderer cannot normalize
+//! # Names are not normalized here
 //!
-//! Monomorphized names are mangled by each compiler's monomorphizer and reach the renderer
-//! already flattened into one symbol, so no rendering rule can reconcile them: the host
-//! qualifies a specialized method by its owner (`Pair__i32__fold__i32`) where the selfhost
-//! does not (`fold__i32__i32`), and the selfhost still prints a placeholder
-//! (`total__<record:DefId(1679)>`) where the host prints the record's name. Making those
-//! agree means changing what the monomorphizers write, not what this file prints, so gate
-//! G7 reports them rather than hiding them.
+//! Monomorphized and synthesized names are written by each compiler's monomorphizer and
+//! capture pass and reach the renderer already flattened into one symbol, so no rendering
+//! rule can reconcile them. The two now write the same names — a specialized method is
+//! qualified by its owner (`Pair__i32__fold__i32`) in both, and a synthesized thunk is
+//! numbered per module in both — and gate G7 reports any name that drifts apart again
+//! rather than hiding it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write;

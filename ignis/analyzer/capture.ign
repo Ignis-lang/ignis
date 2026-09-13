@@ -651,10 +651,17 @@ export namespace Capture {
 
     match (&node.kind) {
       Hir::HirKind::Closure(closureNode) -> {
+        let alreadyThunked: boolean = closureNode.thunkDef.isSome();
+
         Capture::collectClosuresPostorder(hir, closureNode.body, result, visited);
 
-        let mut resultRef: &mut Vector<Hir::HirId> = result;
-        resultRef.push(hirId);
+        // A closure that already carries its thunk was handled by an earlier
+        // module's pass; listing it again would renumber the thunks this one
+        // synthesizes.
+        if (!alreadyThunked) {
+          let mut resultRef: &mut Vector<Hir::HirId> = result;
+          resultRef.push(hirId);
+        }
       },
       Hir::HirKind::Block(blockNode) -> {
         Capture::collectClosuresPostorderList(hir, result, visited, &blockNode.statements);

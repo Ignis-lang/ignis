@@ -91,7 +91,7 @@ function monoRender(source: str): String {
 @test
 function monoResolvesBuiltinEqToRecordMethod(): void {
   let rendered: String = monoRender(
-    "@implements(Eq)\n@implements(Copy)\nrecord Point {\n  public x: i32;\n\n  public equals(&self, other: &Point): boolean {\n    return self.x == other.x;\n  }\n}\n\nfunction samePoint(a: Point, b: Point): boolean {\n  return @eq<Point>(a, b);\n}\n",
+    "@implements(Eq)\n@implements(Copy)\nrecord Point {\n  public x: i32;\n\n  public equals(&self, other: &Point): boolean {\n    return self.x == other.x;\n  }\n}\n\nfunction samePoint(a: Point, b: Point): boolean {\n  return @eq<Point>(a, b);\n}\n\nfunction main(): i32 {\n  return samePoint(Point { x: 1 }, Point { x: 2 }) ? 1 : 0;\n}\n",
   );
 
   Test::assert(monoContains(&rendered, "BuiltinEq"));
@@ -102,7 +102,7 @@ function monoResolvesBuiltinEqToRecordMethod(): void {
 @test
 function monoLeavesBuiltinEqPendingWithoutEqualsMethod(): void {
   let rendered: String = monoRender(
-    "@implements(Copy)\nrecord Plain {\n  public x: i32;\n}\n\nfunction samePlain(a: Plain, b: Plain): boolean {\n  return @eq<Plain>(a, b);\n}\n",
+    "@implements(Copy)\nrecord Plain {\n  public x: i32;\n}\n\nfunction samePlain(a: Plain, b: Plain): boolean {\n  return @eq<Plain>(a, b);\n}\n\nfunction main(): i32 {\n  return samePlain(Plain { x: 1 }, Plain { x: 2 }) ? 1 : 0;\n}\n",
   );
 
   Test::assert(monoContains(&rendered, "BuiltinEq"));
@@ -112,7 +112,7 @@ function monoLeavesBuiltinEqPendingWithoutEqualsMethod(): void {
 @test
 function monoLeavesBuiltinEqPendingWithoutEqTrait(): void {
   let rendered: String = monoRender(
-    "@implements(Copy)\nrecord Loose {\n  public x: i32;\n\n  public equals(&self, other: &Loose): boolean {\n    return self.x == other.x;\n  }\n}\n\nfunction sameLoose(a: Loose, b: Loose): boolean {\n  return @eq<Loose>(a, b);\n}\n",
+    "@implements(Copy)\nrecord Loose {\n  public x: i32;\n\n  public equals(&self, other: &Loose): boolean {\n    return self.x == other.x;\n  }\n}\n\nfunction sameLoose(a: Loose, b: Loose): boolean {\n  return @eq<Loose>(a, b);\n}\n\nfunction main(): i32 {\n  return sameLoose(Loose { x: 1 }, Loose { x: 2 }) ? 1 : 0;\n}\n",
   );
 
   Test::assert(monoContains(&rendered, "BuiltinEq"));
@@ -372,7 +372,7 @@ function monoSpecializesTheDropMethodOfAnInstantiatedNominal(): void {
     @panic("monomorphization produced no Box<i32> instantiation");
   };
 
-  let Option::SOME(dropId) = monoDefNamed(&mut run, "drop__i32") else {
+  let Option::SOME(dropId) = monoDefNamed(&mut run, "Box__i32__drop") else {
     @panic("monomorphization specialized no drop method");
   };
 
