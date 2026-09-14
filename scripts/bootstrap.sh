@@ -75,10 +75,20 @@ Commands:
   gate-g3-host     Run only the host half of G3 and keep its log and exit status.
   gate-g3-compare  Compare the two G3 logs and write gates/G3.json.
   gate-g3-stage1   G3 run against stage1 instead of stage2 -> gates/G3-STAGE1.json
-                   (ci.yml's PR-only check; the promotion ladder still covers stage2).
+                   (ci.yml's PR-only check; the promotion ladder still covers
+                   stage2). Only runs the stage1 half and the compare: pass
+                   the host half's exit status and log to gate-g3-record-host
+                   instead of re-running the host suite. A later local
+                   \`report\` lists these as unscored G3-STAGE1/G5-STAGE1 rows;
+                   they never affect the \`candidate\` verdict.
+  gate-g3-record-host <stage> <exit-status> <log-path>
+                   Record a host run captured elsewhere (e.g. ci.yml's own
+                   "Run the selfhost test suite" step) as the host half of
+                   G3 for <stage>, instead of running the host suite again.
   gate-g5  Run the host error corpus through stage2 and write gates/G5.json.
   gate-g5-stage1   G5 run against stage1 instead of stage2 -> gates/G5-STAGE1.json
-                   (ci.yml's PR-only check; the promotion ladder still covers stage2).
+                   (ci.yml's PR-only check; the promotion ladder still covers
+                   stage2). Same unscored-row note as gate-g3-stage1 above.
   gate-g6  Compare stage2's parse verdicts with the host's and write gates/G6.json.
   gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
   gate-g7  Diff stage2's drop schedules against the host's -> gates/G7.json (informational).
@@ -613,7 +623,7 @@ run_gate_g3_host_for() {
 
   if [[ -z "$host_bin" ]]; then
     write_gate "$gate_id" fail "host compiler not found: ${STAGE0}" \
-      "$(json_object stage2_log "$(gate_g3_log "$stage" "$stage")" host_log "$log")"
+      "$(json_object "${stage}_log" "$(gate_g3_log "$stage" "$stage")" host_log "$log")"
     return 0
   fi
 
@@ -631,6 +641,23 @@ run_gate_g3_host_for() {
 }
 
 run_gate_g3_host() { run_gate_g3_host_for stage2 G3; }
+
+# Record a host run captured elsewhere instead of running the host suite a
+# second time. ci.yml's PR-only `gate-g3-stage1` used to call
+# `run_gate_g3_host_for` directly, but that re-runs `<host> test` byte-for-byte
+# identically to the job's own "Run the selfhost test suite" step a few
+# minutes earlier — this lets that step's own run feed the comparison instead.
+#
+#   $1  stage whose artifact directory this host run is paired with
+#   $2  the host run's exit status
+#   $3  path to the host run's already-captured log
+run_gate_g3_record_host() {
+  local stage="$1" status="$2" log="$3"
+  mkdir -p "$(gate_g3_dir "$stage")" "$GATES_DIR"
+  [[ "$log" -ef "$(gate_g3_log "$stage" host)" ]] || cp "$log" "$(gate_g3_log "$stage" host)"
+  write_gate_g3_status "$stage" host "$status"
+  info "gate-g3: recorded a host run that exited ${status} -> $(gate_g3_log "$stage" host)"
+}
 
 # Compare a built stage's run with the host's and write the gate result.
 #
@@ -663,7 +690,7 @@ run_gate_g3_compare_for() {
     fi
 
     write_gate "$gate_id" fail "the selfhost test runs left nothing to compare" \
-      "$(json_object stage2_log "$stage_log" host_log "$host_log" missing "${missing[*]}")"
+      "$(json_object "${stage}_log" "$stage_log" host_log "$host_log" missing "${missing[*]}")"
     return 0
   fi
 
@@ -709,9 +736,12 @@ run_gate_g3() {
 # until the nightly ladder ran. Kept out of `run_gate_g3`/`run_gates` because
 # the nightly ladder already covers stage2 through the promotion gates; this
 # only needs to run once, on the cheaper stage1, before a PR merges.
+#
+# No host half here: ci.yml already runs `<host> test` in its own "Run the
+# selfhost test suite" step and feeds that run into this comparison via
+# `gate-g3-record-host`, rather than paying for the same suite twice.
 run_gate_g3_stage1() {
-  run_gate_g3_stage stage1 || info "gate-g3-stage1: the stage1 run exited non-zero, continuing"
-  run_gate_g3_host_for stage1 G3-STAGE1 || info "gate-g3-stage1: the host run exited non-zero, continuing"
+  run_gate_g3_stage stage1
   run_gate_g3_compare_for stage1 G3-STAGE1 stage1
 }
 
@@ -1061,6 +1091,7 @@ main() {
     gate-g3-host) run_gate_g3_host ;;
     gate-g3-compare) run_gate_g3_compare ;;
     gate-g3-stage1) run_gate_g3_stage1 ;;
+    gate-g3-record-host) run_gate_g3_record_host "${2-}" "${3-}" "${4-}" ;;
     gates) run_gates ;;
     seal-gates) seal_missing_gates ;;
     report) run_report ;;

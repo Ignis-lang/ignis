@@ -105,19 +105,16 @@ jobs:
     # would hold a runner for six hours, and on a pull request anyone can
     # trigger that. The budget is roughly double the slowest observed run.
     #
-    # The selfhost test suite reached 23 minutes as the corpus grew, which put a
-    # passing run one second inside the old 30-minute cap: every step reported
-    # success and the job was cancelled during cleanup.
+    # The selfhost test suite once reached 23 minutes as the corpus grew (that
+    # was before the test runner's job-pool commit, 29985c90); the whole job
+    # measured 9m03s on run 34782190339 (`ignis test` itself: 7m24s).
     #
-    # Bumped from 60: the stage1 steps below (added to close the PR #201/#202/
-    # #203 gap — a selfhost-built binary was never exercised on a PR at all)
-    # add real time on top of the host-only steps above. Locally: stage1 build
-    # ~3 minutes, gate-g3-stage1 (the test suite under stage1, then again under
-    # the host) ~32 minutes — most of it stage1 itself, which runs its own
-    # analysis noticeably slower than the host binary — and gate-g5-stage1
-    # (the 82-case error corpus replay) well under a minute. 150 keeps this
-    # job's "roughly double the slowest observed run" convention.
-    timeout-minutes: 150
+    # The stage1 steps below (added to close the PR #201/#202/#203 gap — a
+    # selfhost-built binary was never exercised on a PR at all) add stage1's
+    # own build plus one more selfhost-test-suite run under it, roughly
+    # doubling the job; 90 keeps this job's "roughly double the slowest
+    # observed run" convention against that ~45-minute expectation.
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repository
@@ -202,8 +199,17 @@ jobs:
       - name: Analyze the standard library and the selfhost compiler
         run: ignis check
 
+      # Captured to a log rather than just run, so the G3-stage1 comparison
+      # below can compare stage1's run against this exact host run instead of
+      # paying for a second, byte-identical `<host> test` invocation.
       - name: Run the selfhost test suite
-        run: ignis test
+        run: |
+          set -uo pipefail
+          mkdir -p build/bootstrap/stage1-tests
+          status=0
+          timeout 10800 ignis test 2>&1 | tee build/bootstrap/stage1-tests/log-host.txt || status=${PIPESTATUS[0]}
+          scripts/bootstrap.sh gate-g3-record-host stage1 "$status" build/bootstrap/stage1-tests/log-host.txt
+          exit "$status"
 
       # The standard library owns the string runtime the C smoke test used to
       # cover, so its own suite is the gate for it.
@@ -223,10 +229,11 @@ jobs:
           IGNIS_STAGE0: ${{ github.workspace }}/target/ci/ignis
         run: scripts/bootstrap.sh stage1
 
-      # The equivalent of the nightly's gate-g3-stage2/gate-g3-host/
-      # gate-g3-compare trio, run against stage1 instead of stage2, in one
-      # subcommand since a PR job does not split G3's two halves across
-      # runners the way the nightly does. Writes gates/G3-STAGE1.json.
+      # The equivalent of the nightly's gate-g3-stage2/gate-g3-compare pair,
+      # run against stage1 instead of stage2: the host half was already
+      # recorded above by "Run the selfhost test suite", so this only runs
+      # stage1's half of the suite and compares it against that recorded run.
+      # Writes gates/G3-STAGE1.json.
       - name: Run the selfhost test suite under stage1 (G3, stage1)
         run: scripts/bootstrap.sh gate-g3-stage1
 
@@ -273,8 +280,11 @@ jobs:
             exit 1
           fi
 
+      # `failure()` alone misses a run cancelled by `timeout-minutes` expiring
+      # (the job is cancelled, not failed), which is exactly the case these
+      # artifacts would be most useful for diagnosing.
       - name: Upload stage1 selfhost gate artifacts
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: stage1-selfhost-gates
@@ -283,5 +293,7 @@ jobs:
             build/bootstrap/gates/G3-STAGE1.json
             build/bootstrap/gates/G5-STAGE1.json
             build/bootstrap/stage1-tests/log*.txt
+            build/bootstrap/stage1-tests/status-*.json
             build/bootstrap/parity-err-stage1.md
+            build/bootstrap/parity-err-stage1.json
           if-no-files-found: ignore
