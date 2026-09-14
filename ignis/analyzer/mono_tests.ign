@@ -1,4 +1,5 @@
 import Test from "std::test";
+import Vector from "std::vector";
 
 import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
@@ -381,4 +382,155 @@ function monoSpecializesTheDropMethodOfAnInstantiatedNominal(): void {
   };
 
   Test::assertEq<u64>(methodDef.owner.raw() as u64, shellId.raw() as u64);
+}
+
+/// The stores and HIR one analysis pass produced, for tests that call
+/// `Mono::runWithRoots` directly instead of going through `Mono::run`.
+record MonoInputs {
+  public defStore: Analyzer::DefinitionStore;
+  public typeStore: Analyzer::TypeStore;
+  public symbols: Analyzer::SymbolTable;
+  public hir: Hir::HirStore;
+}
+
+/// Parses and analyzes `source`, returning the stores and HIR before
+/// monomorphization runs.
+function monoAnalyze(source: str): MonoInputs {
+  let file: SourceFile = SourceFile::create("mono_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(monoCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(monoCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(monoCountErrors(&output.diagnostics), 0);
+
+  let hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  return MonoInputs {
+    defStore: defStore,
+    typeStore: typeStore,
+    symbols: symbols,
+    hir: hir,
+  };
+}
+
+/// The definition written with exactly this name in `inputs`, before
+/// monomorphization runs. Mirrors `monoDefNamed`, scanning the pre-mono
+/// definition store instead of a completed `MonoRun`.
+function monoInputDefNamed(inputs: &mut MonoInputs, name: str): Option<Analyzer::DefinitionId> {
+  let mut rawId: u64 = 0;
+
+  while (rawId < inputs.defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+    let mut nameSym: Option<Analyzer::SymbolId> = Option::NONE;
+
+    if (let Option::SOME(definition) = inputs.defStore.get(defId)) {
+      nameSym = Option::SOME(definition.name());
+    }
+
+    if (let Option::SOME(defName) = nameSym) {
+      if (let Option::SOME(text) = inputs.symbols.resolve(defName)) {
+        if (String::create(text).equals(name)) {
+          return Option::SOME(defId);
+        }
+      }
+    }
+
+    rawId += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// Scenario: another translation unit calls a function only by its C symbol —
+/// exactly what the `@test` harness dispatch table does — so no Ignis call
+/// site reaches it from `main`. `runWithRoots` must still emit it once its
+/// `DefinitionId` is passed in as an external root, the way the driver's
+/// `collect_test_mono_roots` feeds harness definitions in as roots.
+///
+/// `trulyDeadGeneric` pins the other half of "only what the roots reach is
+/// emitted": every non-generic top-level function is already a root by
+/// itself (`collectRoots`'s public-function arm), so a generic definition is
+/// the one shape `copyIfNonGeneric` still excludes on its own merits — it
+/// stays pending until something instantiates it — and it names no call
+/// site and no external root here, so it never does.
+@test
+function monoRunWithRootsEmitsAnExternalRootUnreachableFromMain(): void {
+  let mut inputs: MonoInputs = monoAnalyze(
+    "function calledOnlyByExternalRoot(): i32 {\n  return 9;\n}\n\nfunction trulyDeadGeneric<T>(value: T): T {\n  return value;\n}\n\nfunction main(): i32 {\n  return 1;\n}\n",
+  );
+
+  let Option::SOME(externalDefId) = monoInputDefNamed(&mut inputs, "calledOnlyByExternalRoot") else {
+    @panic("expected to find calledOnlyByExternalRoot in the definition store");
+  };
+
+  let mut externalRoots: Vector<u32> = Vector::new<u32>();
+  externalRoots.push(externalDefId.raw());
+
+  let monoResult: Mono::MonoOutput = Mono::runWithRoots(
+    &mut inputs.defStore,
+    &mut inputs.typeStore,
+    &mut inputs.symbols,
+    &inputs.hir,
+    false,
+    &externalRoots,
+  );
+
+  let rendered: String = Hir::Display::printHir(&monoResult.hir, &inputs.typeStore, &inputs.defStore, &inputs.symbols);
+
+  Test::assert(monoContains(&rendered, "fn calledOnlyByExternalRoot("));
+  Test::assert(!monoContains(&rendered, "fn trulyDeadGeneric("));
+}
+
+/// Scenario: a standard-library build mirrors the driver's
+/// `collect_mono_roots_for_std` — the archive it produces links into
+/// translation units this build never sees, so `exportAll` must root every
+/// non-generic function and method by itself, without any `main` calling
+/// them and without any external root naming them.
+@test
+function monoRunWithRootsExportAllRootsEveryNonGenericFunctionAndMethod(): void {
+  let mut inputs: MonoInputs = monoAnalyze(
+    "function neverCalledButExported(): i32 {\n  return 4;\n}\n\nrecord Widget {\n  public value: i32;\n\n  public read(&self): i32 {\n    return self.value;\n  }\n}\n",
+  );
+
+  let externalRoots: Vector<u32> = Vector::new<u32>();
+
+  let monoResult: Mono::MonoOutput = Mono::runWithRoots(
+    &mut inputs.defStore,
+    &mut inputs.typeStore,
+    &mut inputs.symbols,
+    &inputs.hir,
+    true,
+    &externalRoots,
+  );
+
+  let rendered: String = Hir::Display::printHir(&monoResult.hir, &inputs.typeStore, &inputs.defStore, &inputs.symbols);
+
+  Test::assert(monoContains(&rendered, "fn neverCalledButExported("));
+
+  // `printDefinitions` only renders `Definition::Function`, so a method's
+  // presence is checked the way `monoSpecializesTheDropMethodOfAnInstantiatedNominal`
+  // does: look the method definition up and confirm mono copied its body.
+  let Option::SOME(readMethodId) = monoInputDefNamed(&mut inputs, "read") else {
+    @panic("expected to find the read method in the definition store");
+  };
+
+  Test::assert(monoResult.hir.functionBodies.get(readMethodId).isSome());
 }

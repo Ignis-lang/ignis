@@ -4,6 +4,15 @@ import Id from "@compiler::ids";
 
 import Analyzer from "@compiler::analyzer";
 
+import
+  Diagnostic,
+  DiagnosticBag,
+  DiagnosticCode,
+  LabelKind,
+  Severity,
+  SourceSpan,
+from "@compiler::diagnostics";
+
 @test
 function typeStoreInitAssignsDeterministicIdsToPrimitives(): void {
   let mut store: Analyzer::TypeStore = Analyzer::TypeStore::init();
@@ -96,4 +105,72 @@ function typeIdAndDefinitionIdAndModuleIdShareRawConstructor(): void {
   Test::assertEq<u32>(typeId.raw(), 7);
   Test::assertEq<u32>(defId.raw(), 7);
   Test::assertEq<u32>(modId.raw(), 7);
+}
+
+/// Scenario: capture analysis runs per module and returns each module's own
+/// `DiagnosticBag`, and the merge loop in `ignis/main.ign` used to push
+/// `*diagnostic` straight from the source bag — a shallow copy that still
+/// pointed at strings the source bag owned. The source bag dropped at the
+/// end of the loop iteration and freed them, so rendering the merged
+/// diagnostic later read freed memory.
+///
+/// `appendDiagnostics` must deep-copy every diagnostic — its message,
+/// labels, notes and help text — so the target bag survives the source bag
+/// being dropped.
+@test
+function appendDiagnosticsSurvivesTheSourceBagBeingDropped(): void {
+  let mut target: DiagnosticBag = DiagnosticBag::init();
+
+  {
+    let mut source: DiagnosticBag = DiagnosticBag::init();
+    let mut diagnostic: Diagnostic = Diagnostic::new(
+      Severity::ERROR,
+      DiagnosticCode::TYPE_MISMATCH,
+      "escaping closure captured a dropped value",
+      SourceSpan::new("module.ign", 4, 9),
+    );
+
+    diagnostic.addLabel(LabelKind::PRIMARY, SourceSpan::new("module.ign", 4, 9), "captured here");
+    diagnostic.addLabel(LabelKind::SECONDARY, SourceSpan::new("module.ign", 1, 2), "declared here");
+    diagnostic.addNote("closures capture by reference by default");
+    diagnostic.setHelp("move the value into the closure instead");
+
+    source.push(diagnostic);
+
+    Analyzer::appendDiagnostics(&mut target, &source);
+  }
+
+  Test::assertEq<u64>(target.length(), 1);
+
+  let Option::SOME(appended) = target.get(0) else {
+    @panic("expected the appended diagnostic to survive the source bag being dropped");
+  };
+
+  Test::assertEq<str>(appended.messageText(), "escaping closure captured a dropped value");
+  Test::assertEq<u64>(appended.labels.length(), 2);
+
+  let Option::SOME(primaryLabel) = appended.labels.get(0) else {
+    @panic("expected a primary label to survive the copy");
+  };
+
+  Test::assertEq<str>(primaryLabel.message.toStr(), "captured here");
+
+  let Option::SOME(secondaryLabel) = appended.labels.get(1) else {
+    @panic("expected a secondary label to survive the copy");
+  };
+
+  Test::assertEq<str>(secondaryLabel.message.toStr(), "declared here");
+  Test::assertEq<u64>(appended.notes.length(), 1);
+
+  let Option::SOME(note) = appended.notes.get(0) else {
+    @panic("expected a note to survive the copy");
+  };
+
+  Test::assertEq<str>(note.message.toStr(), "closures capture by reference by default");
+
+  let Option::SOME(help) = appended.helpText() else {
+    @panic("expected help text to survive the copy");
+  };
+
+  Test::assertEq<str>(help, "move the value into the closure instead");
 }
