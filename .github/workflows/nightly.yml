@@ -494,10 +494,14 @@ jobs:
           exit "$STATUS"
 
       # Everything a gate job needs to run without rebuilding anything: the two
-      # stage binaries `ensure_stage` accepts on sight, stage2's emitted C, the
-      # host compiler, and the std objects the host test run reuses. The ladder's
-      # own results, G1 and G4 with the measurements behind them, travel with it
-      # for the report. Paths are relative to the workspace, so a gate job
+      # stage binaries `ensure_stage` accepts on sight, their stamp.json files
+      # (IGN-210 — without these, ensure_stage sees no stamp at all and
+      # rebuilds both stages in every single gate job; the stamp's compiler
+      # identity is a content hash precisely so it survives this
+      # download-artifact round trip unchanged), stage2's emitted C, the host
+      # compiler, and the std objects the host test run reuses. The ladder's
+      # own results, G1 and G4 with the measurements behind them, travel with
+      # it for the report. Paths are relative to the workspace, so a gate job
       # unpacks the artifact over its own checkout.
       - name: Upload the bootstrap stages
         if: always() && steps.stages.outputs.superseded != 'true'
@@ -507,8 +511,10 @@ jobs:
           path: |
             build/bootstrap/stage0.json
             build/bootstrap/stage1/ignis
+            build/bootstrap/stage1/stamp.json
             build/bootstrap/stage1/log-stage0-official.txt
             build/bootstrap/stage2/ignis
+            build/bootstrap/stage2/stamp.json
             build/bootstrap/stage2/selfhost_emit.c
             build/bootstrap/*/measure.json
             build/bootstrap/*/log.txt

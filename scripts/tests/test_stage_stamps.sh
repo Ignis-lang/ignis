@@ -73,6 +73,11 @@ fi
 mkdir -p "$(dirname "$out")"
 cp "$0" "$out"
 chmod +x "$out"
+# Every real stage emits selfhost_emit.c next to its binary; build_stage3's
+# G1 comparison reads it unconditionally, so stage3 needs one too, even from
+# a fake compiler. Empty and identical every time is fine — G1 is not what
+# these tests are checking.
+touch "$(dirname "$out")/selfhost_emit.c"
 EOF
   chmod +x "$path"
 }
@@ -94,12 +99,17 @@ make_sandbox() {
   echo "$root"
 }
 
+# Extra environment for the run, if any, is set by prefixing the *call* to
+# run_stage itself (e.g. `IGNIS_BOOTSTRAP_TRUST_STAGES=1 run_stage ...`) —
+# not by passing it as a trailing argument here: an expanded "$@" word is
+# never re-parsed as an assignment prefix, even when its text looks like
+# one, so a trailing `IGNIS_STAGE0_KIND=selfhost` argument would run as a
+# (nonexistent) command instead of exporting anything.
 run_stage() {
   local root="$1" stage="$2" stage0_bin="$3"
-  shift 3
   (
     cd "$root"
-    IGNIS_STAGE0="$stage0_bin" "$@" scripts/bootstrap.sh "$stage"
+    IGNIS_STAGE0="$stage0_bin" scripts/bootstrap.sh "$stage"
   )
 }
 
@@ -352,11 +362,314 @@ test_trust_stages_skips_the_check() {
   rm -rf "$root"
 }
 
+# Test 6: an artifact round trip (copy the stage tree elsewhere, come back
+# with fresh inodes/mtimes but identical content — exactly what
+# actions/download-artifact does between the nightly's ladder job and its
+# gate jobs) must not look like a compiler change. The stamp's compiler
+# identity is a content hash (sha256 + size) precisely so this holds
+# (IGN-210 follow-up, review blocker 2) — an earlier path/size/mtime/inode
+# identity would misread every single gate job as "compiler identity
+# changed" and rebuild there every time.
+test_artifact_roundtrip_identity_is_stable() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: an artifact round trip does not look like a compiler change"
+
+  local root
+  root="$(make_sandbox)"
+  write_fake_compiler "$root/bin/ignis-stage0"
+
+  run_stage "$root" stage1 "$root/bin/ignis-stage0" >"$root/run1.log" 2>&1
+  run_stage "$root" stage2 "$root/bin/ignis-stage0" >"$root/run2.log" 2>&1
+
+  local before_inode1 before_inode2
+  before_inode1="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
+  before_inode2="$(stat -c '%i' "$root/build/bootstrap/stage2/ignis")"
+
+  # Simulate the round trip: copy each stage directory elsewhere and back
+  # (fresh inodes throughout), then touch the binaries so mtime moves too.
+  # Content is never touched.
+  local elsewhere
+  elsewhere="$(mktemp -d)"
+  cp -a "$root/build/bootstrap/stage1" "$elsewhere/stage1"
+  cp -a "$root/build/bootstrap/stage2" "$elsewhere/stage2"
+  rm -rf "$root/build/bootstrap/stage1" "$root/build/bootstrap/stage2"
+  cp -a "$elsewhere/stage1" "$root/build/bootstrap/stage1"
+  cp -a "$elsewhere/stage2" "$root/build/bootstrap/stage2"
+  touch "$root/build/bootstrap/stage1/ignis" "$root/build/bootstrap/stage2/ignis"
+  rm -rf "$elsewhere"
+
+  local after_inode1 after_inode2
+  after_inode1="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
+  after_inode2="$(stat -c '%i' "$root/build/bootstrap/stage2/ignis")"
+
+  if [[ "$before_inode1" != "$after_inode1" && "$before_inode2" != "$after_inode2" ]]; then
+    pass "the round trip did give the binaries fresh inodes (sanity check on the test itself)"
+  else
+    fail_test "the round trip left inodes unchanged — this test would not exercise the bug it targets"
+  fi
+
+  # stage3 always recompiles unconditionally once its own check runs, but it
+  # gets there through `ensure_stage stage2` (chain-checking stage1 first),
+  # the exact decision path a gate job's `ensure_stage stage2` call takes.
+  local status=0
+  run_stage "$root" stage3 "$root/bin/ignis-stage0" >"$root/run3.log" 2>&1 || status=$?
+
+  if [[ "$status" -ne 0 ]]; then
+    fail_test "expected stage3 to succeed, exit ${status}, see ${root}/run3.log"
+    sed 's/^/    /' "$root/run3.log"
+    rm -rf "$root"
+    return
+  fi
+
+  if grep -qE 'stage[12]: rebuilding' "$root/run3.log"; then
+    fail_test "a round trip alone triggered a rebuild, see ${root}/run3.log"
+    sed 's/^/    /' "$root/run3.log"
+  else
+    pass "neither stage1 nor stage2 was rebuilt after the round trip"
+  fi
+
+  rm -rf "$root"
+}
+
+# Test 7: `ensure_stage stageN` verifies stageN-1 first (IGN-210 follow-up,
+# review blocker 4). Without that chain check, a stage2 whose own stamp
+# still matches stage1's *current* (not-yet-rebuilt) identity looks fresh
+# even though stage1 itself is stale — and a gate command that calls
+# `ensure_stage stage2` directly (gate-g3-stage2, gate-g5, gate-g6, gate-g7)
+# never happens to rebuild stage2 unconditionally the way the plain "stage2"
+# subcommand does, so it would never notice either.
+test_chain_check_catches_a_stale_prior_stage() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: ensure_stage stage2 verifies stage1 first"
+
+  local root
+  root="$(make_sandbox)"
+  write_fake_compiler "$root/bin/ignis-stage0"
+
+  run_stage "$root" stage1 "$root/bin/ignis-stage0" >"$root/run1.log" 2>&1
+  run_stage "$root" stage2 "$root/bin/ignis-stage0" >"$root/run2.log" 2>&1
+
+  local before_inode1 before_inode2
+  before_inode1="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
+  before_inode2="$(stat -c '%i' "$root/build/bootstrap/stage2/ignis")"
+
+  # A different stage0 binary at the same path (same trigger as the existing
+  # swap test), but — deliberately — neither "stage1" nor "stage2" is run
+  # again here. Only a direct `ensure_stage stage2` call, via a gate
+  # command, gets a chance to notice.
+  cat >"$root/bin/ignis-stage0" <<'EOF'
+#!/usr/bin/env bash
+# A different stage0 binary than the one that built the existing stage1.
+if [[ "${1-}" == "--version" ]]; then
+  exit 1
+fi
+out=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-o" ]]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+[[ -n "$out" ]] || exit 1
+mkdir -p "$(dirname "$out")"
+cp "$0" "$out"
+chmod +x "$out"
+EOF
+  chmod +x "$root/bin/ignis-stage0"
+
+  local status=0
+  run_stage "$root" gate-g3-stage2 "$root/bin/ignis-stage0" >"$root/run3.log" 2>&1 || status=$?
+
+  if [[ "$status" -ne 0 ]]; then
+    fail_test "expected gate-g3-stage2 to succeed, exit ${status}, see ${root}/run3.log"
+    sed 's/^/    /' "$root/run3.log"
+    rm -rf "$root"
+    return
+  fi
+
+  if grep -q 'stage1: rebuilding, stage0 identity changed' "$root/run3.log"; then
+    pass "a direct ensure_stage stage2 call caught stage1's own staleness first"
+  else
+    fail_test "no 'stage1: rebuilding, stage0 identity changed' line from gate-g3-stage2, see ${root}/run3.log"
+  fi
+
+  if grep -q 'stage2: rebuilding, compiler identity changed' "$root/run3.log"; then
+    pass "stage2 was rebuilt in turn, against the freshly rebuilt stage1"
+  else
+    fail_test "no 'stage2: rebuilding, compiler identity changed' line, see ${root}/run3.log"
+  fi
+
+  local after_inode1 after_inode2
+  after_inode1="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
+  after_inode2="$(stat -c '%i' "$root/build/bootstrap/stage2/ignis")"
+
+  [[ "$before_inode1" != "$after_inode1" ]] && pass "stage1/ignis was rebuilt" \
+    || fail_test "stage1/ignis inode is unchanged"
+  [[ "$before_inode2" != "$after_inode2" ]] && pass "stage2/ignis was rebuilt" \
+    || fail_test "stage2/ignis inode is unchanged"
+
+  rm -rf "$root"
+}
+
+# Test 8: a stage0 lineage that is not available here refuses the rebuild
+# instead of silently switching to whatever stage0 happens to be resolvable
+# (IGN-210 follow-up, review blocker 3) — the nightly gate-job scenario:
+# IGNIS_STAGE0 is unset there, stage0.json still says kind=official from the
+# separate ladder-build job, and the official asset itself (an ephemeral
+# runner-temp path) is gone.
+test_stage0_kind_mismatch_refuses() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: a stage0 lineage mismatch refuses to rebuild rather than switching lineage"
+
+  local root
+  root="$(make_sandbox)"
+  write_fake_compiler "$root/bin/ignis-stage0"
+
+  printf '{"kind": "official", "source": "%s/does-not-exist/ignis-official", "sha256": "", "mode": "auto"}\n' "$root" \
+    >"$root/build/bootstrap/stage0.json"
+
+  # No stage1 binary exists at all here (never downloaded, or missing) —
+  # ensure_stage's "missing binary" path alone is enough to reach the guard.
+  local status=0
+  run_stage "$root" stage2 "$root/bin/ignis-stage0" >"$root/run.log" 2>&1 || status=$?
+
+  if [[ "$status" -eq 0 ]]; then
+    fail_test "expected stage2 to fail on the lineage mismatch, it exited 0, see ${root}/run.log"
+  else
+    pass "stage2 exited non-zero (${status})"
+  fi
+
+  if grep -q 'ensure_stage: refusing to rebuild stage1' "$root/run.log" && grep -q 'kind=official' "$root/run.log"; then
+    pass "the refusal names the stage0.json kind mismatch"
+  else
+    fail_test "no clear refusal message, see ${root}/run.log"
+    sed 's/^/    /' "$root/run.log"
+  fi
+
+  if [[ -x "$root/build/bootstrap/stage1/ignis" ]]; then
+    fail_test "stage1/ignis should not have been built against the wrong lineage"
+  else
+    pass "no stage1 binary was built"
+  fi
+
+  rm -rf "$root"
+}
+
+# Test 9: the same mismatch, but with an explicit IGNIS_STAGE0_KIND — a
+# deliberate, informed override — proceeds instead of refusing.
+test_stage0_kind_mismatch_override_proceeds() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: IGNIS_STAGE0_KIND overrides the stage0 lineage mismatch guard"
+
+  local root
+  root="$(make_sandbox)"
+  write_fake_compiler "$root/bin/ignis-stage0"
+
+  printf '{"kind": "official", "source": "%s/does-not-exist/ignis-official", "sha256": "", "mode": "auto"}\n' "$root" \
+    >"$root/build/bootstrap/stage0.json"
+
+  local status=0
+  IGNIS_STAGE0_KIND=selfhost \
+    run_stage "$root" stage2 "$root/bin/ignis-stage0" >"$root/run.log" 2>&1 || status=$?
+
+  if [[ "$status" -eq 0 ]]; then
+    pass "stage2 exited 0 with the explicit override"
+  else
+    fail_test "expected stage2 to succeed with IGNIS_STAGE0_KIND=selfhost, exit ${status}, see ${root}/run.log"
+    sed 's/^/    /' "$root/run.log"
+  fi
+
+  rm -rf "$root"
+}
+
+# Test 10: a source edit must be detected even when the sandbox happens to
+# sit inside an unrelated outer git repository — this is what actually broke
+# CI for test_source_change_rebuilds: on that runner the sandbox (a mktemp -d
+# directory) was nested under a directory `git` already considered part of a
+# work tree, so `git ls-files -z -- ignis std` resolved those pathspecs
+# against the *outer* repo's index — where a random tmp subdirectory's
+# ignis/std were never tracked — matched nothing, and produced a hash that
+# never changed no matter what changed on disk in the sandbox. sources_hash
+# now only trusts `git ls-files` when `$PROJECT_ROOT` is itself the
+# discovered repository's toplevel, not merely nested inside one; otherwise
+# it falls back to `find`, which is always correct here regardless of what
+# surrounds the sandbox.
+test_source_change_detected_inside_an_outer_git_repo() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: a source edit is detected even when the sandbox sits inside an unrelated outer git repo"
+
+  local outer
+  outer="$(mktemp -d)"
+  (
+    cd "$outer" &&
+      git init -q &&
+      git config user.email test@example.com &&
+      git config user.name test &&
+      mkdir -p unrelated &&
+      echo x >unrelated/file &&
+      git add unrelated &&
+      git commit -q -m outer
+  )
+
+  local root="$outer/sandbox"
+  mkdir -p "$root/scripts" "$root/ignis" "$root/std" "$root/bin" "$root/build/bootstrap"
+  cp "$BOOTSTRAP_SH" "$root/scripts/bootstrap.sh"
+  cp "$MEASURE_RUN_PY" "$root/scripts/measure_run.py"
+  printf 'function main(): i32 { return 0; }\n' >"$root/ignis/main.ign"
+  printf 'namespace Std { }\n' >"$root/std/lib.ign"
+  write_fake_compiler "$root/bin/ignis-stage0"
+
+  # Sanity check on the reproduction itself: if the sandbox is not actually
+  # inside the outer repo's work tree, this test proves nothing.
+  local inside
+  inside="$(cd "$root" && git rev-parse --is-inside-work-tree 2>/dev/null || echo false)"
+  if [[ "$inside" != "true" ]]; then
+    fail_test "the sandbox is not nested inside a git work tree — this reproduction did not set up what it targets"
+    rm -rf "$outer"
+    return
+  fi
+
+  run_stage "$root" stage1 "$root/bin/ignis-stage0" >"$root/run1.log" 2>&1
+  local before_inode
+  before_inode="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
+
+  printf 'namespace Std { function extra(): void {} }\n' >"$root/std/lib.ign"
+
+  local status=0
+  run_stage "$root" stage2 "$root/bin/ignis-stage0" >"$root/run2.log" 2>&1 || status=$?
+
+  if [[ "$status" -ne 0 ]]; then
+    fail_test "expected stage2 to succeed, exit ${status}, see ${root}/run2.log"
+    sed 's/^/    /' "$root/run2.log"
+    rm -rf "$outer"
+    return
+  fi
+
+  if grep -q 'stage1: rebuilding, sources changed' "$root/run2.log"; then
+    pass "stage1 rebuilt with reason 'sources changed' despite the outer git repo"
+  else
+    fail_test "no 'stage1: rebuilding, sources changed' line, see ${root}/run2.log"
+  fi
+
+  local after_inode
+  after_inode="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
+  [[ "$before_inode" != "$after_inode" ]] && pass "stage1/ignis binary was recreated" \
+    || fail_test "stage1/ignis binary was not recreated after a source edit"
+
+  rm -rf "$outer"
+}
+
 test_fresh_build_writes_stamp
 test_unchanged_state_reuses
 test_source_change_rebuilds
 test_stage0_swap_rebuilds
 test_trust_stages_skips_the_check
+test_artifact_roundtrip_identity_is_stable
+test_chain_check_catches_a_stale_prior_stage
+test_stage0_kind_mismatch_refuses
+test_source_change_detected_inside_an_outer_git_repo
+test_stage0_kind_mismatch_override_proceeds
 
 echo
 echo "${TESTS_RUN} test(s) run, ${FAILURES} failure(s)"
