@@ -1443,18 +1443,6 @@ export namespace Borrowck {
 
   /// Whether `name` is the monomorphized spelling of a `drop` method, which
   /// `Mono::mangleName` writes as `Owner__args__drop`.
-  function nameEndsWithDrop(name: &String): boolean {
-    let suffix: String = String::create("__drop");
-
-    if (name.length() < suffix.length()) {
-      return false;
-    }
-
-    let tail: String = name.substringBytes(name.length() - suffix.length(), name.length());
-
-    return tail.equals(suffix.toStr());
-  }
-
   /// Whether `methodDefId` is the `drop` method of a type that declares
   /// `@implements(Drop)`. Mirrors `is_drop_method`, including its allowance for
   /// the monomorphized spelling of the name: both compilers mangle the method
@@ -1494,7 +1482,7 @@ export namespace Borrowck {
       // A specialization is named after its owner first (`Rc__i32__drop`), so
       // the mangled form is recognised by its suffix — the same test
       // `ownership_hir` makes.
-      named = spelled.equals("drop") || Borrowck::nameEndsWithDrop(&spelled);
+      named = spelled.equals("drop") || spelled.endsWith("__drop");
     }
 
     if (!named) {
