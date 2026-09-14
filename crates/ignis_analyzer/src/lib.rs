@@ -161,6 +161,15 @@ pub struct Analyzer<'a> {
   import_module_files: HashMap<ignis_type::span::Span, ignis_type::file::FileId>,
   referenced_defs: HashSet<DefinitionId>,
   mutated_defs: HashSet<DefinitionId>,
+
+  /// Pattern bindings that name a place reached through a `&mut` scrutinee.
+  ///
+  /// Such a binding is a window onto storage the referent owns and the caller already
+  /// granted write access to, so `&mut binding` is as legal as `&mut referent.field`.
+  /// It is tracked here rather than as `VariableDefinition::mutable` because nobody
+  /// wrote `mut`: marking the definition mutable would make every one of them look like
+  /// an unused `mut` to the lint, with no keyword to delete.
+  mutable_pattern_bindings: HashSet<DefinitionId>,
   imported_defs: HashMap<DefinitionId, ignis_type::span::Span>,
   lint_overrides: Vec<(LintId, LintLevel)>,
   extension_methods: HashMap<TypeId, HashMap<SymbolId, Vec<DefinitionId>>>,
@@ -420,6 +429,7 @@ impl<'a> Analyzer<'a> {
       import_module_files: HashMap::new(),
       referenced_defs: HashSet::new(),
       mutated_defs: HashSet::new(),
+      mutable_pattern_bindings: HashSet::new(),
       imported_defs: HashMap::new(),
       lint_overrides: Vec::new(),
       extension_methods: HashMap::new(),
@@ -564,6 +574,7 @@ impl<'a> Analyzer<'a> {
       import_module_files: HashMap::new(),
       referenced_defs: HashSet::new(),
       mutated_defs: HashSet::new(),
+      mutable_pattern_bindings: HashSet::new(),
       imported_defs: HashMap::new(),
       lint_overrides: Vec::new(),
       extension_methods: std::mem::take(shared_extension_methods),

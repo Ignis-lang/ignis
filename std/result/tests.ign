@@ -181,3 +181,83 @@ function chainedCombinatorsMoveTheOwningPayloadOnce(): void {
 
   Test::assertEq<u64>(total.unwrap(), 6);
 }
+
+@test
+function asRefBorrowsTheOkPayloadWithoutConsumingTheResult(): void {
+  let source: Result<String, String> = ownedOk("alpha");
+
+  let length: u64 = match (source.asRef()) {
+    Result::OK(value) -> value.length(),
+    Result::ERROR(error) -> error.length(),
+  };
+
+  Test::assertEq<u64>(length, 5);
+  Test::assertEq<str>(source.unwrap().toStr(), "alpha");
+}
+
+@test
+function asRefBorrowsTheErrorPayloadWithoutConsumingTheResult(): void {
+  let source: Result<String, String> = ownedError("boom");
+
+  let length: u64 = match (source.asRef()) {
+    Result::OK(value) -> value.length(),
+    Result::ERROR(error) -> error.length(),
+  };
+
+  Test::assertEq<u64>(length, 4);
+  Test::assertEq<str>(source.unwrapErr().toStr(), "boom");
+}
+
+@test
+function asRefOutlivesTheMatchThatProducedIt(): void {
+  let source: Result<String, String> = ownedOk("alpha");
+  let borrowed: Result<&String, &String> = source.asRef();
+
+  // Read after an intervening call: a binding that copied the payload into the arm's
+  // own stack slot would hand out a pointer to storage this call has since reused.
+  let separator: String = String::create("--");
+
+  let length: u64 = match (borrowed) {
+    Result::OK(value) -> value.length(),
+    Result::ERROR(error) -> error.length(),
+  };
+
+  Test::assertEq<u64>(length + separator.length(), 7);
+}
+
+@test
+function asMutWritesThroughToTheOkPayload(): void {
+  let mut source: Result<String, String> = ownedOk("alpha");
+
+  match (source.asMut()) {
+    Result::OK(value) -> {
+      (*value).pushStr("!");
+    },
+    Result::ERROR(_) -> {},
+  };
+
+  Test::assertEq<str>(source.unwrap().toStr(), "alpha!");
+}
+
+@test
+function asMutWritesThroughToTheErrorPayload(): void {
+  let mut source: Result<String, String> = ownedError("boom");
+
+  match (source.asMut()) {
+    Result::OK(_) -> {},
+    Result::ERROR(error) -> {
+      (*error).pushStr("!");
+    },
+  };
+
+  Test::assertEq<str>(source.unwrapErr().toStr(), "boom!");
+}
+
+@test
+function unwrapOrFreesTheUnusedDefaultExactlyOnce(): void {
+  let present: Result<String, String> = ownedOk("alpha");
+  let unused: String = String::create("fallback");
+  let kept: String = present.unwrapOr(unused);
+
+  Test::assertEq<str>(kept.toStr(), "alpha");
+}

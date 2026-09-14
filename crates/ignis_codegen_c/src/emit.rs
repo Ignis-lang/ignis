@@ -3230,6 +3230,32 @@ impl<'a> CEmitter<'a> {
         )
         .unwrap();
       },
+      Instr::EnumGetPayloadFieldPtr {
+        dest,
+        source,
+        variant_tag,
+        field_index,
+      } => {
+        let s = self.format_operand(func, source);
+        let source_ty = self.operand_type(func, source);
+        let is_pointer = source_ty
+          .as_ref()
+          .is_some_and(|ty| matches!(self.types.get(ty), Type::Pointer { .. } | Type::Reference { .. }));
+        let access = if is_pointer {
+          format!("({})->", s)
+        } else {
+          format!("({}).", s)
+        };
+        writeln!(
+          self.output,
+          "t{} = &({}payload.variant_{}.field_{});",
+          dest.index(),
+          access,
+          variant_tag,
+          field_index
+        )
+        .unwrap();
+      },
       Instr::Trap { .. } => {
         writeln!(self.output, "__builtin_trap();").unwrap();
       },

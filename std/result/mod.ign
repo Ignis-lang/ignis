@@ -155,6 +155,66 @@ export enum Result<T, E> {
     return !self.isOk();
   }
 
+  /// Borrows both payloads, leaving the result usable.
+  ///
+  /// Observes through `&self`, so the receiver is neither moved nor consumed. Nothing is
+  /// copied: the returned `Result<&T, &E>` points into this result, which must outlive
+  /// it. Matching it reaches the `OK` value and the error alike, which is why there is
+  /// no separate error-only borrow — `std::result` deliberately depends on no other
+  /// module, and an `Option<&E>` accessor would make it depend on `std::option`.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  /// import String from "std::string";
+  ///
+  /// let outcome: Result<String, String> = Result::OK(String::create("alpha"));
+  ///
+  /// let length: u64 = match (outcome.asRef()) {
+  ///   Result::OK(value) -> value.length(),
+  ///   Result::ERROR(error) -> error.length(),
+  /// };
+  ///
+  /// // `outcome` is still usable here.
+  /// ```
+  public asRef(&self): Result<&T, &E> {
+    return match (self) {
+      Result::OK(value) -> Result::OK(&value),
+      Result::ERROR(error) -> Result::ERROR(&error),
+    };
+  }
+
+  /// Borrows both payloads mutably, leaving the result usable.
+  ///
+  /// Observes through `&mut self`, so the receiver is neither moved nor consumed. The
+  /// returned `Result<&mut T, &mut E>` points into this result, which must outlive it,
+  /// and writing through it writes the payload in place.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Result from "std::result";
+  /// import String from "std::string";
+  ///
+  /// let mut outcome: Result<String, String> = Result::OK(String::create("alpha"));
+  ///
+  /// match (outcome.asMut()) {
+  ///   Result::OK(value) -> {
+  ///     (*value).pushStr("!");
+  ///   },
+  ///   Result::ERROR(_) -> {},
+  /// };
+  ///
+  /// // `outcome` now holds "alpha!".
+  /// ```
+  public asMut(&mut self): Result<&mut T, &mut E> {
+    return match (self) {
+      Result::OK(value) -> Result::OK(&mut value),
+      Result::ERROR(error) -> Result::ERROR(&mut error),
+    };
+  }
+
   /// Extracts the `OK` value, panicking if `ERROR`.
   ///
   /// Consumes the result: the receiver is moved and cannot be used again.
@@ -230,17 +290,10 @@ export enum Result<T, E> {
   /// let b: i32 = y.unwrapOr(0);  // 0
   /// ```
   public unwrapOr(self, defaultValue: T): T {
-    // `defaultValue` is returned from a statement match rather than a match
-    // expression: returning a by-value parameter out of a match arm of a
-    // consuming method drops it twice.
-    match (self) {
-      Result::OK(t) -> {
-        return t;
-      },
-      Result::ERROR(_) -> {},
+    return match (self) {
+      Result::OK(t) -> t,
+      Result::ERROR(_) -> defaultValue,
     };
-
-    return defaultValue;
   }
 
   /// Returns the `OK` value, or calls `f` with the error to produce

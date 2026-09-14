@@ -242,6 +242,18 @@ pub enum Instr {
     field_index: u32,
   },
 
+  /// Address of an enum payload field, given a pointer to the enum.
+  ///
+  /// `source` is a pointer to the enum storage, not the enum value: this names the
+  /// field in place rather than reading it out, which is what a by-reference pattern
+  /// binding needs so `&binding` points into the referent and not at a copy.
+  EnumGetPayloadFieldPtr {
+    dest: TempId,
+    source: Operand,
+    variant_tag: u32,
+    field_index: u32,
+  },
+
   /// Run T's drop on the value at `ptr`. No-op when T doesn't need dropping.
   DropInPlace {
     ptr: Operand,

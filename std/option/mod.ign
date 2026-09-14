@@ -146,6 +146,67 @@ export enum Option<S> {
     return !self.isSome();
   }
 
+  /// Borrows the contained value, leaving the option usable.
+  ///
+  /// Observes through `&self`, so the receiver is neither moved nor consumed. The
+  /// payload is *not* copied: the returned `Option<&S>` points into this option, which
+  /// must outlive it.
+  ///
+  /// Use this to read an owning payload without giving it away, where a consuming
+  /// combinator would take the whole option.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Option from "std::option";
+  /// import String from "std::string";
+  ///
+  /// let held: Option<String> = Option::SOME(String::create("alpha"));
+  ///
+  /// let length: u64 = match (held.asRef()) {
+  ///   Option::SOME(text) -> text.length(),
+  ///   Option::NONE -> 0,
+  /// };
+  ///
+  /// // `held` is still usable here.
+  /// ```
+  public asRef(&self): Option<&S> {
+    return match (self) {
+      Option::SOME(value) -> Option::SOME(&value),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
+  /// Borrows the contained value mutably, leaving the option usable.
+  ///
+  /// Observes through `&mut self`, so the receiver is neither moved nor consumed. The
+  /// returned `Option<&mut S>` points into this option, which must outlive it, and
+  /// writing through it writes the payload in place.
+  ///
+  /// # Example
+  ///
+  /// ```ignis
+  /// import Option from "std::option";
+  /// import String from "std::string";
+  ///
+  /// let mut held: Option<String> = Option::SOME(String::create("alpha"));
+  ///
+  /// match (held.asMut()) {
+  ///   Option::SOME(text) -> {
+  ///     (*text).pushStr("!");
+  ///   },
+  ///   Option::NONE -> {},
+  /// };
+  ///
+  /// // `held` now holds "alpha!".
+  /// ```
+  public asMut(&mut self): Option<&mut S> {
+    return match (self) {
+      Option::SOME(value) -> Option::SOME(&mut value),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
   /// Extracts the contained value, panicking if `NONE`.
   ///
   /// Consumes the option: the receiver is moved and cannot be used again.
@@ -195,17 +256,10 @@ export enum Option<S> {
   /// let b: i32 = y.unwrapOr(0);  // 0
   /// ```
   public unwrapOr(self, defaultValue: S): S {
-    // `defaultValue` is returned from a statement match rather than a match
-    // expression: returning a by-value parameter out of a match arm of a
-    // consuming method drops it twice.
-    match (self) {
-      Option::SOME(s) -> {
-        return s;
-      },
-      Option::NONE -> {},
+    return match (self) {
+      Option::SOME(s) -> s,
+      Option::NONE -> defaultValue,
     };
-
-    return defaultValue;
   }
 
   /// Returns the contained value, or calls `f` to produce a default.

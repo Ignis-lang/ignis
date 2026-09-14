@@ -771,6 +771,10 @@ impl<'a> HirOwnershipChecker<'a> {
             self.states.insert(def, OwnershipState::Valid);
           }
 
+          self
+            .schedules
+            .borrowed_pattern_bindings
+            .extend(pattern_defs.iter().copied());
           self.borrowed_pattern_bindings.extend(pattern_defs);
         } else {
           self.declare_owned_pattern_bindings(&pattern);
@@ -1654,6 +1658,11 @@ impl<'a> HirOwnershipChecker<'a> {
     let mut arm_states = Vec::new();
     let mut arm_reachability = Vec::new();
 
+    // Values outside the match that one arm hands to the match result. The move is real
+    // on that arm's path and only there, so the arms that did not make it still own the
+    // value and owe its drop — see the compensation pass after the loop.
+    let mut arm_result_moves: Vec<DefinitionId> = Vec::new();
+
     for arm in arms {
       self.states = pre_match_state.clone();
       self.reachable = pre_match_reachable;
@@ -1670,6 +1679,10 @@ impl<'a> HirOwnershipChecker<'a> {
       }
 
       if bindings_borrow_payloads {
+        self
+          .schedules
+          .borrowed_pattern_bindings
+          .extend(arm_pattern_defs.iter().copied());
         self.borrowed_pattern_bindings.extend(arm_pattern_defs.iter().copied());
       }
 
@@ -1699,9 +1712,11 @@ impl<'a> HirOwnershipChecker<'a> {
         // reference moves out of a borrow just as a `let` or `return` would.
         self.reject_move_out_of_borrow(arm.body);
 
-        // An arm whose value is one of its own bindings hands that binding to the match
-        // result. Without consuming it here it stays `Valid`, gets scheduled, and the
-        // drop frees storage the result now owns.
+        // An arm whose value is a bare variable hands that variable to the match result.
+        // Without consuming it here it stays `Valid`, gets scheduled, and the drop frees
+        // storage the result now owns. This holds for the arm's own pattern bindings and
+        // equally for any other owning value in scope — a local or a by-value parameter
+        // named directly as the arm's value.
         if let Some(result_def) = self.arm_result_binding(arm.body) {
           // A block-bodied arm hides the binding behind the block node, so the direct
           // rejection above never sees it; the walk here does.
@@ -1716,8 +1731,21 @@ impl<'a> HirOwnershipChecker<'a> {
               .push(DiagnosticMessage::CannotMoveOutOfBorrowedValue { span: span.clone() }.report());
           }
 
+          // A borrowed pattern binding names storage the match never owned; the
+          // rejection above already reported it and consuming it would schedule a drop
+          // for the referent.
           if arm_pattern_defs.contains(&result_def) {
             self.try_consume(result_def, span.clone());
+          } else if !self.borrowed_pattern_bindings.contains(&result_def)
+            && self.is_valid(&result_def)
+            && self
+              .types
+              .needs_drop_with_defs(self.defs.type_of(&result_def), self.defs)
+          {
+            self.try_consume(result_def, span.clone());
+            if !arm_result_moves.contains(&result_def) {
+              arm_result_moves.push(result_def);
+            }
           }
         }
       }
@@ -1773,6 +1801,30 @@ impl<'a> HirOwnershipChecker<'a> {
 
       arm_states.push(self.states.clone());
       arm_reachability.push(self.reachable);
+    }
+
+    // A value handed to the match result by one arm leaves the match owned by the
+    // result on that path alone. Every other arm still holds it and is the last point
+    // where it is live and unowned, so its drop goes at the end of those arms. Marking
+    // it moved in all of them is then the truth on every path — and is what keeps the
+    // cross-arm merge from reading a real one-sided transfer as an inconsistent move.
+    for def in &arm_result_moves {
+      for (index, arm_state) in arm_states.iter_mut().enumerate() {
+        if arm_state.get(def) != Some(&OwnershipState::Valid) {
+          continue;
+        }
+
+        if arm_reachability[index] {
+          self
+            .schedules
+            .on_match_arm_end
+            .entry(arms[index].body)
+            .or_default()
+            .push(*def);
+        }
+
+        arm_state.insert(*def, OwnershipState::Moved);
+      }
     }
 
     if !arm_states.is_empty() {
