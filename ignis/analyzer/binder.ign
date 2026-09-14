@@ -67,6 +67,13 @@ export namespace Analyzer {
       /// True while the children of an `extern` block are being completed.
       /// The functions inside one have no body and keep their written name.
       public insideExtern: boolean;
+      /// True only while `completeItem` is binding the exact declaration an
+      /// `export` wraps (spec §export-unwrapping mirrors `mark_exported_definition`
+      /// on the host): `export function foo() {}` makes `foo` itself Public.
+      /// `export namespace X { ... }` marks only the namespace's own definition,
+      /// so the `Namespace` arm resets this before recursing into `X`'s
+      /// children — otherwise every member would read as directly exported too.
+      public insideExport: boolean;
       /// C symbols claimed by `@externName` on a definition, co-indexed with
       /// `exportedSymbolSpans`. Two definitions claiming one symbol would emit
       /// two C definitions of it.
@@ -2627,10 +2634,19 @@ export namespace Analyzer {
       let mut typesRef: &mut Analyzer::TypeStore = typeStore;
       let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
 
+      // Mirrors the host's `mark_exported_definition`: a plain top-level or
+      // namespace-scoped function is Private unless it is the exact
+      // declaration an `export` wraps.
+      let mut visibility: Analyzer::Visibility = Analyzer::Visibility::PRIVATE;
+
+      if (state.insideExport) {
+        visibility = Analyzer::Visibility::PUBLIC;
+      }
+
       // Push a placeholder FunctionDef first so sub-defs can reference the owner defId.
       let placeholderFn: Analyzer::FunctionDef = Analyzer::FunctionDef {
         name: sym,
-        visibility: Analyzer::Visibility::PUBLIC,
+        visibility: visibility,
         typeParams: Vector::new<Analyzer::DefinitionId>(),
         params: Vector::new<Analyzer::DefinitionId>(),
         returnType: sentinelId,
@@ -2650,7 +2666,7 @@ export namespace Analyzer {
       // Back-patch with fully-populated FunctionDef.
       let newFn: Analyzer::FunctionDef = Analyzer::FunctionDef {
         name: sym,
-        visibility: Analyzer::Visibility::PUBLIC,
+        visibility: visibility,
         typeParams: typeParams,
         params: params,
         returnType: sentinelId,
@@ -2768,6 +2784,13 @@ export namespace Analyzer {
             bindConstant(state, defStore, typeStore, symbols, itemId, &c, scopeKey);
           },
           Ast::Item::Node::Namespace(ns) -> {
+            // A namespace's own definition may be the exact declaration an
+            // enclosing `export` wraps, but that never reaches its members:
+            // `export namespace X { function foo() {} }` does not make `foo`
+            // directly exported, so this resets the flag before recursing.
+            let mut nsStateRef: &mut Analyzer::Binder::BinderState = state;
+            nsStateRef.insideExport = false;
+
             // Same +1 encoding as pass-1: 0 stays the top-level sentinel.
             let childScopeKey: u64 = (itemId.raw() as u64) + 1;
             let mut childIndex: u64 = 0;
@@ -2781,7 +2804,13 @@ export namespace Analyzer {
           },
           Ast::Item::Node::Export(ex) -> {
             if (let Option::SOME(innerItemId) = ex.declaration) {
+              let mut exportStateRef: &mut Analyzer::Binder::BinderState = state;
+              exportStateRef.insideExport = true;
+
               completeItem(state, defStore, typeStore, symbols, ast, innerItemId, scopeKey, pass1);
+
+              let mut exportStateRefAfter: &mut Analyzer::Binder::BinderState = state;
+              exportStateRefAfter.insideExport = false;
             }
           },
           Ast::Item::Node::Extern(externItem) -> {
@@ -2836,6 +2865,7 @@ export namespace Analyzer {
         scopeSyms: scopeSyms,
         scopeSpans: scopeSpans,
         insideExtern: false,
+        insideExport: false,
         exportedSymbols: Vector::new<String>(),
         exportedSymbolSpans: Vector::new<SourceSpan>(),
       };
@@ -2909,6 +2939,7 @@ export namespace Analyzer {
         scopeSyms: scopeSyms,
         scopeSpans: scopeSpans,
         insideExtern: false,
+        insideExport: false,
         exportedSymbols: Vector::new<String>(),
         exportedSymbolSpans: Vector::new<SourceSpan>(),
       };
