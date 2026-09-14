@@ -12,7 +12,7 @@ The four axes are:
 
 - **scrutinee** — where the matched value comes from:
   `local` (an owned local), `field` (an owned record's field, `holder.kind`),
-  `call` (a call temporary).
+  `call` (a call temporary), `ref` (a shared borrow of an owned local, `&kind`).
 - **construct** — `match`, `ifLet`, `whileLet`, `letElse`.
 - **pattern** — `one` (a variant with one owning payload, bound),
   `two` (a variant with two payloads, both bound),
@@ -50,13 +50,20 @@ A combination is emitted only when it is valid Ignis. The rules, and why:
 4. **`moveOut` needs an owning binding.** `catchAll` binds the scrutinee rather
    than a payload and `wildcard` binds nothing, so neither can move a payload
    out.
-5. **Borrowed scrutinees are out of scope.** `&kind` and `&holder.kind` were
-   generated at first and all 116 of their cases passed, which is the expected
-   result: matching through a shared borrow moves nothing, so no arm is ever
-   owed a drop and the bug class cannot reach them. They were dropped rather
-   than kept as a permanently-green third of the corpus, because the run time
-   is charged to every CI build. If borrowing ever gains a move-out form, this
-   is the rule to revisit.
+5. **A borrowed scrutinee cannot move its payload out.** `moveOut` is pruned for
+   the `ref` scrutinee: the storage belongs to the referent, which still frees
+   it, and the compiler rejects taking it away.
+
+   The `ref` axis was removed once, on the grounds that matching through a
+   shared borrow moves nothing, so no arm is ever owed a drop and the bug class
+   could not reach it. That stopped being true when bindings under a reference
+   scrutinee started lowering as *places* inside the referent — their locals
+   hold an address rather than a copy — because a place that is mistakenly
+   given a drop frees a pointer, and one that stops being recognised as a place
+   frees the referent's payload a second time. The axis is back for that
+   reason, and the balance it asserts is the invariant that change can break.
+   `&mut` scrutinees are not enumerated here: writing through a place is not a
+   drop-balance question, and the targeted fixtures cover it.
 6. **`reassign` needs a field.** Putting the moved-from value back is only
    meaningful when the scrutinee was a field, and writing through a shared
    borrow is not allowed, so `reassign` is generated for the `field` scrutinee
@@ -117,6 +124,7 @@ class Scrutinee:
   # expression that builds an owned value and the type that value has.
   from_field: bool = False
   from_call: bool = False
+  from_ref: bool = False
 
   def setup(
     self,
@@ -136,13 +144,17 @@ class Scrutinee:
     if self.from_call:
       return "makeValue()"
 
-    return "holder.kind" if self.from_field else "kind"
+    if self.from_field:
+      return "holder.kind"
+
+    return "&kind" if self.from_ref else "kind"
 
 
 SCRUTINEES: tuple[Scrutinee, ...] = (
   Scrutinee("local", "an owned local"),
   Scrutinee("field", "an owned record's field", from_field=True),
   Scrutinee("call", "a call temporary", from_call=True),
+  Scrutinee("ref", "a shared borrow of an owned local", from_ref=True),
 )
 
 
@@ -315,6 +327,10 @@ def is_valid(
 
   # 4. A `moveOut` needs a binding that owns a payload.
   if body.moves and not pattern.owning:
+    return False
+
+  # 5. A borrowed scrutinee owns nothing it could hand away.
+  if body.moves and scrutinee.from_ref:
     return False
 
   # 6. Only an owned field can be written back.

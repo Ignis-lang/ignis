@@ -19,17 +19,23 @@ enum Slot<S> {
   }
 }
 
+/// Writes a frame's worth of locals and recurses, so the stack the match arms used is
+/// overwritten by the time the caller reads through the reference it kept.
 function reuseTheStack(depth: i32): i32 {
   if (depth <= 0) {
     return 0;
   }
 
-  let first: u64 = 0xDEADBEEFDEADBEEF;
-  let second: u64 = 0xCAFEBABECAFEBABE;
-  let third: u64 = 0x1111111122222222;
-  let fourth: u64 = 0x3333333344444444;
+  let mut noise: u64 = 0xDEADBEEFDEADBEEF;
+  noise ^= 0xCAFEBABECAFEBABE;
+  noise ^= 0x1111111122222222;
+  noise ^= 0x3333333344444444;
 
-  return reuseTheStack(depth - 1) + ((first ^ second ^ third ^ fourth) as i32 & 1);
+  if (noise == 0) {
+    return -1;
+  }
+
+  return reuseTheStack(depth - 1);
 }
 
 function main(): i32 {

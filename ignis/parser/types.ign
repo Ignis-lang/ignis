@@ -30,13 +30,33 @@ export namespace ParserTypes {
   }
 
   function parseType(parser: &mut ParserShared::State): Option<Ast::TypeId> {
+    return ParserTypes::parseTypeInner(parser, true);
+  }
+
+  /// The type of an `as` cast, where a trailing `&` or `|` is the binary operator of
+  /// the surrounding expression rather than an attempt at a compound type.
+  ///
+  /// `x as i32 & 1` is the shape at issue: a type parser that claims the `&` reports a
+  /// compound type nobody wrote and swallows the operand after it. The host's type
+  /// parser stops at the end of the type and never looks past it, so this is the entry
+  /// that matches it. Every other type position ends at a token that cannot begin an
+  /// operand — `=`, `;`, `)`, `,`, `{` — so an operator there really is a compound type
+  /// and keeps its diagnostic.
+  function parseCastType(parser: &mut ParserShared::State): Option<Ast::TypeId> {
+    return ParserTypes::parseTypeInner(parser, false);
+  }
+
+  function parseTypeInner(
+    parser: &mut ParserShared::State,
+    rejectCompound: boolean
+  ): Option<Ast::TypeId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
     parserRef.skipTrivia();
 
     if (let Option::SOME(start) = parserRef.consumePunctuation(Punctuation::AMPERSAND)) {
       let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
-      let target = ParserTypes::parseType(parserRef)!;
+      let target = ParserTypes::parseTypeInner(parserRef, rejectCompound)!;
 
       let end: SourceSpan = match (parserRef.module.types.get(target)) {
         Option::SOME(node) -> Ast::Serializer::typeSpan(node),
@@ -51,7 +71,7 @@ export namespace ParserTypes {
 
     if (let Option::SOME(start) = parserRef.consumePunctuation(Punctuation::ASTERISK)) {
       let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
-      let pointee = ParserTypes::parseType(parserRef)!;
+      let pointee = ParserTypes::parseTypeInner(parserRef, rejectCompound)!;
 
       let end: SourceSpan = match (parserRef.module.types.get(pointee)) {
         Option::SOME(node) -> Ast::Serializer::typeSpan(node),
@@ -99,6 +119,10 @@ export namespace ParserTypes {
         element: typeId,
         size: size,
       }));
+    }
+
+    if (!rejectCompound) {
+      return Option::SOME(typeId);
     }
 
     parserRef.skipTrivia();
