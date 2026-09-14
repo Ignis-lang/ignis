@@ -1681,17 +1681,62 @@ export namespace Lowering {
     let mut isReferenceable: boolean = false;
     let mut declaredType: Option<Analyzer::TypeId> = Option::NONE;
 
+    // A bare reference to a non-generic function used as a first-class value
+    // (not called) has no direct C representation: the function is a plain C
+    // function, but the value's type is the closure struct type. Collect its
+    // params/return type here (while the immutable borrow from `defStore.get`
+    // is alive) so `lowerFunctionValueReference` can synthesize a
+    // non-capturing closure that forwards to it, once that borrow ends.
+    // Generic functions are left as a plain `Variable` reference below
+    // (`functionValueParams` stays `NONE`): typeck does not support inferring
+    // the instantiation of a generic function value from an expected
+    // function-pointer type, and the selfhost binder does reject such a
+    // reference (A0045) before it reaches lowering. The host does not yet
+    // emit the equivalent diagnostic (tracked separately; not fixed here).
+    let mut functionValueParams: Option<Vector<Analyzer::DefinitionId>> = Option::NONE;
+    let mut functionValueReturnType: Analyzer::TypeId = Lowering::voidType(typeStore);
+
     if (let Option::SOME(definition) = defStore.get(defId)) {
       match (definition) {
         Analyzer::Definition::Variable(variableDef) -> {
           isReferenceable = true;
           declaredType = Option::SOME(variableDef.declaredType);
         },
-        Analyzer::Definition::Function(_) -> {
+        Analyzer::Definition::Function(functionDef) -> {
           isReferenceable = true;
+
+          if (functionDef.typeParams.length() == 0) {
+            let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+            let mut paramIndex: u64 = 0;
+
+            while (paramIndex < functionDef.params.length()) {
+              if (let Option::SOME(paramId) = functionDef.params.get(paramIndex)) {
+                params.push(*paramId);
+              }
+
+              paramIndex += 1;
+            }
+
+            functionValueParams = Option::SOME(params);
+            functionValueReturnType = functionDef.returnType;
+          }
         },
         _ -> {},
       };
+    }
+
+    if (let Option::SOME(params) = functionValueParams) {
+      return Lowering::lowerFunctionValueReference(
+        defStore,
+        typeStore,
+        symbols,
+        locals,
+        hir,
+        defId,
+        params,
+        functionValueReturnType,
+        span,
+      );
     }
 
     if (!isReferenceable) {
@@ -4350,6 +4395,106 @@ export namespace Lowering {
       noEscape: false,
       isExtern: false,
     }));
+  }
+
+  /// Lowers a bare reference to a non-generic function used as a first-class
+  /// value into a non-capturing closure that forwards to it: `helper`
+  /// becomes the equivalent of `(a, b) -> helper(a, b)`. This gives the
+  /// reference a concrete closure representation (thunk + null env) that the
+  /// existing closure pipeline (capture/escape analysis, LIR lowering, C
+  /// codegen) already knows how to emit, instead of a bare `Variable` node
+  /// whose only C representation is the raw function symbol (which does not
+  /// match the closure struct ABI expected wherever a function-typed value
+  /// is used). Mirrors the oracle's `lower_function_value_reference`.
+  function lowerFunctionValueReference(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    locals: &mut Lowering::LocalMap,
+    hir: &mut Hir::HirStore,
+    functionDefId: Analyzer::DefinitionId,
+    originalParams: Vector<Analyzer::DefinitionId>,
+    returnType: Analyzer::TypeId,
+    span: SourceSpan,
+  ): Hir::HirId {
+    let synthId: u32 = Lowering::nextSyntheticId(locals);
+
+    let mut paramDefs: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut argNodes: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut paramTypes: Vector<Analyzer::TypeId> = Vector::new<Analyzer::TypeId>();
+
+    let mut index: u64 = 0;
+
+    while (index < originalParams.length()) {
+      let Option::SOME(origParamId) = originalParams.get(index) else {
+        return Lowering::errorNode(hir, typeStore, span);
+      };
+
+      let Option::SOME(Analyzer::Definition::Variable(paramVarDef)) = defStore.get(*origParamId) else {
+        return Lowering::errorNode(hir, typeStore, span);
+      };
+
+      let paramType: Analyzer::TypeId = paramVarDef.declaredType;
+
+      paramTypes.push(paramType);
+
+      let paramName: String = `__fn_value_p${synthId}_${index}`;
+      let newParamId: Analyzer::DefinitionId = Lowering::declareSyntheticLocal(
+        defStore,
+        symbols,
+        paramName.toStr(),
+        paramType,
+        false,
+      );
+
+      paramDefs.push(newParamId);
+
+      let mut argHirRef: &mut Hir::HirStore = hir;
+      argNodes.push(argHirRef.alloc(Hir::HirNode {
+        kind: Hir::HirKind::Variable(newParamId),
+        span: span,
+        typeId: paramType,
+      }));
+
+      index += 1;
+    }
+
+    let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+    let fnType: Analyzer::TypeId = typeStoreRef.functionType(paramTypes, returnType);
+
+    let mut callHirRef: &mut Hir::HirStore = hir;
+    let callNode: Hir::HirId = callHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Call(Hir::HirCall {
+        callee: functionDefId,
+        typeArgs: Vector::new<Analyzer::TypeId>(),
+        args: argNodes,
+      }),
+      span: span,
+      typeId: returnType,
+    });
+
+    let mut bodyHirRef: &mut Hir::HirStore = hir;
+    let bodyNode: Hir::HirId = bodyHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Return(Option::SOME(callNode)),
+      span: span,
+      typeId: returnType,
+    });
+
+    let mut closureHirRef: &mut Hir::HirStore = hir;
+    return closureHirRef.alloc(Hir::HirNode {
+      kind: Hir::HirKind::Closure(Hir::HirClosure {
+        params: paramDefs,
+        returnType: returnType,
+        body: bodyNode,
+        captures: Vector::new<Hir::HirCapture>(),
+        escapes: false,
+        thunkDef: Option::NONE,
+        dropDef: Option::NONE,
+        captureOverrides: Vector::new<Hir::HirCaptureOverride>(),
+      }),
+      span: span,
+      typeId: fnType,
+    });
   }
 
   function forOfFixedShape(

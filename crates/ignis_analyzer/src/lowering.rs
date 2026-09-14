@@ -822,10 +822,35 @@ impl<'a> Analyzer<'a> {
           });
         };
 
+        // A bare reference to a non-generic, non-variadic function used as a
+        // first-class value (not called) has no direct C representation: the
+        // function is a plain C function, but the value's type is the closure
+        // struct type. Synthesize a non-capturing closure that forwards to the
+        // function so the rest of the closure pipeline (capture/escape
+        // analysis, LIR lowering, codegen) handles it uniformly. Generic or
+        // variadic functions are left as a plain `Variable` reference (see the
+        // fallback type_id computed below): typeck does not support inferring
+        // the instantiation of a generic function value from an expected
+        // function-pointer type, but the host does not yet reject this case
+        // either — `let f: (i32) -> i32 = someGeneric;` currently passes host
+        // typeck with unresolved `Type::Param`s and fails only at the C
+        // compiler (tracked separately; not fixed here). The selfhost binder
+        // does reject it (A0045).
+        if let DefinitionKind::Function(fd) = &self.defs.get(&def_id).kind
+          && fd.type_params.is_empty()
+          && !fd.is_variadic
+        {
+          return self.lower_function_value_reference(def_id, &var.span, hir);
+        }
+
         // Handle type parameters specially - they don't have a type_of in the usual sense
         // but they are used in expressions like sizeOf(T)
         let var_type = match &self.defs.get(&def_id).kind {
           DefinitionKind::TypeParam(tp) => self.types.param(tp.owner, tp.index),
+          DefinitionKind::Function(fd) => {
+            let param_types: Vec<TypeId> = fd.params.iter().map(|p| *self.type_of(p)).collect();
+            self.types.function(param_types, fd.return_type, fd.is_variadic)
+          },
           _ => *self.type_of(&def_id),
         };
 
@@ -3545,6 +3570,96 @@ impl<'a> Analyzer<'a> {
     let id = self.lowering_counter;
     self.lowering_counter += 1;
     id
+  }
+
+  /// Lowers a bare reference to a non-generic, non-variadic function used as a
+  /// first-class value into a non-capturing closure that forwards to it:
+  /// `helper` becomes the equivalent of `(a, b) -> helper(a, b)`. This gives
+  /// the reference a concrete closure representation (thunk + null env) that
+  /// the existing closure pipeline (capture/escape analysis, LIR lowering,
+  /// C codegen) already knows how to emit, instead of a bare `Variable` node
+  /// whose only C representation is the raw function symbol (which does not
+  /// match the closure struct ABI expected wherever a function-typed value is
+  /// used).
+  fn lower_function_value_reference(
+    &mut self,
+    def_id: DefinitionId,
+    span: &Span,
+    hir: &mut HIR,
+  ) -> HIRId {
+    let DefinitionKind::Function(fd) = &self.defs.get(&def_id).kind else {
+      unreachable!("lower_function_value_reference called on a non-function definition");
+    };
+    let fd = fd.clone();
+
+    let synth_id = self.next_synthetic_id();
+    let mut param_ids = Vec::with_capacity(fd.params.len());
+    let mut arg_nodes = Vec::with_capacity(fd.params.len());
+
+    for (index, orig_param_id) in fd.params.iter().enumerate() {
+      let param_type = *self.type_of(orig_param_id);
+      let param_name = self
+        .symbols
+        .borrow_mut()
+        .intern(&format!("__fn_value_p{}_{}", synth_id, index));
+
+      let param_def = Definition {
+        kind: DefinitionKind::Parameter(ignis_type::definition::ParameterDefinition {
+          type_id: param_type,
+          mutable: false,
+          attrs: Vec::new(),
+        }),
+        name: param_name,
+        span: span.clone(),
+        name_span: span.clone(),
+        visibility: Visibility::Private,
+        owner_module: self.current_module,
+        owner_namespace: None,
+        doc: None,
+      };
+      let new_param_id = self.defs.alloc(param_def);
+      param_ids.push(new_param_id);
+
+      arg_nodes.push(hir.alloc(HIRNode {
+        kind: HIRKind::Variable(new_param_id),
+        span: span.clone(),
+        type_id: param_type,
+      }));
+    }
+
+    let param_types: Vec<TypeId> = fd.params.iter().map(|p| *self.type_of(p)).collect();
+    let fn_type = self.types.function(param_types, fd.return_type, fd.is_variadic);
+
+    let call_node = hir.alloc(HIRNode {
+      kind: HIRKind::Call {
+        callee: def_id,
+        type_args: Vec::new(),
+        args: arg_nodes,
+      },
+      span: span.clone(),
+      type_id: fd.return_type,
+    });
+
+    let body = hir.alloc(HIRNode {
+      kind: HIRKind::Return(Some(call_node)),
+      span: span.clone(),
+      type_id: fd.return_type,
+    });
+
+    hir.alloc(HIRNode {
+      kind: HIRKind::Closure {
+        params: param_ids,
+        return_type: fd.return_type,
+        body,
+        captures: Vec::new(),
+        escapes: false,
+        thunk_def: None,
+        drop_def: None,
+        capture_overrides: std::collections::HashMap::new(),
+      },
+      span: span.clone(),
+      type_id: fn_type,
+    })
   }
 
   fn lower_for_of(

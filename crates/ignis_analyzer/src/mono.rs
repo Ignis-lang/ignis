@@ -671,7 +671,21 @@ impl<'a> Monomorphizer<'a> {
     match kind {
       HIRKind::Literal(v) => (HIRKind::Literal(v.clone()), None),
       HIRKind::Unit => (HIRKind::Unit, None),
-      HIRKind::Variable(def) => (HIRKind::Variable(*def), None),
+      HIRKind::Variable(def) => {
+        // A bare reference to a function definition (used as a first-class value,
+        // e.g. `let f: (i32) -> i32 = helper;`) is a reachability edge just like a
+        // direct call. `copy_if_nongeneric` is a no-op for local variables,
+        // parameters, and anything already copied, so this is safe to call
+        // unconditionally. Generic functions referenced this way (no type args are
+        // carried on `Variable`) are left uninstantiated here: typeck does not yet
+        // support inferring the instantiation from an expected function-pointer
+        // type, but it also does not reject the reference, so a generic function
+        // used as a bare value currently reaches this point with unresolved
+        // `Type::Param`s and fails only at the C compiler (tracked separately;
+        // not fixed here).
+        self.copy_if_nongeneric(*def);
+        (HIRKind::Variable(*def), None)
+      },
       HIRKind::Binary { operation, left, right } => {
         let new_left = self.clone_hir_tree(*left);
         let new_right = self.clone_hir_tree(*right);

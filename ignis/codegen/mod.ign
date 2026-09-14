@@ -3590,6 +3590,15 @@ export namespace CodegenC {
       forwardIndex += 1;
     }
 
+    // Closure structs are emitted before record/enum definitions: a closure
+    // struct only needs its `call`/`drop_fn` field types (function pointers)
+    // and its `env` field (`u8*`), so a forward-declared record referenced
+    // there is enough. A record can embed a closure-typed field by value
+    // (e.g. a field declared `(i32) -> i32`), which needs the closure struct
+    // to be a *complete* type by the time the record's own definition is
+    // emitted — the reverse order left that field incomplete.
+    CodegenC::emitClosureTypes(defStore, typeStore, symbols, &mut source, closures);
+
     source.pushStr("\n// Type definitions\n");
 
     let mut definitionIndex: u64 = 0;
@@ -3603,8 +3612,6 @@ export namespace CodegenC {
     }
 
     CodegenC::emitSliceTypes(defStore, typeStore, symbols, &mut source, closures);
-
-    CodegenC::emitClosureTypes(defStore, typeStore, symbols, &mut source, closures);
 
     CodegenC::emitDropGlueHelpers(defStore, typeStore, symbols, &mut source, closures, program);
 
