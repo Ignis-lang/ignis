@@ -121,16 +121,24 @@ function archiveReadExpected(filename: str): String {
   };
 }
 
+/// Best-effort cleanup for a scratch file this module wrote under /tmp.
+/// Ignored errors: an early-return path may call this before the file ever
+/// existed, and cleanup should never fail the test it is deferred from.
+function archiveRemoveFile(path: &Path::PathBuf): void {
+  let _removed = Fs::removeFile(path);
+}
+
 /// Compile a small C file to produce a real object for archive tests.
 ///
 /// Returns the object file path on success, or fails the test on error.
 function archiveCompileTestObject(name: str): Path::PathBuf {
   let cSrc: String = String::create("int ignis_archive_test_").concat(name).concat("(int x) { return x; }");
-  let cPathStr: String = String::create("/tmp/ignis_archive_src_").concat(name).concat(".c");
-  let objPathStr: String = String::create("/tmp/ignis_archive_obj_").concat(name).concat(".o");
+  let cPathStr: String = `/tmp/ignis_archive_src_${Process::id()}_${name}.c`;
+  let objPathStr: String = `/tmp/ignis_archive_obj_${Process::id()}_${name}.o`;
 
   // Write the source.
   let srcPath: Path::PathBuf = Path::PathBuf::create(cPathStr.toStr());
+  defer archiveRemoveFile(&srcPath);
   match (Fs::writeString(&srcPath, &cSrc)) {
     Result::OK(_) -> {},
     Result::ERROR(_) -> {
@@ -168,9 +176,12 @@ function archiveCompileTestObject(name: str): Path::PathBuf {
 @test
 function archiveSuccessfulArchive(): void {
   let objPath: Path::PathBuf = archiveCompileTestObject("a");
+  defer archiveRemoveFile(&objPath);
   let objPathStr: String = objPath.toString();
 
-  let outPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_archive.a");
+  let outPathStr: String = `/tmp/ignis_test_archive_${Process::id()}.a`;
+  let outPath: Path::PathBuf = Path::PathBuf::create(outPathStr.toStr());
+  defer archiveRemoveFile(&outPath);
 
   let mut objects: Vector<String> = Vector::new<String>();
   objects.push(objPathStr.clone());
@@ -192,9 +203,12 @@ function archiveSuccessfulArchive(): void {
 @test
 function archiveDefaultsToArWhenEmpty(): void {
   let objPath: Path::PathBuf = archiveCompileTestObject("b");
+  defer archiveRemoveFile(&objPath);
   let objPathStr: String = objPath.toString();
 
-  let outPath: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_test_archive_default.a");
+  let outPathStr: String = `/tmp/ignis_test_archive_default_${Process::id()}.a`;
+  let outPath: Path::PathBuf = Path::PathBuf::create(outPathStr.toStr());
+  defer archiveRemoveFile(&outPath);
 
   let mut objects: Vector<String> = Vector::new<String>();
   objects.push(objPathStr.clone());

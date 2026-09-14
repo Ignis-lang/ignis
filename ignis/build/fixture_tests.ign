@@ -1,6 +1,7 @@
 import Env from "std::env";
 import Fs from "std::fs";
 import Path from "std::path";
+import Process from "std::process";
 import Sort from "std::sort";
 import String from "std::string";
 import Test from "std::test";
@@ -934,17 +935,36 @@ function fixtureCorpusPath(relativePath: str): Path::PathBuf {
 
 /// A private directory under the system temporary directory, wiped first so a
 /// rerun never observes what an earlier run left behind.
+///
+/// Scoped by this process's pid so two concurrent `ignis test` runs (two
+/// worktrees, or two CI jobs on one machine) never race on the same
+/// removeDirAll/createDirAll/write/read sequence; mirrors `linkerTestPath`
+/// in `linker.ign` and `pipelineTestLayout` in `pipeline.ign`.
 function fixtureScratchDir(name: str): Path::PathBuf {
   let Result::OK(tempRoot) = Fs::tempDir() else {
     Test::fail();
     return Path::PathBuf::new();
   };
 
-  let scratch: Path::PathBuf = tempRoot.join("ignis-selfhost-fixtures").join(name);
+  let dirName: String = `ignis-selfhost-fixtures-${Process::id()}`;
+  let scratch: Path::PathBuf = tempRoot.join(dirName.toStr()).join(name);
   let _removed = Fs::removeDirAll(&scratch);
   let _created = Fs::createDirAll(&scratch);
 
   return scratch;
+}
+
+/// Removes the pid-scoped scratch parent `fixtureScratchDir` created for
+/// `scratch`, not just the leaf test directory named after the fixture case,
+/// so this test's `ignis-selfhost-fixtures-<pid>` tree doesn't linger under
+/// /tmp once the test finishes. Errors are ignored: cleanup is best-effort,
+/// and an early-return path may call this before the directory ever existed.
+function fixtureScratchCleanup(scratch: &Path::PathBuf): void {
+  let Option::SOME(parent) = scratch.parent() else {
+    return;
+  };
+
+  let _removed = Fs::removeDirAll(&parent);
 }
 
 function fixtureNamesOf(cases: &Vector<FixtureCase>): String {
@@ -1011,6 +1031,7 @@ function fixturesAreFilteredBySubstringOnTheirName(): void {
 @test
 function anEqualBaselineMakesAFixturePass(): void {
   let scratch: Path::PathBuf = fixtureScratchDir("equal");
+  defer fixtureScratchCleanup(&scratch);
   let snapshotPath: Path::PathBuf = scratch.join("case.snap");
   let body: String = String::create("exit_code: 0\nstdout: (empty)\nstderr: (empty)");
   let _written = Fs::writeString(&snapshotPath, &body);
@@ -1021,6 +1042,7 @@ function anEqualBaselineMakesAFixturePass(): void {
 @test
 function aDifferingBaselineReportsAMismatchWithItsDiff(): void {
   let scratch: Path::PathBuf = fixtureScratchDir("mismatch");
+  defer fixtureScratchCleanup(&scratch);
   let snapshotPath: Path::PathBuf = scratch.join("case.snap");
   let expected: String = String::create("exit_code: 0\nstdout: a\nstderr: (empty)");
   let actual: String = String::create("exit_code: 0\nstdout: b\nstderr: (empty)");
@@ -1038,6 +1060,7 @@ function aDifferingBaselineReportsAMismatchWithItsDiff(): void {
 @test
 function aMissingBaselineReportsWhatWasObserved(): void {
   let scratch: Path::PathBuf = fixtureScratchDir("missing");
+  defer fixtureScratchCleanup(&scratch);
   let snapshotPath: Path::PathBuf = scratch.join("case.snap");
   let body: String = String::create("exit_code: 7\nstdout: (empty)\nstderr: (empty)");
 
@@ -1052,6 +1075,7 @@ function aMissingBaselineReportsWhatWasObserved(): void {
 @test
 function updateModeCreatesAMissingBaselineAndPasses(): void {
   let scratch: Path::PathBuf = fixtureScratchDir("update-missing");
+  defer fixtureScratchCleanup(&scratch);
   let snapshotPath: Path::PathBuf = scratch.join("nested").join("case.snap");
   let body: String = String::create("exit_code: 0\nstdout: created\nstderr: (empty)");
 
@@ -1068,6 +1092,7 @@ function updateModeCreatesAMissingBaselineAndPasses(): void {
 @test
 function updateModeRewritesADifferingBaselineAndPasses(): void {
   let scratch: Path::PathBuf = fixtureScratchDir("update-mismatch");
+  defer fixtureScratchCleanup(&scratch);
   let snapshotPath: Path::PathBuf = scratch.join("case.snap");
   let stale: String = String::create("exit_code: 1\nstdout: (empty)\nstderr: (empty)");
   let _written = Fs::writeString(&snapshotPath, &stale);

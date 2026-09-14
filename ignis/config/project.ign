@@ -2,6 +2,7 @@ import Env from "std::env";
 import Fs from "std::fs";
 import Io from "std::io";
 import Path from "std::path";
+import Process from "std::process";
 import String from "std::string";
 import Test from "std::test";
 import Toml, TomlDocument, TomlTable, TomlValue, TomlValueKind from "std::toml";
@@ -1333,6 +1334,13 @@ export namespace Config {
   }
 }
 
+/// Best-effort cleanup for a scratch directory tree this module created
+/// under /tmp. Ignored errors: cleanup should never fail the test it is
+/// deferred from.
+function projectRemoveDirAll(path: &Path::PathBuf): void {
+  let _removed = Fs::removeDirAll(path);
+}
+
 function fixturePath(relativePath: str): Path::PathBuf {
   match (Env::currentDir()) {
     Result::OK(root) -> {
@@ -1545,7 +1553,9 @@ function projectLoaderReportsMissingStdManifestForBuildPlanning(): void {
 
 @test
 function projectLoaderReportsMissingConfig(): void {
-  let tempRoot: Path::PathBuf = Path::PathBuf::create("/tmp/ignis-selfhost-config-no-project");
+  let tempRootStr: String = `/tmp/ignis-selfhost-config-no-project-${Process::id()}`;
+  let tempRoot: Path::PathBuf = Path::PathBuf::create(tempRootStr.toStr());
+  defer projectRemoveDirAll(&tempRoot);
   let start: Path::PathBuf = tempRoot.join("nested/path");
   match (Fs::createDirAll(&start)) {
     Result::OK(_) -> {},
