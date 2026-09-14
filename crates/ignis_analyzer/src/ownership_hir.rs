@@ -1737,7 +1737,10 @@ impl<'a> HirOwnershipChecker<'a> {
           if arm_pattern_defs.contains(&result_def) {
             self.try_consume(result_def, span.clone());
           } else if !self.borrowed_pattern_bindings.contains(&result_def)
-            && self.is_valid(&result_def)
+            // Tracked and live: a name this function is the current owner of. Anything
+            // untracked — a global, a value already moved — is not ours to hand over,
+            // and the compensation pass below could not pay for it either.
+            && self.states.get(&result_def) == Some(&OwnershipState::Valid)
             && self
               .types
               .needs_drop_with_defs(self.defs.type_of(&result_def), self.defs)

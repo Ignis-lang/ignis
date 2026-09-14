@@ -1690,6 +1690,7 @@ export namespace CodegenC {
       Lir::Instr::InitEnumVariant(_) -> "InitEnumVariant",
       Lir::Instr::EnumGetTag(_) -> "EnumGetTag",
       Lir::Instr::EnumGetPayloadField(_) -> "EnumGetPayloadField",
+      Lir::Instr::EnumGetPayloadFieldPtr(_) -> "EnumGetPayloadFieldPtr",
       Lir::Instr::DropInPlace(_) -> "DropInPlace",
       Lir::Instr::MarkMoved(_) -> "MarkMoved",
       Lir::Instr::DropGlue(_) -> "DropGlue",
@@ -1856,6 +1857,28 @@ export namespace CodegenC {
           let mut outputRef: &mut String = output;
           outputRef.pushStr(line.toStr());
         }
+      },
+      Lir::Instr::EnumGetPayloadFieldPtr(node) -> {
+        let source: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.source);
+
+        let mut isPointer: boolean = false;
+        if (let Option::SOME(sourceType) = CodegenC::operandType(function_, &node.source)) {
+          if (let Option::SOME(typeNode) = typeStore.get(sourceType)) {
+            isPointer = match (typeNode) {
+              Analyzer::Type::Pointer(_) | Analyzer::Type::Reference(_) -> true,
+              _ -> false,
+            };
+          }
+        }
+
+        let mut access: String = `(${source.toStr()}).`;
+        if (isPointer) {
+          access = `(${source.toStr()})->`;
+        }
+
+        let line: String = `    t${node.dest.raw()} = &(${access.toStr()}payload.variant_${node.variantTag}.field_${node.fieldIndex});\n`;
+        let mut outputRef: &mut String = output;
+        outputRef.pushStr(line.toStr());
       },
       Lir::Instr::InitEnumVariant(node) -> {
         let destination: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.destPtr);

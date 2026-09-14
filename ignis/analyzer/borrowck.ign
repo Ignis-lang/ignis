@@ -3086,6 +3086,29 @@ export namespace Borrowck {
     return Option::NONE;
   }
 
+  /// Overwrites `defRaw`'s value in `snapshot`, adding the entry when the
+  /// snapshot never tracked it. Used by the arm-result move compensation pass
+  /// in `checkMatch`, which forces a value handed to the match result to
+  /// `MOVE_MOVED` in every arm's snapshot so the cross-arm merge reads a real
+  /// one-sided transfer as consistent rather than an inconsistent move.
+  function setSnapshotValue(snapshot: &mut Borrowck::MoveSnapshot, defRaw: u32, value: u32): void {
+    let mut index: u64 = 0;
+
+    while (index < snapshot.defs.length()) {
+      if (let Option::SOME(candidate) = snapshot.defs.get(index)) {
+        if (*candidate == defRaw) {
+          snapshot.values.set(index, value);
+          return;
+        }
+      }
+
+      index += 1;
+    }
+
+    snapshot.defs.push(defRaw);
+    snapshot.values.push(value);
+  }
+
   function allValuesEqual(values: &Vector<u32>, expected: u32): boolean {
     let mut index: u64 = 0;
 
@@ -4337,6 +4360,8 @@ export namespace Borrowck {
           let mut borrowedRef: &mut Borrowck::State = state;
           borrowedRef.setMoveValue(*defRaw, Borrowck::MOVE_VALID);
           borrowedRef.markBorrowedBinding(*defRaw);
+          let mut schedulesRef: &mut Hir::DropSchedules = schedules;
+          schedulesRef.addBorrowedPatternBinding(Id::fromRaw<Analyzer::DefinitionTag>(*defRaw));
         } else {
           // Unlike a match arm binding, a let-else binding outlives the
           // construct and belongs to the enclosing scope, so it is declared
@@ -4429,6 +4454,16 @@ export namespace Borrowck {
     let mut anyReachable: boolean = false;
     let mut armIndex: u64 = 0;
 
+    // Values outside the match that one arm hands to the match result. The move is real
+    // on that arm's path and only there, so the arms that did not make it still own the
+    // value and owe its drop — see the compensation pass after the loop. Mirrors the
+    // Rust `arm_result_moves`.
+    let mut armResultMoves: Vector<u32> = Vector::new<u32>();
+
+    // This arm's own reachability, parallel to `branches`, so the compensation pass
+    // below can tell which arms actually reach their end and owe the compensating drop.
+    let mut armReachableByIndex: Vector<boolean> = Vector::new<boolean>();
+
     while (armIndex < matchNode.arms.length()) {
       let Option::SOME(arm) = matchNode.arms.get(armIndex) else {
         armIndex += 1;
@@ -4454,6 +4489,8 @@ export namespace Borrowck {
           // binding names borrowed storage, and handing it on moves out of it.
           if (bindsBorrowedPayloads) {
             declareRef.markBorrowedBinding(*defRaw);
+            let mut schedulesRef: &mut Hir::DropSchedules = schedules;
+            schedulesRef.addBorrowedPatternBinding(Id::fromRaw<Analyzer::DefinitionTag>(*defRaw));
           }
         }
 
@@ -4504,8 +4541,14 @@ export namespace Borrowck {
             Borrowck::emitCannotMoveOutOfBorrow(diagnostics, span);
           }
 
+          // A borrowed pattern binding names storage the match never owned; the
+          // rejection above already reported it and consuming it would schedule a
+          // drop for the referent.
           if (Borrowck::containsRaw(&mut bindings, result.raw())) {
             Borrowck::tryConsume(state, schedules, result, span);
+          } else if (!resultIsBorrowed && state.isMoveValid(result.raw()) && resultOwnsValue) {
+            Borrowck::tryConsume(state, schedules, result, span);
+            Borrowck::pushUniqueRaw(&mut armResultMoves, result.raw());
           }
         }
       }
@@ -4550,12 +4593,65 @@ export namespace Borrowck {
       }
 
       branches.push(state.snapshotMoves());
+      armReachableByIndex.push(state.reachable);
 
       if (state.reachable) {
         anyReachable = true;
       }
 
       armIndex += 1;
+    }
+
+    // A value handed to the match result by one arm leaves the match owned by the
+    // result on that path alone. Every other arm still holds it and is the last point
+    // where it is live and unowned, so its drop goes at the end of those arms. Marking
+    // it moved in all of them is then the truth on every path — and is what keeps the
+    // cross-arm merge from reading a real one-sided transfer as an inconsistent move.
+    let mut resultMoveIndex: u64 = 0;
+
+    while (resultMoveIndex < armResultMoves.length()) {
+      let Option::SOME(defRaw) = armResultMoves.get(resultMoveIndex) else {
+        resultMoveIndex += 1;
+        continue;
+      };
+      let movedDefRaw: u32 = *defRaw;
+
+      let mut branchIndex: u64 = 0;
+
+      while (branchIndex < branches.length()) {
+        let mut isValidHere: boolean = false;
+
+        if (let Option::SOME(branch) = branches.get(branchIndex)) {
+          if (let Option::SOME(value) = Borrowck::snapshotValue(branch, movedDefRaw)) {
+            isValidHere = value == Borrowck::MOVE_VALID;
+          }
+        }
+
+        if (isValidHere) {
+          let mut reachableHere: boolean = false;
+
+          if (let Option::SOME(flag) = armReachableByIndex.get(branchIndex)) {
+            reachableHere = *flag;
+          }
+
+          if (reachableHere) {
+            if (let Option::SOME(arm) = matchNode.arms.get(branchIndex)) {
+              let mut compensated: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+              compensated.push(Id::fromRaw<Analyzer::DefinitionTag>(movedDefRaw));
+              let mut schedulesRef: &mut Hir::DropSchedules = schedules;
+              schedulesRef.appendMatchArmEnd(arm.body, compensated);
+            }
+          }
+
+          if (let Option::SOME(branch) = branches.getMut(branchIndex)) {
+            Borrowck::setSnapshotValue(branch, movedDefRaw, Borrowck::MOVE_MOVED);
+          }
+        }
+
+        branchIndex += 1;
+      }
+
+      resultMoveIndex += 1;
     }
 
     if (branches.isEmpty()) {
