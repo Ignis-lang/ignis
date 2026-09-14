@@ -346,14 +346,45 @@ jobs:
           mkdir -p build/bootstrap
           STAGE0_JSON="build/bootstrap/stage0.json"
 
+          # Same format `ensure_stage`'s `compiler_identity_of` computes and
+          # compares against (scripts/bootstrap.sh): "sha256:<hex>:<size>", or
+          # "unknown" if the file cannot be read. Recorded here, once, in
+          # stage0.json — not just implied by $STAGE0 — because a gate job
+          # never gets the official/selfhost asset itself (an ephemeral
+          # ${RUNNER_TEMP}/stage0/... path that dies with this job); without
+          # a recorded identity to fall back on, `ensure_stage stage1` in
+          # every gate job would see a bare "ignis" resolve to the host on
+          # PATH instead, read that as "stage0 identity changed", and either
+          # rebuild against the wrong compiler or (correctly, but
+          # needlessly) refuse via its stage0-lineage guard — on any night
+          # the promotion streak is >= 3 (IGN-210 follow-up, review
+          # blocker/should-fix from PR #222).
+          compiler_identity_of() {
+            local bin="$1"
+            if [ ! -f "$bin" ]; then
+              echo "unknown"
+              return 0
+            fi
+            local size hash
+            size=$(stat -c '%s' "$bin")
+            hash=$(sha256sum "$bin" | cut -d' ' -f1)
+            echo "sha256:${hash}:${size}"
+          }
+
           # `mode` records the workflow_dispatch input (auto/host/official) so
           # `scripts/bootstrap.sh stages` can tell an explicit `stage0=official`
           # (must fail outright if the asset cannot build stage1) apart from an
           # `auto` resolution that landed on official (may fall back to the
-          # host — see build_stage1's stage0_explicit_official()).
+          # host — see build_stage1's stage0_explicit_official()). `identity`
+          # is target/ci/ignis's own content identity — always hashable
+          # directly by every job (ladder or gate) once it is built, since it
+          # travels in the bootstrap-stages artifact too, but recorded here
+          # anyway for the same uniform lookup every kind gets.
           write_host_stage0() {
-            jq -n --arg mode "$STAGE0_MODE" \
-              '{kind: "host", source: "target/ci/ignis", sha256: "", mode: $mode}' >"$STAGE0_JSON"
+            local identity
+            identity=$(compiler_identity_of "${GITHUB_WORKSPACE}/target/ci/ignis")
+            jq -n --arg mode "$STAGE0_MODE" --arg identity "$identity" \
+              '{kind: "host", source: "target/ci/ignis", sha256: "", mode: $mode, identity: $identity}' >"$STAGE0_JSON"
           }
 
           if [ "$STAGE0_MODE" = "host" ]; then
@@ -409,11 +440,18 @@ jobs:
 
           chmod +x "$WORKDIR/ignis-selfhost-linux-amd64"
           SHA256=$(cut -d' ' -f1 "$WORKDIR/ignis-selfhost-linux-amd64.sha256")
+          IDENTITY=$(compiler_identity_of "${WORKDIR}/ignis-selfhost-linux-amd64")
 
           echo "IGNIS_STAGE0=${WORKDIR}/ignis-selfhost-linux-amd64" >>"$GITHUB_ENV"
 
-          jq -n --arg source "${WORKDIR}/ignis-selfhost-linux-amd64" --arg sha256 "$SHA256" --arg mode "$STAGE0_MODE" \
-            '{kind: "official", source: $source, sha256: $sha256, mode: $mode}' >"$STAGE0_JSON"
+          # `source` stays the ephemeral ${RUNNER_TEMP} path — dead once this
+          # job ends — but `identity` (unlike `source`) is exactly what every
+          # later gate job needs and can actually use: a gate job's own
+          # `ensure_stage stage1` reads it back from the downloaded
+          # stage0.json to confirm stage1's stamp still matches this run's
+          # official asset, without ever needing the asset itself.
+          jq -n --arg source "${WORKDIR}/ignis-selfhost-linux-amd64" --arg sha256 "$SHA256" --arg mode "$STAGE0_MODE" --arg identity "$IDENTITY" \
+            '{kind: "official", source: $source, sha256: $sha256, mode: $mode, identity: $identity}' >"$STAGE0_JSON"
 
           echo "stage0: official (sha ${SHA256})"
 
@@ -494,10 +532,14 @@ jobs:
           exit "$STATUS"
 
       # Everything a gate job needs to run without rebuilding anything: the two
-      # stage binaries `ensure_stage` accepts on sight, stage2's emitted C, the
-      # host compiler, and the std objects the host test run reuses. The ladder's
-      # own results, G1 and G4 with the measurements behind them, travel with it
-      # for the report. Paths are relative to the workspace, so a gate job
+      # stage binaries `ensure_stage` accepts on sight, their stamp.json files
+      # (IGN-210 — without these, ensure_stage sees no stamp at all and
+      # rebuilds both stages in every single gate job; the stamp's compiler
+      # identity is a content hash precisely so it survives this
+      # download-artifact round trip unchanged), stage2's emitted C, the host
+      # compiler, and the std objects the host test run reuses. The ladder's
+      # own results, G1 and G4 with the measurements behind them, travel with
+      # it for the report. Paths are relative to the workspace, so a gate job
       # unpacks the artifact over its own checkout.
       - name: Upload the bootstrap stages
         if: always() && steps.stages.outputs.superseded != 'true'
@@ -507,8 +549,10 @@ jobs:
           path: |
             build/bootstrap/stage0.json
             build/bootstrap/stage1/ignis
+            build/bootstrap/stage1/stamp.json
             build/bootstrap/stage1/log-stage0-official.txt
             build/bootstrap/stage2/ignis
+            build/bootstrap/stage2/stamp.json
             build/bootstrap/stage2/selfhost_emit.c
             build/bootstrap/*/measure.json
             build/bootstrap/*/log.txt
