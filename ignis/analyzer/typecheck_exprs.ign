@@ -5283,14 +5283,15 @@ export namespace Analyzer {
         index += 1;
       }
 
-      // The reference compiler always reports a non-exhaustive match as a
-      // warning and continues compilation, regardless of whether the match
-      // is used as an expression or a statement (see ignis_analyzer::typeck,
-      // DiagnosticMessage::NonExhaustiveMatch's Severity::Warning arm). The
-      // selfhost mirrors that severity here rather than escalating to an
-      // error in value position.
       let verdict: Analyzer::Typecheck::ExhaustiveVerdict = Analyzer::Typecheck::analyzeMatchExhaustiveness(defStore, typeStore, symbols, module, resolvedBodies, scrutineeTypeOpt, &value.arms);
       if (let Analyzer::Typecheck::ExhaustiveVerdict::Missing(reason) = verdict) {
+        // The reference compiler always reports a non-exhaustive match as a
+        // warning and continues compilation, regardless of whether the match
+        // is used as an expression or a statement (see
+        // `DiagnosticMessage::level()` in crates/ignis_diagnostics/src/message.rs,
+        // the `NonExhaustiveMatch` arm returns `Severity::Warning`
+        // unconditionally). The selfhost mirrors that severity here rather
+        // than escalating to an error in value position.
         Analyzer::Typecheck::emitWarningLabeled(state, value.span, DiagnosticCode::NON_EXHAUSTIVE_MATCH, "non-exhaustive match", reason.toStr());
       }
 

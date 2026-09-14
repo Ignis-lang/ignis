@@ -6315,8 +6315,9 @@ function typecheckMatchExpressionWildcardCoversOpenDomain(): void {
 /// literal arm never guarantees coverage. The reference compiler always
 /// reports a non-exhaustive match as a WARNING and continues compilation,
 /// regardless of whether the match sits in EXPRESSION or statement
-/// position (`ignis_analyzer::typeck`'s `NonExhaustiveMatch` diagnostic is
-/// `Severity::Warning` unconditionally); the selfhost mirrors that severity
+/// position (`DiagnosticMessage::level()` in
+/// crates/ignis_diagnostics/src/message.rs returns `Severity::Warning` for
+/// `NonExhaustiveMatch` unconditionally); the selfhost mirrors that severity
 /// here rather than escalating to an error in value position.
 /// Spec: selfhost-match-exhaustiveness — open-domain requires catch-all,
 /// position-independent severity (parity with the reference compiler).
@@ -6408,9 +6409,13 @@ function typecheckMatchStatementGuardedWildcardDoesNotCountAsCoverage(): void {
 /// not `Node::Match` directly. `checkStmt`'s statement-position guard only
 /// matches a *direct* `Node::Match`, so this takes the ordinary expression
 /// path (`checkExpr`, `valuePosition = true`). Severity no longer depends on
-/// `valuePosition` — the reference compiler always warns — so this still
-/// reports the same WARNING as the direct-statement form; only the code
-/// path taken to get there differs (design D2).
+/// `valuePosition` — the reference compiler always warns — so this reports
+/// the same WARNING as the direct-statement form. What still distinguishes
+/// the two paths is the recorded expression type: the expression path
+/// records the match's type in `node_types` (typecheck_exprs.ign:4870), while
+/// the direct-statement path never assigns one, discarding the match's value
+/// (typecheck_exprs.ign:8793) — this test asserts that recorded type
+/// (design D2).
 /// Spec: selfhost-expected-type-propagation — position mechanism.
 @test
 function typecheckGroupedMatchStatementTakesExpressionPositionPath(): void {
@@ -6448,6 +6453,7 @@ function typecheckGroupedMatchStatementTakesExpressionPositionPath(): void {
   };
   Test::assertEq<Severity>(exhaustivenessDiagnostic.severity, Severity::WARNING);
   Test::assertEq<str>(exhaustivenessDiagnostic.messageText(), "non-exhaustive match");
+  assertExprType(&output, matchExpr, typeStore.intern(Analyzer::Type::I32));
 }
 
 // Phase 13: enum variant coverage crediting (selfhost-match-exhaustiveness,
