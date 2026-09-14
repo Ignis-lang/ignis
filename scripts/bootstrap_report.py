@@ -3,8 +3,10 @@
 
 Two commands, both driven by `scripts/bootstrap.sh`:
 
-  gate-g3   Compare a selfhost test run under stage2 with the same run under the
-            host compiler and write build/bootstrap/gates/G3.json.
+  gate-g3   Compare a selfhost test run under a built stage with the same run
+            under the host compiler and write the gate result (default
+            build/bootstrap/gates/G3.json for stage2; --label/--gate-id let a
+            caller run the same comparison for another stage, e.g. stage1).
   report    Read build/bootstrap/gates/*.json and write build/bootstrap/report.md
             and build/bootstrap/promotion.json.
 
@@ -146,6 +148,14 @@ def has_summary(parsed: dict) -> bool:
 
 
 def build_gate_g3(arguments: argparse.Namespace) -> dict:
+  # `label` names the built-compiler side of the comparison in the JSON
+  # details and summary text ("stage2" for the nightly matrix and a
+  # developer's local `gate-g3`; "stage1" for ci.yml's PR-only check, added to
+  # close the gap PR #201 left where CI never ran the selfhost test suite
+  # under a selfhost-built binary at all). `gate_id` names the JSON payload's
+  # "gate" field and the written file, so the two candidates never collide.
+  label = arguments.label
+  gate_id = arguments.gate_id
   stage2_log = Path(arguments.stage2_log)
   host_log = Path(arguments.host_log)
 
@@ -164,7 +174,7 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
   host_skipped = skipped_names(host)
 
   details = {
-    "stage2": {
+    label: {
       "log": str(stage2_log),
       "exit_status": arguments.stage2_status,
       "summary": stage2["summary"],
@@ -176,18 +186,18 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
       "summary": host["summary"],
       "tests": len(host["tests"]),
     },
-    "failing_only_under_stage2": sorted(stage2_failing - host_failing),
+    f"failing_only_under_{label}": sorted(stage2_failing - host_failing),
     "failing_only_under_host": sorted(host_failing - stage2_failing),
-    "missing_from_stage2": sorted(set(host["tests"]) - set(stage2["tests"])),
+    f"missing_from_{label}": sorted(set(host["tests"]) - set(stage2["tests"])),
     "missing_from_host": sorted(set(stage2["tests"]) - set(host["tests"])),
-    "skipped_only_under_stage2": sorted(stage2_skipped - host_skipped),
+    f"skipped_only_under_{label}": sorted(stage2_skipped - host_skipped),
     "skipped_only_under_host": sorted(host_skipped - stage2_skipped),
     "timeout_seconds": arguments.timeout_seconds,
   }
 
   timed_out = [
     name
-    for name, status in (("stage2", arguments.stage2_status), ("host", arguments.host_status))
+    for name, status in ((label, arguments.stage2_status), ("host", arguments.host_status))
     if status == 124
   ]
 
@@ -195,16 +205,16 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
     details["timed_out"] = timed_out
 
   if not has_summary(stage2):
-    details["stage2"]["errors"] = log_errors(stage2_log)
-    details["stage2"]["log_tail"] = log_tail(stage2_log)
+    details[label]["errors"] = log_errors(stage2_log)
+    details[label]["log_tail"] = log_tail(stage2_log)
 
     reason = (
-      f"stage2 timed out after {arguments.timeout_seconds}s"
+      f"{label} timed out after {arguments.timeout_seconds}s"
       if arguments.stage2_status == 124
-      else f"stage2 produced no test summary (exit {arguments.stage2_status})"
+      else f"{label} produced no test summary (exit {arguments.stage2_status})"
     )
 
-    return {"gate": "G3", "status": STATUS_FAIL, "summary": reason, "details": details}
+    return {"gate": gate_id, "status": STATUS_FAIL, "summary": reason, "details": details}
 
   if not has_summary(host):
     details["host"]["errors"] = log_errors(host_log)
@@ -216,7 +226,7 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
       else f"the host produced no test summary (exit {arguments.host_status})"
     )
 
-    return {"gate": "G3", "status": STATUS_FAIL, "summary": reason, "details": details}
+    return {"gate": gate_id, "status": STATUS_FAIL, "summary": reason, "details": details}
 
   stage2_counts = (
     stage2["summary"]["total"],
@@ -233,10 +243,10 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
 
   if stage2_counts != host_counts:
     return {
-      "gate": "G3",
+      "gate": gate_id,
       "status": STATUS_FAIL,
       "summary": (
-        f"stage2 reported {stage2_counts[1]}/{stage2_counts[0]} passing "
+        f"{label} reported {stage2_counts[1]}/{stage2_counts[0]} passing "
         f"({stage2_counts[3]} skipped), "
         f"the host {host_counts[1]}/{host_counts[0]} ({host_counts[3]} skipped)"
       ),
@@ -249,17 +259,17 @@ def build_gate_g3(arguments: argparse.Namespace) -> dict:
     or stage2["tests"] != host["tests"]
   ):
     return {
-      "gate": "G3",
+      "gate": gate_id,
       "status": STATUS_FAIL,
-      "summary": "stage2 and the host disagree on which tests fail or are skipped",
+      "summary": f"{label} and the host disagree on which tests fail or are skipped",
       "details": details,
     }
 
   return {
-    "gate": "G3",
+    "gate": gate_id,
     "status": STATUS_PASS,
     "summary": (
-      f"stage2 matches the host: {stage2_counts[1]}/{stage2_counts[0]} passing "
+      f"{label} matches the host: {stage2_counts[1]}/{stage2_counts[0]} passing "
       f"({stage2_counts[3]} skipped)"
     ),
     "details": details,
@@ -273,7 +283,7 @@ def command_gate_g3(arguments: argparse.Namespace) -> int:
   output.parent.mkdir(parents=True, exist_ok=True)
   output.write_text(json.dumps(gate, indent=2) + "\n", encoding="utf-8")
 
-  print(f"[bootstrap] gate G3: {gate['status']} — {gate['summary']}", file=sys.stderr)
+  print(f"[bootstrap] gate {gate['gate']}: {gate['status']} — {gate['summary']}", file=sys.stderr)
 
   return 0
 
@@ -516,13 +526,17 @@ def main() -> int:
   parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   subparsers = parser.add_subparsers(dest="command", required=True)
 
-  gate_g3 = subparsers.add_parser("gate-g3", help="compare a stage2 test run with the host's")
-  gate_g3.add_argument("--stage2-log", required=True, help="captured output of the stage2 test run")
+  gate_g3 = subparsers.add_parser("gate-g3", help="compare a built-stage test run with the host's")
+  gate_g3.add_argument("--stage2-log", required=True, help="captured output of the built-stage test run")
   gate_g3.add_argument("--host-log", required=True, help="captured output of the host test run")
-  gate_g3.add_argument("--stage2-status", type=int, default=0, help="exit status of the stage2 run")
+  gate_g3.add_argument("--stage2-status", type=int, default=0, help="exit status of the built-stage run")
   gate_g3.add_argument("--host-status", type=int, default=0, help="exit status of the host run")
   gate_g3.add_argument("--timeout-seconds", type=int, default=0, help="timeout both runs were given")
-  gate_g3.add_argument("--output", required=True, help="path of the G3 gate result")
+  gate_g3.add_argument("--output", required=True, help="path of the gate result")
+  gate_g3.add_argument(
+    "--label", default="stage2", help="name of the built-stage side in the JSON details (default: stage2)"
+  )
+  gate_g3.add_argument("--gate-id", default="G3", help="value of the JSON payload's \"gate\" field (default: G3)")
 
   report = subparsers.add_parser("report", help="write report.md and promotion.json")
   report.add_argument("--bootstrap-root", required=True, help="build/bootstrap directory")

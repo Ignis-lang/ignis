@@ -105,10 +105,16 @@ jobs:
     # would hold a runner for six hours, and on a pull request anyone can
     # trigger that. The budget is roughly double the slowest observed run.
     #
-    # The selfhost test suite reached 23 minutes as the corpus grew, which put a
-    # passing run one second inside the old 30-minute cap: every step reported
-    # success and the job was cancelled during cleanup.
-    timeout-minutes: 60
+    # The selfhost test suite once reached 23 minutes as the corpus grew (that
+    # was before the test runner's job-pool commit, 29985c90); the whole job
+    # measured 9m03s on run 34782190339 (`ignis test` itself: 7m24s).
+    #
+    # The stage1 steps below (added to close the PR #201/#202/#203 gap — a
+    # selfhost-built binary was never exercised on a PR at all) add stage1's
+    # own build plus one more selfhost-test-suite run under it, roughly
+    # doubling the job; 90 keeps this job's "roughly double the slowest
+    # observed run" convention against that ~45-minute expectation.
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repository
@@ -193,10 +199,101 @@ jobs:
       - name: Analyze the standard library and the selfhost compiler
         run: ignis check
 
+      # Captured to a log rather than just run, so the G3-stage1 comparison
+      # below can compare stage1's run against this exact host run instead of
+      # paying for a second, byte-identical `<host> test` invocation.
       - name: Run the selfhost test suite
-        run: ignis test
+        run: |
+          set -uo pipefail
+          mkdir -p build/bootstrap/stage1-tests
+          status=0
+          timeout 10800 ignis test 2>&1 | tee build/bootstrap/stage1-tests/log-host.txt || status=${PIPESTATUS[0]}
+          scripts/bootstrap.sh gate-g3-record-host stage1 "$status" build/bootstrap/stage1-tests/log-host.txt
+          exit "$status"
 
       # The standard library owns the string runtime the C smoke test used to
       # cover, so its own suite is the gate for it.
       - name: Run the standard library test suite
         run: ignis test-std --std-path std
+
+      # Everything above only ever runs the host (Rust) binary. PR #201 passed
+      # this job untouched and still broke the nightly ladder: the selfhost
+      # test suite failed to even link under a selfhost-built binary (G3), and
+      # stage2 panicked on two error-corpus cases (G5) — neither surfaced
+      # until the nightly ran hours later. stage1 (this binary compiling
+      # `ignis/main.ign` once) is the cheapest selfhost binary that exercises
+      # the same code paths, so PRs get it instead of stage2/stage3 or the
+      # rest of the ladder (G1/G2/G4/G6/G7), which stay nightly-only.
+      - name: Build stage1 with the host compiler
+        env:
+          IGNIS_STAGE0: ${{ github.workspace }}/target/ci/ignis
+        run: scripts/bootstrap.sh stage1
+
+      # The equivalent of the nightly's gate-g3-stage2/gate-g3-compare pair,
+      # run against stage1 instead of stage2: the host half was already
+      # recorded above by "Run the selfhost test suite", so this only runs
+      # stage1's half of the suite and compares it against that recorded run.
+      # Writes gates/G3-STAGE1.json.
+      - name: Run the selfhost test suite under stage1 (G3, stage1)
+        run: scripts/bootstrap.sh gate-g3-stage1
+
+      - name: Check G3 (stage1 vs host)
+        run: |
+          set -euo pipefail
+
+          gate_file="build/bootstrap/gates/G3-STAGE1.json"
+          if [ ! -f "$gate_file" ]; then
+            echo "no G3-STAGE1 gate result was produced" >&2
+            exit 1
+          fi
+
+          status="$(jq -r '.status' "$gate_file")"
+          summary="$(jq -r '.summary' "$gate_file")"
+          echo "G3 (stage1 vs host): ${status} — ${summary}"
+
+          if [ "$status" != "pass" ]; then
+            echo "stage1's selfhost test summary differs from the host's; see ${gate_file}" >&2
+            exit 1
+          fi
+
+      # The nightly's gate-g5, run against stage1 instead of stage2. Writes
+      # gates/G5-STAGE1.json.
+      - name: Replay the error corpus through stage1 (G5, stage1)
+        run: scripts/bootstrap.sh gate-g5-stage1
+
+      - name: Check G5 (stage1)
+        run: |
+          set -euo pipefail
+
+          gate_file="build/bootstrap/gates/G5-STAGE1.json"
+          if [ ! -f "$gate_file" ]; then
+            echo "no G5-STAGE1 gate result was produced" >&2
+            exit 1
+          fi
+
+          status="$(jq -r '.status' "$gate_file")"
+          summary="$(jq -r '.summary' "$gate_file")"
+          echo "G5 (stage1): ${status} — ${summary}"
+
+          if [ "$status" != "pass" ]; then
+            echo "stage1 does not keep every diagnostic the host records; see ${gate_file}" >&2
+            exit 1
+          fi
+
+      # `failure()` alone misses a run cancelled by `timeout-minutes` expiring
+      # (the job is cancelled, not failed), which is exactly the case these
+      # artifacts would be most useful for diagnosing.
+      - name: Upload stage1 selfhost gate artifacts
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage1-selfhost-gates
+          path: |
+            build/bootstrap/stage1/log.txt
+            build/bootstrap/gates/G3-STAGE1.json
+            build/bootstrap/gates/G5-STAGE1.json
+            build/bootstrap/stage1-tests/log*.txt
+            build/bootstrap/stage1-tests/status-*.json
+            build/bootstrap/parity-err-stage1.md
+            build/bootstrap/parity-err-stage1.json
+          if-no-files-found: ignore
