@@ -439,13 +439,11 @@ export namespace ParserExpressions {
     slots: &Vector<ParsedExpression>,
     span: SourceSpan
   ): Ast::ExpressionId {
-    let mut headText: String = String::create("");
     let Option::SOME(head) = quasis.get(0) else {
-      return ParserExpressions::buildStringCreate(parser, span, &headText);
+      @panic("template literal desugar requires at least one quasi");
     };
-    headText = head.clone();
 
-    let mut result: Ast::ExpressionId = ParserExpressions::buildStringCreate(parser, span, &headText);
+    let mut result: Ast::ExpressionId = ParserExpressions::buildStringCreate(parser, span, head);
 
     let mut index: u64 = 0;
     while (index < slots.length()) {
@@ -456,14 +454,11 @@ export namespace ParserExpressions {
       let slotArgument: Ast::ExpressionId = ParserExpressions::buildSlotArgument(parser, slot.id, slot.span);
       result = ParserExpressions::buildConcatCall(parser, result, slotArgument, slot.span);
 
-      let Option::SOME(chunk) = quasis.get(index + 1) else {
-        index += 1;
-        continue;
-      };
-
-      if (chunk.length() > 0) {
-        let literalId: Ast::ExpressionId = ParserExpressions::buildStringLiteral(parser, span, chunk);
-        result = ParserExpressions::buildConcatCall(parser, result, literalId, span);
+      if (let Option::SOME(chunk) = quasis.get(index + 1)) {
+        if (chunk.length() > 0) {
+          let literalId: Ast::ExpressionId = ParserExpressions::buildStringLiteral(parser, span, chunk);
+          result = ParserExpressions::buildConcatCall(parser, result, literalId, span);
+        }
       }
 
       index += 1;

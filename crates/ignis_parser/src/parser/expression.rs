@@ -1472,40 +1472,59 @@ mod tests {
     );
   }
 
-  /// Walks the desugared `.concat(..)` chain down to the innermost
-  /// `String::create(..)` call and returns its span.
-  fn string_create_span(
+  /// Walks a desugared `String::create(head).concat(..)` chain, asserting
+  /// that `String::create` and every literal-chunk `concat` span the whole
+  /// literal, while each slot's `concat` spans only that slot. Mirrors the
+  /// selfhost parser's `assertTemplateDesugarSpans` (`ignis/parser/tests.ign`).
+  fn assert_template_desugar_spans(
     result: &ParseResult,
     node: &NodeId,
-  ) -> Span {
+    whole_span: &Span,
+  ) {
     let ASTNode::Expression(ASTExpression::Call(call)) = result.nodes.get(node) else {
-      panic!("expected a call node in the desugar chain");
+      panic!("expected a call node in the template desugar chain");
     };
     let ASTNode::Expression(callee) = result.nodes.get(&call.callee) else {
       panic!("expected a callee expression");
     };
 
     match callee {
-      ASTExpression::Path(_) => call.span.clone(),
-      ASTExpression::MemberAccess(access) => string_create_span(result, &access.object),
-      other => panic!("unexpected callee shape in desugar chain: {:?}", other),
+      ASTExpression::Path(_) => {
+        assert_eq!(&call.span, whole_span, "String::create must span the whole template literal");
+      },
+      ASTExpression::MemberAccess(access) => {
+        let argument_id = call.arguments.first().expect("a concat call is missing its argument");
+        let ASTNode::Expression(argument) = result.nodes.get(argument_id) else {
+          panic!("expected an argument expression");
+        };
+
+        match argument {
+          ASTExpression::Literal(_) => {
+            assert_eq!(&call.span, whole_span, "a literal-chunk concat must span the whole template literal");
+          },
+          other => {
+            let slot_span = other.span();
+            assert_eq!(&call.span, slot_span, "a slot's concat must span only that slot");
+            assert_ne!(slot_span, whole_span, "a slot's span must differ from the whole-literal span");
+          },
+        }
+
+        assert_template_desugar_spans(result, &access.object, whole_span);
+      },
+      other => panic!("unexpected callee shape in template desugar chain: {:?}", other),
     }
   }
 
   /// Regression test for issue #204: the desugared `String::create(..)` call
-  /// must take the whole-literal span (merged across every quasi and slot),
-  /// not the span of the head chunk alone.
+  /// and every literal-chunk `concat` must take the whole-literal span
+  /// (merged across every quasi and slot), while each slot's `concat` must
+  /// take only that slot's own span.
   #[test]
   fn template_desugar_string_create_spans_whole_literal() {
-    let result = parse_expr("`a${x}b`");
+    let result = parse_expr("`a${x}b${y}c`");
     let template = template_of(get_expr(&result));
 
-    let create_span = string_create_span(&result, &template.desugared);
-
-    assert_eq!(
-      create_span, template.span,
-      "String::create must span the whole template literal, not just the head chunk"
-    );
+    assert_template_desugar_spans(&result, &template.desugared, &template.span);
   }
 
   #[test]

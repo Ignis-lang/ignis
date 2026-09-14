@@ -2,7 +2,7 @@ import Fs from "std::fs";
 import Io from "std::io";
 import Test from "std::test";
 
-import Diagnostic, DiagnosticBag, SourceFile from "@compiler::diagnostics";
+import Diagnostic, DiagnosticBag, SourceFile, SourceSpan from "@compiler::diagnostics";
 import Ast from "@compiler::ast";
 import CompileFlags, Parser from "@compiler::parser";
 
@@ -3913,7 +3913,7 @@ function describeArguments(module: &Ast::Module, arguments: &Vector<Ast::Express
   return rendered;
 }
 
-function describeSingleExpressionBody(module: &Ast::Module): String {
+function singleExpressionBodyId(module: &Ast::Module): Ast::ExpressionId {
   let functionId: Ast::ItemId = match (module.roots.get(0)) {
     Option::SOME(value) -> *value,
     Option::NONE -> @panic("missing template function root"),
@@ -3933,8 +3933,71 @@ function describeSingleExpressionBody(module: &Ast::Module): String {
   };
 
   return match (expectStatement(module, statementId)) {
-    Ast::Statement::Node::Expression(expressionStatement) -> describeExpression(module, expressionStatement.expression),
+    Ast::Statement::Node::Expression(expressionStatement) -> expressionStatement.expression,
     _ -> @panic("expected an expression statement"),
+  };
+}
+
+function describeSingleExpressionBody(module: &Ast::Module): String {
+  return describeExpression(module, singleExpressionBodyId(module));
+}
+
+/// Returns the span carried by any expression node shape that a template
+/// literal's interpolated slot can produce in these fixtures.
+function expressionSpanOf(module: &Ast::Module, id: Ast::ExpressionId): SourceSpan {
+  return match (expectExpression(module, id)) {
+    Ast::Expression::Node::Literal(literal) -> literal.span,
+    Ast::Expression::Node::Variable(variable) -> variable.span,
+    Ast::Expression::Node::Path(path) -> path.span,
+    Ast::Expression::Node::Reference(reference) -> reference.span,
+    Ast::Expression::Node::MemberAccess(access) -> access.span,
+    Ast::Expression::Node::Call(call) -> call.span,
+    Ast::Expression::Node::Binary(binaryExpression) -> binaryExpression.span,
+    _ -> @panic("expressionSpanOf: unsupported expression kind in a template desugar test"),
+  };
+}
+
+/// Walks a desugared `String::create(head).concat(..)` chain, mirroring the
+/// host's `desugar_template_string`: `String::create` and every literal-chunk
+/// `concat` must span the whole literal, while a slot's `concat` must span
+/// only that slot. Regression coverage for issue #204.
+function assertTemplateDesugarSpans(
+  module: &Ast::Module,
+  id: Ast::ExpressionId,
+  wholeSpan: SourceSpan
+): void {
+  let Ast::Expression::Node::Call(call) = expectExpression(module, id) else {
+    @panic("expected a call node in the template desugar chain");
+  };
+
+  match (expectExpression(module, call.callee)) {
+    Ast::Expression::Node::Path(_) -> {
+      // The innermost `String::create(head)` call spans the whole literal.
+      Test::assertEq<SourceSpan>(call.span, wholeSpan);
+    },
+    Ast::Expression::Node::MemberAccess(access) -> {
+      let Option::SOME(argumentId) = call.arguments.get(0) else {
+        @panic("a template desugar concat call is missing its argument");
+      };
+
+      let isLiteralChunk: boolean = match (expectExpression(module, *argumentId)) {
+        Ast::Expression::Node::Literal(_) -> true,
+        _ -> false,
+      };
+
+      if (isLiteralChunk) {
+        // A literal-chunk `concat` call spans the whole literal, like `String::create`.
+        Test::assertEq<SourceSpan>(call.span, wholeSpan);
+      } else {
+        // A slot's `concat` call spans only that slot, not the whole literal.
+        let slotSpan: SourceSpan = expressionSpanOf(module, *argumentId);
+        Test::assertEq<SourceSpan>(call.span, slotSpan);
+        Test::assert(!(slotSpan.start == wholeSpan.start && slotSpan.end == wholeSpan.end));
+      }
+
+      assertTemplateDesugarSpans(module, access.object, wholeSpan);
+    },
+    _ -> @panic("unexpected callee shape in the template desugar chain"),
   };
 }
 
@@ -3961,6 +4024,27 @@ function parserDesugarsTemplateWithInterpolations(): void {
   let rendered: String = parseTemplateBody("function main(): void { `a${x}b${y}c`; }");
 
   Test::assertEq<str>(rendered.toStr(), "String::create(\"a\").concat(&x).concat(\"b\").concat(&y).concat(\"c\")");
+}
+
+/// Regression test for issue #204: the desugared `String::create` call and
+/// every literal-chunk `concat` must span the whole template literal, while
+/// each slot's `concat` must span only that slot.
+@test
+function parserTemplateDesugarSpansMatchTheHost(): void {
+  let source: SourceFile = SourceFile::create("fixtures/parser_template_spans.ign", "function main(): void { `a${x}b${y}c`; }");
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+
+  let chainId: Ast::ExpressionId = singleExpressionBodyId(&module);
+
+  // The literal spans the backtick-delimited text `a${x}b${y}c` exactly.
+  let wholeSpan: SourceSpan = SourceSpan::new("fixtures/parser_template_spans.ign", 24, 37);
+  Test::assertEq<SourceSpan>(expressionSpanOf(&module, chainId), wholeSpan);
+
+  assertTemplateDesugarSpans(&module, chainId, wholeSpan);
 }
 
 @test
