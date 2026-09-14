@@ -1,0 +1,31 @@
+// e2e: std
+//
+// A match nested in an arm of another hands its result straight through, so whatever it
+// gave away the outer match gave away too. Compensating only at the inner level left the
+// value moved on one outer arm and live on the others, and the cross-arm merge read a
+// real hand-over as an inconsistent move.
+import String from "std::string";
+import Option from "std::option";
+
+enum Pick {
+  INNER,
+  FALLBACK,
+}
+
+function choose(outer: Option<String>, pick: Pick, fallback: String): String {
+  return match (outer) {
+    Option::SOME(first) -> match (pick) {
+      Pick::INNER -> first,
+      Pick::FALLBACK -> fallback,
+    },
+    Option::NONE -> fallback,
+  };
+}
+
+function main(): i32 {
+  let takenInner: String = choose(Option::SOME(String::create("abc")), Pick::INNER, String::create("fallback"));
+  let takenFallback: String = choose(Option::SOME(String::create("abc")), Pick::FALLBACK, String::create("ab"));
+  let takenOuter: String = choose(Option::NONE, Pick::INNER, String::create("a"));
+
+  return (takenInner.length() + takenFallback.length() + takenOuter.length()) as i32;
+}

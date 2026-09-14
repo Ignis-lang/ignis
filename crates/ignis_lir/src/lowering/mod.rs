@@ -85,12 +85,17 @@ pub struct LoweringContext<'a> {
   thunk_captures: HashMap<DefinitionId, Vec<HIRCapture>>,
   drop_fn_captures: HashMap<DefinitionId, Vec<HIRCapture>>,
 
-  /// Definitions whose local holds a *pointer* to the storage the name denotes, rather
-  /// than the value itself: all reads, writes and `&`/`&mut` on them go through that
+  /// Locals that hold a *pointer* to the storage their name denotes, rather than the
+  /// value itself: all reads, writes and `&`/`&mut` through them go through that
   /// pointer. Two shapes land here — a variable captured by mutable reference in the
   /// current thunk, and a pattern binding destructured out of a reference scrutinee,
   /// which names a place inside the referent and must outlive the match.
-  byref_places: HashSet<DefinitionId>,
+  ///
+  /// Keyed by local rather than by definition because several definitions can share one
+  /// binding's slot: the same name bound in different arms, and the copies
+  /// monomorphisation makes. A def-keyed set has to be kept in sync with every one of
+  /// them, and a def that slipped through read the pointer's bytes as the value.
+  byref_locals: HashSet<LocalId>,
 
   /// Definitions whose locals hold closure values. Maps to (closure_type, heap_allocated).
   /// Used by `emit_drop_for_def` to emit `DropClosure` instead of `Drop`.
@@ -124,7 +129,7 @@ impl<'a> LoweringContext<'a> {
       lowered_error_nodes: Vec::new(),
       thunk_captures: HashMap::new(),
       drop_fn_captures: HashMap::new(),
-      byref_places: HashSet::new(),
+      byref_locals: HashSet::new(),
       closure_locals: HashMap::new(),
     }
   }
@@ -242,8 +247,11 @@ impl<'a> LoweringContext<'a> {
     // Capture modes determine extraction:
     //   ByValue:  GetFieldPtr → LoadPtr → store value into local
     //   ByRef:    GetFieldPtr → LoadPtr → LoadPtr (deref pointer) → store value into local
-    //   ByMutRef: GetFieldPtr → LoadPtr → store pointer into local (tracked in byref_places)
-    self.byref_places.clear();
+    //   ByMutRef: GetFieldPtr → LoadPtr → store pointer into local (tracked in byref_locals)
+    //
+    // Local ids restart with every body, so an entry left over from the last one names a
+    // different slot here.
+    self.byref_locals.clear();
 
     if let Some(captures) = self.thunk_captures.get(&def_id).cloned()
       && !captures.is_empty()
@@ -329,7 +337,7 @@ impl<'a> LoweringContext<'a> {
               value: Operand::Temp(field_val_temp),
             });
             self.def_to_local.insert(cap.source_def, cap_local);
-            self.byref_places.insert(cap.source_def);
+            self.byref_locals.insert(cap_local);
           },
         }
       }
@@ -384,6 +392,9 @@ impl<'a> LoweringContext<'a> {
     self.loop_stack.clear();
     self.synthetic_owned_stack.clear();
     self.load_alias_temps.clear();
+    // Local ids restart with every body, so an entry left over from the last one names
+    // a different slot here.
+    self.byref_locals.clear();
 
     // Allocate locals for parameters and store initial values
     for (idx, &param_id) in method_def.params.iter().enumerate() {
@@ -678,9 +689,15 @@ impl<'a> LoweringContext<'a> {
     def_id: DefinitionId,
     ty: TypeId,
   ) -> Option<Operand> {
-    if let Some(&local_id) = self.def_to_local.get(&def_id) {
-      // ByMutRef captures: local holds a pointer; load + deref to get the value.
-      if self.byref_places.contains(&def_id) {
+    let resolved_local = self.def_to_local.get(&def_id).copied().or_else(|| {
+      let local_id = self.find_equivalent_binding_local(def_id)?;
+      self.def_to_local.insert(def_id, local_id);
+      Some(local_id)
+    });
+
+    if let Some(local_id) = resolved_local {
+      // The local holds a pointer to the real storage; load it, then read through it.
+      if self.byref_locals.contains(&local_id) {
         let ptr_ty = self.fn_builder().local_type(local_id);
         let ptr_temp = self.fn_builder().alloc_temp(ptr_ty, Span::default());
         self.fn_builder().emit(Instr::Load {
@@ -696,17 +713,6 @@ impl<'a> LoweringContext<'a> {
 
         return Some(Operand::Temp(val_temp));
       }
-
-      let temp = self.fn_builder().alloc_temp(ty, Span::default());
-      self.fn_builder().emit(Instr::Load {
-        dest: temp,
-        source: local_id,
-      });
-      self.load_alias_temps.insert(temp);
-
-      Some(Operand::Temp(temp))
-    } else if let Some(local_id) = self.find_equivalent_binding_local(def_id) {
-      self.def_to_local.insert(def_id, local_id);
 
       let temp = self.fn_builder().alloc_temp(ty, Span::default());
       self.fn_builder().emit(Instr::Load {
@@ -1364,9 +1370,9 @@ impl<'a> LoweringContext<'a> {
       // Simple variable: &var → AddrOfLocal
       HIRKind::Variable(def_id) => {
         if let Some(&local_id) = self.def_to_local.get(def_id) {
-          // ByMutRef captures: the local already holds a pointer to the
-          // original place, so load it instead of taking the local's address.
-          if self.byref_places.contains(def_id) {
+          // The local already holds a pointer to the original place, so load it
+          // instead of taking the local's address.
+          if self.byref_locals.contains(&local_id) {
             let ptr_ty = self.fn_builder().local_type(local_id);
             let ptr_temp = self.fn_builder().alloc_temp(ptr_ty, span);
             self.fn_builder().emit(Instr::Load {
@@ -1855,7 +1861,14 @@ impl<'a> LoweringContext<'a> {
   ) -> Option<DefinitionId> {
     let node = self.hir.get(target);
     match &node.kind {
-      HIRKind::Variable(def_id) if self.byref_places.contains(def_id) => Some(*def_id),
+      HIRKind::Variable(def_id)
+        if self
+          .def_to_local
+          .get(def_id)
+          .is_some_and(|local_id| self.byref_locals.contains(local_id)) =>
+      {
+        Some(*def_id)
+      },
       _ => None,
     }
   }
@@ -2676,8 +2689,26 @@ impl<'a> LoweringContext<'a> {
             dest: temp,
             source: *local,
           });
-          let nested =
-            self.lower_pattern_check(Operand::Temp(temp), *element_ty, element_pattern, span.clone(), false, None);
+
+          // Tuple patterns cannot reach a match arm today — the type grammar has no
+          // tuple type to spell one — but the element's address threads through anyway,
+          // so a binding under one is a place the day they can.
+          let element_ptr_ty = self.types.pointer(*element_ty, true);
+          let element_ptr = self.fn_builder().alloc_temp(element_ptr_ty, span.clone());
+          self.fn_builder().emit(Instr::AddrOfLocal {
+            dest: element_ptr,
+            local: *local,
+            mutable: true,
+          });
+
+          let nested = self.lower_pattern_check(
+            Operand::Temp(temp),
+            *element_ty,
+            element_pattern,
+            span.clone(),
+            false,
+            Some(Operand::Temp(element_ptr)),
+          );
           let and_temp = self.fn_builder().alloc_temp(bool_ty, span.clone());
           self.fn_builder().emit(Instr::BinOp {
             dest: and_temp,
@@ -2783,7 +2814,7 @@ impl<'a> LoweringContext<'a> {
         // A binding destructured out of a reference scrutinee names a place inside the
         // referent, not a copy of it: the local holds the address of that place so
         // `&binding` points into the referent and outlives the match, and every read,
-        // write and borrow of the name goes through the pointer (`byref_places`).
+        // write and borrow of the name goes through the pointer (`byref_locals`).
         let byref_place = place
           .clone()
           .filter(|_| borrowed_alias && self.drop_schedules.borrowed_pattern_bindings.contains(def_id));
@@ -2794,7 +2825,11 @@ impl<'a> LoweringContext<'a> {
             DefinitionKind::Variable(var_def) => var_def.mutable,
             _ => false,
           };
-          let binding_borrowed_alias = borrowed_alias && self.types.needs_drop_with_defs(&value_ty, self.defs);
+          // A slot holding a pointer into someone else's storage is a shallow alias
+          // whatever the payload's type: the droppability test below it only ever
+          // mattered for a slot that held the payload's own bytes.
+          let binding_borrowed_alias = byref_place.is_some()
+            || (borrowed_alias && self.types.needs_drop_with_defs(&value_ty, self.defs));
           // The pointer itself is always spelled mutable: whether the *place* may be
           // written is the scrutinee's mutability, which analysis has already decided,
           // and a `const`-spelled slot here would only make `&mut binding` unassignable
@@ -2834,14 +2869,7 @@ impl<'a> LoweringContext<'a> {
         };
 
         if let Some(place_ptr) = byref_place {
-          self.byref_places.insert(*def_id);
-          let aliases: Vec<DefinitionId> = self
-            .def_to_local
-            .iter()
-            .filter(|(_, other_local)| **other_local == binding_local)
-            .map(|(other_def, _)| *other_def)
-            .collect();
-          self.byref_places.extend(aliases);
+          self.byref_locals.insert(binding_local);
           self.fn_builder().emit(Instr::Store {
             dest: binding_local,
             value: place_ptr,

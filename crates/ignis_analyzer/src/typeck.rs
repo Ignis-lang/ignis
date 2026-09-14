@@ -1119,7 +1119,7 @@ impl<'a> Analyzer<'a> {
 
         let target_node = self.ast.get(expr);
         if let ASTNode::Expression(target_expr) = target_node
-          && !self.is_mutable_expression(target_expr)
+          && !self.is_assignable_expression(target_expr)
         {
           let var_name = self.get_var_name_from_expr(target_expr);
           self.add_diagnostic(
@@ -1144,7 +1144,7 @@ impl<'a> Analyzer<'a> {
 
         let target_node = self.ast.get(expr);
         if let ASTNode::Expression(target_expr) = target_node
-          && !self.is_mutable_expression(target_expr)
+          && !self.is_assignable_expression(target_expr)
         {
           let var_name = self.get_var_name_from_expr(target_expr);
           self.add_diagnostic(
@@ -9420,7 +9420,7 @@ impl<'a> Analyzer<'a> {
 
     let target_node = self.ast.get(&assign.target);
     if let ASTNode::Expression(target_expr) = target_node
-      && !self.is_mutable_expression(target_expr)
+      && !self.is_assignable_expression(target_expr)
       && !self.is_mutable_reference_assignment_target(&assign.target, target_type)
     {
       let var_name = self.get_var_name_from_expr(target_expr);
@@ -10069,6 +10069,53 @@ impl<'a> Analyzer<'a> {
         }
       },
       _ => self.types.error(),
+    }
+  }
+
+  /// Whether an assignment may replace what this expression names.
+  ///
+  /// Narrower than [`Self::is_mutable_expression`], which also answers "may this be
+  /// borrowed mutably". A by-reference pattern binding names a place inside the
+  /// referent: reading it and borrowing it are permissions the scrutinee already
+  /// granted, but replacing the value at that place is not one of them — the old value
+  /// there would have to be dropped through the place, and no drop schedule describes
+  /// that. Assignment through such a name is rejected rather than silently overwritten,
+  /// which is also what the compiler did before these bindings became places.
+  fn is_assignable_expression(
+    &self,
+    expr: &ASTExpression,
+  ) -> bool {
+    if self.assignment_root_is_place_binding(expr) {
+      return false;
+    }
+
+    self.is_mutable_expression(expr)
+  }
+
+  /// Whether the place this expression writes bottoms out in a by-reference binding.
+  fn assignment_root_is_place_binding(
+    &self,
+    expr: &ASTExpression,
+  ) -> bool {
+    match expr {
+      ASTExpression::Variable(var) => self
+        .scopes
+        .lookup_def(&var.name)
+        .is_some_and(|def_id| self.mutable_pattern_bindings.contains(def_id)),
+      ASTExpression::MemberAccess(access) => self.assignment_root_is_place_binding_of(&access.object),
+      ASTExpression::VectorAccess(access) => self.assignment_root_is_place_binding_of(&access.name),
+      ASTExpression::Dereference(deref) => self.assignment_root_is_place_binding_of(&deref.inner),
+      _ => false,
+    }
+  }
+
+  fn assignment_root_is_place_binding_of(
+    &self,
+    node_id: &NodeId,
+  ) -> bool {
+    match self.ast.get(node_id) {
+      ASTNode::Expression(expr) => self.assignment_root_is_place_binding(expr),
+      _ => false,
     }
   }
 

@@ -1,0 +1,24 @@
+// e2e: err
+//
+// A binding destructured out of a `&mut` scrutinee names a place inside the referent.
+// Reading it and borrowing it are permissions the scrutinee granted; replacing the value
+// at that place is not one of them — the old value there would have to be dropped
+// through the place, and no drop schedule describes that. Rejected rather than
+// overwritten: accepting it dropped the pointer instead of the payload it points at.
+import String from "std::string";
+
+enum Box {
+  N(String),
+}
+
+function main(): i32 {
+  let mut boxed: Box = Box::N(String::create("old"));
+
+  match (&mut boxed) {
+    Box::N(payload) -> {
+      payload = String::create("new");
+    },
+  };
+
+  return 0;
+}
