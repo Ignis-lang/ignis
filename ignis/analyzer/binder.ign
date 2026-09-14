@@ -67,6 +67,13 @@ export namespace Analyzer {
       /// True while the children of an `extern` block are being completed.
       /// The functions inside one have no body and keep their written name.
       public insideExtern: boolean;
+      /// True only while `completeItem` is binding the exact declaration an
+      /// `export` wraps (spec §export-unwrapping mirrors `mark_exported_definition`
+      /// on the host): `export function foo() {}` makes `foo` itself Public.
+      /// `export namespace X { ... }` marks only the namespace's own definition,
+      /// so the `Namespace` arm resets this before recursing into `X`'s
+      /// children — otherwise every member would read as directly exported too.
+      public insideExport: boolean;
       /// C symbols claimed by `@externName` on a definition, co-indexed with
       /// `exportedSymbolSpans`. Two definitions claiming one symbol would emit
       /// two C definitions of it.
@@ -1887,6 +1894,38 @@ export namespace Analyzer {
       return false;
     }
 
+    /// Return true when metadata contains the `public` modifier, written
+    /// directly on a declaration (`public function foo() {}`). Mirrors the
+    /// host's `func.signature.metadata.is_public()`.
+    function metadataIsPublic(metadata: &Ast::Metadata): boolean {
+      let mut index: u64 = 0;
+
+      while (index < metadata.modifiers.length()) {
+        let Option::SOME(modifier) = metadata.modifiers.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        match (modifier) {
+          Ast::Modifier::Public -> {
+            return true;
+          },
+          Ast::Modifier::Private -> {},
+          Ast::Modifier::Static -> {},
+          Ast::Modifier::Mutable -> {},
+          Ast::Modifier::Inline -> {},
+          Ast::Modifier::InlineAlways -> {},
+          Ast::Modifier::InlineNever -> {},
+          Ast::Modifier::Meta -> {},
+          Ast::Modifier::Declare -> {},
+        };
+
+        index += 1;
+      }
+
+      return false;
+    }
+
     /// Return true when metadata contains the `mut` modifier, which the parser
     /// only ever attaches to a `static mut` field.
     function metadataIsMutable(metadata: &Ast::Metadata): boolean {
@@ -2627,10 +2666,21 @@ export namespace Analyzer {
       let mut typesRef: &mut Analyzer::TypeStore = typeStore;
       let sentinelId: Analyzer::TypeId = typesRef.intern(Analyzer::Type::VOID);
 
+      // Mirrors the host's `mark_exported_definition` and
+      // `func.signature.metadata.is_public()`: a plain top-level or
+      // namespace-scoped function is Private unless it is the exact
+      // declaration an `export` wraps, or it carries its own `public`
+      // modifier directly.
+      let mut visibility: Analyzer::Visibility = Analyzer::Visibility::PRIVATE;
+
+      if (state.insideExport || Analyzer::Binder::metadataIsPublic(&fn_.metadata)) {
+        visibility = Analyzer::Visibility::PUBLIC;
+      }
+
       // Push a placeholder FunctionDef first so sub-defs can reference the owner defId.
       let placeholderFn: Analyzer::FunctionDef = Analyzer::FunctionDef {
         name: sym,
-        visibility: Analyzer::Visibility::PUBLIC,
+        visibility: visibility,
         typeParams: Vector::new<Analyzer::DefinitionId>(),
         params: Vector::new<Analyzer::DefinitionId>(),
         returnType: sentinelId,
@@ -2650,7 +2700,7 @@ export namespace Analyzer {
       // Back-patch with fully-populated FunctionDef.
       let newFn: Analyzer::FunctionDef = Analyzer::FunctionDef {
         name: sym,
-        visibility: Analyzer::Visibility::PUBLIC,
+        visibility: visibility,
         typeParams: typeParams,
         params: params,
         returnType: sentinelId,
@@ -2728,6 +2778,156 @@ export namespace Analyzer {
       stateRef.declScopeKeys.push(scopeKey);
     }
 
+    /// Sets `defId`'s `visibility` to `PUBLIC`, for a `Function` or `Method`
+    /// definition. Mirrors the host's `mark_exported_definition`, which sets
+    /// `Definition::visibility` uninspected of kind; this covers `Function`
+    /// and `Method`, the only kinds an `export { name }` list names in
+    /// practice, and no-ops for every other kind.
+    function markDefinitionExported(
+      defStore: &mut Analyzer::DefinitionStore,
+      defId: Analyzer::DefinitionId,
+    ): void {
+      let Option::SOME(existing) = defStore.get(defId) else {
+        return;
+      };
+
+      match (existing) {
+        Analyzer::Definition::Function(fn_) -> {
+          let mut deprecatedMessage: Option<String> = Option::NONE;
+          if (let Option::SOME(message) = &fn_.deprecatedMessage) {
+            deprecatedMessage = Option::SOME(message.clone());
+          }
+
+          let mut externName: Option<String> = Option::NONE;
+          if (let Option::SOME(name) = &fn_.externName) {
+            externName = Option::SOME(name.clone());
+          }
+
+          let extensionTarget: Option<Analyzer::TypeId> = match (&fn_.extensionTarget) {
+            Option::SOME(target) -> Option::SOME(target),
+            Option::NONE -> Option::NONE,
+          };
+
+          let updated: Analyzer::FunctionDef = Analyzer::FunctionDef {
+            name: fn_.name,
+            visibility: Analyzer::Visibility::PUBLIC,
+            typeParams: Analyzer::copyDefIdBucket(Option::SOME(&fn_.typeParams)),
+            params: Analyzer::copyDefIdBucket(Option::SOME(&fn_.params)),
+            returnType: fn_.returnType,
+            isDeprecated: fn_.isDeprecated,
+            deprecatedMessage: deprecatedMessage,
+            extensionTarget: extensionTarget,
+            extensionMutable: fn_.extensionMutable,
+            isExtern: fn_.isExtern,
+            externName: externName,
+          };
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.replace(defId, Analyzer::Definition::Function(updated));
+        },
+        Analyzer::Definition::Method(method) -> {
+          let mut deprecatedMessage: Option<String> = Option::NONE;
+          if (let Option::SOME(message) = &method.deprecatedMessage) {
+            deprecatedMessage = Option::SOME(message.clone());
+          }
+
+          let updated: Analyzer::MethodDef = Analyzer::MethodDef {
+            name: method.name,
+            visibility: Analyzer::Visibility::PUBLIC,
+            owner: method.owner,
+            typeParams: Analyzer::copyDefIdBucket(Option::SOME(&method.typeParams)),
+            params: Analyzer::copyDefIdBucket(Option::SOME(&method.params)),
+            returnType: method.returnType,
+            isStatic: method.isStatic,
+            selfMutable: method.selfMutable,
+            selfByValue: method.selfByValue,
+            isDeprecated: method.isDeprecated,
+            deprecatedMessage: deprecatedMessage,
+          };
+          let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+          defsRef.replace(defId, Analyzer::Definition::Method(updated));
+        },
+        _ -> {},
+      };
+    }
+
+    /// Every definition bound so far at exactly `scopeKey` whose name is
+    /// `sym`, ascending by bind order. Unlike `DefinitionStore::definitionsNamed`
+    /// (a whole-program index by raw symbol), this only looks inside the one
+    /// scope the caller names — the lexically scoped lookup
+    /// `export name;` needs, mirroring the host's `self.scopes.lookup(name)`.
+    /// More than one result means an overload group.
+    function findScopedDefinitionsNamed(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      scopeKey: u64,
+      sym: Analyzer::SymbolId,
+    ): Vector<Analyzer::DefinitionId> {
+      let mut found: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+      let count: u64 = state.declScopeKeys.length();
+
+      while (index < count) {
+        let Option::SOME(declScopeKey) = state.declScopeKeys.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (*declScopeKey == scopeKey) {
+          if (let Option::SOME(candidateId) = state.defIds.get(index)) {
+            if (let Option::SOME(candidateDef) = defStore.get(*candidateId)) {
+              if (candidateDef.name().raw() == sym.raw()) {
+                found.push(*candidateId);
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return found;
+    }
+
+    /// Marks every definition an `export a, b;` / `export a, b from "./x";`
+    /// list names as exported. Mirrors the host's `exported_definition_ids`:
+    /// both forms resolve each name against what is already bound in the
+    /// export statement's own scope, regardless of `source` (a re-export
+    /// still needs the name to already exist here) — a same-named
+    /// definition in another namespace or module is never a match.
+    function markExportListExported(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      symbols: &mut Analyzer::SymbolTable,
+      scopeKey: u64,
+      items: &Vector<Ast::ImportBinding>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < items.length()) {
+        let Option::SOME(binding) = items.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (let Option::SOME(name) = &binding.name) {
+          let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+          let sym: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
+          let candidates: Vector<Analyzer::DefinitionId> = findScopedDefinitionsNamed(state, defStore, scopeKey, sym);
+          let mut candidateIndex: u64 = 0;
+
+          while (candidateIndex < candidates.length()) {
+            if (let Option::SOME(candidateId) = candidates.get(candidateIndex)) {
+              markDefinitionExported(defStore, *candidateId);
+            }
+
+            candidateIndex += 1;
+          }
+        }
+
+        index += 1;
+      }
+    }
+
     /// Dispatch pass-2 completion for a single item.
     ///
     /// Mirrors `predeclareItem` in shape. Handles Record, Enum, TypeAlias, Trait,
@@ -2768,6 +2968,13 @@ export namespace Analyzer {
             bindConstant(state, defStore, typeStore, symbols, itemId, &c, scopeKey);
           },
           Ast::Item::Node::Namespace(ns) -> {
+            // A namespace's own definition may be the exact declaration an
+            // enclosing `export` wraps, but that never reaches its members:
+            // `export namespace X { function foo() {} }` does not make `foo`
+            // directly exported, so this resets the flag before recursing.
+            let mut nsStateRef: &mut Analyzer::Binder::BinderState = state;
+            nsStateRef.insideExport = false;
+
             // Same +1 encoding as pass-1: 0 stays the top-level sentinel.
             let childScopeKey: u64 = (itemId.raw() as u64) + 1;
             let mut childIndex: u64 = 0;
@@ -2781,15 +2988,28 @@ export namespace Analyzer {
           },
           Ast::Item::Node::Export(ex) -> {
             if (let Option::SOME(innerItemId) = ex.declaration) {
+              let mut exportStateRef: &mut Analyzer::Binder::BinderState = state;
+              exportStateRef.insideExport = true;
+
               completeItem(state, defStore, typeStore, symbols, ast, innerItemId, scopeKey, pass1);
+
+              let mut exportStateRefAfter: &mut Analyzer::Binder::BinderState = state;
+              exportStateRefAfter.insideExport = false;
+            } else {
+              // `export a, b;` / `export a, b from "./x";` — no wrapped
+              // declaration, just a list of names to mark exported.
+              markExportListExported(state, defStore, symbols, scopeKey, &ex.items);
             }
           },
           Ast::Item::Node::Extern(externItem) -> {
             let childScopeKey: u64 = (itemId.raw() as u64) + 1;
             let mut externChildIndex: u64 = 0;
 
+            // Same reasoning as the `Namespace` arm: `export extern { ... }`
+            // exports the extern block's own definition, not its members.
             let mut enterRef: &mut Analyzer::Binder::BinderState = state;
             enterRef.insideExtern = true;
+            enterRef.insideExport = false;
 
             while (externChildIndex < externItem.items.length()) {
               if (let Option::SOME(childId) = externItem.items.get(externChildIndex)) {
@@ -2836,6 +3056,7 @@ export namespace Analyzer {
         scopeSyms: scopeSyms,
         scopeSpans: scopeSpans,
         insideExtern: false,
+        insideExport: false,
         exportedSymbols: Vector::new<String>(),
         exportedSymbolSpans: Vector::new<SourceSpan>(),
       };
@@ -2909,6 +3130,7 @@ export namespace Analyzer {
         scopeSyms: scopeSyms,
         scopeSpans: scopeSpans,
         insideExtern: false,
+        insideExport: false,
         exportedSymbols: Vector::new<String>(),
         exportedSymbolSpans: Vector::new<SourceSpan>(),
       };

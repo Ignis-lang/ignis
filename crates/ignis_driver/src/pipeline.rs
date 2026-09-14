@@ -14,7 +14,7 @@ use ignis_log::{
   cmd_artifact, cmd_fail, cmd_header, cmd_ok, cmd_stats, log_dbg, log_phase, log_trc, phase_log, phase_ok, phase_warn,
   section, section_item, trace_dbg,
 };
-use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, SymbolEntry, Visibility};
+use ignis_type::definition::{DefinitionId, DefinitionKind, DefinitionStore, SymbolEntry};
 use ignis_type::file::SourceMap;
 use ignis_type::module::{ModuleId, ModulePath};
 use ignis_type::symbol::SymbolTable;
@@ -5175,12 +5175,12 @@ fn collect_mono_roots(
         }
       },
 
-      // Include all public functions
-      DefinitionKind::Function(fd)
-        if def.visibility == Visibility::Public && !fd.is_extern && !fd.is_compile_time_only() =>
-      {
-        roots.push(def_id);
-      },
+      // Binaries prune unreferenced exported functions: the arm above
+      // already claims every non-extern, non-compile-time-only function via
+      // its guard, so a `Visibility::Public` arm here would be unreachable
+      // dead code (and was, until removed). Std archives that need every
+      // public export kept regardless of use go through
+      // `collect_mono_roots_for_std` instead.
 
       // Include non-generic records and their methods
       DefinitionKind::Record(rd) if rd.type_params.is_empty() => {
