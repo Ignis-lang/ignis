@@ -1,0 +1,23 @@
+// e2e: std
+//
+// A match in statement position gives its arm's value to nobody. Treating an arm that
+// names an owning parameter as a hand-over left the parameter marked moved with no drop
+// anywhere, and the fallback leaked on the path that named it.
+import String from "std::string";
+import Option from "std::option";
+
+function sink(source: Option<String>, fallback: String): i32 {
+  match (source) {
+    Option::SOME(text) -> text,
+    Option::NONE -> fallback,
+  };
+
+  return 0;
+}
+
+function main(): i32 {
+  let absent: i32 = sink(Option::NONE, String::create("fallback"));
+  let present: i32 = sink(Option::SOME(String::create("payload")), String::create("fallback"));
+
+  return absent + present;
+}

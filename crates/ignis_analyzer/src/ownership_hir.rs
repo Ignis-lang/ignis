@@ -108,6 +108,14 @@ pub struct HirOwnershipChecker<'a> {
   /// move out of a borrow even though the binding's own type is not a reference.
   borrowed_pattern_bindings: HashSet<DefinitionId>,
 
+  /// Nodes sitting directly in a block's statement list, whose value is discarded.
+  statement_position_nodes: HashSet<HIRId>,
+
+  /// One frame per match currently being checked, holding the values its arms handed to
+  /// the match result. Nested matches drain their frame into the enclosing one, because
+  /// a nested match's result *is* the enclosing arm's value.
+  arm_result_move_frames: Vec<Vec<DefinitionId>>,
+
   /// Pre-computed summaries: which parameters each function/method drops.
   /// Built by `build_summaries()` before the main analysis pass.
   summaries: HashMap<DefinitionId, FunctionDropSummary>,
@@ -168,7 +176,45 @@ impl<'a> HirOwnershipChecker<'a> {
       let_condition_bindings: HashMap::new(),
       let_condition_scrutinees: HashMap::new(),
       loop_condition_scrutinees: Vec::new(),
+      statement_position_nodes: Self::collect_statement_position_nodes(hir),
+      arm_result_move_frames: Vec::new(),
     }
+  }
+
+  fn record_arm_result_move(
+    &mut self,
+    def_id: DefinitionId,
+  ) {
+    if let Some(frame) = self.arm_result_move_frames.last_mut()
+      && !frame.contains(&def_id)
+    {
+      frame.push(def_id);
+    }
+  }
+
+  /// Every node that appears directly in a block's statement list, and therefore in a
+  /// position whose value is discarded.
+  ///
+  /// A match in value position hands its arm's value to whatever consumes the match, so
+  /// an arm naming an owning value gives it away. A match in statement position gives it
+  /// to nobody: the value is dropped as a temporary and the name still owns what it
+  /// named, so consuming it there would leave nothing to free it.
+  fn collect_statement_position_nodes(hir: &HIR) -> HashSet<HIRId> {
+    let mut result = HashSet::new();
+
+    for (_, node) in hir.nodes.iter() {
+      match &node.kind {
+        HIRKind::Block { statements, .. } => result.extend(statements.iter().copied()),
+        // Lowering wraps a statement-position expression in this, so the match itself is
+        // the wrapper's child rather than the block's statement.
+        HIRKind::ExpressionStatement(inner) => {
+          result.insert(*inner);
+        },
+        _ => {},
+      }
+    }
+
+    result
   }
 
   pub fn with_source_map(
@@ -1661,7 +1707,17 @@ impl<'a> HirOwnershipChecker<'a> {
     // Values outside the match that one arm hands to the match result. The move is real
     // on that arm's path and only there, so the arms that did not make it still own the
     // value and owe its drop — see the compensation pass after the loop.
-    let mut arm_result_moves: Vec<DefinitionId> = Vec::new();
+    //
+    // A match nested in an arm of this one hands its own result straight through to this
+    // match's result, so whatever it moved this match moved too: the frame it pushes
+    // here is drained into this one when it finishes, and the compensation below pays
+    // for it in the arms of *this* match that never took that path.
+    self.arm_result_move_frames.push(Vec::new());
+
+    // Only a match whose value is used hands anything over. In statement position the
+    // value is discarded, so an arm naming an owning value has given it to nobody and
+    // the name still owes its drop.
+    let match_value_is_used = !self.statement_position_nodes.contains(&hir_id);
 
     for arm in arms {
       self.states = pre_match_state.clone();
@@ -1736,7 +1792,8 @@ impl<'a> HirOwnershipChecker<'a> {
           // for the referent.
           if arm_pattern_defs.contains(&result_def) {
             self.try_consume(result_def, span.clone());
-          } else if !self.borrowed_pattern_bindings.contains(&result_def)
+          } else if match_value_is_used
+            && !self.borrowed_pattern_bindings.contains(&result_def)
             // Tracked and live: a name this function is the current owner of. Anything
             // untracked — a global, a value already moved — is not ours to hand over,
             // and the compensation pass below could not pay for it either.
@@ -1746,9 +1803,7 @@ impl<'a> HirOwnershipChecker<'a> {
               .needs_drop_with_defs(self.defs.type_of(&result_def), self.defs)
           {
             self.try_consume(result_def, span.clone());
-            if !arm_result_moves.contains(&result_def) {
-              arm_result_moves.push(result_def);
-            }
+            self.record_arm_result_move(result_def);
           }
         }
       }
@@ -1811,6 +1866,18 @@ impl<'a> HirOwnershipChecker<'a> {
     // where it is live and unowned, so its drop goes at the end of those arms. Marking
     // it moved in all of them is then the truth on every path — and is what keeps the
     // cross-arm merge from reading a real one-sided transfer as an inconsistent move.
+    let arm_result_moves = self.arm_result_move_frames.pop().unwrap_or_default();
+
+    // Whatever this match handed over, the match that encloses it handed over too: its
+    // own arms have to pay for it in the same way.
+    if let Some(parent) = self.arm_result_move_frames.last_mut() {
+      for def in &arm_result_moves {
+        if !parent.contains(def) {
+          parent.push(*def);
+        }
+      }
+    }
+
     for def in &arm_result_moves {
       for (index, arm_state) in arm_states.iter_mut().enumerate() {
         if arm_state.get(def) != Some(&OwnershipState::Valid) {
@@ -2259,11 +2326,6 @@ impl<'a> HirOwnershipChecker<'a> {
     result
   }
 
-  /// Whether these arms are the shape `lowering.rs` emits for `if (let P = value)` and
-  /// `while (let P = value)`: the pattern arm yields the literal `true`, and a trailing
-  /// wildcard arm yields the literal `false`. Nothing else in the language produces a
-  /// match whose only two arm bodies are those two literals in that order, so an
-  /// ordinary arm with a literal body is not mistaken for a condition.
   fn arms_are_let_condition_desugaring(
     hir: &HIR,
     arms: &[ignis_hir::HIRMatchArm],

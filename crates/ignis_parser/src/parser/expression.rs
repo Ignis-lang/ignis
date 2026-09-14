@@ -1393,6 +1393,13 @@ mod tests {
     for (source, expected) in [
       ("value as i32 & 1", ASTBinaryOperator::BitAnd),
       ("value as i32 | 1", ASTBinaryOperator::BitOr),
+      ("value as i32 ^ 1", ASTBinaryOperator::BitXor),
+      ("value as i32 >> 1", ASTBinaryOperator::ShiftRight),
+      ("value as i32 < 9", ASTBinaryOperator::LessThan),
+      ("value as i32 > 9", ASTBinaryOperator::GreaterThan),
+      ("value as i32 <= 9", ASTBinaryOperator::LessThanOrEqual),
+      ("value as i32 >= 9", ASTBinaryOperator::GreaterThanOrEqual),
+      ("value as i32 == 9", ASTBinaryOperator::Equal),
     ] {
       let result = parse_expr(source);
       let ASTExpression::Binary(binary) = get_expr(&result) else {
