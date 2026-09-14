@@ -1279,7 +1279,7 @@ mod tests {
     pattern::ASTPattern,
     statements::ASTStatement,
   };
-  use ignis_type::{Store, file::SourceMap, symbol::SymbolTable, value::IgnisLiteralValue};
+  use ignis_type::{Store, file::SourceMap, span::Span, symbol::SymbolTable, value::IgnisLiteralValue};
 
   use crate::{lexer::IgnisLexer, parser::IgnisParser};
 
@@ -1469,6 +1469,42 @@ mod tests {
     assert_eq!(
       describe(&result, &template.desugared),
       r#"String::create("").concat(&a).concat(" ").concat(&b.c).concat(" ").concat(d()).concat(" ").concat(e Add f)"#
+    );
+  }
+
+  /// Walks the desugared `.concat(..)` chain down to the innermost
+  /// `String::create(..)` call and returns its span.
+  fn string_create_span(
+    result: &ParseResult,
+    node: &NodeId,
+  ) -> Span {
+    let ASTNode::Expression(ASTExpression::Call(call)) = result.nodes.get(node) else {
+      panic!("expected a call node in the desugar chain");
+    };
+    let ASTNode::Expression(callee) = result.nodes.get(&call.callee) else {
+      panic!("expected a callee expression");
+    };
+
+    match callee {
+      ASTExpression::Path(_) => call.span.clone(),
+      ASTExpression::MemberAccess(access) => string_create_span(result, &access.object),
+      other => panic!("unexpected callee shape in desugar chain: {:?}", other),
+    }
+  }
+
+  /// Regression test for issue #204: the desugared `String::create(..)` call
+  /// must take the whole-literal span (merged across every quasi and slot),
+  /// not the span of the head chunk alone.
+  #[test]
+  fn template_desugar_string_create_spans_whole_literal() {
+    let result = parse_expr("`a${x}b`");
+    let template = template_of(get_expr(&result));
+
+    let create_span = string_create_span(&result, &template.desugared);
+
+    assert_eq!(
+      create_span, template.span,
+      "String::create must span the whole template literal, not just the head chunk"
     );
   }
 

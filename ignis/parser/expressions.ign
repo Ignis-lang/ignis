@@ -425,10 +425,60 @@ export namespace ParserExpressions {
     }));
   }
 
+  /// Builds `String::create(<quasi0>).concat(..)` for a template literal.
+  ///
+  /// Every quasi and slot must already be collected before calling this: it
+  /// mirrors the host's two-phase collect-then-desugar shape so that desugar
+  /// nodes are allocated only after the whole literal has been parsed, and so
+  /// that the leading `String::create` and every literal-chunk `concat` use
+  /// the merged whole-literal span rather than a single chunk's span. Each
+  /// slot's `concat` call still uses that slot's own span, matching the host.
+  function desugarTemplateString(
+    parser: &mut ParserShared::State,
+    quasis: &Vector<String>,
+    slots: &Vector<ParsedExpression>,
+    span: SourceSpan
+  ): Ast::ExpressionId {
+    let mut headText: String = String::create("");
+    let Option::SOME(head) = quasis.get(0) else {
+      return ParserExpressions::buildStringCreate(parser, span, &headText);
+    };
+    headText = head.clone();
+
+    let mut result: Ast::ExpressionId = ParserExpressions::buildStringCreate(parser, span, &headText);
+
+    let mut index: u64 = 0;
+    while (index < slots.length()) {
+      let Option::SOME(slot) = slots.get(index) else {
+        break;
+      };
+
+      let slotArgument: Ast::ExpressionId = ParserExpressions::buildSlotArgument(parser, slot.id, slot.span);
+      result = ParserExpressions::buildConcatCall(parser, result, slotArgument, slot.span);
+
+      let Option::SOME(chunk) = quasis.get(index + 1) else {
+        index += 1;
+        continue;
+      };
+
+      if (chunk.length() > 0) {
+        let literalId: Ast::ExpressionId = ParserExpressions::buildStringLiteral(parser, span, chunk);
+        result = ParserExpressions::buildConcatCall(parser, result, literalId, span);
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
   /// Parses a template literal that has at least one interpolation.
   ///
   /// The literal is desugared into `String::create(head).concat(..)`, which keeps
-  /// every later phase working on constructs it already understands.
+  /// every later phase working on constructs it already understands. Quasis and
+  /// interpolated slots are collected first, then desugared in one pass after the
+  /// whole literal has been parsed, mirroring the host's collect-then-desugar
+  /// shape so that node spans and allocation order match.
   function parseTemplateLiteral(
     parser: &mut ParserShared::State,
     head: Token
@@ -438,14 +488,16 @@ export namespace ParserExpressions {
     let headLexeme: String = parserRef.bump().lexemeString();
     let headText: String = ParserShared::decodeEscapes(ParserShared::stripTemplateDelimiters(&headLexeme, 1 as u64, 2 as u64));
 
-    let mut result: Ast::ExpressionId = ParserExpressions::buildStringCreate(parserRef, head.span, &headText);
+    let mut quasis: Vector<String> = Vector::new<String>();
+    quasis.push(headText);
+
+    let mut slots: Vector<ParsedExpression> = Vector::new<ParsedExpression>();
     let mut span: SourceSpan = head.span;
     let mut done: boolean = false;
 
     while (!done) {
       let slot = ParserExpressions::parseExpression(parserRef)!;
-      let slotArgument: Ast::ExpressionId = ParserExpressions::buildSlotArgument(parserRef, slot.id, slot.span);
-      result = ParserExpressions::buildConcatCall(parserRef, result, slotArgument, slot.span);
+      slots.push(slot);
 
       parserRef.skipTrivia();
       let chunkToken: Token = parserRef.current();
@@ -470,15 +522,13 @@ export namespace ParserExpressions {
 
       let chunkLexeme: String = parserRef.bump().lexemeString();
       let chunkText: String = ParserShared::decodeEscapes(ParserShared::stripTemplateDelimiters(&chunkLexeme, 1 as u64, trailing));
-
-      if (chunkText.length() > 0) {
-        let chunkId: Ast::ExpressionId = ParserExpressions::buildStringLiteral(parserRef, chunkToken.span, &chunkText);
-        result = ParserExpressions::buildConcatCall(parserRef, result, chunkId, chunkToken.span);
-      }
+      quasis.push(chunkText);
 
       span = ParserShared::mergeSpans(span, chunkToken.span);
       done = isTail;
     }
+
+    let result: Ast::ExpressionId = ParserExpressions::desugarTemplateString(parserRef, &quasis, &slots, span);
 
     return Option::SOME(ParsedExpression {
       id: result,
