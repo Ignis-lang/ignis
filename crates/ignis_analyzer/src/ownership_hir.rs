@@ -2,6 +2,35 @@
 //!
 //! This module implements ownership analysis that runs on the HIR representation,
 //! producing `DropSchedules` that tell LIR lowering when to emit drop instructions.
+//!
+//! # Binding mode
+//!
+//! A variant destructure decides, per scrutinee, what its bindings *are*:
+//!
+//! | Scrutinee | Binding mode | What the binding is | Who frees the payload |
+//! | --- | --- | --- | --- |
+//! | owned (`T`) | by value | the payload, moved out of the scrutinee | the binding, or whatever it is moved into |
+//! | reference (`&T` / `&mut T`) | by reference | a *place* inside the referent | the referent's owner; the match owes nothing |
+//!
+//! Under the by-reference mode a binding keeps the payload's type — `s` in
+//! `match (self) { Option::SOME(s) -> … }` over `&Option<S>` is still an `S` — but it
+//! names storage rather than holding a copy, so `&s` is a reference *into* the referent
+//! and outlives the match. Write permission comes from the scrutinee, exactly as it does
+//! for a field projection, and carries down through nested destructures; assigning to
+//! the name itself is rejected, because the old value at that place would have to be
+//! dropped through the place and no schedule here describes that.
+//!
+//! **This module owns the decision and lowering implements it.** The bindings that are
+//! places are published as [`DropSchedules::borrowed_pattern_bindings`] and read by LIR
+//! lowering. Deciding it there as well is what let the two disagree, and a binding
+//! lowered as a pointer while this module still schedules its drop frees a pointer.
+//!
+//! Lowering additionally needs the scrutinee's own address, which it has only when the
+//! scrutinee is reference-typed. A borrowed scrutinee reached another way — a field of a
+//! `&self`, say — keeps its bindings as by-value copies: still never dropped here, still
+//! rejected if moved out of.
+//!
+//! `docs/web/language/ownership.md` carries the same table for language users.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 

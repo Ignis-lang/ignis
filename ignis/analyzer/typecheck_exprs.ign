@@ -526,7 +526,11 @@ export namespace Analyzer {
       // mirroring the reference analyzer's implicit mutable-reference
       // assignment target.
       let mut targetType: Analyzer::TypeId = localBinding.typeId;
-      let mut targetIsMutable: boolean = localBinding.mutable;
+
+      // A by-reference pattern binding reports as mutable so `&mut binding`
+      // is accepted, but replacing the value at that place is not one of the
+      // permissions the scrutinee granted — mirrors `is_assignable_expression`.
+      let mut targetIsMutable: boolean = localBinding.mutable && !localBinding.placeMutable;
 
       if (let Option::SOME(referent) = Analyzer::Typecheck::mutableReferenceReferent(defStore, typeStore, localBinding.typeId)) {
         targetType = referent;
@@ -683,7 +687,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, operandId)) {
+      if (!Analyzer::Typecheck::isAssignablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, operandId)) {
         Analyzer::Typecheck::emitImmutableAssignment(state, module, span, operandId);
         return Option::NONE;
       }
@@ -735,7 +739,7 @@ export namespace Analyzer {
         return Option::NONE;
       };
 
-      if (!Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, value.target)) {
+      if (!Analyzer::Typecheck::isAssignablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, value.target)) {
         Analyzer::Typecheck::emitImmutableAssignment(state, module, value.span, value.target);
         return Option::NONE;
       }
@@ -5765,6 +5769,89 @@ export namespace Analyzer {
       };
 
       @panic("unreachable: isMutablePlaceExpr match did not return");
+    }
+
+    /// Whether an assignment may replace what this expression names.
+    ///
+    /// Narrower than `isMutablePlaceExpr`, which also answers "may this be
+    /// borrowed mutably". A by-reference pattern binding names a place inside
+    /// the referent: reading it and borrowing it are permissions the
+    /// scrutinee already granted, but replacing the value at that place is
+    /// not one of them — the old value there would have to be dropped
+    /// through the place, and no drop schedule describes that. Mirrors the
+    /// reference analyzer's `is_assignable_expression`.
+    function isAssignablePlaceExpr(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      defStore: &mut Analyzer::DefinitionStore,
+      typeStore: &mut Analyzer::TypeStore,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+    ): boolean {
+      if (Analyzer::Typecheck::assignmentRootIsPlaceBinding(state, resolvedBodies, module, exprId)) {
+        return false;
+      }
+
+      return Analyzer::Typecheck::isMutablePlaceExpr(state, defStore, typeStore, resolvedBodies, module, exprId);
+    }
+
+    /// Whether the place this expression writes bottoms out in a by-reference
+    /// pattern binding. Walks through member access, index access and
+    /// dereference to find the root. Mirrors `assignment_root_is_place_binding`.
+    function assignmentRootIsPlaceBinding(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      module: &Ast::Module,
+      exprId: Ast::ExpressionId,
+    ): boolean {
+      let Option::SOME(expr) = module.expressions.get(exprId) else {
+        return false;
+      };
+
+      match (expr) {
+        Ast::Expression::Node::Variable(_) -> {
+          return Analyzer::Typecheck::resolvedRefIsPlaceMutableBinding(state, resolvedBodies, exprId);
+        },
+        Ast::Expression::Node::Path(_) -> {
+          return Analyzer::Typecheck::resolvedRefIsPlaceMutableBinding(state, resolvedBodies, exprId);
+        },
+        Ast::Expression::Node::MemberAccess(memberAccess) -> {
+          return Analyzer::Typecheck::assignmentRootIsPlaceBinding(state, resolvedBodies, module, memberAccess.object);
+        },
+        Ast::Expression::Node::VectorAccess(access) -> {
+          return Analyzer::Typecheck::assignmentRootIsPlaceBinding(state, resolvedBodies, module, access.vector);
+        },
+        Ast::Expression::Node::Dereference(deref) -> {
+          return Analyzer::Typecheck::assignmentRootIsPlaceBinding(state, resolvedBodies, module, deref.operand);
+        },
+        _ -> {
+          return false;
+        },
+      };
+
+      @panic("unreachable: assignmentRootIsPlaceBinding match did not return");
+    }
+
+    /// Whether this expression resolves to a local binding tracked as a
+    /// by-reference pattern binding.
+    function resolvedRefIsPlaceMutableBinding(
+      state: &mut Analyzer::Typecheck::TypecheckState,
+      resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
+      exprId: Ast::ExpressionId,
+    ): boolean {
+      let Option::SOME(resolvedRef) = Analyzer::Typecheck::lookupExprRef(resolvedBodies, exprId) else {
+        return false;
+      };
+
+      let Analyzer::ResolverBodies::ResolvedRef::Local(localId) = resolvedRef else {
+        return false;
+      };
+
+      let Option::SOME(binding) = Analyzer::Typecheck::lookupLocalBinding(state, localId) else {
+        return false;
+      };
+
+      return binding.placeMutable;
     }
 
     function resolvedRefIsMutableBinding(
