@@ -1,0 +1,57 @@
+// e2e: std
+//
+// Three arms competing for two owning parameters, which is the shape the arm-result
+// move has to get right on every path at once: whichever parameter an arm hands to the
+// match result is freed by the result's owner, and the parameters that arm left behind
+// are freed at the end of that arm. A third arm that takes neither owes both.
+//
+// The exit code is the construction/drop imbalance, so 0 means every Tracked was built
+// and freed exactly once across all three paths.
+
+record Counters {
+  static mut MADE: i32 = 0;
+  static mut DROPPED: i32 = 0;
+}
+
+@implements(Drop)
+record Tracked {
+  public id: i32;
+
+  drop(&mut self): void {
+    Counters::DROPPED += 1;
+    return;
+  }
+}
+
+enum Pick {
+  FIRST,
+  SECOND,
+  NEITHER,
+}
+
+function tracked(id: i32): Tracked {
+  Counters::MADE += 1;
+  return Tracked { id: id };
+}
+
+function choose(pick: Pick, first: Tracked, second: Tracked): Tracked {
+  return match (pick) {
+    Pick::FIRST -> first,
+    Pick::SECOND -> second,
+    Pick::NEITHER -> tracked(3),
+  };
+}
+
+function run(): i32 {
+  let chosenFirst: Tracked = choose(Pick::FIRST, tracked(1), tracked(2));
+  let chosenSecond: Tracked = choose(Pick::SECOND, tracked(1), tracked(2));
+  let chosenNeither: Tracked = choose(Pick::NEITHER, tracked(1), tracked(2));
+
+  return chosenFirst.id + chosenSecond.id + chosenNeither.id;
+}
+
+function main(): i32 {
+  let seen: i32 = run();
+
+  return Counters::MADE - Counters::DROPPED + seen - 6;
+}
