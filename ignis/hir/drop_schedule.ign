@@ -197,6 +197,21 @@ export namespace Hir {
     /// deliberately excluded from `isEmpty`.
     public moves: Vector<Hir::MoveEntry>;
 
+    /// Pattern bindings destructured out of a borrowed scrutinee, which name storage the
+    /// match never owned and therefore appear in no drop schedule above. Mirrors the Rust
+    /// `borrowed_pattern_bindings` field.
+    ///
+    /// Ownership decides binding mode and lowering implements it: a binding listed here is
+    /// lowered as a place inside the referent — its local holds the payload's address — so
+    /// a reference taken from it points into the referent and outlives the match. Deciding
+    /// it in lowering instead would let the two disagree, and a binding lowered as a
+    /// pointer while ownership still schedules its drop frees a pointer.
+    ///
+    /// Not every listed binding gets an address: lowering also needs the scrutinee's own
+    /// address, which it has only when the scrutinee is reference-typed. The rest stay
+    /// by-value copies, exactly as before.
+    public borrowedPatternBindings: Vector<Analyzer::DefinitionId>;
+
     public static init(): DropSchedules {
       return DropSchedules {
         onScopeEnd: Vector::new<Hir::NodeDropEntry>(),
@@ -209,7 +224,34 @@ export namespace Hir {
         onScopeEndDefers: Vector::new<Hir::NodeDeferEntry>(),
         onExitDefers: Vector::new<Hir::ExitDeferEntry>(),
         moves: Vector::new<Hir::MoveEntry>(),
+        borrowedPatternBindings: Vector::new<Analyzer::DefinitionId>(),
       };
+    }
+
+    /// Adds `defId` to `borrowedPatternBindings` if it is not already listed, mirroring
+    /// the Rust `HashSet::insert` semantics of `borrowed_pattern_bindings.extend(..)`.
+    public addBorrowedPatternBinding(&mut self, defId: Analyzer::DefinitionId): void {
+      if (self.isBorrowedPatternBinding(defId)) {
+        return;
+      }
+
+      self.borrowedPatternBindings.push(defId);
+    }
+
+    public isBorrowedPatternBinding(&self, defId: Analyzer::DefinitionId): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.borrowedPatternBindings.length()) {
+        if (let Option::SOME(entry) = self.borrowedPatternBindings.get(index)) {
+          if (entry.raw() == defId.raw()) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
     }
 
     public isEmpty(&self): boolean {

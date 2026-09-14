@@ -1,0 +1,51 @@
+// e2e: std
+//
+// A variant destructure over a reference scrutinee binds a place inside the referent,
+// so a reference taken from the binding outlives the match. Binding by value instead
+// made `&payload` point at an arm-local copy: the reference survived the return, the
+// slot did not, and reading through it tripped the dropped-value guard once another
+// call had reused that stack.
+import String from "std::string";
+
+enum Slot<S> {
+  FILLED(S),
+  EMPTY,
+
+  public asRef(&self): Slot<&S> {
+    return match (self) {
+      Slot::FILLED(payload) -> Slot::FILLED(&payload),
+      Slot::EMPTY -> Slot::EMPTY,
+    };
+  }
+}
+
+/// Writes a frame's worth of locals and recurses, so the stack the match arms used is
+/// overwritten by the time the caller reads through the reference it kept.
+function reuseTheStack(depth: i32): i32 {
+  if (depth <= 0) {
+    return 0;
+  }
+
+  let mut noise: u64 = 0xDEADBEEFDEADBEEF;
+  noise ^= 0xCAFEBABECAFEBABE;
+  noise ^= 0x1111111122222222;
+  noise ^= 0x3333333344444444;
+
+  if (noise == 0) {
+    return -1;
+  }
+
+  return reuseTheStack(depth - 1);
+}
+
+function main(): i32 {
+  let owner: Slot<String> = Slot::FILLED(String::create("hello"));
+  let borrowed: Slot<&String> = owner.asRef();
+
+  let noise: i32 = reuseTheStack(8);
+
+  return match (borrowed) {
+    Slot::FILLED(payload) -> (payload.length() as i32) + noise,
+    Slot::EMPTY -> -1,
+  };
+}

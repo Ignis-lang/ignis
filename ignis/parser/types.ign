@@ -30,13 +30,33 @@ export namespace ParserTypes {
   }
 
   function parseType(parser: &mut ParserShared::State): Option<Ast::TypeId> {
+    return ParserTypes::parseTypeInner(parser, true);
+  }
+
+  /// The type of an `as` cast, where a trailing `&` or `|` is the binary operator of
+  /// the surrounding expression rather than an attempt at a compound type.
+  ///
+  /// `x as i32 & 1` is the shape at issue: a type parser that claims the `&` reports a
+  /// compound type nobody wrote and swallows the operand after it. The host's type
+  /// parser stops at the end of the type and never looks past it, so this is the entry
+  /// that matches it. Every other type position ends at a token that cannot begin an
+  /// operand — `=`, `;`, `)`, `,`, `{` — so an operator there really is a compound type
+  /// and keeps its diagnostic.
+  function parseCastType(parser: &mut ParserShared::State): Option<Ast::TypeId> {
+    return ParserTypes::parseTypeInner(parser, false);
+  }
+
+  function parseTypeInner(
+    parser: &mut ParserShared::State,
+    rejectCompound: boolean
+  ): Option<Ast::TypeId> {
     let mut parserRef: &mut ParserShared::State = parser;
 
     parserRef.skipTrivia();
 
     if (let Option::SOME(start) = parserRef.consumePunctuation(Punctuation::AMPERSAND)) {
       let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
-      let target = ParserTypes::parseType(parserRef)!;
+      let target = ParserTypes::parseTypeInner(parserRef, rejectCompound)!;
 
       let end: SourceSpan = match (parserRef.module.types.get(target)) {
         Option::SOME(node) -> Ast::Serializer::typeSpan(node),
@@ -51,7 +71,7 @@ export namespace ParserTypes {
 
     if (let Option::SOME(start) = parserRef.consumePunctuation(Punctuation::ASTERISK)) {
       let mutable: boolean = parserRef.consumeKeyword(Keyword::MUT).isSome();
-      let pointee = ParserTypes::parseType(parserRef)!;
+      let pointee = ParserTypes::parseTypeInner(parserRef, rejectCompound)!;
 
       let end: SourceSpan = match (parserRef.module.types.get(pointee)) {
         Option::SOME(node) -> Ast::Serializer::typeSpan(node),
@@ -101,6 +121,10 @@ export namespace ParserTypes {
       }));
     }
 
+    if (!rejectCompound) {
+      return Option::SOME(typeId);
+    }
+
     parserRef.skipTrivia();
     let operator: Token = parserRef.current();
 
@@ -112,6 +136,37 @@ export namespace ParserTypes {
     }
 
     return Option::SOME(typeId);
+  }
+
+  /// Whether this token is a primitive type keyword rather than the head of a path.
+  ///
+  /// The host splits the two: an identifier path may carry type arguments, a primitive
+  /// never does. Without that split a `<` after a primitive is read as the start of a
+  /// type-argument list, so `value as i32 < 9` loses its comparison — and `i32<...>`
+  /// names nothing anyway.
+  function isPrimitiveTypeKeyword(token: &Token): boolean {
+    if (token.kindValue() != TokenKind::KEYWORD) {
+      return false;
+    }
+
+    return match (token.keywordValue()) {
+      Keyword::INT8_TYPE
+      | Keyword::INT16_TYPE
+      | Keyword::INT32_TYPE
+      | Keyword::INT64_TYPE
+      | Keyword::UINT8_TYPE
+      | Keyword::UINT16_TYPE
+      | Keyword::UINT32_TYPE
+      | Keyword::UINT64_TYPE
+      | Keyword::FLOAT32_TYPE
+      | Keyword::FLOAT64_TYPE
+      | Keyword::BOOLEAN_TYPE
+      | Keyword::ATOM_TYPE
+      | Keyword::STR_TYPE
+      | Keyword::CHAR_TYPE
+      | Keyword::VOID -> true,
+      _ -> false,
+    };
   }
 
   function parsePrimaryType(parser: &mut ParserShared::State): Option<Ast::TypeId> {
@@ -133,6 +188,13 @@ export namespace ParserTypes {
     let first: Token = parserRef.bump();
     let mut last: Token = first.clone();
     segments.push(first.lexemeString());
+
+    if (ParserTypes::isPrimitiveTypeKeyword(&first)) {
+      return Option::SOME(parserRef.module.addType(Ast::Type::Node::Path(Ast::Type::Path {
+        span: first.span,
+        segments: ParserShared::copyStrings(&segments),
+      })));
+    }
 
     while (parserRef.atPunctuation(Punctuation::DOUBLE_COLON)) {
       parserRef.bump();

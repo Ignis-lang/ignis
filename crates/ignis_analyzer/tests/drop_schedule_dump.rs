@@ -327,6 +327,75 @@ function main at test.ign:19:22
 }
 
 #[test]
+fn a_match_arm_that_yields_an_owning_parameter_moves_it_and_pays_on_the_other_arms() {
+  let source = format!(
+    "{RESOURCE}
+enum Slot {{
+  Filled(Resource),
+  Empty,
+}}
+
+function takeOr(slot: Slot, fallback: Resource): Resource {{
+  return match (slot) {{
+    Slot::Filled(inner) -> inner,
+    Slot::Empty -> fallback,
+  }};
+}}
+"
+  );
+
+  // `fallback` leaves through the `Empty` arm, so it is moved — but only on that path.
+  // The `Filled` arm still owns it and is the last point where it is live and unowned,
+  // which is why its single drop sits at that arm's end and not at function exit.
+  assert_eq!(
+    dump(&source),
+    "drop-schedule v1
+function drop at test.ign:5:25
+  <no owned values>
+function takeOr at test.ign:15:59
+  value fallback kind=parameter declared at test.ign:15:59
+    drop at test.ign:17:28 reason=arm-end
+    moved at test.ign:16:10
+  value slot kind=parameter declared at test.ign:15:59
+    moved at test.ign:16:10
+  value inner kind=binding declared at test.ign:17:28
+    moved at test.ign:16:10
+"
+  );
+}
+
+#[test]
+fn a_binding_from_a_reference_scrutinee_owes_no_drop() {
+  let source = format!(
+    "{RESOURCE}
+enum Slot {{
+  Filled(Resource),
+  Empty,
+}}
+
+function peek(slot: &Slot): i32 {{
+  return match (slot) {{
+    Slot::Filled(inner) -> inner.value,
+    Slot::Empty -> 0,
+  }};
+}}
+"
+  );
+
+  // The binding names a place inside the referent, which the caller still owns: nothing
+  // here is owed a drop, and lowering reads the same decision to bind it by address.
+  assert_eq!(
+    dump(&source),
+    "drop-schedule v1
+function drop at test.ign:5:25
+  <no owned values>
+function peek at test.ign:15:33
+  <no owned values>
+"
+  );
+}
+
+#[test]
 fn a_program_without_owned_values_still_lists_every_function() {
   assert_eq!(
     dump("function main(): i32 {\n  return 0;\n}\n"),

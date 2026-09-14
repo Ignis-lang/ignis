@@ -325,6 +325,10 @@ impl<'a> LirVerifier<'a> {
         self.check_operand(func, func_name, block_name, source, defined_temps);
         defined_temps.insert(*dest);
       },
+      Instr::EnumGetPayloadFieldPtr { dest, source, .. } => {
+        self.check_operand(func, func_name, block_name, source, defined_temps);
+        defined_temps.insert(*dest);
+      },
       Instr::Trap { .. } => {},
       Instr::PanicMessage { .. } => {},
       Instr::DropInPlace { ptr, .. } => {
