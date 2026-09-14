@@ -1001,4 +1001,145 @@ export namespace Hir {
       itemIndex += 1;
     }
   }
+  /// Whether the type `typeId` resolves to a function type.
+  function typeIsFunction(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::Function(_) -> true,
+      _ -> false,
+    };
+  }
+
+  /// Whether a `let` whose initializer is `valueId` receives a closure
+  /// value that owns its environment, and therefore has to drop it at
+  /// scope exit. The port of `ignis_hir::binding_owns_closure_env`.
+  ///
+  /// Two initializers own one: a closure expression written in place, and
+  /// a closure value produced by a call. A closure can only reach a caller
+  /// through a return with a heap environment or with none at all —
+  /// escape analysis marks every closure that can reach a return as
+  /// escaping — so the binding that receives it is the one responsible for
+  /// releasing it.
+  ///
+  /// A callee that takes a closure of its own can hand that same closure
+  /// straight back, and its caller's binding for the argument already owns
+  /// that environment. Claiming ownership again would free it twice, so a
+  /// result whose callee could be passing one of its own arguments through
+  /// is left unowned. An indirect closure call has no parameter list to
+  /// read and is treated the same way.
+  function bindingOwnsClosureEnv(
+    hir: &Hir::HirStore,
+    valueId: Hir::HirId,
+    valueType: Analyzer::TypeId,
+    typeStore: &mut Analyzer::TypeStore,
+    defStore: &mut Analyzer::DefinitionStore,
+  ): boolean {
+    let Option::SOME(node) = hir.get(valueId) else {
+      return false;
+    };
+
+    if (let Hir::HirKind::Closure(_) = &node.kind) {
+      return true;
+    }
+
+    let mut callable: Option<Analyzer::DefinitionId> = Option::NONE;
+
+    if (let Hir::HirKind::Call(callNode) = &node.kind) {
+      callable = Option::SOME(callNode.callee);
+    }
+
+    if (let Hir::HirKind::MethodCall(methodNode) = &node.kind) {
+      callable = Option::SOME(methodNode.method);
+    }
+
+    let Option::SOME(callableId) = callable else {
+      return false;
+    };
+
+    if (!Hir::typeIsFunction(typeStore, valueType)) {
+      return false;
+    }
+
+    return !Hir::takesAClosure(typeStore, defStore, callableId);
+  }
+
+  /// Whether any parameter of `callable` is itself of function type.
+  function takesAClosure(
+    typeStore: &mut Analyzer::TypeStore,
+    defStore: &mut Analyzer::DefinitionStore,
+    callable: Analyzer::DefinitionId,
+  ): boolean {
+    let mut params: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+    let mut known: boolean = false;
+
+    if (let Option::SOME(definition) = defStore.get(callable)) {
+      match (definition) {
+        Analyzer::Definition::Function(functionDef) -> {
+          let mut sourceIndex: u64 = 0;
+
+          while (sourceIndex < functionDef.params.length()) {
+            if (let Option::SOME(paramId) = functionDef.params.get(sourceIndex)) {
+              params.push(*paramId);
+            }
+
+            sourceIndex += 1;
+          }
+
+          known = true;
+        },
+        Analyzer::Definition::Method(methodDef) -> {
+          let mut sourceIndex: u64 = 0;
+
+          while (sourceIndex < methodDef.params.length()) {
+            if (let Option::SOME(paramId) = methodDef.params.get(sourceIndex)) {
+              params.push(*paramId);
+            }
+
+            sourceIndex += 1;
+          }
+
+          known = true;
+        },
+        _ -> {},
+      };
+    }
+
+    if (!known) {
+      return true;
+    }
+
+    let mut index: u64 = 0;
+
+    while (index < params.length()) {
+      if (let Option::SOME(paramId) = params.get(index)) {
+        if (let Option::SOME(paramType) = Hir::declaredTypeOf(defStore, *paramId)) {
+          if (Hir::typeIsFunction(typeStore, paramType)) {
+            return true;
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  /// The declared type of a parameter or variable definition.
+  function declaredTypeOf(
+    defStore: &mut Analyzer::DefinitionStore,
+    defId: Analyzer::DefinitionId,
+  ): Option<Analyzer::TypeId> {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return Option::NONE;
+    };
+
+    return match (definition) {
+      Analyzer::Definition::Variable(variable) -> Option::SOME(variable.declaredType),
+      _ -> Option::NONE,
+    };
+  }
 }

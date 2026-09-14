@@ -729,6 +729,12 @@ pub fn populate_closure_captures(
 
   let closure_ids = collect_closures_bottom_up(hir, defs);
 
+  // Where each closure's drop function would be created, kept so that drop
+  // synthesis can run after escape analysis: a heap environment always needs a
+  // drop function to free it, even when no capture needs dropping on its own,
+  // and escape analysis needs the capture lists this loop produces.
+  let mut drop_sites: Vec<(HIRId, usize, ModuleId, Span)> = Vec::new();
+
   for (closure_index, (closure_id, owner_module)) in closure_ids.into_iter().enumerate() {
     let (params, body, return_type, closure_span, overrides) = {
       let node = hir.get(closure_id);
@@ -809,42 +815,49 @@ pub fn populate_closure_captures(
       symbols,
     );
 
-    let drop_def_id = if needs_drop_fn(&captures, types, defs) {
-      Some(create_drop_function(
-        closure_index,
-        &closure_span,
-        owner_module,
-        hir,
-        defs,
-        types,
-        symbols,
-      ))
-    } else {
-      None
-    };
+    drop_sites.push((closure_id, closure_index, owner_module, closure_span));
 
     let node = hir.get_mut(closure_id);
     if let HIRKind::Closure {
       captures: cap,
       thunk_def,
-      drop_def,
       ..
     } = &mut node.kind
     {
       *cap = captures;
       *thunk_def = Some(thunk_def_id);
-      *drop_def = drop_def_id;
     }
   }
 
   let escaping_closures = crate::escape::analyze_escapes(hir, defs);
 
   for closure_id in &escaping_closures {
-    let node = hir.get_mut(*closure_id);
-
-    if let HIRKind::Closure { escapes, captures, .. } = &mut node.kind {
+    if let HIRKind::Closure { escapes, .. } = &mut hir.get_mut(*closure_id).kind {
       *escapes = true;
+    }
+  }
 
+  for (closure_id, closure_index, owner_module, closure_span) in drop_sites {
+    let captures = match &hir.get(closure_id).kind {
+      HIRKind::Closure { captures, .. } => captures.clone(),
+      _ => continue,
+    };
+
+    if !escaping_closures.contains(&closure_id) && !needs_drop_fn(&captures, types, defs) {
+      continue;
+    }
+
+    let drop_def_id = create_drop_function(closure_index, &closure_span, owner_module, hir, defs, types, symbols);
+
+    if let HIRKind::Closure { drop_def, .. } = &mut hir.get_mut(closure_id).kind {
+      *drop_def = Some(drop_def_id);
+    }
+  }
+
+  for closure_id in &escaping_closures {
+    let node = hir.get(*closure_id);
+
+    if let HIRKind::Closure { captures, .. } = &node.kind {
       // Escaping + ref capture = dangling reference after scope exits.
       for cap in captures.iter() {
         if matches!(cap.mode, CaptureMode::ByRef | CaptureMode::ByMutRef) {

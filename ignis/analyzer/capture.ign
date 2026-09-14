@@ -46,6 +46,17 @@ export namespace Capture {
     }
   }
 
+  /// Where a closure's drop function would be created, kept so that drop
+  /// synthesis can run after escape analysis: a heap environment always
+  /// needs a drop function to free it, even when no capture needs dropping
+  /// on its own, and escape analysis needs the capture lists the first
+  /// loop of `populateClosureCaptures` produces.
+  record DropSite {
+    public closureId: Hir::HirId;
+    public closureIndex: u64;
+    public closureSpan: SourceSpan;
+  }
+
   /// A definition is capturable when it names a runtime value. Functions,
   /// types and constants are reached by name at any depth and never enter an
   /// environment.
@@ -1481,6 +1492,7 @@ export namespace Capture {
     let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
 
     let closureIds: Vector<Hir::HirId> = Capture::collectClosuresBottomUp(hir);
+    let mut dropSites: Vector<Capture::DropSite> = Vector::new<Capture::DropSite>();
     let mut closureIndex: u64 = 0;
 
     while (closureIndex < closureIds.length()) {
@@ -1579,21 +1591,17 @@ export namespace Capture {
         bodyId,
       );
 
-      let mut dropDef: Option<Analyzer::DefinitionId> = Option::NONE;
-
-      if (Capture::needsDropFunction(defStore, typeStore, &captures)) {
-        dropDef = Option::SOME(Capture::createDropFunction(
-          defStore,
-          typeStore,
-          symbols,
-          hir,
-          closureIndex,
-          closureSpan,
-        ));
-      }
+      dropSites.push(Capture::DropSite {
+        closureId: *closureId,
+        closureIndex: closureIndex,
+        closureSpan: closureSpan,
+      });
 
       // The node is rebuilt rather than mutated through the enum payload,
-      // the same shape the monomorphizer uses to patch definitions.
+      // the same shape the monomorphizer uses to patch definitions. The
+      // drop function is not created yet: escape analysis (right below)
+      // needs this closure's captures, and drop synthesis needs to know
+      // whether the closure escapes, so it runs after.
       let mut updateRef: &mut Hir::HirStore = hir;
       let _ = updateRef.nodes.set(closureId.raw() as u64, Hir::HirNode {
         kind: Hir::HirKind::Closure(Hir::HirClosure {
@@ -1603,7 +1611,7 @@ export namespace Capture {
           captures: captures,
           escapes: escapes,
           thunkDef: Option::SOME(thunkDef),
-          dropDef: dropDef,
+          dropDef: Option::NONE,
           captureOverrides: overrides,
         }),
         span: closureSpan,
@@ -1614,25 +1622,22 @@ export namespace Capture {
     }
 
     let escaping: Vector<Hir::HirId> = Escape::analyzeEscapes(hir, defStore);
-    let mut escapeIndex: u64 = 0;
+    let mut markEscapeIndex: u64 = 0;
 
-    while (escapeIndex < escaping.length()) {
-      let Option::SOME(escapingId) = escaping.get(escapeIndex) else {
-        escapeIndex += 1;
+    while (markEscapeIndex < escaping.length()) {
+      let Option::SOME(escapingId) = escaping.get(markEscapeIndex) else {
+        markEscapeIndex += 1;
         continue;
       };
 
-      let mut refCaptureNames: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
       let mut escapeSpan: SourceSpan = SourceSpan::new("", 0, 0);
       let mut escapeType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
-
       let mut escapeParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
       let mut escapeOverrides: Vector<Hir::HirCaptureOverride> = Vector::new<Hir::HirCaptureOverride>();
       let mut escapeCaptures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
       let mut escapeBody: Hir::HirId = *escapingId;
       let mut escapeReturnType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
       let mut escapeThunk: Option<Analyzer::DefinitionId> = Option::NONE;
-      let mut escapeDrop: Option<Analyzer::DefinitionId> = Option::NONE;
       let mut escapeIsClosure: boolean = false;
 
       if (let Option::SOME(node) = hir.get(*escapingId)) {
@@ -1646,9 +1651,126 @@ export namespace Capture {
           escapeBody = closureNode.body;
           escapeReturnType = closureNode.returnType;
           escapeThunk = closureNode.thunkDef;
-          escapeDrop = closureNode.dropDef;
           escapeIsClosure = true;
+        }
+      }
 
+      if (!escapeIsClosure) {
+        markEscapeIndex += 1;
+        continue;
+      }
+
+      let mut escapeRef: &mut Hir::HirStore = hir;
+      let _ = escapeRef.nodes.set(escapingId.raw() as u64, Hir::HirNode {
+        kind: Hir::HirKind::Closure(Hir::HirClosure {
+          params: escapeParams,
+          returnType: escapeReturnType,
+          body: escapeBody,
+          captures: escapeCaptures,
+          escapes: true,
+          thunkDef: escapeThunk,
+          dropDef: Option::NONE,
+          captureOverrides: escapeOverrides,
+        }),
+        span: escapeSpan,
+        typeId: escapeType,
+      });
+
+      markEscapeIndex += 1;
+    }
+
+    // A heap environment always needs a drop function to free it, even
+    // when no individual capture needs dropping on its own.
+    let mut dropSiteIndex: u64 = 0;
+
+    while (dropSiteIndex < dropSites.length()) {
+      let Option::SOME(dropSite) = dropSites.get(dropSiteIndex) else {
+        dropSiteIndex += 1;
+        continue;
+      };
+
+      let mut siteCaptures: Vector<Hir::HirCapture> = Vector::new<Hir::HirCapture>();
+      let mut siteParams: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut siteOverrides: Vector<Hir::HirCaptureOverride> = Vector::new<Hir::HirCaptureOverride>();
+      let mut siteBody: Hir::HirId = dropSite.closureId;
+      let mut siteReturnType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+      let mut siteEscapes: boolean = false;
+      let mut siteThunk: Option<Analyzer::DefinitionId> = Option::NONE;
+      let mut siteSpan: SourceSpan = dropSite.closureSpan;
+      let mut siteType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(0);
+      let mut siteIsClosure: boolean = false;
+
+      if (let Option::SOME(node) = hir.get(dropSite.closureId)) {
+        siteSpan = node.span;
+        siteType = node.typeId;
+
+        if (let Hir::HirKind::Closure(closureNode) = &node.kind) {
+          siteCaptures = Capture::copyCaptures(&closureNode.captures);
+          siteParams = Capture::copyDefIds(&closureNode.params);
+          siteOverrides = Capture::copyCaptureOverrides(&closureNode.captureOverrides);
+          siteBody = closureNode.body;
+          siteReturnType = closureNode.returnType;
+          siteEscapes = closureNode.escapes;
+          siteThunk = closureNode.thunkDef;
+          siteIsClosure = true;
+        }
+      }
+
+      if (!siteIsClosure) {
+        dropSiteIndex += 1;
+        continue;
+      }
+
+      let needsDrop: boolean = siteEscapes || Capture::needsDropFunction(defStore, typeStore, &siteCaptures);
+
+      if (!needsDrop) {
+        dropSiteIndex += 1;
+        continue;
+      }
+
+      let siteDropDef: Analyzer::DefinitionId = Capture::createDropFunction(
+        defStore,
+        typeStore,
+        symbols,
+        hir,
+        dropSite.closureIndex,
+        siteSpan,
+      );
+
+      let mut dropRef: &mut Hir::HirStore = hir;
+      let _ = dropRef.nodes.set(dropSite.closureId.raw() as u64, Hir::HirNode {
+        kind: Hir::HirKind::Closure(Hir::HirClosure {
+          params: siteParams,
+          returnType: siteReturnType,
+          body: siteBody,
+          captures: siteCaptures,
+          escapes: siteEscapes,
+          thunkDef: siteThunk,
+          dropDef: Option::SOME(siteDropDef),
+          captureOverrides: siteOverrides,
+        }),
+        span: siteSpan,
+        typeId: siteType,
+      });
+
+      dropSiteIndex += 1;
+    }
+
+    let mut escapeIndex: u64 = 0;
+
+    while (escapeIndex < escaping.length()) {
+      let Option::SOME(escapingId) = escaping.get(escapeIndex) else {
+        escapeIndex += 1;
+        continue;
+      };
+
+      let mut refCaptureNames: Vector<Analyzer::SymbolId> = Vector::new<Analyzer::SymbolId>();
+      let mut escapeSpan: SourceSpan = SourceSpan::new("", 0, 0);
+
+      if (let Option::SOME(node) = hir.get(*escapingId)) {
+        escapeSpan = node.span;
+
+        if (let Hir::HirKind::Closure(closureNode) = &node.kind) {
           let mut captureIndex: u64 = 0;
 
           while (captureIndex < closureNode.captures.length()) {
@@ -1676,27 +1798,6 @@ export namespace Capture {
           }
         }
       }
-
-      if (!escapeIsClosure) {
-        escapeIndex += 1;
-        continue;
-      }
-
-      let mut escapeRef: &mut Hir::HirStore = hir;
-      let _ = escapeRef.nodes.set(escapingId.raw() as u64, Hir::HirNode {
-        kind: Hir::HirKind::Closure(Hir::HirClosure {
-          params: escapeParams,
-          returnType: escapeReturnType,
-          body: escapeBody,
-          captures: escapeCaptures,
-          escapes: true,
-          thunkDef: escapeThunk,
-          dropDef: escapeDrop,
-          captureOverrides: escapeOverrides,
-        }),
-        span: escapeSpan,
-        typeId: escapeType,
-      });
 
       // An escaping closure outlives the frame its references point into.
       let mut nameIndex: u64 = 0;

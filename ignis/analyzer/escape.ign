@@ -5,16 +5,55 @@ import Vector from "std::vector";
 /// Escape analysis for closures, the port of
 /// `crates/ignis_analyzer/src/escape.rs`.
 ///
-/// A closure escapes when its value, or an alias of it, reaches a `return`, a
-/// field or static assignment target, a call argument, a record initializer
-/// field or an enum variant payload. An escaping closure needs a heap-allocated
-/// environment, because the scope that built the environment is gone by the
-/// time the closure runs.
+/// # The rule
 ///
-/// An argument whose parameter carries `@noescape` is exempt: the callee
-/// promises not to keep the closure past the call, so its environment can stay
-/// on the stack. A call through a closure value has no parameter list to
-/// consult, so every argument there escapes.
+/// A closure's environment holds its captures. A non-escaping closure keeps
+/// that environment in the frame that created it; an escaping one must
+/// heap-allocate it, because the value outlives the frame. Deciding this
+/// wrong in the "non-escaping" direction is a use-after-return, so the
+/// analysis is deliberately conservative: when in doubt, escape.
+///
+/// A closure escapes when its **value** reaches a position that outlives the
+/// frame that built it. The analysis is position-aware: the escaping value
+/// may be the closure expression written in place, a variable that aliases
+/// one, or the tail of a block / branch / match arm that produces one.
+/// Concretely, a closure escapes when it appears in:
+///
+///   - a `return` operand, or the tail expression of a function or closure
+///     body (the function's result crosses the frame boundary);
+///   - an assignment whose target is a field, an index, or a static place
+///     (the place outlives the assignment);
+///   - a record-initializer field, an enum-variant payload, or a
+///     vector/tuple literal element (the aggregate may itself outlive the
+///     frame);
+///   - an argument of a call whose matching parameter is **not**
+///     `@noescape` (the callee may store it), or any argument of an
+///     indirect closure call (no static parameter information is
+///     available);
+///   - the capture list of another closure that escapes (transitively).
+///
+/// # Who frees a heap environment
+///
+/// A heap environment is freed by the binding that owns it, exactly once: the
+/// local a closure literal is bound to, or — for a closure that crosses a
+/// return — the local in the caller that receives the returned value. So a
+/// closure literal written as a bare temporary is heap-allocated only where an
+/// owner exists on the other side, which is the result position. Everywhere
+/// else a bare temporary keeps its stack environment: it lives in the frame
+/// that built it, which is alive for the whole call it is handed to, and
+/// heap-allocating it there would only produce an environment nothing frees. A
+/// closure reached through a variable is heap-allocated in every escaping
+/// position, because that variable's binding owns the environment and frees it
+/// at scope exit.
+///
+/// The gap this leaves is a callee that stores a closure it was handed past
+/// the call while its caller's frame, or the binding that owns the
+/// environment, goes away first. `@noescape` is the callee's promise not to do
+/// that, and it is what lets a borrowed reference capture stay sound.
+///
+/// A closure stays non-escaping — and keeps its stack environment — when it
+/// is only bound to a local and called locally, or when it is passed to a
+/// `@noescape` parameter.
 export namespace Escape {
   /// Maps a definition bound to a closure (directly or through an alias
   /// chain) to that closure's node. Two parallel vectors instead of a map,
@@ -75,6 +114,21 @@ export namespace Escape {
 
     let mut idsRef: &mut Vector<Hir::HirId> = ids;
     idsRef.push(value);
+  }
+
+  function copyHirIds(ids: &mut Vector<Hir::HirId>): Vector<Hir::HirId> {
+    let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        result.push(*id);
+      }
+
+      index += 1;
+    }
+
+    return result;
   }
 
   /// The closure nodes that outlive their defining scope.
@@ -138,30 +192,185 @@ export namespace Escape {
 
     while (bodyIndex < hir.functionBodies.length()) {
       if (let Option::SOME(bodyId) = hir.functionBodies.valueAt(bodyIndex)) {
+        Escape::markTailExpression(hir, &aliases, &mut escaping, bodyId);
         Escape::scanForEscapes(hir, defStore, &aliases, &mut escaping, bodyId);
       }
 
       bodyIndex += 1;
     }
 
+    Escape::propagateThroughCaptures(hir, &aliases, &mut escaping);
+
     return escaping;
   }
 
-  /// Marks the closure `hirId` refers to, when it refers to one at all.
-  function markIfClosureRef(
+  /// A closure captured by an escaping closure outlives the capturing
+  /// closure's defining frame too, so its own environment must be
+  /// heap-allocated as well.
+  function propagateThroughCaptures(
+    hir: &mut Hir::HirStore,
+    aliases: &Escape::AliasTable,
+    escaping: &mut Vector<Hir::HirId>,
+  ): void {
+    let mut changed: boolean = true;
+
+    while (changed) {
+      changed = false;
+
+      // Snapshotted so the loop below can freely push onto `escaping`
+      // without iterating the vector it is mutating.
+      let snapshot: Vector<Hir::HirId> = Escape::copyHirIds(escaping);
+      let mut index: u64 = 0;
+
+      while (index < snapshot.length()) {
+        if (let Option::SOME(closureId) = snapshot.get(index)) {
+          let capturedClosureId: Hir::HirId = *closureId;
+
+          if (let Option::SOME(node) = hir.get(capturedClosureId)) {
+            if (let Hir::HirKind::Closure(closureNode) = &node.kind) {
+              let mut captureIndex: u64 = 0;
+
+              while (captureIndex < closureNode.captures.length()) {
+                if (let Option::SOME(capture) = closureNode.captures.get(captureIndex)) {
+                  if (let Option::SOME(innerClosureId) = aliases.lookup(capture.sourceDef)) {
+                    let lengthBefore: u64 = escaping.length();
+                    Escape::pushHirId(escaping, innerClosureId);
+
+                    if (escaping.length() != lengthBefore) {
+                      changed = true;
+                    }
+                  }
+                }
+
+                captureIndex += 1;
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+    }
+  }
+
+  /// Mark the tail expression of a block body: its value is the body's
+  /// result, so it crosses the frame boundary exactly like an explicit
+  /// `return` operand.
+  function markTailExpression(
+    hir: &mut Hir::HirStore,
+    aliases: &Escape::AliasTable,
+    escaping: &mut Vector<Hir::HirId>,
+    bodyId: Hir::HirId,
+  ): void {
+    let Option::SOME(node) = hir.get(bodyId) else {
+      return;
+    };
+
+    if (let Hir::HirKind::Block(blockNode) = &node.kind) {
+      if (let Option::SOME(tailId) = blockNode.expression) {
+        Escape::markEscapingResult(hir, aliases, escaping, tailId);
+      }
+    }
+  }
+
+  /// Mark the closures a **result** can evaluate to: the operand of a
+  /// `return`, or the tail expression of a function or closure body.
+  ///
+  /// The result may be the closure expression itself, a variable aliasing
+  /// one, or the result of a block, an `if`/`else`, or a `match` whose
+  /// branches produce one. A closure literal counts here because the
+  /// caller's binding takes ownership of the environment.
+  function markEscapingResult(
     hir: &mut Hir::HirStore,
     aliases: &Escape::AliasTable,
     escaping: &mut Vector<Hir::HirId>,
     hirId: Hir::HirId,
   ): void {
+    Escape::markEscapingValue(hir, aliases, escaping, hirId, true);
+  }
+
+  /// Mark the closures a value reaching a non-result escaping position can
+  /// evaluate to: a call argument, an assignment to a field or index, a
+  /// record-initializer field, an enum payload, a vector or tuple element.
+  ///
+  /// A closure literal written straight into one of these positions is not
+  /// marked: nothing on the other side owns its environment, so
+  /// heap-allocating it would only leak it, while leaving it in the frame
+  /// that built it keeps it alive for at least as long as a binding in that
+  /// frame would.
+  function markEscapingArgument(
+    hir: &mut Hir::HirStore,
+    aliases: &Escape::AliasTable,
+    escaping: &mut Vector<Hir::HirId>,
+    hirId: Hir::HirId,
+  ): void {
+    Escape::markEscapingValue(hir, aliases, escaping, hirId, false);
+  }
+
+  function markEscapingValue(
+    hir: &mut Hir::HirStore,
+    aliases: &Escape::AliasTable,
+    escaping: &mut Vector<Hir::HirId>,
+    hirId: Hir::HirId,
+    includeLiteral: boolean,
+  ): void {
     let Option::SOME(node) = hir.get(hirId) else {
       return;
     };
 
-    if (let Hir::HirKind::Variable(defId) = &node.kind) {
-      if (let Option::SOME(closureId) = aliases.lookup(defId)) {
-        Escape::pushHirId(escaping, closureId);
+    match (&node.kind) {
+      Hir::HirKind::Closure(_) -> {
+        if (includeLiteral) {
+          Escape::pushHirId(escaping, hirId);
+        }
+      },
+      Hir::HirKind::Variable(defId) -> {
+        if (let Option::SOME(closureId) = aliases.lookup(defId)) {
+          Escape::pushHirId(escaping, closureId);
+        }
+      },
+      Hir::HirKind::Block(blockNode) -> {
+        if (let Option::SOME(tailId) = blockNode.expression) {
+          Escape::markEscapingValue(hir, aliases, escaping, tailId, includeLiteral);
+        }
+      },
+      Hir::HirKind::If(ifNode) -> {
+        Escape::markEscapingValue(hir, aliases, escaping, ifNode.thenBranch, includeLiteral);
+
+        if (let Option::SOME(elseId) = ifNode.elseBranch) {
+          Escape::markEscapingValue(hir, aliases, escaping, elseId, includeLiteral);
+        }
+      },
+      Hir::HirKind::Match(matchNode) -> {
+        let mut armIndex: u64 = 0;
+
+        while (armIndex < matchNode.arms.length()) {
+          if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+            Escape::markEscapingValue(hir, aliases, escaping, arm.body, includeLiteral);
+          }
+
+          armIndex += 1;
+        }
+      },
+      _ -> {},
+    };
+  }
+
+  /// Calls `markEscapingArgument` on every id in `ids`.
+  function markEscapingArgumentList(
+    hir: &mut Hir::HirStore,
+    aliases: &Escape::AliasTable,
+    escaping: &mut Vector<Hir::HirId>,
+    ids: &Vector<Hir::HirId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        Escape::markEscapingArgument(hir, aliases, escaping, *id);
       }
+
+      index += 1;
     }
   }
 
@@ -255,7 +464,7 @@ export namespace Escape {
     while (index < args.length()) {
       if (let Option::SOME(argId) = args.get(index)) {
         if (!Escape::paramIsNoEscape(defStore, paramDefs, index + paramOffset)) {
-          Escape::markIfClosureRef(hir, aliases, escaping, *argId);
+          Escape::markEscapingArgument(hir, aliases, escaping, *argId);
         }
 
         Escape::scanForEscapes(hir, defStore, aliases, escaping, *argId);
@@ -279,7 +488,7 @@ export namespace Escape {
     match (&node.kind) {
       Hir::HirKind::Return(value) -> {
         if (let Option::SOME(valueId) = value) {
-          Escape::markIfClosureRef(hir, aliases, escaping, valueId);
+          Escape::markEscapingResult(hir, aliases, escaping, valueId);
           Escape::scanForEscapes(hir, defStore, aliases, escaping, valueId);
         }
       },
@@ -324,7 +533,7 @@ export namespace Escape {
         }
 
         if (complexTarget) {
-          Escape::markIfClosureRef(hir, aliases, escaping, assignNode.value);
+          Escape::markEscapingArgument(hir, aliases, escaping, assignNode.value);
         }
 
         Escape::scanForEscapes(hir, defStore, aliases, escaping, assignNode.target);
@@ -335,7 +544,7 @@ export namespace Escape {
 
         while (fieldIndex < recordNode.fields.length()) {
           if (let Option::SOME(field) = recordNode.fields.get(fieldIndex)) {
-            Escape::markIfClosureRef(hir, aliases, escaping, field.value);
+            Escape::markEscapingArgument(hir, aliases, escaping, field.value);
             Escape::scanForEscapes(hir, defStore, aliases, escaping, field.value);
           }
 
@@ -347,14 +556,19 @@ export namespace Escape {
 
         while (payloadIndex < variantNode.payload.length()) {
           if (let Option::SOME(payloadId) = variantNode.payload.get(payloadIndex)) {
-            Escape::markIfClosureRef(hir, aliases, escaping, *payloadId);
+            Escape::markEscapingArgument(hir, aliases, escaping, *payloadId);
             Escape::scanForEscapes(hir, defStore, aliases, escaping, *payloadId);
           }
 
           payloadIndex += 1;
         }
       },
-      Hir::HirKind::Closure(_) -> {},
+      // A nested closure body is its own frame: its tail expression and
+      // inner escape points are analyzed exactly like a function body's.
+      Hir::HirKind::Closure(closureNode) -> {
+        Escape::markTailExpression(hir, aliases, escaping, closureNode.body);
+        Escape::scanForEscapes(hir, defStore, aliases, escaping, closureNode.body);
+      },
       Hir::HirKind::Block(blockNode) -> {
         Escape::scanForEscapesList(hir, defStore, aliases, escaping, &blockNode.statements);
 
@@ -441,9 +655,11 @@ export namespace Escape {
         Escape::scanForEscapes(hir, defStore, aliases, escaping, fieldNode.base);
       },
       Hir::HirKind::VectorLiteral(elements) -> {
+        Escape::markEscapingArgumentList(hir, aliases, escaping, &elements);
         Escape::scanForEscapesList(hir, defStore, aliases, escaping, &elements);
       },
       Hir::HirKind::TupleLiteral(elements) -> {
+        Escape::markEscapingArgumentList(hir, aliases, escaping, &elements);
         Escape::scanForEscapesList(hir, defStore, aliases, escaping, &elements);
       },
       Hir::HirKind::MakeSlice(sliceNode) -> {

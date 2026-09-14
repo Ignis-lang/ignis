@@ -3752,27 +3752,22 @@ export namespace Borrowck {
 
     // A closure local owns its environment even when its type needs no drop of
     // its own, and LIR lowering tears that environment down from the same drop
-    // schedule. Mirrors the `is_closure` disjunct of the oracle's `Let` arm.
-    let mut holdsClosure: boolean = false;
+    // schedule. Mirrors the `binding_owns_closure_env` disjunct of the
+    // oracle's `Let` arm: the initializer may be a closure literal, or a call
+    // whose result type is a function (escape analysis marks every closure
+    // that can reach a return as escaping, so the binding is always the one
+    // responsible for releasing it).
+    let mut ownsClosureEnv: boolean = false;
 
     if (let Option::SOME(value) = letNode.value) {
-      holdsClosure = Borrowck::nodeIsClosure(hir, value);
+      if (let Option::SOME(valueType) = Borrowck::variableTypeOf(defStore, letNode.name)) {
+        ownsClosureEnv = Hir::bindingOwnsClosureEnv(hir, value, valueType, typeStore, defStore);
+      }
     }
 
-    if (holdsClosure || Borrowck::definitionNeedsDrop(defStore, typeStore, letNode.name)) {
+    if (ownsClosureEnv || Borrowck::definitionNeedsDrop(defStore, typeStore, letNode.name)) {
       Borrowck::declareOwned(state, letNode.name);
     }
-  }
-
-  function nodeIsClosure(hir: &Hir::HirStore, nodeId: Hir::HirId): boolean {
-    let Option::SOME(node) = hir.get(nodeId) else {
-      return false;
-    };
-
-    return match (&node.kind) {
-      Hir::HirKind::Closure(_) -> true,
-      _ -> false,
-    };
   }
 
   /// A binding initialized with a reference expression keeps that borrow alive

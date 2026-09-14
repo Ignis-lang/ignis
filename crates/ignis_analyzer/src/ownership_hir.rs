@@ -802,9 +802,10 @@ impl<'a> HirOwnershipChecker<'a> {
 
         // Register the new variable if it's owned
         let var_ty = self.defs.type_of(&name);
-        let is_closure = value.is_some_and(|v| matches!(self.hir.get(v).kind, HIRKind::Closure { .. }));
+        let owns_closure_env =
+          value.is_some_and(|v| ignis_hir::binding_owns_closure_env(self.hir, v, var_ty, self.types, self.defs));
 
-        if self.types.needs_drop_with_defs(var_ty, self.defs) || is_closure {
+        if self.types.needs_drop_with_defs(var_ty, self.defs) || owns_closure_env {
           self.declare_owned(name);
         }
       },

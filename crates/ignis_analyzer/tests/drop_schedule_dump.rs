@@ -452,3 +452,35 @@ function main at test.ign:1:22
 "
   );
 }
+
+#[test]
+fn a_closure_received_from_a_call_is_owned_by_the_binding_that_takes_it() {
+  // The environment of the closure `makeAdder` returns is heap-allocated, so the
+  // binding that receives it is scheduled for a drop just like the closure
+  // literal bound inside `makeAdder` would be.
+  assert_eq!(
+    dump(
+      "function makeAdder(base: i32): (i32) -> i32 {
+  return (x: i32): i32 -> x + base;
+}
+
+function main(): i32 {
+  let add = makeAdder(40);
+  return add(2);
+}
+"
+    ),
+    "drop-schedule v1
+function makeAdder at test.ign:1:45
+  <no owned values>
+function __closure_drop_0 at test.ign:2:10
+  <no owned values>
+function __closure_thunk_0 at test.ign:2:10
+  <no owned values>
+function main at test.ign:5:22
+  value add kind=local declared at test.ign:6:3
+    drop at test.ign:5:22 reason=scope-end
+    drop at test.ign:7:3 reason=return
+"
+  );
+}

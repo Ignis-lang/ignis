@@ -11,7 +11,13 @@ pub use drop_schedule::{DropSchedules, ExitKey, MoveSite};
 
 use std::collections::HashMap;
 
-use ignis_type::{Id, Store, definition::DefinitionId, span::Span, types::TypeId, value::IgnisLiteralValue};
+use ignis_type::{
+  Id, Store,
+  definition::{DefinitionId, DefinitionKind, DefinitionStore},
+  span::Span,
+  types::{Type, TypeId, TypeStore},
+  value::IgnisLiteralValue,
+};
 
 pub type HIRId = Id<HIRNode>;
 
@@ -526,6 +532,61 @@ impl Default for HIR {
   fn default() -> Self {
     Self::new()
   }
+}
+
+/// Whether a `let` whose initializer is `value_id` receives a closure value
+/// that owns its environment, and therefore has to drop it at scope exit.
+///
+/// Two initializers own one: a closure expression written in place, and a
+/// closure value produced by a call. A closure can only reach a caller through
+/// a return with a heap environment or with none at all — escape analysis marks
+/// every closure that can reach a return as escaping — so the binding that
+/// receives it is the one responsible for releasing it.
+///
+/// A callee that takes a closure of its own can hand that same closure straight
+/// back, and its caller's binding for the argument already owns that
+/// environment. Claiming ownership again would free it twice, so a result whose
+/// callee could be passing one of its own arguments through is left unowned —
+/// it is the one case where a heap environment may outlive every binding that
+/// could have freed it. An indirect `CallClosure` has no parameter list to read
+/// and is treated the same way.
+pub fn binding_owns_closure_env(
+  hir: &HIR,
+  value_id: HIRId,
+  value_type: &TypeId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+) -> bool {
+  match &hir.get(value_id).kind {
+    HIRKind::Closure { .. } => true,
+
+    HIRKind::Call { callee, .. } => {
+      matches!(types.get(value_type), Type::Function { .. }) && !takes_a_closure(*callee, types, defs)
+    },
+
+    HIRKind::MethodCall { method, .. } => {
+      matches!(types.get(value_type), Type::Function { .. }) && !takes_a_closure(*method, types, defs)
+    },
+
+    _ => false,
+  }
+}
+
+/// Whether any parameter of `callable` is itself of function type.
+fn takes_a_closure(
+  callable: DefinitionId,
+  types: &TypeStore,
+  defs: &DefinitionStore,
+) -> bool {
+  let params = match &defs.get(&callable).kind {
+    DefinitionKind::Function(function) => function.params.clone(),
+    DefinitionKind::Method(method) => method.params.clone(),
+    _ => return true,
+  };
+
+  params
+    .iter()
+    .any(|param| matches!(types.get(defs.type_of(param)), Type::Function { .. }))
 }
 
 impl HIR {

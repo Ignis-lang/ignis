@@ -3462,18 +3462,16 @@ impl<'a> CEmitter<'a> {
         }
       },
 
-      Instr::DropClosure {
-        closure,
-        heap_allocated,
-        ..
-      } => {
+      // The drop function of an escaping closure frees its own heap environment,
+      // so the caller never has to know where the environment came from.
+      Instr::DropClosure { closure, .. } => {
         let c = self.format_operand(func, closure);
         writeln!(self.output, "if ({}.drop_fn) {}.drop_fn({}.env);", c, c, c).unwrap();
+      },
 
-        if *heap_allocated {
-          write!(self.output, "    ").unwrap();
-          writeln!(self.output, "if ({}.env) free({}.env);", c, c).unwrap();
-        }
+      Instr::FreeEnv { env } => {
+        let ptr = self.format_operand(func, env);
+        writeln!(self.output, "if ({}) free({});", ptr, ptr).unwrap();
       },
     }
   }

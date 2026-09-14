@@ -1414,10 +1414,19 @@ export namespace LirLowering {
         LirLowering::registerLocal(state, letNode.name, slot);
 
         if (let Option::SOME(valueId) = letNode.value) {
-          if (let Option::SOME(valueNode) = hirStore.get(valueId)) {
-            if (let Hir::HirKind::Closure(closureNode) = &valueNode.kind) {
-              LirLowering::markClosureLocal(state, letNode.name, declaredType, closureNode.escapes);
+          if (Hir::bindingOwnsClosureEnv(hirStore, valueId, declaredType, typeStore, defStore)) {
+            let mut heapAllocated: boolean = false;
+
+            if (let Option::SOME(valueNode) = hirStore.get(valueId)) {
+              if (let Hir::HirKind::Closure(closureNode) = &valueNode.kind) {
+                heapAllocated = closureNode.escapes;
+              }
             }
+
+            // A closure value that crossed a return boundary: the drop
+            // function it carries knows whether its environment is
+            // heap-allocated.
+            LirLowering::markClosureLocal(state, letNode.name, declaredType, heapAllocated);
           }
 
           let mut valueType: Analyzer::TypeId = declaredType;
@@ -2286,6 +2295,9 @@ export namespace LirLowering {
     public thunkCaptures: Vector<Vector<Hir::HirCapture>>;
     public dropDefRaws: Vector<u32>;
     public dropCaptures: Vector<Vector<Hir::HirCapture>>;
+    /// Drop functions of escaping closures: their environment is
+    /// heap-allocated, so the drop function ends by freeing it.
+    public dropFreesEnvRaws: Vector<u32>;
 
     public static init(): ClosureTables {
       return ClosureTables {
@@ -2293,6 +2305,7 @@ export namespace LirLowering {
         thunkCaptures: Vector::new<Vector<Hir::HirCapture>>(),
         dropDefRaws: Vector::new<u32>(),
         dropCaptures: Vector::new<Vector<Hir::HirCapture>>(),
+        dropFreesEnvRaws: Vector::new<u32>(),
       };
     }
 
@@ -2337,6 +2350,22 @@ export namespace LirLowering {
 
       return Vector::new<Hir::HirCapture>();
     }
+
+    public dropFreesEnv(&self, defRaw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.dropFreesEnvRaws.length()) {
+        if (let Option::SOME(existing) = self.dropFreesEnvRaws.get(index)) {
+          if (*existing == defRaw) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
   }
 
   function copyCaptures(source: &Vector<Hir::HirCapture>): Vector<Hir::HirCapture> {
@@ -2374,6 +2403,10 @@ export namespace LirLowering {
           if (let Option::SOME(dropDef) = closureNode.dropDef) {
             tables.dropDefRaws.push(dropDef.raw());
             tables.dropCaptures.push(LirLowering::copyCaptures(&closureNode.captures));
+
+            if (closureNode.escapes) {
+              tables.dropFreesEnvRaws.push(dropDef.raw());
+            }
           }
         }
       }
@@ -2522,6 +2555,7 @@ export namespace LirLowering {
     state: &mut LirLowering::LowerState,
     paramDefs: &Vector<Analyzer::DefinitionId>,
     captures: &Vector<Hir::HirCapture>,
+    freesEnv: boolean,
   ): void {
     let span: SourceSpan = SourceSpan::new("", 0, 0);
 
@@ -2570,6 +2604,12 @@ export namespace LirLowering {
       }));
 
       index += 1;
+    }
+
+    if (freesEnv) {
+      LirLowering::pushInstr(function_, state, Lir::Instr::FreeEnv(Lir::InstrFreeEnv {
+        env: Lir::Operand::Temp(envTemp),
+      }));
     }
   }
 
@@ -4654,9 +4694,18 @@ export namespace LirLowering {
       // The drop function's own HIR body is a bare `return`, so the field
       // drops go in front of it rather than replacing it.
       let dropCaptures: Vector<Hir::HirCapture> = tables.dropCapturesFor(itemDef.raw());
+      let dropFreesEnv: boolean = tables.dropFreesEnv(itemDef.raw());
 
-      if (dropCaptures.length() > 0) {
-        LirLowering::emitDropFunctionBody(defStore, typeStore, &mut function_, &mut state, &paramDefs, &dropCaptures);
+      if (dropCaptures.length() > 0 || dropFreesEnv) {
+        LirLowering::emitDropFunctionBody(
+          defStore,
+          typeStore,
+          &mut function_,
+          &mut state,
+          &paramDefs,
+          &dropCaptures,
+          dropFreesEnv,
+        );
       }
 
       let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, &mut function_, &mut state, bodyId);

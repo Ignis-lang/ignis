@@ -360,6 +360,9 @@ impl<'a> LirVerifier<'a> {
       Instr::DropClosure { closure, .. } => {
         self.check_operand(func, func_name, block_name, closure, defined_temps);
       },
+      Instr::FreeEnv { env } => {
+        self.check_operand(func, func_name, block_name, env, defined_temps);
+      },
     }
   }
 

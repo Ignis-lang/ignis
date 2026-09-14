@@ -491,6 +491,10 @@ impl<'a> LirPrinter<'a> {
         let heap_str = if *heap_allocated { " [heap]" } else { "" };
         writeln!(self.output, "    drop_closure {} : {}{}", closure_str, ty_str, heap_str).unwrap();
       },
+      Instr::FreeEnv { env } => {
+        let env_str = self.format_operand(func, env);
+        writeln!(self.output, "    free_env {}", env_str).unwrap();
+      },
     }
   }
 
