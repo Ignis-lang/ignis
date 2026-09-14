@@ -2780,9 +2780,9 @@ export namespace Analyzer {
 
     /// Sets `defId`'s `visibility` to `PUBLIC`, for a `Function` or `Method`
     /// definition. Mirrors the host's `mark_exported_definition`, which sets
-    /// `Definition::visibility` uninspected of kind; this covers the two
-    /// kinds `Mono::collectRoots` inspects and no `export { name }` list in
-    /// this codebase names anything else.
+    /// `Definition::visibility` uninspected of kind; this covers `Function`
+    /// and `Method`, the only kinds an `export { name }` list names in
+    /// practice, and no-ops for every other kind.
     function markDefinitionExported(
       defStore: &mut Analyzer::DefinitionStore,
       defId: Analyzer::DefinitionId,
@@ -2850,13 +2850,55 @@ export namespace Analyzer {
       };
     }
 
-    /// Marks every definition an `export { a, b }` / `export { a } from "./x"`
+    /// Every definition bound so far at exactly `scopeKey` whose name is
+    /// `sym`, ascending by bind order. Unlike `DefinitionStore::definitionsNamed`
+    /// (a whole-program index by raw symbol), this only looks inside the one
+    /// scope the caller names — the lexically scoped lookup
+    /// `export name;` needs, mirroring the host's `self.scopes.lookup(name)`.
+    /// More than one result means an overload group.
+    function findScopedDefinitionsNamed(
+      state: &mut Analyzer::Binder::BinderState,
+      defStore: &mut Analyzer::DefinitionStore,
+      scopeKey: u64,
+      sym: Analyzer::SymbolId,
+    ): Vector<Analyzer::DefinitionId> {
+      let mut found: Vector<Analyzer::DefinitionId> = Vector::new<Analyzer::DefinitionId>();
+      let mut index: u64 = 0;
+      let count: u64 = state.declScopeKeys.length();
+
+      while (index < count) {
+        let Option::SOME(declScopeKey) = state.declScopeKeys.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (*declScopeKey == scopeKey) {
+          if (let Option::SOME(candidateId) = state.defIds.get(index)) {
+            if (let Option::SOME(candidateDef) = defStore.get(*candidateId)) {
+              if (candidateDef.name().raw() == sym.raw()) {
+                found.push(*candidateId);
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return found;
+    }
+
+    /// Marks every definition an `export a, b;` / `export a, b from "./x";`
     /// list names as exported. Mirrors the host's `exported_definition_ids`:
-    /// both forms resolve each name against what is already bound, regardless
-    /// of `source` (a re-export still needs the name to already exist here).
+    /// both forms resolve each name against what is already bound in the
+    /// export statement's own scope, regardless of `source` (a re-export
+    /// still needs the name to already exist here) — a same-named
+    /// definition in another namespace or module is never a match.
     function markExportListExported(
+      state: &mut Analyzer::Binder::BinderState,
       defStore: &mut Analyzer::DefinitionStore,
       symbols: &mut Analyzer::SymbolTable,
+      scopeKey: u64,
       items: &Vector<Ast::ImportBinding>,
     ): void {
       let mut index: u64 = 0;
@@ -2870,7 +2912,7 @@ export namespace Analyzer {
         if (let Option::SOME(name) = &binding.name) {
           let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
           let sym: Analyzer::SymbolId = symbolsRef.intern(name.toStr());
-          let candidates: Vector<Analyzer::DefinitionId> = defStore.definitionsNamed(sym);
+          let candidates: Vector<Analyzer::DefinitionId> = findScopedDefinitionsNamed(state, defStore, scopeKey, sym);
           let mut candidateIndex: u64 = 0;
 
           while (candidateIndex < candidates.length()) {
@@ -2954,9 +2996,9 @@ export namespace Analyzer {
               let mut exportStateRefAfter: &mut Analyzer::Binder::BinderState = state;
               exportStateRefAfter.insideExport = false;
             } else {
-              // `export { a, b };` / `export { a } from "./x";` — no wrapped
+              // `export a, b;` / `export a, b from "./x";` — no wrapped
               // declaration, just a list of names to mark exported.
-              markExportListExported(defStore, symbols, &ex.items);
+              markExportListExported(state, defStore, symbols, scopeKey, &ex.items);
             }
           },
           Ast::Item::Node::Extern(externItem) -> {

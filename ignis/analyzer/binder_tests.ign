@@ -3806,3 +3806,98 @@ function binderFunctionOwnPublicModifierIsHonored(): void {
   Test::assertEq<boolean>(binderFunctionIsPublic("public function helper(): i32 {\n  return 1;\n}\n", "helper"), true);
   Test::assertEq<boolean>(binderFunctionIsPublic("function helper(): i32 {\n  return 1;\n}\n", "helper"), false);
 }
+
+/// The visibility of every non-extern function named `name`, bound from
+/// `source`, in bind order (ascending `DefinitionId`, which for two
+/// same-named top-level items follows source order: whichever one
+/// `completeRoots` processes first — reading its own root item, or, for a
+/// namespace member, recursing into that namespace's item — is bound
+/// first). `FunctionDef` carries no owner-namespace field, so this is the
+/// only way two same-named functions in different scopes can be told apart
+/// from source text alone.
+function binderFunctionVisibilitiesNamed(source: str, name: str): Vector<boolean> {
+  let file: SourceFile = SourceFile::create("binder_tests.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(parsed.lexDiagnostics.length(), 0);
+  Test::assertEq<u64>(parsed.parseDiagnostics.length(), 0);
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let pass1 = Analyzer::Binder::predeclareRoots(
+    &parsed.module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+  let _pass2 = Analyzer::Binder::completeRoots(
+    &parsed.module.roots,
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &pass1,
+  );
+
+  let wanted: String = String::create(name);
+  let mut visibilities: Vector<boolean> = Vector::new<boolean>();
+  let mut rawId: u64 = 0;
+
+  while (rawId < defStore.length()) {
+    let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
+    rawId += 1;
+
+    let Option::SOME(Analyzer::Definition::Function(functionDef)) = defStore.get(defId) else {
+      continue;
+    };
+
+    if (functionDef.isExtern) {
+      continue;
+    }
+
+    let Option::SOME(text) = symbols.resolve(functionDef.name) else {
+      continue;
+    };
+
+    if (!wanted.equals(text)) {
+      continue;
+    }
+
+    visibilities.push(functionDef.visibility.equals(&Analyzer::Visibility::PUBLIC));
+  }
+
+  return visibilities;
+}
+
+/// Scenario: `export name;` resolves lexically, against the export
+/// statement's own scope, the way the host's `self.scopes.lookup(name)`
+/// does — not against every definition named `create` in the whole
+/// program. `create` (top-level, bound first) becomes Public; `Other::create`
+/// (bound second, while recursing into the namespace) must stay Private.
+/// Spec: issue #211 (round 2) review item 1.
+@test
+function binderExportListResolvesOnlyTheLocalName(): void {
+  let visibilities: Vector<boolean> = binderFunctionVisibilitiesNamed(
+    "function create(): i32 {\n  return 1;\n}\n\nnamespace Other {\n  function create(): i32 {\n    return 0;\n  }\n}\n\nexport create;\n",
+    "create",
+  );
+
+  Test::assertEq<u64>(visibilities.length(), 2);
+  Test::assertEq<boolean>(match (visibilities.get(0)) { Option::SOME(v) -> *v, Option::NONE -> false }, true);
+  Test::assertEq<boolean>(match (visibilities.get(1)) { Option::SOME(v) -> *v, Option::NONE -> true }, false);
+}
+
+/// Scenario: `export extern __t { ... }` exports the extern block's own
+/// definition, not its members — mirroring `export namespace`. A member
+/// function inside stays Private.
+/// Spec: issue #211 (round 2) review item 4.
+@test
+function binderExportExternMembersStayPrivate(): void {
+  Test::assertEq<boolean>(
+    binderFunctionIsPublic("export extern __t {\n  function helper(): i32;\n}\n", "helper"),
+    false,
+  );
+}
