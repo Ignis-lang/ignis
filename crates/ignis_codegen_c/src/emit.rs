@@ -443,12 +443,20 @@ impl<'a> CEmitter<'a> {
     if !uses_module_headers {
       self.emit_slice_types();
       self.emit_type_forward_declarations();
+      // Closure structs only need their record/enum dependencies forward-declared
+      // (their fields are all pointers: `call`, `drop_fn`, `env`), so they can be
+      // emitted right after the forward declarations. A record or enum can embed a
+      // closure-typed field by value, which needs the closure struct to already be
+      // a complete type by the time the type definitions below are emitted.
+      self.emit_closure_types();
       self.emit_type_definitions();
-    } else if let Some(module_id) = self.target.as_ref().and_then(|target| target.target_user_module()) {
-      self.emit_forced_external_type_definitions(module_id);
+    } else {
+      if let Some(module_id) = self.target.as_ref().and_then(|target| target.target_user_module()) {
+        self.emit_forced_external_type_definitions(module_id);
+      }
+      self.emit_closure_types();
     }
 
-    self.emit_closure_types();
     self.emit_static_constants();
     self.emit_extern_declarations();
     self.emit_drop_glue_helpers();
@@ -4971,16 +4979,19 @@ where
     .map(|&def_id| build_mangled_name_standalone(def_id, defs, namespaces, symbols, types))
     .collect();
 
-  // Separate closure structs from regular external structs.
-  // Closure structs need full definitions (for by-value passing); others get forward decls.
-  let mut external_forward_decls: Vec<&String> = Vec::new();
+  // Separate closure structs from regular record/enum structs.
+  // Closure structs need full definitions (their `call`/`drop_fn` fields are function
+  // pointers, so a forward-declared record/enum referenced there is enough), so every
+  // record/enum name referenced here — including ones this module defines itself —
+  // must be forward-declared before the closure structs are emitted below. Otherwise a
+  // closure struct referencing a by-value record/enum defined later in this same header
+  // (e.g. `Handlers { onPoint: (Point) -> i32 }`) would implicitly declare its own,
+  // incompatible `struct Point` scoped to that parameter list.
+  let mut record_forward_decls: Vec<&String> = Vec::new();
   let mut slice_struct_type_ids: Vec<TypeId> = Vec::new();
   let mut closure_struct_type_ids: Vec<TypeId> = Vec::new();
 
   for name in &struct_forward_decls {
-    if module_type_names.contains(name) {
-      continue;
-    }
     if name.starts_with("__ignis_slice_") {
       for (type_id, ty) in types.iter() {
         if matches!(ty, Type::Slice { .. }) {
@@ -5011,14 +5022,14 @@ where
         }
       }
     } else {
-      external_forward_decls.push(name);
+      record_forward_decls.push(name);
     }
   }
 
-  external_forward_decls.sort();
+  record_forward_decls.sort();
 
-  if !external_forward_decls.is_empty() {
-    for name in &external_forward_decls {
+  if !record_forward_decls.is_empty() {
+    for name in &record_forward_decls {
       writeln!(output, "typedef struct {} {};", name, name).unwrap();
     }
     writeln!(output).unwrap();
