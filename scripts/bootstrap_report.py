@@ -24,14 +24,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Gates whose status decides promotion. A gate stays out of this tuple until a
-# failure of it is a reason not to ship.
-GATE_IDS = ("G1", "G2", "G3", "G4", "G5", "G6")
+# failure of it is a reason not to ship. G7 (drop-schedule parity) joined this
+# set once the selfhost's ownership analysis reached 623/623 own-code parity
+# with the host (nightly-34803378772): a divergence is now a real ownership
+# bug, not the expected state, so it holds the `candidate` verdict like every
+# other gate.
+GATE_IDS = ("G1", "G2", "G3", "G4", "G5", "G6", "G7")
 
-# Gates that are reported in full but never block promotion. G7 diffs the two
-# compilers' drop schedules: a divergence is a lead for an ownership bug, and
-# until the selfhost's ownership analysis is finished a non-zero count is the
-# expected state, so it must not hold the `candidate` verdict hostage.
-INFORMATIONAL_GATE_IDS = ("G7",)
+# No gate is informational anymore, but the split is kept so a future gate can
+# be reported without blocking promotion the same way G7 used to.
+INFORMATIONAL_GATE_IDS = ()
 
 REPORTED_GATE_IDS = GATE_IDS + INFORMATIONAL_GATE_IDS
 
@@ -42,7 +44,7 @@ GATE_TITLES = {
   "G4": "Resource budget within 1.25x of the host",
   "G5": "Diagnostics equal or better than the host",
   "G6": "Syntax parity with the host parser",
-  "G7": "Drop-schedule parity with the host (informational)",
+  "G7": "Drop-schedule parity with the host",
 }
 
 STATUS_PASS = "pass"
@@ -419,9 +421,16 @@ def format_report(
     f"- Candidate: **{'yes' if candidate else 'no'}**",
     "",
     "A run is a candidate when every promotion gate passes. Three consecutive",
-    "candidate nightly runs promote the stage2 binary to official. Gates marked",
-    "informational (" + ", ".join(INFORMATIONAL_GATE_IDS) + ") are reported but",
-    "never counted towards that verdict.",
+    "candidate nightly runs promote the stage2 binary to official.",
+  ]
+
+  if INFORMATIONAL_GATE_IDS:
+    lines += [
+      "Gates marked informational (" + ", ".join(INFORMATIONAL_GATE_IDS) + ") are reported",
+      "but never counted towards that verdict.",
+    ]
+
+  lines += [
     "",
     "## Gates",
     "",

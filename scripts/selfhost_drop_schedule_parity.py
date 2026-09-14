@@ -18,10 +18,10 @@ buries the ownership answer the dump exists to give. That difference is real
 but it is not a drop question, so it is reported as a count of its own instead
 of failing every case. `--all` compares the whole dump, std included.
 
-The gate is **informational**. It does not feed the promotion `candidate`
-verdict — a drop-schedule divergence is a lead to follow, not a release
-blocker, and until the selfhost's ownership analysis is finished a non-zero
-count is the expected state.
+The gate feeds the promotion `candidate` verdict: since the selfhost's
+ownership analysis reached 623/623 own-code parity with the host
+(nightly-34803378772), a drop-schedule divergence is a real ownership bug, not
+the expected state, so it blocks promotion like every other gate.
 
 Case discovery is reused verbatim from `selfhost_e2e_parity.py`, so G7 and G2
 always run over the same corpus.
@@ -29,6 +29,7 @@ always run over the same corpus.
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -56,6 +57,17 @@ DUMP_LINE_PREFIXES = (
 
 HOST_TIMEOUT_SECONDS = 180
 SELFHOST_TIMEOUT_SECONDS = 300
+
+# A project-root case (`--project`) compiles the whole project from its own
+# root rather than one fixture file — G7's own `project:.` case is the
+# selfhost compiler compiling itself, ~98 CPU-s of work. That is fine in
+# isolation but the fixture budget above is not: under contention (a 4-vCPU
+# CI runner running every case's `ThreadPoolExecutor` worker at once) it was
+# observed at 220s wall against the 300s selfhost budget, close enough to
+# time out on a slower or busier runner. Project cases get their own, much
+# larger budget instead of raising the fixture budget for every other case.
+HOST_PROJECT_TIMEOUT_SECONDS = 600
+SELFHOST_PROJECT_TIMEOUT_SECONDS = 900
 
 CLASS_PASS = "pass"
 CLASS_DIFFERS = "differs"
@@ -130,6 +142,14 @@ def collect_cases(
     cases = [case for case in cases if name_filter in case.name]
 
   return cases
+
+
+def timeouts_for(case: DropCase) -> tuple[int, int]:
+  """(host timeout, selfhost timeout) in seconds for one case."""
+  if case.project_root is not None:
+    return HOST_PROJECT_TIMEOUT_SECONDS, SELFHOST_PROJECT_TIMEOUT_SECONDS
+
+  return HOST_TIMEOUT_SECONDS, SELFHOST_TIMEOUT_SECONDS
 
 
 def relative_to(
@@ -284,7 +304,9 @@ def run_case(
   if not case.path.is_file():
     return DropResult(case, CLASS_HOST_NO_DUMP, reason=f"{case.path} does not exist")
 
-  host_lines, host_error = run_dump(host, case, std_path, repository_root, HOST_TIMEOUT_SECONDS)
+  host_timeout, selfhost_timeout = timeouts_for(case)
+
+  host_lines, host_error = run_dump(host, case, std_path, repository_root, host_timeout)
 
   if host_lines is None:
     classification = CLASS_TIMEOUT if "timed out" in host_error else CLASS_HOST_NO_DUMP
@@ -295,7 +317,7 @@ def run_case(
     case,
     std_path,
     repository_root,
-    SELFHOST_TIMEOUT_SECONDS,
+    selfhost_timeout,
   )
 
   if selfhost_lines is None:
@@ -348,8 +370,8 @@ def build_report(
     "declaration site and every scheduled drop site with its reason. Both",
     "compilers print the same format, so their dumps are compared byte for byte.",
     "",
-    "**This gate is informational**: it does not affect the promotion `candidate`",
-    "verdict. A differing case is a lead for an ownership bug, not a blocker.",
+    "**This gate feeds the promotion `candidate` verdict**: a differing case",
+    "is a real ownership bug, not just a lead to follow.",
     "",
     f"- host: `{host}`",
     f"- selfhost: `{compiler}`",
@@ -441,19 +463,26 @@ def build_gate(
   results: list[DropResult],
   counts: dict[str, int],
   compare_everything: bool,
+  retried_timeouts: int = 0,
 ) -> dict:
   total = len(results)
   passed = counts.get(CLASS_PASS, 0)
   scope = "whole-dump" if compare_everything else "own-code"
+  # A timeout still fails the gate (it is real evidence something took too
+  # long, not proof of a divergence), but a night where every timeout cleared
+  # on retry looks identical in the counts to one where a case is
+  # consistently too slow, unless the summary says so: the promotion report
+  # is the only place a maintainer sees this run without digging into logs.
+  retry_plural = "s" if retried_timeouts != 1 else ""
+  retry_note = f" ({retried_timeouts} timeout{retry_plural} retried)" if retried_timeouts else ""
 
   return {
     "gate": GATE_ID,
     "status": "pass" if total > 0 and passed == total else "fail",
-    "informational": True,
-    "summary": f"drop-schedule parity {passed}/{total} {scope} (informational: does not gate promotion)",
+    "summary": f"drop-schedule parity {passed}/{total} {scope}{retry_note}",
     "details": {
-      "informational": True,
       "scope": scope,
+      "timeouts_retried": retried_timeouts,
       "std_function_counts": {
         result.case.name: {
           "host": result.host_std_functions,
@@ -506,7 +535,12 @@ def main() -> int:
     action="store_true",
     help="compare the whole dump, standard library included, instead of just the code under test",
   )
-  parser.add_argument("--jobs", type=int, default=None, help="parallel cases (default: cpu count)")
+  parser.add_argument(
+    "--jobs",
+    type=int,
+    default=None,
+    help="parallel cases, capped at the CPU count (default: cpu count)",
+  )
   parser.add_argument("--report", type=Path, help="markdown report path")
   parser.add_argument("--counts-json", type=Path, help="per-class counts JSON path")
   parser.add_argument("--gate-json", type=Path, help="bootstrap gate result path")
@@ -522,10 +556,19 @@ def main() -> int:
   # Both compilers build the standard library into the same `build/std` on
   # first use; a cold pool would have every worker racing to write the same
   # archive. One warm-up compile per compiler makes that build already done.
-  for compiler, timeout in ((arguments.host, HOST_TIMEOUT_SECONDS), (arguments.compiler, SELFHOST_TIMEOUT_SECONDS)):
+  warmup_host_timeout, warmup_selfhost_timeout = timeouts_for(cases[0])
+  for compiler, timeout in ((arguments.host, warmup_host_timeout), (arguments.compiler, warmup_selfhost_timeout)):
     run_dump(compiler, cases[0], arguments.std, repository_root, timeout)
 
-  with ThreadPoolExecutor(max_workers=arguments.jobs) as executor:
+  # `ThreadPoolExecutor`'s own default (`min(32, cpu_count + 4)`) oversubscribes
+  # a small runner: every worker's compiler subprocess wants a core of its own,
+  # so more workers than cores makes each one slower, not the run faster, and
+  # can turn a comfortable margin under a case's timeout into a miss. An
+  # explicit `--jobs` above the CPU count is capped the same way, not honored.
+  cpu_count = os.cpu_count() or 1
+  jobs = min(arguments.jobs, cpu_count) if arguments.jobs else cpu_count
+
+  with ThreadPoolExecutor(max_workers=jobs) as executor:
     results = list(
       executor.map(
         lambda case: run_case(
@@ -548,6 +591,10 @@ def main() -> int:
     for result in results
     if result.classification in (CLASS_HOST_NO_DUMP, CLASS_SELFHOST_NO_DUMP, CLASS_TIMEOUT)
   ]
+  # Counted before the retry loop overwrites `results`: a case that timed out
+  # and then passed on retry is still worth surfacing, since a slow-but-not-
+  # hung machine is the kind of thing that turns into a real timeout later.
+  retried_timeouts = sum(1 for result in retryable if result.classification == CLASS_TIMEOUT)
 
   for stale in retryable:
     retried = run_case(
@@ -566,7 +613,7 @@ def main() -> int:
   for result in results:
     counts[result.classification] = counts.get(result.classification, 0) + 1
 
-  gate = build_gate(results, counts, arguments.compare_everything)
+  gate = build_gate(results, counts, arguments.compare_everything, retried_timeouts)
 
   if arguments.report:
     arguments.report.parent.mkdir(parents=True, exist_ok=True)
@@ -591,8 +638,10 @@ def main() -> int:
     + ", ".join(f"{classification} {counts.get(classification, 0)}" for classification in CLASS_ORDER)
   )
 
-  # The gate is informational: a divergence is reported, never fatal.
-  return 0
+  # scripts/bootstrap.sh's gate-g7 runs this with `|| true` and reads the gate
+  # file, the same way it reads gate-g6's; the exit code still tells a direct
+  # caller (a developer, this file's own tests) whether every case passed.
+  return 0 if gate["status"] == "pass" else 1
 
 
 if __name__ == "__main__":
