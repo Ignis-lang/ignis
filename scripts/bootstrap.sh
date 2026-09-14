@@ -58,6 +58,13 @@ GATE_IDS=(G1 G2 G3 G4 G5 G6 G7)
 # a hung run still has to leave a gate result behind.
 GATE_G3_TIMEOUT_SECONDS=10800
 
+# Version of the stamp scheme `ensure_stage` reads/writes (see "Stage
+# staleness stamps" below). Bumping this invalidates every stamp a previous
+# bootstrap.sh wrote, so a change to what "fresh" means (e.g. widening the
+# sources hash) forces one rebuild everywhere instead of trusting a stamp it
+# can no longer interpret correctly.
+STAMP_SCHEME_VERSION="1"
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") <command>
@@ -103,6 +110,15 @@ Commands:
 
 Every stage compiles ${ENTRY#"$PROJECT_ROOT/"} and writes its artifacts under
 build/bootstrap/<stage>/. A self-compilation takes several minutes per stage.
+
+\`ensure_stage\` (used by stage2, stage3, and every gate that builds a stage
+on demand) checks a stamp next to each stage binary and rebuilds it when the
+compiler that built it or the ignis/std sources have changed since, so a
+gate never silently reports results for a stale binary. Set
+IGNIS_BOOTSTRAP_TRUST_STAGES=1 to skip that check and reuse whatever is on
+disk unconditionally (only for someone who knows the existing binaries are
+still current — a clean CI checkout never needs it, since there is nothing
+to reuse there anyway).
 EOF
 }
 
@@ -128,6 +144,228 @@ file_md5() {
   else
     echo ""
   fi
+}
+
+# =============================================================================
+# Stage staleness stamps
+# =============================================================================
+#
+# `ensure_stage` reuses build/bootstrap/<stage>/ignis whenever it already
+# exists, so a stage rebuild is skipped by default. Without more, that means
+# a gate can silently report results for a stage binary compiled from
+# selfhost sources, std, or a stage0/host compiler that has since changed
+# (IGN-210) — the whole point of a gate is to say something about *current*
+# code.
+#
+# So every successful stage build also writes build/bootstrap/<stage>/stamp.json
+# next to the binary, recording:
+#
+#   - the identity of the compiler that produced it: resolved path, size,
+#     mtime_ns and inode, mirroring `compiler_identity()`'s exe-side key in
+#     crates/ignis_driver/src/build_layout.rs (and its selfhost mirror in
+#     ignis/build/fingerprint.ign, which reads the same fields via
+#     `Fs::Sys::stat`) — deliberately not a content hash, for the same
+#     near-instant-on-a-cache-hit reason that comment gives.
+#   - a content hash of the `ignis/` and `std/` sources it compiled.
+#   - STAMP_SCHEME_VERSION, so an older stamp this scheme cannot interpret is
+#     treated as absent rather than (mis)trusted.
+#
+# `ensure_stage` recomputes both of the first two and rebuilds whenever
+# either differs from what the stamp recorded, logging why. IGNIS_BOOTSTRAP_TRUST_STAGES=1
+# skips this check entirely (see usage()).
+
+stage_stamp_path() { echo "$(stage_dir "$1")/stamp.json"; }
+
+# Identity of a compiler binary: resolved path, size, mtime_ns and inode as a
+# single "path:size:mtime_ns:inode" string, or "unknown" if it cannot be
+# resolved/stat-ed (e.g. it has been removed since). $1 is looked up on PATH
+# first, the way the shell itself would resolve it, then canonicalized.
+compiler_identity_of() {
+  BIN="$1" python3 -c '
+import os
+import shutil
+
+bin_arg = os.environ["BIN"]
+resolved = shutil.which(bin_arg) or bin_arg
+
+try:
+  resolved = os.path.realpath(resolved)
+  st = os.stat(resolved)
+  print(f"{resolved}:{st.st_size}:{st.st_mtime_ns}:{st.st_ino}")
+except OSError:
+  print("unknown")
+'
+}
+
+# Content hash of the selfhost sources (ignis/ and std/), the same corpus
+# every stage compiles. Uses the git-tracked file list when available (so an
+# untracked scratch file next to them never changes the hash); falls back to
+# a plain directory walk outside a git checkout (e.g. a release tarball). Only
+# directories that actually exist are passed to `git ls-files`/`find` — under
+# `set -e`, either one exits non-zero for a missing path even when the other
+# is fine, which would otherwise abort the whole script from inside a stamp
+# write.
+sources_hash() {
+  (
+    cd "$PROJECT_ROOT"
+
+    local dirs=()
+    local dir
+    for dir in ignis std; do
+      [[ -d "$dir" ]] && dirs+=("$dir")
+    done
+
+    if [[ ${#dirs[@]} -eq 0 ]]; then
+      sha256sum </dev/null | cut -d' ' -f1
+    elif git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      git ls-files -z -- "${dirs[@]}" | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
+    else
+      find "${dirs[@]}" -type f | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1
+    fi
+  )
+}
+
+# Write build/bootstrap/<stage>/stamp.json for a just-built stage binary.
+#
+#   $1  stage
+#   $2  compiler binary that actually built it — for stage1 this is stage0
+#       itself on the direct path, but the host fallback binary
+#       (IGNIS_STAGE0_HOST_FALLBACK) on the fallback path, which is why
+#       stage1's staleness check below reads the separate `stage0_identity`
+#       field instead: it always names $STAGE0, whichever path was taken.
+write_stage_stamp() {
+  local stage="$1" compiler_bin="$2"
+  local stamp_path
+  stamp_path="$(stage_stamp_path "$stage")"
+
+  mkdir -p "$(dirname "$stamp_path")"
+
+  local identity sources stage0_identity
+  identity="$(compiler_identity_of "$compiler_bin")"
+  sources="$(sources_hash)"
+  stage0_identity="$(compiler_identity_of "$STAGE0")"
+
+  # Written to a temp file and renamed into place, same as stage0.json: a
+  # process killed mid-write must never leave a half-written stamp another
+  # `ensure_stage` call would then fail to parse.
+  SCHEME_VERSION="$STAMP_SCHEME_VERSION" \
+  COMPILER_BIN="$compiler_bin" \
+  COMPILER_IDENTITY="$identity" \
+  STAGE0_IDENTITY="$stage0_identity" \
+  SOURCES_HASH="$sources" \
+    python3 -c '
+import json
+import os
+import sys
+import tempfile
+
+payload = {
+  "scheme_version": os.environ["SCHEME_VERSION"],
+  "compiler_bin": os.environ["COMPILER_BIN"],
+  "compiler_identity": os.environ["COMPILER_IDENTITY"],
+  "stage0_identity": os.environ["STAGE0_IDENTITY"],
+  "sources_hash": os.environ["SOURCES_HASH"],
+}
+
+path = sys.argv[1]
+directory = os.path.dirname(path) or "."
+fd, temp_path = tempfile.mkstemp(prefix=".stamp.", suffix=".json.tmp", dir=directory)
+try:
+  with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload, indent=2) + "\n")
+  os.replace(temp_path, path)
+except BaseException:
+  os.unlink(temp_path)
+  raise
+' "$stamp_path"
+}
+
+# Read one field out of a stage's stamp.json, or print nothing if the stamp
+# is missing or unreadable.
+read_stage_stamp_field() {
+  local stage="$1" field="$2"
+  local stamp_path
+  stamp_path="$(stage_stamp_path "$stage")"
+
+  [[ -f "$stamp_path" ]] || return 0
+
+  FIELD="$field" python3 -c '
+import json
+import os
+import sys
+
+try:
+  with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+except (OSError, ValueError):
+  sys.exit(0)
+
+value = data.get(os.environ["FIELD"])
+print(value if value is not None else "")
+' "$stamp_path" 2>/dev/null || true
+}
+
+# Why $1's existing binary is stale against $2 (the compiler that would
+# (re)build it) and the current sources, or empty if its stamp still holds.
+#
+# stage1 is checked against $STAGE0 itself (the `stage0_identity` field —
+# see write_stage_stamp), not $2: on the host-fallback path $2 above was the
+# fallback binary, not stage0, and stage0 might since have started working
+# again, or changed again itself, either of which has to be noticed the same
+# way. Every later stage is checked against $2, the previous stage's own
+# binary, which is a stable path whether or not *it* was built by fallback.
+stage_stale_reason() {
+  local stage="$1" compiler_bin="$2"
+
+  [[ -f "$(stage_stamp_path "$stage")" ]] || { echo "no stamp"; return 0; }
+
+  local recorded_version
+  recorded_version="$(read_stage_stamp_field "$stage" scheme_version)"
+  if [[ "$recorded_version" != "$STAMP_SCHEME_VERSION" ]]; then
+    echo "no stamp"
+    return 0
+  fi
+
+  if [[ "$stage" == "stage1" ]]; then
+    local recorded_stage0 current_stage0
+    recorded_stage0="$(read_stage_stamp_field "$stage" stage0_identity)"
+    current_stage0="$(compiler_identity_of "$STAGE0")"
+    if [[ "$recorded_stage0" != "$current_stage0" ]]; then
+      echo "stage0 identity changed"
+      return 0
+    fi
+  else
+    local recorded_identity current_identity
+    recorded_identity="$(read_stage_stamp_field "$stage" compiler_identity)"
+    current_identity="$(compiler_identity_of "$compiler_bin")"
+    if [[ "$recorded_identity" != "$current_identity" ]]; then
+      echo "compiler identity changed"
+      return 0
+    fi
+  fi
+
+  local recorded_sources current_sources
+  recorded_sources="$(read_stage_stamp_field "$stage" sources_hash)"
+  current_sources="$(sources_hash)"
+  if [[ "$recorded_sources" != "$current_sources" ]]; then
+    echo "sources changed"
+    return 0
+  fi
+
+  echo ""
+}
+
+# Compiler that (re)building $1 would use, i.e. the same binary compile_stage
+# or build_stage1_with_host would be given — stage1's is stage0 ($STAGE0,
+# resolved the same way build_stage1 resolves it), and every later stage's is
+# the previous stage's own binary.
+stage_compiler_bin() {
+  case "$1" in
+    stage1) echo "$STAGE0" ;;
+    stage2) stage_bin stage1 ;;
+    stage3) stage_bin stage2 ;;
+    *) echo "$STAGE0" ;;
+  esac
 }
 
 # Write a gate result to build/bootstrap/gates/<gate>.json.
@@ -211,6 +449,7 @@ compile_stage() {
     fail "${stage}: no binary produced, see ${dir}/log.txt"
   fi
 
+  write_stage_stamp "$stage" "$compiler"
   info "${stage}: ok -> ${dir}/ignis"
 }
 
@@ -383,6 +622,7 @@ build_stage1_with_host() {
   [[ -x "$host_out" ]] || fail "stage1: ${host_out} was not produced"
 
   cp "$host_out" "$dir/ignis"
+  write_stage_stamp stage1 "$host_bin"
   info "stage1: ok -> ${dir}/ignis"
 
   [[ -z "$fallback_reason" ]] || write_stage0_fallback "$host_bin" "$fallback_reason"
@@ -428,7 +668,22 @@ build_stage1() {
 
 ensure_stage() {
   local stage="$1"
-  [[ -x "$(stage_bin "$stage")" ]] || "build_${stage}"
+
+  if [[ ! -x "$(stage_bin "$stage")" ]]; then
+    "build_${stage}"
+    return
+  fi
+
+  if [[ "${IGNIS_BOOTSTRAP_TRUST_STAGES:-}" == "1" ]]; then
+    return
+  fi
+
+  local reason
+  reason="$(stage_stale_reason "$stage" "$(stage_compiler_bin "$stage")")"
+  if [[ -n "$reason" ]]; then
+    info "${stage}: rebuilding, ${reason}"
+    "build_${stage}"
+  fi
 }
 
 build_stage2() {
@@ -821,13 +1076,21 @@ seal_missing_gates() {
 # G4 compares stage2's measurement with stage1's over the same corpus, so it
 # belongs here rather than with the other gates: a ratio only means something
 # when both runs were measured on the same machine.
+#
+# Goes through `ensure_stage` rather than calling build_stage1/2/3 directly,
+# so a second `stages` run against an unchanged tree reuses every stage
+# instead of paying for three self-compilations that would produce byte-
+# identical output — `ensure_stage` still never skips a stage whose stamp
+# says it is stale (IGN-210), so this loses nothing CI's clean-checkout runs
+# rely on: there, every stage has no stamp yet and is built exactly as
+# before.
 run_stages() {
-  build_stage1
-  build_stage2
+  ensure_stage stage1
+  ensure_stage stage2
 
   run_gate_g4 || info "stages: gate-g4 exited non-zero, G4 holds the verdict"
 
-  build_stage3 || info "stages: stage3 exited non-zero, G1 holds the verdict"
+  ensure_stage stage3 || info "stages: stage3 exited non-zero, G1 holds the verdict"
 }
 
 # Run every stage and gate, then the report. A failing step never stops the run:
