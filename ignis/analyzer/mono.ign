@@ -2140,6 +2140,16 @@ export namespace Mono {
           clonedKind = Hir::HirKind::Unit;
         },
         Hir::HirKind::Variable(defId) -> {
+          // A bare reference to a function definition (used as a first-class
+          // value, e.g. `let f: (i32) -> i32 = helper;`) is a reachability edge
+          // just like a direct call. `copyIfNonGeneric` is a no-op for local
+          // variables, parameters, and anything already copied, so this is safe
+          // to call unconditionally. Generic functions referenced this way (no
+          // type args are carried on `Variable`) are left uninstantiated here;
+          // typeck does not yet support inferring the instantiation from an
+          // expected function-pointer type, so such a reference would already
+          // have failed typechecking before reaching mono.
+          Mono::copyIfNonGeneric(defStore, typeStore, symbols, inputHir, outputHir, state, defId);
           clonedKind = Hir::HirKind::Variable(Mono::remapDef(state, defId));
         },
         Hir::HirKind::Binary(binaryNode) -> {
