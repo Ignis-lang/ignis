@@ -181,3 +181,72 @@ function chainedCombinatorsMoveTheOwningPayloadOnce(): void {
 
   Test::assertEq<u64>(total.unwrap(), 6);
 }
+
+@test
+function asRefBorrowsThePayloadWithoutConsumingTheOption(): void {
+  let source: Option<String> = ownedText("alpha");
+
+  let length: u64 = match (source.asRef()) {
+    Option::SOME(text) -> text.length(),
+    Option::NONE -> 0,
+  };
+
+  Test::assertEq<u64>(length, 5);
+  Test::assertEq<str>(source.unwrap().toStr(), "alpha");
+}
+
+@test
+function asRefOnNoneIsNone(): void {
+  let source: Option<String> = Option::NONE;
+
+  Test::assert(source.asRef().isNone());
+  Test::assert(source.isNone());
+}
+
+@test
+function asRefOutlivesTheMatchThatProducedIt(): void {
+  let source: Option<String> = ownedText("alpha");
+  let borrowed: Option<&String> = source.asRef();
+
+  // Read after an intervening call: a binding that copied the payload into the arm's
+  // own stack slot would hand out a pointer to storage this call has since reused.
+  let separator: String = String::create("--");
+
+  let length: u64 = match (borrowed) {
+    Option::SOME(text) -> text.length(),
+    Option::NONE -> 0,
+  };
+
+  Test::assertEq<u64>(length + separator.length(), 7);
+}
+
+@test
+function asMutWritesThroughToTheOption(): void {
+  let mut source: Option<String> = ownedText("alpha");
+
+  match (source.asMut()) {
+    Option::SOME(text) -> {
+      (*text).pushStr("!");
+    },
+    Option::NONE -> {},
+  };
+
+  Test::assertEq<str>(source.unwrap().toStr(), "alpha!");
+}
+
+@test
+function asMutOnNoneIsNone(): void {
+  let mut source: Option<String> = Option::NONE;
+
+  Test::assert(source.asMut().isNone());
+  Test::assert(source.isNone());
+}
+
+@test
+function unwrapOrFreesTheUnusedDefaultExactlyOnce(): void {
+  let present: Option<String> = ownedText("alpha");
+  let unused: String = String::create("fallback");
+  let kept: String = present.unwrapOr(unused);
+
+  Test::assertEq<str>(kept.toStr(), "alpha");
+}
