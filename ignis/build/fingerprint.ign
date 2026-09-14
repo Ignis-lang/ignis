@@ -540,6 +540,13 @@ function fingerprintBaseline(): BuildFingerprint {
   return BuildFingerprint::new("0.1.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-xyz");
 }
 
+/// Best-effort cleanup for a scratch source file this module wrote under
+/// /tmp. Ignored errors: cleanup should never fail the test it is deferred
+/// from.
+function fingerprintRemoveFile(path: &Path::PathBuf): void {
+  let _removed = Fs::removeFile(path);
+}
+
 @test
 function fingerprintSerializationIsStable(): void {
   let fp1: BuildFingerprint = fingerprintBaseline();
@@ -683,6 +690,8 @@ function fingerprintSourceChangeInvalidates(): void {
   let src2PathStr: String = `/tmp/ignis_fp_test_src2_${Process::id()}.c`;
   let src1Path: Path::PathBuf = Path::PathBuf::create(src1PathStr.toStr());
   let src2Path: Path::PathBuf = Path::PathBuf::create(src2PathStr.toStr());
+  defer fingerprintRemoveFile(&src1Path);
+  defer fingerprintRemoveFile(&src2Path);
 
   let content1: String = String::create("int foo(void) { return 1; }");
   let content2: String = String::create("int bar(void) { return 2; }");

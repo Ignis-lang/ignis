@@ -954,6 +954,19 @@ function fixtureScratchDir(name: str): Path::PathBuf {
   return scratch;
 }
 
+/// Removes the pid-scoped scratch parent `fixtureScratchDir` created for
+/// `scratch`, not just the leaf test directory named after the fixture case,
+/// so this test's `ignis-selfhost-fixtures-<pid>` tree doesn't linger under
+/// /tmp once the test finishes. Errors are ignored: cleanup is best-effort,
+/// and an early-return path may call this before the directory ever existed.
+function fixtureScratchCleanup(scratch: &Path::PathBuf): void {
+  let Option::SOME(parent) = scratch.parent() else {
+    return;
+  };
+
+  let _removed = Fs::removeDirAll(&parent);
+}
+
 function fixtureNamesOf(cases: &Vector<FixtureCase>): String {
   let mut names: String = String::new();
   let mut index: u64 = 0;
@@ -1018,6 +1031,7 @@ function fixturesAreFilteredBySubstringOnTheirName(): void {
 @test
 function anEqualBaselineMakesAFixturePass(): void {
   let scratch: Path::PathBuf = fixtureScratchDir("equal");
+  defer fixtureScratchCleanup(&scratch);
   let snapshotPath: Path::PathBuf = scratch.join("case.snap");
   let body: String = String::create("exit_code: 0\nstdout: (empty)\nstderr: (empty)");
   let _written = Fs::writeString(&snapshotPath, &body);
@@ -1028,6 +1042,7 @@ function anEqualBaselineMakesAFixturePass(): void {
 @test
 function aDifferingBaselineReportsAMismatchWithItsDiff(): void {
   let scratch: Path::PathBuf = fixtureScratchDir("mismatch");
+  defer fixtureScratchCleanup(&scratch);
   let snapshotPath: Path::PathBuf = scratch.join("case.snap");
   let expected: String = String::create("exit_code: 0\nstdout: a\nstderr: (empty)");
   let actual: String = String::create("exit_code: 0\nstdout: b\nstderr: (empty)");
@@ -1045,6 +1060,7 @@ function aDifferingBaselineReportsAMismatchWithItsDiff(): void {
 @test
 function aMissingBaselineReportsWhatWasObserved(): void {
   let scratch: Path::PathBuf = fixtureScratchDir("missing");
+  defer fixtureScratchCleanup(&scratch);
   let snapshotPath: Path::PathBuf = scratch.join("case.snap");
   let body: String = String::create("exit_code: 7\nstdout: (empty)\nstderr: (empty)");
 
@@ -1059,6 +1075,7 @@ function aMissingBaselineReportsWhatWasObserved(): void {
 @test
 function updateModeCreatesAMissingBaselineAndPasses(): void {
   let scratch: Path::PathBuf = fixtureScratchDir("update-missing");
+  defer fixtureScratchCleanup(&scratch);
   let snapshotPath: Path::PathBuf = scratch.join("nested").join("case.snap");
   let body: String = String::create("exit_code: 0\nstdout: created\nstderr: (empty)");
 
@@ -1075,6 +1092,7 @@ function updateModeCreatesAMissingBaselineAndPasses(): void {
 @test
 function updateModeRewritesADifferingBaselineAndPasses(): void {
   let scratch: Path::PathBuf = fixtureScratchDir("update-mismatch");
+  defer fixtureScratchCleanup(&scratch);
   let snapshotPath: Path::PathBuf = scratch.join("case.snap");
   let stale: String = String::create("exit_code: 1\nstdout: (empty)\nstderr: (empty)");
   let _written = Fs::writeString(&snapshotPath, &stale);

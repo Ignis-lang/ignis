@@ -1334,6 +1334,13 @@ export namespace Config {
   }
 }
 
+/// Best-effort cleanup for a scratch directory tree this module created
+/// under /tmp. Ignored errors: cleanup should never fail the test it is
+/// deferred from.
+function projectRemoveDirAll(path: &Path::PathBuf): void {
+  let _removed = Fs::removeDirAll(path);
+}
+
 function fixturePath(relativePath: str): Path::PathBuf {
   match (Env::currentDir()) {
     Result::OK(root) -> {
@@ -1548,6 +1555,7 @@ function projectLoaderReportsMissingStdManifestForBuildPlanning(): void {
 function projectLoaderReportsMissingConfig(): void {
   let tempRootStr: String = `/tmp/ignis-selfhost-config-no-project-${Process::id()}`;
   let tempRoot: Path::PathBuf = Path::PathBuf::create(tempRootStr.toStr());
+  defer projectRemoveDirAll(&tempRoot);
   let start: Path::PathBuf = tempRoot.join("nested/path");
   match (Fs::createDirAll(&start)) {
     Result::OK(_) -> {},

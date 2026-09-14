@@ -326,12 +326,21 @@ function cCompilerReadExpected(filename: str): String {
   };
 }
 
+/// Best-effort cleanup for a scratch object file this module wrote under
+/// /tmp. Ignored errors: `compileObject` may have failed before ever
+/// creating the file, and cleanup should never fail the test it is deferred
+/// from.
+function cCompilerRemoveFile(path: &Path::PathBuf): void {
+  let _removed = Fs::removeFile(path);
+}
+
 @test
 function cCompilerSuccessfulCompile(): void {
   let fixtureDir: Path::PathBuf = cCompilerFixtureDir();
   let srcPath: Path::PathBuf = fixtureDir.join("valid.c");
   let objPathStr: String = `/tmp/ignis_test_compile_valid_${Process::id()}.o`;
   let objPath: Path::PathBuf = Path::PathBuf::create(objPathStr.toStr());
+  defer cCompilerRemoveFile(&objPath);
 
   let includes: Vector<String> = Vector::new<String>();
   let flags: Vector<String> = Vector::new<String>();
@@ -358,6 +367,7 @@ function cCompilerFailsOnInvalidSource(): void {
   let srcPath: Path::PathBuf = fixtureDir.join("invalid.c");
   let objPathStr: String = `/tmp/ignis_test_compile_invalid_${Process::id()}.o`;
   let objPath: Path::PathBuf = Path::PathBuf::create(objPathStr.toStr());
+  defer cCompilerRemoveFile(&objPath);
 
   let includes: Vector<String> = Vector::new<String>();
   let flags: Vector<String> = Vector::new<String>();
@@ -384,6 +394,7 @@ function cCompilerDefaultsToGccWhenCcEmpty(): void {
   let srcPath: Path::PathBuf = fixtureDir.join("valid.c");
   let objPathStr: String = `/tmp/ignis_test_compile_default_cc_${Process::id()}.o`;
   let objPath: Path::PathBuf = Path::PathBuf::create(objPathStr.toStr());
+  defer cCompilerRemoveFile(&objPath);
 
   let includes: Vector<String> = Vector::new<String>();
   let flags: Vector<String> = Vector::new<String>();
