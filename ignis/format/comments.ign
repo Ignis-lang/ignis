@@ -53,32 +53,68 @@ export function isCommentTrivia(token: &Token): boolean {
   return kind == TokenKind::LINE_COMMENT || kind == TokenKind::BLOCK_COMMENT || kind == TokenKind::OUTER_DOC_COMMENT || kind == TokenKind::INNER_DOC_COMMENT;
 }
 
-/// Counts newline bytes in `source[0..byteIndex]` to derive a zero-based line number.
-function lineNumber(source: &String, byteIndex: u64): u64 {
-  let mut clampedIndex: u64 = source.length();
+/// A source file's newline byte offsets, sorted ascending, built once with a
+/// single linear scan so `lineAt` can answer a byte-index-to-line-number
+/// query with a binary search instead of rescanning from byte 0.
+///
+/// `classifyCommentPlacement` used to take the raw `&String` and rescan every
+/// comment's neighborhood from the start of the file on every call
+/// (`lineNumber`'s own `while (cursor < clampedIndex)` loop). A file's comment
+/// count and file length both grow together, so that made classification
+/// quadratic in file size: `commentShape` in `safety.ign` calls it once per
+/// comment token while looping every token, and `ModelBuilder::parseRegion`
+/// calls it once per comment block. On `ignis/analyzer/typecheck_tests.ign`
+/// (15.6k lines, 1336 comments) this alone accounted for most of the ~38s the
+/// formatter spent on that single file (see corpus_tests.ign profiling in
+/// issue #220). Building one `LineIndex` per source and threading it through
+/// keeps every call O(log n).
+export record LineIndex {
+  newlineOffsets: Vector<u64>;
 
-  if (byteIndex < clampedIndex) {
-    clampedIndex = byteIndex;
-  }
-  let mut count: u64 = 0;
-  let mut cursor: u64 = 0;
+  public static build(source: &String): LineIndex {
+    let mut offsets: Vector<u64> = Vector::new<u64>();
+    let length: u64 = source.length();
+    let mut cursor: u64 = 0;
 
-  while (cursor < clampedIndex) {
-    if (let Option::SOME(byte) = source.byteAt(cursor) && byte == '\n' as u8) {
-      count += 1;
+    while (cursor < length) {
+      if (let Option::SOME(byte) = source.byteAt(cursor) && byte == '\n' as u8) {
+        offsets.push(cursor);
+      }
+
+      cursor += 1;
     }
 
-    cursor += 1;
+    return LineIndex { newlineOffsets: offsets };
   }
 
-  return count;
+  /// Number of newline bytes strictly before `byteIndex` — a zero-based line
+  /// number, matching the byte-scan this replaces.
+  public lineAt(&self, byteIndex: u64): u64 {
+    let mut low: u64 = 0;
+    let mut high: u64 = self.newlineOffsets.length();
+
+    while (low < high) {
+      let mid: u64 = low + (high - low) / 2;
+      let Option::SOME(offset) = self.newlineOffsets.get(mid) else {
+        break;
+      };
+
+      if (*offset < byteIndex) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+
+    return low;
+  }
 }
 
 /// Classifies where a comment token sits relative to its neighbors: trailing
 /// the previous token on the same line, leading the next item, or detached by
 /// a blank line from what follows.
 export function classifyCommentPlacement(
-  source: &String,
+  lineIndex: &LineIndex,
   tokens: &TokenStream,
   commentIndex: u64,
   startIndex: u64,
@@ -88,7 +124,7 @@ export function classifyCommentPlacement(
     @panic("classifyCommentPlacement: comment index out of range");
   };
 
-  let commentLine: u64 = lineNumber(source, comment.spanStart());
+  let commentLine: u64 = lineIndex.lineAt(comment.spanStart());
 
   let mut previous: Option<&Token> = Option::NONE;
   let mut previousIndex: u64 = commentIndex;
@@ -107,7 +143,7 @@ export function classifyCommentPlacement(
   }
 
   if (let Option::SOME(previousToken) = previous) {
-    let previousLine: u64 = lineNumber(source, previousToken.spanEnd());
+    let previousLine: u64 = lineIndex.lineAt(previousToken.spanEnd());
     let isLeftBrace: boolean = previousToken.kindValue() == TokenKind::PUNCTUATION && previousToken.punctuationValue() == Punctuation::LEFT_BRACE;
 
     if (previousLine == commentLine && !isLeftBrace) {
@@ -133,7 +169,7 @@ export function classifyCommentPlacement(
   }
 
   if (let Option::SOME(nextToken) = next) {
-    let nextLine: u64 = lineNumber(source, nextToken.spanStart());
+    let nextLine: u64 = lineIndex.lineAt(nextToken.spanStart());
 
     if (commentLine + 1 >= nextLine) {
       return CommentPlacement::LEADING;
