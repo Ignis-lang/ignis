@@ -237,6 +237,53 @@ compiler_identity_of() {
   echo "sha256:${hash}:${size}"
 }
 
+# Identity to compare stage1's stamp's `stage0_identity` field against (and
+# what a fresh stage1 build's own stamp records that field as). Prefers, in
+# order:
+#
+#   1. stage0.json's recorded "source" path, hashed directly, when that
+#      exact file exists here — the job that actually resolved stage0
+#      (where "source" is exactly what $STAGE0 is set to), a local rerun
+#      against the same paths, or a host-kind stage0.json anywhere
+#      target/ci/ignis has traveled (it ships in the nightly's
+#      bootstrap-stages artifact precisely so a gate job has it too).
+#   2. stage0.json's own recorded "identity" field — a content sha256+size
+#      the nightly's "Resolve stage0" step computes once, when it actually
+#      has the asset in hand. Covers an official/selfhost stage0 in a gate
+#      job: that asset never travels there (multiple gigabytes of runner
+#      bandwidth for something every gate job would redundantly
+#      re-download and re-verify just to hash), but the identity computed
+#      once by the job that had it does, via stage0.json (IGN-210
+#      follow-up, PR #222 review) — without this, a gate job's bare
+#      `$STAGE0` (unset, so whatever "ignis" resolves to on PATH — the
+#      host binary there, not the official asset that actually built
+#      stage1) would misread every single official-stage0 night as
+#      "stage0 identity changed" and hit the lineage guard below.
+#   3. $STAGE0 resolved the same way build_stage1 resolves it — the bare
+#      case with no stage0.json at all (a plain local run).
+#
+# "unknown" only when none of the above has anything to offer.
+current_stage0_identity() {
+  local recorded_source="" recorded_identity=""
+
+  if [[ -f "${BOOTSTRAP_ROOT}/stage0.json" ]]; then
+    recorded_source="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
+    recorded_identity="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("identity", ""))' "${BOOTSTRAP_ROOT}/stage0.json" 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$recorded_source" && -f "$recorded_source" ]]; then
+    compiler_identity_of "$recorded_source"
+    return 0
+  fi
+
+  if [[ -n "$recorded_identity" ]]; then
+    echo "$recorded_identity"
+    return 0
+  fi
+
+  compiler_identity_of "$STAGE0"
+}
+
 # Content hash of the selfhost sources (ignis/ and std/), the same corpus
 # every stage compiles. Uses the git-tracked file list when available (so an
 # untracked scratch file next to them never changes the hash); falls back to
@@ -296,7 +343,7 @@ write_stage_stamp() {
 
   local identity stage0_identity
   identity="$(compiler_identity_of "$compiler_bin")"
-  stage0_identity="$(compiler_identity_of "$STAGE0")"
+  stage0_identity="$(current_stage0_identity)"
 
   # Written to a temp file and renamed into place, same as stage0.json: a
   # process killed mid-write must never leave a half-written stamp another
@@ -382,7 +429,7 @@ stage_stale_reason() {
   if [[ "$stage" == "stage1" ]]; then
     local recorded_stage0 current_stage0
     recorded_stage0="$(read_stage_stamp_field "$stage" stage0_identity)"
-    current_stage0="$(compiler_identity_of "$STAGE0")"
+    current_stage0="$(current_stage0_identity)"
     if [[ "$recorded_stage0" != "$current_stage0" ]]; then
       echo "stage0 identity changed"
       return 0
@@ -585,13 +632,22 @@ stage0_is_selfhost() {
 # IGNIS_STAGE0 is unset there, so $STAGE0 falls back to whatever "ignis"
 # resolves to on PATH in that job (the host compiler), while stage0.json
 # still records kind=official/selfhost from the job that actually built it.
-# If something then decided stage1 needed a rebuild there (which 1/2 above
-# mean should no longer happen on the ordinary path — this is defense in
-# depth for whenever it still does, by mistake or by design change),
-# `stage0_is_selfhost` would read that recorded kind and try to compile
-# directly with the host CLI as if it were a selfhost binary — either a
-# confusing failure, or, worse, a silent success against the wrong compiler
-# that reports gate results for it.
+# If something then decided stage1 needed a rebuild there (current_stage0_
+# identity's recorded-"identity"-field fallback means the *ordinary* gate
+# job never reaches this at all anymore — see that function — so this is
+# defense in depth for whenever a rebuild is still decided, by a genuine
+# source/lineage change this job cannot safely act on, by mistake, or by a
+# future design change), `stage0_is_selfhost` would read that recorded kind
+# and try to compile directly with the host CLI as if it were a selfhost
+# binary — either a confusing failure, or, worse, a silent success against
+# the wrong compiler that reports gate results for it.
+#
+# Deliberately does not accept stage0.json's recorded "identity" field on
+# its own as an escape: that field tells this job what stage0 *should* be,
+# not how to actually invoke it — current_stage0_identity already uses it to
+# avoid a false "stale" reading in the first place, but once a rebuild is
+# genuinely needed, only having the asset's actual bytes here (recorded
+# "source" pointing at a file that exists) makes attempting one safe.
 #
 # Returns a non-empty reason to refuse the rebuild with, or empty to proceed.
 stage0_rebuild_guard_reason() {

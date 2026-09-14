@@ -41,6 +41,15 @@ json_get() {
   python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print(v if v is not None else "")' "$path" "$key"
 }
 
+# Content hash of a produced stage binary, to tell "rebuilt" (a different
+# hash) from "reused" (the exact same bytes) apart. Deliberately not an
+# inode or mtime comparison: both are filesystem/runner-dependent (CI hit a
+# runner where a freshly `rm -rf`+`cp`'d file kept the same inode number),
+# where a content hash is not.
+binary_hash() {
+  sha256sum "$1" | cut -d' ' -f1
+}
+
 # A fake "compiler" invoked as every stage is: `compiler entry -o output`.
 # Rather than compile anything, it copies itself to `-o`'s target, so the
 # binary it produces is itself a working fake compiler the next stage can
@@ -48,6 +57,13 @@ json_get() {
 # self-compilation. `--version` fails, so `stage0_is_selfhost` classifies it
 # as a selfhost-shaped stage0 and compiles it directly rather than through
 # `<bin> build`.
+#
+# Appends a fresh marker line on every invocation: a plain self-copy of this
+# same, unchanging script would otherwise produce byte-identical output on
+# every rebuild, which would make binary_hash() useless for telling "rebuilt
+# with identical output" apart from "never touched" — exactly the ambiguity
+# an inode/mtime check was trying (and, per the CI failure above, failing)
+# to resolve differently.
 write_fake_compiler() {
   local path="$1"
   cat >"$path" <<'EOF'
@@ -73,6 +89,7 @@ fi
 mkdir -p "$(dirname "$out")"
 cp "$0" "$out"
 chmod +x "$out"
+echo "# build-marker: $$-${RANDOM}-$(date +%s%N 2>/dev/null || echo 0)" >>"$out"
 # Every real stage emits selfhost_emit.c next to its binary; build_stage3's
 # G1 comparison reads it unconditionally, so stage3 needs one too, even from
 # a fake compiler. Empty and identical every time is fine — G1 is not what
@@ -211,7 +228,16 @@ test_unchanged_state_reuses() {
 }
 
 # Test 3: touching a source file (ignis/ or std/) rebuilds stage1, with the
-# "sources changed" reason logged.
+# "sources changed" reason logged. The sandbox here has no .git of its own,
+# so sources_hash can never take the git-toplevel fast path for it (it is
+# never that path's toplevel, wherever it happens to sit) — this exercises
+# the `find` fallback specifically, deterministically, regardless of
+# whether the runner's mktemp happens to nest under an unrelated outer
+# repo or not either way. test_source_change_detected_inside_an_outer_git_repo
+# below forces the nested-outer-repo sub-case explicitly, and
+# test_source_change_detected_via_git_toplevel further down exercises the
+# other branch: a sandbox that *is* its own git toplevel, the git-ls-files
+# fast path.
 test_source_change_rebuilds() {
   TESTS_RUN=$((TESTS_RUN + 1))
   echo "test: touching a source file rebuilds stage1"
@@ -221,8 +247,8 @@ test_source_change_rebuilds() {
   write_fake_compiler "$root/bin/ignis-stage0"
 
   run_stage "$root" stage1 "$root/bin/ignis-stage0" >"$root/run1.log" 2>&1
-  local before_inode
-  before_inode="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
+  local before_hash
+  before_hash="$(binary_hash "$root/build/bootstrap/stage1/ignis")"
 
   # mtime alone can be too coarse a clock on some filesystems; sources_hash
   # is content-based, so a plain content change (no sleep needed) is already
@@ -245,13 +271,14 @@ test_source_change_rebuilds() {
     fail_test "no 'stage1: rebuilding, sources changed' line, see ${root}/run2.log"
   fi
 
-  # The fake compiler always re-emits byte-identical content (a self-copy),
-  # so content alone cannot prove a rebuild happened; compile_stage's
-  # `rm -rf "$dir"; mkdir -p "$dir"` before every build does give the new
-  # file a fresh inode, which content equality would not.
-  local after_inode
-  after_inode="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
-  [[ "$before_inode" != "$after_inode" ]] && pass "stage1/ignis binary was recreated" \
+  # write_fake_compiler appends a fresh marker on every invocation
+  # specifically so this comparison is meaningful: a plain self-copy alone
+  # would be byte-identical across rebuilds, and an inode/mtime check is
+  # filesystem/runner-dependent (a freshly `rm -rf`+`cp`'d file kept the
+  # same inode number on at least one CI runner).
+  local after_hash
+  after_hash="$(binary_hash "$root/build/bootstrap/stage1/ignis")"
+  [[ "$before_hash" != "$after_hash" ]] && pass "stage1/ignis binary was recreated" \
     || fail_test "stage1/ignis binary was not recreated after a source edit"
 
   rm -rf "$root"
@@ -381,13 +408,17 @@ test_artifact_roundtrip_identity_is_stable() {
   run_stage "$root" stage1 "$root/bin/ignis-stage0" >"$root/run1.log" 2>&1
   run_stage "$root" stage2 "$root/bin/ignis-stage0" >"$root/run2.log" 2>&1
 
-  local before_inode1 before_inode2
-  before_inode1="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
-  before_inode2="$(stat -c '%i' "$root/build/bootstrap/stage2/ignis")"
+  local before_hash1 before_hash2 before_mtime1 before_mtime2
+  before_hash1="$(binary_hash "$root/build/bootstrap/stage1/ignis")"
+  before_hash2="$(binary_hash "$root/build/bootstrap/stage2/ignis")"
+  before_mtime1="$(stat -c '%Y' "$root/build/bootstrap/stage1/ignis")"
+  before_mtime2="$(stat -c '%Y' "$root/build/bootstrap/stage2/ignis")"
 
-  # Simulate the round trip: copy each stage directory elsewhere and back
-  # (fresh inodes throughout), then touch the binaries so mtime moves too.
-  # Content is never touched.
+  # Simulate the round trip: copy each stage directory elsewhere and back,
+  # then force a different mtime deterministically with `touch -d` — not by
+  # relying on `cp` alone to give the file a fresh inode/mtime, which is
+  # filesystem/runner-dependent (a freshly `rm -rf`+`cp`'d file kept the
+  # same inode number on at least one CI runner). Content is never touched.
   local elsewhere
   elsewhere="$(mktemp -d)"
   cp -a "$root/build/bootstrap/stage1" "$elsewhere/stage1"
@@ -395,17 +426,17 @@ test_artifact_roundtrip_identity_is_stable() {
   rm -rf "$root/build/bootstrap/stage1" "$root/build/bootstrap/stage2"
   cp -a "$elsewhere/stage1" "$root/build/bootstrap/stage1"
   cp -a "$elsewhere/stage2" "$root/build/bootstrap/stage2"
-  touch "$root/build/bootstrap/stage1/ignis" "$root/build/bootstrap/stage2/ignis"
+  touch -d '2 hours ago' "$root/build/bootstrap/stage1/ignis" "$root/build/bootstrap/stage2/ignis"
   rm -rf "$elsewhere"
 
-  local after_inode1 after_inode2
-  after_inode1="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
-  after_inode2="$(stat -c '%i' "$root/build/bootstrap/stage2/ignis")"
+  local after_mtime1 after_mtime2
+  after_mtime1="$(stat -c '%Y' "$root/build/bootstrap/stage1/ignis")"
+  after_mtime2="$(stat -c '%Y' "$root/build/bootstrap/stage2/ignis")"
 
-  if [[ "$before_inode1" != "$after_inode1" && "$before_inode2" != "$after_inode2" ]]; then
-    pass "the round trip did give the binaries fresh inodes (sanity check on the test itself)"
+  if [[ "$before_mtime1" != "$after_mtime1" && "$before_mtime2" != "$after_mtime2" ]]; then
+    pass "the round trip did give the binaries a different mtime (sanity check on the test itself)"
   else
-    fail_test "the round trip left inodes unchanged — this test would not exercise the bug it targets"
+    fail_test "the round trip left mtime unchanged — this test would not exercise the bug it targets"
   fi
 
   # stage3 always recompiles unconditionally once its own check runs, but it
@@ -428,6 +459,14 @@ test_artifact_roundtrip_identity_is_stable() {
     pass "neither stage1 nor stage2 was rebuilt after the round trip"
   fi
 
+  local after_hash1 after_hash2
+  after_hash1="$(binary_hash "$root/build/bootstrap/stage1/ignis")"
+  after_hash2="$(binary_hash "$root/build/bootstrap/stage2/ignis")"
+  [[ "$before_hash1" == "$after_hash1" ]] && pass "stage1/ignis content is unchanged" \
+    || fail_test "stage1/ignis content changed despite no rebuild being logged"
+  [[ "$before_hash2" == "$after_hash2" ]] && pass "stage2/ignis content is unchanged" \
+    || fail_test "stage2/ignis content changed despite no rebuild being logged"
+
   rm -rf "$root"
 }
 
@@ -449,9 +488,9 @@ test_chain_check_catches_a_stale_prior_stage() {
   run_stage "$root" stage1 "$root/bin/ignis-stage0" >"$root/run1.log" 2>&1
   run_stage "$root" stage2 "$root/bin/ignis-stage0" >"$root/run2.log" 2>&1
 
-  local before_inode1 before_inode2
-  before_inode1="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
-  before_inode2="$(stat -c '%i' "$root/build/bootstrap/stage2/ignis")"
+  local before_hash1 before_hash2
+  before_hash1="$(binary_hash "$root/build/bootstrap/stage1/ignis")"
+  before_hash2="$(binary_hash "$root/build/bootstrap/stage2/ignis")"
 
   # A different stage0 binary at the same path (same trigger as the existing
   # swap test), but — deliberately — neither "stage1" nor "stage2" is run
@@ -500,14 +539,14 @@ EOF
     fail_test "no 'stage2: rebuilding, compiler identity changed' line, see ${root}/run3.log"
   fi
 
-  local after_inode1 after_inode2
-  after_inode1="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
-  after_inode2="$(stat -c '%i' "$root/build/bootstrap/stage2/ignis")"
+  local after_hash1 after_hash2
+  after_hash1="$(binary_hash "$root/build/bootstrap/stage1/ignis")"
+  after_hash2="$(binary_hash "$root/build/bootstrap/stage2/ignis")"
 
-  [[ "$before_inode1" != "$after_inode1" ]] && pass "stage1/ignis was rebuilt" \
-    || fail_test "stage1/ignis inode is unchanged"
-  [[ "$before_inode2" != "$after_inode2" ]] && pass "stage2/ignis was rebuilt" \
-    || fail_test "stage2/ignis inode is unchanged"
+  [[ "$before_hash1" != "$after_hash1" ]] && pass "stage1/ignis was rebuilt" \
+    || fail_test "stage1/ignis content is unchanged"
+  [[ "$before_hash2" != "$after_hash2" ]] && pass "stage2/ignis was rebuilt" \
+    || fail_test "stage2/ignis content is unchanged"
 
   rm -rf "$root"
 }
@@ -583,7 +622,142 @@ test_stage0_kind_mismatch_override_proceeds() {
   rm -rf "$root"
 }
 
-# Test 10: a source edit must be detected even when the sandbox happens to
+# Test 10: a gate job — official-kind stage0.json with a recorded identity,
+# the asset itself absent (as in every real gate job: it never travels,
+# too large and redundant to re-download and re-verify per job),
+# stage1/stage2 already built and stamped by that exact stage0 — reuses
+# cleanly: no rebuild, no lineage refusal. Second re-review blocker on
+# PR #222: without this recorded-identity fallback, `ensure_stage stage1`
+# in a real gate job (IGNIS_STAGE0 unset, so $STAGE0 falls back to whatever
+# "ignis" resolves to on PATH — the host binary there, not the official
+# asset that actually built stage1) misread *every single* official-stage0
+# night — any promotion streak >= 3 — as "stage0 identity changed", which
+# then hit the lineage guard and aborted every gate (G2, G3-stage2, G5, G6,
+# G7) with no gate file, sealed as skipped, degrading promotion.
+test_gate_job_reuses_with_recorded_stage0_identity() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: a gate job reuses stage1/stage2 via stage0.json's recorded identity, asset absent"
+
+  local root
+  root="$(make_sandbox)"
+  write_fake_compiler "$root/bin/ignis-official"
+
+  # Build for real, as the ladder-build job would: stage1's stamp now
+  # records the official asset's own identity.
+  run_stage "$root" stage1 "$root/bin/ignis-official" >"$root/run1.log" 2>&1
+  run_stage "$root" stage2 "$root/bin/ignis-official" >"$root/run2.log" 2>&1
+
+  local built_identity
+  built_identity="$(json_get "$root/build/bootstrap/stage1/stamp.json" stage0_identity)"
+
+  local before_hash1 before_hash2
+  before_hash1="$(binary_hash "$root/build/bootstrap/stage1/ignis")"
+  before_hash2="$(binary_hash "$root/build/bootstrap/stage2/ignis")"
+
+  # Now the gate job: stage0.json records that exact identity (as the
+  # nightly's "Resolve stage0" step now does), but the asset itself (an
+  # ephemeral runner-temp path from a separate job) is gone.
+  printf '{"kind": "official", "source": "%s/does-not-exist/ignis-official", "sha256": "", "mode": "auto", "identity": "%s"}\n' \
+    "$root" "$built_identity" >"$root/build/bootstrap/stage0.json"
+
+  # $STAGE0 itself resolves to something else entirely — a decoy standing in
+  # for the gate job's bare "ignis" -> host binary on PATH.
+  # current_stage0_identity must never even need it, since the recorded
+  # identity above already matches.
+  write_fake_compiler "$root/bin/ignis-decoy-host"
+
+  local status=0
+  run_stage "$root" gate-g3-stage2 "$root/bin/ignis-decoy-host" >"$root/run3.log" 2>&1 || status=$?
+
+  if [[ "$status" -ne 0 ]]; then
+    fail_test "expected gate-g3-stage2 to succeed, exit ${status}, see ${root}/run3.log"
+    sed 's/^/    /' "$root/run3.log"
+    rm -rf "$root"
+    return
+  fi
+  pass "gate-g3-stage2 exited 0"
+
+  if grep -qE 'stage[12]: rebuilding|refusing to rebuild' "$root/run3.log"; then
+    fail_test "a rebuild or lineage refusal was triggered despite a matching recorded identity, see ${root}/run3.log"
+    sed 's/^/    /' "$root/run3.log"
+  else
+    pass "neither stage1 nor stage2 was rebuilt, and no lineage refusal fired"
+  fi
+
+  local after_hash1 after_hash2
+  after_hash1="$(binary_hash "$root/build/bootstrap/stage1/ignis")"
+  after_hash2="$(binary_hash "$root/build/bootstrap/stage2/ignis")"
+
+  [[ "$before_hash1" == "$after_hash1" ]] && pass "stage1/ignis was reused" \
+    || fail_test "stage1/ignis was rebuilt"
+  [[ "$before_hash2" == "$after_hash2" ]] && pass "stage2/ignis was reused" \
+    || fail_test "stage2/ignis was rebuilt"
+
+  rm -rf "$root"
+}
+
+# Test 11: when stage1's own stamp and stage0.json's recorded identity
+# genuinely disagree (tampering, or a real lineage change this job cannot
+# safely act on) and the asset itself is not here either, ensure_stage still
+# refuses loudly — the honest outcome. The recorded-identity fallback the
+# previous test exercises only prevents a *false* "stale" reading; it must
+# never mask a real one.
+test_gate_job_tampered_stamp_still_refuses() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: a genuine stage0 lineage mismatch still refuses loudly even with a recorded identity"
+
+  local root
+  root="$(make_sandbox)"
+  write_fake_compiler "$root/bin/ignis-official"
+
+  run_stage "$root" stage1 "$root/bin/ignis-official" >"$root/run1.log" 2>&1
+  run_stage "$root" stage2 "$root/bin/ignis-official" >"$root/run2.log" 2>&1
+
+  local built_identity
+  built_identity="$(json_get "$root/build/bootstrap/stage1/stamp.json" stage0_identity)"
+
+  # stage0.json still correctly records what actually built stage1 ...
+  printf '{"kind": "official", "source": "%s/does-not-exist/ignis-official", "sha256": "", "mode": "auto", "identity": "%s"}\n' \
+    "$root" "$built_identity" >"$root/build/bootstrap/stage0.json"
+
+  # ... but stage1's own stamp — its "binary content", the artifact this
+  # gate job actually downloaded — is tampered to claim a different one, as
+  # if it had shipped from a mismatched lineage.
+  python3 - "$root/build/bootstrap/stage1/stamp.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+  data = json.load(handle)
+data["stage0_identity"] = "sha256:0000000000000000000000000000000000000000000000000000000000000000:1"
+with open(path, "w", encoding="utf-8") as handle:
+  json.dump(data, handle, indent=2)
+  handle.write("\n")
+PY
+
+  write_fake_compiler "$root/bin/ignis-decoy-host"
+
+  local status=0
+  run_stage "$root" gate-g3-stage2 "$root/bin/ignis-decoy-host" >"$root/run3.log" 2>&1 || status=$?
+
+  if [[ "$status" -eq 0 ]]; then
+    fail_test "expected gate-g3-stage2 to fail on the genuine lineage mismatch, it exited 0, see ${root}/run3.log"
+  else
+    pass "gate-g3-stage2 exited non-zero (${status})"
+  fi
+
+  if grep -q 'ensure_stage: refusing to rebuild stage1' "$root/run3.log"; then
+    pass "the refusal fired despite stage0.json carrying a recorded identity"
+  else
+    fail_test "no clear refusal message, see ${root}/run3.log"
+    sed 's/^/    /' "$root/run3.log"
+  fi
+
+  rm -rf "$root"
+}
+
+# Test 12: a source edit must be detected even when the sandbox happens to
 # sit inside an unrelated outer git repository — this is what actually broke
 # CI for test_source_change_rebuilds: on that runner the sandbox (a mktemp -d
 # directory) was nested under a directory `git` already considered part of a
@@ -621,18 +795,26 @@ test_source_change_detected_inside_an_outer_git_repo() {
   write_fake_compiler "$root/bin/ignis-stage0"
 
   # Sanity check on the reproduction itself: if the sandbox is not actually
-  # inside the outer repo's work tree, this test proves nothing.
-  local inside
+  # inside the outer repo's work tree — and not itself that work tree's
+  # toplevel, the exact distinction sources_hash's fix keys on — this test
+  # proves nothing.
+  local inside toplevel
   inside="$(cd "$root" && git rev-parse --is-inside-work-tree 2>/dev/null || echo false)"
+  toplevel="$(cd "$root" && git rev-parse --show-toplevel 2>/dev/null || echo "")"
   if [[ "$inside" != "true" ]]; then
     fail_test "the sandbox is not nested inside a git work tree — this reproduction did not set up what it targets"
     rm -rf "$outer"
     return
   fi
+  if [[ "$toplevel" == "$(cd "$root" && pwd -P)" ]]; then
+    fail_test "the sandbox is its own git toplevel — this reproduction did not set up the nested (non-toplevel) case it targets"
+    rm -rf "$outer"
+    return
+  fi
 
   run_stage "$root" stage1 "$root/bin/ignis-stage0" >"$root/run1.log" 2>&1
-  local before_inode
-  before_inode="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
+  local before_hash
+  before_hash="$(binary_hash "$root/build/bootstrap/stage1/ignis")"
 
   printf 'namespace Std { function extra(): void {} }\n' >"$root/std/lib.ign"
 
@@ -652,12 +834,83 @@ test_source_change_detected_inside_an_outer_git_repo() {
     fail_test "no 'stage1: rebuilding, sources changed' line, see ${root}/run2.log"
   fi
 
-  local after_inode
-  after_inode="$(stat -c '%i' "$root/build/bootstrap/stage1/ignis")"
-  [[ "$before_inode" != "$after_inode" ]] && pass "stage1/ignis binary was recreated" \
+  local after_hash
+  after_hash="$(binary_hash "$root/build/bootstrap/stage1/ignis")"
+  [[ "$before_hash" != "$after_hash" ]] && pass "stage1/ignis binary was recreated" \
     || fail_test "stage1/ignis binary was not recreated after a source edit"
 
   rm -rf "$outer"
+}
+
+# Test 13: a source edit must also be detected when the sandbox *is* its own
+# git repository (the opposite corner from the previous test) — exercising
+# sources_hash's fast path (`git ls-files`) explicitly and deterministically,
+# rather than relying on inference that it must be correct because the
+# fallback is. ignis/ and std/ are committed so `git ls-files` actually has
+# something tracked to list.
+test_source_change_detected_via_git_toplevel() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: a source edit is detected via the git-toplevel fast path"
+
+  local root
+  root="$(mktemp -d)"
+  mkdir -p "$root/scripts" "$root/ignis" "$root/std" "$root/bin" "$root/build/bootstrap"
+  cp "$BOOTSTRAP_SH" "$root/scripts/bootstrap.sh"
+  cp "$MEASURE_RUN_PY" "$root/scripts/measure_run.py"
+  printf 'function main(): i32 { return 0; }\n' >"$root/ignis/main.ign"
+  printf 'namespace Std { }\n' >"$root/std/lib.ign"
+  write_fake_compiler "$root/bin/ignis-stage0"
+
+  (
+    cd "$root" &&
+      git init -q &&
+      git config user.email test@example.com &&
+      git config user.name test &&
+      git add ignis std &&
+      git commit -q -m sandbox
+  )
+
+  # Sanity check on the reproduction itself: sources_hash only takes the git
+  # fast path when $PROJECT_ROOT (here, the sandbox root) is itself the
+  # discovered repository's toplevel.
+  local toplevel
+  toplevel="$(cd "$root" && git rev-parse --show-toplevel 2>/dev/null || echo "")"
+  if [[ "$toplevel" != "$(cd "$root" && pwd -P)" ]]; then
+    fail_test "the sandbox is not its own git toplevel — this reproduction did not set up what it targets"
+    rm -rf "$root"
+    return
+  fi
+
+  run_stage "$root" stage1 "$root/bin/ignis-stage0" >"$root/run1.log" 2>&1
+  local before_hash
+  before_hash="$(binary_hash "$root/build/bootstrap/stage1/ignis")"
+
+  # A tracked-file edit — `git add` is not required again; `git ls-files`
+  # lists the path regardless of its working-tree content.
+  printf 'namespace Std { function extra(): void {} }\n' >"$root/std/lib.ign"
+
+  local status=0
+  run_stage "$root" stage2 "$root/bin/ignis-stage0" >"$root/run2.log" 2>&1 || status=$?
+
+  if [[ "$status" -ne 0 ]]; then
+    fail_test "expected stage2 to succeed, exit ${status}, see ${root}/run2.log"
+    sed 's/^/    /' "$root/run2.log"
+    rm -rf "$root"
+    return
+  fi
+
+  if grep -q 'stage1: rebuilding, sources changed' "$root/run2.log"; then
+    pass "stage1 rebuilt with reason 'sources changed' via the git-toplevel fast path"
+  else
+    fail_test "no 'stage1: rebuilding, sources changed' line, see ${root}/run2.log"
+  fi
+
+  local after_hash
+  after_hash="$(binary_hash "$root/build/bootstrap/stage1/ignis")"
+  [[ "$before_hash" != "$after_hash" ]] && pass "stage1/ignis binary was recreated" \
+    || fail_test "stage1/ignis binary was not recreated after a source edit"
+
+  rm -rf "$root"
 }
 
 test_fresh_build_writes_stamp
@@ -668,8 +921,11 @@ test_trust_stages_skips_the_check
 test_artifact_roundtrip_identity_is_stable
 test_chain_check_catches_a_stale_prior_stage
 test_stage0_kind_mismatch_refuses
-test_source_change_detected_inside_an_outer_git_repo
 test_stage0_kind_mismatch_override_proceeds
+test_gate_job_reuses_with_recorded_stage0_identity
+test_gate_job_tampered_stamp_still_refuses
+test_source_change_detected_inside_an_outer_git_repo
+test_source_change_detected_via_git_toplevel
 
 echo
 echo "${TESTS_RUN} test(s) run, ${FAILURES} failure(s)"
