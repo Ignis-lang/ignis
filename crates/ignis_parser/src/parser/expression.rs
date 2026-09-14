@@ -1500,7 +1500,10 @@ mod tests {
 
         match argument {
           ASTExpression::Literal(_) => {
-            assert_eq!(&call.span, whole_span, "a literal-chunk concat must span the whole template literal");
+            assert_eq!(
+              &call.span, whole_span,
+              "a literal-chunk concat must span the whole template literal"
+            );
           },
           other => {
             let slot_span = other.span();
