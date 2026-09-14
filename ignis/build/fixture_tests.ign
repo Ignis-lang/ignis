@@ -1,6 +1,7 @@
 import Env from "std::env";
 import Fs from "std::fs";
 import Path from "std::path";
+import Process from "std::process";
 import Sort from "std::sort";
 import String from "std::string";
 import Test from "std::test";
@@ -934,13 +935,19 @@ function fixtureCorpusPath(relativePath: str): Path::PathBuf {
 
 /// A private directory under the system temporary directory, wiped first so a
 /// rerun never observes what an earlier run left behind.
+///
+/// Scoped by this process's pid so two concurrent `ignis test` runs (two
+/// worktrees, or two CI jobs on one machine) never race on the same
+/// removeDirAll/createDirAll/write/read sequence; mirrors `linkerTestPath`
+/// in `linker.ign` and `pipelineTestLayout` in `pipeline.ign`.
 function fixtureScratchDir(name: str): Path::PathBuf {
   let Result::OK(tempRoot) = Fs::tempDir() else {
     Test::fail();
     return Path::PathBuf::new();
   };
 
-  let scratch: Path::PathBuf = tempRoot.join("ignis-selfhost-fixtures").join(name);
+  let dirName: String = `ignis-selfhost-fixtures-${Process::id()}`;
+  let scratch: Path::PathBuf = tempRoot.join(dirName.toStr()).join(name);
   let _removed = Fs::removeDirAll(&scratch);
   let _created = Fs::createDirAll(&scratch);
 

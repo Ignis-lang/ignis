@@ -677,9 +677,12 @@ function fingerprintLegacyStampMissingCompilerIdentityIsRejected(): void {
 
 @test
 function fingerprintSourceChangeInvalidates(): void {
-  // Write two fixture source files to /tmp.
-  let src1Path: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_fp_test_src1.c");
-  let src2Path: Path::PathBuf = Path::PathBuf::create("/tmp/ignis_fp_test_src2.c");
+  // Write two fixture source files to /tmp, scoped by pid so two concurrent
+  // `ignis test` runs never race on the same source files.
+  let src1PathStr: String = `/tmp/ignis_fp_test_src1_${Process::id()}.c`;
+  let src2PathStr: String = `/tmp/ignis_fp_test_src2_${Process::id()}.c`;
+  let src1Path: Path::PathBuf = Path::PathBuf::create(src1PathStr.toStr());
+  let src2Path: Path::PathBuf = Path::PathBuf::create(src2PathStr.toStr());
 
   let content1: String = String::create("int foo(void) { return 1; }");
   let content2: String = String::create("int bar(void) { return 2; }");

@@ -2,6 +2,7 @@ import Fs from "std::fs";
 import Io from "std::io";
 import LibC from "std::libc";
 import Path from "std::path";
+import Process from "std::process";
 import String from "std::string";
 import Test from "std::test";
 
@@ -19,7 +20,8 @@ function assertInvalidInput(error: Io::IoError): void {
 
 @test
 function writeStringAndReadToStringPreserveInteriorNulBytes(): void {
-  let path: str = "/tmp/ignis_std_test_runner_fs_interior_nul.bin";
+  let pathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_interior_nul.bin`;
+  let path: str = pathOwned.toStr();
 
   if (Fs::exists(path)) {
     match (Fs::removeFile(path)) {
@@ -73,8 +75,10 @@ function writeStringAndReadToStringPreserveInteriorNulBytes(): void {
 
 @test
 function readDirNextReturnsOkSomeAndThenOkNone(): void {
-  let dirPath: str = "/tmp/ignis_std_test_runner_fs_read_dir_entries";
-  let filePath: str = "/tmp/ignis_std_test_runner_fs_read_dir_entries/alpha.txt";
+  let dirPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_read_dir_entries`;
+  let dirPath: str = dirPathOwned.toStr();
+  let filePathOwned: String = `${dirPath}/alpha.txt`;
+  let filePath: str = filePathOwned.toStr();
 
   if (Fs::exists(filePath)) {
     match (Fs::removeFile(filePath)) {
@@ -148,7 +152,8 @@ function readDirNextReturnsOkSomeAndThenOkNone(): void {
 
 @test
 function readDirNextReturnsOkNoneForExhaustedEmptyDirectory(): void {
-  let dirPath: str = "/tmp/ignis_std_test_runner_fs_read_dir_empty";
+  let dirPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_read_dir_empty`;
+  let dirPath: str = dirPathOwned.toStr();
 
   if (Fs::exists(dirPath)) {
     match (Fs::removeDir(dirPath)) {
@@ -200,7 +205,8 @@ function readDirNextReturnsOkNoneForExhaustedEmptyDirectory(): void {
 
 @test
 function readDirNextReturnsErrorAfterDirectoryStreamIsInvalidated(): void {
-  let dirPath: str = "/tmp/ignis_std_test_runner_fs_read_dir_invalidated";
+  let dirPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_read_dir_invalidated`;
+  let dirPath: str = dirPathOwned.toStr();
 
   if (Fs::exists(dirPath)) {
     match (Fs::removeDir(dirPath)) {
@@ -244,10 +250,12 @@ function readDirNextReturnsErrorAfterDirectoryStreamIsInvalidated(): void {
 
 @test
 function writeBytesAndReadToBytesPreserveEmptyAndBinaryPayloads(): void {
-  let emptyPath: str = "/tmp/ignis_std_test_runner_fs_bytes_empty.bin";
-  let binaryPath: str = "/tmp/ignis_std_test_runner_fs_bytes_binary.bin";
+  let emptyPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_bytes_empty.bin`;
+  let emptyPath: str = emptyPathOwned.toStr();
+  let binaryPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_bytes_binary.bin`;
+  let binaryPath: str = binaryPathOwned.toStr();
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_bytes_empty.bin /tmp/ignis_std_test_runner_fs_bytes_binary.bin");
+  shellRemoveTree(`rm -rf ${emptyPath} ${binaryPath}`.toStr());
 
   let emptyPayload: Vector<u8> = Vector::new<u8>();
   let Result::OK(_) = Fs::writeBytes(emptyPath, emptyPayload.asPtr() as *void, emptyPayload.length()) else {
@@ -281,7 +289,7 @@ function writeBytesAndReadToBytesPreserveEmptyAndBinaryPayloads(): void {
     },
   };
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_bytes_empty.bin /tmp/ignis_std_test_runner_fs_bytes_binary.bin");
+  shellRemoveTree(`rm -rf ${emptyPath} ${binaryPath}`.toStr());
 
   Test::assertEq<u64>(emptyReadBack.length(), 0);
   Test::assertEq<u64>(binaryReadBack.length(), 3);
@@ -292,7 +300,7 @@ function writeBytesAndReadToBytesPreserveEmptyAndBinaryPayloads(): void {
 
 @test
 function fsOwnedPathsRejectInteriorNulBytes(): void {
-  let mut invalidPath: String = String::create("/tmp/ignis_std_test_runner_fs_invalid_path");
+  let mut invalidPath: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_invalid_path`;
   let suffix: String = String::create("suffix");
   invalidPath.pushChar('\0');
   invalidPath.push(&suffix);
@@ -339,12 +347,16 @@ function fsOwnedPathsRejectInteriorNulBytes(): void {
 
 @test
 function canonicalizeRequiresExistingPathAndResolvesRealLocation(): void {
-  let nestedPath: str = "/tmp/ignis_std_test_runner_fs_canonicalize/real/child.txt";
-  let missingPath: str = "/tmp/ignis_std_test_runner_fs_canonicalize_missing";
+  let canonicalizeRootOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_canonicalize`;
+  let canonicalizeRoot: str = canonicalizeRootOwned.toStr();
+  let nestedPathOwned: String = `${canonicalizeRoot}/real/child.txt`;
+  let nestedPath: str = nestedPathOwned.toStr();
+  let missingPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_canonicalize_missing`;
+  let missingPath: str = missingPathOwned.toStr();
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_canonicalize /tmp/ignis_std_test_runner_fs_canonicalize_missing");
+  shellRemoveTree(`rm -rf ${canonicalizeRoot} ${missingPath}`.toStr());
 
-  match (Fs::createDirAll("/tmp/ignis_std_test_runner_fs_canonicalize/real")) {
+  match (Fs::createDirAll(`${canonicalizeRoot}/real`.toStr())) {
     Result::OK(_) -> {},
     Result::ERROR(_) -> Test::fail(),
   };
@@ -355,7 +367,7 @@ function canonicalizeRequiresExistingPathAndResolvesRealLocation(): void {
     return;
   };
 
-  let resolved: Path::PathBuf = match (Fs::canonicalize("/tmp/ignis_std_test_runner_fs_canonicalize/real/../real/./child.txt")) {
+  let resolved: Path::PathBuf = match (Fs::canonicalize(`${canonicalizeRoot}/real/../real/./child.txt`.toStr())) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
       Test::fail();
@@ -365,7 +377,7 @@ function canonicalizeRequiresExistingPathAndResolvesRealLocation(): void {
 
   let missingResult: Result<Path::PathBuf, Io::IoError> = Fs::canonicalize(missingPath);
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_canonicalize /tmp/ignis_std_test_runner_fs_canonicalize_missing");
+  shellRemoveTree(`rm -rf ${canonicalizeRoot} ${missingPath}`.toStr());
 
   Test::assertEq<str>(resolved.asStr(), nestedPath);
   match (missingResult) {
@@ -392,17 +404,22 @@ function tempDirReturnsExistingDirectoryRoot(): void {
 
 @test
 function walkTreatsSymlinkDirectoryAsLeaf(): void {
-  let rootPath: str = "/tmp/ignis_std_test_runner_fs_walk";
-  let targetDir: str = "/tmp/ignis_std_test_runner_fs_walk/real";
-  let nestedFile: str = "/tmp/ignis_std_test_runner_fs_walk/real/nested.txt";
-  let symlinkPath: str = "/tmp/ignis_std_test_runner_fs_walk/link_to_real";
-  let symlinkDescendantPath: str = "/tmp/ignis_std_test_runner_fs_walk/link_to_real/nested.txt";
+  let rootPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_walk`;
+  let rootPath: str = rootPathOwned.toStr();
+  let targetDirOwned: String = `${rootPath}/real`;
+  let targetDir: str = targetDirOwned.toStr();
+  let nestedFileOwned: String = `${rootPath}/real/nested.txt`;
+  let nestedFile: str = nestedFileOwned.toStr();
+  let symlinkPathOwned: String = `${rootPath}/link_to_real`;
+  let symlinkPath: str = symlinkPathOwned.toStr();
+  let symlinkDescendantPathOwned: String = `${rootPath}/link_to_real/nested.txt`;
+  let symlinkDescendantPath: str = symlinkDescendantPathOwned.toStr();
   let targetDirString: String = String::create(targetDir);
   let nestedFileString: String = String::create(nestedFile);
   let symlinkPathString: String = String::create(symlinkPath);
   let symlinkDescendantString: String = String::create(symlinkDescendantPath);
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_walk");
+  shellRemoveTree(`rm -rf ${rootPath}`.toStr());
 
   match (Fs::createDirAll(targetDir)) {
     Result::OK(_) -> {},
@@ -415,7 +432,7 @@ function walkTreatsSymlinkDirectoryAsLeaf(): void {
     return;
   };
 
-  Test::assertEq<i32>(LibC::Process::system("ln -s /tmp/ignis_std_test_runner_fs_walk/real /tmp/ignis_std_test_runner_fs_walk/link_to_real" as *u8), 0);
+  Test::assertEq<i32>(LibC::Process::system(`ln -s ${targetDir} ${symlinkPath}`.toStr() as *u8), 0);
 
   let walkedEntries: Vector<String> = match (Fs::walk(rootPath)) {
     Result::OK(value) -> value,
@@ -430,7 +447,7 @@ function walkTreatsSymlinkDirectoryAsLeaf(): void {
   let sawSymlink: boolean = Fs::walkContains(&walkedEntries, symlinkPathString.toStr());
   let sawSymlinkDescendant: boolean = Fs::walkContains(&walkedEntries, symlinkDescendantString.toStr());
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_walk");
+  shellRemoveTree(`rm -rf ${rootPath}`.toStr());
 
   Test::assert(sawRealDir);
   Test::assert(sawNestedFile);
@@ -440,16 +457,22 @@ function walkTreatsSymlinkDirectoryAsLeaf(): void {
 
 @test
 function removeDirAllFailsWhenMissingAndRemovesNestedTreesWithoutFollowingSymlinks(): void {
-  let rootPath: str = "/tmp/ignis_std_test_runner_fs_remove_dir_all";
-  let externalPath: str = "/tmp/ignis_std_test_runner_fs_remove_dir_all_external";
-  let missingPath: str = "/tmp/ignis_std_test_runner_fs_remove_dir_all_missing";
-  let nestedFile: str = "/tmp/ignis_std_test_runner_fs_remove_dir_all/root/child.txt";
-  let linkPath: str = "/tmp/ignis_std_test_runner_fs_remove_dir_all/link_to_external";
-  let externalFile: str = "/tmp/ignis_std_test_runner_fs_remove_dir_all_external/keep.txt";
+  let rootPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_remove_dir_all`;
+  let rootPath: str = rootPathOwned.toStr();
+  let externalPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_remove_dir_all_external`;
+  let externalPath: str = externalPathOwned.toStr();
+  let missingPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_remove_dir_all_missing`;
+  let missingPath: str = missingPathOwned.toStr();
+  let nestedFileOwned: String = `${rootPath}/root/child.txt`;
+  let nestedFile: str = nestedFileOwned.toStr();
+  let linkPathOwned: String = `${rootPath}/link_to_external`;
+  let linkPath: str = linkPathOwned.toStr();
+  let externalFileOwned: String = `${externalPath}/keep.txt`;
+  let externalFile: str = externalFileOwned.toStr();
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_remove_dir_all /tmp/ignis_std_test_runner_fs_remove_dir_all_external /tmp/ignis_std_test_runner_fs_remove_dir_all_missing");
+  shellRemoveTree(`rm -rf ${rootPath} ${externalPath} ${missingPath}`.toStr());
 
-  match (Fs::createDirAll("/tmp/ignis_std_test_runner_fs_remove_dir_all/root")) {
+  match (Fs::createDirAll(`${rootPath}/root`.toStr())) {
     Result::OK(_) -> {},
     Result::ERROR(_) -> Test::fail(),
   };
@@ -472,7 +495,7 @@ function removeDirAllFailsWhenMissingAndRemovesNestedTreesWithoutFollowingSymlin
     return;
   };
 
-  Test::assertEq<i32>(LibC::Process::system("ln -s /tmp/ignis_std_test_runner_fs_remove_dir_all_external /tmp/ignis_std_test_runner_fs_remove_dir_all/link_to_external" as *u8), 0);
+  Test::assertEq<i32>(LibC::Process::system(`ln -s ${externalPath} ${linkPath}`.toStr() as *u8), 0);
 
   let missingResult: Result<void, Io::IoError> = Fs::removeDirAll(missingPath);
 
@@ -482,7 +505,7 @@ function removeDirAllFailsWhenMissingAndRemovesNestedTreesWithoutFollowingSymlin
   let externalFileStillExists: boolean = Fs::exists(externalFile);
   let linkGone: boolean = !Fs::exists(linkPath);
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_remove_dir_all /tmp/ignis_std_test_runner_fs_remove_dir_all_external /tmp/ignis_std_test_runner_fs_remove_dir_all_missing");
+  shellRemoveTree(`rm -rf ${rootPath} ${externalPath} ${missingPath}`.toStr());
 
   if (let Result::OK(_) = missingResult) {
     Test::fail();
@@ -500,13 +523,15 @@ function removeDirAllFailsWhenMissingAndRemovesNestedTreesWithoutFollowingSymlin
 
 @test
 function metadataDistinguishesFilesFromDirectoriesAndReportsSize(): void {
-  let rootPath: str = "/tmp/ignis_std_test_runner_fs_metadata";
-  let filePath: str = "/tmp/ignis_std_test_runner_fs_metadata/payload.txt";
+  let rootPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_metadata`;
+  let rootPath: str = rootPathOwned.toStr();
+  let filePathOwned: String = `${rootPath}/payload.txt`;
+  let filePath: str = filePathOwned.toStr();
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_metadata");
+  shellRemoveTree(`rm -rf ${rootPath}`.toStr());
 
   // Deferred so the tree is removed on the early-failure paths too, not only on success.
-  defer shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_metadata");
+  defer shellRemoveTree(`rm -rf ${rootPath}`.toStr());
 
   match (Fs::createDirAll(rootPath)) {
     Result::OK(_) -> {},
@@ -548,9 +573,10 @@ function metadataDistinguishesFilesFromDirectoriesAndReportsSize(): void {
 
 @test
 function metadataFailsForAMissingPath(): void {
-  let missingPath: str = "/tmp/ignis_std_test_runner_fs_metadata_missing";
+  let missingPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_metadata_missing`;
+  let missingPath: str = missingPathOwned.toStr();
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_metadata_missing");
+  shellRemoveTree(`rm -rf ${missingPath}`.toStr());
 
   match (Fs::metadata(missingPath)) {
     Result::OK(_) -> Test::fail(),
@@ -560,11 +586,14 @@ function metadataFailsForAMissingPath(): void {
 
 @test
 function createDirAllSucceedsAgainOnAnExistingTree(): void {
-  let nestedPath: str = "/tmp/ignis_std_test_runner_fs_create_dir_all/one/two";
+  let rootOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_create_dir_all`;
+  let root: str = rootOwned.toStr();
+  let nestedPathOwned: String = `${root}/one/two`;
+  let nestedPath: str = nestedPathOwned.toStr();
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_create_dir_all");
+  shellRemoveTree(`rm -rf ${root}`.toStr());
 
-  defer shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_create_dir_all");
+  defer shellRemoveTree(`rm -rf ${root}`.toStr());
 
   match (Fs::createDirAll(nestedPath)) {
     Result::OK(_) -> {},
@@ -593,12 +622,14 @@ function createDirAllSucceedsAgainOnAnExistingTree(): void {
 
 @test
 function walkYieldsDescendantsAndExcludesTheDirectoryItself(): void {
-  let rootPath: str = "/tmp/ignis_std_test_runner_fs_walk_empty";
-  let emptyChildPath: str = "/tmp/ignis_std_test_runner_fs_walk_empty/child";
+  let rootPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_walk_empty`;
+  let rootPath: str = rootPathOwned.toStr();
+  let emptyChildPathOwned: String = `${rootPath}/child`;
+  let emptyChildPath: str = emptyChildPathOwned.toStr();
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_walk_empty");
+  shellRemoveTree(`rm -rf ${rootPath}`.toStr());
 
-  defer shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_walk_empty");
+  defer shellRemoveTree(`rm -rf ${rootPath}`.toStr());
 
   match (Fs::createDirAll(rootPath)) {
     Result::OK(_) -> {},
@@ -643,12 +674,14 @@ function walkYieldsDescendantsAndExcludesTheDirectoryItself(): void {
 
 @test
 function statReadsEveryFieldTheHostStructLayoutPlacesAtItsOwnOffset(): void {
-  let rootPath: str = "/tmp/ignis_std_test_runner_fs_stat_layout";
-  let filePath: str = "/tmp/ignis_std_test_runner_fs_stat_layout/payload.bin";
+  let rootPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_stat_layout`;
+  let rootPath: str = rootPathOwned.toStr();
+  let filePathOwned: String = `${rootPath}/payload.bin`;
+  let filePath: str = filePathOwned.toStr();
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_stat_layout");
+  shellRemoveTree(`rm -rf ${rootPath}`.toStr());
 
-  defer shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_stat_layout");
+  defer shellRemoveTree(`rm -rf ${rootPath}`.toStr());
 
   let Result::OK(_) = Fs::createDirAll(rootPath) else {
     Test::fail();
@@ -697,19 +730,20 @@ function statReadsEveryFieldTheHostStructLayoutPlacesAtItsOwnOffset(): void {
 
 @test
 function readdirReadsTheNameAndTypeTheHostDirentLayoutPlacesAtTheirOwnOffsets(): void {
-  let rootPath: str = "/tmp/ignis_std_test_runner_fs_dirent_layout";
+  let rootPathOwned: String = `/tmp/ignis_std_test_runner_fs_${Process::id()}_dirent_layout`;
+  let rootPath: str = rootPathOwned.toStr();
 
-  shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_dirent_layout");
+  shellRemoveTree(`rm -rf ${rootPath}`.toStr());
 
-  defer shellRemoveTree("rm -rf /tmp/ignis_std_test_runner_fs_dirent_layout");
+  defer shellRemoveTree(`rm -rf ${rootPath}`.toStr());
 
-  let Result::OK(_) = Fs::createDirAll("/tmp/ignis_std_test_runner_fs_dirent_layout/child") else {
+  let Result::OK(_) = Fs::createDirAll(`${rootPath}/child`.toStr()) else {
     Test::fail();
     return;
   };
 
   let payload: String = String::create("x");
-  let Result::OK(_) = Fs::writeString("/tmp/ignis_std_test_runner_fs_dirent_layout/leaf.txt", &payload) else {
+  let Result::OK(_) = Fs::writeString(`${rootPath}/leaf.txt`.toStr(), &payload) else {
     Test::fail();
     return;
   };
