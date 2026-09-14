@@ -443,12 +443,20 @@ impl<'a> CEmitter<'a> {
     if !uses_module_headers {
       self.emit_slice_types();
       self.emit_type_forward_declarations();
+      // Closure structs only need their record/enum dependencies forward-declared
+      // (their fields are all pointers: `call`, `drop_fn`, `env`), so they can be
+      // emitted right after the forward declarations. A record or enum can embed a
+      // closure-typed field by value, which needs the closure struct to already be
+      // a complete type by the time the type definitions below are emitted.
+      self.emit_closure_types();
       self.emit_type_definitions();
-    } else if let Some(module_id) = self.target.as_ref().and_then(|target| target.target_user_module()) {
-      self.emit_forced_external_type_definitions(module_id);
+    } else {
+      if let Some(module_id) = self.target.as_ref().and_then(|target| target.target_user_module()) {
+        self.emit_forced_external_type_definitions(module_id);
+      }
+      self.emit_closure_types();
     }
 
-    self.emit_closure_types();
     self.emit_static_constants();
     self.emit_extern_declarations();
     self.emit_drop_glue_helpers();
@@ -4971,16 +4979,53 @@ where
     .map(|&def_id| build_mangled_name_standalone(def_id, defs, namespaces, symbols, types))
     .collect();
 
-  // Separate closure structs from regular external structs.
-  // Closure structs need full definitions (for by-value passing); others get forward decls.
-  let mut external_forward_decls: Vec<&String> = Vec::new();
+  // Discover external record/enum definitions this module needs by value (a local, a
+  // parameter, a field, or transitively through another by-value record/enum field) so
+  // their fields/payloads can be scanned below for closure and forward-decl dependencies
+  // *before* struct_forward_decls is partitioned. Without this, an externally-sourced
+  // record embedding a closure by value (e.g. `Handlers { onPoint: (Point) -> i32 }`
+  // defined in another module, pulled in here because it's used by value) would get a
+  // full definition with an undefined closure struct field, since nothing in *this*
+  // module's own code ever names that closure type directly.
+  let external_definition_ids =
+    collect_external_type_definition_ids(defs, types, symbols, namespaces, &module_type_names, &struct_forward_decls);
+
+  for &def_id in module_records
+    .iter()
+    .chain(module_enums.iter())
+    .chain(external_definition_ids.iter())
+  {
+    match &defs.get(&def_id).kind {
+      DefinitionKind::Record(rd) => {
+        for field in &rd.fields {
+          collect_struct_types_from_type(&field.type_id, types, defs, symbols, namespaces, &mut struct_forward_decls);
+        }
+      },
+      DefinitionKind::Enum(ed) => {
+        for variant in &ed.variants {
+          for payload_ty in &variant.payload {
+            collect_struct_types_from_type(payload_ty, types, defs, symbols, namespaces, &mut struct_forward_decls);
+          }
+        }
+      },
+      _ => {},
+    }
+  }
+
+  // Separate closure structs from regular record/enum structs.
+  // Closure structs need full definitions (their `call`/`drop_fn` fields are function
+  // pointers, so a forward-declared record/enum referenced there is enough), so every
+  // record/enum name referenced here — including ones this module defines itself, or
+  // pulls in from another module — must be forward-declared before the closure structs
+  // are emitted below. Otherwise a closure struct referencing a by-value record/enum
+  // defined later in this same header (e.g. `Handlers { onPoint: (Point) -> i32 }`)
+  // would implicitly declare its own, incompatible `struct Point` scoped to that
+  // parameter list.
+  let mut record_forward_decls: Vec<&String> = Vec::new();
   let mut slice_struct_type_ids: Vec<TypeId> = Vec::new();
   let mut closure_struct_type_ids: Vec<TypeId> = Vec::new();
 
   for name in &struct_forward_decls {
-    if module_type_names.contains(name) {
-      continue;
-    }
     if name.starts_with("__ignis_slice_") {
       for (type_id, ty) in types.iter() {
         if matches!(ty, Type::Slice { .. }) {
@@ -5011,14 +5056,14 @@ where
         }
       }
     } else {
-      external_forward_decls.push(name);
+      record_forward_decls.push(name);
     }
   }
 
-  external_forward_decls.sort();
+  record_forward_decls.sort();
 
-  if !external_forward_decls.is_empty() {
-    for name in &external_forward_decls {
+  if !record_forward_decls.is_empty() {
+    for name in &record_forward_decls {
       writeln!(output, "typedef struct {} {};", name, name).unwrap();
     }
     writeln!(output).unwrap();
@@ -5074,10 +5119,6 @@ where
   if !closure_struct_type_ids.is_empty() {
     writeln!(output).unwrap();
   }
-
-  // Collect external type definitions needed by this module (by-value usage).
-  let external_definition_ids =
-    collect_external_type_definition_ids(defs, types, symbols, namespaces, &module_type_names, &struct_forward_decls);
 
   // Build a unified set of all type definitions: module enums + records + external deps.
   // Then topologically sort them so that if type A contains type B by-value, B comes first.
@@ -5637,9 +5678,23 @@ fn collect_struct_types_from_type(
     Type::FixedArray { element, .. } => {
       collect_struct_types_from_type(element, types, defs, symbols, namespaces, out);
     },
+    Type::Tuple(elements) => {
+      for element in elements {
+        collect_struct_types_from_type(element, types, defs, symbols, namespaces, out);
+      }
+    },
     Type::Function { params, ret, .. } => {
       let name = closure_struct_name_standalone(params, ret, types, defs, symbols, namespaces);
       out.insert(name);
+
+      // The closure struct's `call` field takes every parameter and the return type by
+      // value, so any record/enum/slice/closure reachable from the signature must also be
+      // forward-declared (or, for a nested closure struct, fully defined) before this
+      // struct is emitted.
+      for param in params {
+        collect_struct_types_from_type(param, types, defs, symbols, namespaces, out);
+      }
+      collect_struct_types_from_type(ret, types, defs, symbols, namespaces, out);
     },
     _ => {},
   }
