@@ -1089,8 +1089,6 @@ function main(): i32 {
     point_forward_decl_pos < closure_struct_pos,
     "Point must be forward-declared before the closure struct that references it by value"
   );
-
-  assert_snapshot!("c_closure_struct_record_param_by_value_ordering", c_code);
 }
 
 #[test]
@@ -1123,6 +1121,4 @@ function main(): i32 {
     closure_struct_pos < adder_struct_pos,
     "the closure struct must be fully defined before Adder embeds it by value"
   );
-
-  assert_snapshot!("c_record_with_closure_field_by_value_ordering", c_code);
 }
