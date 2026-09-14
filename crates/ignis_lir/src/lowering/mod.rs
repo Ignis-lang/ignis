@@ -2828,8 +2828,8 @@ impl<'a> LoweringContext<'a> {
           // A slot holding a pointer into someone else's storage is a shallow alias
           // whatever the payload's type: the droppability test below it only ever
           // mattered for a slot that held the payload's own bytes.
-          let binding_borrowed_alias = byref_place.is_some()
-            || (borrowed_alias && self.types.needs_drop_with_defs(&value_ty, self.defs));
+          let binding_borrowed_alias =
+            byref_place.is_some() || (borrowed_alias && self.types.needs_drop_with_defs(&value_ty, self.defs));
           // The pointer itself is always spelled mutable: whether the *place* may be
           // written is the scrutinee's mutability, which analysis has already decided,
           // and a `const`-spelled slot here would only make `&mut binding` unassignable

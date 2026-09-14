@@ -147,7 +147,16 @@ export namespace Analyzer {
 
     record LocalBindingInfo {
       public typeId: Analyzer::TypeId;
+      /// Whether this binding may be borrowed mutably or its own `&mut` used —
+      /// `true` for a declared `mut` binding, and also for a place-mutable
+      /// binding (destructured under `&mut`) even though it declared no `mut`.
       public mutable: boolean;
+      /// Whether this binding is a by-reference pattern binding (destructured
+      /// under `&mut`): reading and borrowing it are permissions the scrutinee
+      /// already granted, but replacing the value at that place is not one of
+      /// them, so an assignment target rooted here is rejected even though
+      /// `mutable` reads true.
+      public placeMutable: boolean;
       /// True while the binding was declared without an annotation and without
       /// an initializer, so `typeId` is a placeholder the first assignment
       /// replaces. Reading such a binding before that assignment is an error.
@@ -2047,13 +2056,16 @@ export namespace Analyzer {
           // touching `declaredBindingMutable`, which the unused-mut lint reads
           // instead of this record.
           let mut effectiveMutable: boolean = *mutable;
+          let mut isPlaceMutable: boolean = false;
           if (let Option::SOME(placeMutable) = state.localPlaceMutableFlags.get(index)) {
+            isPlaceMutable = *placeMutable;
             effectiveMutable = effectiveMutable || *placeMutable;
           }
 
           let info: Analyzer::Typecheck::LocalBindingInfo = Analyzer::Typecheck::LocalBindingInfo {
             typeId: *typeId,
             mutable: effectiveMutable,
+            placeMutable: isPlaceMutable,
             pending: pendingFlag,
           };
 

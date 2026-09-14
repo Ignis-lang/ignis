@@ -242,8 +242,14 @@ function asMutOnNoneIsNone(): void {
   Test::assert(source.isNone());
 }
 
+/// `unwrapOr` takes its default by value and gives it away only when the receiver holds
+/// nothing. This asserts the value it keeps; that the default it did *not* keep is freed
+/// exactly once is asserted by the e2e corpus instead, where the fixtures run under leak
+/// checking — `match_expression_arm_returns_owning_parameter` and
+/// `match_expression_arm_result_compensates_every_other_arm`. The std test binary links
+/// without leak flags, and a drop-counting type declared here gets no drop glue emitted.
 @test
-function unwrapOrFreesTheUnusedDefaultExactlyOnce(): void {
+function unwrapOrKeepsThePayloadAndConsumesTheUnusedDefault(): void {
   let present: Option<String> = ownedText("alpha");
   let unused: String = String::create("fallback");
   let kept: String = present.unwrapOr(unused);
