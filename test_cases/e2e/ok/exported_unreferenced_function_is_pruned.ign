@@ -1,0 +1,20 @@
+// Pins issue #211 review item 1: `collect_mono_roots`'s "every public
+// function is a root" arm sits behind the entry-point arm in a `match`
+// whose guard is a strict superset, so it is unreachable — a binary only
+// ever roots `main`, `@externName` symbols, and non-generic record/enum
+// methods. `exportedDead` is exported but never called, so both compilers
+// must prune it exactly like an unreferenced private function — and take
+// `helperOnlyFromExported` with it, since nothing else calls that either.
+// The `--dump-drop-schedule` gate (G7) diffs the host against the selfhost
+// over this fixture and both dumps must list only `main`.
+function helperOnlyFromExported(): i32 {
+    return 3;
+}
+
+export function exportedDead(): i32 {
+    return helperOnlyFromExported() + 7;
+}
+
+function main(): i32 {
+    return 0;
+}

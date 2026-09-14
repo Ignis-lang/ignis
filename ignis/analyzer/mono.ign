@@ -2762,6 +2762,14 @@ export namespace Mono {
   /// `collect_mono_roots`: the entry point, and every method declared on a
   /// non-generic record or enum. Everything else is reached through them.
   ///
+  /// `collect_mono_roots` also has a "every public function is a root" arm,
+  /// but it sits behind the entry-point arm in a `match`, whose guard
+  /// (`!fd.is_extern && !fd.is_compile_time_only()`) is a strict superset of
+  /// the public-function arm's — so the public-function arm never runs; a
+  /// non-generic binary only ever roots `main`. There is deliberately no
+  /// equivalent arm here: an exported-but-unreferenced function is pruned by
+  /// both compilers, the same as an unreferenced private one.
+  ///
   /// One addition the reference compiler does not need: a function `@externName`
   /// gives a fixed C symbol is called by name from generated C — the entry
   /// wrapper calls `ignis_runtime_init` — and no Ignis call site names it. The
@@ -2790,18 +2798,18 @@ export namespace Mono {
       let defId: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(rawId as u32);
 
       let mut isEntryPoint: boolean = false;
-      let mut isPublicExtern: boolean = false;
-      let mut isPublicFunction: boolean = false;
       let mut isCSymbol: boolean = false;
       let mut isExported: boolean = false;
       let mut ownsMethods: boolean = false;
 
       if (let Option::SOME(definition) = defStore.get(defId)) {
         match (definition) {
+          // An extern function is never a root here, mirroring the host: both
+          // of `collect_mono_roots`'s function arms require `!fd.is_extern`.
+          // A used one is reached the ordinary way, through the HIR call site
+          // that names it; an unused one has no body to copy anyway.
           Analyzer::Definition::Function(functionDef) -> {
-            if (functionDef.isExtern) {
-              isPublicExtern = functionDef.visibility.equals(&Analyzer::Visibility::PUBLIC);
-            } else {
+            if (!functionDef.isExtern) {
               if (let Option::SOME(text) = symbols.resolve(functionDef.name)) {
                 isEntryPoint = String::create(text).equals("main");
               }
@@ -2810,7 +2818,6 @@ export namespace Mono {
                 isCSymbol = true;
               }
 
-              isPublicFunction = functionDef.visibility.equals(&Analyzer::Visibility::PUBLIC);
               isExported = exportAll && functionDef.typeParams.length() == 0;
             }
           },
@@ -2827,7 +2834,7 @@ export namespace Mono {
         };
       }
 
-      if (isEntryPoint || isPublicExtern || isPublicFunction || isCSymbol || isExported) {
+      if (isEntryPoint || isCSymbol || isExported) {
         roots.push(defId);
       }
 

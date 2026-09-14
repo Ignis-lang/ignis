@@ -461,16 +461,16 @@ function monoInputDefNamed(inputs: &mut MonoInputs, name: str): Option<Analyzer:
 
 /// Scenario: another translation unit calls a function only by its C symbol —
 /// exactly what the `@test` harness dispatch table does — so no Ignis call
-/// site reaches it from `main`. `runWithRoots` must still emit it once its
+/// site reaches it from `main`, and (mirroring the host, whose only roots
+/// are `main`, `@externName` symbols, and non-generic record/enum methods)
+/// nothing else roots it either. `runWithRoots` must still emit it once its
 /// `DefinitionId` is passed in as an external root, the way the driver's
 /// `collect_test_mono_roots` feeds harness definitions in as roots.
 ///
 /// `trulyDeadGeneric` pins the other half of "only what the roots reach is
-/// emitted": every non-generic top-level function is already a root by
-/// itself (`collectRoots`'s public-function arm), so a generic definition is
-/// the one shape `copyIfNonGeneric` still excludes on its own merits — it
-/// stays pending until something instantiates it — and it names no call
-/// site and no external root here, so it never does.
+/// emitted": it names no call site and no external root, and even if it did,
+/// `copyIfNonGeneric` excludes a generic definition on its own merits — it
+/// stays pending until something instantiates it.
 @test
 function monoRunWithRootsEmitsAnExternalRootUnreachableFromMain(): void {
   let mut inputs: MonoInputs = monoAnalyze(
