@@ -107,6 +107,7 @@ CLASS_ORDER = {
     CLASS_WORDING,
     CLASS_MISSING,
     CLASS_COMPILED,
+    CLASS_COMPILE_ERROR,
     CLASS_COMPILE_TIMEOUT,
     CLASS_DECLARED_SKIP,
     CLASS_SKIPPED,
@@ -629,6 +630,22 @@ def run_err_case(case: Case, compiler: Path, std_path: Path, work_dir: Path) -> 
       f"selfhost accepted a program the host rejects with `{expected_lines[0].strip()}`"
       if expected_lines
       else "selfhost accepted a program the host rejects",
+      compiler_tail=observed,
+      expected_lines=expected_lines,
+      missing_lines=missing,
+    )
+
+  # Symmetric to the error check above: a program the host only warns on must
+  # still compile under the selfhost. Without this, a diagnostic re-escalated
+  # from warning to error (e.g. IGN-238's A0158 severity regression) would
+  # slip through G5 undetected, since the diagnostic text would still match.
+  if case.kind == KIND_WARNING and compilation.returncode != 0:
+    return CaseResult(
+      case,
+      CLASS_COMPILE_ERROR,
+      f"selfhost rejected a program the host only warns on with `{expected_lines[0].strip()}`"
+      if expected_lines
+      else "selfhost rejected a program the host only warns on",
       compiler_tail=observed,
       expected_lines=expected_lines,
       missing_lines=missing,
