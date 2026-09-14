@@ -18,10 +18,10 @@ buries the ownership answer the dump exists to give. That difference is real
 but it is not a drop question, so it is reported as a count of its own instead
 of failing every case. `--all` compares the whole dump, std included.
 
-The gate is **informational**. It does not feed the promotion `candidate`
-verdict — a drop-schedule divergence is a lead to follow, not a release
-blocker, and until the selfhost's ownership analysis is finished a non-zero
-count is the expected state.
+The gate feeds the promotion `candidate` verdict: since the selfhost's
+ownership analysis reached 623/623 own-code parity with the host
+(nightly-34803378772), a drop-schedule divergence is a real ownership bug, not
+the expected state, so it blocks promotion like every other gate.
 
 Case discovery is reused verbatim from `selfhost_e2e_parity.py`, so G7 and G2
 always run over the same corpus.
@@ -348,8 +348,8 @@ def build_report(
     "declaration site and every scheduled drop site with its reason. Both",
     "compilers print the same format, so their dumps are compared byte for byte.",
     "",
-    "**This gate is informational**: it does not affect the promotion `candidate`",
-    "verdict. A differing case is a lead for an ownership bug, not a blocker.",
+    "**This gate feeds the promotion `candidate` verdict**: a differing case",
+    "is a real ownership bug, not just a lead to follow.",
     "",
     f"- host: `{host}`",
     f"- selfhost: `{compiler}`",
@@ -449,10 +449,8 @@ def build_gate(
   return {
     "gate": GATE_ID,
     "status": "pass" if total > 0 and passed == total else "fail",
-    "informational": True,
-    "summary": f"drop-schedule parity {passed}/{total} {scope} (informational: does not gate promotion)",
+    "summary": f"drop-schedule parity {passed}/{total} {scope}",
     "details": {
-      "informational": True,
       "scope": scope,
       "std_function_counts": {
         result.case.name: {
@@ -591,8 +589,10 @@ def main() -> int:
     + ", ".join(f"{classification} {counts.get(classification, 0)}" for classification in CLASS_ORDER)
   )
 
-  # The gate is informational: a divergence is reported, never fatal.
-  return 0
+  # scripts/bootstrap.sh's gate-g7 runs this with `|| true` and reads the gate
+  # file, the same way it reads gate-g6's; the exit code still tells a direct
+  # caller (a developer, this file's own tests) whether every case passed.
+  return 0 if gate["status"] == "pass" else 1
 
 
 if __name__ == "__main__":

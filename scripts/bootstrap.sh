@@ -23,7 +23,6 @@
 #   G5  diagnostics: stage2's messages equal or better than the host's
 #   G6  syntax: stage2 accepts and rejects exactly what the host parser does
 #   G7  drop schedules: stage2's --dump-drop-schedule matches the host's
-#       (informational: reported, but not part of the promotion verdict)
 #
 # `gates` runs all of them and then `report`, which turns the gate files into
 # build/bootstrap/report.md and build/bootstrap/promotion.json. The nightly
@@ -48,11 +47,11 @@ STAGE1_MEASURE="stage1-measure"
 G4_THRESHOLD="1.25"
 SELF="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
 
-# Gate identifiers in report order. G4, G5 and G6 have their own subcommands;
-# when those are absent `gates` still records a result for them.
-# The gates a run is expected to produce. G7 is listed so that `seal-gates`
-# records a skipped placeholder for it, not because it gates promotion:
-# scripts/bootstrap_report.py keeps it out of the `candidate` verdict.
+# Gate identifiers in report order. G4, G5, G6 and G7 have their own
+# subcommands; when those are absent `gates` still records a result for them,
+# and `seal-gates` records a skipped placeholder for any of them a run never
+# produced. scripts/bootstrap_report.py's `candidate` verdict is `all` over
+# this same set.
 GATE_IDS=(G1 G2 G3 G4 G5 G6 G7)
 
 # The selfhost test suite runs a full analysis of `ignis/` before it links, and
@@ -91,7 +90,7 @@ Commands:
                    stage2). Same unscored-row note as gate-g3-stage1 above.
   gate-g6  Compare stage2's parse verdicts with the host's and write gates/G6.json.
   gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
-  gate-g7  Diff stage2's drop schedules against the host's -> gates/G7.json (informational).
+  gate-g7  Diff stage2's drop schedules against the host's -> gates/G7.json.
   gates    Run every stage and gate in order, then write the promotion report.
   seal-gates  Record a skipped result for every gate that produced no file.
   report   Turn build/bootstrap/gates/*.json into report.md and promotion.json.
@@ -971,7 +970,7 @@ run_gate_g7() {
 
   info "gate-g7: diffing the drop schedules of $(stage_bin stage2) against ${STAGE0}'s"
 
-  # Informational gate: a divergence is the product, never a failure of the run.
+  # A non-zero exit only means some cases diverge; the gate file is the product.
   python3 "${SCRIPT_DIR}/selfhost_drop_schedule_parity.py" \
     --compiler "$(stage_bin stage2)" \
     --host "$STAGE0" \
