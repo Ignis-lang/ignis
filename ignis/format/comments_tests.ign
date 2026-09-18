@@ -54,3 +54,43 @@ function commentsClassifiesDetachedAndTrailingCommentsByLinePosition(): void {
   Test::assertEq<CommentPlacement>(detached, CommentPlacement::DETACHED);
   Test::assertEq<CommentPlacement>(trailing, CommentPlacement::TRAILING);
 }
+
+@test
+function lineIndexHandlesAnEmptySource(): void {
+  let source: String = String::new();
+  let lineIndex: LineIndex = LineIndex::build(&source);
+
+  Test::assertEq<u64>(lineIndex.lineAt(0), 0);
+
+  // Past EOF on an empty source: no newlines exist anywhere, so this still
+  // has to return 0 rather than panicking or under/overflowing.
+  Test::assertEq<u64>(lineIndex.lineAt(100), 0);
+}
+
+/// `"line0\nline1\nline2"` (no trailing newline): `\n` bytes sit at offsets 5
+/// and 11, and the source is 17 bytes long.
+@test
+function lineIndexCountsNewlinesStrictlyBeforeEachByteOffset(): void {
+  let source: String = String::create("line0\nline1\nline2");
+  let lineIndex: LineIndex = LineIndex::build(&source);
+
+  Test::assertEq<u64>(source.length(), 17);
+
+  // Offset 0: before any newline.
+  Test::assertEq<u64>(lineIndex.lineAt(0), 0);
+
+  // Offset exactly on a '\n': that newline is not strictly before itself, so
+  // it isn't counted yet.
+  Test::assertEq<u64>(lineIndex.lineAt(5), 0);
+  Test::assertEq<u64>(lineIndex.lineAt(11), 1);
+
+  // The byte immediately after a '\n': that newline is now strictly before.
+  Test::assertEq<u64>(lineIndex.lineAt(6), 1);
+  Test::assertEq<u64>(lineIndex.lineAt(12), 2);
+
+  // EOF with no trailing newline: every newline in the source counts.
+  Test::assertEq<u64>(lineIndex.lineAt(17), 2);
+
+  // Past EOF: still every newline in the source, no panic or truncation.
+  Test::assertEq<u64>(lineIndex.lineAt(1000), 2);
+}

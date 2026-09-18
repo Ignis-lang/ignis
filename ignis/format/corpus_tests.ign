@@ -309,21 +309,11 @@ function runFixedPointDir(label: str, root: str): void {
 function runToleratedDir(label: str, root: str): void {
   let files: Vector<String> = collectIgnFiles(root);
   let mut report: String = String::new();
+
+  // `requireFixedPoint: false` never counts a failure (see runCorpusFiles),
+  // so the findings this reports are never asserted — only recorded.
   let _findings: u64 = runCorpusFiles(&files, false, &mut report);
-
-  if (report.length() > 0) {
-    let mut path: String = String::create("build/format-corpus-");
-    path.pushStr(label);
-    path.pushStr(".txt");
-
-    if (let Result::ERROR(_) = Fs::writeString(path.toStr(), &report)) {
-      let mut writeFailure: String = String::create("formatter corpus: could not write ");
-      writeFailure.push(&path);
-      Io::eprintln(writeFailure);
-    }
-
-    Io::eprintln(report.clone());
-  }
+  finishCorpusReport(label, &report, 0);
 }
 
 /// The number of shards `test_cases/e2e/ok` is split into. Its file count is
@@ -379,26 +369,242 @@ function shardOfSortedFiles(root: str, shardIndex: u64, shardCount: u64): Vector
 function runToleratedShard(label: str, root: str, shardIndex: u64, shardCount: u64): void {
   let files: Vector<String> = shardOfSortedFiles(root, shardIndex, shardCount);
   let mut report: String = String::new();
+
+  // `requireFixedPoint: false` never counts a failure (see runCorpusFiles),
+  // so the findings this reports are never asserted — only recorded.
   let _findings: u64 = runCorpusFiles(&files, false, &mut report);
+  finishCorpusReport(label, &report, 0);
+}
 
-  if (report.length() > 0) {
-    let mut path: String = String::create("build/format-corpus-");
-    path.pushStr(label);
-    path.pushStr(".txt");
+/// Counts a file's lines by reading it. Only used by the line-balanced
+/// sharding/guard helpers below, never on the fixed-point hot path.
+function lineCountOf(path: &String): u64 {
+  let Result::OK(source) = Fs::readToString(path.toStr()) else {
+    return 0;
+  };
 
-    if (let Result::ERROR(_) = Fs::writeString(path.toStr(), &report)) {
-      let mut writeFailure: String = String::create("formatter corpus: could not write ");
-      writeFailure.push(&path);
-      Io::eprintln(writeFailure);
+  return source.lines().length();
+}
+
+/// Output of `packFilesByLineCount`: `files` is the (lexically sorted) file
+/// list, `assignment[i]` is the shard index `files[i]` was packed into, and
+/// `totals[shardIndex]` is that shard's summed line count.
+record LineBalancedShards {
+  public files: Vector<String>;
+  public assignment: Vector<u64>;
+  public totals: Vector<u64>;
+}
+
+/// Greedily packs every `.ign` file recursively under `root` into
+/// `shardCount` groups by line count, heaviest file first, each file going
+/// to the shard with the smallest running total so far (ties go to the
+/// lowest shard index). Unlike an index-range split, this balances total
+/// cost per shard rather than file count — needed for a directory like
+/// `ignis/analyzer` where a handful of files are 3k-15k lines and the rest
+/// are a fraction of that. Deterministic and computed fresh from the tree
+/// every run (files are sorted lexically first, so ties in line count break
+/// the same way every time), so a new or resized file is picked up
+/// automatically without touching this file.
+function packFilesByLineCount(root: str, shardCount: u64): LineBalancedShards {
+  let mut files: Vector<String> = collectIgnFiles(root);
+  Sort::stableLexicalStrings(&mut files);
+
+  let fileCount: u64 = files.length();
+
+  let mut lineCounts: Vector<u64> = Vector::new<u64>();
+  let mut countIndex: u64 = 0;
+
+  while (countIndex < fileCount) {
+    let Option::SOME(path) = files.get(countIndex) else {
+      countIndex += 1;
+      continue;
+    };
+
+    lineCounts.push(lineCountOf(path));
+    countIndex += 1;
+  }
+
+  // Selection sort of file indices by descending line count (small N, so
+  // O(n^2) is fine, and it avoids a closure capturing `lineCounts`).
+  let mut order: Vector<u64> = Vector::new<u64>();
+  let mut orderInit: u64 = 0;
+
+  while (orderInit < fileCount) {
+    order.push(orderInit);
+    orderInit += 1;
+  }
+
+  let mut outer: u64 = 0;
+
+  while (outer < order.length()) {
+    let mut largestPos: u64 = outer;
+    let mut largestLines: u64 = 0;
+
+    if (let Option::SOME(outerFileIndex) = order.get(outer)) {
+      if (let Option::SOME(lines) = lineCounts.get(*outerFileIndex)) {
+        largestLines = *lines;
+      }
     }
 
-    Io::eprintln(report.clone());
+    let mut inner: u64 = outer + 1;
+
+    while (inner < order.length()) {
+      let mut candidateLines: u64 = 0;
+
+      if (let Option::SOME(innerFileIndex) = order.get(inner)) {
+        if (let Option::SOME(lines) = lineCounts.get(*innerFileIndex)) {
+          candidateLines = *lines;
+        }
+      }
+
+      if (candidateLines > largestLines) {
+        largestLines = candidateLines;
+        largestPos = inner;
+      }
+
+      inner += 1;
+    }
+
+    if (largestPos != outer) {
+      let Option::SOME(outerValueRef) = order.get(outer) else {
+        outer += 1;
+        continue;
+      };
+      let Option::SOME(largestValueRef) = order.get(largestPos) else {
+        outer += 1;
+        continue;
+      };
+      let outerValue: u64 = *outerValueRef;
+      let largestValue: u64 = *largestValueRef;
+
+      order.set(outer, largestValue);
+      order.set(largestPos, outerValue);
+    }
+
+    outer += 1;
   }
+
+  // Greedy bin packing: heaviest file first, into the currently-lightest
+  // shard.
+  let mut totals: Vector<u64> = Vector::new<u64>();
+  let mut totalsInit: u64 = 0;
+
+  while (totalsInit < shardCount) {
+    totals.push(0);
+    totalsInit += 1;
+  }
+
+  let mut assignment: Vector<u64> = Vector::new<u64>();
+  let mut assignInit: u64 = 0;
+
+  while (assignInit < fileCount) {
+    assignment.push(0);
+    assignInit += 1;
+  }
+
+  let mut orderPos: u64 = 0;
+
+  while (orderPos < order.length()) {
+    let Option::SOME(fileIndexRef) = order.get(orderPos) else {
+      orderPos += 1;
+      continue;
+    };
+    let fileIndex: u64 = *fileIndexRef;
+
+    let mut bestShard: u64 = 0;
+    let mut bestTotal: u64 = 0;
+
+    if (let Option::SOME(firstTotal) = totals.get(0)) {
+      bestTotal = *firstTotal;
+    }
+
+    let mut shardScan: u64 = 1;
+
+    while (shardScan < shardCount) {
+      let Option::SOME(candidateTotal) = totals.get(shardScan) else {
+        shardScan += 1;
+        continue;
+      };
+
+      if (*candidateTotal < bestTotal) {
+        bestTotal = *candidateTotal;
+        bestShard = shardScan;
+      }
+
+      shardScan += 1;
+    }
+
+    assignment.set(fileIndex, bestShard);
+
+    let mut fileLines: u64 = 0;
+
+    if (let Option::SOME(lines) = lineCounts.get(fileIndex)) {
+      fileLines = *lines;
+    }
+
+    totals.set(bestShard, bestTotal + fileLines);
+    orderPos += 1;
+  }
+
+  return LineBalancedShards { files: files, assignment: assignment, totals: totals };
+}
+
+/// The file list `packFilesByLineCount` assigned to shard `shardIndex`.
+function shardOfFilesByLineCount(root: str, shardIndex: u64, shardCount: u64): Vector<String> {
+  let packed: LineBalancedShards = packFilesByLineCount(root, shardCount);
+  let mut shard: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < packed.files.length()) {
+    let Option::SOME(assignedShard) = packed.assignment.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (*assignedShard == shardIndex) {
+      let Option::SOME(path) = packed.files.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      shard.push(path.clone());
+    }
+
+    index += 1;
+  }
+
+  return shard;
+}
+
+/// The number of shards `ignis/analyzer` is packed into. Its files vary
+/// wildly in size (several are 3k-15k lines each, most are a fraction of
+/// that), so an index-range split like `test_cases/e2e/ok`'s would leave
+/// some shards far heavier than others; `packFilesByLineCount` bin-packs by
+/// line count instead, balancing total cost per shard rather than file
+/// count.
+///
+/// `corpusIgnisAnalyzerShardSizeStaysReasonable` asserts the heaviest
+/// shard's line total stays under a ceiling; bump this and add the matching
+/// `corpusIgnisAnalyzerShardN` test if that ever trips.
+function ignisAnalyzerShardCount(): u64 {
+  return 6;
+}
+
+/// Formats one line-balanced shard of `root`, requiring byte-for-byte
+/// equality with the (already host-formatted) input.
+function runFixedPointLineShard(label: str, root: str, shardIndex: u64, shardCount: u64): void {
+  let files: Vector<String> = shardOfFilesByLineCount(root, shardIndex, shardCount);
+  let mut report: String = String::new();
+  let failures: u64 = runCorpusFiles(&files, true, &mut report);
+  finishCorpusReport(label, &report, failures);
 }
 
 // ---------------------------------------------------------------------------
 // ignis/ — one @test per top-level subdirectory, plus one for the loose files
-// directly inside `ignis/`. All are fixed points of the host formatter.
+// directly inside `ignis/`. `ignis/analyzer` is line-balanced-sharded like
+// `test_cases/e2e/ok` (see `ignisAnalyzerShardCount`); every other
+// subdirectory is small and even enough for one @test. All are fixed points
+// of the host formatter.
 // ---------------------------------------------------------------------------
 
 @test
@@ -410,8 +616,33 @@ function corpusIgnisRootFiles(): void {
 }
 
 @test
-function corpusIgnisAnalyzer(): void {
-  runFixedPointDir("ignis-analyzer", "ignis/analyzer");
+function corpusIgnisAnalyzerShard0(): void {
+  runFixedPointLineShard("ignis-analyzer-0", "ignis/analyzer", 0, ignisAnalyzerShardCount());
+}
+
+@test
+function corpusIgnisAnalyzerShard1(): void {
+  runFixedPointLineShard("ignis-analyzer-1", "ignis/analyzer", 1, ignisAnalyzerShardCount());
+}
+
+@test
+function corpusIgnisAnalyzerShard2(): void {
+  runFixedPointLineShard("ignis-analyzer-2", "ignis/analyzer", 2, ignisAnalyzerShardCount());
+}
+
+@test
+function corpusIgnisAnalyzerShard3(): void {
+  runFixedPointLineShard("ignis-analyzer-3", "ignis/analyzer", 3, ignisAnalyzerShardCount());
+}
+
+@test
+function corpusIgnisAnalyzerShard4(): void {
+  runFixedPointLineShard("ignis-analyzer-4", "ignis/analyzer", 4, ignisAnalyzerShardCount());
+}
+
+@test
+function corpusIgnisAnalyzerShard5(): void {
+  runFixedPointLineShard("ignis-analyzer-5", "ignis/analyzer", 5, ignisAnalyzerShardCount());
 }
 
 @test
@@ -901,6 +1132,59 @@ function corpusE2eOkShardSizeStaysReasonable(): void {
     message.push(&ceilingText);
     message.pushStr(
       "). Increase e2eOkShardCount() and add the matching corpusTestCasesE2eOkShardN test in corpus_tests.ign.",
+    );
+    Io::eprintln(message);
+    Test::fail();
+  }
+}
+
+/// Guards `ignis/analyzer`'s line-balanced shard scheme against silent
+/// growth. Unlike `test_cases/e2e/ok`'s uniformly tiny fixtures, a handful
+/// of `ignis/analyzer`'s files are 3k-15k lines each — file COUNT is a
+/// meaningless proxy for a shard's cost there, so this asserts the heaviest
+/// shard's total LINE count instead, failing loudly before growth quietly
+/// re-creates issue #220 one shard at a time.
+@test
+function corpusIgnisAnalyzerShardSizeStaysReasonable(): void {
+  let shardCount: u64 = ignisAnalyzerShardCount();
+  let packed: LineBalancedShards = packFilesByLineCount("ignis/analyzer", shardCount);
+
+  let mut worstShard: u64 = 0;
+  let mut worstTotal: u64 = 0;
+  let mut shardIndex: u64 = 0;
+
+  while (shardIndex < shardCount) {
+    let Option::SOME(total) = packed.totals.get(shardIndex) else {
+      shardIndex += 1;
+      continue;
+    };
+
+    if (*total > worstTotal) {
+      worstTotal = *total;
+      worstShard = shardIndex;
+    }
+
+    shardIndex += 1;
+  }
+
+  // Comfortably above today's heaviest shard (set by the single biggest
+  // file, ~15-16k lines), comfortably below a size that would risk the
+  // per-test timeout again.
+  let ceiling: u64 = 35000;
+
+  if (worstTotal > ceiling) {
+    let worstShardText: String = worstShard.toString();
+    let worstTotalText: String = worstTotal.toString();
+    let ceilingText: String = ceiling.toString();
+
+    let mut message: String = String::create("formatter corpus: ignis/analyzer shard ");
+    message.push(&worstShardText);
+    message.pushStr(" has grown to ");
+    message.push(&worstTotalText);
+    message.pushStr(" lines (ceiling ");
+    message.push(&ceilingText);
+    message.pushStr(
+      "). Increase ignisAnalyzerShardCount() and add the matching corpusIgnisAnalyzerShardN test in corpus_tests.ign.",
     );
     Io::eprintln(message);
     Test::fail();
