@@ -180,9 +180,12 @@ match (slot.asMut()) {
 };
 ```
 
-Assigning to the binding *name* is not allowed — `payload = other` is rejected. The name
-stands for a place the referent owns, and replacing what lives there is the referent's
-decision, not the match's.
+Assigning through the binding is not allowed. `payload = other` is rejected, and so is
+every write reached from it — a field (`payload.count = 1`), an element
+(`payload[0] = 1`), a dereference (`*payload = other`). The name stands for a place the
+referent owns, and replacing what lives there is the referent's decision, not the
+match's. Calling a mutating method through an explicit deref, as above, is unaffected:
+that reads the place and mutates what is already there rather than overwriting it.
 
 Payloads that need no drop (an `i32`, say) are still copied into the binding rather than
 named in place. Reading one is the same either way; taking `&binding` gives you the

@@ -17,8 +17,9 @@
 //! names storage rather than holding a copy, so `&s` is a reference *into* the referent
 //! and outlives the match. Write permission comes from the scrutinee, exactly as it does
 //! for a field projection, and carries down through nested destructures; assigning to
-//! the name itself is rejected, because the old value at that place would have to be
-//! dropped through the place and no schedule here describes that.
+//! the name — or to any field, element or dereference reached from it — is rejected,
+//! because the old value at that place would have to be dropped through the place and no
+//! schedule here describes that.
 //!
 //! **This module owns the decision and lowering implements it.** The bindings that are
 //! places are published as [`DropSchedules::borrowed_pattern_bindings`] and read by LIR
@@ -228,17 +229,51 @@ impl<'a> HirOwnershipChecker<'a> {
   /// an arm naming an owning value gives it away. A match in statement position gives it
   /// to nobody: the value is dropped as a temporary and the name still owns what it
   /// named, so consuming it there would leave nothing to free it.
+  ///
+  /// Being discarded travels inward. An arm's body *is* the match's result, and a block's
+  /// trailing expression is the block's, so a match written in one of those positions
+  /// hands its own result to the same nobody. Deciding this per node instead left a match
+  /// nested in a discarded arm looking used: it consumed what its arm named, the
+  /// enclosing match drained that move outward and compensated its other arms, and on the
+  /// nested path the value reached a discarded result with no drop left anywhere.
   fn collect_statement_position_nodes(hir: &HIR) -> HashSet<HIRId> {
+    fn discard(
+      id: HIRId,
+      result: &mut HashSet<HIRId>,
+      pending: &mut Vec<HIRId>,
+    ) {
+      if result.insert(id) {
+        pending.push(id);
+      }
+    }
+
     let mut result = HashSet::new();
+    let mut pending: Vec<HIRId> = Vec::new();
 
     for (_, node) in hir.nodes.iter() {
       match &node.kind {
-        HIRKind::Block { statements, .. } => result.extend(statements.iter().copied()),
+        HIRKind::Block { statements, .. } => {
+          for &statement in statements {
+            discard(statement, &mut result, &mut pending);
+          }
+        },
         // Lowering wraps a statement-position expression in this, so the match itself is
         // the wrapper's child rather than the block's statement.
-        HIRKind::ExpressionStatement(inner) => {
-          result.insert(*inner);
+        HIRKind::ExpressionStatement(inner) => discard(*inner, &mut result, &mut pending),
+        _ => {},
+      }
+    }
+
+    while let Some(id) = pending.pop() {
+      match &hir.get(id).kind {
+        HIRKind::Match { arms, .. } => {
+          for arm in arms {
+            discard(arm.body, &mut result, &mut pending);
+          }
         },
+        HIRKind::Block {
+          expression: Some(tail), ..
+        } => discard(*tail, &mut result, &mut pending),
         _ => {},
       }
     }
@@ -2355,6 +2390,11 @@ impl<'a> HirOwnershipChecker<'a> {
     result
   }
 
+  /// Whether these arms are the shape `lowering.rs` emits for `if (let P = value)` and
+  /// `while (let P = value)`: the pattern arm yields the literal `true`, and a trailing
+  /// wildcard arm yields the literal `false`. Nothing else in the language produces a
+  /// match whose only two arm bodies are those two literals in that order, so an
+  /// ordinary arm with a literal body is not mistaken for a condition.
   fn arms_are_let_condition_desugaring(
     hir: &HIR,
     arms: &[ignis_hir::HIRMatchArm],

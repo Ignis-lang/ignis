@@ -5031,8 +5031,13 @@ export namespace Borrowck {
   /// statement position gives it to nobody: the value is dropped as a
   /// temporary and the name still owns what it named, so consuming it there
   /// would leave nothing to free it. Mirrors `collect_statement_position_nodes`.
+  ///
+  /// Being discarded travels inward. An arm's body *is* the match's result,
+  /// and a block's trailing expression is the block's, so a match written in
+  /// one of those positions hands its own result to the same nobody.
   function collectStatementPositionNodes(hir: &Hir::HirStore): Vector<u32> {
     let mut result: Vector<u32> = Vector::new<u32>();
+    let mut pending: Vector<u32> = Vector::new<u32>();
     let mut index: u64 = 0;
 
     while (index < hir.nodes.length()) {
@@ -5043,7 +5048,7 @@ export namespace Borrowck {
 
             while (stmtIndex < block.statements.length()) {
               if (let Option::SOME(stmtId) = block.statements.get(stmtIndex)) {
-                Borrowck::pushUniqueRaw(&mut result, stmtId.raw());
+                Borrowck::discardRaw(&mut result, &mut pending, stmtId.raw());
               }
 
               stmtIndex += 1;
@@ -5053,7 +5058,7 @@ export namespace Borrowck {
           // match itself is the wrapper's child rather than the block's
           // statement.
           Hir::HirKind::ExpressionStatement(inner) -> {
-            Borrowck::pushUniqueRaw(&mut result, inner.raw());
+            Borrowck::discardRaw(&mut result, &mut pending, inner.raw());
           },
           _ -> {},
         };
@@ -5062,7 +5067,50 @@ export namespace Borrowck {
       index += 1;
     }
 
+    while (pending.length() > 0) {
+      let mut current: u32 = 0;
+
+      if (let Option::SOME(raw) = pending.pop()) {
+        current = raw;
+      }
+
+      if (let Option::SOME(node) = hir.nodes.get(current as u64)) {
+        match (&node.kind) {
+          Hir::HirKind::Match(matchNode) -> {
+            let mut armIndex: u64 = 0;
+
+            while (armIndex < matchNode.arms.length()) {
+              if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+                Borrowck::discardRaw(&mut result, &mut pending, arm.body.raw());
+              }
+
+              armIndex += 1;
+            }
+          },
+          Hir::HirKind::Block(block) -> {
+            if (let Option::SOME(tail) = block.expression) {
+              Borrowck::discardRaw(&mut result, &mut pending, tail.raw());
+            }
+          },
+          _ -> {},
+        };
+      }
+    }
+
     return result;
+  }
+
+  /// Record `raw` as discarded and queue it, unless it already was.
+  function discardRaw(result: &mut Vector<u32>, pending: &mut Vector<u32>, raw: u32): void {
+    if (Borrowck::containsRaw(result, raw)) {
+      return;
+    }
+
+    let mut discarded: &mut Vector<u32> = result;
+    discarded.push(raw);
+
+    let mut queued: &mut Vector<u32> = pending;
+    queued.push(raw);
   }
 
   function checkFunction(
