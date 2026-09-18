@@ -1051,3 +1051,74 @@ function main(): i32 {
 
   assert_eq!(first, second, "generated C differs between identical compilations");
 }
+
+// =============================================================================
+// Closure / record type-section ordering (issue #216)
+// =============================================================================
+
+#[test]
+fn c_closure_struct_record_param_by_value_ordering() {
+  let c_code = common::compile_to_c(
+    r#"
+record Point {
+    public x: i32;
+    public y: i32;
+}
+
+record Handlers {
+    public onPoint: (Point) -> i32;
+}
+
+function main(): i32 {
+    let h: Handlers = Handlers { onPoint: (p: Point): i32 -> p.x + p.y };
+    let f: (Point) -> i32 = h.onPoint;
+    return f(Point { x: 20, y: 22 });
+}
+"#,
+  );
+
+  // The closure struct's `call` field takes `struct Point` by value, so `Point`
+  // must at least be forward-declared before the closure struct is emitted.
+  let point_forward_decl_pos = c_code
+    .find("typedef struct Point Point;")
+    .expect("expected a forward declaration for Point");
+  let closure_struct_pos = c_code
+    .find("struct __ignis_closure_Point_i32 {")
+    .expect("expected the closure struct definition");
+  assert!(
+    point_forward_decl_pos < closure_struct_pos,
+    "Point must be forward-declared before the closure struct that references it by value"
+  );
+}
+
+#[test]
+fn c_record_with_closure_field_by_value_ordering() {
+  let c_code = common::compile_to_c(
+    r#"
+record Adder {
+    public offset: i32;
+    public apply: (i32) -> i32;
+}
+
+function main(): i32 {
+    let offset: i32 = 10;
+    let adder: Adder = Adder { offset: offset, apply: (n: i32): i32 -> n + offset };
+    let f: (i32) -> i32 = adder.apply;
+    return f(32);
+}
+"#,
+  );
+
+  // Adder embeds the closure struct by value, so the closure struct must be a
+  // complete type (fully defined) before Adder's own definition is emitted.
+  let closure_struct_pos = c_code
+    .find("struct __ignis_closure_i32_i32 {")
+    .expect("expected the closure struct definition");
+  let adder_struct_pos = c_code
+    .find("struct Adder {")
+    .expect("expected the Adder struct definition");
+  assert!(
+    closure_struct_pos < adder_struct_pos,
+    "the closure struct must be fully defined before Adder embeds it by value"
+  );
+}

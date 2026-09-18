@@ -27,6 +27,10 @@ use crate::EmitInput;
 const USER_MAIN_SYMBOL: &str = "__ignis_user_main";
 const GENERATED_C_LINE_FILE: &str = "<generated-c>";
 
+/// One closure env struct's info: the owning thunk, its captured field types,
+/// and the closure's function-signature type.
+type ClosureEnvInfo = (DefinitionId, Vec<TypeId>, TypeId);
+
 /// Runtime type definitions every emitted translation unit needs.
 ///
 /// `std/runtime/ignis_rt.h` guards an identical block with the same macro, so a
@@ -221,10 +225,10 @@ pub struct CEmitter<'a> {
   std_defined_symbols: Option<&'a HashSet<String>>,
 
   /// Maps `Type::Function` TypeId → emitted closure struct name.
-  /// Populated during `emit_closure_types()`, used by `format_type()`.
+  /// Populated during `emit_closure_signature_structs()`, used by `format_type()`.
   closure_struct_names: HashMap<TypeId, String>,
 
-  /// Maps thunk DefinitionId → env struct name. Populated during `emit_closure_types()`.
+  /// Maps thunk DefinitionId → env struct name. Populated during `emit_closure_env_structs()`.
   closure_env_names: HashMap<DefinitionId, String>,
 
   /// Optional native test harness dispatch table.
@@ -440,15 +444,35 @@ impl<'a> CEmitter<'a> {
 
     let uses_module_headers = matches!(self.target, Some(EmitTarget::UserModule(_)) | Some(EmitTarget::StdModule(_)));
 
+    let (env_infos, sorted_sigs) = self.collect_closure_type_info();
+
     if !uses_module_headers {
       self.emit_slice_types();
       self.emit_type_forward_declarations();
+      // Closure signature structs only need their record/enum dependencies
+      // forward-declared (their fields are all pointers: `call`, `drop_fn`,
+      // `env`), so they can be emitted right after the forward declarations. A
+      // record or enum can embed a closure-typed field by value, which needs
+      // the closure struct to already be a complete type by the time the type
+      // definitions below are emitted.
+      self.emit_closure_signature_structs(&sorted_sigs);
       self.emit_type_definitions();
-    } else if let Some(module_id) = self.target.as_ref().and_then(|target| target.target_user_module()) {
-      self.emit_forced_external_type_definitions(module_id);
+      // Closure environment structs are the reverse: a captured record/enum
+      // sits in the env struct by value, so it needs those types definitions
+      // above it to already be complete.
+      self.emit_closure_env_structs(&env_infos);
+    } else {
+      if let Some(module_id) = self.target.as_ref().and_then(|target| target.target_user_module()) {
+        self.emit_forced_external_type_definitions(module_id);
+      }
+      // The module build already has every record/enum this module owns as a
+      // complete type by this point (this translation unit's own header,
+      // included above by `emit_headers`, defines them), so both closure
+      // struct kinds can be emitted back to back here.
+      self.emit_closure_signature_structs(&sorted_sigs);
+      self.emit_closure_env_structs(&env_infos);
     }
 
-    self.emit_closure_types();
     self.emit_static_constants();
     self.emit_extern_declarations();
     self.emit_drop_glue_helpers();
@@ -1430,11 +1454,15 @@ impl<'a> CEmitter<'a> {
     writeln!(self.output).unwrap();
   }
 
-  /// Scan LIR for closure instructions and emit the required C type definitions:
+  /// Scans LIR for closure instructions, returning the info needed to emit:
   /// - An env struct per thunk (holding captured values)
   /// - A closure struct per unique function signature
-  fn emit_closure_types(&mut self) {
-    let mut env_infos: Vec<(DefinitionId, Vec<TypeId>, TypeId)> = Vec::new();
+  ///
+  /// Split out from emission so the two struct kinds can be written at
+  /// different points relative to `// Type definitions` — see
+  /// `emit_closure_signature_structs` and `emit_closure_env_structs`.
+  fn collect_closure_type_info(&self) -> (Vec<ClosureEnvInfo>, Vec<TypeId>) {
+    let mut env_infos: Vec<ClosureEnvInfo> = Vec::new();
     let mut seen_thunks: HashSet<DefinitionId> = HashSet::new();
     let mut seen_sigs: HashSet<TypeId> = HashSet::new();
 
@@ -1511,33 +1539,30 @@ impl<'a> CEmitter<'a> {
       }
     }
 
-    if env_infos.is_empty() && seen_sigs.is_empty() {
+    let mut sorted_sigs: Vec<TypeId> = seen_sigs.into_iter().collect();
+    sorted_sigs.sort_by_key(|type_id| type_id.index());
+
+    (env_infos, sorted_sigs)
+  }
+
+  /// Closure call-signature structs (`call`/`drop_fn`/`env`): every field is a
+  /// pointer, so a forward-declared record/enum reachable from the signature
+  /// is enough. Call this *before* `// Type definitions` — a record can embed
+  /// a closure-typed field by value (e.g. `(i32) -> i32`), which needs this
+  /// struct to already be a complete type by the time the record's own
+  /// definition is emitted. The selfhost's `emitClosureSignatureStructs`
+  /// follows the same rule; keep both in sync.
+  fn emit_closure_signature_structs(
+    &mut self,
+    sorted_sigs: &[TypeId],
+  ) {
+    if sorted_sigs.is_empty() {
       return;
     }
 
     writeln!(self.output, "// Closure types").unwrap();
 
-    for (thunk_id, cap_types, _) in &env_infos {
-      let env_name = format!("__closure_env_{}", thunk_id.index());
-      writeln!(self.output, "struct {} {{", env_name).unwrap();
-
-      if cap_types.is_empty() {
-        writeln!(self.output, "    char _empty;").unwrap();
-      } else {
-        for (i, &ty) in cap_types.iter().enumerate() {
-          let ty_str = self.format_type(ty);
-          writeln!(self.output, "    {} field_{};", ty_str, i).unwrap();
-        }
-      }
-
-      writeln!(self.output, "}};").unwrap();
-      self.closure_env_names.insert(*thunk_id, env_name);
-    }
-
-    let mut sorted_sigs: Vec<TypeId> = seen_sigs.into_iter().collect();
-    sorted_sigs.sort_by_key(|type_id| type_id.index());
-
-    for sig_type_id in sorted_sigs {
+    for &sig_type_id in sorted_sigs {
       if let Type::Function { params, ret, .. } = self.types.get(&sig_type_id) {
         let struct_name = self.closure_struct_name(sig_type_id);
 
@@ -1565,6 +1590,47 @@ impl<'a> CEmitter<'a> {
 
         self.closure_struct_names.insert(sig_type_id, struct_name);
       }
+    }
+
+    writeln!(self.output).unwrap();
+  }
+
+  /// Closure environment structs (one per thunk, holding its captured
+  /// values). Unlike the signature struct above, a captured record or enum
+  /// can sit in this struct *by value*, so it needs a *complete* type at the
+  /// point of capture — the reverse of the signature-struct rule. Call this
+  /// *after* `// Type definitions`, once every record/enum this translation
+  /// unit defines is complete: the module build gets this for free because
+  /// the generated header, included before this point, already carries every
+  /// record/enum the module owns as a complete type; callers without that
+  /// header (the non-module `emit()` path) need the explicit ordering. The
+  /// selfhost's `emitClosureEnvStructs` follows the same rule; keep both in
+  /// sync.
+  fn emit_closure_env_structs(
+    &mut self,
+    env_infos: &[ClosureEnvInfo],
+  ) {
+    if env_infos.is_empty() {
+      return;
+    }
+
+    writeln!(self.output, "// Closure environments").unwrap();
+
+    for (thunk_id, cap_types, _) in env_infos {
+      let env_name = format!("__closure_env_{}", thunk_id.index());
+      writeln!(self.output, "struct {} {{", env_name).unwrap();
+
+      if cap_types.is_empty() {
+        writeln!(self.output, "    char _empty;").unwrap();
+      } else {
+        for (i, &ty) in cap_types.iter().enumerate() {
+          let ty_str = self.format_type(ty);
+          writeln!(self.output, "    {} field_{};", ty_str, i).unwrap();
+        }
+      }
+
+      writeln!(self.output, "}};").unwrap();
+      self.closure_env_names.insert(*thunk_id, env_name);
     }
 
     writeln!(self.output).unwrap();
@@ -4971,16 +5037,53 @@ where
     .map(|&def_id| build_mangled_name_standalone(def_id, defs, namespaces, symbols, types))
     .collect();
 
-  // Separate closure structs from regular external structs.
-  // Closure structs need full definitions (for by-value passing); others get forward decls.
-  let mut external_forward_decls: Vec<&String> = Vec::new();
+  // Discover external record/enum definitions this module needs by value (a local, a
+  // parameter, a field, or transitively through another by-value record/enum field) so
+  // their fields/payloads can be scanned below for closure and forward-decl dependencies
+  // *before* struct_forward_decls is partitioned. Without this, an externally-sourced
+  // record embedding a closure by value (e.g. `Handlers { onPoint: (Point) -> i32 }`
+  // defined in another module, pulled in here because it's used by value) would get a
+  // full definition with an undefined closure struct field, since nothing in *this*
+  // module's own code ever names that closure type directly.
+  let external_definition_ids =
+    collect_external_type_definition_ids(defs, types, symbols, namespaces, &module_type_names, &struct_forward_decls);
+
+  for &def_id in module_records
+    .iter()
+    .chain(module_enums.iter())
+    .chain(external_definition_ids.iter())
+  {
+    match &defs.get(&def_id).kind {
+      DefinitionKind::Record(rd) => {
+        for field in &rd.fields {
+          collect_struct_types_from_type(&field.type_id, types, defs, symbols, namespaces, &mut struct_forward_decls);
+        }
+      },
+      DefinitionKind::Enum(ed) => {
+        for variant in &ed.variants {
+          for payload_ty in &variant.payload {
+            collect_struct_types_from_type(payload_ty, types, defs, symbols, namespaces, &mut struct_forward_decls);
+          }
+        }
+      },
+      _ => {},
+    }
+  }
+
+  // Separate closure structs from regular record/enum structs.
+  // Closure structs need full definitions (their `call`/`drop_fn` fields are function
+  // pointers, so a forward-declared record/enum referenced there is enough), so every
+  // record/enum name referenced here — including ones this module defines itself, or
+  // pulls in from another module — must be forward-declared before the closure structs
+  // are emitted below. Otherwise a closure struct referencing a by-value record/enum
+  // defined later in this same header (e.g. `Handlers { onPoint: (Point) -> i32 }`)
+  // would implicitly declare its own, incompatible `struct Point` scoped to that
+  // parameter list.
+  let mut record_forward_decls: Vec<&String> = Vec::new();
   let mut slice_struct_type_ids: Vec<TypeId> = Vec::new();
   let mut closure_struct_type_ids: Vec<TypeId> = Vec::new();
 
   for name in &struct_forward_decls {
-    if module_type_names.contains(name) {
-      continue;
-    }
     if name.starts_with("__ignis_slice_") {
       for (type_id, ty) in types.iter() {
         if matches!(ty, Type::Slice { .. }) {
@@ -5011,14 +5114,14 @@ where
         }
       }
     } else {
-      external_forward_decls.push(name);
+      record_forward_decls.push(name);
     }
   }
 
-  external_forward_decls.sort();
+  record_forward_decls.sort();
 
-  if !external_forward_decls.is_empty() {
-    for name in &external_forward_decls {
+  if !record_forward_decls.is_empty() {
+    for name in &record_forward_decls {
       writeln!(output, "typedef struct {} {};", name, name).unwrap();
     }
     writeln!(output).unwrap();
@@ -5074,10 +5177,6 @@ where
   if !closure_struct_type_ids.is_empty() {
     writeln!(output).unwrap();
   }
-
-  // Collect external type definitions needed by this module (by-value usage).
-  let external_definition_ids =
-    collect_external_type_definition_ids(defs, types, symbols, namespaces, &module_type_names, &struct_forward_decls);
 
   // Build a unified set of all type definitions: module enums + records + external deps.
   // Then topologically sort them so that if type A contains type B by-value, B comes first.
@@ -5637,9 +5736,23 @@ fn collect_struct_types_from_type(
     Type::FixedArray { element, .. } => {
       collect_struct_types_from_type(element, types, defs, symbols, namespaces, out);
     },
+    Type::Tuple(elements) => {
+      for element in elements {
+        collect_struct_types_from_type(element, types, defs, symbols, namespaces, out);
+      }
+    },
     Type::Function { params, ret, .. } => {
       let name = closure_struct_name_standalone(params, ret, types, defs, symbols, namespaces);
       out.insert(name);
+
+      // The closure struct's `call` field takes every parameter and the return type by
+      // value, so any record/enum/slice/closure reachable from the signature must also be
+      // forward-declared (or, for a nested closure struct, fully defined) before this
+      // struct is emitted.
+      for param in params {
+        collect_struct_types_from_type(param, types, defs, symbols, namespaces, out);
+      }
+      collect_struct_types_from_type(ret, types, defs, symbols, namespaces, out);
     },
     _ => {},
   }

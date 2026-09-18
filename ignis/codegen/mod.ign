@@ -3232,19 +3232,93 @@ export namespace CodegenC {
     }
   }
 
-  function emitClosureTypes(
+  /// Closure call-signature structs (`call`/`drop_fn`/`env`): every field is a
+  /// pointer, so a forward-declared record/enum reachable from the signature
+  /// is enough. Emitted *before* `// Type definitions` — a record can embed a
+  /// closure-typed field by value (e.g. `(i32) -> i32`), which needs this
+  /// struct to already be a complete type by the time the record's own
+  /// definition is emitted. The host's `emit_closure_signature_structs`
+  /// follows the same rule; keep both in sync.
+  function emitClosureSignatureStructs(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
     symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     closures: &CodegenC::ClosureTables,
   ): void {
-    if (closures.envs.length() == 0 && closures.signatures.length() == 0) {
+    if (closures.signatures.length() == 0) {
       return;
     }
 
     let mut headerRef: &mut String = output;
     headerRef.pushStr("\n// Closure types\n");
+
+    let mut signatureIndex: u64 = 0;
+
+    while (signatureIndex < closures.signatures.length()) {
+      let Option::SOME(raw) = closures.signatures.get(signatureIndex) else {
+        signatureIndex += 1;
+        continue;
+      };
+
+      let signatureType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
+      let name: String = CodegenC::closureStructName(signatureType);
+
+      let mut callParams: String = String::create("u8*");
+      let mut returnText: String = String::create("void");
+
+      if (let Option::SOME(typeNode) = typeStore.get(signatureType)) {
+        if (let Analyzer::Type::Function(functionType) = typeNode) {
+          returnText = CodegenC::formatCType(defStore, typeStore, symbols, closures, functionType.returnType);
+
+          let params: Vector<Analyzer::TypeId> = CodegenC::copyTypeIds(&functionType.params);
+          let mut paramIndex: u64 = 0;
+
+          while (paramIndex < params.length()) {
+            if (let Option::SOME(paramType) = params.get(paramIndex)) {
+              let text: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, *paramType);
+              callParams.pushStr(", ");
+              callParams.pushStr(text.toStr());
+            }
+
+            paramIndex += 1;
+          }
+        }
+      }
+
+      let body: String = `struct ${name.toStr()} {\n    ${returnText.toStr()} (*call)(${callParams.toStr()});\n    void (*drop_fn)(u8*);\n    u8* env;\n};\n`;
+
+      let mut bodyRef: &mut String = output;
+      bodyRef.pushStr(body.toStr());
+
+      signatureIndex += 1;
+    }
+  }
+
+  /// Closure environment structs (one per thunk, holding its captured
+  /// values). Unlike the call-signature struct above, a captured record or
+  /// enum can sit in this struct *by value*, so it needs a *complete* type
+  /// at the point of capture — the reverse of the signature-struct rule.
+  /// Emitted *after* `// Type definitions`, once every record/enum this
+  /// program defines is a complete type. The host's `emit_closure_env_structs`
+  /// follows the same rule (its module build gets this for free because the
+  /// generated header, included before the body, already carries every
+  /// record/enum this module owns as a complete type; the single-file build
+  /// this function serves has no such header, so the ordering has to be
+  /// explicit here); keep both in sync.
+  function emitClosureEnvStructs(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    output: &mut String,
+    closures: &CodegenC::ClosureTables,
+  ): void {
+    if (closures.envs.length() == 0) {
+      return;
+    }
+
+    let mut headerRef: &mut String = output;
+    headerRef.pushStr("\n// Closure environments\n");
 
     let mut envIndex: u64 = 0;
 
@@ -3288,47 +3362,6 @@ export namespace CodegenC {
       closeRef.pushStr("};\n");
 
       envIndex += 1;
-    }
-
-    let mut signatureIndex: u64 = 0;
-
-    while (signatureIndex < closures.signatures.length()) {
-      let Option::SOME(raw) = closures.signatures.get(signatureIndex) else {
-        signatureIndex += 1;
-        continue;
-      };
-
-      let signatureType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
-      let name: String = CodegenC::closureStructName(signatureType);
-
-      let mut callParams: String = String::create("u8*");
-      let mut returnText: String = String::create("void");
-
-      if (let Option::SOME(typeNode) = typeStore.get(signatureType)) {
-        if (let Analyzer::Type::Function(functionType) = typeNode) {
-          returnText = CodegenC::formatCType(defStore, typeStore, symbols, closures, functionType.returnType);
-
-          let params: Vector<Analyzer::TypeId> = CodegenC::copyTypeIds(&functionType.params);
-          let mut paramIndex: u64 = 0;
-
-          while (paramIndex < params.length()) {
-            if (let Option::SOME(paramType) = params.get(paramIndex)) {
-              let text: String = CodegenC::formatCType(defStore, typeStore, symbols, closures, *paramType);
-              callParams.pushStr(", ");
-              callParams.pushStr(text.toStr());
-            }
-
-            paramIndex += 1;
-          }
-        }
-      }
-
-      let body: String = `struct ${name.toStr()} {\n    ${returnText.toStr()} (*call)(${callParams.toStr()});\n    void (*drop_fn)(u8*);\n    u8* env;\n};\n`;
-
-      let mut bodyRef: &mut String = output;
-      bodyRef.pushStr(body.toStr());
-
-      signatureIndex += 1;
     }
   }
 
@@ -3590,14 +3623,14 @@ export namespace CodegenC {
       forwardIndex += 1;
     }
 
-    // Closure structs are emitted before record/enum definitions: a closure
-    // struct only needs its `call`/`drop_fn` field types (function pointers)
-    // and its `env` field (`u8*`), so a forward-declared record referenced
-    // there is enough. A record can embed a closure-typed field by value
-    // (e.g. a field declared `(i32) -> i32`), which needs the closure struct
-    // to be a *complete* type by the time the record's own definition is
-    // emitted — the reverse order left that field incomplete.
-    CodegenC::emitClosureTypes(defStore, typeStore, symbols, &mut source, closures);
+    // Closure signature structs are emitted before record/enum definitions: a
+    // closure struct only needs its `call`/`drop_fn` field types (function
+    // pointers) and its `env` field (`u8*`), so a forward-declared record
+    // referenced there is enough. A record can embed a closure-typed field by
+    // value (e.g. a field declared `(i32) -> i32`), which needs the closure
+    // struct to be a *complete* type by the time the record's own definition
+    // is emitted — the reverse order left that field incomplete.
+    CodegenC::emitClosureSignatureStructs(defStore, typeStore, symbols, &mut source, closures);
 
     source.pushStr("\n// Type definitions\n");
 
@@ -3610,6 +3643,14 @@ export namespace CodegenC {
 
       definitionIndex += 1;
     }
+
+    // Closure environment structs are emitted after record/enum definitions —
+    // the reverse of the signature structs above. A closure that captures a
+    // record or enum by value stores it directly as a field, which needs that
+    // type to already be complete; emitting it any earlier reproduces the
+    // same "incomplete type" class of bug the signature-struct reorder fixed,
+    // just on the capturing side instead of the parameter side.
+    CodegenC::emitClosureEnvStructs(defStore, typeStore, symbols, &mut source, closures);
 
     CodegenC::emitSliceTypes(defStore, typeStore, symbols, &mut source, closures);
 
