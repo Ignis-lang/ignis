@@ -27,7 +27,7 @@ use crate::backend::{
 };
 use crate::build_layout::{
   compiler_identity, hash_file, is_module_stamp_valid, is_std_stamp_valid, write_if_changed, write_module_stamp,
-  write_std_stamp, BuildFingerprint, BuildLayout, FileEntry, ModuleStamp, StdStamp,
+  normalize_features, write_std_stamp, BuildFingerprint, BuildLayout, FileEntry, ModuleStamp, StdStamp,
 };
 use crate::context::CompilationContext;
 use crate::link::{compile_to_object, format_tool_error, link_executable, link_executable_multi, LinkPlan};
@@ -936,6 +936,7 @@ pub fn compile_project(
             compiler_identity: compiler_identity(COMPILER_VERSION),
             codegen_abi_version: ignis_codegen_c::CODEGEN_ABI_VERSION,
             target: String::new(), // TODO: add target triple when cross-compilation is supported
+            features: normalize_features(config.enabled_features.iter()),
           };
 
           // Pre-compute hashes for all user modules
@@ -4790,6 +4791,7 @@ pub fn build_std(
     compiler_identity: compiler_identity(COMPILER_VERSION),
     codegen_abi_version: ignis_codegen_c::CODEGEN_ABI_VERSION,
     target: String::new(),
+    features: normalize_features(config.enabled_features.iter()),
   };
 
   match StdStamp::compute(std_path, fingerprint) {
@@ -5069,6 +5071,7 @@ fn ensure_std_built(
     compiler_identity: compiler_identity(COMPILER_VERSION),
     codegen_abi_version: ignis_codegen_c::CODEGEN_ABI_VERSION,
     target: String::new(),
+    features: normalize_features(config.enabled_features.iter()),
   };
 
   let force_rebuild = config.build_config.as_ref().map(|bc| bc.force_rebuild).unwrap_or(false);

@@ -289,26 +289,28 @@ impl BuildLayout {
 }
 
 // =============================================================================
-// Stamp v3: content-hash based cache invalidation
+// Stamp v4: content-hash based cache invalidation
 // =============================================================================
 //
 // Format (key=value, sorted):
-//   version=3
+//   version=4
 //   compiler_version=0.1.0
 //   compiler_identity=<exe path:size:mtime_ns:inode>-<compiler_version>
 //   codegen_abi_version=1
 //   target=
+//   features=a,b,c
 //   file_count=N
 //   file.0.path=...
 //   file.0.hash=...
 //   ...
 //
 // For per-module stamps (user modules with deps):
-//   version=3
+//   version=4
 //   compiler_version=...
 //   compiler_identity=...
 //   codegen_abi_version=...
 //   target=
+//   features=a,b,c
 //   self_path=...
 //   self_hash=...
 //   dep_count=N
@@ -323,7 +325,7 @@ impl BuildLayout {
 // `STAMP_VERSION` invalidates every stamp written by a compiler older than
 // this change, one time, regardless of identity.
 
-const STAMP_VERSION: &str = "3";
+const STAMP_VERSION: &str = "4";
 
 static COMPILER_EXE_KEY: OnceLock<String> = OnceLock::new();
 
@@ -393,6 +395,26 @@ pub struct BuildFingerprint {
   pub compiler_identity: String,
   pub codegen_abi_version: u32,
   pub target: String,
+  /// Enabled compile-time features, sorted and deduplicated.
+  ///
+  /// `@configFlag(@feature("x"))` is folded while parsing, so two builds of the
+  /// same sources under different feature sets produce different artifacts. The
+  /// feature set has to be part of the cache key or a build that enables a
+  /// feature silently relinks the archive built without it.
+  pub features: Vec<String>,
+}
+
+/// Orders and deduplicates a feature set so the fingerprint does not depend on
+/// the order the features were supplied in.
+pub fn normalize_features<I, S>(features: I) -> Vec<String>
+where
+  I: IntoIterator<Item = S>,
+  S: AsRef<str>,
+{
+  let mut normalized: Vec<String> = features.into_iter().map(|f| f.as_ref().to_string()).collect();
+  normalized.sort();
+  normalized.dedup();
+  normalized
 }
 
 impl BuildFingerprint {
@@ -406,7 +428,21 @@ impl BuildFingerprint {
       compiler_identity: compiler_identity(compiler_version),
       codegen_abi_version,
       target: String::new(), // placeholder for future target triple
+      features: Vec::new(),
     }
+  }
+
+  #[allow(dead_code)]
+  pub fn with_features<I, S>(
+    mut self,
+    features: I,
+  ) -> Self
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+  {
+    self.features = normalize_features(features);
+    self
   }
 }
 
@@ -486,6 +522,7 @@ impl StdStamp {
     writeln!(out, "compiler_identity={}", self.fingerprint.compiler_identity).unwrap();
     writeln!(out, "codegen_abi_version={}", self.fingerprint.codegen_abi_version).unwrap();
     writeln!(out, "target={}", self.fingerprint.target).unwrap();
+    writeln!(out, "features={}", self.fingerprint.features.join(",")).unwrap();
     writeln!(out, "file_count={}", self.files.len()).unwrap();
     for (i, f) in self.files.iter().enumerate() {
       writeln!(out, "file.{}.path={}", i, f.path.display()).unwrap();
@@ -506,6 +543,10 @@ impl StdStamp {
       compiler_identity: map.get("compiler_identity")?.to_string(),
       codegen_abi_version: map.get("codegen_abi_version")?.parse().ok()?,
       target: map.get("target").map(|s| s.to_string()).unwrap_or_default(),
+      features: map
+        .get("features")
+        .map(|s| normalize_features(s.split(',').filter(|f| !f.is_empty())))
+        .unwrap_or_default(),
     };
 
     let file_count: usize = map.get("file_count")?.parse().ok()?;
@@ -606,6 +647,7 @@ impl ModuleStamp {
     writeln!(out, "compiler_identity={}", self.fingerprint.compiler_identity).unwrap();
     writeln!(out, "codegen_abi_version={}", self.fingerprint.codegen_abi_version).unwrap();
     writeln!(out, "target={}", self.fingerprint.target).unwrap();
+    writeln!(out, "features={}", self.fingerprint.features.join(",")).unwrap();
     writeln!(out, "self_path={}", self.self_path.display()).unwrap();
     writeln!(out, "self_hash={}", self.self_hash).unwrap();
     writeln!(out, "dep_count={}", self.deps.len()).unwrap();
@@ -628,6 +670,10 @@ impl ModuleStamp {
       compiler_identity: map.get("compiler_identity")?.to_string(),
       codegen_abi_version: map.get("codegen_abi_version")?.parse().ok()?,
       target: map.get("target").map(|s| s.to_string()).unwrap_or_default(),
+      features: map
+        .get("features")
+        .map(|s| normalize_features(s.split(',').filter(|f| !f.is_empty())))
+        .unwrap_or_default(),
     };
 
     let self_path = PathBuf::from(map.get("self_path")?);
@@ -1009,12 +1055,14 @@ mod tests {
       compiler_identity: "exe-hash-aaaa-0.1.0".to_string(),
       codegen_abi_version: 1,
       target: String::new(),
+      features: Vec::new(),
     };
     let fp_new = BuildFingerprint {
       compiler_version: "0.1.0".to_string(),
       compiler_identity: "exe-hash-bbbb-0.1.0".to_string(),
       codegen_abi_version: 1,
       target: String::new(),
+      features: Vec::new(),
     };
     let stamp = ModuleStamp::new(fp_old.clone(), PathBuf::from("main.ign"), "hash".to_string(), vec![]);
 
@@ -1062,6 +1110,7 @@ mod tests {
       compiler_identity: "some-identity-0.1.0".to_string(),
       codegen_abi_version: 1,
       target: String::new(),
+      features: Vec::new(),
     };
     let stamp = StdStamp {
       fingerprint: fp,
@@ -1085,6 +1134,52 @@ mod tests {
 
     let legacy_module = "version=2\ncompiler_version=0.1.0\ncodegen_abi_version=1\ntarget=\nself_path=main.ign\nself_hash=abc\ndep_count=0\n";
     assert!(ModuleStamp::deserialize(legacy_module).is_none());
+  }
+
+  fn fingerprint_with(features: &[&str]) -> BuildFingerprint {
+    BuildFingerprint::new("0.1.0", 1).with_features(features)
+  }
+
+  #[test]
+  fn test_fingerprint_differs_by_feature_set() {
+    assert_ne!(fingerprint_with(&[]), fingerprint_with(&["alloc-trace"]));
+    assert_ne!(fingerprint_with(&["simd"]), fingerprint_with(&["alloc-trace"]));
+    assert_ne!(fingerprint_with(&["simd"]), fingerprint_with(&["simd", "alloc-trace"]));
+  }
+
+  #[test]
+  fn test_fingerprint_is_independent_of_feature_order() {
+    assert_eq!(
+      fingerprint_with(&["simd", "alloc-trace"]),
+      fingerprint_with(&["alloc-trace", "simd"])
+    );
+    assert_eq!(
+      fingerprint_with(&["simd", "simd", "alloc-trace"]),
+      fingerprint_with(&["alloc-trace", "simd"])
+    );
+  }
+
+  #[test]
+  fn test_std_stamp_roundtrips_feature_set() {
+    let stamp = StdStamp {
+      fingerprint: fingerprint_with(&["alloc-trace", "simd"]),
+      files: vec![],
+    };
+
+    let serialized = stamp.serialize();
+    assert!(serialized.contains("features=alloc-trace,simd"));
+    assert_eq!(StdStamp::deserialize(&serialized).unwrap(), stamp);
+  }
+
+  #[test]
+  fn test_std_stamp_from_a_different_feature_set_is_not_reused() {
+    let traced = StdStamp {
+      fingerprint: fingerprint_with(&["alloc-trace"]),
+      files: vec![],
+    };
+    let untraced = StdStamp::deserialize(&traced.serialize()).unwrap();
+
+    assert_ne!(untraced.fingerprint, fingerprint_with(&[]));
   }
 
   #[test]
