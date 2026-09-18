@@ -221,10 +221,10 @@ pub struct CEmitter<'a> {
   std_defined_symbols: Option<&'a HashSet<String>>,
 
   /// Maps `Type::Function` TypeId → emitted closure struct name.
-  /// Populated during `emit_closure_types()`, used by `format_type()`.
+  /// Populated during `emit_closure_signature_structs()`, used by `format_type()`.
   closure_struct_names: HashMap<TypeId, String>,
 
-  /// Maps thunk DefinitionId → env struct name. Populated during `emit_closure_types()`.
+  /// Maps thunk DefinitionId → env struct name. Populated during `emit_closure_env_structs()`.
   closure_env_names: HashMap<DefinitionId, String>,
 
   /// Optional native test harness dispatch table.
@@ -440,21 +440,33 @@ impl<'a> CEmitter<'a> {
 
     let uses_module_headers = matches!(self.target, Some(EmitTarget::UserModule(_)) | Some(EmitTarget::StdModule(_)));
 
+    let (env_infos, sorted_sigs) = self.collect_closure_type_info();
+
     if !uses_module_headers {
       self.emit_slice_types();
       self.emit_type_forward_declarations();
-      // Closure structs only need their record/enum dependencies forward-declared
-      // (their fields are all pointers: `call`, `drop_fn`, `env`), so they can be
-      // emitted right after the forward declarations. A record or enum can embed a
-      // closure-typed field by value, which needs the closure struct to already be
-      // a complete type by the time the type definitions below are emitted.
-      self.emit_closure_types();
+      // Closure signature structs only need their record/enum dependencies
+      // forward-declared (their fields are all pointers: `call`, `drop_fn`,
+      // `env`), so they can be emitted right after the forward declarations. A
+      // record or enum can embed a closure-typed field by value, which needs
+      // the closure struct to already be a complete type by the time the type
+      // definitions below are emitted.
+      self.emit_closure_signature_structs(&sorted_sigs);
       self.emit_type_definitions();
+      // Closure environment structs are the reverse: a captured record/enum
+      // sits in the env struct by value, so it needs those types definitions
+      // above it to already be complete.
+      self.emit_closure_env_structs(&env_infos);
     } else {
       if let Some(module_id) = self.target.as_ref().and_then(|target| target.target_user_module()) {
         self.emit_forced_external_type_definitions(module_id);
       }
-      self.emit_closure_types();
+      // The module build already has every record/enum this module owns as a
+      // complete type by this point (this translation unit's own header,
+      // included above by `emit_headers`, defines them), so both closure
+      // struct kinds can be emitted back to back here.
+      self.emit_closure_signature_structs(&sorted_sigs);
+      self.emit_closure_env_structs(&env_infos);
     }
 
     self.emit_static_constants();
@@ -1438,10 +1450,14 @@ impl<'a> CEmitter<'a> {
     writeln!(self.output).unwrap();
   }
 
-  /// Scan LIR for closure instructions and emit the required C type definitions:
+  /// Scans LIR for closure instructions, returning the info needed to emit:
   /// - An env struct per thunk (holding captured values)
   /// - A closure struct per unique function signature
-  fn emit_closure_types(&mut self) {
+  ///
+  /// Split out from emission so the two struct kinds can be written at
+  /// different points relative to `// Type definitions` — see
+  /// `emit_closure_signature_structs` and `emit_closure_env_structs`.
+  fn collect_closure_type_info(&self) -> (Vec<(DefinitionId, Vec<TypeId>, TypeId)>, Vec<TypeId>) {
     let mut env_infos: Vec<(DefinitionId, Vec<TypeId>, TypeId)> = Vec::new();
     let mut seen_thunks: HashSet<DefinitionId> = HashSet::new();
     let mut seen_sigs: HashSet<TypeId> = HashSet::new();
@@ -1519,33 +1535,30 @@ impl<'a> CEmitter<'a> {
       }
     }
 
-    if env_infos.is_empty() && seen_sigs.is_empty() {
+    let mut sorted_sigs: Vec<TypeId> = seen_sigs.into_iter().collect();
+    sorted_sigs.sort_by_key(|type_id| type_id.index());
+
+    (env_infos, sorted_sigs)
+  }
+
+  /// Closure call-signature structs (`call`/`drop_fn`/`env`): every field is a
+  /// pointer, so a forward-declared record/enum reachable from the signature
+  /// is enough. Call this *before* `// Type definitions` — a record can embed
+  /// a closure-typed field by value (e.g. `(i32) -> i32`), which needs this
+  /// struct to already be a complete type by the time the record's own
+  /// definition is emitted. The selfhost's `emitClosureSignatureStructs`
+  /// follows the same rule; keep both in sync.
+  fn emit_closure_signature_structs(
+    &mut self,
+    sorted_sigs: &[TypeId],
+  ) {
+    if sorted_sigs.is_empty() {
       return;
     }
 
     writeln!(self.output, "// Closure types").unwrap();
 
-    for (thunk_id, cap_types, _) in &env_infos {
-      let env_name = format!("__closure_env_{}", thunk_id.index());
-      writeln!(self.output, "struct {} {{", env_name).unwrap();
-
-      if cap_types.is_empty() {
-        writeln!(self.output, "    char _empty;").unwrap();
-      } else {
-        for (i, &ty) in cap_types.iter().enumerate() {
-          let ty_str = self.format_type(ty);
-          writeln!(self.output, "    {} field_{};", ty_str, i).unwrap();
-        }
-      }
-
-      writeln!(self.output, "}};").unwrap();
-      self.closure_env_names.insert(*thunk_id, env_name);
-    }
-
-    let mut sorted_sigs: Vec<TypeId> = seen_sigs.into_iter().collect();
-    sorted_sigs.sort_by_key(|type_id| type_id.index());
-
-    for sig_type_id in sorted_sigs {
+    for &sig_type_id in sorted_sigs {
       if let Type::Function { params, ret, .. } = self.types.get(&sig_type_id) {
         let struct_name = self.closure_struct_name(sig_type_id);
 
@@ -1573,6 +1586,47 @@ impl<'a> CEmitter<'a> {
 
         self.closure_struct_names.insert(sig_type_id, struct_name);
       }
+    }
+
+    writeln!(self.output).unwrap();
+  }
+
+  /// Closure environment structs (one per thunk, holding its captured
+  /// values). Unlike the signature struct above, a captured record or enum
+  /// can sit in this struct *by value*, so it needs a *complete* type at the
+  /// point of capture — the reverse of the signature-struct rule. Call this
+  /// *after* `// Type definitions`, once every record/enum this translation
+  /// unit defines is complete: the module build gets this for free because
+  /// the generated header, included before this point, already carries every
+  /// record/enum the module owns as a complete type; callers without that
+  /// header (the non-module `emit()` path) need the explicit ordering. The
+  /// selfhost's `emitClosureEnvStructs` follows the same rule; keep both in
+  /// sync.
+  fn emit_closure_env_structs(
+    &mut self,
+    env_infos: &[(DefinitionId, Vec<TypeId>, TypeId)],
+  ) {
+    if env_infos.is_empty() {
+      return;
+    }
+
+    writeln!(self.output, "// Closure environments").unwrap();
+
+    for (thunk_id, cap_types, _) in env_infos {
+      let env_name = format!("__closure_env_{}", thunk_id.index());
+      writeln!(self.output, "struct {} {{", env_name).unwrap();
+
+      if cap_types.is_empty() {
+        writeln!(self.output, "    char _empty;").unwrap();
+      } else {
+        for (i, &ty) in cap_types.iter().enumerate() {
+          let ty_str = self.format_type(ty);
+          writeln!(self.output, "    {} field_{};", ty_str, i).unwrap();
+        }
+      }
+
+      writeln!(self.output, "}};").unwrap();
+      self.closure_env_names.insert(*thunk_id, env_name);
     }
 
     writeln!(self.output).unwrap();
