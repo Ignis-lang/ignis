@@ -1,5 +1,6 @@
 import Fs from "std::fs";
 import Io from "std::io";
+import Sort from "std::sort";
 import String from "std::string";
 import Test from "std::test";
 import Vector from "std::vector";
@@ -35,6 +36,7 @@ function isIgnFile(path: &String): boolean {
   return suffix.equals(".ign");
 }
 
+/// Recursively collects every `.ign` file under `rootPath`.
 function collectIgnFiles(rootPath: str): Vector<String> {
   let mut files: Vector<String> = Vector::new<String>();
 
@@ -64,23 +66,71 @@ function collectIgnFiles(rootPath: str): Vector<String> {
   return files;
 }
 
-/// The roots whose files are already a fixed point of the host formatter, so
-/// the selfhost formatter must return them byte for byte.
-function fixedPointRoots(): Vector<String> {
-  let mut roots: Vector<String> = Vector::new<String>();
-  roots.push(String::create("ignis"));
-  roots.push(String::create("std"));
-  return roots;
+/// Lists the `.ign` files directly inside `rootPath`, not descending into
+/// subdirectories. Used for the handful of loose files sitting next to a
+/// root's subdirectories (e.g. `ignis/main.ign`), so a new loose file is
+/// picked up automatically without touching this file.
+function directChildIgnFiles(rootPath: str): Vector<String> {
+  let mut files: Vector<String> = Vector::new<String>();
+
+  let dirResult: Result<Fs::ReadDir, Io::IoError> = Fs::ReadDir::open(rootPath);
+  let Result::OK(dirValue) = dirResult else {
+    return files;
+  };
+  let mut dir: Fs::ReadDir = dirValue;
+
+  while (true) {
+    let Result::OK(entryOpt) = dir.next() else {
+      break;
+    };
+
+    let Option::SOME(entry) = entryOpt else {
+      break;
+    };
+
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    let mut path: String = entry.path.toString();
+
+    if (isIgnFile(&path)) {
+      files.push(path);
+    } else {
+      path.drop();
+    }
+  }
+
+  return files;
 }
 
-/// The roots holding fixtures the host formatter itself rewrites or rejects
-/// (deliberately malformed parser inputs, unformatted analyzer cases). They are
-/// checked for a clean, stable run rather than for byte equality.
-function toleratedRoots(): Vector<String> {
-  let mut roots: Vector<String> = Vector::new<String>();
-  roots.push(String::create("test_cases"));
-  roots.push(String::create("example"));
-  return roots;
+/// Lists the immediate subdirectory names of `rootPath` (not full paths),
+/// sorted lexically for a deterministic, diffable comparison.
+function subdirectoryNames(rootPath: str): Vector<String> {
+  let mut names: Vector<String> = Vector::new<String>();
+
+  let dirResult: Result<Fs::ReadDir, Io::IoError> = Fs::ReadDir::open(rootPath);
+  let Result::OK(dirValue) = dirResult else {
+    return names;
+  };
+  let mut dir: Fs::ReadDir = dirValue;
+
+  while (true) {
+    let Result::OK(entryOpt) = dir.next() else {
+      break;
+    };
+
+    let Option::SOME(entry) = entryOpt else {
+      break;
+    };
+
+    if (entry.isDir() && !Fs::isDotEntry(entry.name.clone())) {
+      names.push(entry.name.clone());
+    }
+  }
+
+  Sort::stableLexicalStrings(&mut names);
+  return names;
 }
 
 function firstDifferingLine(left: &String, right: &String): u64 {
@@ -156,87 +206,75 @@ function reportError(report: &mut String, path: &String, detail: &String): void 
   reportRef.pushChar('\n');
 }
 
-/// Formats every `.ign` file under `roots`, returning how many failed.
+/// Formats every file in `files`, returning how many failed.
 ///
 /// `requireFixedPoint` asks for byte equality with the input; otherwise the
 /// file only has to format without an error (`Format::formatSource` already
 /// rejects an unstable second pass on its own).
-function runCorpus(roots: &Vector<String>, requireFixedPoint: boolean, report: &mut String): u64 {
+function runCorpusFiles(
+  files: &Vector<String>,
+  requireFixedPoint: boolean,
+  report: &mut String
+): u64 {
   let mut reportRef: &mut String = report;
   let config: FormatterConfig = FormatterConfig::default();
   let mut failures: u64 = 0;
-  let mut rootIndex: u64 = 0;
+  let mut fileIndex: u64 = 0;
 
-  while (rootIndex < roots.length()) {
-    let Option::SOME(root) = roots.get(rootIndex) else {
-      rootIndex += 1;
+  while (fileIndex < files.length()) {
+    let Option::SOME(path) = files.get(fileIndex) else {
+      fileIndex += 1;
       continue;
     };
 
-    let files: Vector<String> = collectIgnFiles(root.toStr());
-    let mut fileIndex: u64 = 0;
+    let Result::OK(source) = Fs::readToString(path.toStr()) else {
+      let detail: String = String::create("could not read file");
+      reportError(reportRef, path, &detail);
+      failures += 1;
+      fileIndex += 1;
+      continue;
+    };
 
-    while (fileIndex < files.length()) {
-      let Option::SOME(path) = files.get(fileIndex) else {
+    let Result::OK(formatted) = Format::formatSource(&source, &config) else {
+      let Result::ERROR(error) = Format::formatSource(&source, &config) else {
         fileIndex += 1;
         continue;
       };
 
-      let Result::OK(source) = Fs::readToString(path.toStr()) else {
-        let detail: String = String::create("could not read file");
-        reportError(reportRef, path, &detail);
-        failures += 1;
-        fileIndex += 1;
-        continue;
-      };
+      let detail: String = error.describe();
+      reportError(reportRef, path, &detail);
 
-      let Result::OK(formatted) = Format::formatSource(&source, &config) else {
-        let Result::ERROR(error) = Format::formatSource(&source, &config) else {
-          fileIndex += 1;
-          continue;
-        };
-
-        let detail: String = error.describe();
-        reportError(reportRef, path, &detail);
-
-        if (requireFixedPoint) {
-          failures += 1;
-        }
-
-        fileIndex += 1;
-        continue;
-      };
-
-      if (requireFixedPoint && !formatted.equals(&source)) {
-        reportDifference(reportRef, path, &source, &formatted);
+      if (requireFixedPoint) {
         failures += 1;
       }
 
       fileIndex += 1;
+      continue;
+    };
+
+    if (requireFixedPoint && !formatted.equals(&source)) {
+      reportDifference(reportRef, path, &source, &formatted);
+      failures += 1;
     }
 
-    rootIndex += 1;
+    fileIndex += 1;
   }
 
   return failures;
 }
 
-@test
-function corpusFormatsTheHostFormattedTreeWithoutChangingIt(): void {
-  let mut report: String = String::new();
-
-  let fixedPoint: Vector<String> = fixedPointRoots();
-  let failures: u64 = runCorpus(&fixedPoint, true, &mut report);
-
-  // `test_cases/` and `example/` hold fixtures the host formatter itself
-  // rewrites or rejects, so they are run for a clean, stable pass and their
-  // findings are recorded rather than asserted.
-  let tolerated: Vector<String> = toleratedRoots();
-  let _toleratedFindings: u64 = runCorpus(&tolerated, false, &mut report);
-
+/// Writes a per-test failure report (namespaced by `label` so parallel test
+/// processes never race on the same output file) and fails the test when
+/// `failures > 0`.
+function finishCorpusReport(label: str, report: &String, failures: u64): void {
   if (report.length() > 0) {
-    if (let Result::ERROR(_) = Fs::writeString("build/format-corpus.txt", &report)) {
-      let writeFailure: String = String::create("formatter corpus: could not write build/format-corpus.txt");
+    let mut path: String = String::create("build/format-corpus-");
+    path.pushStr(label);
+    path.pushStr(".txt");
+
+    if (let Result::ERROR(_) = Fs::writeString(path.toStr(), report)) {
+      let mut writeFailure: String = String::create("formatter corpus: could not write ");
+      writeFailure.push(&path);
       Io::eprintln(writeFailure);
     }
 
@@ -245,9 +283,909 @@ function corpusFormatsTheHostFormattedTreeWithoutChangingIt(): void {
 
   if (failures > 0) {
     let count: String = failures.toString();
-    let mut message: String = String::create("formatter corpus: ");
+    let mut message: String = String::create("formatter corpus (");
+    message.pushStr(label);
+    message.pushStr("): ");
     message.push(&count);
     message.pushStr(" file(s) differ from their host-formatted input");
+    Io::eprintln(message);
+    Test::fail();
+  }
+}
+
+/// Formats every `.ign` file recursively under `root`, requiring byte-for-byte
+/// equality with the (already host-formatted) input.
+function runFixedPointDir(label: str, root: str): void {
+  let files: Vector<String> = collectIgnFiles(root);
+  let mut report: String = String::new();
+  let failures: u64 = runCorpusFiles(&files, true, &mut report);
+  finishCorpusReport(label, &report, failures);
+}
+
+/// Formats every `.ign` file recursively under `root`, only checking for a
+/// clean, stable pass: `test_cases/` and `example/` hold fixtures the host
+/// formatter itself rewrites or rejects (deliberately malformed parser
+/// inputs, unformatted analyzer cases), so byte equality is not asserted.
+function runToleratedDir(label: str, root: str): void {
+  let files: Vector<String> = collectIgnFiles(root);
+  let mut report: String = String::new();
+
+  // `requireFixedPoint: false` never counts a failure (see runCorpusFiles),
+  // so the findings this reports are never asserted — only recorded.
+  let _findings: u64 = runCorpusFiles(&files, false, &mut report);
+  finishCorpusReport(label, &report, 0);
+}
+
+/// The number of shards `test_cases/e2e/ok` is split into. Its file count is
+/// by far the largest of any single directory in the corpus (into the
+/// hundreds), so it is chunked by sorted index range rather than getting one
+/// `@test` per directory like everything else.
+///
+/// `corpusE2eOkShardSizeStaysReasonable` asserts each shard stays under a
+/// generous file-count ceiling; bump `E2E_OK_SHARD_COUNT` if that ever trips.
+function e2eOkShardCount(): u64 {
+  return 8;
+}
+
+/// Byte-range shard `shardIndex` (0-based) of `shardCount` over the sorted
+/// file list at `root`. Contiguous, non-overlapping, gap-free by
+/// construction: shard `i` covers `[i * ceil(total / shardCount), (i + 1) *
+/// ceil(total / shardCount))`, clamped to `total`, so the union of every
+/// shard from 0 to `shardCount - 1` is always the full file list, regardless
+/// of how many files exist.
+function shardOfSortedFiles(root: str, shardIndex: u64, shardCount: u64): Vector<String> {
+  let mut all: Vector<String> = collectIgnFiles(root);
+  Sort::stableLexicalStrings(&mut all);
+
+  let total: u64 = all.length();
+  let chunkSize: u64 = (total + shardCount - 1) / shardCount;
+  let mut start: u64 = shardIndex * chunkSize;
+  let mut end: u64 = start + chunkSize;
+
+  if (start > total) {
+    start = total;
+  }
+
+  if (end > total) {
+    end = total;
+  }
+
+  let mut shard: Vector<String> = Vector::new<String>();
+  let mut index: u64 = start;
+
+  while (index < end) {
+    let Option::SOME(path) = all.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    shard.push(path.clone());
+    index += 1;
+  }
+
+  return shard;
+}
+
+function runToleratedShard(label: str, root: str, shardIndex: u64, shardCount: u64): void {
+  let files: Vector<String> = shardOfSortedFiles(root, shardIndex, shardCount);
+  let mut report: String = String::new();
+
+  // `requireFixedPoint: false` never counts a failure (see runCorpusFiles),
+  // so the findings this reports are never asserted — only recorded.
+  let _findings: u64 = runCorpusFiles(&files, false, &mut report);
+  finishCorpusReport(label, &report, 0);
+}
+
+/// Counts a file's lines by reading it. Only used by the line-balanced
+/// sharding/guard helpers below, never on the fixed-point hot path.
+function lineCountOf(path: &String): u64 {
+  let Result::OK(source) = Fs::readToString(path.toStr()) else {
+    return 0;
+  };
+
+  return source.lines().length();
+}
+
+/// Output of `packFilesByLineCount`: `files` is the (lexically sorted) file
+/// list, `assignment[i]` is the shard index `files[i]` was packed into, and
+/// `totals[shardIndex]` is that shard's summed line count.
+record LineBalancedShards {
+  public files: Vector<String>;
+  public assignment: Vector<u64>;
+  public totals: Vector<u64>;
+}
+
+/// Greedily packs every `.ign` file recursively under `root` into
+/// `shardCount` groups by line count, heaviest file first, each file going
+/// to the shard with the smallest running total so far (ties go to the
+/// lowest shard index). Unlike an index-range split, this balances total
+/// cost per shard rather than file count — needed for a directory like
+/// `ignis/analyzer` where a handful of files are 3k-15k lines and the rest
+/// are a fraction of that. Deterministic and computed fresh from the tree
+/// every run (files are sorted lexically first, so ties in line count break
+/// the same way every time), so a new or resized file is picked up
+/// automatically without touching this file.
+function packFilesByLineCount(root: str, shardCount: u64): LineBalancedShards {
+  let mut files: Vector<String> = collectIgnFiles(root);
+  Sort::stableLexicalStrings(&mut files);
+
+  let fileCount: u64 = files.length();
+
+  let mut lineCounts: Vector<u64> = Vector::new<u64>();
+  let mut countIndex: u64 = 0;
+
+  while (countIndex < fileCount) {
+    let Option::SOME(path) = files.get(countIndex) else {
+      countIndex += 1;
+      continue;
+    };
+
+    lineCounts.push(lineCountOf(path));
+    countIndex += 1;
+  }
+
+  // Selection sort of file indices by descending line count (small N, so
+  // O(n^2) is fine, and it avoids a closure capturing `lineCounts`).
+  let mut order: Vector<u64> = Vector::new<u64>();
+  let mut orderInit: u64 = 0;
+
+  while (orderInit < fileCount) {
+    order.push(orderInit);
+    orderInit += 1;
+  }
+
+  let mut outer: u64 = 0;
+
+  while (outer < order.length()) {
+    let mut largestPos: u64 = outer;
+    let mut largestLines: u64 = 0;
+
+    if (let Option::SOME(outerFileIndex) = order.get(outer)) {
+      if (let Option::SOME(lines) = lineCounts.get(*outerFileIndex)) {
+        largestLines = *lines;
+      }
+    }
+
+    let mut inner: u64 = outer + 1;
+
+    while (inner < order.length()) {
+      let mut candidateLines: u64 = 0;
+
+      if (let Option::SOME(innerFileIndex) = order.get(inner)) {
+        if (let Option::SOME(lines) = lineCounts.get(*innerFileIndex)) {
+          candidateLines = *lines;
+        }
+      }
+
+      if (candidateLines > largestLines) {
+        largestLines = candidateLines;
+        largestPos = inner;
+      }
+
+      inner += 1;
+    }
+
+    if (largestPos != outer) {
+      let Option::SOME(outerValueRef) = order.get(outer) else {
+        outer += 1;
+        continue;
+      };
+      let Option::SOME(largestValueRef) = order.get(largestPos) else {
+        outer += 1;
+        continue;
+      };
+      let outerValue: u64 = *outerValueRef;
+      let largestValue: u64 = *largestValueRef;
+
+      order.set(outer, largestValue);
+      order.set(largestPos, outerValue);
+    }
+
+    outer += 1;
+  }
+
+  // Greedy bin packing: heaviest file first, into the currently-lightest
+  // shard.
+  let mut totals: Vector<u64> = Vector::new<u64>();
+  let mut totalsInit: u64 = 0;
+
+  while (totalsInit < shardCount) {
+    totals.push(0);
+    totalsInit += 1;
+  }
+
+  let mut assignment: Vector<u64> = Vector::new<u64>();
+  let mut assignInit: u64 = 0;
+
+  while (assignInit < fileCount) {
+    assignment.push(0);
+    assignInit += 1;
+  }
+
+  let mut orderPos: u64 = 0;
+
+  while (orderPos < order.length()) {
+    let Option::SOME(fileIndexRef) = order.get(orderPos) else {
+      orderPos += 1;
+      continue;
+    };
+    let fileIndex: u64 = *fileIndexRef;
+
+    let mut bestShard: u64 = 0;
+    let mut bestTotal: u64 = 0;
+
+    if (let Option::SOME(firstTotal) = totals.get(0)) {
+      bestTotal = *firstTotal;
+    }
+
+    let mut shardScan: u64 = 1;
+
+    while (shardScan < shardCount) {
+      let Option::SOME(candidateTotal) = totals.get(shardScan) else {
+        shardScan += 1;
+        continue;
+      };
+
+      if (*candidateTotal < bestTotal) {
+        bestTotal = *candidateTotal;
+        bestShard = shardScan;
+      }
+
+      shardScan += 1;
+    }
+
+    assignment.set(fileIndex, bestShard);
+
+    let mut fileLines: u64 = 0;
+
+    if (let Option::SOME(lines) = lineCounts.get(fileIndex)) {
+      fileLines = *lines;
+    }
+
+    totals.set(bestShard, bestTotal + fileLines);
+    orderPos += 1;
+  }
+
+  return LineBalancedShards { files: files, assignment: assignment, totals: totals };
+}
+
+/// The file list `packFilesByLineCount` assigned to shard `shardIndex`.
+function shardOfFilesByLineCount(root: str, shardIndex: u64, shardCount: u64): Vector<String> {
+  let packed: LineBalancedShards = packFilesByLineCount(root, shardCount);
+  let mut shard: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < packed.files.length()) {
+    let Option::SOME(assignedShard) = packed.assignment.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (*assignedShard == shardIndex) {
+      let Option::SOME(path) = packed.files.get(index) else {
+        index += 1;
+        continue;
+      };
+
+      shard.push(path.clone());
+    }
+
+    index += 1;
+  }
+
+  return shard;
+}
+
+/// The number of shards `ignis/analyzer` is packed into. Its files vary
+/// wildly in size (several are 3k-15k lines each, most are a fraction of
+/// that), so an index-range split like `test_cases/e2e/ok`'s would leave
+/// some shards far heavier than others; `packFilesByLineCount` bin-packs by
+/// line count instead, balancing total cost per shard rather than file
+/// count.
+///
+/// `corpusIgnisAnalyzerShardSizeStaysReasonable` asserts the heaviest
+/// shard's line total stays under a ceiling; bump this and add the matching
+/// `corpusIgnisAnalyzerShardN` test if that ever trips.
+function ignisAnalyzerShardCount(): u64 {
+  return 6;
+}
+
+/// Formats one line-balanced shard of `root`, requiring byte-for-byte
+/// equality with the (already host-formatted) input.
+function runFixedPointLineShard(label: str, root: str, shardIndex: u64, shardCount: u64): void {
+  let files: Vector<String> = shardOfFilesByLineCount(root, shardIndex, shardCount);
+  let mut report: String = String::new();
+  let failures: u64 = runCorpusFiles(&files, true, &mut report);
+  finishCorpusReport(label, &report, failures);
+}
+
+// ---------------------------------------------------------------------------
+// ignis/ — one @test per top-level subdirectory, plus one for the loose files
+// directly inside `ignis/`. `ignis/analyzer` is line-balanced-sharded like
+// `test_cases/e2e/ok` (see `ignisAnalyzerShardCount`); every other
+// subdirectory is small and even enough for one @test. All are fixed points
+// of the host formatter.
+// ---------------------------------------------------------------------------
+
+@test
+function corpusIgnisRootFiles(): void {
+  let files: Vector<String> = directChildIgnFiles("ignis");
+  let mut report: String = String::new();
+  let failures: u64 = runCorpusFiles(&files, true, &mut report);
+  finishCorpusReport("ignis-root", &report, failures);
+}
+
+@test
+function corpusIgnisAnalyzerShard0(): void {
+  runFixedPointLineShard("ignis-analyzer-0", "ignis/analyzer", 0, ignisAnalyzerShardCount());
+}
+
+@test
+function corpusIgnisAnalyzerShard1(): void {
+  runFixedPointLineShard("ignis-analyzer-1", "ignis/analyzer", 1, ignisAnalyzerShardCount());
+}
+
+@test
+function corpusIgnisAnalyzerShard2(): void {
+  runFixedPointLineShard("ignis-analyzer-2", "ignis/analyzer", 2, ignisAnalyzerShardCount());
+}
+
+@test
+function corpusIgnisAnalyzerShard3(): void {
+  runFixedPointLineShard("ignis-analyzer-3", "ignis/analyzer", 3, ignisAnalyzerShardCount());
+}
+
+@test
+function corpusIgnisAnalyzerShard4(): void {
+  runFixedPointLineShard("ignis-analyzer-4", "ignis/analyzer", 4, ignisAnalyzerShardCount());
+}
+
+@test
+function corpusIgnisAnalyzerShard5(): void {
+  runFixedPointLineShard("ignis-analyzer-5", "ignis/analyzer", 5, ignisAnalyzerShardCount());
+}
+
+@test
+function corpusIgnisAst(): void {
+  runFixedPointDir("ignis-ast", "ignis/ast");
+}
+
+@test
+function corpusIgnisBuild(): void {
+  runFixedPointDir("ignis-build", "ignis/build");
+}
+
+@test
+function corpusIgnisCodegen(): void {
+  runFixedPointDir("ignis-codegen", "ignis/codegen");
+}
+
+@test
+function corpusIgnisConfig(): void {
+  runFixedPointDir("ignis-config", "ignis/config");
+}
+
+@test
+function corpusIgnisDiagnostics(): void {
+  runFixedPointDir("ignis-diagnostics", "ignis/diagnostics");
+}
+
+@test
+function corpusIgnisFormat(): void {
+  runFixedPointDir("ignis-format", "ignis/format");
+}
+
+@test
+function corpusIgnisHir(): void {
+  runFixedPointDir("ignis-hir", "ignis/hir");
+}
+
+@test
+function corpusIgnisIds(): void {
+  runFixedPointDir("ignis-ids", "ignis/ids");
+}
+
+@test
+function corpusIgnisIndexing(): void {
+  runFixedPointDir("ignis-indexing", "ignis/indexing");
+}
+
+@test
+function corpusIgnisInterning(): void {
+  runFixedPointDir("ignis-interning", "ignis/interning");
+}
+
+@test
+function corpusIgnisLexer(): void {
+  runFixedPointDir("ignis-lexer", "ignis/lexer");
+}
+
+@test
+function corpusIgnisLir(): void {
+  runFixedPointDir("ignis-lir", "ignis/lir");
+}
+
+@test
+function corpusIgnisParser(): void {
+  runFixedPointDir("ignis-parser", "ignis/parser");
+}
+
+@test
+function corpusIgnisSymbols(): void {
+  runFixedPointDir("ignis-symbols", "ignis/symbols");
+}
+
+@test
+function corpusIgnisSyntax(): void {
+  runFixedPointDir("ignis-syntax", "ignis/syntax");
+}
+
+// ---------------------------------------------------------------------------
+// std/ — one @test per top-level subdirectory. All are fixed points of the
+// host formatter.
+// ---------------------------------------------------------------------------
+
+@test
+function corpusStdChar(): void {
+  runFixedPointDir("std-char", "std/char");
+}
+
+@test
+function corpusStdCli(): void {
+  runFixedPointDir("std-cli", "std/cli");
+}
+
+@test
+function corpusStdCollections(): void {
+  runFixedPointDir("std-collections", "std/collections");
+}
+
+@test
+function corpusStdCompile(): void {
+  runFixedPointDir("std-compile", "std/compile");
+}
+
+@test
+function corpusStdEnv(): void {
+  runFixedPointDir("std-env", "std/env");
+}
+
+@test
+function corpusStdFfi(): void {
+  runFixedPointDir("std-ffi", "std/ffi");
+}
+
+@test
+function corpusStdFormat(): void {
+  runFixedPointDir("std-format", "std/format");
+}
+
+@test
+function corpusStdFs(): void {
+  runFixedPointDir("std-fs", "std/fs");
+}
+
+@test
+function corpusStdHash(): void {
+  runFixedPointDir("std-hash", "std/hash");
+}
+
+@test
+function corpusStdIo(): void {
+  runFixedPointDir("std-io", "std/io");
+}
+
+@test
+function corpusStdJson(): void {
+  runFixedPointDir("std-json", "std/json");
+}
+
+@test
+function corpusStdLibc(): void {
+  runFixedPointDir("std-libc", "std/libc");
+}
+
+@test
+function corpusStdMath(): void {
+  runFixedPointDir("std-math", "std/math");
+}
+
+@test
+function corpusStdMemory(): void {
+  runFixedPointDir("std-memory", "std/memory");
+}
+
+@test
+function corpusStdNumber(): void {
+  runFixedPointDir("std-number", "std/number");
+}
+
+@test
+function corpusStdOption(): void {
+  runFixedPointDir("std-option", "std/option");
+}
+
+@test
+function corpusStdPath(): void {
+  runFixedPointDir("std-path", "std/path");
+}
+
+@test
+function corpusStdProcess(): void {
+  runFixedPointDir("std-process", "std/process");
+}
+
+@test
+function corpusStdPtr(): void {
+  runFixedPointDir("std-ptr", "std/ptr");
+}
+
+@test
+function corpusStdRc(): void {
+  runFixedPointDir("std-rc", "std/rc");
+}
+
+@test
+function corpusStdResult(): void {
+  runFixedPointDir("std-result", "std/result");
+}
+
+@test
+function corpusStdRuntime(): void {
+  runFixedPointDir("std-runtime", "std/runtime");
+}
+
+@test
+function corpusStdSerializer(): void {
+  runFixedPointDir("std-serializer", "std/serializer");
+}
+
+@test
+function corpusStdSort(): void {
+  runFixedPointDir("std-sort", "std/sort");
+}
+
+@test
+function corpusStdString(): void {
+  runFixedPointDir("std-string", "std/string");
+}
+
+@test
+function corpusStdTerminal(): void {
+  runFixedPointDir("std-terminal", "std/terminal");
+}
+
+@test
+function corpusStdTest(): void {
+  runFixedPointDir("std-test", "std/test");
+}
+
+@test
+function corpusStdTime(): void {
+  runFixedPointDir("std-time", "std/time");
+}
+
+@test
+function corpusStdToml(): void {
+  runFixedPointDir("std-toml", "std/toml");
+}
+
+@test
+function corpusStdTypes(): void {
+  runFixedPointDir("std-types", "std/types");
+}
+
+@test
+function corpusStdVector(): void {
+  runFixedPointDir("std-vector", "std/vector");
+}
+
+// ---------------------------------------------------------------------------
+// test_cases/ and example/ — fixtures the host formatter itself rewrites or
+// rejects (deliberately malformed parser inputs, unformatted analyzer
+// cases). Checked for a clean, stable pass rather than byte equality.
+// `test_cases/e2e/ok` is sharded; every other directory is small enough for
+// one @test.
+// ---------------------------------------------------------------------------
+
+@test
+function corpusTestCasesAnalyzer(): void {
+  runToleratedDir("test_cases-analyzer", "test_cases/analyzer");
+}
+
+@test
+function corpusTestCasesE2eErr(): void {
+  runToleratedDir("test_cases-e2e-err", "test_cases/e2e/err");
+}
+
+@test
+function corpusTestCasesE2eOkShard0(): void {
+  runToleratedShard("test_cases-e2e-ok-0", "test_cases/e2e/ok", 0, e2eOkShardCount());
+}
+
+@test
+function corpusTestCasesE2eOkShard1(): void {
+  runToleratedShard("test_cases-e2e-ok-1", "test_cases/e2e/ok", 1, e2eOkShardCount());
+}
+
+@test
+function corpusTestCasesE2eOkShard2(): void {
+  runToleratedShard("test_cases-e2e-ok-2", "test_cases/e2e/ok", 2, e2eOkShardCount());
+}
+
+@test
+function corpusTestCasesE2eOkShard3(): void {
+  runToleratedShard("test_cases-e2e-ok-3", "test_cases/e2e/ok", 3, e2eOkShardCount());
+}
+
+@test
+function corpusTestCasesE2eOkShard4(): void {
+  runToleratedShard("test_cases-e2e-ok-4", "test_cases/e2e/ok", 4, e2eOkShardCount());
+}
+
+@test
+function corpusTestCasesE2eOkShard5(): void {
+  runToleratedShard("test_cases-e2e-ok-5", "test_cases/e2e/ok", 5, e2eOkShardCount());
+}
+
+@test
+function corpusTestCasesE2eOkShard6(): void {
+  runToleratedShard("test_cases-e2e-ok-6", "test_cases/e2e/ok", 6, e2eOkShardCount());
+}
+
+@test
+function corpusTestCasesE2eOkShard7(): void {
+  runToleratedShard("test_cases-e2e-ok-7", "test_cases/e2e/ok", 7, e2eOkShardCount());
+}
+
+@test
+function corpusTestCasesParser(): void {
+  runToleratedDir("test_cases-parser", "test_cases/parser");
+}
+
+@test
+function corpusTestCasesSelfhost(): void {
+  runToleratedDir("test_cases-selfhost", "test_cases/selfhost");
+}
+
+@test
+function corpusExample(): void {
+  runToleratedDir("example", "example");
+}
+
+// ---------------------------------------------------------------------------
+// Coverage sanity check — guards against a new top-level directory or a
+// large `test_cases/e2e/ok` growth spurt silently escaping every unit test
+// above.
+// ---------------------------------------------------------------------------
+
+function knownIgnisSubdirs(): Vector<String> {
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("analyzer"));
+  names.push(String::create("ast"));
+  names.push(String::create("build"));
+  names.push(String::create("codegen"));
+  names.push(String::create("config"));
+  names.push(String::create("diagnostics"));
+  names.push(String::create("format"));
+  names.push(String::create("hir"));
+  names.push(String::create("ids"));
+  names.push(String::create("indexing"));
+  names.push(String::create("interning"));
+  names.push(String::create("lexer"));
+  names.push(String::create("lir"));
+  names.push(String::create("parser"));
+  names.push(String::create("symbols"));
+  names.push(String::create("syntax"));
+  Sort::stableLexicalStrings(&mut names);
+  return names;
+}
+
+function knownStdSubdirs(): Vector<String> {
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("char"));
+  names.push(String::create("cli"));
+  names.push(String::create("collections"));
+  names.push(String::create("compile"));
+  names.push(String::create("env"));
+  names.push(String::create("ffi"));
+  names.push(String::create("format"));
+  names.push(String::create("fs"));
+  names.push(String::create("hash"));
+  names.push(String::create("io"));
+  names.push(String::create("json"));
+  names.push(String::create("libc"));
+  names.push(String::create("math"));
+  names.push(String::create("memory"));
+  names.push(String::create("number"));
+  names.push(String::create("option"));
+  names.push(String::create("path"));
+  names.push(String::create("process"));
+  names.push(String::create("ptr"));
+  names.push(String::create("rc"));
+  names.push(String::create("result"));
+  names.push(String::create("runtime"));
+  names.push(String::create("serializer"));
+  names.push(String::create("sort"));
+  names.push(String::create("string"));
+  names.push(String::create("terminal"));
+  names.push(String::create("test"));
+  names.push(String::create("time"));
+  names.push(String::create("toml"));
+  names.push(String::create("types"));
+  names.push(String::create("vector"));
+  Sort::stableLexicalStrings(&mut names);
+  return names;
+}
+
+function knownTestCasesSubdirs(): Vector<String> {
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("analyzer"));
+  names.push(String::create("e2e"));
+  names.push(String::create("parser"));
+  names.push(String::create("selfhost"));
+  Sort::stableLexicalStrings(&mut names);
+  return names;
+}
+
+function knownE2eSubdirs(): Vector<String> {
+  let mut names: Vector<String> = Vector::new<String>();
+  names.push(String::create("err"));
+  names.push(String::create("ok"));
+  Sort::stableLexicalStrings(&mut names);
+  return names;
+}
+
+/// Fails with a readable diff when `actual` (the directories really on disk)
+/// is not exactly `known` (the directories this file has a unit test for).
+function assertSubdirCoverage(label: str, known: &Vector<String>, actual: &Vector<String>): void {
+  let mut mismatched: boolean = false;
+
+  if (known.length() != actual.length()) {
+    mismatched = true;
+  }
+
+  let mut index: u64 = 0;
+  let shorter: u64 = known.length() < actual.length() ? known.length() : actual.length();
+
+  while (index < shorter) {
+    let Option::SOME(knownName) = known.get(index) else {
+      index += 1;
+      continue;
+    };
+    let Option::SOME(actualName) = actual.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (!knownName.equals(actualName)) {
+      mismatched = true;
+    }
+
+    index += 1;
+  }
+
+  if (!mismatched) {
+    return;
+  }
+
+  let mut message: String = String::create("formatter corpus coverage (");
+  message.pushStr(label);
+  message.pushStr("): known subdirectories do not match the tree.\n  known:  ");
+  let knownDescription: String = Fs::walkDescribe(known);
+  message.push(&knownDescription);
+  message.pushStr("\n  actual: ");
+  let actualDescription: String = Fs::walkDescribe(actual);
+  message.push(&actualDescription);
+  message.pushStr(
+    "\n  Add a @test for the new/removed directory in corpus_tests.ign and update the matching known*Subdirs() list.",
+  );
+
+  Io::eprintln(message);
+  Test::fail();
+}
+
+@test
+function corpusDirectoryCoverageMatchesTree(): void {
+  let ignisKnown: Vector<String> = knownIgnisSubdirs();
+  let ignisActual: Vector<String> = subdirectoryNames("ignis");
+  assertSubdirCoverage("ignis", &ignisKnown, &ignisActual);
+
+  let stdKnown: Vector<String> = knownStdSubdirs();
+  let stdActual: Vector<String> = subdirectoryNames("std");
+  assertSubdirCoverage("std", &stdKnown, &stdActual);
+
+  let testCasesKnown: Vector<String> = knownTestCasesSubdirs();
+  let testCasesActual: Vector<String> = subdirectoryNames("test_cases");
+  assertSubdirCoverage("test_cases", &testCasesKnown, &testCasesActual);
+
+  let e2eKnown: Vector<String> = knownE2eSubdirs();
+  let e2eActual: Vector<String> = subdirectoryNames("test_cases/e2e");
+  assertSubdirCoverage("test_cases/e2e", &e2eKnown, &e2eActual);
+}
+
+/// Guards `test_cases/e2e/ok`'s shard scheme against silent growth: if the
+/// directory grows enough that a shard's file count creeps toward what used
+/// to time the whole corpus test out, this fails loudly instead of the
+/// growth quietly re-creating issue #220 one shard at a time.
+@test
+function corpusE2eOkShardSizeStaysReasonable(): void {
+  let shardCount: u64 = e2eOkShardCount();
+  let allFiles: Vector<String> = collectIgnFiles("test_cases/e2e/ok");
+  let total: u64 = allFiles.length();
+  let chunkSize: u64 = (total + shardCount - 1) / shardCount;
+
+  // Comfortably above today's ~90 files/shard, comfortably below a size that
+  // would risk the per-test timeout again.
+  let ceiling: u64 = 250;
+
+  if (chunkSize > ceiling) {
+    let totalText: String = total.toString();
+    let chunkSizeText: String = chunkSize.toString();
+    let ceilingText: String = ceiling.toString();
+
+    let mut message: String = String::create("formatter corpus: test_cases/e2e/ok has grown to ");
+    message.push(&totalText);
+    message.pushStr(" files (");
+    message.push(&chunkSizeText);
+    message.pushStr(" per shard, ceiling ");
+    message.push(&ceilingText);
+    message.pushStr(
+      "). Increase e2eOkShardCount() and add the matching corpusTestCasesE2eOkShardN test in corpus_tests.ign.",
+    );
+    Io::eprintln(message);
+    Test::fail();
+  }
+}
+
+/// Guards `ignis/analyzer`'s line-balanced shard scheme against silent
+/// growth. Unlike `test_cases/e2e/ok`'s uniformly tiny fixtures, a handful
+/// of `ignis/analyzer`'s files are 3k-15k lines each — file COUNT is a
+/// meaningless proxy for a shard's cost there, so this asserts the heaviest
+/// shard's total LINE count instead, failing loudly before growth quietly
+/// re-creates issue #220 one shard at a time.
+@test
+function corpusIgnisAnalyzerShardSizeStaysReasonable(): void {
+  let shardCount: u64 = ignisAnalyzerShardCount();
+  let packed: LineBalancedShards = packFilesByLineCount("ignis/analyzer", shardCount);
+
+  let mut worstShard: u64 = 0;
+  let mut worstTotal: u64 = 0;
+  let mut shardIndex: u64 = 0;
+
+  while (shardIndex < shardCount) {
+    let Option::SOME(total) = packed.totals.get(shardIndex) else {
+      shardIndex += 1;
+      continue;
+    };
+
+    if (*total > worstTotal) {
+      worstTotal = *total;
+      worstShard = shardIndex;
+    }
+
+    shardIndex += 1;
+  }
+
+  // Comfortably above today's heaviest shard (set by the single biggest
+  // file, ~15-16k lines), comfortably below a size that would risk the
+  // per-test timeout again.
+  let ceiling: u64 = 35000;
+
+  if (worstTotal > ceiling) {
+    let worstShardText: String = worstShard.toString();
+    let worstTotalText: String = worstTotal.toString();
+    let ceilingText: String = ceiling.toString();
+
+    let mut message: String = String::create("formatter corpus: ignis/analyzer shard ");
+    message.push(&worstShardText);
+    message.pushStr(" has grown to ");
+    message.push(&worstTotalText);
+    message.pushStr(" lines (ceiling ");
+    message.push(&ceilingText);
+    message.pushStr(
+      "). Increase ignisAnalyzerShardCount() and add the matching corpusIgnisAnalyzerShardN test in corpus_tests.ign.",
+    );
     Io::eprintln(message);
     Test::fail();
   }

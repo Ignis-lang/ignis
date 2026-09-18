@@ -10,6 +10,7 @@ import
   CommentBlock,
   CommentPlacement,
   CommentTrivia,
+  LineIndex,
   classifyCommentPlacement,
   isCommentTrivia,
 from "./comments";
@@ -414,9 +415,10 @@ function cloneFormatItemVector(items: &Vector<Format::FormatItem>): Vector<Forma
 record ModelBuilder {
   source: &String;
   tokens: &TokenStream;
+  lineIndex: LineIndex;
 
   public static create(source: &String, tokens: &TokenStream): ModelBuilder {
-    return ModelBuilder { source: source, tokens: tokens };
+    return ModelBuilder { source: source, tokens: tokens, lineIndex: LineIndex::build(source) };
   }
 
   parseRegion(
@@ -461,7 +463,7 @@ record ModelBuilder {
 
           let consumed: ConsumeCommentBlockResult = self.consumeCommentBlock(cursor);
           let placement: CommentPlacement = classifyCommentPlacement(
-            self.source,
+            &self.lineIndex,
             self.tokens,
             consumed.nextIndex - 1,
             startIndex,
@@ -482,7 +484,7 @@ record ModelBuilder {
 
         let consumed: ConsumeCommentBlockResult = self.consumeCommentBlock(cursor);
         let placement: CommentPlacement = classifyCommentPlacement(
-          self.source,
+          &self.lineIndex,
           self.tokens,
           consumed.nextIndex - 1,
           startIndex,

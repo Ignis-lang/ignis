@@ -5,7 +5,7 @@ import SourceFile from "@compiler::diagnostics";
 import LexResult, Lexer from "@compiler::lexer";
 import TokenKind from "@compiler::syntax";
 
-import CommentPlacement, classifyCommentPlacement, isCommentTrivia from "./comments";
+import CommentPlacement, LineIndex, classifyCommentPlacement, isCommentTrivia from "./comments";
 import FormatError from "./error";
 import _ from "./model";
 
@@ -471,6 +471,7 @@ export namespace Format {
   function commentShape(source: &String): Result<Vector<Format::CommentShape>, FormatError> {
     let lexResult: LexResult = lexOrFail("formatter_comments.ign", source)!;
     let tokenCount: u64 = lexResult.tokens.length();
+    let lineIndex: LineIndex = LineIndex::build(source);
 
     let mut eofIndex: u64 = 0;
 
@@ -493,7 +494,7 @@ export namespace Format {
       }
 
       let rawLexeme: String = token.lexemeString();
-      let placement: CommentPlacement = classifyCommentPlacement(source, &lexResult.tokens, index, 0, eofIndex);
+      let placement: CommentPlacement = classifyCommentPlacement(&lineIndex, &lexResult.tokens, index, 0, eofIndex);
 
       let mut hasPrevious: boolean = false;
       let mut previousText: String = String::new();
