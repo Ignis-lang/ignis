@@ -1,0 +1,33 @@
+// e2e: std
+//
+// An arm of a match *expression* whose value is a by-value owning parameter hands that
+// parameter to the match result. The move used to be recorded only for the arm's own
+// pattern bindings, so the parameter was copied into the result and still dropped at
+// function exit — one buffer, two frees.
+import String from "std::string";
+
+enum Slot<S> {
+  FILLED(S),
+  EMPTY,
+
+  public takeOr(self, fallback: S): S {
+    return match (self) {
+      Slot::FILLED(payload) -> payload,
+      Slot::EMPTY -> fallback,
+    };
+  }
+}
+
+function main(): i32 {
+  let empty: Slot<String> = Slot::EMPTY;
+  let fallback: String = String::create("fallback");
+  let fromFallback: String = empty.takeOr(fallback);
+
+  // The arm that did not take the fallback still owns it and frees it there: the
+  // filled case must neither leak the unused fallback nor free it twice.
+  let filled: Slot<String> = Slot::FILLED(String::create("payload"));
+  let unused: String = String::create("unused");
+  let fromPayload: String = filled.takeOr(unused);
+
+  return ((fromFallback.length() + fromPayload.length()) as i32);
+}

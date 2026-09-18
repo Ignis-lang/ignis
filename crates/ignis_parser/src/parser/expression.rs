@@ -1385,6 +1385,36 @@ mod tests {
     }
   }
 
+  /// A `&` or `|` after a cast's type belongs to the surrounding expression, not to the
+  /// type. A type parser that reaches past the type to claim it reports a compound type
+  /// nobody wrote and swallows the operand behind it.
+  #[test]
+  fn a_cast_type_stops_before_a_following_bitwise_operator() {
+    for (source, expected) in [
+      ("value as i32 & 1", ASTBinaryOperator::BitAnd),
+      ("value as i32 | 1", ASTBinaryOperator::BitOr),
+      ("value as i32 ^ 1", ASTBinaryOperator::BitXor),
+      ("value as i32 >> 1", ASTBinaryOperator::ShiftRight),
+      ("value as i32 < 9", ASTBinaryOperator::LessThan),
+      ("value as i32 > 9", ASTBinaryOperator::GreaterThan),
+      ("value as i32 <= 9", ASTBinaryOperator::LessThanOrEqual),
+      ("value as i32 >= 9", ASTBinaryOperator::GreaterThanOrEqual),
+      ("value as i32 == 9", ASTBinaryOperator::Equal),
+    ] {
+      let result = parse_expr(source);
+      let ASTExpression::Binary(binary) = get_expr(&result) else {
+        panic!("expected `{}` to parse as a binary expression", source);
+      };
+
+      assert_eq!(binary.operator, expected, "operator of `{}`", source);
+      assert!(
+        matches!(result.nodes.get(&binary.left), ASTNode::Expression(ASTExpression::Cast(_))),
+        "left operand of `{}` should be the cast",
+        source
+      );
+    }
+  }
+
   #[test]
   fn parses_template_without_interpolation() {
     let result = parse_expr("`hello`");

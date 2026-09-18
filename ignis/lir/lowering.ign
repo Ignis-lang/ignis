@@ -38,8 +38,12 @@ export namespace LirLowering {
     /// value that already carries its own scheduled drop, so spilling it
     /// would drop the same value twice.
     public loadAliasTempRaws: Vector<u32>;
-    /// Definitions whose local slot holds a pointer to the original place
-    /// rather than a copy: the by-mutable-reference captures of a thunk.
+    /// Definitions whose local slot holds a pointer to the storage the name
+    /// denotes, rather than the value itself: all reads, writes and `&`/`&mut`
+    /// on them go through that pointer. Two shapes land here — a by-mutable-
+    /// reference capture of a thunk, and a pattern binding destructured out of
+    /// a reference scrutinee, which names a place inside the referent and
+    /// must outlive the match.
     public byrefCaptureRaws: Vector<u32>;
     /// Locals initialized from a closure literal, so a scheduled drop of one
     /// tears the environment down instead of dropping the value struct.
@@ -2911,6 +2915,26 @@ export namespace LirLowering {
     return currentType;
   }
 
+  /// Peel a possibly-reference scrutinee down to the value the pattern tests against.
+  ///
+  /// `place` is the address of that value, present exactly when at least one reference
+  /// layer was peeled: the operand that was dereferenced last *is* the pointer to the
+  /// referent, and a by-reference binding needs it to name a place inside the referent
+  /// rather than the copy `value` holds.
+  record MaterializedPatternValue {
+    public value: Lir::Operand;
+    public place: Option<Lir::Operand>;
+  }
+
+  /// Manual clone for `Option<Lir::Operand>`, mirroring `Lir::copyOperand`: a place is
+  /// read again by every recursive pattern check that shares it.
+  function copyPlace(place: &Option<Lir::Operand>): Option<Lir::Operand> {
+    return match (place) {
+      Option::SOME(operand) -> Option::SOME(Lir::copyOperand(&operand)),
+      Option::NONE -> Option::NONE,
+    };
+  }
+
   function materializePatternValue(
     typeStore: &mut Analyzer::TypeStore,
     function_: &mut Lir::FunctionLir,
@@ -2918,9 +2942,10 @@ export namespace LirLowering {
     value: Lir::Operand,
     valueType: Analyzer::TypeId,
     span: SourceSpan,
-  ): Lir::Operand {
+  ): LirLowering::MaterializedPatternValue {
     let mut currentValue: Lir::Operand = value;
     let mut currentType: Analyzer::TypeId = valueType;
+    let mut place: Option<Lir::Operand> = Option::NONE;
     let mut guard: u64 = 0;
 
     while (guard < 16) {
@@ -2933,10 +2958,12 @@ export namespace LirLowering {
       }
 
       let Option::SOME(inner) = referent else {
-        return currentValue;
+        return LirLowering::MaterializedPatternValue { value: currentValue, place: place };
       };
 
       let loaded: Lir::TempId = LirLowering::freshTemp(function_, inner, span);
+
+      place = Option::SOME(Lir::copyOperand(&currentValue));
 
       LirLowering::pushInstr(function_, state, Lir::Instr::LoadPtr(Lir::InstrLoadPtr {
         dest: loaded,
@@ -2948,7 +2975,7 @@ export namespace LirLowering {
       guard += 1;
     }
 
-    return currentValue;
+    return LirLowering::MaterializedPatternValue { value: currentValue, place: place };
   }
 
   /// Payload types of `variantTag` for a scrutinee whose (dereferenced) type
@@ -3033,6 +3060,10 @@ export namespace LirLowering {
   /// boolean operand describing whether `value` matches `pattern`, binding
   /// pattern locals along the way. Tuple patterns keep the oracle's own
   /// empty-tuple simplification.
+  /// `place`, when present, is a pointer to the storage `value` was read out of, and is
+  /// what makes a binding under a reference scrutinee name that storage instead of a
+  /// copy of it. It is `Option::NONE` for an owned scrutinee, whose bindings take the
+  /// payload.
   function lowerPatternCheck(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3045,6 +3076,7 @@ export namespace LirLowering {
     pattern: &Hir::HirPattern,
     span: SourceSpan,
     borrowedAlias: boolean,
+    place: Option<Lir::Operand>,
   ): Lir::Operand {
     let boolType: Analyzer::TypeId = LirLowering::booleanTypeId(typeStore);
 
@@ -3058,7 +3090,7 @@ export namespace LirLowering {
       },
       Hir::HirPattern::Literal(literal) -> {
         let matchType: Analyzer::TypeId = LirLowering::materializedPatternType(typeStore, valueType);
-        let matchValue: Lir::Operand = LirLowering::materializePatternValue(
+        let materialized: LirLowering::MaterializedPatternValue = LirLowering::materializePatternValue(
           typeStore,
           function_,
           state,
@@ -3066,6 +3098,7 @@ export namespace LirLowering {
           valueType,
           span,
         );
+        let matchValue: Lir::Operand = materialized.value;
 
         let mut literalOperand: Lir::Operand = Lir::Operand::Const(Lir::ConstValue::Undef(matchType));
 
@@ -3085,7 +3118,7 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirPattern::Constant(defId) -> {
-        let matchValue: Lir::Operand = LirLowering::materializePatternValue(
+        let materialized: LirLowering::MaterializedPatternValue = LirLowering::materializePatternValue(
           typeStore,
           function_,
           state,
@@ -3093,6 +3126,7 @@ export namespace LirLowering {
           valueType,
           span,
         );
+        let matchValue: Lir::Operand = materialized.value;
 
         let mut constantOperand: Lir::Operand = Lir::Operand::GlobalRef(defId);
 
@@ -3114,6 +3148,23 @@ export namespace LirLowering {
         return Lir::Operand::Temp(dest);
       },
       Hir::HirPattern::Binding(defId) -> {
+        // A binding destructured out of a reference scrutinee names a place inside the
+        // referent, not a copy of it: the local holds the address of that place so
+        // `&binding` points into the referent and outlives the match, and every read,
+        // write and borrow of the name goes through the pointer (`byrefCaptureRaws`).
+        let mut byrefPlace: Option<Lir::Operand> = Option::NONE;
+
+        if (aliased && dropSchedules.isBorrowedPatternBinding(defId)) {
+          byrefPlace = LirLowering::copyPlace(&place);
+        }
+
+        let mut hasByrefPlace: boolean = false;
+
+        match (&byrefPlace) {
+          Option::SOME(_) -> { hasByrefPlace = true; },
+          Option::NONE -> {},
+        };
+
         let mut bindingSlot: Lir::LocalId = Id::fromRaw<Lir::LocalTag>(0);
         let mut haveSlot: boolean = false;
 
@@ -3133,10 +3184,21 @@ export namespace LirLowering {
 
           let bindingAliases: boolean = aliased && Borrowck::needsDropType(defStore, typeStore, valueType);
 
+          // The pointer itself is always spelled mutable: whether the *place* may be
+          // written is the scrutinee's mutability, which analysis has already decided,
+          // and a `const`-spelled slot here would only make `&mut binding` unassignable
+          // in the emitted C for a borrow analysis already accepted.
+          let mut localType: Analyzer::TypeId = valueType;
+
+          if (hasByrefPlace) {
+            let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+            localType = typeStoreRef.mutablePointer(valueType);
+          }
+
           let mut bindingFunctionRef: &mut Lir::FunctionLir = function_;
           bindingSlot = bindingFunctionRef.allocLocal(Lir::LocalData {
             defId: Option::SOME(defId),
-            ty: valueType,
+            ty: localType,
             mutable: bindingMutable,
             name: Option::NONE,
             borrowedAlias: bindingAliases,
@@ -3145,15 +3207,27 @@ export namespace LirLowering {
           LirLowering::registerLocal(state, defId, bindingSlot);
         }
 
-        LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
-          dest: bindingSlot,
-          value: Lir::copyOperand(value),
-        }));
+        match (byrefPlace) {
+          Option::SOME(placePtr) -> {
+            LirLowering::markByrefCapture(state, defId);
+
+            LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+              dest: bindingSlot,
+              value: placePtr,
+            }));
+          },
+          Option::NONE -> {
+            LirLowering::pushInstr(function_, state, Lir::Instr::Store(Lir::InstrStore {
+              dest: bindingSlot,
+              value: Lir::copyOperand(value),
+            }));
+          },
+        };
 
         return LirLowering::boolConstOperand(typeStore, function_, state, true, span);
       },
       Hir::HirPattern::Variant(variantPattern) -> {
-        let enumValue: Lir::Operand = LirLowering::materializePatternValue(
+        let materializedEnum: LirLowering::MaterializedPatternValue = LirLowering::materializePatternValue(
           typeStore,
           function_,
           state,
@@ -3161,6 +3235,19 @@ export namespace LirLowering {
           valueType,
           span,
         );
+        let enumValue: Lir::Operand = materializedEnum.value;
+
+        // The place a reference-scrutinee binding needs is the enum's own address:
+        // the peeled place from dereferencing the scrutinee when there was one, or the
+        // caller's own `place` when this pattern check was itself invoked with one (a
+        // nested destructure one level down that never needed its own dereference).
+        let mut enumPlace: Option<Lir::Operand> = materializedEnum.place;
+
+        match (&enumPlace) {
+          Option::SOME(_) -> {},
+          Option::NONE -> { enumPlace = LirLowering::copyPlace(&place); },
+        };
+
         let enumType: Analyzer::TypeId = LirLowering::materializedPatternType(typeStore, valueType);
 
         let Option::SOME(payloadTypes) = LirLowering::enumVariantPayloadTypes(
@@ -3216,6 +3303,27 @@ export namespace LirLowering {
               variantTag: variantPattern.variantTag,
               fieldIndex: runtimeFieldIndex,
             }));
+
+            // Taking the field's address is pointer arithmetic over the union and is
+            // safe on every arm, matched or not; only a binding under a matched arm
+            // ever loads through it.
+            let mut fieldPlace: Option<Lir::Operand> = Option::NONE;
+
+            if (let Option::SOME(enumPtr) = LirLowering::copyPlace(&enumPlace)) {
+              let mut typeStoreRef: &mut Analyzer::TypeStore = typeStore;
+              let fieldPtrType: Analyzer::TypeId = typeStoreRef.mutablePointer(*fieldType);
+              let fieldPtr: Lir::TempId = LirLowering::freshTemp(function_, fieldPtrType, span);
+
+              LirLowering::pushInstr(function_, state, Lir::Instr::EnumGetPayloadFieldPtr(Lir::InstrEnumGetPayloadFieldPtr {
+                dest: fieldPtr,
+                source: enumPtr,
+                variantTag: variantPattern.variantTag,
+                fieldIndex: runtimeFieldIndex,
+              }));
+
+              fieldPlace = Option::SOME(Lir::Operand::Temp(fieldPtr));
+            }
+
             runtimeFieldIndex += 1;
 
             let fieldOperand: Lir::Operand = Lir::Operand::Temp(fieldTemp);
@@ -3231,6 +3339,7 @@ export namespace LirLowering {
               argPattern,
               span,
               aliased,
+              fieldPlace,
             );
           }
 
@@ -3271,6 +3380,7 @@ export namespace LirLowering {
             alternative,
             span,
             aliased,
+            LirLowering::copyPlace(&place),
           );
 
           let orTemp: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
@@ -3374,6 +3484,7 @@ export namespace LirLowering {
             elementPattern,
             span,
             borrowedAlias,
+            Option::NONE,
           );
 
           let andTemp: Lir::TempId = LirLowering::freshTemp(function_, boolType, span);
@@ -3847,6 +3958,7 @@ export namespace LirLowering {
           &arm.pattern,
           nodeSpan,
           false,
+          Option::NONE,
         );
       }
 
@@ -3996,6 +4108,7 @@ export namespace LirLowering {
       &letElseNode.pattern,
       nodeSpan,
       false,
+      Option::NONE,
     );
 
     let continueBlock: Lir::BlockId = LirLowering::createBlock(function_, "let_else_ok");

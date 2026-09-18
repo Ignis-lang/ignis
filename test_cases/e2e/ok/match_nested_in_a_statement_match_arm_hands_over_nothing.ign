@@ -1,0 +1,36 @@
+// e2e: std
+//
+// The enclosing match is in statement position, so its value is discarded and an arm
+// naming an owning parameter hands it to nobody. A match nested in one of those arms
+// occupies the same discarded result position and hands nothing over either.
+//
+// Deciding that per match node made the inner one "used": it consumed the parameter its
+// taken arm named, the outer match drained that move into its own frame and compensated
+// its other arms, and on the inner path the value reached a discarded result with no
+// drop left anywhere.
+import String from "std::string";
+
+enum Tri {
+  A,
+  B,
+}
+
+function drain(outer: Tri, inner: Tri, one: String, two: String, three: String): void {
+  match (outer) {
+    Tri::A -> match (inner) {
+      Tri::A -> one,
+      Tri::B -> two,
+    },
+    Tri::B -> three,
+  };
+
+  return;
+}
+
+function main(): i32 {
+  drain(Tri::A, Tri::A, String::create("one"), String::create("two"), String::create("three"));
+  drain(Tri::A, Tri::B, String::create("one"), String::create("two"), String::create("three"));
+  drain(Tri::B, Tri::A, String::create("one"), String::create("two"), String::create("three"));
+
+  return 0;
+}

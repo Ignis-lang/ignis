@@ -101,6 +101,14 @@ export namespace Analyzer {
       public localIndexes: Vector<u32>;
       public localTypeIds: Vector<Analyzer::TypeId>;
       public localMutableFlags: Vector<boolean>;
+      /// Parallel to `localMutableFlags`, but never fed to `markBindingDeclared`: a
+      /// binding destructured under a `&mut` scrutinee names a place the referent
+      /// already granted write access to, so `&mut binding` is as legal as
+      /// `&mut referent.field` even though nobody wrote `mut`. Tracked here rather than
+      /// folded into `localMutableFlags` because that vector also feeds the unused-mut
+      /// lint, and every one of these bindings would then look like an unused `mut` with
+      /// no keyword to delete.
+      public localPlaceMutableFlags: Vector<boolean>;
       /// Parallel to `localTypeIds`: true while the binding is waiting for its
       /// first assignment to decide its type.
       public localPendingFlags: Vector<boolean>;
@@ -139,7 +147,16 @@ export namespace Analyzer {
 
     record LocalBindingInfo {
       public typeId: Analyzer::TypeId;
+      /// Whether this binding may be borrowed mutably or its own `&mut` used —
+      /// `true` for a declared `mut` binding, and also for a place-mutable
+      /// binding (destructured under `&mut`) even though it declared no `mut`.
       public mutable: boolean;
+      /// Whether this binding is a by-reference pattern binding (destructured
+      /// under `&mut`): reading and borrowing it are permissions the scrutinee
+      /// already granted, but replacing the value at that place is not one of
+      /// them, so an assignment target rooted here is rejected even though
+      /// `mutable` reads true.
+      public placeMutable: boolean;
       /// True while the binding was declared without an annotation and without
       /// an initializer, so `typeId` is a placeholder the first assignment
       /// replaces. Reading such a binding before that assignment is an error.
@@ -965,6 +982,7 @@ export namespace Analyzer {
         stateRef.localIndexes.pop();
         stateRef.localTypeIds.pop();
         stateRef.localMutableFlags.pop();
+        stateRef.localPlaceMutableFlags.pop();
         stateRef.localPendingFlags.pop();
       }
     }
@@ -2032,9 +2050,22 @@ export namespace Analyzer {
             pendingFlag = *pending;
           }
 
+          // A place-mutable binding (destructured under `&mut`) is reported as
+          // mutable to every caller of `lookupLocalBinding`, so `&mut binding` is
+          // accepted exactly as `&mut referent.field` would be — without ever
+          // touching `declaredBindingMutable`, which the unused-mut lint reads
+          // instead of this record.
+          let mut effectiveMutable: boolean = *mutable;
+          let mut isPlaceMutable: boolean = false;
+          if (let Option::SOME(placeMutable) = state.localPlaceMutableFlags.get(index)) {
+            isPlaceMutable = *placeMutable;
+            effectiveMutable = effectiveMutable || *placeMutable;
+          }
+
           let info: Analyzer::Typecheck::LocalBindingInfo = Analyzer::Typecheck::LocalBindingInfo {
             typeId: *typeId,
-            mutable: *mutable,
+            mutable: effectiveMutable,
+            placeMutable: isPlaceMutable,
             pending: pendingFlag,
           };
 
@@ -2272,15 +2303,24 @@ export namespace Analyzer {
         stateRef.localIndexes.pop();
         stateRef.localTypeIds.pop();
         stateRef.localMutableFlags.pop();
+        stateRef.localPlaceMutableFlags.pop();
       }
     }
 
+    /// `placeMutable` says the pattern is destructuring through a `&mut` scrutinee, so
+    /// the binding names a place the caller may write. It is not the binding's own
+    /// declared mutability (`mutable`, from a `let mut` or similar) — nobody wrote
+    /// `mut` — which is why it lands in `localPlaceMutableFlags` instead of being folded
+    /// into `mutable` before it reaches `markBindingDeclared`: doing that would make
+    /// every one of these bindings look like an unused `mut` to the lint, with no
+    /// keyword to delete.
     function pushPatternLocal(
       state: &mut Analyzer::Typecheck::TypecheckState,
       resolvedBodies: &Analyzer::ResolverBodies::ResolverBodiesOutput,
       patternId: Ast::PatternId,
       typeId: Analyzer::TypeId,
       mutable: boolean,
+      placeMutable: boolean,
       span: SourceSpan,
     ): boolean {
       let localOpt: Option<Analyzer::ResolverBodies::LocalId> = Analyzer::Typecheck::lookupPatternLocal(resolvedBodies, patternId);
@@ -2297,6 +2337,7 @@ export namespace Analyzer {
       stateRef.localIndexes.push(localId.index);
       stateRef.localTypeIds.push(typeId);
       stateRef.localMutableFlags.push(mutable);
+      stateRef.localPlaceMutableFlags.push(placeMutable);
       stateRef.localPendingFlags.push(false);
       Analyzer::Typecheck::recordBindingType(state, patternId.raw(), typeId);
       return true;
@@ -2314,7 +2355,7 @@ export namespace Analyzer {
       placeholder: Analyzer::TypeId,
       span: SourceSpan,
     ): boolean {
-      if (!Analyzer::Typecheck::pushPatternLocal(state, resolvedBodies, patternId, placeholder, true, span)) {
+      if (!Analyzer::Typecheck::pushPatternLocal(state, resolvedBodies, patternId, placeholder, true, false, span)) {
         return false;
       }
 
@@ -3133,6 +3174,7 @@ export namespace Analyzer {
       pattern: &Ast::Pattern::Path,
       typeId: Analyzer::TypeId,
       mutable: boolean,
+      placeMutable: boolean,
       span: SourceSpan,
     ): boolean {
       let expectedRecordDefIdOpt: Option<Analyzer::DefinitionId> = Analyzer::Typecheck::requireNonGenericRecordDefId(
@@ -3204,7 +3246,7 @@ export namespace Analyzer {
           return false;
         };
 
-        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *argPatternId, fieldType, mutable, span)) {
+        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *argPatternId, fieldType, mutable, placeMutable, span)) {
           return false;
         }
 
@@ -3234,8 +3276,21 @@ export namespace Analyzer {
       variantDefId: Analyzer::DefinitionId,
       typeId: Analyzer::TypeId,
       mutable: boolean,
+      placeMutable: boolean,
       span: SourceSpan,
     ): boolean {
+      // A `&mut` scrutinee hands its payloads out as places the referent owns, and that
+      // write permission carries down through this destructure to every payload
+      // binding, exactly like `payload_place_mutable` in the reference analyzer.
+      let mut payloadPlaceMutable: boolean = placeMutable;
+      if (let Option::SOME(scrutineeTypeNode) = typeStore.get(typeId)) {
+        if (let Analyzer::Type::Reference(referenceType) = scrutineeTypeNode) {
+          if (referenceType.mutable) {
+            payloadPlaceMutable = true;
+          }
+        }
+      }
+
       // Matching through a reference destructures the referent: `match (src)`
       // on a `&Source` names the same variants as on a `Source`. The payload
       // sub-patterns still bind the declared types, so handing one on by value
@@ -3304,7 +3359,7 @@ export namespace Analyzer {
           boundType = typeStoreRef.substitute(boundType, &enumOwner.typeParamSymbols, &enumOwner.typeArguments);
         }
 
-        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *argPatternId, boundType, mutable, span)) {
+        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *argPatternId, boundType, mutable, payloadPlaceMutable, span)) {
           return false;
         }
 
@@ -3436,6 +3491,7 @@ export namespace Analyzer {
       pattern: &Ast::Pattern::Tuple,
       typeId: Analyzer::TypeId,
       mutable: boolean,
+      placeMutable: boolean,
     ): boolean {
       let resolved: Analyzer::Typecheck::AliasResolutionResult = Analyzer::Typecheck::resolveAliasChainChecked(defStore, typeStore, typeId);
 
@@ -3483,7 +3539,7 @@ export namespace Analyzer {
           continue;
         };
 
-        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *elementPatternId, *elementType, mutable, pattern.span)) {
+        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *elementPatternId, *elementType, mutable, placeMutable, pattern.span)) {
           return false;
         }
 
@@ -3513,6 +3569,7 @@ export namespace Analyzer {
       pattern: &Ast::Pattern::Or,
       typeId: Analyzer::TypeId,
       mutable: boolean,
+      placeMutable: boolean,
     ): boolean {
       let mut accepted: boolean = true;
 
@@ -3530,7 +3587,7 @@ export namespace Analyzer {
           continue;
         };
 
-        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *alternativeId, typeId, mutable, pattern.span)) {
+        if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, *alternativeId, typeId, mutable, placeMutable, pattern.span)) {
           accepted = false;
         }
 
@@ -3540,6 +3597,9 @@ export namespace Analyzer {
       return accepted;
     }
 
+    /// `placeMutable` says this pattern is destructuring through a `&mut` scrutinee, so
+    /// the bindings under it name places the caller may write. It is not the binding's
+    /// own declared mutability (`mutable`) — see `pushPatternLocal`.
     function collectPatternBindings(
       state: &mut Analyzer::Typecheck::TypecheckState,
       defStore: &mut Analyzer::DefinitionStore,
@@ -3550,6 +3610,7 @@ export namespace Analyzer {
       patternId: Ast::PatternId,
       typeId: Analyzer::TypeId,
       mutable: boolean,
+      placeMutable: boolean,
       span: SourceSpan,
     ): boolean {
       let Option::SOME(pattern) = module.patterns.get(patternId) else {
@@ -3558,7 +3619,7 @@ export namespace Analyzer {
 
       match (pattern) {
         Ast::Pattern::Node::Binding(_) -> {
-          return Analyzer::Typecheck::pushPatternLocal(state, resolvedBodies, patternId, typeId, mutable, span);
+          return Analyzer::Typecheck::pushPatternLocal(state, resolvedBodies, patternId, typeId, mutable, placeMutable, span);
         },
         Ast::Pattern::Node::Wildcard(_) -> {
           return true;
@@ -3575,7 +3636,7 @@ export namespace Analyzer {
           }
 
           if (pathBindsLocal) {
-            return Analyzer::Typecheck::pushPatternLocal(state, resolvedBodies, patternId, typeId, mutable, span);
+            return Analyzer::Typecheck::pushPatternLocal(state, resolvedBodies, patternId, typeId, mutable, placeMutable, span);
           }
 
           if (let Option::SOME(Analyzer::ResolverBodies::ResolvedRef::Definition(defId)) = patternRefOpt) {
@@ -3598,6 +3659,7 @@ export namespace Analyzer {
                   defId,
                   typeId,
                   mutable,
+                  placeMutable,
                   span,
                 );
               }
@@ -3615,6 +3677,7 @@ export namespace Analyzer {
             &path,
             typeId,
             mutable,
+            placeMutable,
             span,
           );
         },
@@ -3640,6 +3703,7 @@ export namespace Analyzer {
             &tuple,
             typeId,
             mutable,
+            placeMutable,
           );
         },
         Ast::Pattern::Node::Or(orPattern) -> {
@@ -3653,6 +3717,7 @@ export namespace Analyzer {
             &orPattern,
             typeId,
             mutable,
+            placeMutable,
           );
         },
       };
@@ -3673,7 +3738,11 @@ export namespace Analyzer {
       span: SourceSpan,
     ): void {
       let mark: u64 = state.localPatternIds.length();
-      if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, patternId, typeId, mutable, span)) {
+
+      // The top-level scrutinee is never itself a destructured-out place: `placeMutable`
+      // only turns on when `collectPatternBindings` descends into an enum-variant
+      // payload reached through a `&mut` scrutinee.
+      if (!Analyzer::Typecheck::collectPatternBindings(state, defStore, typeStore, symbols, resolvedBodies, module, patternId, typeId, mutable, false, span)) {
         Analyzer::Typecheck::truncateLocalBindings(state, mark);
       }
     }

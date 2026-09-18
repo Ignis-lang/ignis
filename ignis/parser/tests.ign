@@ -335,6 +335,77 @@ function parserRejectsUnsupportedIntersectionTypeSyntaxWithTargetedDiagnostic():
   };
 }
 
+/// A `&` or `|` after a cast's type belongs to the surrounding expression, not to the
+/// type. Reaching past the type to claim it reports a compound type nobody wrote and
+/// swallows the operand behind it — which is what the host's type parser, stopping at
+/// the end of the type, never does.
+@test
+function parserKeepsABitwiseOperatorAfterACastTypeOutOfTheType(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_cast_type_followed_by_bitwise_operator.ign",
+    "function recovered(): i32 { return value as i32 & 1 | 2 ^ 3 >> 4; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing function root after cast followed by a bitwise operator"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> Test::assertEq<str>(functionItem.name.toStr(), "recovered"),
+    _ -> @panic("expected function item after cast followed by a bitwise operator"),
+  };
+}
+
+/// A comparison after an `as` cast's type is the surrounding expression's, not the
+/// start of a type-argument list. The host never looks for type arguments after a
+/// primitive, so neither may this parser: `value as i32 < 9` is a comparison.
+@test
+function parserKeepsAComparisonAfterACastTypeOutOfTheType(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_cast_type_followed_by_comparison.ign",
+    "function recovered(): boolean { return value as i32 < 9 || value as i32 >= 2; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+
+  let functionId: Ast::ItemId = match (module.roots.get(0)) {
+    Option::SOME(value) -> *value,
+    Option::NONE -> @panic("missing function root after cast followed by a comparison"),
+  };
+
+  match (expectItem(&module, functionId)) {
+    Ast::Item::Node::Function(functionItem) -> Test::assertEq<str>(functionItem.name.toStr(), "recovered"),
+    _ -> @panic("expected function item after cast followed by a comparison"),
+  };
+}
+
+/// An identifier path still takes type arguments: the split is primitive versus path,
+/// and narrowing it any further would stop `value as Option<i32>` from parsing.
+@test
+function parserStillReadsTypeArgumentsAfterAnIdentifierCastType(): void {
+  let source: SourceFile = SourceFile::create(
+    "fixtures/parser_cast_type_with_type_arguments.ign",
+    "function recovered(): void { let held = value as Option<i32>; }"
+  );
+  let mut module: Ast::Module = Ast::Module::init();
+  let mut diagnostics = DiagnosticBag::init();
+  Parser::parseInto(&source, &mut module, &mut diagnostics);
+
+  Test::assertEq<u64>(diagnostics.length(), 0);
+  Test::assertEq<u64>(module.roots.length(), 1);
+}
+
 @test
 function parserRejectsTupleTypeSyntaxWithTargetedDiagnostic(): void {
   let source: SourceFile = SourceFile::create(

@@ -1119,7 +1119,7 @@ impl<'a> Analyzer<'a> {
 
         let target_node = self.ast.get(expr);
         if let ASTNode::Expression(target_expr) = target_node
-          && !self.is_mutable_expression(target_expr)
+          && !self.is_assignable_expression(target_expr)
         {
           let var_name = self.get_var_name_from_expr(target_expr);
           self.add_diagnostic(
@@ -1144,7 +1144,7 @@ impl<'a> Analyzer<'a> {
 
         let target_node = self.ast.get(expr);
         if let ASTNode::Expression(target_expr) = target_node
-          && !self.is_mutable_expression(target_expr)
+          && !self.is_assignable_expression(target_expr)
         {
           let var_name = self.get_var_name_from_expr(target_expr);
           self.add_diagnostic(
@@ -1540,6 +1540,21 @@ impl<'a> Analyzer<'a> {
     expected_type: &TypeId,
     mutable: bool,
   ) -> bool {
+    self.typecheck_pattern_in_place(pattern, expected_type, mutable, false)
+  }
+
+  /// `place_mutable` says the pattern is destructuring through a `&mut` scrutinee, so the
+  /// bindings under it name places the caller may write. It is not the binding's own
+  /// mutability — nobody wrote `mut` — which is why it is tracked beside the definition
+  /// instead of on it: writing it onto the definition would make every such binding look
+  /// like an unused `mut` the author could delete.
+  fn typecheck_pattern_in_place(
+    &mut self,
+    pattern: &ASTPattern,
+    expected_type: &TypeId,
+    mutable: bool,
+    place_mutable: bool,
+  ) -> bool {
     match pattern {
       ASTPattern::Wildcard { .. } => true,
       ASTPattern::Literal { value, span } => {
@@ -1627,10 +1642,15 @@ impl<'a> Analyzer<'a> {
                 );
               }
 
+              // A `&mut` scrutinee hands its payloads out as places the referent owns,
+              // and that write permission carries down through every nested destructure.
+              let payload_place_mutable =
+                place_mutable || matches!(self.types.get(expected_type), Type::Reference { mutable: true, .. });
+
               if let Some(pattern_args) = args {
                 for (i, arg_pattern) in pattern_args.iter().enumerate() {
                   if let Some(payload_ty) = expected_payload.get(i) {
-                    self.typecheck_pattern(arg_pattern, payload_ty, mutable);
+                    self.typecheck_pattern_in_place(arg_pattern, payload_ty, mutable, payload_place_mutable);
                   }
                 }
               }
@@ -1657,7 +1677,10 @@ impl<'a> Analyzer<'a> {
             return true;
           }
 
-          self.define_pattern_binding_if_absent(*name, span, *expected_type, mutable);
+          let binding = self.define_pattern_binding_if_absent(*name, span, *expected_type, mutable);
+          if place_mutable && let Some(def_id) = binding {
+            self.mutable_pattern_bindings.insert(def_id);
+          }
           return true;
         }
 
@@ -1701,7 +1724,7 @@ impl<'a> Analyzer<'a> {
           }
 
           for (elem_pattern, elem_type) in elements.iter().zip(tuple_elements.iter()) {
-            self.typecheck_pattern(elem_pattern, elem_type, mutable);
+            self.typecheck_pattern_in_place(elem_pattern, elem_type, mutable, place_mutable);
           }
         } else {
           self.add_diagnostic(
@@ -1720,7 +1743,7 @@ impl<'a> Analyzer<'a> {
           self.add_diagnostic(DiagnosticMessage::OrPatternBindingsDisallowed { span: span.clone() }.report());
         }
         for p in patterns {
-          self.typecheck_pattern(p, expected_type, mutable);
+          self.typecheck_pattern_in_place(p, expected_type, mutable, place_mutable);
         }
         patterns.iter().all(|p| matches!(p, ASTPattern::Wildcard { .. }))
       },
@@ -1908,7 +1931,7 @@ impl<'a> Analyzer<'a> {
     span: &Span,
     type_id: TypeId,
     mutable: bool,
-  ) {
+  ) -> Option<DefinitionId> {
     let current_scope = *self.scopes.current();
 
     if let Some(def_id) = self
@@ -1926,7 +1949,7 @@ impl<'a> Analyzer<'a> {
         var_def.type_id = type_id;
         var_def.mutable = mutable;
       }
-      return;
+      return Some(def_id);
     }
 
     let existing_def = self.defs.iter().find_map(|(def_id, def)| {
@@ -1947,7 +1970,7 @@ impl<'a> Analyzer<'a> {
       }
 
       let _ = self.scopes.define(&name, &def_id, false);
-      return;
+      return Some(def_id);
     }
 
     let var_def = VariableDefinition { type_id, mutable };
@@ -1977,6 +2000,8 @@ impl<'a> Analyzer<'a> {
         .report(),
       );
     }
+
+    Some(def_id)
   }
 
   fn typecheck_type_alias(
@@ -9395,7 +9420,7 @@ impl<'a> Analyzer<'a> {
 
     let target_node = self.ast.get(&assign.target);
     if let ASTNode::Expression(target_expr) = target_node
-      && !self.is_mutable_expression(target_expr)
+      && !self.is_assignable_expression(target_expr)
       && !self.is_mutable_reference_assignment_target(&assign.target, target_type)
     {
       let var_name = self.get_var_name_from_expr(target_expr);
@@ -10047,6 +10072,53 @@ impl<'a> Analyzer<'a> {
     }
   }
 
+  /// Whether an assignment may replace what this expression names.
+  ///
+  /// Narrower than [`Self::is_mutable_expression`], which also answers "may this be
+  /// borrowed mutably". A by-reference pattern binding names a place inside the
+  /// referent: reading it and borrowing it are permissions the scrutinee already
+  /// granted, but replacing the value at that place is not one of them — the old value
+  /// there would have to be dropped through the place, and no drop schedule describes
+  /// that. Assignment through such a name is rejected rather than silently overwritten,
+  /// which is also what the compiler did before these bindings became places.
+  fn is_assignable_expression(
+    &self,
+    expr: &ASTExpression,
+  ) -> bool {
+    if self.assignment_root_is_place_binding(expr) {
+      return false;
+    }
+
+    self.is_mutable_expression(expr)
+  }
+
+  /// Whether the place this expression writes bottoms out in a by-reference binding.
+  fn assignment_root_is_place_binding(
+    &self,
+    expr: &ASTExpression,
+  ) -> bool {
+    match expr {
+      ASTExpression::Variable(var) => self
+        .scopes
+        .lookup_def(&var.name)
+        .is_some_and(|def_id| self.mutable_pattern_bindings.contains(def_id)),
+      ASTExpression::MemberAccess(access) => self.assignment_root_is_place_binding_of(&access.object),
+      ASTExpression::VectorAccess(access) => self.assignment_root_is_place_binding_of(&access.name),
+      ASTExpression::Dereference(deref) => self.assignment_root_is_place_binding_of(&deref.inner),
+      _ => false,
+    }
+  }
+
+  fn assignment_root_is_place_binding_of(
+    &self,
+    node_id: &NodeId,
+  ) -> bool {
+    match self.ast.get(node_id) {
+      ASTNode::Expression(expr) => self.assignment_root_is_place_binding(expr),
+      _ => false,
+    }
+  }
+
   fn is_mutable_expression(
     &self,
     expr: &ASTExpression,
@@ -10054,6 +10126,10 @@ impl<'a> Analyzer<'a> {
     match expr {
       ASTExpression::Variable(var) => {
         if let Some(def_id) = self.scopes.lookup_def(&var.name) {
+          if self.mutable_pattern_bindings.contains(def_id) {
+            return true;
+          }
+
           match &self.defs.get(def_id).kind {
             DefinitionKind::Variable(var_def) => var_def.mutable,
             DefinitionKind::Parameter(param_def) => param_def.mutable,

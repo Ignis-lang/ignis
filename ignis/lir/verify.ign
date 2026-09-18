@@ -2,6 +2,7 @@ import Vector from "std::vector";
 
 import Id from "@compiler::ids";
 import Analyzer from "@compiler::analyzer";
+import Borrowck from "@compiler::analyzer::borrowck";
 import Lir from "./mod";
 
 /// LIR well-formedness verification, mirroring `ignis_lir::verify`: every
@@ -157,6 +158,8 @@ export namespace LirVerify {
 
   function verifyInstr(
     state: &mut LirVerify::VerifyState,
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
     function_: &Lir::FunctionLir,
     functionLabel: u32,
     blockLabel: &String,
@@ -269,6 +272,16 @@ export namespace LirVerify {
       Lir::Instr::PanicMessage(_) -> {},
       Lir::Instr::Drop(node) -> {
         LirVerify::checkLocal(state, function_, functionLabel, blockLabel, node.local);
+
+        // A drop of a slot that owns nothing is a schedule and a lowering disagreeing
+        // about what the slot holds — a pointer alias given the payload's drop, say.
+        // The host's verifier catches it; this one has to agree or the two compilers
+        // accept different programs.
+        if (let Option::SOME(localData) = function_.locals.get(node.local.raw() as u64)) {
+          if (!Borrowck::needsDropType(defStore, typeStore, localData.ty)) {
+            LirVerify::report(state, functionLabel, blockLabel, "drop of a non-droppable local");
+          }
+        }
       },
       Lir::Instr::GetFieldPtr(node) -> {
         LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.base);
@@ -294,6 +307,10 @@ export namespace LirVerify {
         LirVerify::markDefined(state, node.dest);
       },
       Lir::Instr::EnumGetPayloadField(node) -> {
+        LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.source);
+        LirVerify::markDefined(state, node.dest);
+      },
+      Lir::Instr::EnumGetPayloadFieldPtr(node) -> {
         LirVerify::checkOperand(state, function_, functionLabel, blockLabel, &node.source);
         LirVerify::markDefined(state, node.dest);
       },
@@ -416,7 +433,7 @@ export namespace LirVerify {
 
       while (instrIndex < block.instructions.length()) {
         if (let Option::SOME(instr) = block.instructions.get(instrIndex)) {
-          LirVerify::verifyInstr(state, function_, functionLabel, &block.label, instr);
+          LirVerify::verifyInstr(state, defStore, typeStore, function_, functionLabel, &block.label, instr);
         }
 
         instrIndex += 1;

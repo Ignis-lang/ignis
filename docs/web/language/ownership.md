@@ -130,6 +130,67 @@ function main(): i32 {
 }
 ```
 
+## Patterns and matching
+
+What a destructuring pattern binds depends on what you matched, not on what the payload
+is:
+
+| Scrutinee | Binding mode | What the binding is | Who frees the payload |
+| --- | --- | --- | --- |
+| owned (`T`) | by value | the payload, moved out of the scrutinee | the binding, or whatever it is moved into |
+| reference (`&T` / `&mut T`) | by reference | a place inside the referent | the referent's owner; the match owes nothing |
+
+Matching an owned value moves its payload into the binding, and the binding is what frees
+it. Matching a reference does not move anything: the binding names storage the referent
+still owns, so a reference taken from it points into the referent and stays valid after
+the match ends.
+
+```ignis
+enum Slot {
+    FILLED(String),
+    EMPTY,
+}
+
+function borrowed(slot: &Slot): Option<&String> {
+    // `payload` names the String inside `slot`, so `&payload` outlives the match.
+    return match (slot) {
+        Slot::FILLED(payload) -> Option::SOME(&payload),
+        Slot::EMPTY -> Option::NONE,
+    };
+}
+
+function owned(slot: Slot): String {
+    // `payload` *is* the String, moved out of `slot`.
+    return match (slot) {
+        Slot::FILLED(payload) -> payload,
+        Slot::EMPTY -> String::create(""),
+    };
+}
+```
+
+A `&mut` scrutinee hands out places you may write through, the same way `&mut record.field`
+does, and that permission carries down through nested patterns:
+
+```ignis
+match (slot.asMut()) {
+    Slot::FILLED(payload) -> {
+        (*payload).pushStr("!");
+    },
+    Slot::EMPTY -> {},
+};
+```
+
+Assigning through the binding is not allowed. `payload = other` is rejected, and so is
+every write reached from it — a field (`payload.count = 1`), an element
+(`payload[0] = 1`), a dereference (`*payload = other`). The name stands for a place the
+referent owns, and replacing what lives there is the referent's decision, not the
+match's. Calling a mutating method through an explicit deref, as above, is unaffected:
+that reads the place and mutates what is already there rather than overwriting it.
+
+Payloads that need no drop (an `i32`, say) are still copied into the binding rather than
+named in place. Reading one is the same either way; taking `&binding` gives you the
+copy's address, not an address inside the referent.
+
 ## Across the FFI boundary
 
 An extern function does not take ownership of what you hand it, unless the declaration says so with

@@ -1,6 +1,6 @@
 //! Drop scheduling: schedules that tell LIR lowering when to emit Drop instructions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ignis_type::{definition::DefinitionId, span::Span};
 
@@ -102,6 +102,20 @@ pub struct DropSchedules {
   /// Where each binding was marked moved. Debug metadata only: nothing in lowering
   /// reads it, and it is deliberately excluded from [`DropSchedules::is_empty`].
   pub moves: HashMap<DefinitionId, Vec<MoveSite>>,
+
+  /// Pattern bindings destructured out of a borrowed scrutinee, which name storage the
+  /// match never owned and therefore appear in no drop schedule above.
+  ///
+  /// Ownership decides binding mode and lowering implements it: a binding listed here is
+  /// lowered as a place inside the referent — its local holds the payload's address — so
+  /// a reference taken from it points into the referent and outlives the match. Deciding
+  /// it in lowering instead would let the two disagree, and a binding lowered as a
+  /// pointer while ownership still schedules its drop frees a pointer.
+  ///
+  /// Not every listed binding gets an address: lowering also needs the scrutinee's own
+  /// address, which it has only when the scrutinee is reference-typed. The rest stay
+  /// by-value copies, exactly as before.
+  pub borrowed_pattern_bindings: HashSet<DefinitionId>,
 }
 
 impl DropSchedules {
