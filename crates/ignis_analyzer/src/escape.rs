@@ -58,6 +58,11 @@ use ignis_type::{
 /// only bound to a local and called locally, or when it is passed to a
 /// `@noescape` parameter.
 ///
+/// A closure with no captures is reported here like any other, but it has no
+/// environment to place anywhere: `populate_closure_captures` keeps its
+/// `escapes` flag false so that a plain function used as a function value,
+/// which lowers to a zero-capture closure, allocates nothing.
+///
 /// Returns the set of closure HIRIds that escape.
 pub fn analyze_escapes(
   hir: &HIR,

@@ -1660,6 +1660,16 @@ export namespace Capture {
         continue;
       }
 
+      // A closure with no captures has no environment: there is nothing to
+      // heap-allocate and nothing to free, so it keeps a stack environment
+      // however far its value travels. This is what keeps a plain function
+      // used as a function value — which lowers to a zero-capture closure —
+      // from allocating. Mirrors `heap_env_closures` in the oracle.
+      if (escapeCaptures.length() == 0) {
+        markEscapeIndex += 1;
+        continue;
+      }
+
       let mut escapeRef: &mut Hir::HirStore = hir;
       let _ = escapeRef.nodes.set(escapingId.raw() as u64, Hir::HirNode {
         kind: Hir::HirKind::Closure(Hir::HirClosure {

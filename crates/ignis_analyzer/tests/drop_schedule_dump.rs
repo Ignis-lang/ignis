@@ -484,3 +484,35 @@ function main at test.ign:5:22
 "
   );
 }
+
+#[test]
+fn returning_a_closure_local_cancels_its_drop() {
+  // The environment goes to the caller, so `makeAdder` must not free it on the
+  // way out: `add` is transferred, not dropped.
+  assert_eq!(
+    dump(
+      "function makeAdder(base: i32): (i32) -> i32 {
+  let add = (x: i32): i32 -> x + base;
+  return add;
+}
+
+function main(): i32 {
+  let f = makeAdder(40);
+  return f(2);
+}
+"
+    ),
+    "drop-schedule v1
+function makeAdder at test.ign:1:45
+  <no owned values>
+function __closure_drop_0 at test.ign:2:13
+  <no owned values>
+function __closure_thunk_0 at test.ign:2:13
+  <no owned values>
+function main at test.ign:6:22
+  value f kind=local declared at test.ign:7:3
+    drop at test.ign:6:22 reason=scope-end
+    drop at test.ign:8:3 reason=return
+"
+  );
+}

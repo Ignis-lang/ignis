@@ -237,3 +237,38 @@ function makeChain(base: i32): (i32) -> i32 {
     vec![true, true]
   );
 }
+
+#[test]
+fn a_returned_closure_with_no_captures_keeps_its_stack_environment() {
+  // Nothing to place anywhere: an empty environment is neither heap-allocated
+  // nor freed, however far the closure value travels.
+  assert_eq!(
+    escape_flags(
+      r#"
+function makeConst(): (i32) -> i32 {
+    return (x: i32): i32 -> x + 1;
+}
+"#
+    ),
+    vec![false]
+  );
+}
+
+#[test]
+fn a_function_used_as_a_returned_value_keeps_its_stack_environment() {
+  // A plain function used as a function value lowers to a zero-capture closure.
+  assert_eq!(
+    escape_flags(
+      r#"
+function inc(x: i32): i32 {
+    return x + 1;
+}
+
+function makeIncrementer(): (i32) -> i32 {
+    return inc;
+}
+"#
+    ),
+    vec![false]
+  );
+}

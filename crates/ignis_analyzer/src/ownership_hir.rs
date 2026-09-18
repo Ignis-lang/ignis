@@ -175,6 +175,16 @@ pub struct HirOwnershipChecker<'a> {
   /// `check_break` reads to pay that drop, and it holds one frame per enclosing loop so a
   /// `break` out of an inner loop pays only for its own condition.
   loop_condition_scrutinees: Vec<Vec<DefinitionId>>,
+
+  /// Maps every binding that names a heap closure environment to the binding
+  /// that owns it. An owner maps to itself; `let alias = owner` adds the alias.
+  ///
+  /// A closure value is copied bitwise, so an alias does not take the
+  /// environment over — but returning either one hands it to the caller, and the
+  /// owner's drop has to be cancelled or the caller receives a freed
+  /// environment. The type itself needs no drop, so `get_moved_var` does not see
+  /// these bindings and the ordinary move path never fires for them.
+  closure_env_owner_of: HashMap<DefinitionId, DefinitionId>,
 }
 
 impl<'a> HirOwnershipChecker<'a> {
@@ -208,6 +218,7 @@ impl<'a> HirOwnershipChecker<'a> {
       loop_condition_scrutinees: Vec::new(),
       statement_position_nodes: Self::collect_statement_position_nodes(hir),
       arm_result_move_frames: Vec::new(),
+      closure_env_owner_of: HashMap::new(),
     }
   }
 
@@ -805,6 +816,12 @@ impl<'a> HirOwnershipChecker<'a> {
         let owns_closure_env =
           value.is_some_and(|v| ignis_hir::binding_owns_closure_env(self.hir, v, var_ty, self.types, self.defs));
 
+        if owns_closure_env {
+          self.closure_env_owner_of.insert(name, name);
+        } else if let Some(owner) = value.and_then(|v| self.closure_env_owner(v)) {
+          self.closure_env_owner_of.insert(name, owner);
+        }
+
         if self.types.needs_drop_with_defs(var_ty, self.defs) || owns_closure_env {
           self.declare_owned(name);
         }
@@ -1378,6 +1395,14 @@ impl<'a> HirOwnershipChecker<'a> {
         if self.types.needs_drop_with_defs(ty, self.defs) {
           self.states.insert(def_id, OwnershipState::Returned);
         }
+      }
+
+      // Returning a closure value hands its environment to the caller, whether
+      // the returned binding is the one that owns it or an alias of it. The
+      // owner's drop is cancelled, or the caller would receive a freed
+      // environment.
+      if let Some(owner) = self.closure_env_owner(val_id) {
+        self.states.insert(owner, OwnershipState::Returned);
       }
 
       self.reject_move_out_of_borrow(val_id);
@@ -2847,6 +2872,18 @@ impl<'a> HirOwnershipChecker<'a> {
           None
         }
       },
+      _ => None,
+    }
+  }
+
+  /// The binding that owns the heap closure environment `hir_id` evaluates to,
+  /// when it is a variable naming one.
+  fn closure_env_owner(
+    &self,
+    hir_id: HIRId,
+  ) -> Option<DefinitionId> {
+    match &self.hir.get(hir_id).kind {
+      HIRKind::Variable(def_id) => self.closure_env_owner_of.get(def_id).copied(),
       _ => None,
     }
   }

@@ -831,7 +831,20 @@ pub fn populate_closure_captures(
 
   let escaping_closures = crate::escape::analyze_escapes(hir, defs);
 
-  for closure_id in &escaping_closures {
+  // A closure with no captures has no environment: there is nothing to
+  // heap-allocate and nothing to free, so it keeps a stack environment however
+  // far its value travels. This is what keeps a plain function used as a
+  // function value — which lowers to a zero-capture closure — from allocating.
+  let heap_env_closures: HashSet<HIRId> = escaping_closures
+    .iter()
+    .copied()
+    .filter(|closure_id| match &hir.get(*closure_id).kind {
+      HIRKind::Closure { captures, .. } => !captures.is_empty(),
+      _ => false,
+    })
+    .collect();
+
+  for closure_id in &heap_env_closures {
     if let HIRKind::Closure { escapes, .. } = &mut hir.get_mut(*closure_id).kind {
       *escapes = true;
     }
@@ -843,7 +856,7 @@ pub fn populate_closure_captures(
       _ => continue,
     };
 
-    if !escaping_closures.contains(&closure_id) && !needs_drop_fn(&captures, types, defs) {
+    if !heap_env_closures.contains(&closure_id) && !needs_drop_fn(&captures, types, defs) {
       continue;
     }
 

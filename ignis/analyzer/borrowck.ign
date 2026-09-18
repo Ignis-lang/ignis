@@ -231,6 +231,21 @@ export namespace Borrowck {
     letConditionScrutineeMatches: Vector<u32>;
     letConditionScrutineeDefs: Vector<u32>;
 
+    /// Maps every binding that names a heap closure environment to the binding
+    /// that owns it, as a flat map: `closureEnvBindings[i]` is the raw
+    /// definition of the binding and `closureEnvOwners[i]` the raw definition
+    /// of its owner. An owner maps to itself; `let alias = owner` adds the
+    /// alias.
+    ///
+    /// A closure value is copied bitwise, so an alias does not take the
+    /// environment over — but returning either one hands it to the caller, and
+    /// the owner's drop has to be cancelled or the caller receives a freed
+    /// environment. The type itself needs no drop, so `movedVariable` does not
+    /// see these bindings and the ordinary move path never fires for them.
+    /// Mirrors `closure_env_owner_of`.
+    closureEnvBindings: Vector<u32>;
+    closureEnvOwners: Vector<u32>;
+
     /// False after a terminator, until a join restores it.
     public reachable: boolean;
 
@@ -276,6 +291,8 @@ export namespace Borrowck {
         letConditionOwned: Vector::new<u32>(),
         letConditionScrutineeMatches: Vector::new<u32>(),
         letConditionScrutineeDefs: Vector::new<u32>(),
+        closureEnvBindings: Vector::new<u32>(),
+        closureEnvOwners: Vector::new<u32>(),
         reachable: true,
         inDefer: false,
         inDropMethod: false,
@@ -293,6 +310,32 @@ export namespace Borrowck {
 
     public setReachable(&mut self, value: boolean): void {
       self.reachable = value;
+    }
+
+    /// Note that binding `bindingRaw` names the closure environment owned by
+    /// `ownerRaw`.
+    public recordClosureEnvOwner(&mut self, bindingRaw: u32, ownerRaw: u32): void {
+      self.closureEnvBindings.push(bindingRaw);
+      self.closureEnvOwners.push(ownerRaw);
+    }
+
+    /// The binding that owns the closure environment `bindingRaw` names.
+    public closureEnvOwnerOf(&self, bindingRaw: u32): Option<u32> {
+      let mut index: u64 = 0;
+
+      while (index < self.closureEnvBindings.length()) {
+        if (let Option::SOME(raw) = self.closureEnvBindings.get(index)) {
+          if (*raw == bindingRaw) {
+            if (let Option::SOME(owner) = self.closureEnvOwners.get(index)) {
+              return Option::SOME(*owner);
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return Option::NONE;
     }
 
     /// Note that `defRaw` is owed a drop by whatever branch the condition of
@@ -3417,6 +3460,15 @@ export namespace Borrowck {
             returnRef.setMoveValue(source.raw(), Borrowck::MOVE_RETURNED);
           }
 
+          // Returning a closure value hands its environment to the caller,
+          // whether the returned binding is the one that owns it or an alias
+          // of it. The owner's drop is cancelled, or the caller would receive
+          // a freed environment.
+          if (let Option::SOME(owner) = Borrowck::closureEnvOwner(hir, state, returned)) {
+            let mut closureRef: &mut Borrowck::State = state;
+            closureRef.setMoveValue(owner, Borrowck::MOVE_RETURNED);
+          }
+
           Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, returned);
         }
 
@@ -3765,9 +3817,39 @@ export namespace Borrowck {
       }
     }
 
+    if (ownsClosureEnv) {
+      let mut ownerRef: &mut Borrowck::State = state;
+      ownerRef.recordClosureEnvOwner(letNode.name.raw(), letNode.name.raw());
+    } else {
+      if (let Option::SOME(value) = letNode.value) {
+        if (let Option::SOME(owner) = Borrowck::closureEnvOwner(hir, state, value)) {
+          let mut aliasRef: &mut Borrowck::State = state;
+          aliasRef.recordClosureEnvOwner(letNode.name.raw(), owner);
+        }
+      }
+    }
+
     if (ownsClosureEnv || Borrowck::definitionNeedsDrop(defStore, typeStore, letNode.name)) {
       Borrowck::declareOwned(state, letNode.name);
     }
+  }
+
+  /// The binding that owns the heap closure environment `nodeId` evaluates to,
+  /// when it is a variable naming one. Mirrors `closure_env_owner`.
+  function closureEnvOwner(
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    nodeId: Hir::HirId,
+  ): Option<u32> {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return Option::NONE;
+    };
+
+    if (let Hir::HirKind::Variable(defId) = &node.kind) {
+      return state.closureEnvOwnerOf(defId.raw());
+    }
+
+    return Option::NONE;
   }
 
   /// A binding initialized with a reference expression keeps that borrow alive
