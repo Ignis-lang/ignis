@@ -23,7 +23,8 @@ use ignis_type::{
 /// closure escapes when it appears in:
 ///
 ///   - a `return` operand, or the tail expression of a function or closure body
-///     (the function's result crosses the frame boundary);
+///     (the function's result crosses the frame boundary), including a closure
+///     literal written into an aggregate built in that position;
 ///   - an assignment whose target is a field, an index, or a static place
 ///     (the place outlives the assignment);
 ///   - a record-initializer field, an enum-variant payload, or a vector/tuple
@@ -441,9 +442,10 @@ fn scan_for_escapes(
 /// the tail expression of a function or closure body.
 ///
 /// The result may be the closure expression itself (`return (x: i32): i32 -> x + c;`),
-/// a variable aliasing one (`let f = ...; return f;`), or the result of a block,
-/// an `if`/`else`, or a `match` whose branches produce one. A closure literal
-/// counts here because the caller's binding takes ownership of the environment.
+/// a variable aliasing one (`let f = ...; return f;`), the result of a block, an
+/// `if`/`else`, or a `match` whose branches produce one, or an element of an
+/// aggregate built in place (`return Holder { f: (): i32 -> c };`). A closure
+/// literal counts here because the value crosses the frame boundary.
 fn mark_escaping_result(
   hir: &HIR,
   hir_id: HIRId,
@@ -511,6 +513,28 @@ fn mark_escaping_value(
     HIRKind::Match { arms, .. } => {
       for arm in arms {
         mark_escaping_value(hir, arm.body, alias_to_closure, escaping, include_literal);
+      }
+    },
+
+    // An aggregate built in result position crosses the frame boundary with its
+    // elements inside it, so a closure literal written into one is in result
+    // position too. Outside result position the aggregate is only as long-lived
+    // as the frame that built it, which is what the literal already assumes.
+    HIRKind::RecordInit { fields, .. } if include_literal => {
+      for (_, value) in fields {
+        mark_escaping_value(hir, *value, alias_to_closure, escaping, true);
+      }
+    },
+
+    HIRKind::EnumVariant { payload, .. } if include_literal => {
+      for &element in payload {
+        mark_escaping_value(hir, element, alias_to_closure, escaping, true);
+      }
+    },
+
+    HIRKind::VectorLiteral { elements } | HIRKind::TupleLiteral { elements } if include_literal => {
+      for &element in elements {
+        mark_escaping_value(hir, element, alias_to_closure, escaping, true);
       }
     },
 

@@ -1,0 +1,25 @@
+// e2e: allow-leak
+// The closure literal is written into a record that is then returned, so it
+// leaves the frame inside that record and needs a heap environment. Nothing owns
+// that environment: a record field is not a binding, and a record's drop glue
+// does not release the environments of its closure fields, so it leaks. A leak
+// is the conservative choice here — the alternative was reading a dead frame.
+record Point {
+    public x: i32;
+    public y: i32;
+}
+
+record Holder {
+    public callback: () -> i32;
+}
+
+function makeAdder(p: Point): Holder {
+    return Holder { callback: (): i32 -> p.x + p.y };
+}
+
+function main(): i32 {
+    let holder = makeAdder(Point { x: 20, y: 22 });
+    let call = holder.callback;
+
+    return call();
+}

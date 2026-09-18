@@ -1398,10 +1398,13 @@ impl<'a> HirOwnershipChecker<'a> {
       }
 
       // Returning a closure value hands its environment to the caller, whether
-      // the returned binding is the one that owns it or an alias of it. The
-      // owner's drop is cancelled, or the caller would receive a freed
-      // environment.
-      if let Some(owner) = self.closure_env_owner(val_id) {
+      // the returned binding is the one that owns it, an alias of it, or a
+      // record or other aggregate carrying it out. The owner's drop is
+      // cancelled, or the caller would receive a freed environment.
+      let mut closure_env_owners = Vec::new();
+      self.collect_closure_env_owners(val_id, &mut closure_env_owners);
+
+      for owner in closure_env_owners {
         self.states.insert(owner, OwnershipState::Returned);
       }
 
@@ -2885,6 +2888,66 @@ impl<'a> HirOwnershipChecker<'a> {
     match &self.hir.get(hir_id).kind {
       HIRKind::Variable(def_id) => self.closure_env_owner_of.get(def_id).copied(),
       _ => None,
+    }
+  }
+
+  /// Every binding whose heap closure environment leaves the frame inside
+  /// `hir_id`, following the same shapes escape analysis treats as result
+  /// position: branches and match arms, and aggregates built in place.
+  ///
+  /// A closure stored into a record that is then returned leaves with that
+  /// record, so the binding that built it must not free it on the way out.
+  fn collect_closure_env_owners(
+    &self,
+    hir_id: HIRId,
+    owners: &mut Vec<DefinitionId>,
+  ) {
+    if let Some(owner) = self.closure_env_owner(hir_id) {
+      owners.push(owner);
+      return;
+    }
+
+    match &self.hir.get(hir_id).kind {
+      HIRKind::Block {
+        expression: Some(tail), ..
+      } => self.collect_closure_env_owners(*tail, owners),
+
+      HIRKind::If {
+        then_branch,
+        else_branch,
+        ..
+      } => {
+        self.collect_closure_env_owners(*then_branch, owners);
+        if let Some(otherwise) = else_branch {
+          self.collect_closure_env_owners(*otherwise, owners);
+        }
+      },
+
+      HIRKind::Match { arms, .. } => {
+        for arm in arms {
+          self.collect_closure_env_owners(arm.body, owners);
+        }
+      },
+
+      HIRKind::RecordInit { fields, .. } => {
+        for (_, value) in fields {
+          self.collect_closure_env_owners(*value, owners);
+        }
+      },
+
+      HIRKind::EnumVariant { payload, .. } => {
+        for &element in payload {
+          self.collect_closure_env_owners(element, owners);
+        }
+      },
+
+      HIRKind::VectorLiteral { elements } | HIRKind::TupleLiteral { elements } => {
+        for &element in elements {
+          self.collect_closure_env_owners(element, owners);
+        }
+      },
+
+      _ => {},
     }
   }
 

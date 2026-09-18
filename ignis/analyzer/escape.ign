@@ -20,7 +20,8 @@ import Vector from "std::vector";
 /// Concretely, a closure escapes when it appears in:
 ///
 ///   - a `return` operand, or the tail expression of a function or closure
-///     body (the function's result crosses the frame boundary);
+///     body (the function's result crosses the frame boundary), including a
+///     closure literal written into an aggregate built in that position;
 ///   - an assignment whose target is a field, an index, or a static place
 ///     (the place outlives the assignment);
 ///   - a record-initializer field, an enum-variant payload, or a
@@ -357,8 +358,59 @@ export namespace Escape {
           armIndex += 1;
         }
       },
+      // An aggregate built in result position crosses the frame boundary with
+      // its elements inside it, so a closure literal written into one is in
+      // result position too. Outside result position the aggregate is only as
+      // long-lived as the frame that built it, which is what the literal
+      // already assumes.
+      Hir::HirKind::RecordInit(recordNode) -> {
+        if (includeLiteral) {
+          let mut fieldIndex: u64 = 0;
+
+          while (fieldIndex < recordNode.fields.length()) {
+            if (let Option::SOME(field) = recordNode.fields.get(fieldIndex)) {
+              Escape::markEscapingValue(hir, aliases, escaping, field.value, true);
+            }
+
+            fieldIndex += 1;
+          }
+        }
+      },
+      Hir::HirKind::EnumVariant(variantNode) -> {
+        if (includeLiteral) {
+          Escape::markEscapingResultList(hir, aliases, escaping, &variantNode.payload);
+        }
+      },
+      Hir::HirKind::VectorLiteral(elements) -> {
+        if (includeLiteral) {
+          Escape::markEscapingResultList(hir, aliases, escaping, &elements);
+        }
+      },
+      Hir::HirKind::TupleLiteral(elements) -> {
+        if (includeLiteral) {
+          Escape::markEscapingResultList(hir, aliases, escaping, &elements);
+        }
+      },
       _ -> {},
     };
+  }
+
+  /// Calls `markEscapingResult` on every id in `ids`.
+  function markEscapingResultList(
+    hir: &mut Hir::HirStore,
+    aliases: &Escape::AliasTable,
+    escaping: &mut Vector<Hir::HirId>,
+    ids: &Vector<Hir::HirId>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        Escape::markEscapingResult(hir, aliases, escaping, *id);
+      }
+
+      index += 1;
+    }
   }
 
   /// Calls `markEscapingArgument` on every id in `ids`.

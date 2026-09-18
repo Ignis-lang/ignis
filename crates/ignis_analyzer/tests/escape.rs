@@ -272,3 +272,44 @@ function makeIncrementer(): (i32) -> i32 {
     vec![false]
   );
 }
+
+#[test]
+fn closure_written_into_a_returned_record_escapes() {
+  // The record carries the closure out of the frame, so result position reaches
+  // through the initializer to the literal inside it.
+  assert_eq!(
+    escape_flags(
+      r#"
+record Holder {
+    public callback: () -> i32;
+}
+
+function makeAdder(base: i32): Holder {
+    return Holder { callback: (): i32 -> base + 2 };
+}
+"#
+    ),
+    vec![true]
+  );
+}
+
+#[test]
+fn closure_written_into_a_record_that_stays_local_keeps_its_stack_environment() {
+  assert_eq!(
+    escape_flags(
+      r#"
+record Holder {
+    public callback: () -> i32;
+}
+
+function useAdder(base: i32): i32 {
+    let holder = Holder { callback: (): i32 -> base + 2 };
+    let call = holder.callback;
+
+    return call();
+}
+"#
+    ),
+    vec![false]
+  );
+}

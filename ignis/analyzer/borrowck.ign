@@ -3461,12 +3461,22 @@ export namespace Borrowck {
           }
 
           // Returning a closure value hands its environment to the caller,
-          // whether the returned binding is the one that owns it or an alias
-          // of it. The owner's drop is cancelled, or the caller would receive
-          // a freed environment.
-          if (let Option::SOME(owner) = Borrowck::closureEnvOwner(hir, state, returned)) {
-            let mut closureRef: &mut Borrowck::State = state;
-            closureRef.setMoveValue(owner, Borrowck::MOVE_RETURNED);
+          // whether the returned binding is the one that owns it, an alias of
+          // it, or a record or other aggregate carrying it out. The owner's
+          // drop is cancelled, or the caller would receive a freed
+          // environment.
+          let mut closureEnvOwners: Vector<u32> = Vector::new<u32>();
+          Borrowck::collectClosureEnvOwners(hir, state, returned, &mut closureEnvOwners);
+
+          let mut ownerIndex: u64 = 0;
+
+          while (ownerIndex < closureEnvOwners.length()) {
+            if (let Option::SOME(owner) = closureEnvOwners.get(ownerIndex)) {
+              let mut closureRef: &mut Borrowck::State = state;
+              closureRef.setMoveValue(*owner, Borrowck::MOVE_RETURNED);
+            }
+
+            ownerIndex += 1;
           }
 
           Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, returned);
@@ -3850,6 +3860,95 @@ export namespace Borrowck {
     }
 
     return Option::NONE;
+  }
+
+  /// Every binding whose heap closure environment leaves the frame inside
+  /// `nodeId`, following the same shapes escape analysis treats as result
+  /// position: branches and match arms, and aggregates built in place.
+  ///
+  /// A closure stored into a record that is then returned leaves with that
+  /// record, so the binding that built it must not free it on the way out.
+  /// Mirrors `collect_closure_env_owners`.
+  function collectClosureEnvOwners(
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    nodeId: Hir::HirId,
+    owners: &mut Vector<u32>,
+  ): void {
+    if (let Option::SOME(owner) = Borrowck::closureEnvOwner(hir, state, nodeId)) {
+      let mut ownersRef: &mut Vector<u32> = owners;
+      ownersRef.push(owner);
+      return;
+    }
+
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return;
+    };
+
+    match (&node.kind) {
+      Hir::HirKind::Block(blockNode) -> {
+        if (let Option::SOME(tailId) = blockNode.expression) {
+          Borrowck::collectClosureEnvOwners(hir, state, tailId, owners);
+        }
+      },
+      Hir::HirKind::If(ifNode) -> {
+        Borrowck::collectClosureEnvOwners(hir, state, ifNode.thenBranch, owners);
+
+        if (let Option::SOME(elseId) = ifNode.elseBranch) {
+          Borrowck::collectClosureEnvOwners(hir, state, elseId, owners);
+        }
+      },
+      Hir::HirKind::Match(matchNode) -> {
+        let mut armIndex: u64 = 0;
+
+        while (armIndex < matchNode.arms.length()) {
+          if (let Option::SOME(arm) = matchNode.arms.get(armIndex)) {
+            Borrowck::collectClosureEnvOwners(hir, state, arm.body, owners);
+          }
+
+          armIndex += 1;
+        }
+      },
+      Hir::HirKind::RecordInit(recordNode) -> {
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < recordNode.fields.length()) {
+          if (let Option::SOME(field) = recordNode.fields.get(fieldIndex)) {
+            Borrowck::collectClosureEnvOwners(hir, state, field.value, owners);
+          }
+
+          fieldIndex += 1;
+        }
+      },
+      Hir::HirKind::EnumVariant(variantNode) -> {
+        Borrowck::collectClosureEnvOwnersList(hir, state, &variantNode.payload, owners);
+      },
+      Hir::HirKind::VectorLiteral(elements) -> {
+        Borrowck::collectClosureEnvOwnersList(hir, state, &elements, owners);
+      },
+      Hir::HirKind::TupleLiteral(elements) -> {
+        Borrowck::collectClosureEnvOwnersList(hir, state, &elements, owners);
+      },
+      _ -> {},
+    };
+  }
+
+  /// Calls `collectClosureEnvOwners` on every id in `ids`.
+  function collectClosureEnvOwnersList(
+    hir: &Hir::HirStore,
+    state: &mut Borrowck::State,
+    ids: &Vector<Hir::HirId>,
+    owners: &mut Vector<u32>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < ids.length()) {
+      if (let Option::SOME(id) = ids.get(index)) {
+        Borrowck::collectClosureEnvOwners(hir, state, *id, owners);
+      }
+
+      index += 1;
+    }
   }
 
   /// A binding initialized with a reference expression keeps that borrow alive
