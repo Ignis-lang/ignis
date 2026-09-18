@@ -36,6 +36,65 @@ fn dump(src: &str) -> String {
     .render()
 }
 
+/// The raw `on_overwrite` lists, which the dump collapses.
+fn overwrite_schedule(src: &str) -> Vec<Vec<String>> {
+  let mut source_map = SourceMap::new();
+  let file_id = source_map.add_file("test.ign", src.to_string());
+
+  let mut lexer = IgnisLexer::new(file_id, source_map.get(&file_id).text.as_str());
+  lexer.scan_tokens();
+  assert!(lexer.diagnostics.is_empty(), "lexer errors: {:?}", lexer.diagnostics);
+
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+  let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+  let (nodes, roots) = parser.parse().expect("parse failed");
+
+  let output = Analyzer::analyze(&nodes, &roots, symbols.clone());
+  let symbols = symbols.borrow();
+
+  let (schedules, _) = HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &symbols)
+    .with_source_map(&source_map)
+    .check();
+
+  let mut entries: Vec<Vec<String>> = schedules
+    .on_overwrite
+    .values()
+    .map(|defs| {
+      defs
+        .iter()
+        .map(|def_id| symbols.get(&output.defs.get(def_id).name).to_string())
+        .collect()
+    })
+    .collect();
+
+  entries.sort();
+  entries
+}
+
+#[test]
+fn an_overwrite_inside_a_loop_is_scheduled_once() {
+  // `check_loop` walks the body a second time to simulate another iteration. One
+  // assignment drops one value, so the second walk must not add a second drop —
+  // for a closure-environment owner that was a double free, and the dump alone
+  // cannot see it because it collapses the list.
+  assert_eq!(
+    overwrite_schedule(
+      "function make(limit: i32): (i32) -> i32 {
+  let base: i32 = 40;
+  let mut f = (x: i32): i32 -> x + base;
+  let mut i: i32 = 0;
+  while (i < limit) {
+    f = (x: i32): i32 -> x + base;
+    i += 1;
+  }
+  return f;
+}
+"
+    ),
+    vec![vec!["f".to_string()]]
+  );
+}
+
 const RESOURCE: &str = r#"@implements(Drop)
 record Resource {
   public value: i32;

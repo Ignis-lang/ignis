@@ -1332,15 +1332,15 @@ impl<'a> HirOwnershipChecker<'a> {
 
       // A binding that owns a closure environment counts even though its type
       // needs no drop of its own: overwriting it drops the last reference to
-      // that environment, and nothing would free it afterwards. Read before the
-      // assignment is recorded below, because what is dropped here is the
-      // environment the binding held coming in.
+      // that environment, and nothing would free it afterwards. Ownership from an
+      // assignment is established at the binding's `let`, so this reads the
+      // environment the binding holds coming into the assignment.
       let owned_closure_env = self.closure_env_owner_of.get(&target_def) == Some(&target_def);
 
       if self.types.needs_drop_with_defs(target_ty, self.defs) || owned_closure_env {
         if self.is_valid(&target_def) {
           // Need to drop old value before overwriting
-          self.schedules.on_overwrite.entry(hir_id).or_default().push(target_def);
+          self.schedules.record_overwrite(hir_id, target_def);
         }
 
         // Re-initialization: assigning to a dropped/moved variable makes it valid again.

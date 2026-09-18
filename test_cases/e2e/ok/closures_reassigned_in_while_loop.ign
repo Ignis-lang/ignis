@@ -1,0 +1,25 @@
+// The loop body is walked twice by ownership analysis to simulate a second
+// iteration, so the overwrite drop must be recorded once per assignment rather
+// than once per walk. `limit` is a parameter so the trip count is not a compile
+// time constant: 0, 1 and 3 iterations all free N-1 environments in the loop and
+// the last one through the caller's binding.
+function make(limit: i32): (i32) -> i32 {
+    let base: i32 = 40;
+    let mut f = (x: i32): i32 -> x + base;
+    let mut i: i32 = 0;
+
+    while (i < limit) {
+        f = (x: i32): i32 -> x + base;
+        i += 1;
+    }
+
+    return f;
+}
+
+function main(): i32 {
+    let zero = make(0);
+    let one = make(1);
+    let three = make(3);
+
+    return zero(2) + one(0) + three(0) - 80;
+}
