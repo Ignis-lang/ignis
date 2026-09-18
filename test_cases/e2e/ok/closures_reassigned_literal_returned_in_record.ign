@@ -1,0 +1,23 @@
+// e2e: allow-leak
+// The reassigned closure escapes inside a returned record. The record field is
+// not a binding, so the environment it carries is unowned and leaks, exactly as
+// in `closures_record_field_captures_record_parameter`.
+record Holder {
+    public callback: (i32) -> i32;
+}
+
+function make(): Holder {
+    let a: i32 = 10;
+    let b: i32 = 40;
+    let mut f = (x: i32): i32 -> x + a;
+    f = (x: i32): i32 -> x + b;
+
+    return Holder { callback: f };
+}
+
+function main(): i32 {
+    let holder = make();
+    let call = holder.callback;
+
+    return call(2);
+}

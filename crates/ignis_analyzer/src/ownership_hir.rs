@@ -215,6 +215,12 @@ pub struct HirOwnershipChecker<'a> {
   /// closure drop function does not tear down closure-typed captures. See the
   /// leak noted on `binding_owns_closure_env`.
   envs_captured_by_escaping_closures: HashSet<DefinitionId>,
+
+  /// Bindings that are handed a closure environment by an assignment rather than
+  /// by their initializer. They own it exactly like an initialized one, and the
+  /// drop belongs to the scope the binding lives in, so the `Let` arm reads this
+  /// and declares them owned there.
+  bindings_assigned_closure_env: HashSet<DefinitionId>,
 }
 
 impl<'a> HirOwnershipChecker<'a> {
@@ -250,6 +256,7 @@ impl<'a> HirOwnershipChecker<'a> {
       arm_result_move_frames: Vec::new(),
       closure_env_owner_of: HashMap::new(),
       envs_captured_by_escaping_closures: Self::collect_envs_captured_by_escaping_closures(hir),
+      bindings_assigned_closure_env: Self::collect_bindings_assigned_closure_env(hir, types, defs),
     }
   }
 
@@ -264,20 +271,26 @@ impl<'a> HirOwnershipChecker<'a> {
     }
   }
 
-  /// Every node that appears directly in a block's statement list, and therefore in a
-  /// position whose value is discarded.
-  ///
-  /// A match in value position hands its arm's value to whatever consumes the match, so
-  /// an arm naming an owning value gives it away. A match in statement position gives it
-  /// to nobody: the value is dropped as a temporary and the name still owns what it
-  /// named, so consuming it there would leave nothing to free it.
-  ///
-  /// Being discarded travels inward. An arm's body *is* the match's result, and a block's
-  /// trailing expression is the block's, so a match written in one of those positions
-  /// hands its own result to the same nobody. Deciding this per node instead left a match
-  /// nested in a discarded arm looking used: it consumed what its arm named, the
-  /// enclosing match drained that move outward and compensated its other arms, and on the
-  /// nested path the value reached a discarded result with no drop left anywhere.
+  /// The bindings an assignment hands a closure environment to.
+  fn collect_bindings_assigned_closure_env(
+    hir: &HIR,
+    types: &TypeStore,
+    defs: &DefinitionStore,
+  ) -> HashSet<DefinitionId> {
+    let mut assigned = HashSet::new();
+
+    for (_, node) in hir.nodes.iter() {
+      if let HIRKind::Assign { target, value, .. } = &node.kind
+        && let HIRKind::Variable(def_id) = &hir.get(*target).kind
+        && ignis_hir::binding_owns_closure_env(hir, *value, defs.type_of(def_id), types, defs)
+      {
+        assigned.insert(*def_id);
+      }
+    }
+
+    assigned
+  }
+
   /// The bindings an escaping closure captures by value, which is how a closure
   /// value moves into an environment that outlives the frame that built it.
   fn collect_envs_captured_by_escaping_closures(hir: &HIR) -> HashSet<DefinitionId> {
@@ -301,6 +314,20 @@ impl<'a> HirOwnershipChecker<'a> {
     captured
   }
 
+  /// Every node that appears directly in a block's statement list, and therefore in a
+  /// position whose value is discarded.
+  ///
+  /// A match in value position hands its arm's value to whatever consumes the match, so
+  /// an arm naming an owning value gives it away. A match in statement position gives it
+  /// to nobody: the value is dropped as a temporary and the name still owns what it
+  /// named, so consuming it there would leave nothing to free it.
+  ///
+  /// Being discarded travels inward. An arm's body *is* the match's result, and a block's
+  /// trailing expression is the block's, so a match written in one of those positions
+  /// hands its own result to the same nobody. Deciding this per node instead left a match
+  /// nested in a discarded arm looking used: it consumed what its arm named, the
+  /// enclosing match drained that move outward and compensated its other arms, and on the
+  /// nested path the value reached a discarded result with no drop left anywhere.
   fn collect_statement_position_nodes(hir: &HIR) -> HashSet<HIRId> {
     fn discard(
       id: HIRId,
@@ -871,6 +898,11 @@ impl<'a> HirOwnershipChecker<'a> {
         let owns_closure_env =
           value.is_some_and(|v| ignis_hir::binding_owns_closure_env(self.hir, v, var_ty, self.types, self.defs));
 
+        // A later `f = <closure>` hands this binding an environment too, and the
+        // drop belongs in the scope the binding lives in rather than wherever the
+        // assignment happens to sit, so the decision is made here.
+        let owns_closure_env = owns_closure_env || self.bindings_assigned_closure_env.contains(&name);
+
         // A closure value moved into an escaping closure's environment leaves
         // this frame with it, so this binding no longer owns the environment and
         // must not free it. Nothing frees it instead; see the field's comment.
@@ -1300,10 +1332,12 @@ impl<'a> HirOwnershipChecker<'a> {
 
       // A binding that owns a closure environment counts even though its type
       // needs no drop of its own: overwriting it drops the last reference to
-      // that environment, and nothing would free it afterwards.
-      let owns_closure_env = self.closure_env_owner_of.get(&target_def) == Some(&target_def);
+      // that environment, and nothing would free it afterwards. Read before the
+      // assignment is recorded below, because what is dropped here is the
+      // environment the binding held coming in.
+      let owned_closure_env = self.closure_env_owner_of.get(&target_def) == Some(&target_def);
 
-      if self.types.needs_drop_with_defs(target_ty, self.defs) || owns_closure_env {
+      if self.types.needs_drop_with_defs(target_ty, self.defs) || owned_closure_env {
         if self.is_valid(&target_def) {
           // Need to drop old value before overwriting
           self.schedules.on_overwrite.entry(hir_id).or_default().push(target_def);

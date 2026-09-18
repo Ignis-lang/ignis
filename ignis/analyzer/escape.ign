@@ -75,33 +75,59 @@ export namespace Escape {
       };
     }
 
-    public lookup(&self, defId: Analyzer::DefinitionId): Option<Hir::HirId> {
+    /// Every closure ever bound to `defId`. One binding can name several over
+    /// its lifetime — `let mut f = A; f = B;` — and which one is live where the
+    /// binding's value escapes needs flow analysis this pass does not do, so all
+    /// of them escape with it: when in doubt, escape.
+    public lookupAll(&self, defId: Analyzer::DefinitionId): Vector<Hir::HirId> {
+      let mut result: Vector<Hir::HirId> = Vector::new<Hir::HirId>();
       let mut index: u64 = 0;
 
       while (index < self.defs.length()) {
         if (let Option::SOME(existing) = self.defs.get(index)) {
           if (existing.raw() == defId.raw()) {
             if (let Option::SOME(closureId) = self.closures.get(index)) {
-              return Option::SOME(*closureId);
+              result.push(*closureId);
             }
-
-            return Option::NONE;
           }
         }
 
         index += 1;
       }
 
-      return Option::NONE;
+      return result;
     }
 
-    public insert(&mut self, defId: Analyzer::DefinitionId, closureId: Hir::HirId): void {
-      if (self.lookup(defId).isSome()) {
-        return;
+    /// Whether `defId` already names `closureId`.
+    public names(&self, defId: Analyzer::DefinitionId, closureId: Hir::HirId): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.defs.length()) {
+        if (let Option::SOME(existing) = self.defs.get(index)) {
+          if (existing.raw() == defId.raw()) {
+            if (let Option::SOME(bound) = self.closures.get(index)) {
+              if (bound.raw() == closureId.raw()) {
+                return true;
+              }
+            }
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
+
+    public insert(&mut self, defId: Analyzer::DefinitionId, closureId: Hir::HirId): boolean {
+      if (self.names(defId, closureId)) {
+        return false;
       }
 
       self.defs.push(defId);
       self.closures.push(closureId);
+
+      return true;
     }
   }
 
@@ -137,6 +163,37 @@ export namespace Escape {
     return result;
   }
 
+  /// A binding and the value written into it, by `let` or by assignment.
+  record BoundClosure {
+    public name: Analyzer::DefinitionId;
+    public valueId: Hir::HirId;
+  }
+
+  /// The binding `node` writes a value into: the name of a `let`, or the
+  /// variable an assignment targets. Anything else answers `NONE`.
+  function boundClosureTarget(
+    hir: &mut Hir::HirStore,
+    node: &Hir::HirNode
+  ): Option<Escape::BoundClosure> {
+    if (let Hir::HirKind::Let(letNode) = &node.kind) {
+      if (let Option::SOME(valueId) = letNode.value) {
+        return Option::SOME(Escape::BoundClosure { name: letNode.name, valueId: valueId });
+      }
+
+      return Option::NONE;
+    }
+
+    if (let Hir::HirKind::Assign(assignNode) = &node.kind) {
+      if (let Option::SOME(targetNode) = hir.get(assignNode.target)) {
+        if (let Hir::HirKind::Variable(defId) = &targetNode.kind) {
+          return Option::SOME(Escape::BoundClosure { name: defId, valueId: assignNode.value });
+        }
+      }
+    }
+
+    return Option::NONE;
+  }
+
   /// The closure nodes that outlive their defining scope.
   function analyzeEscapes(
     hir: &mut Hir::HirStore,
@@ -148,12 +205,14 @@ export namespace Escape {
 
     while (nodeIndex < hir.nodes.length()) {
       if (let Option::SOME(node) = hir.nodes.get(nodeIndex)) {
-        if (let Hir::HirKind::Let(letNode) = &node.kind) {
-          if (let Option::SOME(valueId) = letNode.value) {
-            if (let Option::SOME(valueNode) = hir.get(valueId)) {
-              if (let Hir::HirKind::Closure(_) = &valueNode.kind) {
-                aliases.insert(letNode.name, valueId);
-              }
+        // A binding names a closure when it is initialized with one, and
+        // equally when one is later assigned to it. Reading only the `let`
+        // left a closure literal assigned to an existing binding unreachable
+        // from the name, so a later `return f` marked nothing.
+        if (let Option::SOME(bound) = Escape::boundClosureTarget(hir, node)) {
+          if (let Option::SOME(valueNode) = hir.get(bound.valueId)) {
+            if (let Hir::HirKind::Closure(_) = &valueNode.kind) {
+              let _ = aliases.insert(bound.name, bound.valueId);
             }
           }
         }
@@ -173,16 +232,20 @@ export namespace Escape {
 
       while (aliasIndex < hir.nodes.length()) {
         if (let Option::SOME(node) = hir.nodes.get(aliasIndex)) {
-          if (let Hir::HirKind::Let(letNode) = &node.kind) {
-            if (let Option::SOME(valueId) = letNode.value) {
-              if (let Option::SOME(valueNode) = hir.get(valueId)) {
-                if (let Hir::HirKind::Variable(sourceDef) = &valueNode.kind) {
-                  if (let Option::SOME(closureId) = aliases.lookup(sourceDef)) {
-                    if (aliases.lookup(letNode.name).isNone()) {
-                      aliases.insert(letNode.name, closureId);
+          if (let Option::SOME(bound) = Escape::boundClosureTarget(hir, node)) {
+            if (let Option::SOME(valueNode) = hir.get(bound.valueId)) {
+              if (let Hir::HirKind::Variable(sourceDef) = &valueNode.kind) {
+                let sources: Vector<Hir::HirId> = aliases.lookupAll(sourceDef);
+                let mut sourceIndex: u64 = 0;
+
+                while (sourceIndex < sources.length()) {
+                  if (let Option::SOME(closureId) = sources.get(sourceIndex)) {
+                    if (aliases.insert(bound.name, *closureId)) {
                       changed = true;
                     }
                   }
+
+                  sourceIndex += 1;
                 }
               }
             }
@@ -238,13 +301,20 @@ export namespace Escape {
 
               while (captureIndex < closureNode.captures.length()) {
                 if (let Option::SOME(capture) = closureNode.captures.get(captureIndex)) {
-                  if (let Option::SOME(innerClosureId) = aliases.lookup(capture.sourceDef)) {
-                    let lengthBefore: u64 = escaping.length();
-                    Escape::pushHirId(escaping, innerClosureId);
+                  let inner: Vector<Hir::HirId> = aliases.lookupAll(capture.sourceDef);
+                  let mut innerIndex: u64 = 0;
 
-                    if (escaping.length() != lengthBefore) {
-                      changed = true;
+                  while (innerIndex < inner.length()) {
+                    if (let Option::SOME(innerClosureId) = inner.get(innerIndex)) {
+                      let lengthBefore: u64 = escaping.length();
+                      Escape::pushHirId(escaping, *innerClosureId);
+
+                      if (escaping.length() != lengthBefore) {
+                        changed = true;
+                      }
                     }
+
+                    innerIndex += 1;
                   }
                 }
 
@@ -331,8 +401,15 @@ export namespace Escape {
         }
       },
       Hir::HirKind::Variable(defId) -> {
-        if (let Option::SOME(closureId) = aliases.lookup(defId)) {
-          Escape::pushHirId(escaping, closureId);
+        let bound: Vector<Hir::HirId> = aliases.lookupAll(defId);
+        let mut boundIndex: u64 = 0;
+
+        while (boundIndex < bound.length()) {
+          if (let Option::SOME(closureId) = bound.get(boundIndex)) {
+            Escape::pushHirId(escaping, *closureId);
+          }
+
+          boundIndex += 1;
         }
       },
       Hir::HirKind::Block(blockNode) -> {

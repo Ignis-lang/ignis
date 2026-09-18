@@ -69,40 +69,71 @@ pub fn analyze_escapes(
   hir: &HIR,
   defs: &DefinitionStore,
 ) -> HashSet<HIRId> {
-  let mut binding_to_closure: HashMap<DefinitionId, HIRId> = HashMap::new();
+  // One binding can name several closures over its lifetime — `let mut f = A;
+  // f = B;` — and any of them can be the one live when the binding's value
+  // escapes. Which one that is needs flow analysis this pass does not do, so
+  // every closure ever bound to the name escapes with it: when in doubt, escape.
+  let mut alias_to_closure: HashMap<DefinitionId, Vec<HIRId>> = HashMap::new();
 
+  let record = |alias: &mut HashMap<DefinitionId, Vec<HIRId>>, name: DefinitionId, closure_id: HIRId| -> bool {
+    let bound = alias.entry(name).or_default();
+    if bound.contains(&closure_id) {
+      return false;
+    }
+    bound.push(closure_id);
+    true
+  };
+
+  // A binding names a closure when it is initialized with one, and equally when
+  // one is later assigned to it. `escape.rs` used to read only the `let`, so a
+  // closure literal assigned to an existing binding was never reachable from the
+  // name and a later `return f` marked nothing.
   for (_hir_id, node) in hir.nodes.iter() {
-    if let HIRKind::Let {
-      name,
-      value: Some(val_id),
-    } = &node.kind
+    let bound = match &node.kind {
+      HIRKind::Let {
+        name,
+        value: Some(val_id),
+      } => Some((*name, *val_id)),
+      HIRKind::Assign { target, value, .. } => match &hir.get(*target).kind {
+        HIRKind::Variable(def_id) => Some((*def_id, *value)),
+        _ => None,
+      },
+      _ => None,
+    };
+
+    if let Some((name, val_id)) = bound
+      && matches!(&hir.get(val_id).kind, HIRKind::Closure { .. })
     {
-      let val_node = hir.get(*val_id);
-      if matches!(&val_node.kind, HIRKind::Closure { .. }) {
-        binding_to_closure.insert(*name, *val_id);
-      }
+      record(&mut alias_to_closure, name, val_id);
     }
   }
 
-  // Fixed-point alias propagation: `let b = a` where `a` is a closure binding.
-  let mut alias_to_closure: HashMap<DefinitionId, HIRId> = binding_to_closure.clone();
+  // Fixed-point alias propagation: `let b = a` or `b = a`, where `a` already
+  // names one or more closures.
   let mut changed = true;
 
   while changed {
     changed = false;
+
     for (_hir_id, node) in hir.nodes.iter() {
-      if let HIRKind::Let {
-        name,
-        value: Some(val_id),
-      } = &node.kind
+      let bound = match &node.kind {
+        HIRKind::Let {
+          name,
+          value: Some(val_id),
+        } => Some((*name, *val_id)),
+        HIRKind::Assign { target, value, .. } => match &hir.get(*target).kind {
+          HIRKind::Variable(def_id) => Some((*def_id, *value)),
+          _ => None,
+        },
+        _ => None,
+      };
+
+      if let Some((name, val_id)) = bound
+        && let HIRKind::Variable(src_def) = &hir.get(val_id).kind
+        && let Some(sources) = alias_to_closure.get(src_def).cloned()
       {
-        let val_node = hir.get(*val_id);
-        if let HIRKind::Variable(src_def) = &val_node.kind
-          && let Some(&closure_id) = alias_to_closure.get(src_def)
-          && !alias_to_closure.contains_key(name)
-        {
-          alias_to_closure.insert(*name, closure_id);
-          changed = true;
+        for closure_id in sources {
+          changed |= record(&mut alias_to_closure, name, closure_id);
         }
       }
     }
@@ -124,7 +155,7 @@ pub fn analyze_escapes(
 /// defining frame too, so its own environment must be heap-allocated as well.
 fn propagate_through_captures(
   hir: &HIR,
-  alias_to_closure: &HashMap<DefinitionId, HIRId>,
+  alias_to_closure: &HashMap<DefinitionId, Vec<HIRId>>,
   escaping: &mut HashSet<HIRId>,
 ) {
   let mut changed = true;
@@ -139,7 +170,9 @@ fn propagate_through_captures(
         _ => None,
       })
       .flatten()
-      .filter_map(|capture| alias_to_closure.get(&capture.source_def).copied())
+      .filter_map(|capture| alias_to_closure.get(&capture.source_def))
+      .flatten()
+      .copied()
       .filter(|inner| !escaping.contains(inner))
       .collect();
 
@@ -155,7 +188,7 @@ fn propagate_through_captures(
 fn mark_tail_expression(
   hir: &HIR,
   body_id: HIRId,
-  alias_to_closure: &HashMap<DefinitionId, HIRId>,
+  alias_to_closure: &HashMap<DefinitionId, Vec<HIRId>>,
   escaping: &mut HashSet<HIRId>,
 ) {
   if let HIRKind::Block {
@@ -171,7 +204,7 @@ fn scan_for_escapes(
   hir: &HIR,
   hir_id: HIRId,
   defs: &DefinitionStore,
-  alias_to_closure: &HashMap<DefinitionId, HIRId>,
+  alias_to_closure: &HashMap<DefinitionId, Vec<HIRId>>,
   escaping: &mut HashSet<HIRId>,
 ) {
   let node = hir.get(hir_id);
@@ -449,7 +482,7 @@ fn scan_for_escapes(
 fn mark_escaping_result(
   hir: &HIR,
   hir_id: HIRId,
-  alias_to_closure: &HashMap<DefinitionId, HIRId>,
+  alias_to_closure: &HashMap<DefinitionId, Vec<HIRId>>,
   escaping: &mut HashSet<HIRId>,
 ) {
   mark_escaping_value(hir, hir_id, alias_to_closure, escaping, true);
@@ -467,7 +500,7 @@ fn mark_escaping_result(
 fn mark_escaping_argument(
   hir: &HIR,
   hir_id: HIRId,
-  alias_to_closure: &HashMap<DefinitionId, HIRId>,
+  alias_to_closure: &HashMap<DefinitionId, Vec<HIRId>>,
   escaping: &mut HashSet<HIRId>,
 ) {
   mark_escaping_value(hir, hir_id, alias_to_closure, escaping, false);
@@ -476,7 +509,7 @@ fn mark_escaping_argument(
 fn mark_escaping_value(
   hir: &HIR,
   hir_id: HIRId,
-  alias_to_closure: &HashMap<DefinitionId, HIRId>,
+  alias_to_closure: &HashMap<DefinitionId, Vec<HIRId>>,
   escaping: &mut HashSet<HIRId>,
   include_literal: bool,
 ) {
@@ -488,7 +521,7 @@ fn mark_escaping_value(
     },
 
     HIRKind::Variable(def_id) => {
-      if let Some(&closure_id) = alias_to_closure.get(def_id) {
+      for &closure_id in alias_to_closure.get(def_id).into_iter().flatten() {
         escaping.insert(closure_id);
       }
     },
