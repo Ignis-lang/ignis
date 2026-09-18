@@ -537,6 +537,13 @@ impl Default for HIR {
 /// Whether a `let` whose initializer is `value_id` receives a closure value
 /// that owns its environment, and therefore has to drop it at scope exit.
 ///
+/// This is analyzer policy, but it lives here because both sides of the split
+/// need the same answer: `ignis_analyzer`'s ownership checker to schedule the
+/// drop, and `ignis_lir` lowering to emit `DropClosure` rather than `Drop` for
+/// that local. A second copy is what lets the two disagree, and a binding
+/// lowered as a plain drop while the schedule says otherwise leaks the
+/// environment.
+///
 /// Two initializers own one: a closure expression written in place, and a
 /// closure value produced by a call. A closure can only reach a caller through
 /// a return with a heap environment or with none at all — escape analysis marks

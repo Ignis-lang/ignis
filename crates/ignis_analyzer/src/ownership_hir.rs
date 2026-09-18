@@ -32,6 +32,27 @@
 //! rejected if moved out of.
 //!
 //! `docs/web/language/ownership.md` carries the same table for language users.
+//!
+//! # Closure environments
+//!
+//! An escaping closure's captures live in a heap environment. A closure type needs
+//! no drop of its own, so none of the checks keyed on `needs_drop_with_defs` see
+//! these values and the ordinary move machinery never fires for them. Ownership of
+//! the environment is tracked separately, and it belongs to a **binding**:
+//!
+//! | Site | Effect |
+//! | --- | --- |
+//! | `let f = <closure literal>` / a call returning a function value | `f` owns the environment ([`ignis_hir::binding_owns_closure_env`]) and drops it at scope exit |
+//! | `let g = f` | `g` names the same environment but does not own it |
+//! | `f = <new closure>` | the old environment is dropped before the overwrite |
+//! | `return f`, or returning an aggregate holding it | ownership goes to the caller; the owner's drop is cancelled |
+//! | captured by value into an escaping closure | the environment leaves with that closure; the owner's drop is cancelled |
+//!
+//! A closure value is `Copy`, so copies never own and can never double-free. The
+//! cost of that is leaks where no binding is left holding the environment: inside
+//! an aggregate, inside another closure's environment, and behind the
+//! pass-through case in `binding_owns_closure_env`. Those are known gaps, tracked
+//! in issue #228 together with the shapes where a copy outlives its owner.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -185,6 +206,15 @@ pub struct HirOwnershipChecker<'a> {
   /// environment. The type itself needs no drop, so `get_moved_var` does not see
   /// these bindings and the ordinary move path never fires for them.
   closure_env_owner_of: HashMap<DefinitionId, DefinitionId>,
+
+  /// Bindings whose closure value is captured by value into an escaping closure's
+  /// environment. That environment outlives the frame, so the binding must not
+  /// free the captured closure's own environment at scope exit.
+  ///
+  /// Nothing frees it instead: the outer environment holds the only copy, and a
+  /// closure drop function does not tear down closure-typed captures. See the
+  /// leak noted on `binding_owns_closure_env`.
+  envs_captured_by_escaping_closures: HashSet<DefinitionId>,
 }
 
 impl<'a> HirOwnershipChecker<'a> {
@@ -219,6 +249,7 @@ impl<'a> HirOwnershipChecker<'a> {
       statement_position_nodes: Self::collect_statement_position_nodes(hir),
       arm_result_move_frames: Vec::new(),
       closure_env_owner_of: HashMap::new(),
+      envs_captured_by_escaping_closures: Self::collect_envs_captured_by_escaping_closures(hir),
     }
   }
 
@@ -247,6 +278,29 @@ impl<'a> HirOwnershipChecker<'a> {
   /// nested in a discarded arm looking used: it consumed what its arm named, the
   /// enclosing match drained that move outward and compensated its other arms, and on the
   /// nested path the value reached a discarded result with no drop left anywhere.
+  /// The bindings an escaping closure captures by value, which is how a closure
+  /// value moves into an environment that outlives the frame that built it.
+  fn collect_envs_captured_by_escaping_closures(hir: &HIR) -> HashSet<DefinitionId> {
+    let mut captured = HashSet::new();
+
+    for (_, node) in hir.nodes.iter() {
+      if let HIRKind::Closure {
+        escapes: true,
+        captures,
+        ..
+      } = &node.kind
+      {
+        for capture in captures {
+          if capture.mode == CaptureMode::ByValue {
+            captured.insert(capture.source_def);
+          }
+        }
+      }
+    }
+
+    captured
+  }
+
   fn collect_statement_position_nodes(hir: &HIR) -> HashSet<HIRId> {
     fn discard(
       id: HIRId,
@@ -742,6 +796,7 @@ impl<'a> HirOwnershipChecker<'a> {
     self.loop_continue_stack.clear();
     self.loop_condition_scrutinees.clear();
     self.borrowed_pattern_bindings.clear();
+    self.closure_env_owner_of.clear();
     self.current_fn = Some(fn_def_id);
 
     // Push function root scope (no block_hir_id)
@@ -815,6 +870,12 @@ impl<'a> HirOwnershipChecker<'a> {
         let var_ty = self.defs.type_of(&name);
         let owns_closure_env =
           value.is_some_and(|v| ignis_hir::binding_owns_closure_env(self.hir, v, var_ty, self.types, self.defs));
+
+        // A closure value moved into an escaping closure's environment leaves
+        // this frame with it, so this binding no longer owns the environment and
+        // must not free it. Nothing frees it instead; see the field's comment.
+        let moved_into_escaping_env = self.envs_captured_by_escaping_closures.contains(&name);
+        let owns_closure_env = owns_closure_env && !moved_into_escaping_env;
 
         if owns_closure_env {
           self.closure_env_owner_of.insert(name, name);
@@ -1237,7 +1298,12 @@ impl<'a> HirOwnershipChecker<'a> {
     if let Some(target_def) = self.get_assign_target_def(target) {
       let target_ty = self.defs.type_of(&target_def);
 
-      if self.types.needs_drop_with_defs(target_ty, self.defs) {
+      // A binding that owns a closure environment counts even though its type
+      // needs no drop of its own: overwriting it drops the last reference to
+      // that environment, and nothing would free it afterwards.
+      let owns_closure_env = self.closure_env_owner_of.get(&target_def) == Some(&target_def);
+
+      if self.types.needs_drop_with_defs(target_ty, self.defs) || owns_closure_env {
         if self.is_valid(&target_def) {
           // Need to drop old value before overwriting
           self.schedules.on_overwrite.entry(hir_id).or_default().push(target_def);

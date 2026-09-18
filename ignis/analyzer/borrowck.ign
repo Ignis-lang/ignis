@@ -246,6 +246,14 @@ export namespace Borrowck {
     closureEnvBindings: Vector<u32>;
     closureEnvOwners: Vector<u32>;
 
+    /// Bindings whose closure value is captured by value into an escaping
+    /// closure's environment. That environment outlives the frame, so the
+    /// binding must not free the captured closure's own environment at scope
+    /// exit. Nothing frees it instead: the outer environment holds the only
+    /// copy, and a closure drop function does not tear down closure-typed
+    /// captures. Mirrors `envs_captured_by_escaping_closures`.
+    envsCapturedByEscapingClosures: Vector<u32>;
+
     /// False after a terminator, until a join restores it.
     public reachable: boolean;
 
@@ -293,6 +301,7 @@ export namespace Borrowck {
         letConditionScrutineeDefs: Vector::new<u32>(),
         closureEnvBindings: Vector::new<u32>(),
         closureEnvOwners: Vector::new<u32>(),
+        envsCapturedByEscapingClosures: Vector::new<u32>(),
         reachable: true,
         inDefer: false,
         inDropMethod: false,
@@ -310,6 +319,26 @@ export namespace Borrowck {
 
     public setReachable(&mut self, value: boolean): void {
       self.reachable = value;
+    }
+
+    public setEnvsCapturedByEscapingClosures(&mut self, values: Vector<u32>): void {
+      self.envsCapturedByEscapingClosures = values;
+    }
+
+    public envIsCapturedByEscapingClosure(&self, bindingRaw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.envsCapturedByEscapingClosures.length()) {
+        if (let Option::SOME(existing) = self.envsCapturedByEscapingClosures.get(index)) {
+          if (*existing == bindingRaw) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
     }
 
     /// Note that binding `bindingRaw` names the closure environment owned by
@@ -3827,6 +3856,13 @@ export namespace Borrowck {
       }
     }
 
+    // A closure value moved into an escaping closure's environment leaves this
+    // frame with it, so this binding no longer owns the environment and must
+    // not free it. Nothing frees it instead; see the field's comment.
+    if (state.envIsCapturedByEscapingClosure(letNode.name.raw())) {
+      ownsClosureEnv = false;
+    }
+
     if (ownsClosureEnv) {
       let mut ownerRef: &mut Borrowck::State = state;
       ownerRef.recordClosureEnvOwner(letNode.name.raw(), letNode.name.raw());
@@ -4068,7 +4104,17 @@ export namespace Borrowck {
     // which answers for a `Variable` target and nothing else; dropping the old
     // field value is not scheduled by either compiler.
     if (let Option::SOME(target) = Borrowck::variableOf(hir, assign.target)) {
-      if (Borrowck::definitionNeedsDrop(defStore, typeStore, target)) {
+      // A binding that owns a closure environment counts even though its type
+      // needs no drop of its own: overwriting it drops the last reference to
+      // that environment, and nothing would free it afterwards. Mirrors the
+      // `owns_closure_env` disjunct of the oracle's `check_assign`.
+      let mut ownsClosureEnv: boolean = false;
+
+      if (let Option::SOME(owner) = state.closureEnvOwnerOf(target.raw())) {
+        ownsClosureEnv = owner == target.raw();
+      }
+
+      if (ownsClosureEnv || Borrowck::definitionNeedsDrop(defStore, typeStore, target)) {
         // Overwriting a local that still holds a value leaks it unless the old
         // value is dropped first. Mirrors the `on_overwrite` arm of
         // `check_assign`, which reads the state before the revival below.
@@ -5211,6 +5257,40 @@ export namespace Borrowck {
   /// Being discarded travels inward. An arm's body *is* the match's result,
   /// and a block's trailing expression is the block's, so a match written in
   /// one of those positions hands its own result to the same nobody.
+  /// The bindings an escaping closure captures by value, which is how a closure
+  /// value moves into an environment that outlives the frame that built it.
+  /// Mirrors `collect_envs_captured_by_escaping_closures`.
+  function collectEnvsCapturedByEscapingClosures(hir: &Hir::HirStore): Vector<u32> {
+    let mut result: Vector<u32> = Vector::new<u32>();
+    let mut index: u64 = 0;
+
+    while (index < hir.nodes.length()) {
+      if (let Option::SOME(node) = hir.nodes.get(index)) {
+        if (let Hir::HirKind::Closure(closureNode) = &node.kind) {
+          if (closureNode.escapes) {
+            let mut captureIndex: u64 = 0;
+
+            while (captureIndex < closureNode.captures.length()) {
+              if (let Option::SOME(capture) = closureNode.captures.get(captureIndex)) {
+                if (let Hir::CaptureMode::ByValue = capture.mode) {
+                  if (!Borrowck::containsRaw(&mut result, capture.sourceDef.raw())) {
+                    result.push(capture.sourceDef.raw());
+                  }
+                }
+              }
+
+              captureIndex += 1;
+            }
+          }
+        }
+      }
+
+      index += 1;
+    }
+
+    return result;
+  }
+
   function collectStatementPositionNodes(hir: &Hir::HirStore): Vector<u32> {
     let mut result: Vector<u32> = Vector::new<u32>();
     let mut pending: Vector<u32> = Vector::new<u32>();
@@ -5300,9 +5380,11 @@ export namespace Borrowck {
     params: &Vector<Analyzer::DefinitionId>,
     bodyId: Hir::HirId,
     statementPositionNodes: &Vector<u32>,
+    envsCapturedByEscapingClosures: &Vector<u32>,
   ): void {
     let mut state: Borrowck::State = Borrowck::State::init();
     state.setStatementPositionNodes(Borrowck::copyU32Vector(statementPositionNodes));
+    state.setEnvsCapturedByEscapingClosures(Borrowck::copyU32Vector(envsCapturedByEscapingClosures));
     state.pushScope(0, false, false);
     state.setInDropMethod(Borrowck::isInstanceDropMethod(defStore, symbols, functionId));
     state.setCurrentFunction(functionId);
@@ -5345,6 +5427,7 @@ export namespace Borrowck {
     let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
     let mut schedules: Hir::DropSchedules = Hir::DropSchedules::init();
     let statementPositionNodes: Vector<u32> = Borrowck::collectStatementPositionNodes(hir);
+    let envsCapturedByEscapingClosures: Vector<u32> = Borrowck::collectEnvsCapturedByEscapingClosures(hir);
     let mut index: u64 = 0;
 
     while (index < hir.items.length()) {
@@ -5374,6 +5457,7 @@ export namespace Borrowck {
         &params,
         bodyId,
         &statementPositionNodes,
+        &envsCapturedByEscapingClosures,
       );
 
       index += 1;

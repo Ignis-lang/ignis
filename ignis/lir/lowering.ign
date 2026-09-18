@@ -47,10 +47,9 @@ export namespace LirLowering {
     public byrefCaptureRaws: Vector<u32>;
     /// Locals initialized from a closure literal, so a scheduled drop of one
     /// tears the environment down instead of dropping the value struct.
-    /// Parallel to `closureLocalTypeRaws` and `closureLocalHeap`.
+    /// Parallel to `closureLocalTypeRaws`.
     public closureLocalDefRaws: Vector<u32>;
     public closureLocalTypeRaws: Vector<u32>;
-    public closureLocalHeap: Vector<boolean>;
     /// Set while lowering a match scrutinee that no arm takes a payload out of,
     /// so the field read does not mark the field moved. See the `FieldAccess`
     /// lowering. Mirrors `reading_field_scrutinee_by_copy`.
@@ -75,7 +74,6 @@ export namespace LirLowering {
         byrefCaptureRaws: Vector::new<u32>(),
         closureLocalDefRaws: Vector::new<u32>(),
         closureLocalTypeRaws: Vector::new<u32>(),
-        closureLocalHeap: Vector::new<boolean>(),
         readingFieldScrutineeByCopy: false,
         constValues: LirLowering::copyConstValueMap(constValues),
       };
@@ -819,13 +817,11 @@ export namespace LirLowering {
     state: &mut LirLowering::LowerState,
     defId: Analyzer::DefinitionId,
     closureType: Analyzer::TypeId,
-    heapAllocated: boolean,
   ): void {
     let mut stateRef: &mut LirLowering::LowerState = state;
 
     stateRef.closureLocalDefRaws.push(defId.raw());
     stateRef.closureLocalTypeRaws.push(closureType.raw());
-    stateRef.closureLocalHeap.push(heapAllocated);
   }
 
   function closureLocalIndex(
@@ -864,10 +860,6 @@ export namespace LirLowering {
       let Option::SOME(closureTypeRaw) = state.closureLocalTypeRaws.get(index) else {
         return;
       };
-      let Option::SOME(heapAllocated) = state.closureLocalHeap.get(index) else {
-        return;
-      };
-
       let closureType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*closureTypeRaw);
       let mut slotType: Analyzer::TypeId = closureType;
 
@@ -885,7 +877,6 @@ export namespace LirLowering {
       LirLowering::pushInstr(function_, state, Lir::Instr::DropClosure(Lir::InstrDropClosure {
         closure: Lir::Operand::Temp(closureTemp),
         closureType: closureType,
-        heapAllocated: *heapAllocated,
       }));
 
       return;
@@ -1415,18 +1406,7 @@ export namespace LirLowering {
 
         if (let Option::SOME(valueId) = letNode.value) {
           if (Hir::bindingOwnsClosureEnv(hirStore, valueId, declaredType, typeStore, defStore)) {
-            let mut heapAllocated: boolean = false;
-
-            if (let Option::SOME(valueNode) = hirStore.get(valueId)) {
-              if (let Hir::HirKind::Closure(closureNode) = &valueNode.kind) {
-                heapAllocated = closureNode.escapes;
-              }
-            }
-
-            // A closure value that crossed a return boundary: the drop
-            // function it carries knows whether its environment is
-            // heap-allocated.
-            LirLowering::markClosureLocal(state, letNode.name, declaredType, heapAllocated);
+            LirLowering::markClosureLocal(state, letNode.name, declaredType);
           }
 
           let mut valueType: Analyzer::TypeId = declaredType;

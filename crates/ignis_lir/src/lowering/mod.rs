@@ -101,9 +101,9 @@ pub struct LoweringContext<'a> {
   /// them, and a def that slipped through read the pointer's bytes as the value.
   byref_locals: HashSet<LocalId>,
 
-  /// Definitions whose locals hold closure values. Maps to (closure_type, heap_allocated).
+  /// Definitions whose locals hold closure values, mapped to the closure's type.
   /// Used by `emit_drop_for_def` to emit `DropClosure` instead of `Drop`.
-  closure_locals: HashMap<DefinitionId, (TypeId, bool)>,
+  closure_locals: HashMap<DefinitionId, TypeId>,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -1664,14 +1664,7 @@ impl<'a> LoweringContext<'a> {
       let value_node = self.hir.get(value_id);
 
       if ignis_hir::binding_owns_closure_env(self.hir, value_id, &ty, self.types, self.defs) {
-        let heap_allocated = match &value_node.kind {
-          HIRKind::Closure { escapes, .. } => *escapes,
-          // A closure value that crossed a return boundary: the drop function it
-          // carries knows whether its environment is heap-allocated.
-          _ => false,
-        };
-
-        self.closure_locals.insert(name, (ty, heap_allocated));
+        self.closure_locals.insert(name, ty);
       }
 
       if let HIRKind::RecordInit {
@@ -3703,7 +3696,7 @@ impl<'a> LoweringContext<'a> {
     def_id: DefinitionId,
   ) {
     if let Some(&local) = self.def_to_local.get(&def_id) {
-      if let Some(&(closure_type, heap_allocated)) = self.closure_locals.get(&def_id) {
+      if let Some(&closure_type) = self.closure_locals.get(&def_id) {
         let ty = self.fn_builder().local_type(local);
         let temp = self.fn_builder().alloc_temp(ty, Span::default());
         self.fn_builder().emit(Instr::Load {
@@ -3713,7 +3706,6 @@ impl<'a> LoweringContext<'a> {
         self.fn_builder().emit(Instr::DropClosure {
           closure: Operand::Temp(temp),
           closure_type,
-          heap_allocated,
         });
       } else {
         self.fn_builder().emit(Instr::Drop { local });

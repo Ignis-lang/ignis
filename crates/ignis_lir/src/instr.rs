@@ -301,7 +301,6 @@ pub enum Instr {
   DropClosure {
     closure: Operand,
     closure_type: TypeId,
-    heap_allocated: bool,
   },
 
   /// Frees the heap environment of an escaping closure. Emitted only as the last

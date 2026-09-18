@@ -1506,6 +1506,16 @@ impl<'a> CEmitter<'a> {
                   Operand::FuncRef(_) | Operand::GlobalRef(_) => self.types.void(),
                 })
                 .collect();
+
+              // A capture that is itself a closure needs its signature struct, or
+              // the environment field falls back to `void*` and the store of a
+              // closure value into it is not valid C.
+              for &cap_ty in &cap_types {
+                if matches!(self.types.get(&cap_ty), Type::Function { .. }) && !raw_fn_ptr_types.contains(&cap_ty) {
+                  seen_sigs.insert(cap_ty);
+                }
+              }
+
               env_infos.push((*thunk, cap_types, *closure_type));
             }
 
