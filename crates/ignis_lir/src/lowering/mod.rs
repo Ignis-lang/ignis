@@ -85,6 +85,10 @@ pub struct LoweringContext<'a> {
   thunk_captures: HashMap<DefinitionId, Vec<HIRCapture>>,
   drop_fn_captures: HashMap<DefinitionId, Vec<HIRCapture>>,
 
+  /// Drop functions of escaping closures: their environment is heap-allocated,
+  /// so the drop function ends by freeing it.
+  drop_fns_freeing_env: HashSet<DefinitionId>,
+
   /// Locals that hold a *pointer* to the storage their name denotes, rather than the
   /// value itself: all reads, writes and `&`/`&mut` through them go through that
   /// pointer. Two shapes land here — a variable captured by mutable reference in the
@@ -97,9 +101,9 @@ pub struct LoweringContext<'a> {
   /// them, and a def that slipped through read the pointer's bytes as the value.
   byref_locals: HashSet<LocalId>,
 
-  /// Definitions whose locals hold closure values. Maps to (closure_type, heap_allocated).
+  /// Definitions whose locals hold closure values, mapped to the closure's type.
   /// Used by `emit_drop_for_def` to emit `DropClosure` instead of `Drop`.
-  closure_locals: HashMap<DefinitionId, (TypeId, bool)>,
+  closure_locals: HashMap<DefinitionId, TypeId>,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -129,6 +133,7 @@ impl<'a> LoweringContext<'a> {
       lowered_error_nodes: Vec::new(),
       thunk_captures: HashMap::new(),
       drop_fn_captures: HashMap::new(),
+      drop_fns_freeing_env: HashSet::new(),
       byref_locals: HashSet::new(),
       closure_locals: HashMap::new(),
     }
@@ -346,7 +351,8 @@ impl<'a> LoweringContext<'a> {
     // If this is a closure drop function, emit field-drop logic directly
     // instead of lowering the dummy HIR body.
     if let Some(captures) = self.drop_fn_captures.get(&def_id).cloned() {
-      self.emit_drop_fn_body(&func_def, &captures, &def.span);
+      let frees_env = self.drop_fns_freeing_env.contains(&def_id);
+      self.emit_drop_fn_body(&func_def, &captures, frees_env, &def.span);
 
       self.ensure_return();
       let func = self.current_fn.take().unwrap().finish();
@@ -1657,8 +1663,8 @@ impl<'a> LoweringContext<'a> {
       // Check for init-in-place opportunity
       let value_node = self.hir.get(value_id);
 
-      if let HIRKind::Closure { escapes, .. } = &value_node.kind {
-        self.closure_locals.insert(name, (ty, *escapes));
+      if ignis_hir::binding_owns_closure_env(self.hir, value_id, &ty, self.types, self.defs) {
+        self.closure_locals.insert(name, ty);
       }
 
       if let HIRKind::RecordInit {
@@ -3690,7 +3696,7 @@ impl<'a> LoweringContext<'a> {
     def_id: DefinitionId,
   ) {
     if let Some(&local) = self.def_to_local.get(&def_id) {
-      if let Some(&(closure_type, heap_allocated)) = self.closure_locals.get(&def_id) {
+      if let Some(&closure_type) = self.closure_locals.get(&def_id) {
         let ty = self.fn_builder().local_type(local);
         let temp = self.fn_builder().alloc_temp(ty, Span::default());
         self.fn_builder().emit(Instr::Load {
@@ -3700,7 +3706,6 @@ impl<'a> LoweringContext<'a> {
         self.fn_builder().emit(Instr::DropClosure {
           closure: Operand::Temp(temp),
           closure_type,
-          heap_allocated,
         });
       } else {
         self.fn_builder().emit(Instr::Drop { local });
@@ -4261,6 +4266,7 @@ impl<'a> LoweringContext<'a> {
     &mut self,
     func_def: &ignis_type::definition::FunctionDefinition,
     captures: &[HIRCapture],
+    frees_env: bool,
     span: &Span,
   ) {
     let env_param_id = func_def.params[0];
@@ -4296,6 +4302,12 @@ impl<'a> LoweringContext<'a> {
         ty: cap.type_in_env,
       });
     }
+
+    if frees_env {
+      self.fn_builder().emit(Instr::FreeEnv {
+        env: Operand::Temp(env_ptr_temp),
+      });
+    }
   }
 
   fn collect_thunk_captures(&mut self) {
@@ -4304,6 +4316,7 @@ impl<'a> LoweringContext<'a> {
         thunk_def,
         drop_def,
         captures,
+        escapes,
         ..
       } = &node.kind
       {
@@ -4313,6 +4326,10 @@ impl<'a> LoweringContext<'a> {
 
         if let Some(drop_id) = drop_def {
           self.drop_fn_captures.insert(*drop_id, captures.clone());
+
+          if *escapes {
+            self.drop_fns_freeing_env.insert(*drop_id);
+          }
         }
       }
     }

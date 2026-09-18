@@ -481,15 +481,14 @@ impl<'a> LirPrinter<'a> {
           .unwrap();
         }
       },
-      Instr::DropClosure {
-        closure,
-        closure_type,
-        heap_allocated,
-      } => {
+      Instr::DropClosure { closure, closure_type } => {
         let closure_str = self.format_operand(func, closure);
         let ty_str = self.format_type(*closure_type);
-        let heap_str = if *heap_allocated { " [heap]" } else { "" };
-        writeln!(self.output, "    drop_closure {} : {}{}", closure_str, ty_str, heap_str).unwrap();
+        writeln!(self.output, "    drop_closure {} : {}", closure_str, ty_str).unwrap();
+      },
+      Instr::FreeEnv { env } => {
+        let env_str = self.format_operand(func, env);
+        writeln!(self.output, "    free_env {}", env_str).unwrap();
       },
     }
   }

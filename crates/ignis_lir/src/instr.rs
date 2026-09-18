@@ -293,10 +293,19 @@ pub enum Instr {
     return_type: TypeId,
   },
 
-  /// Calls `closure.drop(closure.env)` if non-null, then frees heap env if applicable.
+  /// Calls `closure.drop(closure.env)` if non-null.
+  ///
+  /// Freeing a heap environment is the drop function's own job (see `FreeEnv`),
+  /// so that dropping a closure value whose origin is not statically known —
+  /// one returned by a call, for instance — still releases it exactly once.
   DropClosure {
     closure: Operand,
     closure_type: TypeId,
-    heap_allocated: bool,
+  },
+
+  /// Frees the heap environment of an escaping closure. Emitted only as the last
+  /// instruction of a synthesized closure drop function.
+  FreeEnv {
+    env: Operand,
   },
 }

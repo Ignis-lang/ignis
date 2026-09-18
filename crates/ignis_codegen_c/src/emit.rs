@@ -1506,6 +1506,16 @@ impl<'a> CEmitter<'a> {
                   Operand::FuncRef(_) | Operand::GlobalRef(_) => self.types.void(),
                 })
                 .collect();
+
+              // A capture that is itself a closure needs its signature struct, or
+              // the environment field falls back to `void*` and the store of a
+              // closure value into it is not valid C.
+              for &cap_ty in &cap_types {
+                if matches!(self.types.get(&cap_ty), Type::Function { .. }) && !raw_fn_ptr_types.contains(&cap_ty) {
+                  seen_sigs.insert(cap_ty);
+                }
+              }
+
               env_infos.push((*thunk, cap_types, *closure_type));
             }
 
@@ -3462,18 +3472,16 @@ impl<'a> CEmitter<'a> {
         }
       },
 
-      Instr::DropClosure {
-        closure,
-        heap_allocated,
-        ..
-      } => {
+      // The drop function of an escaping closure frees its own heap environment,
+      // so the caller never has to know where the environment came from.
+      Instr::DropClosure { closure, .. } => {
         let c = self.format_operand(func, closure);
         writeln!(self.output, "if ({}.drop_fn) {}.drop_fn({}.env);", c, c, c).unwrap();
+      },
 
-        if *heap_allocated {
-          write!(self.output, "    ").unwrap();
-          writeln!(self.output, "if ({}.env) free({}.env);", c, c).unwrap();
-        }
+      Instr::FreeEnv { env } => {
+        let ptr = self.format_operand(func, env);
+        writeln!(self.output, "if ({}) free({});", ptr, ptr).unwrap();
       },
     }
   }

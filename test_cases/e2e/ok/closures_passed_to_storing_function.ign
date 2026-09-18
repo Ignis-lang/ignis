@@ -1,0 +1,19 @@
+// e2e: std
+// `collect`'s parameter is not `@noescape` and it does store the closure, so the
+// argument escapes and gets a heap environment. `add`'s binding owns that
+// environment and frees it exactly once at main's scope exit.
+import Vector from "std::vector";
+
+function collect(f: (i32) -> i32): i32 {
+    let mut callbacks: Vector<(i32) -> i32> = Vector::new<(i32) -> i32>();
+    callbacks.push(f);
+
+    return f(2);
+}
+
+function main(): i32 {
+    let base: i32 = 40;
+    let add = (x: i32): i32 -> x + base;
+
+    return collect(add);
+}

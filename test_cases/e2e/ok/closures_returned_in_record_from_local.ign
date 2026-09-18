@@ -1,0 +1,20 @@
+// e2e: allow-leak
+// The environment leaves the frame inside the returned record, so the binding
+// that built it must not free it on the way out. Same unowned-environment leak
+// as `closures_returned_in_record_field`.
+record Holder {
+    public callback: () -> i32;
+}
+
+function makeAdder(base: i32): Holder {
+    let add = (): i32 -> base + 2;
+
+    return Holder { callback: add };
+}
+
+function main(): i32 {
+    let holder = makeAdder(40);
+    let call = holder.callback;
+
+    return call();
+}

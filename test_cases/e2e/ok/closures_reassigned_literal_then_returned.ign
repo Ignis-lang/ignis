@@ -1,0 +1,19 @@
+// A closure literal assigned to an existing binding has to be reachable from
+// that binding's name, or returning it keeps a stack environment. Both closures
+// escape: which one is live at the return needs flow analysis escape analysis
+// does not do, so both get a heap environment. The first is freed by the
+// overwrite, the second by the caller's binding.
+function make(): (i32) -> i32 {
+    let a: i32 = 10;
+    let b: i32 = 40;
+    let mut f = (x: i32): i32 -> x + a;
+    f = (x: i32): i32 -> x + b;
+
+    return f;
+}
+
+function main(): i32 {
+    let g = make();
+
+    return g(2);
+}

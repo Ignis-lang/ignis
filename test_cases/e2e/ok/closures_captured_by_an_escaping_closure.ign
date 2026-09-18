@@ -1,0 +1,17 @@
+// e2e: allow-leak
+// The outer closure captures `inner` by value, so `inner`'s environment leaves
+// the frame inside the outer environment and must be heap-allocated too.
+// Ownership moves with it, so `inner`'s binding must not free it at scope exit.
+// Nothing frees it instead: a closure drop function does not tear down
+// closure-typed captures, so the inner environment leaks.
+function makeChain(base: i32): (i32) -> i32 {
+    let inner = (x: i32): i32 -> x + base;
+
+    return (x: i32): i32 -> inner(x) + 1;
+}
+
+function main(): i32 {
+    let f = makeChain(39);
+
+    return f(2);
+}

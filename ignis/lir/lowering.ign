@@ -47,10 +47,9 @@ export namespace LirLowering {
     public byrefCaptureRaws: Vector<u32>;
     /// Locals initialized from a closure literal, so a scheduled drop of one
     /// tears the environment down instead of dropping the value struct.
-    /// Parallel to `closureLocalTypeRaws` and `closureLocalHeap`.
+    /// Parallel to `closureLocalTypeRaws`.
     public closureLocalDefRaws: Vector<u32>;
     public closureLocalTypeRaws: Vector<u32>;
-    public closureLocalHeap: Vector<boolean>;
     /// Set while lowering a match scrutinee that no arm takes a payload out of,
     /// so the field read does not mark the field moved. See the `FieldAccess`
     /// lowering. Mirrors `reading_field_scrutinee_by_copy`.
@@ -75,7 +74,6 @@ export namespace LirLowering {
         byrefCaptureRaws: Vector::new<u32>(),
         closureLocalDefRaws: Vector::new<u32>(),
         closureLocalTypeRaws: Vector::new<u32>(),
-        closureLocalHeap: Vector::new<boolean>(),
         readingFieldScrutineeByCopy: false,
         constValues: LirLowering::copyConstValueMap(constValues),
       };
@@ -819,13 +817,11 @@ export namespace LirLowering {
     state: &mut LirLowering::LowerState,
     defId: Analyzer::DefinitionId,
     closureType: Analyzer::TypeId,
-    heapAllocated: boolean,
   ): void {
     let mut stateRef: &mut LirLowering::LowerState = state;
 
     stateRef.closureLocalDefRaws.push(defId.raw());
     stateRef.closureLocalTypeRaws.push(closureType.raw());
-    stateRef.closureLocalHeap.push(heapAllocated);
   }
 
   function closureLocalIndex(
@@ -864,10 +860,6 @@ export namespace LirLowering {
       let Option::SOME(closureTypeRaw) = state.closureLocalTypeRaws.get(index) else {
         return;
       };
-      let Option::SOME(heapAllocated) = state.closureLocalHeap.get(index) else {
-        return;
-      };
-
       let closureType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*closureTypeRaw);
       let mut slotType: Analyzer::TypeId = closureType;
 
@@ -885,7 +877,6 @@ export namespace LirLowering {
       LirLowering::pushInstr(function_, state, Lir::Instr::DropClosure(Lir::InstrDropClosure {
         closure: Lir::Operand::Temp(closureTemp),
         closureType: closureType,
-        heapAllocated: *heapAllocated,
       }));
 
       return;
@@ -1414,10 +1405,8 @@ export namespace LirLowering {
         LirLowering::registerLocal(state, letNode.name, slot);
 
         if (let Option::SOME(valueId) = letNode.value) {
-          if (let Option::SOME(valueNode) = hirStore.get(valueId)) {
-            if (let Hir::HirKind::Closure(closureNode) = &valueNode.kind) {
-              LirLowering::markClosureLocal(state, letNode.name, declaredType, closureNode.escapes);
-            }
+          if (Hir::bindingOwnsClosureEnv(hirStore, valueId, declaredType, typeStore, defStore)) {
+            LirLowering::markClosureLocal(state, letNode.name, declaredType);
           }
 
           let mut valueType: Analyzer::TypeId = declaredType;
@@ -2286,6 +2275,9 @@ export namespace LirLowering {
     public thunkCaptures: Vector<Vector<Hir::HirCapture>>;
     public dropDefRaws: Vector<u32>;
     public dropCaptures: Vector<Vector<Hir::HirCapture>>;
+    /// Drop functions of escaping closures: their environment is
+    /// heap-allocated, so the drop function ends by freeing it.
+    public dropFreesEnvRaws: Vector<u32>;
 
     public static init(): ClosureTables {
       return ClosureTables {
@@ -2293,6 +2285,7 @@ export namespace LirLowering {
         thunkCaptures: Vector::new<Vector<Hir::HirCapture>>(),
         dropDefRaws: Vector::new<u32>(),
         dropCaptures: Vector::new<Vector<Hir::HirCapture>>(),
+        dropFreesEnvRaws: Vector::new<u32>(),
       };
     }
 
@@ -2337,6 +2330,22 @@ export namespace LirLowering {
 
       return Vector::new<Hir::HirCapture>();
     }
+
+    public dropFreesEnv(&self, defRaw: u32): boolean {
+      let mut index: u64 = 0;
+
+      while (index < self.dropFreesEnvRaws.length()) {
+        if (let Option::SOME(existing) = self.dropFreesEnvRaws.get(index)) {
+          if (*existing == defRaw) {
+            return true;
+          }
+        }
+
+        index += 1;
+      }
+
+      return false;
+    }
   }
 
   function copyCaptures(source: &Vector<Hir::HirCapture>): Vector<Hir::HirCapture> {
@@ -2374,6 +2383,10 @@ export namespace LirLowering {
           if (let Option::SOME(dropDef) = closureNode.dropDef) {
             tables.dropDefRaws.push(dropDef.raw());
             tables.dropCaptures.push(LirLowering::copyCaptures(&closureNode.captures));
+
+            if (closureNode.escapes) {
+              tables.dropFreesEnvRaws.push(dropDef.raw());
+            }
           }
         }
       }
@@ -2522,6 +2535,7 @@ export namespace LirLowering {
     state: &mut LirLowering::LowerState,
     paramDefs: &Vector<Analyzer::DefinitionId>,
     captures: &Vector<Hir::HirCapture>,
+    freesEnv: boolean,
   ): void {
     let span: SourceSpan = SourceSpan::new("", 0, 0);
 
@@ -2570,6 +2584,12 @@ export namespace LirLowering {
       }));
 
       index += 1;
+    }
+
+    if (freesEnv) {
+      LirLowering::pushInstr(function_, state, Lir::Instr::FreeEnv(Lir::InstrFreeEnv {
+        env: Lir::Operand::Temp(envTemp),
+      }));
     }
   }
 
@@ -4654,9 +4674,18 @@ export namespace LirLowering {
       // The drop function's own HIR body is a bare `return`, so the field
       // drops go in front of it rather than replacing it.
       let dropCaptures: Vector<Hir::HirCapture> = tables.dropCapturesFor(itemDef.raw());
+      let dropFreesEnv: boolean = tables.dropFreesEnv(itemDef.raw());
 
-      if (dropCaptures.length() > 0) {
-        LirLowering::emitDropFunctionBody(defStore, typeStore, &mut function_, &mut state, &paramDefs, &dropCaptures);
+      if (dropCaptures.length() > 0 || dropFreesEnv) {
+        LirLowering::emitDropFunctionBody(
+          defStore,
+          typeStore,
+          &mut function_,
+          &mut state,
+          &paramDefs,
+          &dropCaptures,
+          dropFreesEnv,
+        );
       }
 
       let bodyValue: Lir::Operand = LirLowering::lowerExpr(defStore, typeStore, hirStore, dropSchedules, &mut function_, &mut state, bodyId);

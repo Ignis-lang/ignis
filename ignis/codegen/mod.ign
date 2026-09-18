@@ -1697,6 +1697,7 @@ export namespace CodegenC {
       Lir::Instr::MakeClosure(_) -> "MakeClosure",
       Lir::Instr::CallClosure(_) -> "CallClosure",
       Lir::Instr::DropClosure(_) -> "DropClosure",
+      Lir::Instr::FreeEnv(_) -> "FreeEnv",
     };
   }
 
@@ -2213,6 +2214,9 @@ export namespace CodegenC {
         let mut outputRef: &mut String = output;
         outputRef.pushStr(call.toStr());
       },
+      // The drop function of an escaping closure frees its own heap
+      // environment (see `FreeEnv`), so the caller never has to know where
+      // the environment came from.
       Lir::Instr::DropClosure(node) -> {
         let closure: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.closure);
 
@@ -2220,13 +2224,14 @@ export namespace CodegenC {
 
         let mut guardRef: &mut String = output;
         guardRef.pushStr(guard.toStr());
+      },
+      Lir::Instr::FreeEnv(node) -> {
+        let ptr: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.env);
 
-        if (node.heapAllocated) {
-          let release: String = `    if (${closure.toStr()}.env) free(${closure.toStr()}.env);\n`;
+        let release: String = `    if (${ptr.toStr()}) free(${ptr.toStr()});\n`;
 
-          let mut releaseRef: &mut String = output;
-          releaseRef.pushStr(release.toStr());
-        }
+        let mut releaseRef: &mut String = output;
+        releaseRef.pushStr(release.toStr());
       },
       Lir::Instr::BuiltinEq(node) -> {
         let left: String = CodegenC::formatOperand(defStore, typeStore, symbols, closures, &node.left);
@@ -3023,6 +3028,25 @@ export namespace CodegenC {
                   captureIndex += 1;
                 }
 
+                // A capture that is itself a closure needs its signature
+                // struct, or the environment field falls back to `void*` and
+                // the store of a closure value into it is not valid C.
+                let mut signatureIndex: u64 = 0;
+
+                while (signatureIndex < captureTypes.length()) {
+                  if (let Option::SOME(raw) = captureTypes.get(signatureIndex)) {
+                    let captureType: Analyzer::TypeId = Id::fromRaw<Analyzer::TypeTag>(*raw);
+
+                    if (CodegenC::typeIsClosure(typeStore, captureType)) {
+                      if (!CodegenC::containsRaw(&mut tables.signatures, *raw)) {
+                        tables.signatures.push(*raw);
+                      }
+                    }
+                  }
+
+                  signatureIndex += 1;
+                }
+
                 tables.envs.push(CodegenC::ClosureEnv {
                   thunk: node.thunk.raw(),
                   captureTypes: captureTypes,
@@ -3814,6 +3838,19 @@ export namespace CodegenC {
     }
 
     return false;
+  }
+
+  /// Whether `typeId` is a function type, and therefore rendered as a closure
+  /// signature struct rather than a plain C type.
+  function typeIsClosure(typeStore: &mut Analyzer::TypeStore, typeId: Analyzer::TypeId): boolean {
+    let Option::SOME(typeNode) = typeStore.get(typeId) else {
+      return false;
+    };
+
+    return match (typeNode) {
+      Analyzer::Type::Function(_) -> true,
+      _ -> false,
+    };
   }
 
   function containsRaw(values: &mut Vector<u32>, target: u32): boolean {

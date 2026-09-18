@@ -1,0 +1,18 @@
+// The same escaping closure reaches two record fields. A copy of a closure value
+// never takes ownership of the environment, so only the original binding frees
+// it: two copies must not produce two frees.
+record Pair {
+    public left: (i32) -> i32;
+    public right: (i32) -> i32;
+}
+
+function main(): i32 {
+    let base: i32 = 20;
+    let add = (x: i32): i32 -> x + base;
+
+    let pair = Pair { left: add, right: add };
+    let left = pair.left;
+    let right = pair.right;
+
+    return left(1) + right(1);
+}

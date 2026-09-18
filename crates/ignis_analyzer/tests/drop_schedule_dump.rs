@@ -36,6 +36,65 @@ fn dump(src: &str) -> String {
     .render()
 }
 
+/// The raw `on_overwrite` lists, which the dump collapses.
+fn overwrite_schedule(src: &str) -> Vec<Vec<String>> {
+  let mut source_map = SourceMap::new();
+  let file_id = source_map.add_file("test.ign", src.to_string());
+
+  let mut lexer = IgnisLexer::new(file_id, source_map.get(&file_id).text.as_str());
+  lexer.scan_tokens();
+  assert!(lexer.diagnostics.is_empty(), "lexer errors: {:?}", lexer.diagnostics);
+
+  let symbols = Rc::new(RefCell::new(SymbolTable::new()));
+  let mut parser = IgnisParser::new(lexer.tokens, symbols.clone());
+  let (nodes, roots) = parser.parse().expect("parse failed");
+
+  let output = Analyzer::analyze(&nodes, &roots, symbols.clone());
+  let symbols = symbols.borrow();
+
+  let (schedules, _) = HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &symbols)
+    .with_source_map(&source_map)
+    .check();
+
+  let mut entries: Vec<Vec<String>> = schedules
+    .on_overwrite
+    .values()
+    .map(|defs| {
+      defs
+        .iter()
+        .map(|def_id| symbols.get(&output.defs.get(def_id).name).to_string())
+        .collect()
+    })
+    .collect();
+
+  entries.sort();
+  entries
+}
+
+#[test]
+fn an_overwrite_inside_a_loop_is_scheduled_once() {
+  // `check_loop` walks the body a second time to simulate another iteration. One
+  // assignment drops one value, so the second walk must not add a second drop —
+  // for a closure-environment owner that was a double free, and the dump alone
+  // cannot see it because it collapses the list.
+  assert_eq!(
+    overwrite_schedule(
+      "function make(limit: i32): (i32) -> i32 {
+  let base: i32 = 40;
+  let mut f = (x: i32): i32 -> x + base;
+  let mut i: i32 = 0;
+  while (i < limit) {
+    f = (x: i32): i32 -> x + base;
+    i += 1;
+  }
+  return f;
+}
+"
+    ),
+    vec![vec!["f".to_string()]]
+  );
+}
+
 const RESOURCE: &str = r#"@implements(Drop)
 record Resource {
   public value: i32;
@@ -449,6 +508,70 @@ fn a_program_without_owned_values_still_lists_every_function() {
     "drop-schedule v1
 function main at test.ign:1:22
   <no owned values>
+"
+  );
+}
+
+#[test]
+fn a_closure_received_from_a_call_is_owned_by_the_binding_that_takes_it() {
+  // The environment of the closure `makeAdder` returns is heap-allocated, so the
+  // binding that receives it is scheduled for a drop just like the closure
+  // literal bound inside `makeAdder` would be.
+  assert_eq!(
+    dump(
+      "function makeAdder(base: i32): (i32) -> i32 {
+  return (x: i32): i32 -> x + base;
+}
+
+function main(): i32 {
+  let add = makeAdder(40);
+  return add(2);
+}
+"
+    ),
+    "drop-schedule v1
+function makeAdder at test.ign:1:45
+  <no owned values>
+function __closure_drop_0 at test.ign:2:10
+  <no owned values>
+function __closure_thunk_0 at test.ign:2:10
+  <no owned values>
+function main at test.ign:5:22
+  value add kind=local declared at test.ign:6:3
+    drop at test.ign:5:22 reason=scope-end
+    drop at test.ign:7:3 reason=return
+"
+  );
+}
+
+#[test]
+fn returning_a_closure_local_cancels_its_drop() {
+  // The environment goes to the caller, so `makeAdder` must not free it on the
+  // way out: `add` is transferred, not dropped.
+  assert_eq!(
+    dump(
+      "function makeAdder(base: i32): (i32) -> i32 {
+  let add = (x: i32): i32 -> x + base;
+  return add;
+}
+
+function main(): i32 {
+  let f = makeAdder(40);
+  return f(2);
+}
+"
+    ),
+    "drop-schedule v1
+function makeAdder at test.ign:1:45
+  <no owned values>
+function __closure_drop_0 at test.ign:2:13
+  <no owned values>
+function __closure_thunk_0 at test.ign:2:13
+  <no owned values>
+function main at test.ign:6:22
+  value f kind=local declared at test.ign:7:3
+    drop at test.ign:6:22 reason=scope-end
+    drop at test.ign:8:3 reason=return
 "
   );
 }

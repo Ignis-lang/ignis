@@ -81,6 +81,11 @@ pub struct DropSchedules {
   pub on_condition_skip: HashMap<HIRId, Vec<DefinitionId>>,
 
   /// Drops before overwriting an owned variable, keyed by Assign HIRId.
+  ///
+  /// One assignment drops one value, so a definition appears at most once per
+  /// entry. Record through [`DropSchedules::record_overwrite`], which enforces
+  /// that: a loop body is walked twice to simulate a second iteration, and a
+  /// plain push would schedule the same free twice for one assignment.
   pub on_overwrite: HashMap<HIRId, Vec<DefinitionId>>,
 
   /// Drops before overwriting one field of an owned value, keyed by Assign HIRId
@@ -121,6 +126,23 @@ pub struct DropSchedules {
 impl DropSchedules {
   pub fn new() -> Self {
     Self::default()
+  }
+
+  /// Schedule the drop of `def_id` before the overwrite at `assign`, once.
+  ///
+  /// The caller can reach the same assignment twice — `check_loop` walks a body
+  /// a second time to simulate another iteration — and one assignment drops one
+  /// value, so a repeat is the same schedule rather than a second drop.
+  pub fn record_overwrite(
+    &mut self,
+    assign: HIRId,
+    def_id: DefinitionId,
+  ) {
+    let scheduled = self.on_overwrite.entry(assign).or_default();
+
+    if !scheduled.contains(&def_id) {
+      scheduled.push(def_id);
+    }
   }
 
   /// Check if there are any drops or defers scheduled anywhere.

@@ -232,10 +232,21 @@ export namespace Lir {
     public returnType: Analyzer::TypeId;
   }
 
+  /// Calls `closure.drop(closure.env)` if non-null.
+  ///
+  /// Freeing a heap environment is the drop function's own job (see
+  /// `InstrFreeEnv`), so that dropping a closure value whose origin is not
+  /// statically known — one returned by a call, for instance — still
+  /// releases it exactly once.
   record InstrDropClosure {
     public closure: Lir::Operand;
     public closureType: Analyzer::TypeId;
-    public heapAllocated: boolean;
+  }
+
+  /// Frees the heap environment of an escaping closure. Emitted only as
+  /// the last instruction of a synthesized closure drop function.
+  record InstrFreeEnv {
+    public env: Lir::Operand;
   }
 
   /// Mirrors `ignis_lir::Instr` (TAC: one operation, result in a temp).
@@ -283,5 +294,6 @@ export namespace Lir {
     MakeClosure(Lir::InstrMakeClosure),
     CallClosure(Lir::InstrCallClosure),
     DropClosure(Lir::InstrDropClosure),
+    FreeEnv(Lir::InstrFreeEnv),
   }
 }

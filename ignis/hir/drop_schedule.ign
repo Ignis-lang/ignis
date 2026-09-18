@@ -354,13 +354,30 @@ export namespace Hir {
       return;
     }
 
-    /// Appends one local to the drop-before-overwrite list of an assignment,
-    /// mirroring the Rust `entry(..).or_default().push(..)`.
+    /// Schedules the drop of `defId` before the overwrite at `assign`, once.
+    /// Mirrors `DropSchedules::record_overwrite`.
+    ///
+    /// The caller can reach the same assignment twice — `checkLoop` walks a
+    /// body a second time to simulate another iteration — and one assignment
+    /// drops one value, so a repeat is the same schedule rather than a second
+    /// drop.
     public appendOverwrite(&mut self, assign: Hir::HirId, defId: Analyzer::DefinitionId): void {
       let existing: Option<u64> = Hir::findNodeEntry(&self.onOverwrite, assign);
 
       if (let Option::SOME(index) = existing) {
         let mut merged: Vector<Analyzer::DefinitionId> = self.overwriteDrops(assign);
+        let mut scheduledIndex: u64 = 0;
+
+        while (scheduledIndex < merged.length()) {
+          if (let Option::SOME(scheduled) = merged.get(scheduledIndex)) {
+            if (scheduled.raw() == defId.raw()) {
+              return;
+            }
+          }
+
+          scheduledIndex += 1;
+        }
+
         merged.push(defId);
 
         self.onOverwrite.set(index, Hir::NodeDropEntry { node: assign, defs: merged });
