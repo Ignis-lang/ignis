@@ -27,6 +27,10 @@ use crate::EmitInput;
 const USER_MAIN_SYMBOL: &str = "__ignis_user_main";
 const GENERATED_C_LINE_FILE: &str = "<generated-c>";
 
+/// One closure env struct's info: the owning thunk, its captured field types,
+/// and the closure's function-signature type.
+type ClosureEnvInfo = (DefinitionId, Vec<TypeId>, TypeId);
+
 /// Runtime type definitions every emitted translation unit needs.
 ///
 /// `std/runtime/ignis_rt.h` guards an identical block with the same macro, so a
@@ -1457,8 +1461,8 @@ impl<'a> CEmitter<'a> {
   /// Split out from emission so the two struct kinds can be written at
   /// different points relative to `// Type definitions` — see
   /// `emit_closure_signature_structs` and `emit_closure_env_structs`.
-  fn collect_closure_type_info(&self) -> (Vec<(DefinitionId, Vec<TypeId>, TypeId)>, Vec<TypeId>) {
-    let mut env_infos: Vec<(DefinitionId, Vec<TypeId>, TypeId)> = Vec::new();
+  fn collect_closure_type_info(&self) -> (Vec<ClosureEnvInfo>, Vec<TypeId>) {
+    let mut env_infos: Vec<ClosureEnvInfo> = Vec::new();
     let mut seen_thunks: HashSet<DefinitionId> = HashSet::new();
     let mut seen_sigs: HashSet<TypeId> = HashSet::new();
 
@@ -1604,7 +1608,7 @@ impl<'a> CEmitter<'a> {
   /// sync.
   fn emit_closure_env_structs(
     &mut self,
-    env_infos: &[(DefinitionId, Vec<TypeId>, TypeId)],
+    env_infos: &[ClosureEnvInfo],
   ) {
     if env_infos.is_empty() {
       return;
