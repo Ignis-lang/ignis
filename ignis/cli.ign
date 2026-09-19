@@ -296,6 +296,44 @@ function cliMissingValue(flag: str, expected: str): String {
   return `error: ${flag} requires ${expected}`;
 }
 
+function cliInvalidFeatureName(name: &String): String {
+  return `error: invalid feature name '${name.toStr()}': feature names must be non-empty and contain only ASCII letters, digits, '_', '.' or '-'`;
+}
+
+/// Reports whether `name` is a syntactically valid feature name.
+///
+/// A valid name is non-empty ASCII containing only letters, digits, `_`,
+/// `.` or `-`. Enforced here (rather than imported from `./build/fingerprint`)
+/// to avoid the Ignis relative-import-key collision bug -- see the identical
+/// workaround in `ignis/build/config.ign`. Mirrors
+/// `fingerprintIsValidFeatureName` in `ignis/build/fingerprint.ign` and the
+/// Rust host's `is_valid_feature_name` in `crates/ignis_config/src/lib.rs`.
+function cliIsValidFeatureName(name: &String): boolean {
+  if (name.length() == 0) {
+    return false;
+  }
+
+  let mut index: u64 = 0;
+  while (index < name.length()) {
+    let Option::SOME(byte) = name.byteAt(index) else {
+      return false;
+    };
+
+    let isDigit: boolean = byte >= 48 && byte <= 57;
+    let isUpper: boolean = byte >= 65 && byte <= 90;
+    let isLower: boolean = byte >= 97 && byte <= 122;
+    let isAllowedSymbol: boolean = byte == 95 || byte == 46 || byte == 45;
+
+    if (!isDigit && !isUpper && !isLower && !isAllowedSymbol) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
 /// `ESC`. Ignis string literals have no `\x`/`\u{}` escape, so every ANSI
 /// code below is built one `char` at a time from this rather than embedding
 /// a raw control byte in the source.
@@ -1158,6 +1196,10 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
         return Result::ERROR(cliMissingValue("--feature", "a name"));
       };
 
+      if (!cliIsValidFeatureName(value)) {
+        return Result::ERROR(cliInvalidFeatureName(value));
+      }
+
       options.features.push(value.clone());
       index += 2;
       continue;
@@ -1173,6 +1215,9 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
 
       while (parsedIndex < parsed.length()) {
         if (let Option::SOME(feature) = parsed.get(parsedIndex)) {
+          if (!cliIsValidFeatureName(feature)) {
+            return Result::ERROR(cliInvalidFeatureName(feature));
+          }
           options.features.push(feature.clone());
         }
 
@@ -1709,6 +1754,74 @@ function cliRejectsInvalidOptimizationLevels(): void {
   cliPush(&mut arguments, "9");
 
   Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: invalid optimization level: 9");
+}
+
+/// A `,` in a `--feature` name is rejected: it collides with the delimiter
+/// the build fingerprint's stamp format uses to join the enabled set, which
+/// would let an archive built for the single feature "a,b" be reused for
+/// the set {a, b}.
+@test
+function cliRejectsAFeatureNameContainingAComma(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "build");
+  cliPush(&mut arguments, "--feature");
+  cliPush(&mut arguments, "a,b");
+
+  Test::assertEq<str>(
+    cliParseError(&arguments).toStr(),
+    "error: invalid feature name 'a,b': feature names must be non-empty and contain only ASCII letters, digits, '_', '.' or '-'",
+  );
+}
+
+/// Every comma-separated entry in `--features` is validated too, not just
+/// the first.
+@test
+function cliRejectsAnInvalidNameInACommaSeparatedFeatureList(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "build");
+  cliPush(&mut arguments, "--features");
+  cliPush(&mut arguments, "alpha,a=b");
+
+  Test::assertEq<str>(
+    cliParseError(&arguments).toStr(),
+    "error: invalid feature name 'a=b': feature names must be non-empty and contain only ASCII letters, digits, '_', '.' or '-'",
+  );
+}
+
+/// An empty `--feature` name is rejected.
+@test
+function cliRejectsAnEmptyFeatureName(): void {
+  let mut arguments: Vector<String> = Vector::new<String>();
+  cliPush(&mut arguments, "build");
+  cliPush(&mut arguments, "--feature");
+  cliPush(&mut arguments, "");
+
+  Test::assertEq<str>(
+    cliParseError(&arguments).toStr(),
+    "error: invalid feature name '': feature names must be non-empty and contain only ASCII letters, digits, '_', '.' or '-'",
+  );
+}
+
+@test
+function cliIsValidFeatureNameAcceptsAndRejects(): void {
+  let simd: String = String::create("simd");
+  let allocTrace: String = String::create("alloc-trace");
+  let allocTraceUnderscore: String = String::create("alloc_trace");
+  let versioned: String = String::create("v1.2");
+  let empty: String = String::new();
+  let comma: String = String::create("a,b");
+  let equals: String = String::create("a=b");
+  let space: String = String::create("a b");
+
+  Test::assertEq<boolean>(cliIsValidFeatureName(&simd), true);
+  Test::assertEq<boolean>(cliIsValidFeatureName(&allocTrace), true);
+  Test::assertEq<boolean>(cliIsValidFeatureName(&allocTraceUnderscore), true);
+  Test::assertEq<boolean>(cliIsValidFeatureName(&versioned), true);
+
+  Test::assertEq<boolean>(cliIsValidFeatureName(&empty), false);
+  Test::assertEq<boolean>(cliIsValidFeatureName(&comma), false);
+  Test::assertEq<boolean>(cliIsValidFeatureName(&equals), false);
+  Test::assertEq<boolean>(cliIsValidFeatureName(&space), false);
 }
 
 /// `--help` and `--version` answer whatever else the command line carries.

@@ -38,6 +38,11 @@ pub enum ProjectError {
 
   /// Alias path does not exist on disk.
   AliasPathNotFound { alias: String, path: PathBuf },
+
+  /// A feature name in `[build] known_features`/`default_features` is empty
+  /// or contains a character the build fingerprint's stamp format cannot
+  /// round-trip (see `ignis_config::is_valid_feature_name`).
+  InvalidFeatureName { name: String, field: &'static str },
 }
 
 impl fmt::Display for ProjectError {
@@ -88,6 +93,14 @@ impl fmt::Display for ProjectError {
 
       ProjectError::AliasPathNotFound { alias, path } => {
         write!(f, "alias '{}' path not found: '{}'", alias, path.display())
+      },
+
+      ProjectError::InvalidFeatureName { name, field } => {
+        write!(
+          f,
+          "invalid feature name '{}' in [build] {}: feature names must be non-empty and contain only ASCII letters, digits, '_', '.' or '-'",
+          name, field
+        )
       },
     }
   }

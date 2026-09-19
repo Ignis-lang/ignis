@@ -18,6 +18,103 @@ export record SourceHash {
   public hash: String;
 }
 
+/// Reports whether `name` is a syntactically valid feature name.
+///
+/// A valid name is non-empty ASCII containing only letters, digits, `_`,
+/// `.` or `-`. Enforced at every boundary a feature name enters the
+/// compiler -- CLI `--feature`/`--features` and `ignis.toml`'s
+/// `[build] known_features`/`default_features` -- because the build
+/// fingerprint's stamp format serializes the enabled set as a single
+/// `features=a,b,c` line: a name containing `,` collides with the
+/// delimiter (`--feature 'a,b'` and `--feature a --feature b` would
+/// serialize identically, letting an archive built for one reuse the
+/// other's stamp), a name containing `=` or whitespace corrupts the
+/// `key=value` line, and a name containing a newline injects extra lines
+/// into the stamp file.
+///
+/// Mirrors the Rust host's `is_valid_feature_name` in
+/// `crates/ignis_config/src/lib.rs`.
+export function fingerprintIsValidFeatureName(name: &String): boolean {
+  if (name.length() == 0) {
+    return false;
+  }
+
+  let mut index: u64 = 0;
+  while (index < name.length()) {
+    let Option::SOME(byte) = name.byteAt(index) else {
+      return false;
+    };
+
+    let isDigit: boolean = byte >= 48 && byte <= 57;
+    let isUpper: boolean = byte >= 65 && byte <= 90;
+    let isLower: boolean = byte >= 97 && byte <= 122;
+    let isAllowedSymbol: boolean = byte == 95 || byte == 46 || byte == 45;
+
+    if (!isDigit && !isUpper && !isLower && !isAllowedSymbol) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// Orders and deduplicates a feature set so the fingerprint does not depend on
+/// the order the features were supplied in.
+///
+/// Also filters out any name that fails `fingerprintIsValidFeatureName`.
+/// Every entry point that can add a feature already rejects an invalid name
+/// with a diagnostic before it reaches here, so this is a defensive
+/// backstop: it guarantees the `features=a,b,c` stamp line can never
+/// contain the `,` delimiter, an `=`, whitespace, or a newline, regardless
+/// of how a name got into the set.
+///
+/// Mirrors the Rust host's `normalize_features` in
+/// `crates/ignis_driver/src/build_layout.rs`.
+export function fingerprintNormalizeFeatures(features: &Vector<String>): Vector<String> {
+  let mut normalized: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < features.length()) {
+    let Option::SOME(feature) = features.get(index) else {
+      break;
+    };
+    if (fingerprintIsValidFeatureName(feature)) {
+      normalized.push(feature.clone());
+    }
+    index += 1;
+  }
+
+  normalized.sort((a: &String, b: &String): i32 -> {
+  return a.compare(b);
+});
+
+  let mut deduped: Vector<String> = Vector::new<String>();
+  let mut di: u64 = 0;
+
+  while (di < normalized.length()) {
+    let Option::SOME(candidate) = normalized.get(di) else {
+      break;
+    };
+
+    let mut isDuplicate: boolean = false;
+    if (deduped.length() > 0) {
+      if (let Option::SOME(last) = deduped.get(deduped.length() - 1)) {
+        isDuplicate = last.equals(candidate);
+      }
+    }
+
+    if (!isDuplicate) {
+      deduped.push(candidate.clone());
+    }
+
+    di += 1;
+  }
+
+  return deduped;
+}
+
 /// Build configuration that affects output identity.
 ///
 /// All fields participate in cache invalidation. Any change to a field
@@ -41,6 +138,14 @@ export record BuildFingerprint {
   public cflagsHash: String;
   public stdManifestHash: String;
 
+  /// Enabled compile-time features, sorted and deduplicated.
+  ///
+  /// `@configFlag(@feature("x"))` is folded while parsing, so two builds of the
+  /// same sources under different feature sets produce different artifacts. The
+  /// feature set has to be part of the cache key or a build that enables a
+  /// feature silently relinks the archive built without it.
+  public features: Vector<String>;
+
   /// One entry per resolved module source, in alphabetical-by-path order.
   public perSourceHashes: Vector<SourceHash>;
 
@@ -60,6 +165,7 @@ export record BuildFingerprint {
     cc: str,
     cflagsHash: str,
     stdManifestHash: str,
+    features: &Vector<String>,
   ): BuildFingerprint {
     return BuildFingerprint {
       compilerVersion: String::create(compilerVersion),
@@ -70,6 +176,7 @@ export record BuildFingerprint {
       cc: String::create(cc),
       cflagsHash: String::create(cflagsHash),
       stdManifestHash: String::create(stdManifestHash),
+      features: fingerprintNormalizeFeatures(features),
       perSourceHashes: Vector::new<SourceHash>(),
       transitiveHash: String::new(),
     };
@@ -87,6 +194,7 @@ export record BuildFingerprint {
     cc: str,
     cflagsHash: str,
     stdManifestHash: str,
+    features: &Vector<String>,
     perSourceHashes: Vector<SourceHash>,
     transitiveHash: String,
   ): BuildFingerprint {
@@ -99,6 +207,7 @@ export record BuildFingerprint {
       cc: String::create(cc),
       cflagsHash: String::create(cflagsHash),
       stdManifestHash: String::create(stdManifestHash),
+      features: fingerprintNormalizeFeatures(features),
       perSourceHashes: perSourceHashes,
       transitiveHash: transitiveHash,
     };
@@ -323,6 +432,20 @@ export function fingerprintSerialize(fp: &BuildFingerprint): String {
   out.push(&fp.compilerVersion);
   out.pushChar('\n');
 
+  out.pushStr("features=");
+  let mut featureIdx: u64 = 0;
+  while (featureIdx < fp.features.length()) {
+    let Option::SOME(feature) = fp.features.get(featureIdx) else {
+      break;
+    };
+    if (featureIdx > 0) {
+      out.pushChar(',');
+    }
+    out.push(feature);
+    featureIdx += 1;
+  }
+  out.pushChar('\n');
+
   out.pushStr("per_source_count=");
   let perSourceCount: u64 = fp.perSourceHashes.length();
   let countText: String = perSourceCount.toString();
@@ -414,6 +537,68 @@ function fingerprintLookupKey(lines: &Vector<String>, key: str): String {
   return String::new();
 }
 
+/// Lookup the value for a key in a serialized key=value block, distinguishing
+/// "key present with an empty value" from "key absent entirely".
+///
+/// A stamp written before the `features` field existed has no `features=`
+/// line at all; a stamp written by this compiler with no enabled features
+/// still has the line, just with an empty value. `fingerprintLookupKey` alone
+/// cannot tell those apart -- both read back as `""` -- so this variant scans
+/// for the key itself and only then returns its (possibly empty) value.
+function fingerprintLookupKeyOptional(lines: &Vector<String>, key: str): Option<String> {
+  let searchKey: String = String::create(key);
+  let mut index: u64 = 0;
+
+  while (index < lines.length()) {
+    let Option::SOME(line) = lines.get(index) else {
+      break;
+    };
+
+    let trimmed: String = line.trimAsciiWhitespace();
+    let Option::SOME(eqIndex) = trimmed.indexOfCharFrom('=', 0) else {
+      index += 1;
+      continue;
+    };
+
+    let lineKey: String = trimmed.substringBytes(0, eqIndex).trimAsciiWhitespace();
+    if (lineKey.equals(&searchKey)) {
+      return Option::SOME(trimmed.substringBytes(eqIndex + 1, trimmed.length()).trimAsciiWhitespace());
+    }
+
+    index += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// Parse a `features=a,b,c` value into a normalized (sorted, deduplicated) feature set.
+///
+/// An empty value parses to an empty set rather than a single empty-string feature.
+function fingerprintParseFeatures(value: &String): Vector<String> {
+  let mut raw: Vector<String> = Vector::new<String>();
+
+  if (value.length() > 0) {
+    raw = value.split((b: u8): boolean -> {
+  return b == 44;
+});
+  }
+
+  let mut nonEmpty: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < raw.length()) {
+    let Option::SOME(feature) = raw.get(index) else {
+      break;
+    };
+    if (feature.length() > 0) {
+      nonEmpty.push(feature.clone());
+    }
+    index += 1;
+  }
+
+  return fingerprintNormalizeFeatures(&nonEmpty);
+}
+
 /// Parse all `per_source=path|hash` lines from a serialized block.
 ///
 /// Returns entries in the order they appear; the caller (serialize) guarantees
@@ -495,6 +680,15 @@ export function fingerprintDeserialize(text: &String): Option<BuildFingerprint> 
     return Option::NONE;
   }
 
+  // A stamp missing the `features` key entirely (rather than carrying an
+  // empty value) was written before the enabled feature set was part of the
+  // cache key; reject it so every such cache is invalidated exactly once,
+  // the same way the missing-`compiler_identity` check above does.
+  let Option::SOME(featuresValue) = fingerprintLookupKeyOptional(&lines, "features") else {
+    return Option::NONE;
+  };
+  let features: Vector<String> = fingerprintParseFeatures(&featuresValue);
+
   let perSourceHashes: Vector<SourceHash> = fingerprintParsePerSource(&lines);
 
   return Option::SOME(BuildFingerprint {
@@ -506,6 +700,7 @@ export function fingerprintDeserialize(text: &String): Option<BuildFingerprint> 
     cc: cc,
     cflagsHash: cflagsHash,
     stdManifestHash: stdManifestHash,
+    features: features,
     perSourceHashes: perSourceHashes,
     transitiveHash: transitiveHash,
   });
@@ -537,7 +732,8 @@ function fingerprintReadExpected(filename: str): String {
 }
 
 function fingerprintBaseline(): BuildFingerprint {
-  return BuildFingerprint::new("0.1.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-xyz");
+  let features: Vector<String> = Vector::new<String>();
+  return BuildFingerprint::new("0.1.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-xyz", &features);
 }
 
 /// Best-effort cleanup for a scratch source file this module wrote under
@@ -578,7 +774,8 @@ function fingerprintRoundtrip(): void {
 @test
 function fingerprintCompilerVersionChangeInvalidates(): void {
   let fp1: BuildFingerprint = fingerprintBaseline();
-  let fp2: BuildFingerprint = BuildFingerprint::new("0.2.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-xyz");
+  let features: Vector<String> = Vector::new<String>();
+  let fp2: BuildFingerprint = BuildFingerprint::new("0.2.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-xyz", &features);
 
   let expected: String = fingerprintReadExpected("expected_invalidated.txt");
   let mut actual: String = String::create("stable");
@@ -591,7 +788,8 @@ function fingerprintCompilerVersionChangeInvalidates(): void {
 @test
 function fingerprintAbiVersionChangeInvalidates(): void {
   let fp1: BuildFingerprint = fingerprintBaseline();
-  let fp2: BuildFingerprint = BuildFingerprint::new("0.1.0", 2, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-xyz");
+  let features: Vector<String> = Vector::new<String>();
+  let fp2: BuildFingerprint = BuildFingerprint::new("0.1.0", 2, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-xyz", &features);
 
   let expected: String = fingerprintReadExpected("expected_invalidated.txt");
   let mut actual: String = String::create("stable");
@@ -604,7 +802,8 @@ function fingerprintAbiVersionChangeInvalidates(): void {
 @test
 function fingerprintStdManifestHashChangeInvalidates(): void {
   let fp1: BuildFingerprint = fingerprintBaseline();
-  let fp2: BuildFingerprint = BuildFingerprint::new("0.1.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-CHANGED");
+  let features: Vector<String> = Vector::new<String>();
+  let fp2: BuildFingerprint = BuildFingerprint::new("0.1.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-CHANGED", &features);
 
   let expected: String = fingerprintReadExpected("expected_invalidated.txt");
   let mut actual: String = String::create("stable");
@@ -612,6 +811,130 @@ function fingerprintStdManifestHashChangeInvalidates(): void {
     actual = String::create("invalidated");
   }
   Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+function fingerprintBaselineWithFeatures(features: &Vector<String>): BuildFingerprint {
+  return BuildFingerprint::new("0.1.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash-abc", "manifest-hash-xyz", features);
+}
+
+@test
+function fingerprintDiffersByFeatureSet(): void {
+  let empty: Vector<String> = Vector::new<String>();
+
+  let mut simd: Vector<String> = Vector::new<String>();
+  simd.push(String::create("simd"));
+
+  let mut allocTrace: Vector<String> = Vector::new<String>();
+  allocTrace.push(String::create("alloc-trace"));
+
+  let mut both: Vector<String> = Vector::new<String>();
+  both.push(String::create("simd"));
+  both.push(String::create("alloc-trace"));
+
+  let fpEmpty: BuildFingerprint = fingerprintBaselineWithFeatures(&empty);
+  let fpAllocTrace: BuildFingerprint = fingerprintBaselineWithFeatures(&allocTrace);
+  let fpSimd: BuildFingerprint = fingerprintBaselineWithFeatures(&simd);
+  let fpBoth: BuildFingerprint = fingerprintBaselineWithFeatures(&both);
+
+  Test::assertEq<boolean>(fingerprintEquals(&fpEmpty, &fpAllocTrace), false);
+  Test::assertEq<boolean>(fingerprintEquals(&fpSimd, &fpAllocTrace), false);
+  Test::assertEq<boolean>(fingerprintEquals(&fpSimd, &fpBoth), false);
+}
+
+@test
+function fingerprintIsIndependentOfFeatureOrderAndDuplicates(): void {
+  let mut ordered: Vector<String> = Vector::new<String>();
+  ordered.push(String::create("alloc-trace"));
+  ordered.push(String::create("simd"));
+
+  let mut reorderedWithDuplicates: Vector<String> = Vector::new<String>();
+  reorderedWithDuplicates.push(String::create("simd"));
+  reorderedWithDuplicates.push(String::create("simd"));
+  reorderedWithDuplicates.push(String::create("alloc-trace"));
+
+  let fp1: BuildFingerprint = fingerprintBaselineWithFeatures(&ordered);
+  let fp2: BuildFingerprint = fingerprintBaselineWithFeatures(&reorderedWithDuplicates);
+
+  Test::assertEq<boolean>(fingerprintEquals(&fp1, &fp2), true);
+}
+
+@test
+function fingerprintIsValidFeatureNameAcceptsAndRejects(): void {
+  let simd: String = String::create("simd");
+  let allocTrace: String = String::create("alloc-trace");
+  let allocTraceUnderscore: String = String::create("alloc_trace");
+  let versioned: String = String::create("v1.2");
+  let empty: String = String::new();
+  let comma: String = String::create("a,b");
+  let equals: String = String::create("a=b");
+  let space: String = String::create("a b");
+
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&simd), true);
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&allocTrace), true);
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&allocTraceUnderscore), true);
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&versioned), true);
+
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&empty), false);
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&comma), false);
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&equals), false);
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&space), false);
+}
+
+@test
+function fingerprintNormalizeFeaturesFiltersInvalidNames(): void {
+  // Defensive backstop: even if an invalid name somehow reached
+  // fingerprintNormalizeFeatures (every real entry point rejects it
+  // first), it must never reach the serialized stamp.
+  let mut raw: Vector<String> = Vector::new<String>();
+  raw.push(String::create("simd"));
+  raw.push(String::create("a,b"));
+  raw.push(String::create("a=b"));
+  raw.push(String::create("a b"));
+  raw.push(String::new());
+
+  let normalized: Vector<String> = fingerprintNormalizeFeatures(&raw);
+
+  Test::assertEq<u64>(normalized.length(), 1);
+  match (normalized.get(0)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "simd"),
+    Option::NONE -> Test::fail(),
+  };
+}
+
+@test
+function fingerprintFeatureSetRoundtrips(): void {
+  let mut features: Vector<String> = Vector::new<String>();
+  features.push(String::create("simd"));
+  features.push(String::create("alloc-trace"));
+
+  let fp: BuildFingerprint = fingerprintBaselineWithFeatures(&features);
+  let serialized: String = fingerprintSerialize(&fp);
+
+  let marker: String = String::create("features=alloc-trace,simd");
+  Test::assertEq<boolean>(serialized.contains(&marker), true);
+
+  let Option::SOME(deserialized) = fingerprintDeserialize(&serialized) else {
+    Test::fail();
+    return;
+  };
+  Test::assertEq<boolean>(fingerprintEquals(&fp, &deserialized), true);
+}
+
+@test
+function fingerprintStampFromDifferentFeatureSetIsNotReused(): void {
+  let mut traced: Vector<String> = Vector::new<String>();
+  traced.push(String::create("alloc-trace"));
+  let empty: Vector<String> = Vector::new<String>();
+
+  let fpTraced: BuildFingerprint = fingerprintBaselineWithFeatures(&traced);
+  let serialized: String = fingerprintSerialize(&fpTraced);
+  let Option::SOME(deserializedTraced) = fingerprintDeserialize(&serialized) else {
+    Test::fail();
+    return;
+  };
+
+  let fpUntraced: BuildFingerprint = fingerprintBaselineWithFeatures(&empty);
+  Test::assertEq<boolean>(fingerprintEquals(&deserializedTraced, &fpUntraced), false);
 }
 
 @test
@@ -647,6 +970,7 @@ function fingerprintCompilerIdentityChangeInvalidatesEvenWithSameVersion(): void
     cc: String::create("gcc"),
     cflagsHash: String::create("cflags-hash-abc"),
     stdManifestHash: String::create("manifest-hash-xyz"),
+    features: Vector::new<String>(),
     perSourceHashes: Vector::new<SourceHash>(),
     transitiveHash: String::new(),
   };
@@ -659,6 +983,7 @@ function fingerprintCompilerIdentityChangeInvalidatesEvenWithSameVersion(): void
     cc: String::create("gcc"),
     cflagsHash: String::create("cflags-hash-abc"),
     stdManifestHash: String::create("manifest-hash-xyz"),
+    features: Vector::new<String>(),
     perSourceHashes: Vector::new<SourceHash>(),
     transitiveHash: String::new(),
   };
@@ -677,6 +1002,19 @@ function fingerprintLegacyStampMissingCompilerIdentityIsRejected(): void {
   // must fail to deserialize so every pre-change cache is invalidated once.
   let legacy: String = String::create(
     "abi_version=1\nbackend=c\ncc=gcc\ncflags_hash=cflags-hash-abc\ncompiler_version=0.1.0\nper_source_count=0\nstd_manifest_hash=manifest-hash-xyz\ntarget_triple=x86_64-linux\ntransitive_hash=",
+  );
+
+  Test::assertEq<boolean>(fingerprintDeserialize(&legacy).isSome(), false);
+}
+
+@test
+function fingerprintLegacyStampMissingFeaturesIsRejected(): void {
+  // A stamp written before the enabled feature set was part of the cache key
+  // has a `compiler_identity` line but no `features` line at all; it must
+  // fail to deserialize so every such cache is invalidated once, mirroring
+  // the Rust host's STAMP_VERSION bump.
+  let legacy: String = String::create(
+    "abi_version=1\nbackend=c\ncc=gcc\ncflags_hash=cflags-hash-abc\ncompiler_identity=exe-hash-aaaa-0.1.0\ncompiler_version=0.1.0\nper_source_count=0\nstd_manifest_hash=manifest-hash-xyz\ntarget_triple=x86_64-linux\ntransitive_hash=",
   );
 
   Test::assertEq<boolean>(fingerprintDeserialize(&legacy).isSome(), false);
@@ -727,9 +1065,11 @@ function fingerprintSourceChangeInvalidates(): void {
   });
 
   let transitive1: String = fingerprintTransitiveHash(&sources1);
+  let features: Vector<String> = Vector::new<String>();
 
   let fp1: BuildFingerprint = BuildFingerprint::withSources(
     "0.1.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash", "manifest-hash",
+    &features,
     sources1,
     transitive1,
   );
@@ -762,6 +1102,7 @@ function fingerprintSourceChangeInvalidates(): void {
 
   let fp2: BuildFingerprint = BuildFingerprint::withSources(
     "0.1.0", 1, "x86_64-linux", "c", "gcc", "cflags-hash", "manifest-hash",
+    &features,
     sources2,
     transitive2,
   );

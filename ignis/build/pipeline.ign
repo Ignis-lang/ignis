@@ -228,6 +228,7 @@ export namespace BuildPipeline {
       config.cc.toStr(),
       cflagsHash.toStr(),
       manifestHash.toStr(),
+      &config.features,
       sourceHashes,
       transitiveHash,
     );
@@ -535,6 +536,7 @@ function pipelineBuildTestConfig(manifestPath: &Path::PathBuf): BuildConfig {
         cflags: Vector::new<String>(),
         emit: String::new(),
         stdManifest: Option::NONE,
+        features: Vector::new<String>(),
       };
     },
   };
@@ -552,6 +554,7 @@ function pipelineBuildTestConfig(manifestPath: &Path::PathBuf): BuildConfig {
     cflags: Vector::new<String>(),
     emit: String::new(),
     stdManifest: Option::SOME(manifest),
+    features: Vector::new<String>(),
   };
 }
 
@@ -722,4 +725,111 @@ function pipelineBuildStdCacheHitSkipsRecompile(): void {
   };
   let sentinelStr: String = String::create("SENTINEL");
   Test::assertEq<boolean>(libContent.equals(&sentinelStr), true);
+}
+
+/// Reads the std stamp file and reports whether its `features=` line
+/// contains `marker`. Used to tell a genuine recompile (the stamp is
+/// rewritten with the new feature set) apart from a stale cache hit (the old
+/// stamp, without `marker`, stays on disk).
+function pipelineStampHasFeature(layout: &BuildLayout, marker: str): boolean {
+  let stampPath: Path::PathBuf = layout.stdStampPath();
+  let content: String = match (Fs::readToString(&stampPath)) {
+    Result::OK(text) -> text,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return false;
+    },
+  };
+  let needle: String = String::create(marker);
+  return content.contains(&needle);
+}
+
+@test
+function pipelineBuildStdFeatureChangeForcesRecompileThenCaches(): void {
+  let layout: BuildLayout = pipelineTestLayout("feature_change");
+
+  // Set up the std src directory and write a minimal manifest.
+  let stdFakeRootNameFeature: String = `/tmp/ignis_pipeline_std_root_feature_${Process::id()}`;
+  let stdFakeRoot: Path::PathBuf = Path::PathBuf::fromString(&stdFakeRootNameFeature);
+  pipelineEnsureDir(&stdFakeRoot);
+  pipelineWriteMinimalManifest(&stdFakeRoot, "rt", "rt.ign");
+
+  // Write the .ign stub so the fingerprint hasher can read it.
+  let ignPath: Path::PathBuf = stdFakeRoot.join("rt.ign");
+  let ignContent: String = String::create("// feature stub");
+  match (Fs::writeString(&ignPath, &ignContent)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  // Write the corresponding .c file under layout.stdSrcDir().
+  let stdSrcDirFeature: Path::PathBuf = layout.stdSrcDir();
+  pipelineEnsureDir(&stdSrcDirFeature);
+  let cPath: Path::PathBuf = stdSrcDirFeature.join("rt.c");
+  pipelineWriteMinimalC(&cPath, "ignis_std_rt_feature");
+
+  let manifestPath: Path::PathBuf = stdFakeRoot.join("manifest.toml");
+  let libPath: Path::PathBuf = layout.stdLibPath();
+
+  // First build — no features enabled.
+  let config1: BuildConfig = pipelineBuildTestConfig(&manifestPath);
+  let result1: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(config1, &layout);
+  let mut firstOk: boolean = false;
+  if (let Result::OK(r) = result1) {
+    firstOk = r.succeeded;
+  }
+  Test::assertEq<boolean>(firstOk, true);
+  Test::assertEq<boolean>(pipelineStampHasFeature(&layout, "alloc-trace"), false);
+
+  // Second build — same sources, but "alloc-trace" is now enabled. The
+  // fingerprint must differ, so this must NOT be a cache hit: the stamp is
+  // rewritten to record the new feature set and the archive is recompiled.
+  let mut config2: BuildConfig = pipelineBuildTestConfig(&manifestPath);
+  let mut allocTraceFeature: Vector<String> = Vector::new<String>();
+  allocTraceFeature.push(String::create("alloc-trace"));
+  config2.features = allocTraceFeature;
+  let result2: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(config2, &layout);
+  let mut secondOk: boolean = false;
+  if (let Result::OK(r) = result2) {
+    secondOk = r.succeeded;
+  }
+  Test::assertEq<boolean>(secondOk, true);
+  Test::assertEq<boolean>(pipelineStampHasFeature(&layout, "alloc-trace"), true);
+
+  // Overwrite the now-valid archive with a sentinel byte so a recompile is
+  // detectable. Safe here because the third build below is expected to be a
+  // cache hit, which never touches the archive file.
+  let sentinel: String = String::create("SENTINEL");
+  match (Fs::writeString(&libPath, &sentinel)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  // Third build — same "alloc-trace" feature set as the second build. This
+  // must be a cache hit: the sentinel survives untouched.
+  let mut config3: BuildConfig = pipelineBuildTestConfig(&manifestPath);
+  let mut allocTraceFeatureAgain: Vector<String> = Vector::new<String>();
+  allocTraceFeatureAgain.push(String::create("alloc-trace"));
+  config3.features = allocTraceFeatureAgain;
+  let result3: Result<StdBuildResult, DiagnosticBag> = BuildPipeline::buildStd(config3, &layout);
+  let mut thirdOk: boolean = false;
+  if (let Result::OK(r) = result3) {
+    thirdOk = r.succeeded;
+  }
+  Test::assertEq<boolean>(thirdOk, true);
+
+  let libContentAfterCacheHit: String = match (Fs::readToString(&libPath)) {
+    Result::OK(text) -> text,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+  Test::assertEq<boolean>(libContentAfterCacheHit.equals(&sentinel), true);
 }

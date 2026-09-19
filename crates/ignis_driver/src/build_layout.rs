@@ -289,26 +289,28 @@ impl BuildLayout {
 }
 
 // =============================================================================
-// Stamp v3: content-hash based cache invalidation
+// Stamp v4: content-hash based cache invalidation
 // =============================================================================
 //
 // Format (key=value, sorted):
-//   version=3
+//   version=4
 //   compiler_version=0.1.0
 //   compiler_identity=<exe path:size:mtime_ns:inode>-<compiler_version>
 //   codegen_abi_version=1
 //   target=
+//   features=a,b,c
 //   file_count=N
 //   file.0.path=...
 //   file.0.hash=...
 //   ...
 //
 // For per-module stamps (user modules with deps):
-//   version=3
+//   version=4
 //   compiler_version=...
 //   compiler_identity=...
 //   codegen_abi_version=...
 //   target=
+//   features=a,b,c
 //   self_path=...
 //   self_hash=...
 //   dep_count=N
@@ -323,7 +325,7 @@ impl BuildLayout {
 // `STAMP_VERSION` invalidates every stamp written by a compiler older than
 // this change, one time, regardless of identity.
 
-const STAMP_VERSION: &str = "3";
+const STAMP_VERSION: &str = "4";
 
 static COMPILER_EXE_KEY: OnceLock<String> = OnceLock::new();
 
@@ -393,6 +395,39 @@ pub struct BuildFingerprint {
   pub compiler_identity: String,
   pub codegen_abi_version: u32,
   pub target: String,
+  /// Enabled compile-time features, sorted and deduplicated.
+  ///
+  /// `@configFlag(@feature("x"))` is folded while parsing, so two builds of the
+  /// same sources under different feature sets produce different artifacts. The
+  /// feature set has to be part of the cache key or a build that enables a
+  /// feature silently relinks the archive built without it.
+  pub features: Vec<String>,
+}
+
+/// Orders and deduplicates a feature set so the fingerprint does not depend on
+/// the order the features were supplied in.
+///
+/// Also filters out any name that fails `ignis_config::is_valid_feature_name`.
+/// Every entry point that can add a feature (CLI `--feature`/`--features`,
+/// `ignis.toml`'s `known_features`/`default_features`) already rejects an
+/// invalid name with a diagnostic before it reaches here, so this is a
+/// defensive backstop: it guarantees the `features=a,b,c` stamp line can
+/// never contain the `,` delimiter, an `=`, whitespace, or a newline,
+/// regardless of how a name got into the set (including reading a
+/// hand-edited or corrupted stamp file back in).
+pub fn normalize_features<I, S>(features: I) -> Vec<String>
+where
+  I: IntoIterator<Item = S>,
+  S: AsRef<str>,
+{
+  let mut normalized: Vec<String> = features
+    .into_iter()
+    .map(|f| f.as_ref().to_string())
+    .filter(|f| ignis_config::is_valid_feature_name(f))
+    .collect();
+  normalized.sort();
+  normalized.dedup();
+  normalized
 }
 
 impl BuildFingerprint {
@@ -406,7 +441,21 @@ impl BuildFingerprint {
       compiler_identity: compiler_identity(compiler_version),
       codegen_abi_version,
       target: String::new(), // placeholder for future target triple
+      features: Vec::new(),
     }
+  }
+
+  #[cfg(test)]
+  pub fn with_features<I, S>(
+    mut self,
+    features: I,
+  ) -> Self
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+  {
+    self.features = normalize_features(features);
+    self
   }
 }
 
@@ -486,6 +535,7 @@ impl StdStamp {
     writeln!(out, "compiler_identity={}", self.fingerprint.compiler_identity).unwrap();
     writeln!(out, "codegen_abi_version={}", self.fingerprint.codegen_abi_version).unwrap();
     writeln!(out, "target={}", self.fingerprint.target).unwrap();
+    writeln!(out, "features={}", self.fingerprint.features.join(",")).unwrap();
     writeln!(out, "file_count={}", self.files.len()).unwrap();
     for (i, f) in self.files.iter().enumerate() {
       writeln!(out, "file.{}.path={}", i, f.path.display()).unwrap();
@@ -506,6 +556,11 @@ impl StdStamp {
       compiler_identity: map.get("compiler_identity")?.to_string(),
       codegen_abi_version: map.get("codegen_abi_version")?.parse().ok()?,
       target: map.get("target").map(|s| s.to_string()).unwrap_or_default(),
+      // A v4 stamp always writes a `features=` line, even when the set is
+      // empty; one missing the key entirely is malformed (hand-edited or
+      // corrupted) rather than merely feature-less, so it is rejected here
+      // rather than defaulted to an empty set.
+      features: normalize_features(map.get("features")?.split(',').filter(|f| !f.is_empty())),
     };
 
     let file_count: usize = map.get("file_count")?.parse().ok()?;
@@ -606,6 +661,7 @@ impl ModuleStamp {
     writeln!(out, "compiler_identity={}", self.fingerprint.compiler_identity).unwrap();
     writeln!(out, "codegen_abi_version={}", self.fingerprint.codegen_abi_version).unwrap();
     writeln!(out, "target={}", self.fingerprint.target).unwrap();
+    writeln!(out, "features={}", self.fingerprint.features.join(",")).unwrap();
     writeln!(out, "self_path={}", self.self_path.display()).unwrap();
     writeln!(out, "self_hash={}", self.self_hash).unwrap();
     writeln!(out, "dep_count={}", self.deps.len()).unwrap();
@@ -628,6 +684,8 @@ impl ModuleStamp {
       compiler_identity: map.get("compiler_identity")?.to_string(),
       codegen_abi_version: map.get("codegen_abi_version")?.parse().ok()?,
       target: map.get("target").map(|s| s.to_string()).unwrap_or_default(),
+      // See the matching comment in `StdStamp::deserialize`.
+      features: normalize_features(map.get("features")?.split(',').filter(|f| !f.is_empty())),
     };
 
     let self_path = PathBuf::from(map.get("self_path")?);
@@ -1009,12 +1067,14 @@ mod tests {
       compiler_identity: "exe-hash-aaaa-0.1.0".to_string(),
       codegen_abi_version: 1,
       target: String::new(),
+      features: Vec::new(),
     };
     let fp_new = BuildFingerprint {
       compiler_version: "0.1.0".to_string(),
       compiler_identity: "exe-hash-bbbb-0.1.0".to_string(),
       codegen_abi_version: 1,
       target: String::new(),
+      features: Vec::new(),
     };
     let stamp = ModuleStamp::new(fp_old.clone(), PathBuf::from("main.ign"), "hash".to_string(), vec![]);
 
@@ -1062,6 +1122,7 @@ mod tests {
       compiler_identity: "some-identity-0.1.0".to_string(),
       codegen_abi_version: 1,
       target: String::new(),
+      features: Vec::new(),
     };
     let stamp = StdStamp {
       fingerprint: fp,
@@ -1085,6 +1146,104 @@ mod tests {
 
     let legacy_module = "version=2\ncompiler_version=0.1.0\ncodegen_abi_version=1\ntarget=\nself_path=main.ign\nself_hash=abc\ndep_count=0\n";
     assert!(ModuleStamp::deserialize(legacy_module).is_none());
+  }
+
+  #[test]
+  fn test_old_v3_stamp_is_rejected() {
+    // v3 (pre-feature-set) stamps already carry compiler_identity but have
+    // no `features=` line at all; STAMP_VERSION was bumped 3 -> 4 for this
+    // reason, so every v3 stamp must be invalidated exactly once, the same
+    // way the v2 -> v3 bump invalidated stamps missing compiler_identity.
+    let legacy = "version=3\ncompiler_version=0.1.0\ncompiler_identity=exe-hash-aaaa-0.1.0\ncodegen_abi_version=1\ntarget=\nfile_count=0\n";
+    assert!(StdStamp::deserialize(legacy).is_none());
+
+    let legacy_module = "version=3\ncompiler_version=0.1.0\ncompiler_identity=exe-hash-aaaa-0.1.0\ncodegen_abi_version=1\ntarget=\nself_path=main.ign\nself_hash=abc\ndep_count=0\n";
+    assert!(ModuleStamp::deserialize(legacy_module).is_none());
+  }
+
+  #[test]
+  fn test_v4_stamp_missing_features_line_is_rejected() {
+    // Defensive: even under the current STAMP_VERSION, a stamp that is
+    // otherwise well-formed but missing the `features=` line entirely
+    // (hand-edited or corrupted) must not silently default to an empty
+    // feature set.
+    let malformed = "version=4\ncompiler_version=0.1.0\ncompiler_identity=exe-hash-aaaa-0.1.0\ncodegen_abi_version=1\ntarget=\nfile_count=0\n";
+    assert!(StdStamp::deserialize(malformed).is_none());
+
+    let malformed_module = "version=4\ncompiler_version=0.1.0\ncompiler_identity=exe-hash-aaaa-0.1.0\ncodegen_abi_version=1\ntarget=\nself_path=main.ign\nself_hash=abc\ndep_count=0\n";
+    assert!(ModuleStamp::deserialize(malformed_module).is_none());
+  }
+
+  #[test]
+  fn test_normalize_features_filters_invalid_names() {
+    // Defensive backstop: even if an invalid name somehow reached
+    // normalize_features (every real entry point rejects it first), it must
+    // never reach the serialized stamp.
+    assert_eq!(normalize_features(["simd", "a,b", "a=b", "a b", ""]), vec!["simd".to_string()]);
+  }
+
+  fn fingerprint_with(features: &[&str]) -> BuildFingerprint {
+    BuildFingerprint::new("0.1.0", 1).with_features(features)
+  }
+
+  #[test]
+  fn test_fingerprint_differs_by_feature_set() {
+    assert_ne!(fingerprint_with(&[]), fingerprint_with(&["alloc-trace"]));
+    assert_ne!(fingerprint_with(&["simd"]), fingerprint_with(&["alloc-trace"]));
+    assert_ne!(fingerprint_with(&["simd"]), fingerprint_with(&["simd", "alloc-trace"]));
+  }
+
+  #[test]
+  fn test_fingerprint_is_independent_of_feature_order() {
+    assert_eq!(
+      fingerprint_with(&["simd", "alloc-trace"]),
+      fingerprint_with(&["alloc-trace", "simd"])
+    );
+    assert_eq!(
+      fingerprint_with(&["simd", "simd", "alloc-trace"]),
+      fingerprint_with(&["alloc-trace", "simd"])
+    );
+  }
+
+  #[test]
+  fn test_std_stamp_roundtrips_feature_set() {
+    let stamp = StdStamp {
+      fingerprint: fingerprint_with(&["alloc-trace", "simd"]),
+      files: vec![],
+    };
+
+    let serialized = stamp.serialize();
+    assert!(serialized.contains("features=alloc-trace,simd"));
+    assert_eq!(StdStamp::deserialize(&serialized).unwrap(), stamp);
+  }
+
+  #[test]
+  fn test_std_stamp_from_a_different_feature_set_is_not_reused() {
+    // Drives the real `is_std_stamp_valid` cache check against a stamp file
+    // on disk, the same way `ensure_std_built`/`build_std` do, rather than
+    // only comparing in-memory `BuildFingerprint` values.
+    let temp_dir = std::env::temp_dir().join("ignis_std_stamp_feature_reuse_test");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let std_dir = temp_dir.join("std");
+    std::fs::create_dir_all(&std_dir).unwrap();
+    std::fs::write(std_dir.join("io.ign"), "// io module").unwrap();
+
+    let traced_fp = fingerprint_with(&["alloc-trace"]);
+    let stamp = StdStamp::compute(&std_dir, traced_fp.clone()).unwrap();
+    let stamp_path = temp_dir.join(".stamp");
+    write_std_stamp(&stamp_path, &stamp).unwrap();
+
+    // A stamp written for {alloc-trace} is valid for {alloc-trace}...
+    assert!(is_std_stamp_valid(&stamp_path, &std_dir, &traced_fp));
+
+    // ...but not reused for an empty feature set, even though every source
+    // file is unchanged.
+    let untraced_fp = fingerprint_with(&[]);
+    assert!(!is_std_stamp_valid(&stamp_path, &std_dir, &untraced_fp));
+
+    std::fs::remove_dir_all(&temp_dir).unwrap();
   }
 
   #[test]
