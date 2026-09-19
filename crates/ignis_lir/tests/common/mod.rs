@@ -30,6 +30,26 @@ pub fn lower_to_lir_with_hir_edit(
   src: &str,
   edit: impl FnOnce(&mut ignis_hir::HIR),
 ) -> LirResult {
+  lower_to_lir_with_edits(src, edit, |_| {})
+}
+
+/// Same as `lower_to_lir`, with a chance to edit the drop schedules before lowering.
+///
+/// A schedule that lists one value twice for a site is what a second walk of a loop body
+/// used to produce, and the recorders now refuse it, so the only way to hand that shape to
+/// lowering is to write it here.
+pub fn lower_to_lir_with_schedule_edit(
+  src: &str,
+  edit: impl FnOnce(&mut ignis_hir::DropSchedules),
+) -> LirResult {
+  lower_to_lir_with_edits(src, |_| {}, edit)
+}
+
+pub fn lower_to_lir_with_edits(
+  src: &str,
+  edit_hir: impl FnOnce(&mut ignis_hir::HIR),
+  edit_schedules: impl FnOnce(&mut ignis_hir::DropSchedules),
+) -> LirResult {
   let mut sm = SourceMap::new();
   let file_id = sm.add_file("test.ign", src.to_string());
 
@@ -50,7 +70,7 @@ pub fn lower_to_lir_with_hir_edit(
     .any(|d| matches!(d.severity, ignis_diagnostics::diagnostic_report::Severity::Error));
   assert!(!has_errors, "Analyzer errors: {:?}", output.diagnostics);
 
-  edit(&mut output.hir);
+  edit_hir(&mut output.hir);
 
   let mut types = output.types.clone();
 
@@ -59,7 +79,8 @@ pub fn lower_to_lir_with_hir_edit(
     let symbols = output.symbols.borrow();
     let ownership_checker =
       ignis_analyzer::HirOwnershipChecker::new(&output.hir, &output.types, &output.defs, &symbols);
-    let (drop_schedules, _) = ownership_checker.check();
+    let (mut drop_schedules, _) = ownership_checker.check();
+    edit_schedules(&mut drop_schedules);
     lower_and_verify(&output.hir, &mut types, &output.defs, &symbols, &drop_schedules, None)
   };
 

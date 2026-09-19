@@ -39,6 +39,25 @@ pub struct MoveSite {
 /// Drop schedules produced by ownership analysis.
 /// All Vec<DefinitionId> are in drop order (reverse declaration, inner→outer).
 /// All Vec<HIRId> for defers are in LIFO order (last registered = first executed).
+///
+/// # One entry per value per site
+///
+/// The ownership walk reaches the same node twice: `check_loop` goes through a loop body
+/// a second time to simulate another iteration. Every schedule below therefore has to say
+/// what a second visit does, and the two answers are:
+///
+/// - **Replaced.** `on_scope_end`, `on_exit`, `on_condition_fail`, `on_condition_skip`,
+///   `on_scope_end_defers` and `on_exit_defers` are written with `HashMap::insert`, so the
+///   second visit supersedes the first. The list is rebuilt from the scope stack each
+///   time and a repeat is impossible by construction.
+/// - **Accumulated.** `on_overwrite`, `on_field_overwrite`, `on_match_arm_end` and `moves`
+///   grow across visits. A plain `push` there schedules the same free twice for one site,
+///   which is a double free. Each has a recorder below that adds nothing already listed,
+///   and nothing outside this type appends to them.
+///
+/// `borrowed_pattern_bindings` is a set and needs no rule. Closure environments have no
+/// schedule of their own: a closure local is listed like any other value and lowering
+/// turns its drop into `DropClosure`.
 #[derive(Debug, Default, Clone)]
 pub struct DropSchedules {
   /// Drops at block end, keyed by Block HIRId.
@@ -142,6 +161,55 @@ impl DropSchedules {
 
     if !scheduled.contains(&def_id) {
       scheduled.push(def_id);
+    }
+  }
+
+  /// Schedule the drop of the field `def_id` before the overwrite at `assign`, once.
+  ///
+  /// One assignment replaces one field, so a repeat is the same schedule. An assignment
+  /// inside a loop body is reached twice and would otherwise owe two frees for it.
+  pub fn record_field_overwrite(
+    &mut self,
+    assign: HIRId,
+    def_id: DefinitionId,
+  ) {
+    let scheduled = self.on_field_overwrite.entry(assign).or_default();
+
+    if !scheduled.contains(&def_id) {
+      scheduled.push(def_id);
+    }
+  }
+
+  /// Schedule the drop of `def_id` at the end of the arm body `arm`, once.
+  ///
+  /// An arm inside a loop body is walked twice, and both the pattern bindings the arm owns
+  /// and the values its siblings handed to the match result are recorded on each visit.
+  pub fn record_match_arm_end(
+    &mut self,
+    arm: HIRId,
+    def_id: DefinitionId,
+  ) {
+    let scheduled = self.on_match_arm_end.entry(arm).or_default();
+
+    if !scheduled.contains(&def_id) {
+      scheduled.push(def_id);
+    }
+  }
+
+  /// Record that `def_id` was moved at `site`, once per distinct site.
+  ///
+  /// A binding really can be moved at two places — one per branch — so this keeps sites
+  /// apart by span. What it rejects is the same span twice, which is the second loop walk
+  /// re-reporting one move.
+  pub fn record_move(
+    &mut self,
+    def_id: DefinitionId,
+    site: MoveSite,
+  ) {
+    let sites = self.moves.entry(def_id).or_default();
+
+    if !sites.contains(&site) {
+      sites.push(site);
     }
   }
 

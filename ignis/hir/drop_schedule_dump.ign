@@ -42,7 +42,22 @@ import _ from "./pattern";
 /// index; drop sites are sorted by position then reason, and always print
 /// before move sites for the same value (mirroring the host's derived `Ord`
 /// on its `Site` enum, where the `Drop` variant sorts before `Move`
-/// regardless of position); duplicate sites are collapsed.
+/// regardless of position).
+///
+/// Sites are **not** deduplicated. A schedule holding the same drop twice is a
+/// double free, and this dump is the only ownership oracle gate G7 has:
+/// collapsing the repeat would print the same bytes for a correct schedule and
+/// for a broken one.
+///
+/// **Two identical drop lines mean one schedule list holding a value twice,
+/// with no exception.** Distinct keys always print distinct lines: a chain of
+/// `&&` nests left and every link starts at the same byte, so
+/// `if (let A = f() && let B = g() && let C = h())` owes `A` on the false path
+/// of two different `Binary` nodes — two correct entries on disjoint edges —
+/// and the `condition-fail` and `condition-skip` lines carry the key's end
+/// position (`node-end=<line>:<column>`) to tell those apart. Every other
+/// reason is keyed by a node a value reaches once, so its position already
+/// identifies the entry and its line is unchanged.
 ///
 /// # Attribution and normalization
 ///
@@ -143,6 +158,12 @@ export namespace Hir {
       public position: Hir::DropScheduleDump::RenderedPosition;
       public reasonRank: u32;
       public reasonText: str;
+
+      /// End of the node the schedule keyed on, printed only for the reasons
+      /// whose keys can share a start position. `hasNodeEnd` is the `Option`
+      /// this language would otherwise need inside a record.
+      public hasNodeEnd: boolean;
+      public nodeEnd: Hir::DropScheduleDump::RenderedPosition;
     }
 
     record ValueEntry {
@@ -314,6 +335,19 @@ export namespace Hir {
         line: location.line,
         column: location.byteColumn,
       };
+    }
+
+    /// The same resolution taken at the span's end, for the `node-end` half of
+    /// a `condition-fail` or `condition-skip` line.
+    function resolveEndPosition(
+      span: &SourceSpan,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      storage: &mut Vector<String>,
+    ): Hir::DropScheduleDump::RenderedPosition {
+      let endSpan: SourceSpan = SourceSpan::new(span.filePath, span.end, span.end);
+
+      return Hir::DropScheduleDump::resolvePosition(&endSpan, files, workingDirectory, storage);
     }
 
     function positionsEqual(
@@ -959,51 +993,6 @@ export namespace Hir {
 
     // --- values (drop and move sites) -------------------------------------------------
 
-    function dropSitesEqual(
-      a: &Hir::DropScheduleDump::DropSiteEntry,
-      b: &Hir::DropScheduleDump::DropSiteEntry,
-    ): boolean {
-      return Hir::DropScheduleDump::positionsEqual(&a.position, &b.position) && a.reasonRank == b.reasonRank;
-    }
-
-    function hasDropSite(
-      sites: &Vector<Hir::DropScheduleDump::DropSiteEntry>,
-      candidate: &Hir::DropScheduleDump::DropSiteEntry,
-    ): boolean {
-      let mut index: u64 = 0;
-
-      while (index < sites.length()) {
-        if (let Option::SOME(site) = sites.get(index)) {
-          if (Hir::DropScheduleDump::dropSitesEqual(site, candidate)) {
-            return true;
-          }
-        }
-
-        index += 1;
-      }
-
-      return false;
-    }
-
-    function hasPosition(
-      positions: &Vector<Hir::DropScheduleDump::RenderedPosition>,
-      candidate: &Hir::DropScheduleDump::RenderedPosition,
-    ): boolean {
-      let mut index: u64 = 0;
-
-      while (index < positions.length()) {
-        if (let Option::SOME(position) = positions.get(index)) {
-          if (Hir::DropScheduleDump::positionsEqual(position, candidate)) {
-            return true;
-          }
-        }
-
-        index += 1;
-      }
-
-      return false;
-    }
-
     function copyDropSites(
       sites: &Vector<Hir::DropScheduleDump::DropSiteEntry>,
     ): Vector<Hir::DropScheduleDump::DropSiteEntry> {
@@ -1016,6 +1005,8 @@ export namespace Hir {
           position: site.position,
           reasonRank: site.reasonRank,
           reasonText: site.reasonText,
+          hasNodeEnd: site.hasNodeEnd,
+          nodeEnd: site.nodeEnd,
         });
         }
 
@@ -1056,6 +1047,8 @@ export namespace Hir {
       position: Hir::DropScheduleDump::RenderedPosition,
       reasonRank: u32,
       reasonText: str,
+      hasNodeEnd: boolean,
+      nodeEnd: Hir::DropScheduleDump::RenderedPosition,
     ): Vector<Hir::DropScheduleDump::ValueEntry> {
       let mut result: Vector<Hir::DropScheduleDump::ValueEntry> = values;
       let defRaw: u32 = defId.raw();
@@ -1063,26 +1056,26 @@ export namespace Hir {
         position: position,
         reasonRank: reasonRank,
         reasonText: reasonText,
+        hasNodeEnd: hasNodeEnd,
+        nodeEnd: nodeEnd,
       };
 
       let existing: Option<u64> = Hir::DropScheduleDump::findValueIndex(&result, defRaw);
 
       if (let Option::SOME(index) = existing) {
         if (let Option::SOME(entry) = result.get(index)) {
-          if (!Hir::DropScheduleDump::hasDropSite(&entry.dropSites, &site)) {
-            let mut newDropSites: Vector<Hir::DropScheduleDump::DropSiteEntry> = Hir::DropScheduleDump::copyDropSites(&entry.dropSites);
-            newDropSites.push(site);
+          let mut newDropSites: Vector<Hir::DropScheduleDump::DropSiteEntry> = Hir::DropScheduleDump::copyDropSites(&entry.dropSites);
+          newDropSites.push(site);
 
-            let newMoveSites: Vector<Hir::DropScheduleDump::RenderedPosition> = Hir::DropScheduleDump::copyPositions(&entry.moveSites);
+          let newMoveSites: Vector<Hir::DropScheduleDump::RenderedPosition> = Hir::DropScheduleDump::copyPositions(&entry.moveSites);
 
-            result.set(index, Hir::DropScheduleDump::ValueEntry {
+          result.set(index, Hir::DropScheduleDump::ValueEntry {
             defRaw: defRaw,
             declaration: entry.declaration,
             name: entry.name,
             dropSites: newDropSites,
             moveSites: newMoveSites,
           });
-          }
         }
 
         return result;
@@ -1123,19 +1116,17 @@ export namespace Hir {
 
       if (let Option::SOME(index) = existing) {
         if (let Option::SOME(entry) = result.get(index)) {
-          if (!Hir::DropScheduleDump::hasPosition(&entry.moveSites, &position)) {
-            let dropSites: Vector<Hir::DropScheduleDump::DropSiteEntry> = Hir::DropScheduleDump::copyDropSites(&entry.dropSites);
-            let mut moveSites: Vector<Hir::DropScheduleDump::RenderedPosition> = Hir::DropScheduleDump::copyPositions(&entry.moveSites);
-            moveSites.push(position);
+          let dropSites: Vector<Hir::DropScheduleDump::DropSiteEntry> = Hir::DropScheduleDump::copyDropSites(&entry.dropSites);
+          let mut moveSites: Vector<Hir::DropScheduleDump::RenderedPosition> = Hir::DropScheduleDump::copyPositions(&entry.moveSites);
+          moveSites.push(position);
 
-            result.set(index, Hir::DropScheduleDump::ValueEntry {
+          result.set(index, Hir::DropScheduleDump::ValueEntry {
             defRaw: defRaw,
             declaration: entry.declaration,
             name: entry.name,
             dropSites: dropSites,
             moveSites: moveSites,
           });
-          }
         }
 
         return result;
@@ -1235,7 +1226,27 @@ export namespace Hir {
         return positionCompare;
       }
 
-      return Hir::DropScheduleDump::compareU32(a.reasonRank, b.reasonRank);
+      let reasonCompare: i32 = Hir::DropScheduleDump::compareU32(a.reasonRank, b.reasonRank);
+
+      if (reasonCompare != 0) {
+        return reasonCompare;
+      }
+
+      // Mirrors the host's derived `Ord` on `Option<Position>`, where `None`
+      // sorts before `Some`.
+      if (!a.hasNodeEnd && !b.hasNodeEnd) {
+        return 0;
+      }
+
+      if (!a.hasNodeEnd) {
+        return -1;
+      }
+
+      if (!b.hasNodeEnd) {
+        return 1;
+      }
+
+      return Hir::DropScheduleDump::comparePositions(&a.nodeEnd, &b.nodeEnd);
     }
 
     function sortDropSites(
@@ -1290,6 +1301,8 @@ export namespace Hir {
               position: chosen.position,
               reasonRank: chosen.reasonRank,
               reasonText: chosen.reasonText,
+              hasNodeEnd: chosen.hasNodeEnd,
+              nodeEnd: chosen.nodeEnd,
             });
           }
 
@@ -1367,8 +1380,9 @@ export namespace Hir {
     }
 
     /// Rebuilds every `ValueEntry` with its drop and move sites sorted
-    /// (drops before moves, mirroring the host's derived `Ord` on `Site`) and
-    /// deduplicated.
+    /// (drops before moves, mirroring the host's derived `Ord` on `Site`).
+    /// Both sorts keep equal elements, so a duplicated schedule entry reaches
+    /// the rendered output as a repeated line.
     function sortAllValueSites(
       values: Vector<Hir::DropScheduleDump::ValueEntry>,
     ): Vector<Hir::DropScheduleDump::ValueEntry> {
@@ -1442,6 +1456,7 @@ export namespace Hir {
                 values = Hir::DropScheduleDump::recordDropSite(
                 values, defs, symbols, declarations, &fallbackPosition, *defId, position,
                 Hir::DropScheduleDump::REASON_SCOPE_END, "scope-end",
+                false, Hir::DropScheduleDump::syntheticPosition(),
               );
               }
 
@@ -1467,6 +1482,7 @@ export namespace Hir {
                 values = Hir::DropScheduleDump::recordDropSite(
                 values, defs, symbols, declarations, &fallbackPosition, *defId, position,
                 Hir::DropScheduleDump::REASON_ARM_END, "arm-end",
+                false, Hir::DropScheduleDump::syntheticPosition(),
               );
               }
 
@@ -1492,6 +1508,7 @@ export namespace Hir {
                 values = Hir::DropScheduleDump::recordDropSite(
                 values, defs, symbols, declarations, &fallbackPosition, *defId, position,
                 Hir::DropScheduleDump::REASON_CONDITION_FAIL, "condition-fail",
+                true, Hir::DropScheduleDump::resolveEndPosition(&span, files, workingDirectory, storage),
               );
               }
 
@@ -1517,6 +1534,7 @@ export namespace Hir {
                 values = Hir::DropScheduleDump::recordDropSite(
                 values, defs, symbols, declarations, &fallbackPosition, *defId, position,
                 Hir::DropScheduleDump::REASON_CONDITION_SKIP, "condition-skip",
+                true, Hir::DropScheduleDump::resolveEndPosition(&span, files, workingDirectory, storage),
               );
               }
 
@@ -1542,6 +1560,7 @@ export namespace Hir {
                 values = Hir::DropScheduleDump::recordDropSite(
                 values, defs, symbols, declarations, &fallbackPosition, *defId, position,
                 Hir::DropScheduleDump::REASON_OVERWRITE, "overwrite",
+                false, Hir::DropScheduleDump::syntheticPosition(),
               );
               }
 
@@ -1567,6 +1586,7 @@ export namespace Hir {
                 values = Hir::DropScheduleDump::recordDropSite(
                 values, defs, symbols, declarations, &fallbackPosition, *defId, position,
                 Hir::DropScheduleDump::REASON_OVERWRITE, "overwrite",
+                false, Hir::DropScheduleDump::syntheticPosition(),
               );
               }
 
@@ -1593,6 +1613,7 @@ export namespace Hir {
                 values = Hir::DropScheduleDump::recordDropSite(
                 values, defs, symbols, declarations, &fallbackPosition, *defId, position,
                 site.reasonRank, site.reasonText,
+                false, Hir::DropScheduleDump::syntheticPosition(),
               );
               }
 
@@ -2163,7 +2184,13 @@ export namespace Hir {
 
             while (dropIndex < value.dropSites.length()) {
               if (let Option::SOME(site) = value.dropSites.get(dropIndex)) {
-                output.pushStr(`    drop at ${Hir::DropScheduleDump::renderPosition(&site.position)} reason=${site.reasonText}\n`.toStr());
+                output.pushStr(`    drop at ${Hir::DropScheduleDump::renderPosition(&site.position)} reason=${site.reasonText}`.toStr());
+
+                if (site.hasNodeEnd) {
+                  output.pushStr(` node-end=${site.nodeEnd.line}:${site.nodeEnd.column}`.toStr());
+                }
+
+                output.pushStr("\n");
               }
 
               dropIndex += 1;

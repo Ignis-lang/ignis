@@ -8,9 +8,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ignis_analyzer::{Analyzer, HirOwnershipChecker};
+use ignis_hir::DropSchedules;
 use ignis_hir::drop_schedule_dump::DropScheduleDumper;
 use ignis_parser::{IgnisLexer, IgnisParser};
-use ignis_type::{file::SourceMap, symbol::SymbolTable};
+use ignis_type::{definition::DefinitionId, file::SourceMap, symbol::SymbolTable};
 
 fn dump(src: &str) -> String {
   let mut source_map = SourceMap::new();
@@ -36,8 +37,15 @@ fn dump(src: &str) -> String {
     .render()
 }
 
-/// The raw `on_overwrite` lists, which the dump collapses.
-fn overwrite_schedule(src: &str) -> Vec<Vec<String>> {
+/// One accumulating schedule's lists, read straight off [`DropSchedules`] rather than
+/// through the dump, so a pin fails on a second entry even if the renderer changes.
+///
+/// `select` picks the schedule; each list comes back as the names it holds, in schedule
+/// order, and the lists are sorted so hash-map iteration order does not leak in.
+fn named_lists(
+  src: &str,
+  select: impl Fn(&DropSchedules) -> Vec<Vec<DefinitionId>>,
+) -> Vec<Vec<String>> {
   let mut source_map = SourceMap::new();
   let file_id = source_map.add_file("test.ign", src.to_string());
 
@@ -56,9 +64,8 @@ fn overwrite_schedule(src: &str) -> Vec<Vec<String>> {
     .with_source_map(&source_map)
     .check();
 
-  let mut entries: Vec<Vec<String>> = schedules
-    .on_overwrite
-    .values()
+  let mut entries: Vec<Vec<String>> = select(&schedules)
+    .into_iter()
     .map(|defs| {
       defs
         .iter()
@@ -71,12 +78,34 @@ fn overwrite_schedule(src: &str) -> Vec<Vec<String>> {
   entries
 }
 
+fn overwrite_schedule(src: &str) -> Vec<Vec<String>> {
+  named_lists(src, |schedules| schedules.on_overwrite.values().cloned().collect())
+}
+
+fn field_overwrite_schedule(src: &str) -> Vec<Vec<String>> {
+  named_lists(src, |schedules| schedules.on_field_overwrite.values().cloned().collect())
+}
+
+fn match_arm_end_schedule(src: &str) -> Vec<Vec<String>> {
+  named_lists(src, |schedules| schedules.on_match_arm_end.values().cloned().collect())
+}
+
+/// One list per moved binding, holding that binding's name once per recorded move site.
+fn move_schedule(src: &str) -> Vec<Vec<String>> {
+  named_lists(src, |schedules| {
+    schedules
+      .moves
+      .iter()
+      .map(|(def_id, sites)| sites.iter().map(|_| *def_id).collect())
+      .collect()
+  })
+}
+
 #[test]
 fn an_overwrite_inside_a_loop_is_scheduled_once() {
   // `check_loop` walks the body a second time to simulate another iteration. One
   // assignment drops one value, so the second walk must not add a second drop —
-  // for a closure-environment owner that was a double free, and the dump alone
-  // cannot see it because it collapses the list.
+  // for a closure-environment owner that was a double free.
   assert_eq!(
     overwrite_schedule(
       "function make(limit: i32): (i32) -> i32 {
@@ -92,6 +121,118 @@ fn an_overwrite_inside_a_loop_is_scheduled_once() {
 "
     ),
     vec![vec!["f".to_string()]]
+  );
+}
+
+#[test]
+fn a_field_overwrite_inside_a_loop_is_scheduled_once() {
+  // One assignment replaces one field. The second walk of the loop body reaches the same
+  // assignment, and a second entry there frees the old field twice.
+  let source = format!(
+    "{RESOURCE}
+record Holder {{
+  public slot: Resource;
+}}
+
+function make(): Resource {{
+  return Resource {{ value: 1 }};
+}}
+
+function run(limit: i32): i32 {{
+  let mut holder: Holder = Holder {{ slot: make() }};
+  let mut index: i32 = 0;
+
+  while (index < limit) {{
+    holder.slot = make();
+    index += 1;
+  }}
+
+  return holder.slot.value;
+}}
+"
+  );
+
+  assert_eq!(field_overwrite_schedule(&source), vec![vec!["slot".to_string()]]);
+}
+
+#[test]
+fn a_match_arm_binding_inside_a_loop_is_scheduled_once() {
+  // The arm owns its pattern binding and the loop body is walked twice, so without the
+  // at-most-once rule the arm end owes two frees for one binding.
+  let source = format!(
+    "{RESOURCE}
+enum Slot {{
+  Filled(Resource),
+  Empty,
+}}
+
+function make(): Slot {{
+  return Slot::Filled(Resource {{ value: 1 }});
+}}
+
+function drain(limit: i32): i32 {{
+  let mut seen: i32 = 0;
+  let mut index: i32 = 0;
+
+  while (index < limit) {{
+    index += 1;
+
+    match (make()) {{
+      Slot::Filled(payload) -> {{
+        seen += payload.value;
+      }},
+      _ -> {{}},
+    }};
+  }}
+
+  return seen;
+}}
+"
+  );
+
+  assert_eq!(match_arm_end_schedule(&source), vec![vec!["payload".to_string()]]);
+}
+
+#[test]
+fn a_move_inside_a_loop_is_recorded_once() {
+  // `moves` is debug metadata, but it is rendered by the dump, so a second walk
+  // re-reporting the same move is a diff gate G7 would have to explain away.
+  let source = format!(
+    "{RESOURCE}
+enum Slot {{
+  Filled(Resource),
+  Empty,
+}}
+
+function make(): Slot {{
+  return Slot::Filled(Resource {{ value: 1 }});
+}}
+
+function drain(): i32 {{
+  let mut seen: i32 = 0;
+  let mut outer: Slot = make();
+
+  while (let Slot::Filled(outerItem) = outer) {{
+    seen += outerItem.value;
+    outer = make();
+
+    let mut inner: Slot = make();
+
+    while (let Slot::Filled(innerItem) = inner) {{
+      seen += innerItem.value;
+      inner = make();
+    }}
+  }}
+
+  return seen;
+}}
+"
+  );
+
+  // `inner`'s move sits in the outer body, which the walk goes through twice.
+  assert_eq!(
+    move_schedule(&source),
+    vec![vec!["inner".to_string()], vec!["outer".to_string()]]
   );
 }
 
@@ -181,7 +322,7 @@ function drop at test.ign:5:25
   <no owned values>
 function take at test.ign:15:35
   value slot kind=local declared at test.ign:17:3
-    drop at test.ign:19:7 reason=condition-skip
+    drop at test.ign:19:7 reason=condition-skip node-end=19:45
     moved at test.ign:19:15
   value inner kind=binding declared at test.ign:19:15
     drop at test.ign:19:47 reason=scope-end
@@ -226,10 +367,59 @@ function make at test.ign:15:23
   <no owned values>
 function take at test.ign:19:22
   value first kind=binding declared at test.ign:22:7
-    drop at test.ign:22:7 reason=condition-fail
+    drop at test.ign:22:7 reason=condition-fail node-end=22:76
     drop at test.ign:22:78 reason=scope-end
   value second kind=binding declared at test.ign:22:43
     drop at test.ign:22:78 reason=scope-end
+"
+  );
+}
+
+#[test]
+fn a_three_link_chain_tells_its_two_short_circuit_entries_apart() {
+  let source = format!(
+    "{RESOURCE}
+enum Slot {{
+  Filled(Resource),
+  Empty,
+}}
+
+function make(): Slot {{
+  return Slot::Filled(Resource {{ value: 1 }});
+}}
+
+function take(): i32 {{
+  let mut seen: i32 = 0;
+
+  if (let Slot::Filled(first) = make() && let Slot::Filled(second) = make() && let Slot::Filled(third) = make()) {{
+    seen = first.value + second.value + third.value;
+  }}
+
+  return seen;
+}}
+"
+  );
+
+  // `first` is owed on the false path of both links of the chain, which nest left and so
+  // start at the same byte. Two correct entries on disjoint edges: the key's end position
+  // is what keeps them from printing as one repeated line.
+  assert_eq!(
+    dump(&source),
+    "drop-schedule v1
+function drop at test.ign:5:25
+  <no owned values>
+function make at test.ign:15:23
+  <no owned values>
+function take at test.ign:19:22
+  value first kind=binding declared at test.ign:22:7
+    drop at test.ign:22:7 reason=condition-fail node-end=22:76
+    drop at test.ign:22:7 reason=condition-fail node-end=22:112
+    drop at test.ign:22:114 reason=scope-end
+  value second kind=binding declared at test.ign:22:43
+    drop at test.ign:22:7 reason=condition-fail node-end=22:112
+    drop at test.ign:22:114 reason=scope-end
+  value third kind=binding declared at test.ign:22:80
+    drop at test.ign:22:114 reason=scope-end
 "
   );
 }

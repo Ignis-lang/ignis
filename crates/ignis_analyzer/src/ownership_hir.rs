@@ -1411,12 +1411,7 @@ impl<'a> HirOwnershipChecker<'a> {
       return;
     };
 
-    self
-      .schedules
-      .on_field_overwrite
-      .entry(hir_id)
-      .or_default()
-      .push(field_def);
+    self.schedules.record_field_overwrite(hir_id, field_def);
   }
 
   /// The field a `base.field` place names, as its own definition.
@@ -2033,12 +2028,9 @@ impl<'a> HirOwnershipChecker<'a> {
               .extend(pattern_drops.iter().rev().copied());
           }
         } else {
-          self
-            .schedules
-            .on_match_arm_end
-            .entry(arm.body)
-            .or_default()
-            .extend(pattern_drops);
+          for def in pattern_drops {
+            self.schedules.record_match_arm_end(arm.body, def);
+          }
         }
       }
 
@@ -2078,12 +2070,7 @@ impl<'a> HirOwnershipChecker<'a> {
         }
 
         if arm_reachability[index] {
-          self
-            .schedules
-            .on_match_arm_end
-            .entry(arms[index].body)
-            .or_default()
-            .push(*def);
+          self.schedules.record_match_arm_end(arms[index].body, *def);
         }
 
         arm_state.insert(*def, OwnershipState::Moved);
@@ -2718,12 +2705,7 @@ impl<'a> HirOwnershipChecker<'a> {
       return;
     };
 
-    self
-      .schedules
-      .moves
-      .entry(def_id)
-      .or_default()
-      .push(MoveSite { function, span });
+    self.schedules.record_move(def_id, MoveSite { function, span });
   }
 
   fn merge_branch_states(

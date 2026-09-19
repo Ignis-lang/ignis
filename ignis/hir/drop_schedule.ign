@@ -146,6 +146,27 @@ export namespace Hir {
   /// Mutation lives in methods rather than in free functions because a direct
   /// field write from outside a record is currently miscompiled for owning
   /// fields.
+  ///
+  /// # One entry per value per site
+  ///
+  /// The ownership walk reaches the same node twice: `checkLoop` goes through a
+  /// loop body a second time to simulate another iteration. Every schedule
+  /// below therefore has to say what a second visit does, and the two answers
+  /// are:
+  ///
+  /// - **Replaced.** `onScopeEnd`, `onExit`, `onConditionFail`,
+  ///   `onConditionSkip`, `onScopeEndDefers` and `onExitDefers` are written by
+  ///   a `set*` method that overwrites the entry, so the second visit
+  ///   supersedes the first. The list is rebuilt from the scope stack each time
+  ///   and a repeat is impossible by construction.
+  /// - **Accumulated.** `onOverwrite`, `onFieldOverwrite`, `onMatchArmEnd` and
+  ///   `moves` grow across visits. A plain append there schedules the same free
+  ///   twice for one site, which is a double free. Each `append*`/`record*`
+  ///   method below adds nothing already listed.
+  ///
+  /// `borrowedPatternBindings` is a set and needs no rule. Closure environments
+  /// have no schedule of their own: a closure local is listed like any other
+  /// value and lowering turns its drop into a closure drop.
   record DropSchedules {
     public onScopeEnd: Vector<Hir::NodeDropEntry>;
     public onMatchArmEnd: Vector<Hir::NodeDropEntry>;
@@ -272,33 +293,38 @@ export namespace Hir {
       self.onScopeEnd.push(Hir::NodeDropEntry { node: block, defs: defs });
     }
 
-    /// Appends to the drop list of a match arm body, mirroring the Rust
-    /// `entry(..).or_default().extend(..)` on `on_match_arm_end`.
+    /// Appends to the drop list of a match arm body, listing each value once.
+    /// Mirrors `DropSchedules::record_match_arm_end`.
+    ///
+    /// An arm inside a loop body is walked twice, and both the pattern bindings
+    /// the arm owns and the values its siblings handed to the match result are
+    /// recorded on each visit. One arm end frees one value.
     public appendMatchArmEnd(
       &mut self,
       body: Hir::HirId,
       defs: Vector<Analyzer::DefinitionId>
     ): void {
       let existing: Option<u64> = Hir::findNodeEntry(&self.onMatchArmEnd, body);
+      let mut merged: Vector<Analyzer::DefinitionId> = self.matchArmDrops(body);
+      let extra: Vector<Analyzer::DefinitionId> = defs;
+      let mut extraIndex: u64 = 0;
 
-      if (let Option::SOME(index) = existing) {
-        let mut merged: Vector<Analyzer::DefinitionId> = self.matchArmDrops(body);
-        let extra: Vector<Analyzer::DefinitionId> = defs;
-        let mut extraIndex: u64 = 0;
-
-        while (extraIndex < extra.length()) {
-          if (let Option::SOME(defId) = extra.get(extraIndex)) {
+      while (extraIndex < extra.length()) {
+        if (let Option::SOME(defId) = extra.get(extraIndex)) {
+          if (!Hir::containsDefinitionId(&merged, *defId)) {
             merged.push(*defId);
           }
-
-          extraIndex += 1;
         }
 
+        extraIndex += 1;
+      }
+
+      if (let Option::SOME(index) = existing) {
         self.onMatchArmEnd.set(index, Hir::NodeDropEntry { node: body, defs: merged });
         return;
       }
 
-      self.onMatchArmEnd.push(Hir::NodeDropEntry { node: body, defs: defs });
+      self.onMatchArmEnd.push(Hir::NodeDropEntry { node: body, defs: merged });
     }
 
     /// Replaces the drop list a short-circuited `&&` owes, mirroring the Rust
@@ -366,16 +392,9 @@ export namespace Hir {
 
       if (let Option::SOME(index) = existing) {
         let mut merged: Vector<Analyzer::DefinitionId> = self.overwriteDrops(assign);
-        let mut scheduledIndex: u64 = 0;
 
-        while (scheduledIndex < merged.length()) {
-          if (let Option::SOME(scheduled) = merged.get(scheduledIndex)) {
-            if (scheduled.raw() == defId.raw()) {
-              return;
-            }
-          }
-
-          scheduledIndex += 1;
+        if (Hir::containsDefinitionId(&merged, defId)) {
+          return;
         }
 
         merged.push(defId);
@@ -391,7 +410,12 @@ export namespace Hir {
     }
 
     /// Appends one field to the drop-before-overwrite list of an assignment
-    /// whose target is a field, mirroring `on_field_overwrite`.
+    /// whose target is a field, once. Mirrors
+    /// `DropSchedules::record_field_overwrite`.
+    ///
+    /// One assignment replaces one field, so a repeat is the same schedule. An
+    /// assignment inside a loop body is reached twice and would otherwise owe
+    /// two frees for it.
     public appendFieldOverwrite(
       &mut self,
       assign: Hir::HirId,
@@ -401,6 +425,11 @@ export namespace Hir {
 
       if (let Option::SOME(index) = existing) {
         let mut merged: Vector<Analyzer::DefinitionId> = self.fieldOverwriteDrops(assign);
+
+        if (Hir::containsDefinitionId(&merged, defId)) {
+          return;
+        }
+
         merged.push(defId);
 
         self.onFieldOverwrite.set(index, Hir::NodeDropEntry { node: assign, defs: merged });
@@ -446,8 +475,12 @@ export namespace Hir {
       self.onExitDefers.push(Hir::ExitDeferEntry { key: key, bodies: bodies });
     }
 
-    /// Appends one move site for `defId`, mirroring the Rust
-    /// `entry(..).or_default().push(..)` on `moves`.
+    /// Records that `defId` was moved at `span`, once per distinct site.
+    /// Mirrors `DropSchedules::record_move`.
+    ///
+    /// A binding really can be moved at two places — one per branch — so sites
+    /// stay apart by span. What this rejects is the same span twice, which is
+    /// the second loop walk re-reporting one move.
     public recordMove(
       &mut self,
       defId: Analyzer::DefinitionId,
@@ -459,6 +492,11 @@ export namespace Hir {
 
       if (let Option::SOME(index) = existing) {
         let mut sites: Vector<Hir::MoveSite> = self.movesOf(defId);
+
+        if (Hir::containsMoveSite(&sites, &site)) {
+          return;
+        }
+
         sites.push(site);
 
         self.moves.set(index, Hir::MoveEntry { def: defId, sites: sites });
@@ -573,6 +611,58 @@ export namespace Hir {
 
       return Vector::new<Hir::HirId>();
     }
+  }
+
+  /// Whether `defId` is already listed. Every accumulating schedule asks this
+  /// before it appends, so one site never owes the same free twice.
+  function containsDefinitionId(
+    list: &Vector<Analyzer::DefinitionId>,
+    defId: Analyzer::DefinitionId
+  ): boolean {
+    let mut index: u64 = 0;
+
+    while (index < list.length()) {
+      if (let Option::SOME(entry) = list.get(index)) {
+        if (entry.raw() == defId.raw()) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
+  function moveSitesEqual(left: &Hir::MoveSite, right: &Hir::MoveSite): boolean {
+    if (left.functionId.raw() != right.functionId.raw()) {
+      return false;
+    }
+
+    if (left.span.start != right.span.start || left.span.end != right.span.end) {
+      return false;
+    }
+
+    let leftPath: str = left.span.filePath;
+    let rightPath: str = right.span.filePath;
+
+    return @eq<str>(&leftPath, &rightPath);
+  }
+
+  function containsMoveSite(sites: &Vector<Hir::MoveSite>, candidate: &Hir::MoveSite): boolean {
+    let mut index: u64 = 0;
+
+    while (index < sites.length()) {
+      if (let Option::SOME(site) = sites.get(index)) {
+        if (Hir::moveSitesEqual(site, candidate)) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
   }
 
   function findNodeEntry(entries: &Vector<Hir::NodeDropEntry>, node: Hir::HirId): Option<u64> {

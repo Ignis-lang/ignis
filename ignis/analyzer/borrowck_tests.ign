@@ -620,6 +620,84 @@ function borrowckRenderSchedules(
   return rendered;
 }
 
+/// Renders the schedules that accumulate across visits — the ones a second
+/// walk of a loop body can append to — as one line each.
+///
+/// Kept apart from `borrowckRenderSchedules` so that a fixture written to pin
+/// one of these lists is not also pinning every unrelated scope-end entry, and
+/// so that `moves`, which almost every fixture records, does not reach the
+/// expectations that do not care about it.
+///
+/// `moves` prints a count rather than a position: a repeat the second loop walk
+/// records is the same site twice, so the count is exactly what changes.
+function borrowckRenderAccumulatingSchedules(
+  defStore: &Analyzer::DefinitionStore,
+  symbols: &Analyzer::SymbolTable,
+  schedules: &Hir::DropSchedules,
+): String {
+  let mut rendered: String = String::create("");
+  let mut armIndex: u64 = 0;
+
+  while (armIndex < schedules.onMatchArmEnd.length()) {
+    if (let Option::SOME(entry) = schedules.onMatchArmEnd.get(armIndex)) {
+      let defs: String = borrowckRenderDefs(defStore, symbols, &entry.defs);
+
+      rendered.pushStr("arm-end: ");
+      rendered.pushStr(defs.toStr());
+      rendered.pushStr("\n");
+    }
+
+    armIndex += 1;
+  }
+
+  let mut fieldIndex: u64 = 0;
+
+  while (fieldIndex < schedules.onFieldOverwrite.length()) {
+    if (let Option::SOME(entry) = schedules.onFieldOverwrite.get(fieldIndex)) {
+      let defs: String = borrowckRenderDefs(defStore, symbols, &entry.defs);
+
+      rendered.pushStr("field-overwrite: ");
+      rendered.pushStr(defs.toStr());
+      rendered.pushStr("\n");
+    }
+
+    fieldIndex += 1;
+  }
+
+  let mut overwriteIndex: u64 = 0;
+
+  while (overwriteIndex < schedules.onOverwrite.length()) {
+    if (let Option::SOME(entry) = schedules.onOverwrite.get(overwriteIndex)) {
+      let defs: String = borrowckRenderDefs(defStore, symbols, &entry.defs);
+
+      rendered.pushStr("overwrite: ");
+      rendered.pushStr(defs.toStr());
+      rendered.pushStr("\n");
+    }
+
+    overwriteIndex += 1;
+  }
+
+  let mut moveIndex: u64 = 0;
+
+  while (moveIndex < schedules.moves.length()) {
+    if (let Option::SOME(entry) = schedules.moves.get(moveIndex)) {
+      let name: String = borrowckDefinitionName(defStore, symbols, entry.def);
+      let count: String = String::create(entry.sites.length());
+
+      rendered.pushStr("moves ");
+      rendered.pushStr(name.toStr());
+      rendered.pushStr(": ");
+      rendered.pushStr(count.toStr());
+      rendered.pushStr("\n");
+    }
+
+    moveIndex += 1;
+  }
+
+  return rendered;
+}
+
 /// Parses, analyzes and lowers `source`, then renders the drop schedules the
 /// borrow-check walk recorded over the resulting HIR.
 ///
@@ -627,6 +705,16 @@ function borrowckRenderSchedules(
 /// `borrowckDiagnostics` rejects them: a fixture the rest of the pipeline
 /// refuses lowers to something the schedules would describe meaninglessly.
 function borrowckSchedules(source: str): String {
+  return borrowckRenderedSchedules(source, false);
+}
+
+/// The same pipeline, rendered through
+/// `borrowckRenderAccumulatingSchedules` instead.
+function borrowckAccumulatingSchedules(source: str): String {
+  return borrowckRenderedSchedules(source, true);
+}
+
+function borrowckRenderedSchedules(source: str, accumulating: boolean): String {
   let file: SourceFile = SourceFile::create("borrowck_tests.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
@@ -671,6 +759,10 @@ function borrowckSchedules(source: str): String {
     &mut symbols,
     &hir,
   );
+
+  if (accumulating) {
+    return borrowckRenderAccumulatingSchedules(&defStore, &symbols, &checked.dropSchedules);
+  }
 
   return borrowckRenderSchedules(&defStore, &symbols, &checked.dropSchedules);
 }
@@ -1007,6 +1099,54 @@ function borrowckSchedulesLoopIterationDrop(): void {
   );
 
   Test::assertEq<str>(rendered.toStr(), "scope-end: value\n");
+}
+
+/// Scenario: an assignment inside a loop body drops the value it replaces
+/// once, however many times the walk reaches it.
+/// Spec: IGN-39 — `appendOverwrite` lists a definition at most once.
+@test
+function borrowckSchedulesOverwriteInLoopOnce(): void {
+  let rendered: String = borrowckAccumulatingSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nfunction run(count: u32): u32 {\n  let mut value: Owned = Owned { id: 1 };\n  let mut total: u32 = 0;\n\n  while (total < count) {\n    value = Owned { id: 2 };\n    total = total + 1;\n  }\n\n  return value.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "overwrite: value\n");
+}
+
+/// Scenario: writing one field of an owned record inside a loop body frees the
+/// field's old value once.
+/// Spec: IGN-39 — `appendFieldOverwrite` lists a field at most once.
+@test
+function borrowckSchedulesFieldOverwriteInLoopOnce(): void {
+  let rendered: String = borrowckAccumulatingSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nrecord Holder {\n  public slot: Owned;\n}\n\nfunction run(count: u32): u32 {\n  let mut holder: Holder = Holder { slot: Owned { id: 1 } };\n  let mut total: u32 = 0;\n\n  while (total < count) {\n    holder.slot = Owned { id: 2 };\n    total = total + 1;\n  }\n\n  return holder.slot.id;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "field-overwrite: slot\n");
+}
+
+/// Scenario: a match arm inside a loop body owns its pattern binding and frees
+/// it once at the arm's end.
+/// Spec: IGN-39 — `appendMatchArmEnd` lists a definition at most once.
+@test
+function borrowckSchedulesMatchArmEndInLoopOnce(): void {
+  let rendered: String = borrowckAccumulatingSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Slot {\n  Filled(Owned),\n  Empty,\n}\n\nfunction make(): Slot {\n  return Slot::Filled(Owned { id: 1 });\n}\n\nfunction run(count: u32): u32 {\n  let mut total: u32 = 0;\n\n  while (total < count) {\n    total = total + 1;\n\n    match (make()) {\n      Slot::Filled(payload) -> {\n        total = total + payload.id;\n      },\n      _ -> {},\n    };\n  }\n\n  return total;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "arm-end: payload\n");
+}
+
+/// Scenario: a move that sits in a loop body the walk goes through twice is
+/// still one move site.
+/// Spec: IGN-39 — `recordMove` keeps one entry per distinct site.
+@test
+function borrowckSchedulesMoveInLoopOnce(): void {
+  let rendered: String = borrowckAccumulatingSchedules(
+    "@implements(Drop)\nrecord Owned {\n  public id: u32;\n}\n\nenum Slot {\n  Filled(Owned),\n  Empty,\n}\n\nfunction make(): Slot {\n  return Slot::Filled(Owned { id: 1 });\n}\n\nfunction run(): u32 {\n  let mut seen: u32 = 0;\n  let mut outer: Slot = make();\n\n  while (let Slot::Filled(outerItem) = outer) {\n    seen = seen + outerItem.id;\n    outer = make();\n\n    let mut inner: Slot = make();\n\n    while (let Slot::Filled(innerItem) = inner) {\n      seen = seen + innerItem.id;\n      inner = make();\n    }\n  }\n\n  return seen;\n}\n",
+  );
+
+  Test::assertEq<str>(rendered.toStr(), "moves outer: 1\nmoves inner: 1\n");
 }
 
 /// Scenario: a `break` unwinds every scope between it and the loop it leaves,

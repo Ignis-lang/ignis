@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ignis_type::{
   definition::{DefinitionId, DefinitionStore},
@@ -75,6 +75,14 @@ pub enum VerifyError {
     actual_type: TypeId,
   },
 
+  /// A local is dropped twice on one straight-line path with nothing that re-initializes
+  /// it in between, so the second drop frees storage the first already released.
+  DoubleDrop {
+    function: String,
+    block: String,
+    local: LocalId,
+  },
+
   /// An analysis error placeholder was reached while lowering.
   ///
   /// Lowering runs only after analysis reported no errors, so this means a phase produced
@@ -143,6 +151,94 @@ impl<'a> LirVerifier<'a> {
     // Verify each block
     for block in func.blocks.get_all() {
       self.verify_block(func, &func_name, block, &mut defined_temps);
+    }
+
+    self.verify_no_double_drops(func, &func_name);
+  }
+
+  /// Rejects a local freed twice inside one block with nothing between the two drops that
+  /// gives it a new value.
+  ///
+  /// This is what a duplicated drop schedule reaches the program as: ownership lists the
+  /// same value twice for one site, and lowering emits both frees back to back. Scope-end
+  /// and early-exit drops of one value land in different blocks, so a repeat that matters
+  /// shows up inside a block.
+  ///
+  /// # Limit
+  ///
+  /// The check is intra-block: it never follows an edge, so two drops in different blocks
+  /// are not compared even when one dominates the other. A cross-block rule needs a
+  /// liveness dataflow over the whole function, and the shape this exists to catch —
+  /// `record_overwrite` or `record_match_arm_end` holding one value twice — always emits
+  /// both frees into one block.
+  ///
+  /// # What counts as re-initialization
+  ///
+  /// A `Store` to the local, which is how every new value reaches a slot. Reads do not:
+  /// a closure is freed as `Load` then `DropClosure`, so treating the `Load` as a write
+  /// would hide exactly the double free PR #226 found.
+  ///
+  /// A local whose address is ever taken — `AddrOfLocal`, or an `Operand::Local` used as a
+  /// pointer — is skipped entirely. Anything reachable through that pointer can write the
+  /// slot, in this block or another one, and the verifier cannot see it.
+  fn verify_no_double_drops(
+    &mut self,
+    func: &FunctionLir,
+    func_name: &str,
+  ) {
+    let addressed = addressed_locals(func);
+
+    for block in func.blocks.get_all() {
+      // Cleared per block: the check never follows an edge, so nothing carries over.
+      let mut dropped: HashSet<LocalId> = HashSet::new();
+      let mut loaded_from: HashMap<TempId, LocalId> = HashMap::new();
+
+      for instr in &block.instructions {
+        match instr {
+          Instr::Load { dest, source } => {
+            loaded_from.insert(*dest, *source);
+          },
+          Instr::Store { dest, .. } => {
+            dropped.remove(dest);
+            loaded_from.retain(|_, local| local != dest);
+          },
+          Instr::MarkMoved { ptr, .. } => {
+            if let Some(local) = local_behind(ptr, &loaded_from) {
+              dropped.remove(&local);
+            }
+          },
+          Instr::Drop { local } => {
+            self.record_drop(*local, &addressed, &mut dropped, func_name, &block.label);
+          },
+          Instr::DropClosure { closure, .. } => {
+            if let Some(local) = local_behind(closure, &loaded_from) {
+              self.record_drop(local, &addressed, &mut dropped, func_name, &block.label);
+            }
+          },
+          _ => {},
+        }
+      }
+    }
+  }
+
+  fn record_drop(
+    &mut self,
+    local: LocalId,
+    addressed: &HashSet<LocalId>,
+    dropped: &mut HashSet<LocalId>,
+    func_name: &str,
+    block_name: &str,
+  ) {
+    if addressed.contains(&local) {
+      return;
+    }
+
+    if !dropped.insert(local) {
+      self.errors.push(VerifyError::DoubleDrop {
+        function: func_name.to_string(),
+        block: block_name.to_string(),
+        local,
+      });
     }
   }
 
@@ -566,6 +662,151 @@ impl<'a> LirVerifier<'a> {
       crate::ConstValue::Null(ty) => *ty,
       crate::ConstValue::Undef(ty) => *ty,
     }
+  }
+}
+
+/// Every local whose slot could be written through a pointer.
+///
+/// `AddrOfLocal` hands out the address explicitly; an `Operand::Local` is a slot used
+/// where a pointer is expected, which is the same thing. Either way the verifier cannot
+/// tell what writes through it or where, so the double-drop check leaves those locals
+/// alone rather than guess.
+///
+/// A drop's own operand is not one of those uses. `DropClosure` naming a slot directly is
+/// the drop under test, so counting it here would mark the local addressed and switch the
+/// check off for exactly the instruction it exists to check.
+fn addressed_locals(func: &FunctionLir) -> HashSet<LocalId> {
+  let mut addressed = HashSet::new();
+
+  for block in func.blocks.get_all() {
+    for instr in &block.instructions {
+      if let Instr::AddrOfLocal { local, .. } = instr {
+        addressed.insert(*local);
+      }
+
+      if matches!(instr, Instr::DropClosure { .. }) {
+        continue;
+      }
+
+      each_operand(instr, &mut |operand| {
+        if let Operand::Local(local) = operand {
+          addressed.insert(*local);
+        }
+      });
+    }
+
+    match &block.terminator {
+      Terminator::Branch { condition, .. } => {
+        if let Operand::Local(local) = condition {
+          addressed.insert(*local);
+        }
+      },
+      Terminator::Return(Some(Operand::Local(local))) => {
+        addressed.insert(*local);
+      },
+      Terminator::Goto(_) | Terminator::Return(_) | Terminator::Unreachable => {},
+    }
+  }
+
+  addressed
+}
+
+/// The local a drop names when the value reached the instruction through a temp.
+///
+/// A closure is freed as a `Load` into a temp followed by `DropClosure` on that temp, so
+/// without this the pair reads as a drop of nothing.
+fn local_behind(
+  operand: &Operand,
+  loaded_from: &HashMap<TempId, LocalId>,
+) -> Option<LocalId> {
+  match operand {
+    Operand::Local(local) => Some(*local),
+    Operand::Temp(temp) => loaded_from.get(temp).copied(),
+    Operand::Const(_) | Operand::FuncRef(_) | Operand::GlobalRef(_) => None,
+  }
+}
+
+/// Calls `visit` on every operand an instruction reads or writes through.
+///
+/// Written out rather than matched with a catch-all so that a new instruction carrying an
+/// operand has to be listed here instead of silently going unseen.
+fn each_operand(
+  instr: &Instr,
+  visit: &mut impl FnMut(&Operand),
+) {
+  match instr {
+    Instr::Store { value, .. } => visit(value),
+    Instr::LoadPtr { ptr, .. } => visit(ptr),
+    Instr::StorePtr { ptr, value } => {
+      visit(ptr);
+      visit(value);
+    },
+    Instr::BuiltinLoad { ptr, .. } => visit(ptr),
+    Instr::BuiltinStore { ptr, value, .. } => {
+      visit(ptr);
+      visit(value);
+    },
+    Instr::BuiltinHash { value, hasher, .. } => {
+      visit(value);
+      visit(hasher);
+    },
+    Instr::BuiltinEq { left, right, .. } => {
+      visit(left);
+      visit(right);
+    },
+    Instr::Copy { source, .. } => visit(source),
+    Instr::BinOp { left, right, .. } => {
+      visit(left);
+      visit(right);
+    },
+    Instr::UnaryOp { operand, .. } => visit(operand),
+    Instr::Call { args, .. } | Instr::RuntimeCall { args, .. } => args.iter().for_each(visit),
+    Instr::Cast { source, .. } | Instr::BitCast { source, .. } => visit(source),
+    Instr::GetElementPtr { base, index, .. } => {
+      visit(base);
+      visit(index);
+    },
+    Instr::MakeSlice { data, len, .. } => {
+      visit(data);
+      visit(len);
+    },
+    Instr::InitVector { dest_ptr, elements, .. } => {
+      visit(dest_ptr);
+      elements.iter().for_each(visit);
+    },
+    Instr::TypeIdOf { source, .. } => visit(source),
+    Instr::GetFieldPtr { base, .. } => visit(base),
+    Instr::InitRecord { dest_ptr, fields, .. } => {
+      visit(dest_ptr);
+      fields.iter().for_each(|(_, operand)| visit(operand));
+    },
+    Instr::InitEnumVariant { dest_ptr, payload, .. } => {
+      visit(dest_ptr);
+      payload.iter().for_each(visit);
+    },
+    Instr::EnumGetTag { source, .. }
+    | Instr::EnumGetPayloadField { source, .. }
+    | Instr::EnumGetPayloadFieldPtr { source, .. } => visit(source),
+    Instr::DropInPlace { ptr, .. } | Instr::MarkMoved { ptr, .. } => visit(ptr),
+    Instr::MakeClosure { captures, .. } => captures.iter().for_each(visit),
+    Instr::CallClosure { closure, args, .. } => {
+      visit(closure);
+      args.iter().for_each(visit);
+    },
+    Instr::DropClosure { closure, .. } => visit(closure),
+    Instr::FreeEnv { env } => visit(env),
+    Instr::Load { .. }
+    | Instr::AddrOfLocal { .. }
+    | Instr::AddrOfGlobal { .. }
+    | Instr::Nop
+    | Instr::SizeOf { .. }
+    | Instr::AlignOf { .. }
+    | Instr::MaxOf { .. }
+    | Instr::MinOf { .. }
+    | Instr::Trap { .. }
+    | Instr::PanicMessage { .. }
+    | Instr::Drop { .. }
+    | Instr::DropGlue { .. } => {},
   }
 }
 
