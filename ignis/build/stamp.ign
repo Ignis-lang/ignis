@@ -174,26 +174,14 @@ function stampFeaturesEqual(left: &Vector<String>, right: &Vector<String>): bool
 /// Why a cached build cannot be reused, or an empty string when it can.
 ///
 /// The reason is what the build reports, so it names the input that moved
-/// rather than restating that the stamp did not match.
+/// rather than restating that the stamp did not match. The stamp is read
+/// first: on a cold build every artifact is missing too, and "no stamp" says
+/// more about that run than the name of one file that was never written.
 export function stampStaleReason(
   stampPath: &Path::PathBuf,
   fingerprint: &BuildFingerprint,
   artifacts: &Vector<Path::PathBuf>,
 ): String {
-  let mut index: u64 = 0;
-
-  while (index < artifacts.length()) {
-    let Option::SOME(artifact) = artifacts.get(index) else {
-      break;
-    };
-
-    if (!Fs::exists(artifact.asStr())) {
-      return `missing ${artifact.asStr()}`;
-    }
-
-    index += 1;
-  }
-
   if (!Fs::exists(stampPath.asStr())) {
     return String::create("no stamp");
   }
@@ -220,6 +208,20 @@ export function stampStaleReason(
 
   if (!fingerprintEquals(fingerprint, &existing)) {
     return String::create("build configuration changed");
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < artifacts.length()) {
+    let Option::SOME(artifact) = artifacts.get(index) else {
+      break;
+    };
+
+    if (!Fs::exists(artifact.asStr())) {
+      return `missing ${artifact.asStr()}`;
+    }
+
+    index += 1;
   }
 
   return String::new();
@@ -367,6 +369,8 @@ function stampStaleReasonNamesWhatMoved(): void {
   let edited: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
   let editedReason: String = stampStaleReason(&stamp, &edited, &artifacts);
   Test::assertEq<str>(editedReason.toStr(), "sources changed");
+
+  stampWrite(&stamp, &edited);
 
   match (Fs::removeFile(&object)) {
     Result::OK(_) -> {},

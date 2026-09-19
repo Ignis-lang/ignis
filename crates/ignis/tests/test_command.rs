@@ -2410,7 +2410,14 @@ fn assert_cache_line(
 fn selfhost_build_cache_reuses_warm_builds_and_invalidates_on_every_input() {
   let project_dir = make_temp_project_dir("build-cache");
   let std_root = copy_workspace_std(&project_dir);
-  write_build_cache_project(&project_dir, &std_root, NO_TESTS_MAIN);
+
+  // The fingerprint covers the modules the build actually parses, so the
+  // fixture has to import the std module the test later edits.
+  write_build_cache_project(
+    &project_dir,
+    &std_root,
+    "import Io from \"std::io\";\n\nfunction main(): void {\n  Io::println(\"cached\");\n}\n",
+  );
 
   let compiler = selfhost_compiler();
   let binary = project_dir.join("build/bin/build_cache_fixture");
