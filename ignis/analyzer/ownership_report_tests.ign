@@ -1,0 +1,183 @@
+import Vector from "std::vector";
+import Test from "std::test";
+
+import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+import ParseOutput, Parser from "@compiler::parser";
+import Lowering from "./lowering";
+import Capture from "./capture";
+import Borrowck from "./borrowck";
+import _ from "./ownership_report";
+
+/// Pins the format of `--dump-ownership-report`. The report exists to be
+/// diffed — between two compiler builds, and between the checker's decisions
+/// before and after a change — so these tests compare whole renderings rather
+/// than fragments, the same way the drop-schedule dump tests do.
+
+function ownershipReportCountErrors(bag: &DiagnosticBag): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    let Option::SOME(diagnostic) = bag.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    if (diagnostic.severity == Severity::ERROR) {
+      count += 1;
+    }
+
+    index += 1;
+  }
+
+  return count;
+}
+
+/// What one run of the checker produced, kept together so the JSON and the
+/// summary of one program are rendered from the same walk.
+record OwnershipReportRun {
+  public json: String;
+  public summary: String;
+  public ownershipErrors: u64;
+}
+
+/// Parses, analyzes, lowers and ownership-checks `source` with the report on,
+/// then renders it exactly as `--dump-ownership-report` would for a single
+/// file named `test.ign`.
+function runOwnershipReport(source: str, filter: str): OwnershipReportRun {
+  let file: SourceFile = SourceFile::create("test.ign", source);
+  let parsed: ParseOutput = Parser::parseFile(&file);
+
+  Test::assertEq<u64>(ownershipReportCountErrors(&parsed.lexDiagnostics), 0);
+  Test::assertEq<u64>(ownershipReportCountErrors(&parsed.parseDiagnostics), 0);
+
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let mut typeStore: Analyzer::TypeStore = Analyzer::TypeStore::init();
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+
+  let output: Analyzer::AnalyzerOutput = Analyzer::analyzeModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+  );
+
+  Test::assertEq<u64>(ownershipReportCountErrors(&output.diagnostics), 0);
+
+  let mut hir: Hir::HirStore = Lowering::lowerModule(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &parsed.module,
+    &output,
+  );
+
+  let captureDiagnostics: DiagnosticBag = Capture::populateClosureCaptures(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &mut hir,
+  );
+
+  Test::assertEq<u64>(ownershipReportCountErrors(&captureDiagnostics), 0);
+
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModuleReporting(
+    &mut defStore,
+    &mut typeStore,
+    &mut symbols,
+    &hir,
+    true,
+  );
+
+  let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
+  files.push(SourceFile::create("test.ign", source));
+
+  let json: String = Borrowck::OwnershipReport::renderJson(
+    &hir, &defStore, &symbols, &checked.dropSchedules, &checked.ownershipEvents, &files, "", filter,
+  );
+  let summary: String = Borrowck::OwnershipReport::renderSummary(
+    &hir, &defStore, &symbols, &checked.dropSchedules, &checked.ownershipEvents, &files, "", filter,
+  );
+
+  return OwnershipReportRun {
+    json: json,
+    summary: summary,
+    ownershipErrors: ownershipReportCountErrors(&checked.diagnostics),
+  };
+}
+
+const OWNERSHIP_REPORT_RESOURCE: str = "@implements(Drop)\nrecord Resource {\n  public value: i32;\n\n  drop(&mut self): void {\n    return;\n  }\n}\n";
+
+/// A program that reaches every event kind the report models except the
+/// diagnostic one: it moves, borrows, overwrites, returns early, matches on a
+/// reference scrutinee and returns a capturing closure through an alias.
+function ownershipReportWideSource(): String {
+  let mut source: String = String::create(OWNERSHIP_REPORT_RESOURCE);
+  source.pushStr("\nenum Slot {\n  Filled(Resource),\n  Empty,\n}\n");
+  source.pushStr("\nfunction readValue(resource: &Resource): i32 {\n  return resource.value;\n}\n");
+  source.pushStr("\nfunction consume(resource: Resource): i32 {\n  return resource.value;\n}\n");
+  source.pushStr("\nfunction readSlot(slot: &Slot): i32 {\n  match (slot) {\n    Slot::Filled(inner) -> {\n      return inner.value;\n    },\n    Slot::Empty -> {\n      return 0;\n    },\n  };\n\n  return -1;\n}\n");
+  source.pushStr("\nfunction makeCounter(start: i32): (i32) -> i32 {\n  let counter = (step: i32): i32 -> step + start;\n  let alias = counter;\n\n  return alias;\n}\n");
+  source.pushStr("\nfunction borrowAndOverwrite(flag: boolean): i32 {\n  let mut held: Resource = Resource { value: 1 };\n  let seen: i32 = readValue(&held);\n\n  if (flag) {\n    return seen;\n  }\n\n  held = Resource { value: 2 };\n\n  let moved: Resource = held;\n  return consume(moved) + seen;\n}\n");
+  source.pushStr("\nfunction main(): i32 {\n  let slot: Slot = Slot::Filled(Resource { value: 3 });\n  let read: i32 = readSlot(&slot);\n  let counter: (i32) -> i32 = makeCounter(read);\n\n  return borrowAndOverwrite(false) + counter(1);\n}\n");
+  return source;
+}
+
+/// Scenario: one program covering move, borrow open and release, drop with
+/// every reason it can carry here, closure environment ownership and aliasing,
+/// and a by-reference pattern binding.
+@test
+function ownershipReportCoversEveryEventKind(): void {
+  let source: String = ownershipReportWideSource();
+  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "");
+
+  Test::assertEq<u64>(run.ownershipErrors, 0);
+  Test::assertSnapshot("ownership-report-wide", run.json.toStr());
+}
+
+/// Scenario: the same program with a function filter, which is how a reader
+/// narrows a whole-program report down to the one function a bug is in.
+@test
+function ownershipReportFunctionFilterKeepsOneRecord(): void {
+  let source: String = ownershipReportWideSource();
+  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "borrowAndOverwrite");
+
+  Test::assertSnapshot("ownership-report-filtered", run.json.toStr());
+}
+
+/// Scenario: the stderr summary of the filtered report, which is what a reader
+/// sees while the JSON goes to a file.
+@test
+function ownershipReportSummaryCountsEventsPerFunction(): void {
+  let source: String = ownershipReportWideSource();
+  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "borrowAndOverwrite");
+
+  Test::assertSnapshot("ownership-report-summary", run.summary.toStr());
+}
+
+/// Scenario: a use after move. The diagnostic event carries the code and the
+/// move state the checker held for that variable, which is the pair that says
+/// whether the walk arrived at the state honestly.
+@test
+function ownershipReportRecordsDiagnosticsWithOwnershipState(): void {
+  let mut source: String = String::create(OWNERSHIP_REPORT_RESOURCE);
+  source.pushStr("\nfunction consume(resource: Resource): i32 {\n  return resource.value;\n}\n");
+  source.pushStr("\nfunction main(): i32 {\n  let held: Resource = Resource { value: 1 };\n  let first: i32 = consume(held);\n  let second: i32 = consume(held);\n\n  return first + second;\n}\n");
+
+  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "main");
+
+  Test::assertEq<u64>(run.ownershipErrors, 1);
+  Test::assertSnapshot("ownership-report-diagnostic", run.json.toStr());
+}
+
+/// Scenario: a function with nothing to report still gets a record, so a diff
+/// between two builds shows a function that lost all of its events.
+@test
+function ownershipReportListsFunctionsWithoutEvents(): void {
+  let run: OwnershipReportRun = runOwnershipReport("function main(): i32 {\n  return 0;\n}\n", "");
+
+  Test::assertEq<u64>(run.ownershipErrors, 0);
+  Test::assertSnapshot("ownership-report-empty", run.json.toStr());
+}
