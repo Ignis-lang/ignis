@@ -390,9 +390,10 @@ export namespace LirVerify {
   /// Marks every local one instruction could hand an address of.
   ///
   /// `AddrOfLocal` hands out the address explicitly; an `Operand::Local` is a
-  /// slot used where a pointer is expected, which is the same thing. Written
-  /// out arm by arm rather than with a catch-all so a new instruction carrying
-  /// an operand has to be listed here instead of silently going unseen.
+  /// slot used where a pointer is expected, which is the same thing. A drop's
+  /// own operand is the exception, for the reason its arm gives. Written out
+  /// arm by arm rather than with a catch-all so a new instruction carrying an
+  /// operand has to be listed here instead of silently going unseen.
   function collectAddressed(addressed: &mut Vector<boolean>, instr: &Lir::Instr): void {
     match (instr) {
       Lir::Instr::Store(node) -> {
@@ -513,9 +514,10 @@ export namespace LirVerify {
         LirVerify::markAddressedOperand(addressed, &node.closure);
         LirVerify::markAddressedOperandList(addressed, &node.args);
       },
-      Lir::Instr::DropClosure(node) -> {
-        LirVerify::markAddressedOperand(addressed, &node.closure);
-      },
+      // A drop's own operand is not an address-taking use: `DropClosure` naming a slot
+      // directly is the drop under test, so marking it here would switch the double-drop
+      // check off for exactly the instruction it exists to check.
+      Lir::Instr::DropClosure(_) -> {},
       Lir::Instr::FreeEnv(node) -> {
         LirVerify::markAddressedOperand(addressed, &node.env);
       },

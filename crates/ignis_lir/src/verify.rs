@@ -671,6 +671,10 @@ impl<'a> LirVerifier<'a> {
 /// where a pointer is expected, which is the same thing. Either way the verifier cannot
 /// tell what writes through it or where, so the double-drop check leaves those locals
 /// alone rather than guess.
+///
+/// A drop's own operand is not one of those uses. `DropClosure` naming a slot directly is
+/// the drop under test, so counting it here would mark the local addressed and switch the
+/// check off for exactly the instruction it exists to check.
 fn addressed_locals(func: &FunctionLir) -> HashSet<LocalId> {
   let mut addressed = HashSet::new();
 
@@ -678,6 +682,10 @@ fn addressed_locals(func: &FunctionLir) -> HashSet<LocalId> {
     for instr in &block.instructions {
       if let Instr::AddrOfLocal { local, .. } = instr {
         addressed.insert(*local);
+      }
+
+      if matches!(instr, Instr::DropClosure { .. }) {
+        continue;
       }
 
       each_operand(instr, &mut |operand| {

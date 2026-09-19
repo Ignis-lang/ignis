@@ -6,7 +6,10 @@
 
 mod common;
 
-use ignis_lir::verify::VerifyError;
+use std::collections::HashMap;
+
+use ignis_lir::verify::{VerifyError, verify_lir};
+use ignis_lir::{Instr, LocalId, Operand, TempId};
 
 /// A closure reassigned inside a loop: the shape PR #226 found the double free in.
 const REASSIGNED_CLOSURE: &str = "function make(limit: i32): (i32) -> i32 {
@@ -38,6 +41,65 @@ fn one_drop_per_site_verifies() {
     result.verify_errors.is_empty(),
     "expected no verification errors, got: {:?}",
     result.verify_errors
+  );
+}
+
+#[test]
+fn a_closure_drop_that_names_its_slot_directly_is_still_checked() {
+  // Lowering loads the closure into a temp before freeing it, so the direct form has no
+  // source-level spelling and has to be written here. A drop's own operand must not count
+  // as taking the local's address: if it did, this pair would go unchecked.
+  let mut result = common::lower_to_lir(REASSIGNED_CLOSURE);
+
+  for func in result.program.functions.values_mut() {
+    let block_ids: Vec<_> = func.blocks.iter().map(|(id, _)| id).collect();
+
+    for block_id in block_ids {
+      let block = func.blocks.get_mut(&block_id);
+      let mut loaded_from: HashMap<TempId, LocalId> = HashMap::new();
+      let mut rewritten: Vec<Instr> = Vec::with_capacity(block.instructions.len());
+
+      for instr in block.instructions.drain(..) {
+        if let Instr::Load { dest, source } = &instr {
+          loaded_from.insert(*dest, *source);
+        }
+
+        let Instr::DropClosure {
+          closure: Operand::Temp(temp),
+          closure_type,
+        } = &instr
+        else {
+          rewritten.push(instr);
+          continue;
+        };
+
+        let Some(local) = loaded_from.get(temp).copied() else {
+          rewritten.push(instr);
+          continue;
+        };
+
+        let direct = Instr::DropClosure {
+          closure: Operand::Local(local),
+          closure_type: *closure_type,
+        };
+
+        rewritten.push(direct.clone());
+        rewritten.push(direct);
+      }
+
+      block.instructions = rewritten;
+    }
+  }
+
+  let errors = match verify_lir(&result.program, &result.types, &result.analyzer_output.defs) {
+    Ok(()) => Vec::new(),
+    Err(errors) => errors,
+  };
+
+  assert_eq!(
+    double_drops(&errors),
+    1,
+    "expected the repeated closure drop to be rejected, got: {errors:?}"
   );
 }
 
