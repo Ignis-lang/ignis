@@ -344,6 +344,395 @@ export namespace LirVerify {
     };
   }
 
+  function markAddressed(addressed: &mut Vector<boolean>, local: Lir::LocalId): void {
+    let mut flags: &mut Vector<boolean> = addressed;
+    let index: u64 = local.raw() as u64;
+
+    while (flags.length() <= index) {
+      flags.push(false);
+    }
+
+    let _ = flags.set(index, true);
+  }
+
+  function isAddressed(addressed: &Vector<boolean>, local: Lir::LocalId): boolean {
+    if (let Option::SOME(flag) = addressed.get(local.raw() as u64)) {
+      return *flag;
+    }
+
+    return false;
+  }
+
+  function markAddressedOperand(addressed: &mut Vector<boolean>, operand: &Lir::Operand): void {
+    match (operand) {
+      Lir::Operand::Local(local) -> {
+        LirVerify::markAddressed(addressed, local);
+      },
+      _ -> {},
+    };
+  }
+
+  function markAddressedOperandList(
+    addressed: &mut Vector<boolean>,
+    operands: &Vector<Lir::Operand>,
+  ): void {
+    let mut index: u64 = 0;
+
+    while (index < operands.length()) {
+      if (let Option::SOME(operand) = operands.get(index)) {
+        LirVerify::markAddressedOperand(addressed, operand);
+      }
+
+      index += 1;
+    }
+  }
+
+  /// Marks every local one instruction could hand an address of.
+  ///
+  /// `AddrOfLocal` hands out the address explicitly; an `Operand::Local` is a
+  /// slot used where a pointer is expected, which is the same thing. Written
+  /// out arm by arm rather than with a catch-all so a new instruction carrying
+  /// an operand has to be listed here instead of silently going unseen.
+  function collectAddressed(addressed: &mut Vector<boolean>, instr: &Lir::Instr): void {
+    match (instr) {
+      Lir::Instr::Store(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.value);
+      },
+      Lir::Instr::LoadPtr(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.ptr);
+      },
+      Lir::Instr::StorePtr(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.ptr);
+        LirVerify::markAddressedOperand(addressed, &node.value);
+      },
+      Lir::Instr::BuiltinLoad(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.ptr);
+      },
+      Lir::Instr::BuiltinStore(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.ptr);
+        LirVerify::markAddressedOperand(addressed, &node.value);
+      },
+      Lir::Instr::BuiltinHash(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.value);
+        LirVerify::markAddressedOperand(addressed, &node.hasher);
+      },
+      Lir::Instr::BuiltinEq(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.left);
+        LirVerify::markAddressedOperand(addressed, &node.right);
+      },
+      Lir::Instr::Copy(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.source);
+      },
+      Lir::Instr::BinOp(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.left);
+        LirVerify::markAddressedOperand(addressed, &node.right);
+      },
+      Lir::Instr::UnaryOp(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.operand);
+      },
+      Lir::Instr::Call(node) -> {
+        LirVerify::markAddressedOperandList(addressed, &node.args);
+      },
+      Lir::Instr::Cast(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.source);
+      },
+      Lir::Instr::BitCast(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.source);
+      },
+      Lir::Instr::AddrOfLocal(node) -> {
+        LirVerify::markAddressed(addressed, node.local);
+      },
+      Lir::Instr::AddrOfGlobal(_) -> {},
+      Lir::Instr::GetElementPtr(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.base);
+        LirVerify::markAddressedOperand(addressed, &node.index);
+      },
+      Lir::Instr::MakeSlice(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.data);
+        LirVerify::markAddressedOperand(addressed, &node.len);
+      },
+      Lir::Instr::InitVector(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.destPtr);
+        LirVerify::markAddressedOperandList(addressed, &node.elements);
+      },
+      Lir::Instr::Nop -> {},
+      Lir::Instr::RuntimeCall(node) -> {
+        LirVerify::markAddressedOperandList(addressed, &node.args);
+      },
+      Lir::Instr::TypeIdOf(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.source);
+      },
+      Lir::Instr::SizeOf(_) -> {},
+      Lir::Instr::AlignOf(_) -> {},
+      Lir::Instr::MaxOf(_) -> {},
+      Lir::Instr::MinOf(_) -> {},
+      Lir::Instr::Trap(_) -> {},
+      Lir::Instr::PanicMessage(_) -> {},
+      Lir::Instr::Load(_) -> {},
+      Lir::Instr::Drop(_) -> {},
+      Lir::Instr::GetFieldPtr(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.base);
+      },
+      Lir::Instr::InitRecord(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.destPtr);
+
+        let mut fieldIndex: u64 = 0;
+
+        while (fieldIndex < node.fields.length()) {
+          if (let Option::SOME(field) = node.fields.get(fieldIndex)) {
+            LirVerify::markAddressedOperand(addressed, &field.value);
+          }
+
+          fieldIndex += 1;
+        }
+      },
+      Lir::Instr::InitEnumVariant(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.destPtr);
+        LirVerify::markAddressedOperandList(addressed, &node.payload);
+      },
+      Lir::Instr::EnumGetTag(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.source);
+      },
+      Lir::Instr::EnumGetPayloadField(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.source);
+      },
+      Lir::Instr::EnumGetPayloadFieldPtr(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.source);
+      },
+      Lir::Instr::DropInPlace(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.ptr);
+      },
+      Lir::Instr::MarkMoved(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.ptr);
+      },
+      Lir::Instr::DropGlue(_) -> {},
+      Lir::Instr::MakeClosure(node) -> {
+        LirVerify::markAddressedOperandList(addressed, &node.captures);
+      },
+      Lir::Instr::CallClosure(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.closure);
+        LirVerify::markAddressedOperandList(addressed, &node.args);
+      },
+      Lir::Instr::DropClosure(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.closure);
+      },
+      Lir::Instr::FreeEnv(node) -> {
+        LirVerify::markAddressedOperand(addressed, &node.env);
+      },
+    };
+  }
+
+  function addressedLocals(function_: &Lir::FunctionLir): Vector<boolean> {
+    let mut addressed: Vector<boolean> = Vector::new<boolean>();
+    let mut blockIndex: u64 = 0;
+
+    while (blockIndex < function_.blocks.length()) {
+      let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+        blockIndex += 1;
+        continue;
+      };
+
+      let mut instrIndex: u64 = 0;
+
+      while (instrIndex < block.instructions.length()) {
+        if (let Option::SOME(instr) = block.instructions.get(instrIndex)) {
+          LirVerify::collectAddressed(&mut addressed, instr);
+        }
+
+        instrIndex += 1;
+      }
+
+      match (&block.terminator) {
+        Lir::Terminator::Branch(branch) -> {
+          LirVerify::markAddressedOperand(&mut addressed, &branch.condition);
+        },
+        Lir::Terminator::Return(valueOpt) -> {
+          if (let Option::SOME(value) = valueOpt) {
+            LirVerify::markAddressedOperand(&mut addressed, &value);
+          }
+        },
+        _ -> {},
+      };
+
+      blockIndex += 1;
+    }
+
+    return addressed;
+  }
+
+  /// The local a drop names when the value reached the instruction through a
+  /// temp. A closure is freed as a `Load` into a temp followed by
+  /// `DropClosure` on that temp, so without this the pair reads as a drop of
+  /// nothing. `loadedFrom` holds the source local of each temp, or -1.
+  function localBehind(operand: &Lir::Operand, loadedFrom: &Vector<i64>): Option<Lir::LocalId> {
+    match (operand) {
+      Lir::Operand::Local(local) -> {
+        return Option::SOME(local);
+      },
+      Lir::Operand::Temp(temp) -> {
+        if (let Option::SOME(source) = loadedFrom.get(temp.raw() as u64)) {
+          if (*source >= 0) {
+            return Option::SOME(Id::fromRaw<Lir::LocalTag>(*source as u32));
+          }
+        }
+      },
+      _ -> {},
+    };
+
+    return Option::NONE;
+  }
+
+  function recordLoadAlias(
+    loadedFrom: &mut Vector<i64>,
+    temp: Lir::TempId,
+    local: Lir::LocalId,
+  ): void {
+    let mut aliases: &mut Vector<i64> = loadedFrom;
+    let index: u64 = temp.raw() as u64;
+
+    while (aliases.length() <= index) {
+      aliases.push(-1);
+    }
+
+    let _ = aliases.set(index, local.raw() as i64);
+  }
+
+  /// Forgets every temp alias that named `local`, because the store replaced
+  /// what those temps were read from.
+  function clearLoadAliases(loadedFrom: &mut Vector<i64>, local: Lir::LocalId): void {
+    let mut aliases: &mut Vector<i64> = loadedFrom;
+    let target: i64 = local.raw() as i64;
+    let mut index: u64 = 0;
+
+    while (index < aliases.length()) {
+      let mut matches: boolean = false;
+
+      if (let Option::SOME(source) = aliases.get(index)) {
+        matches = *source == target;
+      }
+
+      if (matches) {
+        let _ = aliases.set(index, -1);
+      }
+
+      index += 1;
+    }
+  }
+
+  function markDroppedOnce(
+    state: &mut LirVerify::VerifyState,
+    dropped: &mut Vector<boolean>,
+    addressed: &Vector<boolean>,
+    functionLabel: u32,
+    blockLabel: &String,
+    local: Lir::LocalId,
+  ): void {
+    if (LirVerify::isAddressed(addressed, local)) {
+      return;
+    }
+
+    let mut flags: &mut Vector<boolean> = dropped;
+    let index: u64 = local.raw() as u64;
+
+    while (flags.length() <= index) {
+      flags.push(false);
+    }
+
+    let mut alreadyDropped: boolean = false;
+
+    if (let Option::SOME(flag) = flags.get(index)) {
+      alreadyDropped = *flag;
+    }
+
+    if (alreadyDropped) {
+      LirVerify::report(state, functionLabel, blockLabel, "double drop of a local without an intervening store");
+      return;
+    }
+
+    let _ = flags.set(index, true);
+  }
+
+  function clearDropped(dropped: &mut Vector<boolean>, local: Lir::LocalId): void {
+    let mut flags: &mut Vector<boolean> = dropped;
+    let index: u64 = local.raw() as u64;
+
+    if (index < flags.length()) {
+      let _ = flags.set(index, false);
+    }
+  }
+
+  /// Rejects a local freed twice inside one block with nothing between the two
+  /// drops that gives it a new value.
+  ///
+  /// This is what a duplicated drop schedule reaches the program as: ownership
+  /// lists the same value twice for one site, and lowering emits both frees
+  /// back to back. Mirrors the host's `verify_no_double_drops`, including its
+  /// limit: the walk never follows an edge, so two drops in different blocks
+  /// are not compared even when one dominates the other. A cross-block rule
+  /// needs a liveness dataflow over the whole function, and the shape this
+  /// exists to catch always emits both frees into one block.
+  ///
+  /// Only a `Store` re-initializes. Reads do not: a closure is freed as `Load`
+  /// then `DropClosure`, so treating the `Load` as a write would hide exactly
+  /// the double free the check is for. A local whose address is ever taken is
+  /// skipped, because anything reachable through that pointer can write the
+  /// slot where the walk cannot see it.
+  function verifyNoDoubleDrops(
+    state: &mut LirVerify::VerifyState,
+    function_: &Lir::FunctionLir,
+    functionLabel: u32,
+  ): void {
+    let addressed: Vector<boolean> = LirVerify::addressedLocals(function_);
+    let mut blockIndex: u64 = 0;
+
+    while (blockIndex < function_.blocks.length()) {
+      let Option::SOME(block) = function_.blocks.get(blockIndex) else {
+        blockIndex += 1;
+        continue;
+      };
+
+      // Cleared per block: the walk never follows an edge, so nothing carries over.
+      let mut dropped: Vector<boolean> = Vector::new<boolean>();
+      let mut loadedFrom: Vector<i64> = Vector::new<i64>();
+      let mut instrIndex: u64 = 0;
+
+      while (instrIndex < block.instructions.length()) {
+        let Option::SOME(instr) = block.instructions.get(instrIndex) else {
+          instrIndex += 1;
+          continue;
+        };
+
+        match (instr) {
+          Lir::Instr::Load(node) -> {
+            LirVerify::recordLoadAlias(&mut loadedFrom, node.dest, node.source);
+          },
+          Lir::Instr::Store(node) -> {
+            LirVerify::clearDropped(&mut dropped, node.dest);
+            LirVerify::clearLoadAliases(&mut loadedFrom, node.dest);
+          },
+          Lir::Instr::MarkMoved(node) -> {
+            if (let Option::SOME(local) = LirVerify::localBehind(&node.ptr, &loadedFrom)) {
+              LirVerify::clearDropped(&mut dropped, local);
+            }
+          },
+          Lir::Instr::Drop(node) -> {
+            LirVerify::markDroppedOnce(state, &mut dropped, &addressed, functionLabel, &block.label, node.local);
+          },
+          Lir::Instr::DropClosure(node) -> {
+            if (let Option::SOME(local) = LirVerify::localBehind(&node.closure, &loadedFrom)) {
+              LirVerify::markDroppedOnce(state, &mut dropped, &addressed, functionLabel, &block.label, local);
+            }
+          },
+          _ -> {},
+        };
+
+        instrIndex += 1;
+      }
+
+      blockIndex += 1;
+    }
+  }
+
   function verifyTerminator(
     state: &mut LirVerify::VerifyState,
     defStore: &mut Analyzer::DefinitionStore,
@@ -446,6 +835,8 @@ export namespace LirVerify {
 
       blockIndex += 1;
     }
+
+    LirVerify::verifyNoDoubleDrops(state, function_, functionLabel);
   }
 
   /// Verifies every non-extern function of a lowered program and returns the
