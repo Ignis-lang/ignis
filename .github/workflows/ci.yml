@@ -117,8 +117,13 @@ jobs:
     timeout-minutes: 90
 
     steps:
+      # Full history: the baseline churn report below diffs against the merge
+      # base with the pull request's base branch, and the default shallow
+      # checkout has neither that branch nor a common ancestor to find.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Pure bash/python against fake compiler binaries, so it needs neither
       # Rust nor a built `ignis` — runs before either is set up. Covers
@@ -134,6 +139,7 @@ jobs:
         run: |
           scripts/tests/test_stage0_fallback.sh
           scripts/tests/test_stage_stamps.sh
+          scripts/tests/test_baseline_churn_report.sh
           python3 scripts/tests/test_bootstrap_report.py
 
       - name: Install Rust toolchain
@@ -200,6 +206,18 @@ jobs:
       # so the common mistake is reported here rather than 40 minutes later.
       - name: Check every e2e fixture has a drop-schedule baseline
         run: python3 scripts/selfhost_drop_schedule_parity.py --check-coverage
+
+      # Regenerating the baselines is one command, which makes it the easy way
+      # to turn a red gate green, and nobody reads 700 generated files in a
+      # diff. This puts the churn in the job summary, where the reviewer sees
+      # it. `.github/CODEOWNERS` is the other half, once branch protection
+      # requires code-owner review.
+      - name: Report baseline churn
+        if: github.event_name == 'pull_request'
+        run: |
+          scripts/baseline_churn_report.sh \
+            "origin/${{ github.base_ref }}" \
+            test_cases/e2e/ok/__drop_schedules__
 
       - name: Add Ignis to PATH
         run: echo "${GITHUB_WORKSPACE}/target/ci" >> "$GITHUB_PATH"

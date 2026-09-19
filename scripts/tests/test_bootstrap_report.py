@@ -47,17 +47,23 @@ sys.path.insert(0, str(SCRIPT_DIR))
 # The module under test for the G7-specific fixtures below: real gate-summary
 # formatting, not prose retyped into this file, so a wording change to
 # build_gate is what these tests see change, not a copy of it.
+import selfhost_drop_schedule_parity as drop_parity  # noqa: E402
 from selfhost_drop_schedule_parity import (  # noqa: E402
   CLASS_BASELINE_MISSING,
   CLASS_DIFFERS,
+  CLASS_FIXTURE_MISSING,
   CLASS_PASS,
   CLASS_TIMEOUT,
+  RETRYABLE_CLASSES,
   DropCase,
   DropResult,
+  DumpFailure,
   Settings,
   build_gate,
+  parse_arguments,
   run_case,
   stale_baselines,
+  write_baselines,
 )
 
 # Every gate promotion.json's `candidate` verdict is computed over. Kept as a
@@ -273,6 +279,20 @@ class DropScheduleBaselineTests(unittest.TestCase):
     self.assertIn("1 stale baseline", gate["summary"])
     self.assertEqual(len(gate["details"]["stale_baselines"]), 1)
 
+  def test_a_missing_fixture_file_is_not_retried(self) -> None:
+    case = DropCase(name="gone", path=REPO_ROOT / "test_cases" / "e2e" / "ok" / "definitely_not_here.ign")
+
+    result = run_case(case, self.settings)
+
+    self.assertEqual(result.classification, CLASS_FIXTURE_MISSING)
+    self.assertNotIn(CLASS_FIXTURE_MISSING, RETRYABLE_CLASSES)
+
+  def test_a_timeout_is_classified_by_the_failure_not_by_its_wording(self) -> None:
+    # A compiler whose own error text happens to contain "timed out" must not
+    # be recorded as a timeout, and a real timeout must be one whatever it says.
+    self.assertTrue(DumpFailure("timed out after 300s", timed_out=True).timed_out)
+    self.assertFalse(DumpFailure("error: the request timed out upstream").timed_out)
+
   def test_cases_without_a_baseline_need_a_reference_compiler(self) -> None:
     project = DropCase(
       name="project:.",
@@ -285,6 +305,101 @@ class DropScheduleBaselineTests(unittest.TestCase):
 
     self.assertNotEqual(result.classification, CLASS_PASS)
     self.assertIn("--reference", result.reason)
+
+
+class WriteBaselinesTests(unittest.TestCase):
+  """`--write-baselines` must never destroy more than it records.
+
+  Both rules here are regressions waiting to happen: a filtered regeneration
+  that prunes took the directory from 721 files to 3, and a compiler that
+  produced nothing still wrote a partial directory the gate would then read as
+  a corpus of real ownership changes.
+  """
+
+  def setUp(self) -> None:
+    self._tmp = tempfile.TemporaryDirectory()
+    self.addCleanup(self._tmp.cleanup)
+    self.baseline_dir = Path(self._tmp.name) / "__drop_schedules__"
+    self.baseline_dir.mkdir(parents=True)
+    self.settings = synthetic_settings(self.baseline_dir)
+
+    for name in ("kept_one", "kept_two", "rewritten"):
+      (self.baseline_dir / f"{name}.txt").write_text("drop-schedule v1\nstale content\n", encoding="utf-8")
+
+    self.cases = [
+      DropCase(name=name, path=REPO_ROOT / "scripts" / "bootstrap.sh")
+      for name in ("kept_one", "kept_two", "rewritten")
+    ]
+
+  def stub_dumps(self, lines: list[str] | None, failure: DumpFailure | None = None) -> None:
+    self.addCleanup(setattr, drop_parity, "scoped_dump", drop_parity.scoped_dump)
+    self.addCleanup(setattr, drop_parity, "run_dump", drop_parity.run_dump)
+    drop_parity.scoped_dump = lambda compiler, case, settings: (lines, 0, failure)
+    drop_parity.run_dump = lambda *arguments, **keywords: (lines, failure)
+
+  def baseline_names(self) -> set[str]:
+    return {path.name for path in self.baseline_dir.glob("*.txt")}
+
+  def test_a_filtered_regeneration_never_prunes_the_cases_it_skipped(self) -> None:
+    self.stub_dumps(["drop-schedule v1", "function rewritten at x.ign:1:1"])
+
+    status = write_baselines(self.settings, self.cases[2:], jobs=1, filtered=True)
+
+    self.assertEqual(status, 0)
+    self.assertEqual(self.baseline_names(), {"kept_one.txt", "kept_two.txt", "rewritten.txt"})
+    self.assertIn("function rewritten", (self.baseline_dir / "rewritten.txt").read_text(encoding="utf-8"))
+    self.assertIn("stale content", (self.baseline_dir / "kept_one.txt").read_text(encoding="utf-8"))
+
+  def test_an_unfiltered_regeneration_prunes_what_the_corpus_no_longer_has(self) -> None:
+    self.stub_dumps(["drop-schedule v1"])
+
+    status = write_baselines(self.settings, self.cases[:2], jobs=1, filtered=False)
+
+    self.assertEqual(status, 0)
+    self.assertEqual(self.baseline_names(), {"kept_one.txt", "kept_two.txt"})
+
+  def test_a_compiler_that_produces_no_dump_writes_nothing_at_all(self) -> None:
+    self.stub_dumps(None, DumpFailure("could not run compiler"))
+
+    status = write_baselines(self.settings, self.cases, jobs=1, filtered=False)
+
+    self.assertEqual(status, 1)
+    self.assertEqual(self.baseline_names(), {"kept_one.txt", "kept_two.txt", "rewritten.txt"})
+
+    for name in self.baseline_names():
+      self.assertIn("stale content", (self.baseline_dir / name).read_text(encoding="utf-8"))
+
+
+class ArgumentCombinationTests(unittest.TestCase):
+  """Flag combinations that would write baselines nothing can ever match."""
+
+  def parse(self, *argv: str) -> None:
+    original = sys.argv
+    sys.argv = ["selfhost_drop_schedule_parity.py", *argv]
+    self.addCleanup(setattr, sys, "argv", original)
+    parse_arguments(REPO_ROOT)
+
+  def assert_rejected(self, *argv: str) -> None:
+    with open("/dev/null", "w", encoding="utf-8") as devnull:
+      original_stderr = sys.stderr
+      sys.stderr = devnull
+      try:
+        with self.assertRaises(SystemExit) as raised:
+          self.parse(*argv)
+      finally:
+        sys.stderr = original_stderr
+
+    self.assertEqual(raised.exception.code, 2)
+
+  def test_write_baselines_rejects_whole_dump_and_host_compare(self) -> None:
+    self.assert_rejected("--compiler", "ignis", "--write-baselines", "--all", "--host-compare", "--host", "ignis")
+    self.assert_rejected("--compiler", "ignis", "--write-baselines", "--host-compare", "--host", "ignis")
+
+  def test_write_baselines_and_check_coverage_are_separate_runs(self) -> None:
+    self.assert_rejected("--compiler", "ignis", "--write-baselines", "--check-coverage")
+
+  def test_a_plain_regeneration_is_accepted(self) -> None:
+    self.parse("--compiler", "ignis", "--write-baselines")
 
 
 if __name__ == "__main__":

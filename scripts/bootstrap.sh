@@ -23,7 +23,8 @@
 #   G5  diagnostics: stage2's messages equal or better than the host's
 #   G6  syntax: stage2 accepts and rejects exactly what the host parser does
 #   G7  drop schedules: stage2's --dump-drop-schedule matches the committed
-#       baselines under test_cases/e2e/ok/__drop_schedules__
+#       baselines under test_cases/e2e/ok/__drop_schedules__, and until the
+#       host is removed stage0 is cross-checked against the same baselines
 #
 # `gates` runs all of them and then `report`, which turns the gate files into
 # build/bootstrap/report.md and build/bootstrap/promotion.json. The nightly
@@ -107,9 +108,11 @@ Commands:
   gate-g6  Compare stage2's parse verdicts with the host's and write gates/G6.json.
   gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
   gate-g7  Check stage2's drop schedules against the committed baselines
-           (test_cases/e2e/ok/__drop_schedules__) -> gates/G7.json. No host
-           compiler is involved; the selfhost compiler's own sources have no
-           baseline and are compared against stage1 instead.
+           (test_cases/e2e/ok/__drop_schedules__) -> gates/G7.json. The
+           selfhost compiler's own sources have no baseline and are compared
+           against stage1 instead. Until the host is removed this run also
+           cross-checks \$IGNIS_STAGE0 against the same baselines, so
+           regenerating them cannot turn a red gate green on its own.
   gate-g7-stage1   G7 run against stage1 instead of stage2 -> gates/G7-STAGE1.json
                    (ci.yml's PR-only check; the promotion ladder still covers
                    stage2). Same unscored-row note as gate-g3-stage1 above.
@@ -1491,8 +1494,16 @@ run_gate_g7_for() {
   # asking stage1 to be compared against itself would prove nothing, and the
   # pull-request run cannot afford a second self-compilation anyway.
   # `ensure_stage stage2` already verified and, if needed, rebuilt stage1.
+  #
+  # The nightly's stage2 run also cross-checks $STAGE0 against the same
+  # baselines. Nothing else stops a red gate from being turned green by
+  # regenerating the baselines, so while a second compiler that can still
+  # build this tree exists, the gate keeps asking it. It costs what the old
+  # host-oracle gate-g7 already cost, and the flag goes away with the host.
+  # The pull-request run (stage1) stays host-free on purpose: it is the shape
+  # the gate has after the cut.
   if [[ "$stage" == "stage2" ]]; then
-    reference_arguments=(--reference "$(stage_bin stage1)" --project .)
+    reference_arguments=(--reference "$(stage_bin stage1)" --project . --host "$STAGE0")
   fi
 
   mkdir -p "$GATES_DIR"

@@ -48,12 +48,16 @@ G3 | `gate-g3` | the selfhost test suite, run under stage2 vs. under the host
 G4 | `gate-g4` | stage2's resource use (RSS, wall time) against stage1's, within 1.25x
 G5 | `gate-g5` | diagnostics: stage2's error corpus output against the host's
 G6 | `gate-g6` | syntax: which programs stage2 accepts/rejects, against the host's parser
-G7 | `gate-g7` | `--dump-drop-schedule` output, stage2 against committed baselines
+G7 | `gate-g7` | `--dump-drop-schedule` output, stage2 against committed baselines (and, until the cut, stage0 against the same baselines)
 
-G7 is the first gate that does not use the host as a live oracle. Its
-baselines were generated from the host while it still existed, verified
-byte-identical against the selfhost compiler, and committed under
-`test_cases/e2e/ok/__drop_schedules__/`. See "Drop-schedule baselines" below.
+G7 is the first gate whose verdict does not depend on the host. Its baselines
+were generated from the host while it still existed, verified byte-identical
+against the selfhost compiler, and committed under
+`test_cases/e2e/ok/__drop_schedules__/`. Until the host is removed the nightly
+run still cross-checks stage0 against those same baselines, so a regeneration
+cannot quietly turn a red gate green; the pull-request run (`gate-g7-stage1`)
+is already host-free, which is the shape the gate keeps after the cut. See
+"Drop-schedule baselines" below.
 
 `scripts/bootstrap.sh gates` runs every stage and gate locally, then
 `report` turns `build/bootstrap/gates/*.json` into `report.md` and
@@ -103,23 +107,45 @@ Regenerating is the same command. It rewrites every baseline and deletes the
 ones whose fixture is gone, so an unrelated ownership change shows up as a
 diff in the cases it touched.
 
+A filtered regeneration (`--filter`) rewrites only the cases it matched and
+prunes nothing, and a run where any case failed to produce a dump writes
+nothing at all rather than leaving the directory half old and half new.
+
 **A baseline diff in a pull request is a semantic change.** It says the
 compiler now drops something somewhere else, or at a different time, or not at
 all. A reviewer has to read those lines and agree with them; "regenerated the
 baselines" is not a reason to approve one.
 
-### Cross-checking against the host
+### What stops a regeneration from hiding a bug
 
-While the Rust host still exists, it can be asked whether it still agrees with
-the baselines it produced:
+Baselines are the gate's own expectations, so regenerating them is the easy
+way to make a failing gate pass. Three things stand against that:
+
+1. **An independent oracle, until the cut.** The nightly's `gate-g7` passes
+   `--host "$IGNIS_STAGE0"` and cross-checks stage0 against the same
+   baselines. A baseline changed to match a broken stage2 then fails against
+   stage0, and the gate reports `host cross-check N-1/N` and fails. This flag
+   goes away when the host does.
+2. **The churn is reported where it is read.** Pull-request CI runs
+   `scripts/baseline_churn_report.sh` and writes the added, changed and
+   removed baselines into the job summary with the line above. Nobody reads
+   700 generated files in a diff; everybody reads the summary.
+3. **`.github/CODEOWNERS`** assigns the directory to the repository owner.
+   This has no effect until branch protection on `main` requires review from
+   code owners — worth enabling, and worth knowing it is not enabled yet.
+
+### Cross-checking against the host by hand
 
 ```bash
 python3 scripts/selfhost_drop_schedule_parity.py \
   --compiler build/bootstrap/stage2/ignis --host ignis
 ```
 
-The gate itself never does this, and `--host-compare` still performs the
-original direct host-vs-selfhost diff, so the move to baselines is reversible.
+`--host` also cross-checks the `--project`/`--extra` cases, which otherwise
+only ever see one selfhost stage compared against another: a bug in `ignis/`
+itself sits identically in both stages and is invisible without a third
+opinion. `--host-compare` still performs the original direct
+host-vs-selfhost diff, so the move to baselines is reversible.
 
 ## The two-step rule
 

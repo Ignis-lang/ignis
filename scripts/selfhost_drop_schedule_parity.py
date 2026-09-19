@@ -93,6 +93,7 @@ PROJECT_TIMEOUT_SECONDS = 900
 CLASS_PASS = "pass"
 CLASS_DIFFERS = "differs"
 CLASS_BASELINE_MISSING = "baseline-missing"
+CLASS_FIXTURE_MISSING = "fixture-missing"
 CLASS_NO_DUMP = "no-dump"
 CLASS_REFERENCE_NO_DUMP = "reference-no-dump"
 CLASS_TIMEOUT = "timeout"
@@ -101,11 +102,16 @@ CLASS_ORDER = (
   CLASS_PASS,
   CLASS_DIFFERS,
   CLASS_BASELINE_MISSING,
+  CLASS_FIXTURE_MISSING,
   CLASS_NO_DUMP,
   CLASS_REFERENCE_NO_DUMP,
   CLASS_TIMEOUT,
 )
 
+# A case whose dump is missing may have lost a race for the shared `build/std`
+# directory, so rerunning it can change the answer. A case with no baseline, no
+# fixture file, or no `--reference` is the same on every attempt: retrying it
+# only costs a second compile to reach the same verdict.
 RETRYABLE_CLASSES = (CLASS_NO_DUMP, CLASS_REFERENCE_NO_DUMP, CLASS_TIMEOUT)
 
 # How much of a divergence the report shows per case. The point is to name the
@@ -114,6 +120,22 @@ REPORTED_DIFF_LINES = 6
 
 # How many diverging cases get their own detail section.
 REPORTED_CASES = 25
+
+
+@dataclass
+class DumpFailure:
+  """Why one compiler produced no dump.
+
+  `timed_out` is carried as a field rather than recovered by looking for
+  "timed out" in the message: a compiler that prints those words in its own
+  error output would otherwise be classified as a timeout it never had.
+  """
+
+  message: str
+  timed_out: bool = False
+
+  def __str__(self) -> str:
+    return self.message
 
 
 @dataclass
@@ -222,7 +244,7 @@ def run_dump(
   std_path: Path,
   repository_root: Path,
   timeout: int,
-) -> tuple[list[str] | None, str]:
+) -> tuple[list[str] | None, DumpFailure | None]:
   """Run one compiler over one case and return the dump's lines.
 
   The dump starts at the last `drop-schedule v1` header on stdout and ends at
@@ -254,15 +276,15 @@ def run_dump(
       timeout=timeout,
     )
   except subprocess.TimeoutExpired:
-    return None, f"timed out after {timeout}s"
+    return None, DumpFailure(f"timed out after {timeout}s", timed_out=True)
   except OSError as error:
-    return None, f"could not run {compiler}: {error}"
+    return None, DumpFailure(f"could not run {compiler}: {error}")
 
   lines = completed.stdout.splitlines()
 
   if DUMP_HEADER not in lines:
     tail = "\n".join((completed.stderr or completed.stdout).splitlines()[-3:])
-    return None, f"no dump on stdout (exit {completed.returncode}){': ' + tail if tail else ''}"
+    return None, DumpFailure(f"no dump on stdout (exit {completed.returncode}){': ' + tail if tail else ''}")
 
   start = len(lines) - 1 - lines[::-1].index(DUMP_HEADER)
   dump = [DUMP_HEADER]
@@ -272,16 +294,16 @@ def run_dump(
       break
     dump.append(line)
 
-  return dump, ""
+  return dump, None
 
 
 def scoped_dump(
   compiler: Path,
   case: DropCase,
   settings: Settings,
-) -> tuple[list[str] | None, int, str]:
+) -> tuple[list[str] | None, int, DumpFailure | None]:
   """One compiler's dump for one case, narrowed to the code under test."""
-  lines, error = run_dump(
+  lines, failure = run_dump(
     compiler,
     case,
     settings.std_path,
@@ -290,7 +312,7 @@ def scoped_dump(
   )
 
   if lines is None:
-    return None, 0, error
+    return None, 0, failure
 
   std_prefix = f"{relative_to(settings.std_path, settings.repository_root)}/"
   scoped, std_functions = scope_to_own_code(lines, std_prefix)
@@ -298,7 +320,7 @@ def scoped_dump(
   if settings.compare_everything:
     scoped = lines
 
-  return scoped, std_functions, ""
+  return scoped, std_functions, None
 
 
 def compare(
@@ -376,31 +398,31 @@ def scope_to_own_code(
 def expected_for(
   case: DropCase,
   settings: Settings,
-) -> tuple[list[str] | None, int, str, str]:
-  """What this case's dump is compared against: (lines, std count, source, error).
+) -> tuple[list[str] | None, int, str, DumpFailure | None]:
+  """What this case's dump is compared against: (lines, std count, source, failure).
 
   `source` names where the expectation came from, for the report.
   """
   if settings.host_compare:
     assert settings.host is not None
-    lines, std_functions, error = scoped_dump(settings.host, case, settings)
+    lines, std_functions, failure = scoped_dump(settings.host, case, settings)
 
-    return lines, std_functions, "host", error
+    return lines, std_functions, "host", failure
 
   if not case.has_baseline:
     if settings.reference is None:
-      return None, 0, "reference", "no --reference compiler was given for a --project/--extra case"
+      return None, 0, "reference", DumpFailure("no --reference compiler was given for a --project/--extra case")
 
-    lines, std_functions, error = scoped_dump(settings.reference, case, settings)
+    lines, std_functions, failure = scoped_dump(settings.reference, case, settings)
 
-    return lines, std_functions, "reference", error
+    return lines, std_functions, "reference", failure
 
   path = baseline_path(settings.baseline_dir, case)
 
   if not path.is_file():
-    return None, 0, "baseline", ""
+    return None, 0, "baseline", None
 
-  return path.read_text(encoding="utf-8").splitlines(), 0, "baseline", ""
+  return path.read_text(encoding="utf-8").splitlines(), 0, "baseline", None
 
 
 def run_case(
@@ -408,11 +430,15 @@ def run_case(
   settings: Settings,
 ) -> DropResult:
   if not case.path.is_file():
-    return DropResult(case, CLASS_NO_DUMP, reason=f"{case.path} does not exist")
+    return DropResult(
+      case,
+      CLASS_FIXTURE_MISSING,
+      reason=f"{relative_to(case.path, settings.repository_root)} does not exist",
+    )
 
-  expected, reference_std, source, expected_error = expected_for(case, settings)
+  expected, reference_std, source, expected_failure = expected_for(case, settings)
 
-  if expected is None and source == "baseline":
+  if expected is None and expected_failure is None:
     return DropResult(
       case,
       CLASS_BASELINE_MISSING,
@@ -421,14 +447,16 @@ def run_case(
     )
 
   if expected is None:
-    classification = CLASS_TIMEOUT if "timed out" in expected_error else CLASS_REFERENCE_NO_DUMP
-    return DropResult(case, classification, reason=f"{source}: {expected_error}")
+    assert expected_failure is not None
+    classification = CLASS_TIMEOUT if expected_failure.timed_out else CLASS_REFERENCE_NO_DUMP
+    return DropResult(case, classification, reason=f"{source}: {expected_failure}")
 
-  actual, std_functions, actual_error = scoped_dump(settings.compiler, case, settings)
+  actual, std_functions, actual_failure = scoped_dump(settings.compiler, case, settings)
 
   if actual is None:
-    classification = CLASS_TIMEOUT if "timed out" in actual_error else CLASS_NO_DUMP
-    return DropResult(case, classification, reason=actual_error, expected_lines=len(expected))
+    assert actual_failure is not None
+    classification = CLASS_TIMEOUT if actual_failure.timed_out else CLASS_NO_DUMP
+    return DropResult(case, classification, reason=str(actual_failure), expected_lines=len(expected))
 
   first_difference, diff_lines = compare(expected, actual)
 
@@ -443,7 +471,7 @@ def run_case(
     reference_std_functions=reference_std,
   )
 
-  if settings.host is not None and not settings.host_compare and case.has_baseline:
+  if settings.host is not None and not settings.host_compare:
     result.host_cross_check = cross_check_host(case, expected, settings)
 
   return result
@@ -454,12 +482,20 @@ def cross_check_host(
   expected: list[str],
   settings: Settings,
 ) -> str:
-  """Does the host still produce the committed baseline for this case?"""
+  """Does the host still agree with what this case is checked against?
+
+  For a fixture that is the committed baseline. For a `--project`/`--extra`
+  case it is the `--reference` compiler's dump, which the primary comparison
+  has just held the compiler under test to — so agreement here means all three
+  produce the same schedule. Without it a `--project` case would only ever be
+  compared against another selfhost stage, and a bug in `ignis/` itself would
+  sit identically in both and never show.
+  """
   assert settings.host is not None
-  host_lines, _, error = scoped_dump(settings.host, case, settings)
+  host_lines, _, failure = scoped_dump(settings.host, case, settings)
 
   if host_lines is None:
-    return error or "the host produced no dump"
+    return str(failure) if failure else "the host produced no dump"
 
   first_difference, _ = compare(expected, host_lines)
 
@@ -499,8 +535,22 @@ def write_baselines(
   settings: Settings,
   cases: list[DropCase],
   jobs: int,
+  filtered: bool,
 ) -> int:
-  """(Re)generate every fixture baseline from `--compiler`."""
+  """(Re)generate the fixture baselines from `--compiler`.
+
+  Two rules keep a regeneration from quietly destroying the corpus it is
+  supposed to record:
+
+  - Nothing is written unless every case produced a dump. A compiler that
+    cannot run, or that fails on half the corpus, would otherwise leave a
+    directory that is part old and part new, and the gate would read it as a
+    set of real ownership changes.
+  - Pruning only happens over the whole corpus. Under `--filter` the cases
+    this run did not ask about are not stale, they are simply out of scope,
+    and deleting them would take the corpus down to whatever the filter
+    matched.
+  """
   fixtures = [case for case in cases if case.has_baseline]
 
   if not fixtures:
@@ -512,37 +562,44 @@ def write_baselines(
   with ThreadPoolExecutor(max_workers=jobs) as executor:
     dumps = list(executor.map(lambda case: (case, *scoped_dump(settings.compiler, case, settings)), fixtures))
 
-  failed = [(case, error) for case, lines, _, error in dumps if lines is None]
+  failed = [(case, failure) for case, lines, _, failure in dumps if lines is None]
+
+  if failed:
+    print(
+      f"{len(failed)} of {len(dumps)} cases produced no dump; no baseline was written or removed",
+      file=sys.stderr,
+    )
+
+    for case, failure in failed[:REPORTED_CASES]:
+      print(f"  {case.name}: {failure}", file=sys.stderr)
+
+    return 1
+
+  total_bytes = 0
 
   for case, lines, _, _ in dumps:
-    if lines is None:
-      continue
-
     path = baseline_path(settings.baseline_dir, case)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    content = "\n".join(lines) + "\n"
+    path.write_text(content, encoding="utf-8")
+    total_bytes += len(content.encode("utf-8"))
 
-  removed = stale_baselines(settings, cases)
+  removed: list[str] = []
 
-  for name in removed:
-    (settings.repository_root / name).unlink()
+  if not filtered:
+    removed = stale_baselines(settings, cases)
 
-  written = len(dumps) - len(failed)
-  total_bytes = sum(
-    baseline_path(settings.baseline_dir, case).stat().st_size
-    for case, lines, _, _ in dumps
-    if lines is not None
-  )
+    for name in removed:
+      (settings.repository_root / name).unlink()
+
+  pruning = f"removed {len(removed)} stale" if not filtered else "kept every other baseline (--filter)"
 
   print(
-    f"wrote {written} baselines ({total_bytes / 1024:.0f} KiB) under "
-    f"{relative_to(settings.baseline_dir, settings.repository_root)}, removed {len(removed)} stale"
+    f"wrote {len(dumps)} baselines ({total_bytes / 1024:.0f} KiB) under "
+    f"{relative_to(settings.baseline_dir, settings.repository_root)}, {pruning}"
   )
 
-  for case, error in failed:
-    print(f"  {case.name}: {error}", file=sys.stderr)
-
-  return 1 if failed else 0
+  return 0
 
 
 def warm_up(
@@ -914,6 +971,18 @@ def parse_arguments(repository_root: Path) -> argparse.Namespace:
   if not arguments.check_coverage and arguments.compiler is None:
     parser.error("--compiler is required unless --check-coverage is given")
 
+  if arguments.write_baselines and arguments.check_coverage:
+    parser.error("--write-baselines and --check-coverage are separate runs; pick one")
+
+  # Baselines record the own-code section of the compiler's own dump. Written
+  # under either of these the files would be whole-dump or host-shaped, and
+  # every later own-code comparison against them would fail.
+  if arguments.write_baselines and arguments.compare_everything:
+    parser.error("--write-baselines records the own-code dump; --all would write baselines nothing can match")
+
+  if arguments.write_baselines and arguments.host_compare:
+    parser.error("--write-baselines records --compiler's dump; --host-compare has no baselines to write")
+
   if arguments.host_compare and arguments.host is None:
     parser.error("--host-compare needs a --host compiler to compare against")
 
@@ -966,7 +1035,7 @@ def main() -> int:
   jobs = min(arguments.jobs, cpu_count) if arguments.jobs else cpu_count
 
   if arguments.write_baselines:
-    return write_baselines(settings, cases, jobs)
+    return write_baselines(settings, cases, jobs, filtered=bool(arguments.filter))
 
   warm_up(settings, cases[0])
 
