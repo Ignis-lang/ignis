@@ -6,8 +6,16 @@
 # is a semantic change, so the cases that matter are: it names every kind of
 # change, it says nothing when nothing changed, it compares against the merge
 # base rather than the base branch tip (a branch that is merely behind must
-# not claim someone else's baselines as its own churn), and it never fails the
-# job that runs it.
+# not claim someone else's baselines as its own churn), it shows both halves
+# of a rename, and it never fails the job that runs it.
+#
+# Hermetic on purpose. The script under test appends to $GITHUB_STEP_SUMMARY
+# whenever that is set, so a test that captured its stdout passed locally and
+# failed on a CI runner, where the variable is already exported: every report
+# went into the real job summary and the capture came back empty. Every
+# invocation below is given its own summary file, and the sandbox repository
+# carries its own identity and branch names rather than inheriting the
+# runner's git configuration.
 #
 # Usage: scripts/tests/test_baseline_churn_report.sh
 
@@ -56,13 +64,43 @@ check_absent() {
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
+SUMMARY_COUNT=0
+
+# Runs the report with a summary file of its own and returns what it wrote,
+# so nothing depends on whether the caller's environment already exports
+# GITHUB_STEP_SUMMARY.
+report_for() {
+  SUMMARY_COUNT=$((SUMMARY_COUNT + 1))
+  local summary="${WORK_DIR}/summary-${SUMMARY_COUNT}.md"
+  local status=0
+
+  # Pre-created so the usage-error path, which exits before writing anything,
+  # still leaves something to read and reports its own exit status rather than
+  # `cat`'s.
+  : >"$summary"
+
+  GITHUB_STEP_SUMMARY="$summary" "$REPORT" "$@" || status=$?
+
+  cat "$summary"
+
+  return "$status"
+}
+
+# A clean runner has no global git identity and may default to any initial
+# branch name, so the sandbox repository supplies both itself.
+export GIT_AUTHOR_NAME="Baseline Churn Test"
+export GIT_AUTHOR_EMAIL="test@example.invalid"
+export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
 REPOSITORY="${WORK_DIR}/repository"
 mkdir -p "${REPOSITORY}/baselines"
 cd "$REPOSITORY"
 
 git init --quiet --initial-branch=main .
-git config user.email "test@example.invalid"
-git config user.name "Test"
+git config user.email "$GIT_AUTHOR_EMAIL"
+git config user.name "$GIT_AUTHOR_NAME"
+git config commit.gpgsign false
 
 printf 'original\n' >baselines/kept.txt
 printf 'original\n' >baselines/changed.txt
@@ -90,7 +128,7 @@ git commit --quiet -m "regenerate baselines"
 
 echo "baseline_churn_report.sh"
 
-report="$("$REPORT" main baselines)"
+report="$(report_for main baselines)"
 
 check_contains "$report" "1 added, 1 changed, 1 removed." "counts every kind of change"
 check_contains "$report" "baselines/added.txt" "names the added baseline"
@@ -101,25 +139,32 @@ check_absent "$report" "source.txt" "ignores files outside the given directories
 check_absent "$report" "baselines/other.txt" "compares against the merge base, not the base tip"
 
 git checkout --quiet -b untouched main
-report="$("$REPORT" main baselines)"
+report="$(report_for main baselines)"
 check_contains "$report" "No committed baselines changed" "says so when nothing changed"
 
 git checkout --quiet feature
 
 status=0
-"$REPORT" definitely-not-a-ref baselines >/dev/null || status=$?
+report="$(report_for definitely-not-a-ref baselines)" || status=$?
 if [[ "$status" -eq 0 ]]; then
   pass "an unknown base ref is reported, not a job failure"
 else
   fail "an unknown base ref exited ${status}"
 fi
+check_contains "$report" "No merge base" "says why it could not compare"
 
-summary_file="${WORK_DIR}/summary.md"
+# The script's whole job is appending to $GITHUB_STEP_SUMMARY when CI sets it.
+summary_file="${WORK_DIR}/explicit-summary.md"
 GITHUB_STEP_SUMMARY="$summary_file" "$REPORT" main baselines
 check_contains "$(cat "$summary_file")" "1 added, 1 changed, 1 removed." "writes to \$GITHUB_STEP_SUMMARY"
 
+# With no summary variable at all the report goes to stdout, which is what a
+# developer running it by hand gets.
+report="$(env -u GITHUB_STEP_SUMMARY "$REPORT" main baselines)"
+check_contains "$report" "1 added, 1 changed, 1 removed." "falls back to stdout"
+
 status=0
-"$REPORT" main >/dev/null 2>&1 || status=$?
+report_for main >/dev/null 2>&1 || status=$?
 if [[ "$status" -eq 2 ]]; then
   pass "a missing directory argument is a usage error"
 else
@@ -133,7 +178,7 @@ git checkout --quiet -b renames main
 git mv baselines/kept.txt baselines/kept_under_a_new_name.txt
 git commit --quiet -m "rename a baseline"
 
-report="$("$REPORT" main baselines)"
+report="$(report_for main baselines)"
 
 check_contains "$report" "renamed" "labels a rename as such"
 check_contains "$report" "baselines/kept.txt -> baselines/kept_under_a_new_name.txt" \
