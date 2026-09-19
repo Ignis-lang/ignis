@@ -1,0 +1,399 @@
+import Fs from "std::fs";
+import Path from "std::path";
+import Sort from "std::sort";
+import String from "std::string";
+import Test from "std::test";
+import Vector from "std::vector";
+
+import
+  BuildFingerprint,
+  SourceHash,
+  fingerprintDeserialize,
+  fingerprintEquals,
+  fingerprintHashFile,
+  fingerprintHashStr,
+  fingerprintSerialize,
+  fingerprintTransitiveHash,
+from "./fingerprint";
+
+/// Codegen ABI the emitted translation unit follows, kept equal to the Rust
+/// host's `ignis_codegen_c::CODEGEN_ABI_VERSION`. A change to the emitted C
+/// shape has to bump both, or a stamp written by one compiler would let the
+/// other reuse an object that no longer matches its runtime prelude.
+export const SELFHOST_CODEGEN_ABI_VERSION: u32 = 2;
+
+/// The backend the selfhost emits for. Recorded in the stamp so a future
+/// backend can never reuse an object emitted by this one.
+const SELFHOST_BACKEND: str = "c";
+
+/// The stamp a build writes beside its object file.
+///
+/// The suffix is appended rather than replacing the extension, so a stamp can
+/// never collide with an artifact the build itself writes.
+export function stampPathForObject(objectPath: &Path::PathBuf): Path::PathBuf {
+  let objectText: String = objectPath.toString();
+  let stampText: String = objectText.concat(".stamp");
+  return Path::PathBuf::fromString(&stampText);
+}
+
+/// Hash every source the build reads, in alphabetical path order.
+///
+/// Duplicates are dropped so a module that is both a graph node and a prelude
+/// entry is hashed once, which keeps the transitive hash independent of how
+/// the caller assembled the list.
+export function stampSourceHashes(paths: &Vector<Path::PathBuf>): Vector<SourceHash> {
+  let mut sorted: Vector<String> = Vector::new<String>();
+  let mut index: u64 = 0;
+
+  while (index < paths.length()) {
+    let Option::SOME(path) = paths.get(index) else {
+      break;
+    };
+
+    sorted.push(path.toString());
+    index += 1;
+  }
+
+  Sort::stableLexicalStrings(&mut sorted);
+
+  let mut entries: Vector<SourceHash> = Vector::new<SourceHash>();
+  let mut sortedIndex: u64 = 0;
+
+  while (sortedIndex < sorted.length()) {
+    let Option::SOME(pathText) = sorted.get(sortedIndex) else {
+      break;
+    };
+
+    let mut isDuplicate: boolean = false;
+
+    if (entries.length() > 0) {
+      if (let Option::SOME(last) = entries.get(entries.length() - 1)) {
+        isDuplicate = last.path.equals(pathText);
+      }
+    }
+
+    if (!isDuplicate) {
+      let path: Path::PathBuf = Path::PathBuf::fromString(pathText);
+      let hash: String = fingerprintHashFile(&path);
+
+      entries.push(SourceHash {
+        path: pathText.clone(),
+        hash: hash,
+      });
+    }
+
+    sortedIndex += 1;
+  }
+
+  return entries;
+}
+
+/// Fold the C toolchain profile into one hash.
+///
+/// The optimization level and the debug switch decide the object as much as an
+/// explicit flag does, so all three share one field of the fingerprint.
+export function stampProfileHash(optLevel: u64, debug: boolean, cflags: &Vector<String>): String {
+  let mut combined: String = String::new();
+  combined.pushStr("O");
+
+  let levelText: String = optLevel.toString();
+  combined.push(&levelText);
+  combined.pushStr(debug ? "|debug" : "|release");
+
+  let mut index: u64 = 0;
+
+  while (index < cflags.length()) {
+    let Option::SOME(flag) = cflags.get(index) else {
+      break;
+    };
+
+    combined.pushChar('|');
+    combined.push(flag);
+    index += 1;
+  }
+
+  return fingerprintHashStr(combined.toStr());
+}
+
+/// The fingerprint a whole-program build is cached under.
+///
+/// `sources` must carry every module the build parses, std included: the
+/// selfhost emits user and standard-library code into one translation unit, so
+/// a std source edit changes the same artifact a user source edit does.
+export function stampProgramFingerprint(
+  compilerVersion: str,
+  targetTriple: str,
+  cc: str,
+  profileHash: str,
+  manifestHash: str,
+  features: &Vector<String>,
+  sources: &Vector<Path::PathBuf>,
+): BuildFingerprint {
+  let entries: Vector<SourceHash> = stampSourceHashes(sources);
+  let transitiveHash: String = fingerprintTransitiveHash(&entries);
+
+  return BuildFingerprint::withSources(
+    compilerVersion,
+    SELFHOST_CODEGEN_ABI_VERSION,
+    targetTriple,
+    SELFHOST_BACKEND,
+    cc,
+    profileHash,
+    manifestHash,
+    features,
+    entries,
+    transitiveHash,
+  );
+}
+function stampFeaturesEqual(left: &Vector<String>, right: &Vector<String>): boolean {
+  if (left.length() != right.length()) {
+    return false;
+  }
+
+  let mut index: u64 = 0;
+
+  while (index < left.length()) {
+    let Option::SOME(leftFeature) = left.get(index) else {
+      return false;
+    };
+
+    let Option::SOME(rightFeature) = right.get(index) else {
+      return false;
+    };
+
+    if (!leftFeature.equals(rightFeature)) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// Why a cached build cannot be reused, or an empty string when it can.
+///
+/// The reason is what the build reports, so it names the input that moved
+/// rather than restating that the stamp did not match.
+export function stampStaleReason(
+  stampPath: &Path::PathBuf,
+  fingerprint: &BuildFingerprint,
+  artifacts: &Vector<Path::PathBuf>,
+): String {
+  let mut index: u64 = 0;
+
+  while (index < artifacts.length()) {
+    let Option::SOME(artifact) = artifacts.get(index) else {
+      break;
+    };
+
+    if (!Fs::exists(artifact.asStr())) {
+      return `missing ${artifact.asStr()}`;
+    }
+
+    index += 1;
+  }
+
+  if (!Fs::exists(stampPath.asStr())) {
+    return String::create("no stamp");
+  }
+
+  let Result::OK(content) = Fs::readToString(stampPath) else {
+    return String::create("unreadable stamp");
+  };
+
+  let Option::SOME(existing) = fingerprintDeserialize(&content) else {
+    return String::create("unreadable stamp");
+  };
+
+  if (!existing.compilerIdentity.equals(&fingerprint.compilerIdentity)) {
+    return String::create("compiler changed");
+  }
+
+  if (!stampFeaturesEqual(&existing.features, &fingerprint.features)) {
+    return String::create("feature set changed");
+  }
+
+  if (!existing.transitiveHash.equals(&fingerprint.transitiveHash)) {
+    return String::create("sources changed");
+  }
+
+  if (!fingerprintEquals(fingerprint, &existing)) {
+    return String::create("build configuration changed");
+  }
+
+  return String::new();
+}
+
+/// Drop a stamp so a build that fails part way through cannot leave one behind
+/// that describes artifacts it never finished writing.
+export function stampInvalidate(stampPath: &Path::PathBuf): void {
+  if (!Fs::exists(stampPath.asStr())) {
+    return;
+  }
+
+  match (Fs::removeFile(stampPath)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {},
+  };
+}
+
+/// Record the fingerprint the artifacts beside `stampPath` were built from.
+///
+/// A failed write is not a build failure: the next run simply finds no stamp
+/// and rebuilds.
+export function stampWrite(stampPath: &Path::PathBuf, fingerprint: &BuildFingerprint): void {
+  let content: String = fingerprintSerialize(fingerprint);
+
+  match (Fs::writeString(stampPath, &content)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {},
+  };
+}
+function stampTestDir(): Path::PathBuf {
+  return Path::PathBuf::create("/tmp/ignis_selfhost_stamp_test");
+}
+
+function stampTestWriteSource(path: &Path::PathBuf, body: str): void {
+  let content: String = String::create(body);
+
+  match (Fs::writeString(path, &content)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+}
+
+function stampTestFingerprint(
+  sources: &Vector<Path::PathBuf>,
+  features: &Vector<String>
+): BuildFingerprint {
+  return stampProgramFingerprint("0.4.0", "", "cc", "profile", "manifest", features, sources);
+}
+
+/// A stamp is a plain suffix on the object path, so it can never be mistaken
+/// for the object or the translation unit beside it.
+@test
+function stampPathIsDerivedFromTheObject(): void {
+  let object: Path::PathBuf = Path::PathBuf::create("build/user/obj/app.o");
+  let stamp: Path::PathBuf = stampPathForObject(&object);
+  let stampText: String = stamp.toString();
+
+  Test::assertEq<str>(stampText.toStr(), "build/user/obj/app.o.stamp");
+}
+
+/// The source set is hashed in path order and deduplicated, so the same graph
+/// handed over in a different order fingerprints identically.
+@test
+function stampSourceHashesAreOrderIndependent(): void {
+  let dir: Path::PathBuf = stampTestDir();
+
+  match (Fs::createDirAll(&dir)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let first: Path::PathBuf = dir.join("a.ign");
+  let second: Path::PathBuf = dir.join("b.ign");
+  stampTestWriteSource(&first, "function a(): void {}\n");
+  stampTestWriteSource(&second, "function b(): void {}\n");
+
+  let mut forward: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  forward.push(first.clone());
+  forward.push(second.clone());
+
+  let mut backward: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  backward.push(second.clone());
+  backward.push(first.clone());
+  backward.push(first.clone());
+
+  let entries: Vector<SourceHash> = stampSourceHashes(&forward);
+  let reversed: Vector<SourceHash> = stampSourceHashes(&backward);
+
+  Test::assertEq<u64>(entries.length(), 2);
+  Test::assertEq<u64>(reversed.length(), 2);
+
+  let forwardHash: String = fingerprintTransitiveHash(&entries);
+  let backwardHash: String = fingerprintTransitiveHash(&reversed);
+
+  Test::assertEq<str>(forwardHash.toStr(), backwardHash.toStr());
+}
+
+/// A stamp written from one fingerprint is reused for the same inputs, and a
+/// changed source, a changed feature set or a missing artifact each name
+/// themselves as the reason it is not.
+@test
+function stampStaleReasonNamesWhatMoved(): void {
+  let dir: Path::PathBuf = stampTestDir();
+
+  match (Fs::createDirAll(&dir)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let source: Path::PathBuf = dir.join("main.ign");
+  let object: Path::PathBuf = dir.join("main.o");
+  stampTestWriteSource(&source, "function main(): void {}\n");
+  stampTestWriteSource(&object, "object\n");
+
+  let mut sources: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  sources.push(source.clone());
+
+  let mut artifacts: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  artifacts.push(object.clone());
+
+  let noFeatures: Vector<String> = Vector::new<String>();
+  let stamp: Path::PathBuf = stampPathForObject(&object);
+  stampInvalidate(&stamp);
+
+  let cold: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
+  let coldReason: String = stampStaleReason(&stamp, &cold, &artifacts);
+  Test::assertEq<str>(coldReason.toStr(), "no stamp");
+
+  stampWrite(&stamp, &cold);
+
+  let warm: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
+  let warmReason: String = stampStaleReason(&stamp, &warm, &artifacts);
+  Test::assertEq<str>(warmReason.toStr(), "");
+
+  let mut features: Vector<String> = Vector::new<String>();
+  features.push(String::create("tracing"));
+
+  let featured: BuildFingerprint = stampTestFingerprint(&sources, &features);
+  let featureReason: String = stampStaleReason(&stamp, &featured, &artifacts);
+  Test::assertEq<str>(featureReason.toStr(), "feature set changed");
+
+  stampTestWriteSource(&source, "function main(): i32 { return 1; }\n");
+
+  let edited: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
+  let editedReason: String = stampStaleReason(&stamp, &edited, &artifacts);
+  Test::assertEq<str>(editedReason.toStr(), "sources changed");
+
+  match (Fs::removeFile(&object)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {},
+  };
+
+  let missingReason: String = stampStaleReason(&stamp, &edited, &artifacts);
+  Test::assertEq<boolean>(missingReason.startsWith("missing "), true);
+
+  stampInvalidate(&stamp);
+  match (Fs::removeFile(&source)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> {},
+  };
+}
+
+/// The profile hash folds the optimization level and the debug switch in, so a
+/// `-O2` object is never reused for a `-O0` build.
+@test
+function stampProfileHashCoversOptimizationAndDebug(): void {
+  let flags: Vector<String> = Vector::new<String>();
+  let base: String = stampProfileHash(0, true, &flags);
+  let optimized: String = stampProfileHash(2, true, &flags);
+  let release: String = stampProfileHash(0, false, &flags);
+  let same: String = stampProfileHash(0, true, &flags);
+
+  Test::assertEq<str>(base.toStr(), same.toStr());
+  Test::assertNe<str>(base.toStr(), optimized.toStr());
+  Test::assertNe<str>(base.toStr(), release.toStr());
+}

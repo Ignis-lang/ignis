@@ -44,6 +44,9 @@ export record CliOptions {
   public optLevel: Option<u64>;
   public debug: Option<boolean>;
   public features: Vector<String>;
+  /// Rebuild even when the build cache reports the artifacts are current,
+  /// mirroring the host's `ignis build --force`.
+  public force: boolean;
   public filter: String;
   public updateSnapshots: boolean;
   /// Print the ownership checker's drop schedules after analysis, mirroring
@@ -89,6 +92,7 @@ export record CliOptions {
       optLevel: Option::NONE,
       debug: Option::NONE,
       features: Vector::new<String>(),
+      force: false,
       filter: String::new(),
       updateSnapshots: false,
       dumpDropSchedule: false,
@@ -1153,6 +1157,12 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    if (argument.equals("-f") || argument.equals("--force") || argument.equals("--rebuild")) {
+      options.force = true;
+      index += 1;
+      continue;
+    }
+
     if (argument.equals("--dump-drop-schedule")) {
       options.dumpDropSchedule = true;
       index += 1;
@@ -1347,6 +1357,7 @@ export function helpText(): String {
   text.pushStr("  -O, --opt-level <0-3>     Override [build] opt_level\n");
   text.pushStr("      --debug               Build with debug information\n");
   text.pushStr("      --no-debug            Build without debug information\n");
+  text.pushStr("  -f, --force               Rebuild even when the build cache is current\n");
   text.pushStr("      --dump-drop-schedule  Print ownership drop schedules after analysis\n");
   text.pushStr("      --dump-ownership-report[=<FN>]\n");
   text.pushStr("                            Print the ownership checker's decisions as JSON Lines on\n");

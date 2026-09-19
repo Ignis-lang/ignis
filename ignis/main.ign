@@ -31,7 +31,7 @@ import Mono from "./analyzer/mono";
 import LirLowering from "./lir/lowering";
 import LirVerify from "./lir/verify";
 
-import CliCommand, CliOptions, helpText, parseArguments, versionText from "./cli";
+import CliCommand, CliOptions, IGNIS_VERSION, helpText, parseArguments, versionText from "./cli";
 import BuildGraph, BuildModuleKind from "./build/module_graph";
 import BuildLayout from "./build/layout";
 import
@@ -52,11 +52,20 @@ import
   FixtureTests,
 from "./build/fixture_tests";
 
-// Pulled in so `ignis check` analyzes them and `ignis test build::fingerprint`
-// and `ignis test build::pipeline` can select their `@test`s: nothing else in
-// this binary's import graph reaches these modules yet, and a module outside
-// the graph is never typechecked or planned for testing.
-import _ from "./build/fingerprint";
+import BuildFingerprint, fingerprintHashFile from "./build/fingerprint";
+import
+  stampInvalidate,
+  stampPathForObject,
+  stampProfileHash,
+  stampProgramFingerprint,
+  stampStaleReason,
+  stampWrite,
+from "./build/stamp";
+
+// Pulled in so `ignis check` analyzes it and `ignis test build::pipeline` can
+// select its `@test`s: nothing else in this binary's import graph reaches this
+// module yet, and a module outside the graph is never typechecked or planned
+// for testing.
 import _ from "./build/pipeline";
 import
   ProcessOutcome,
@@ -305,6 +314,131 @@ function resolveBuildProfile(discovery: &DiscoveryResult, optLevel: Option<u64>)
   return profile;
 }
 
+/// Every module a discovered build parses, std included.
+///
+/// The prelude paths are added even though discovery already holds them as
+/// graph nodes: `stampSourceHashes` deduplicates, and a list that is a
+/// superset can only make the cache more conservative, never less.
+function discoveredSourcePaths(discovery: &DiscoveryResult): Vector<Path::PathBuf> {
+  let mut sources: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut nodeIndex: u64 = 0;
+
+  while (nodeIndex < discovery.graph.nodes.length()) {
+    let Option::SOME(node) = discovery.graph.nodes.get(nodeIndex) else {
+      break;
+    };
+
+    sources.push(node.path.clone());
+    nodeIndex += 1;
+  }
+
+  let mut preludeIndex: u64 = 0;
+
+  while (preludeIndex < discovery.preludePaths.length()) {
+    let Option::SOME(preludePath) = discovery.preludePaths.get(preludeIndex) else {
+      break;
+    };
+
+    sources.push(preludePath.clone());
+    preludeIndex += 1;
+  }
+
+  if (discovery.hasProjectFile) {
+    sources.push(discovery.root.join("ignis.toml"));
+  }
+
+  return sources;
+}
+
+/// The fingerprint a build's artifacts are cached under.
+///
+/// This compiler emits user and standard-library code into one translation
+/// unit, so there is no standard-library archive a user build could reuse on
+/// its own: the key covers every module the build parses, the std manifest,
+/// the enabled feature set, the C toolchain profile and the identity of the
+/// compiler binary that produced the artifacts.
+function programBuildFingerprint(
+  discovery: &DiscoveryResult,
+  profile: &BuildProfile
+): BuildFingerprint {
+  let sources: Vector<Path::PathBuf> = discoveredSourcePaths(discovery);
+  let profileHash: String = stampProfileHash(profile.optLevel, profile.debug, &profile.cflags);
+  let manifestPath: Path::PathBuf = discovery.stdRoot.join("manifest.toml");
+  let manifestHash: String = fingerprintHashFile(&manifestPath);
+
+  return stampProgramFingerprint(
+    IGNIS_VERSION,
+    discovery.flags.targetTriple.toStr(),
+    profile.cc.toStr(),
+    profileHash.toStr(),
+    manifestHash.toStr(),
+    &discovery.flags.features,
+    &sources,
+  );
+}
+
+/// Why a build cannot reuse the artifacts a previous run left behind.
+///
+/// `--force` short-circuits the comparison so a rebuild happens even when
+/// nothing about the sources, the toolchain or the compiler moved.
+function buildCacheStaleReason(
+  force: boolean,
+  stampPath: &Path::PathBuf,
+  fingerprint: &BuildFingerprint,
+  artifacts: &Vector<Path::PathBuf>,
+): String {
+  if (force) {
+    return String::create("--force");
+  }
+
+  return stampStaleReason(stampPath, fingerprint, artifacts);
+}
+
+/// The artifacts a whole-program build's stamp stands for.
+///
+/// A project that links nothing produces the translation unit and no object or
+/// binary, so guarding those would report a miss on every run.
+function guardedBuildArtifacts(
+  artifacts: &BuildArtifacts,
+  linksExecutable: boolean
+): Vector<Path::PathBuf> {
+  let mut guarded: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  guarded.push(artifacts.source.clone());
+
+  if (linksExecutable) {
+    guarded.push(artifacts.object.clone());
+    guarded.push(artifacts.executable.clone());
+  }
+
+  return guarded;
+}
+
+/// Report a reused build in the shape a compiled one reports itself in, so a
+/// caller reading the run's output finds the same lines either way.
+function reportReusedBuild(
+  artifacts: &BuildArtifacts,
+  linksExecutable: boolean,
+  statusToStderr: boolean
+): void {
+  printStatus(`  emit: ${artifacts.source.asStr()}`, statusToStderr);
+
+  if (linksExecutable) {
+    printStatus(`  link: ${artifacts.executable.asStr()}`, statusToStderr);
+  }
+
+  printStatus(String::create("  summary: 0 errors, 0 warnings"), statusToStderr);
+}
+
+/// Report in one line whether a build reused its artifacts, and why it did not.
+function reportCacheDecision(label: str, reason: &String, statusToStderr: boolean): void {
+  if (reason.length() == 0) {
+    printStatus(`  ${label}: reused`, statusToStderr);
+    return;
+  }
+
+  printStatus(`  ${label}: rebuilding, ${reason.toStr()}`, statusToStderr);
+}
+
 /// Compile and link one fixture's translation unit without reporting anything.
 ///
 /// A fixture's toolchain failure belongs to that fixture's own report block,
@@ -365,10 +499,14 @@ function compileAndLinkQuietly(
 
 /// Compile every emitted translation unit and link them into an executable.
 ///
+/// `prebuiltObjects` are linked without being compiled, which is how a run
+/// reuses an object the build cache reported current.
+///
 /// Returns 0 when every toolchain step succeeds and 1 when any one fails.
 function compileAndLinkUnits(
   sourcePaths: &Vector<Path::PathBuf>,
   objectPaths: &Vector<Path::PathBuf>,
+  prebuiltObjects: &Vector<Path::PathBuf>,
   outputPath: &Path::PathBuf,
   stdRoot: &Path::PathBuf,
   profile: &BuildProfile,
@@ -393,6 +531,17 @@ function compileAndLinkUnits(
 
     objects.push(objectPath.toString());
     unitIndex += 1;
+  }
+
+  let mut prebuiltIndex: u64 = 0;
+
+  while (prebuiltIndex < prebuiltObjects.length()) {
+    let Option::SOME(objectPath) = prebuiltObjects.get(prebuiltIndex) else {
+      break;
+    };
+
+    objects.push(objectPath.toString());
+    prebuiltIndex += 1;
   }
 
   if (let Result::ERROR(compileBag) = CCompiler::compileObjects(
@@ -1191,6 +1340,24 @@ function runCompile(
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+  let artifacts: BuildArtifacts = projectMode ? projectArtifacts(&discovery.name, &discovery.outDir, &options.outputPath) : singleFileArtifacts(&options.outputPath);
+  let stampPath: Path::PathBuf = stampPathForObject(&artifacts.object);
+  let fingerprint: BuildFingerprint = programBuildFingerprint(&discovery, &profile);
+
+  if (!checkOnly) {
+    let guarded: Vector<Path::PathBuf> = guardedBuildArtifacts(&artifacts, discovery.bin);
+    let reason: String = buildCacheStaleReason(options.force, &stampPath, &fingerprint, &guarded);
+
+    reportCacheDecision("cache", &reason, statusToStderr);
+
+    if (reason.length() == 0) {
+      reportReusedBuild(&artifacts, discovery.bin, statusToStderr);
+      return 0;
+    }
+
+    stampInvalidate(&stampPath);
+  }
+
   let mut compileOptions: CompileOptions = CompileOptions::build(!checkOnly);
   compileOptions.dumpDropSchedule = options.dumpDropSchedule;
   compileOptions.dumpOwnershipReport = options.dumpOwnershipReport;
@@ -1203,8 +1370,6 @@ function runCompile(
   // and the `// unsupported instruction: <Variant>` comments in it are how the
   // remaining work is counted per variant.
   if (!checkOnly && compiled.source.length() > 0) {
-    let artifacts: BuildArtifacts = projectMode ? projectArtifacts(&discovery.name, &discovery.outDir, &options.outputPath) : singleFileArtifacts(&options.outputPath);
-
     if (!ensureParentDirectory(&artifacts.source) || !ensureParentDirectory(&artifacts.object) || !ensureParentDirectory(&artifacts.executable)) {
       return 1;
     }
@@ -1220,10 +1385,13 @@ function runCompile(
       let mut objectPaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
       objectPaths.push(artifacts.object.clone());
 
+      let noPrebuiltObjects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+
       if (discovery.bin) {
         linkErrors += compileAndLinkUnits(
           &sourcePaths,
           &objectPaths,
+          &noPrebuiltObjects,
           &artifacts.executable,
           &discovery.stdRoot,
           &profile,
@@ -1235,6 +1403,10 @@ function runCompile(
   }
 
   let totalErrors: u64 = compiled.errors + linkErrors;
+
+  if (!checkOnly && totalErrors == 0 && compiled.source.length() > 0) {
+    stampWrite(&stampPath, &fingerprint);
+  }
 
   printStatus(
     `  summary: ${totalErrors} errors, ${compiled.warnings} warnings`,
@@ -1721,6 +1893,84 @@ function mainFixtureOutcomeReportsAStaleSkipAsFailing(): void {
   Test::assertEq<u64>(outcome.skipped.length(), 0);
 }
 
+/// Emit, compile and link the two translation units a test run executes.
+///
+/// Only the program unit takes part in the build cache. The harness follows
+/// the selected test set, so the filter and the shard the command line named
+/// change its source on every run, and regenerating it costs one small C file.
+///
+/// Returns the linked binary, or nothing when a write or a toolchain step
+/// failed.
+function linkTestBinary(
+  discovery: &DiscoveryResult,
+  profile: &BuildProfile,
+  file: &SourceFile,
+  options: &CliOptions,
+  compiled: &CompiledProgram,
+  selected: &Vector<TestCase>,
+): Option<Path::PathBuf> {
+  let outputPath: String = options.outputPathOr("selfhost_tests");
+  let programSourceText: String = outputPath.concat("-program.c");
+  let harnessSourceText: String = outputPath.concat("-harness.c");
+  let programObjectText: String = outputPath.concat("-program.o");
+  let harnessObjectText: String = outputPath.concat("-harness.o");
+  let programPath: Path::PathBuf = Path::PathBuf::fromString(&programSourceText);
+  let harnessPath: Path::PathBuf = Path::PathBuf::fromString(&harnessSourceText);
+  let programObjectPath: Path::PathBuf = Path::PathBuf::fromString(&programObjectText);
+  let stampPath: Path::PathBuf = stampPathForObject(&programObjectPath);
+  let fingerprint: BuildFingerprint = programBuildFingerprint(discovery, profile);
+
+  let mut guarded: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  guarded.push(programPath.clone());
+  guarded.push(programObjectPath.clone());
+
+  let reason: String = buildCacheStaleReason(options.force, &stampPath, &fingerprint, &guarded);
+  let programIsCached: boolean = reason.length() == 0;
+  reportCacheDecision("object", &reason, true);
+
+  if (!programIsCached) {
+    stampInvalidate(&stampPath);
+
+    if (let Result::ERROR(_) = Fs::writeString(programPath.asStr(), &compiled.source)) {
+      Io::eprintln(`error: could not write ${programPath.asStr()}`);
+      return Option::NONE;
+    }
+  }
+
+  let harness: String = TestRunner::harnessSource(selected);
+
+  if (let Result::ERROR(_) = Fs::writeString(harnessPath.asStr(), &harness)) {
+    Io::eprintln(`error: could not write ${harnessPath.asStr()}`);
+    return Option::NONE;
+  }
+
+  let mut sourcePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut objectPaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let mut prebuiltObjects: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+
+  if (programIsCached) {
+    prebuiltObjects.push(programObjectPath.clone());
+  } else {
+    sourcePaths.push(programPath.clone());
+    objectPaths.push(programObjectPath.clone());
+  }
+
+  sourcePaths.push(harnessPath.clone());
+  objectPaths.push(Path::PathBuf::fromString(&harnessObjectText));
+
+  let binaryPath: Path::PathBuf = Path::PathBuf::fromString(&outputPath);
+
+  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &prebuiltObjects, &binaryPath, &discovery.stdRoot, profile, file, false) > 0) {
+    return Option::NONE;
+  }
+
+  if (!programIsCached) {
+    stampWrite(&stampPath, &fingerprint);
+  }
+
+  return Option::SOME(binaryPath);
+}
+
 /// Build the project's test harness and run every selected test in its own
 /// process, reporting the way the host `ignis test` runner does.
 ///
@@ -1785,40 +2035,10 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
     FixtureTests::prepareSnapshotDirectories(&selectedFixtures);
   }
 
-  let outputPath: String = options.outputPathOr("selfhost_tests");
-  let programSourceText: String = outputPath.concat("-program.c");
-  let harnessSourceText: String = outputPath.concat("-harness.c");
-  let programObjectText: String = outputPath.concat("-program.o");
-  let harnessObjectText: String = outputPath.concat("-harness.o");
-  let programPath: Path::PathBuf = Path::PathBuf::fromString(&programSourceText);
-  let harnessPath: Path::PathBuf = Path::PathBuf::fromString(&harnessSourceText);
-
-  if (let Result::ERROR(_) = Fs::writeString(programPath.asStr(), &compiled.source)) {
-    Io::eprintln(`error: could not write ${programPath.asStr()}`);
-    return 1;
-  }
-
-  let harness: String = TestRunner::harnessSource(&selected);
-
-  if (let Result::ERROR(_) = Fs::writeString(harnessPath.asStr(), &harness)) {
-    Io::eprintln(`error: could not write ${harnessPath.asStr()}`);
-    return 1;
-  }
-
-  let mut sourcePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-  sourcePaths.push(programPath.clone());
-  sourcePaths.push(harnessPath.clone());
-
-  let mut objectPaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-  objectPaths.push(Path::PathBuf::fromString(&programObjectText));
-  objectPaths.push(Path::PathBuf::fromString(&harnessObjectText));
-
-  let binaryPath: Path::PathBuf = Path::PathBuf::fromString(&outputPath);
-
-  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &binaryPath, &discovery.stdRoot, &profile, &file, false) > 0) {
+  let Option::SOME(binaryPath) = linkTestBinary(&discovery, &profile, &file, options, &compiled, &selected) else {
     Io::eprintln(String::create("error: test setup failed"));
     return 1;
-  }
+  };
 
   Io::eprintln(TestRunner::sectionHeader("Running"));
 
@@ -2946,6 +3166,31 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
 
   let file: SourceFile = entrySourceFile(&discovery.entry);
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
+
+  let base: Path::PathBuf = stdArtifactBase(&discovery.outDir, &options.outDir, &options.outputPath);
+  let layout: BuildLayout = BuildLayout::new("std", &base);
+  let sourcePath: Path::PathBuf = layout.stdSrcDir().join("ignis_std.c");
+  let objectPath: Path::PathBuf = layout.stdObjDir().join("ignis_std.o");
+  let libraryPath: Path::PathBuf = layout.stdLibPath();
+  let stampPath: Path::PathBuf = layout.stdStampPath();
+  let fingerprint: BuildFingerprint = programBuildFingerprint(&discovery, &profile);
+
+  let mut guarded: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  guarded.push(sourcePath.clone());
+  guarded.push(objectPath.clone());
+  guarded.push(libraryPath.clone());
+
+  let reason: String = buildCacheStaleReason(options.force, &stampPath, &fingerprint, &guarded);
+  reportCacheDecision("cache", &reason, false);
+
+  if (reason.length() == 0) {
+    Io::println(`  archive: ${libraryPath.asStr()}`);
+    Io::println(String::create("  summary: 0 errors, 0 warnings"));
+    return 0;
+  }
+
+  stampInvalidate(&stampPath);
+
   let compileOptions: CompileOptions = stdCompileOptions();
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
 
@@ -2954,13 +3199,7 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
     return 1;
   }
 
-  let base: Path::PathBuf = stdArtifactBase(&discovery.outDir, &options.outDir, &options.outputPath);
-  let layout: BuildLayout = BuildLayout::new("std", &base);
-  let sourcePath: Path::PathBuf = layout.stdSrcDir().join("ignis_std.c");
-  let objectPath: Path::PathBuf = layout.stdObjDir().join("ignis_std.o");
-  let libraryPath: Path::PathBuf = layout.stdLibPath();
-
-  if (!ensureParentDirectory(&sourcePath) || !ensureParentDirectory(&objectPath) || !ensureParentDirectory(&libraryPath)) {
+  if (!ensureParentDirectory(&sourcePath) || !ensureParentDirectory(&objectPath) || !ensureParentDirectory(&libraryPath) || !ensureParentDirectory(&stampPath)) {
     return 1;
   }
 
@@ -2997,6 +3236,8 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
     Io::println(String::create("  archive: failed"));
     return 1;
   }
+
+  stampWrite(&stampPath, &fingerprint);
 
   Io::println(`  archive: ${libraryPath.asStr()}`);
   Io::println(`  summary: 0 errors, ${compiled.warnings} warnings`);
