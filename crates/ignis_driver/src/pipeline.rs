@@ -3931,6 +3931,17 @@ pub fn run_std_tests(
   filter: Option<&str>,
   update_snapshots: bool,
   output_dir: Option<&Path>,
+) -> Result<(), ()> {
+  run_std_tests_with_features(std_root, filter, update_snapshots, output_dir, &HashSet::new())
+}
+
+/// `run_std_tests` with an explicit feature set, so `@configFlag`-gated std
+/// tests can be selected from the command line.
+pub fn run_std_tests_with_features(
+  std_root: &Path,
+  filter: Option<&str>,
+  update_snapshots: bool,
+  output_dir: Option<&Path>,
   features: &HashSet<String>,
 ) -> Result<(), ()> {
   let start = Instant::now();

@@ -12,8 +12,8 @@ use cli::{BuildCommand, CheckCommand, Cli, DocCommand, FmtCommand, SubCommand, T
 use ignis_config::{IgnisBuildConfig, IgnisConfig, IgnisSTDManifest};
 use ignis_driver::{
   build_std, check_std, compile_project, find_project_root, load_project_toml, resolve_project,
-  run_project_tests_with_options, run_single_file_tests_with_options, run_std_tests, CliOverrides, Project,
-  TestRunOptions,
+  run_project_tests_with_options, run_single_file_tests_with_options, run_std_tests_with_features, CliOverrides,
+  Project, TestRunOptions,
 };
 use ignis_formatter::{FormatOptions, FormatterCliOverrides, FormatterConfigPaths, format_file, load_formatter_config};
 use init::run_init;
@@ -629,7 +629,7 @@ fn run_test_std(
   let output_dir = cmd.output_dir.as_deref().map(Path::new);
   let features = collect_cli_features(&cmd.feature, &cmd.features);
 
-  run_std_tests(
+  run_std_tests_with_features(
     Path::new(&std_path),
     cmd.filter.as_deref(),
     cmd.update_snapshots,
