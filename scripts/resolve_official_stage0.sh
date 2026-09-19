@@ -40,8 +40,16 @@
 # official, or STAGE0_UNAVAILABLE_ACTION unset in official mode) and is
 # unavailable; 2 the official asset is unavailable and
 # STAGE0_UNAVAILABLE_ACTION=skip was requested.
-
-set -uo pipefail
+#
+# `-e` matters here specifically because this now runs as its own process
+# (`scripts/resolve_official_stage0.sh` from the workflow YAML's `run:`)
+# rather than inline in a `run:` block, where GitHub Actions' own `bash -e
+# {0}` used to cover it: an unexpected failure (a missing jq, a corrupt
+# promotion-streak.json) must abort before any `resolved=` output is
+# written, not fall through to a stale/empty stage0.json with a false
+# success. Every place that intentionally continues past a failing command
+# already guards it with `if ! ...` / `||`.
+set -euo pipefail
 
 STAGE0_MODE="${STAGE0_MODE:-auto}"
 WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
@@ -97,7 +105,7 @@ unavailable() {
   esac
 
   if [ "$STAGE0_MODE" = "official" ]; then
-    echo "stage0: official was forced but is unavailable"
+    echo "stage0: official was forced (STAGE0_MODE=official) but is unavailable"
     emit_output resolved false
     emit_output kind ""
     exit 1
@@ -109,7 +117,7 @@ unavailable() {
 }
 
 if [ "$STAGE0_MODE" = "host" ]; then
-  echo "stage0: host forced"
+  echo "stage0: host forced (STAGE0_MODE=host)"
   write_host_stage0
   exit 0
 fi

@@ -347,8 +347,20 @@ jobs:
           STAGE0_UNAVAILABLE_ACTION: skip
         run: scripts/resolve_official_stage0.sh
 
+      # scripts/resolve_official_stage0.sh always sets `resolved` (true or
+      # false) on every intentional outcome, including the skip path — an
+      # empty output means the step failed before reaching that point (a gh
+      # outage, a missing jq, a token problem, a future bug in the script),
+      # which continue-on-error above would otherwise make indistinguishable
+      # from "no official asset published" and let the job pass green.
+      - name: Fail on an unexpected stage0 resolution error
+        if: steps.stage0.outputs.resolved == ''
+        run: |
+          echo "::error::stage0 resolution failed unexpectedly — see the 'Resolve the official stage0 asset' step's log. This is not the same as no official asset being published (that case sets resolved=false and skips)."
+          exit 1
+
       - name: No official asset to check yet
-        if: steps.stage0.outputs.resolved != 'true'
+        if: steps.stage0.outputs.resolved == 'false'
         run: echo "::notice::No official selfhost asset is published yet (fresh fork, or the promotion streak has not reached 3); skipping the two-step rule gate."
 
       # `id: build` plus `continue-on-error` so the next step can turn a
@@ -375,12 +387,14 @@ jobs:
         run: |
           set -euo pipefail
 
+          MESSAGE="stage1 did not build with the official stage0 compiler. If the uploaded log (official-stage0-gate-log) shows a compiler diagnostic, this is a two-step rule violation: a language change may only be used in ignis/ or std/ after compiler support for it has been promoted to the official binary. Split this PR (land the compiler support, wait for it to promote, then use the feature), or, only if this is a bug fix the official binary genuinely cannot express, apply the 'stage0-break-approved' label. If the log instead shows a build/link/environment failure unrelated to a compiler diagnostic, that is a gate problem, not a two-step rule violation — please report it."
+
           if echo "$LABELS_JSON" | jq -e 'index("stage0-break-approved") != null' >/dev/null 2>&1; then
-            echo "::warning::stage1 failed to build with the official stage0 compiler (two-step rule), but the 'stage0-break-approved' label overrides this to a warning. See build/bootstrap/stage1/log.txt."
+            echo "::warning::${MESSAGE} The 'stage0-break-approved' label is present, so this is a warning, not a failure."
             exit 0
           fi
 
-          echo "::error::stage1 failed to build with the official stage0 compiler. A language change may only be used in ignis/ or std/ after compiler support for it has been promoted to the official binary. Split this PR (land the compiler support, wait for it to promote, then use the feature), or, only if this is a bug fix the official binary genuinely cannot express, apply the 'stage0-break-approved' label."
+          echo "::error::${MESSAGE}"
           exit 1
 
       - name: Upload the stage1 log

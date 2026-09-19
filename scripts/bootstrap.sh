@@ -598,6 +598,16 @@ first_error_line() {
   [[ -n "$line" ]] && echo "$line" || echo "see ${log}"
 }
 
+# Failure for build_stage1 when IGNIS_STAGE0_NO_FALLBACK=1 (the PR-time
+# two-step-rule gate; see BOOTSTRAP.md) — a factored-out message rather than
+# an inline `fail` call so it reads identically regardless of which of
+# build_stage1's two official/selfhost checks (explicit stage0=official, or
+# the ordinary auto-resolved-to-official path) reaches it first.
+fail_two_step_rule() {
+  local first_error="$1"
+  fail "stage1: the official stage0 compiler reported errors (${first_error}), see $(stage_dir stage1)/log.txt -- two-step rule violated: a language change may only be used in ignis/ or std/ after compiler support for it has been promoted to the official binary. Split this PR (land the compiler support, wait for it to promote to official, then use the feature in a follow-up), or, only if this is a bug fix the official binary genuinely cannot express, apply the 'stage0-break-approved' label to override this gate."
+}
+
 # stage0 is either the Rust host or a previously promoted selfhost binary
 # (`IGNIS_STAGE0` pointed at the nightly's official asset). The two take
 # different command forms: the host reads ignis.toml through `ignis build`,
@@ -827,18 +837,19 @@ build_stage1() {
     local first_error
     first_error="$(first_error_line "$(stage_dir stage1)/log.txt")"
 
-    if stage0_explicit_official; then
-      fail "stage1: the official stage0 compiler reported errors (${first_error}), see $(stage_dir stage1)/log.txt"
+    # The PR-time two-step-rule gate (ci.yml's "Official stage0 gate") sets
+    # IGNIS_STAGE0_NO_FALLBACK=1 and STAGE0_MODE=official (so stage0.json's
+    # `mode` reads "official" too), which makes stage0_explicit_official()
+    # true below — this check must come first, or that gate's own failure
+    # would be swallowed by the plain "official stage0 compiler reported
+    # errors" message just below with no mention of the rule it exists to
+    # enforce.
+    if [[ "${IGNIS_STAGE0_NO_FALLBACK:-}" == "1" ]]; then
+      fail_two_step_rule "$first_error"
     fi
 
-    # The PR-time two-step-rule gate (ci.yml's "Official stage0 gate") sets
-    # this to require stage1 to build with the official binary alone, with no
-    # silent fallback to the host masking a violation the way it would for
-    # every other caller of build_stage1. The rule: a language change may only
-    # be used in ignis/ or std/ after compiler support for it has been
-    # promoted to the official binary — see BOOTSTRAP.md.
-    if [[ "${IGNIS_STAGE0_NO_FALLBACK:-}" == "1" ]]; then
-      fail "stage1: the official stage0 compiler reported errors (${first_error}), see $(stage_dir stage1)/log.txt -- two-step rule violated: a language change may only be used in ignis/ or std/ after compiler support for it has been promoted to the official binary. Split this PR (land the compiler support, wait for it to promote to official, then use the feature in a follow-up), or, only if this is a bug fix the official binary genuinely cannot express, apply the 'stage0-break-approved' label to override this gate."
+    if stage0_explicit_official; then
+      fail "stage1: the official stage0 compiler reported errors (${first_error}), see $(stage_dir stage1)/log.txt"
     fi
 
     # A published selfhost binary can go stale against a link or runtime

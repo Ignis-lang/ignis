@@ -42,8 +42,8 @@ the official binary, and a build failure there is terminal, not a fallback.
 
 Gate | Command | What it compares
 --- | --- | ---
-G1 | `gate-g1` (part of `stage3`) | stage3's emitted C against stage2's — the fixed point
-G2 | `gate-g2` / `parity` | the host e2e corpus, run through stage2
+G1 | (part of `stage3`, no separate subcommand) | stage3's emitted C against stage2's — the fixed point
+G2 | `parity` | the host e2e corpus, run through stage2
 G3 | `gate-g3` | the selfhost test suite, run under stage2 vs. under the host
 G4 | `gate-g4` | stage2's resource use (RSS, wall time) against stage1's, within 1.25x
 G5 | `gate-g5` | diagnostics: stage2's error corpus output against the host's
