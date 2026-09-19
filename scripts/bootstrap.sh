@@ -22,7 +22,8 @@
 #   G4  resource budget: stage2 within 1.25x of the host
 #   G5  diagnostics: stage2's messages equal or better than the host's
 #   G6  syntax: stage2 accepts and rejects exactly what the host parser does
-#   G7  drop schedules: stage2's --dump-drop-schedule matches the host's
+#   G7  drop schedules: stage2's --dump-drop-schedule matches the committed
+#       baselines under test_cases/e2e/ok/__drop_schedules__
 #
 # `gates` runs all of them and then `report`, which turns the gate files into
 # build/bootstrap/report.md and build/bootstrap/promotion.json. The nightly
@@ -105,7 +106,18 @@ Commands:
                    stage2). Same unscored-row note as gate-g3-stage1 above.
   gate-g6  Compare stage2's parse verdicts with the host's and write gates/G6.json.
   gate-g4  Compare stage2's resource use with stage1's -> build/bootstrap/gates/G4.json.
-  gate-g7  Diff stage2's drop schedules against the host's -> gates/G7.json.
+  gate-g7  Check stage2's drop schedules against the committed baselines
+           (test_cases/e2e/ok/__drop_schedules__) -> gates/G7.json. No host
+           compiler is involved; the selfhost compiler's own sources have no
+           baseline and are compared against stage1 instead.
+  gate-g7-stage1   G7 run against stage1 instead of stage2 -> gates/G7-STAGE1.json
+                   (ci.yml's PR-only check; the promotion ladder still covers
+                   stage2). Same unscored-row note as gate-g3-stage1 above.
+  gate-g7-baselines [compiler]
+           Regenerate the drop-schedule baselines from <compiler> (default:
+           \$IGNIS_STAGE0). A deliberate developer step: the new dumps land in
+           the pull request's diff, where a reviewer reads them as the
+           semantic change they are.
   gates    Run every stage and gate in order, then write the promotion report.
   seal-gates  Record a skipped result for every gate that produced no file.
   report   Turn build/bootstrap/gates/*.json into report.md and promotion.json.
@@ -1451,35 +1463,74 @@ run_gate_g6() {
   info "gate-g6: result -> ${gate_file} (report ${report})"
 }
 
-run_gate_g7() {
-  ensure_stage stage2
+# G7: every `ok` fixture's drop schedule must match the dump committed under
+# test_cases/e2e/ok/__drop_schedules__. No host compiler is involved: the
+# baselines were generated from it before the freeze and are the reference now.
+#
+# The selfhost compiler compiling itself (`--project .`) deliberately has no
+# baseline — it would change with nearly every commit to `ignis/` — so it is
+# compared against stage1 instead, which is the same sources built by a
+# different compiler. Equal dumps there mean stage0 did not change what
+# `ignis/` means to its own ownership analysis.
+run_gate_g7_for() {
+  local stage="$1" gate_id="$2"
+  ensure_stage "$stage"
 
-  local report="${BOOTSTRAP_ROOT}/parity-drops.md"
-  local counts="${BOOTSTRAP_ROOT}/parity-drops.json"
-  local gate_file="${GATES_DIR}/G7.json"
+  # stage2 keeps its original, unsuffixed report/counts paths so nothing that
+  # already reads build/bootstrap/parity-drops.{md,json} breaks.
+  local suffix=""
+  [[ "$stage" == "stage2" ]] || suffix="-${stage}"
+
+  local report="${BOOTSTRAP_ROOT}/parity-drops${suffix}.md"
+  local counts="${BOOTSTRAP_ROOT}/parity-drops${suffix}.json"
+  local gate_file="${GATES_DIR}/${gate_id}.json"
+
+  local -a reference_arguments=()
+
+  # Only the stage2 run carries the project case: stage1 is its reference, so
+  # asking stage1 to be compared against itself would prove nothing, and the
+  # pull-request run cannot afford a second self-compilation anyway.
+  if [[ "$stage" == "stage2" ]]; then
+    ensure_stage stage1
+    reference_arguments=(--reference "$(stage_bin stage1)" --project .)
+  fi
 
   mkdir -p "$GATES_DIR"
   rm -f "$gate_file"
 
-  info "gate-g7: diffing the drop schedules of $(stage_bin stage2) against ${STAGE0}'s"
+  info "gate-g7: checking the drop schedules of $(stage_bin "$stage") against the committed baselines"
 
   # A non-zero exit only means some cases diverge; the gate file is the product.
   python3 "${SCRIPT_DIR}/selfhost_drop_schedule_parity.py" \
-    --compiler "$(stage_bin stage2)" \
-    --host "$STAGE0" \
+    --compiler "$(stage_bin "$stage")" \
     --std "${PROJECT_ROOT}/std" \
-    --project . \
+    "${reference_arguments[@]}" \
     --counts-json "$counts" \
     --report "$report" \
     --gate-json "$gate_file" || true
 
   if [[ ! -f "$gate_file" ]]; then
-    write_gate G7 fail "the drop-schedule parity run produced no gate result" \
+    write_gate "$gate_id" fail "the drop-schedule parity run produced no gate result" \
       "$(json_object report "$report")"
     return 0
   fi
 
   info "gate-g7: result -> ${gate_file} (report ${report})"
+}
+
+run_gate_g7() { run_gate_g7_for stage2 G7; }
+
+# Regenerate every committed baseline from one compiler. Deliberately a manual
+# step: the new dumps land in the pull request's diff and a reviewer reads them.
+run_gate_g7_baselines() {
+  local compiler="${1:-$STAGE0}"
+
+  info "gate-g7-baselines: regenerating the drop-schedule baselines from ${compiler}"
+
+  python3 "${SCRIPT_DIR}/selfhost_drop_schedule_parity.py" \
+    --compiler "$compiler" \
+    --std "${PROJECT_ROOT}/std" \
+    --write-baselines
 }
 
 # G4: the selfhost-built compiler (stage2) compiling the selfhost corpus must
@@ -1578,6 +1629,8 @@ main() {
     gate-g6) run_gate_g6 ;;
     gate-g4) run_gate_g4 ;;
     gate-g7) run_gate_g7 ;;
+    gate-g7-stage1) run_gate_g7_for stage1 G7-STAGE1 ;;
+    gate-g7-baselines) run_gate_g7_baselines "${2-}" ;;
     gate-g3) run_gate_g3 ;;
     gate-g3-stage2) run_gate_g3_stage2 ;;
     gate-g3-host) run_gate_g3_host ;;
