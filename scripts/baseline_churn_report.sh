@@ -61,25 +61,37 @@ render_changes() {
 
   listed=0
 
-  while IFS=$'\t' read -r status path _rest; do
+  # A rename or copy line is `R100<TAB>old<TAB>new`, two paths rather than
+  # one. Read into `path` alone it would report the path that no longer
+  # exists, which is the least useful half of the change.
+  while IFS=$'\t' read -r status path destination; do
     [[ -n "$status" ]] || continue
 
     if [[ "$listed" -ge "$MAX_LISTED_FILES" ]]; then
       break
     fi
 
-    local label
+    local label rendered
+    rendered="$path"
+
     case "$status" in
       A*) label="added" ;;
       M*) label="changed" ;;
       D*) label="removed" ;;
-      R*) label="renamed" ;;
+      R*)
+        label="renamed"
+        rendered="${path} -> ${destination}"
+        ;;
+      C*)
+        label="copied"
+        rendered="${path} -> ${destination}"
+        ;;
       *) label="$status" ;;
     esac
 
     # Markdown backticks, not command substitution.
     # shellcheck disable=SC2016
-    printf '| %s | `%s` |\n' "$label" "$path"
+    printf '| %s | `%s` |\n' "$label" "$rendered"
     listed=$((listed + 1))
   done <<<"$changes"
 

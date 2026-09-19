@@ -126,6 +126,19 @@ else
   fail "a missing directory argument exited ${status}, expected 2"
 fi
 
+# `git diff --name-status` renders a rename as `R100<TAB>old<TAB>new`. Both
+# halves matter: the old path says what went away, the new one says where the
+# recorded answer lives now.
+git checkout --quiet -b renames main
+git mv baselines/kept.txt baselines/kept_under_a_new_name.txt
+git commit --quiet -m "rename a baseline"
+
+report="$("$REPORT" main baselines)"
+
+check_contains "$report" "renamed" "labels a rename as such"
+check_contains "$report" "baselines/kept.txt -> baselines/kept_under_a_new_name.txt" \
+  "shows both halves of a rename"
+
 echo
 echo "${TESTS_RUN} test(s) run, ${FAILURES} failure(s)"
 

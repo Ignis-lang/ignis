@@ -122,10 +122,13 @@ Baselines are the gate's own expectations, so regenerating them is the easy
 way to make a failing gate pass. Three things stand against that:
 
 1. **An independent oracle, until the cut.** The nightly's `gate-g7` passes
-   `--host "$IGNIS_STAGE0"` and cross-checks stage0 against the same
-   baselines. A baseline changed to match a broken stage2 then fails against
-   stage0, and the gate reports `host cross-check N-1/N` and fails. This flag
-   goes away when the host does.
+   `--host` the Rust host (`$IGNIS_STAGE0_HOST_FALLBACK`, default `ignis` on
+   PATH) and cross-checks it against the same baselines. A baseline changed to
+   match a broken stage2 then fails there, and the gate reports
+   `host cross-check N-1/N` and fails. Deliberately not `$IGNIS_STAGE0`: that
+   can resolve to the promoted official selfhost asset, and asking a selfhost
+   binary to confirm baselines one of its own ancestors produced proves
+   nothing. This flag goes away when the host does.
 2. **The churn is reported where it is read.** Pull-request CI runs
    `scripts/baseline_churn_report.sh` and writes the added, changed and
    removed baselines into the job summary with the line above. Nobody reads

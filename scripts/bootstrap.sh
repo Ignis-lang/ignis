@@ -110,9 +110,10 @@ Commands:
   gate-g7  Check stage2's drop schedules against the committed baselines
            (test_cases/e2e/ok/__drop_schedules__) -> gates/G7.json. The
            selfhost compiler's own sources have no baseline and are compared
-           against stage1 instead. Until the host is removed this run also
-           cross-checks \$IGNIS_STAGE0 against the same baselines, so
-           regenerating them cannot turn a red gate green on its own.
+           against stage1 instead. Until the cut this run also cross-checks the
+           Rust host (\$IGNIS_STAGE0_HOST_FALLBACK, default \`ignis\` on PATH)
+           against the same baselines, so regenerating them cannot turn a red
+           gate green on its own.
   gate-g7-stage1   G7 run against stage1 instead of stage2 -> gates/G7-STAGE1.json
                    (ci.yml's PR-only check; the promotion ladder still covers
                    stage2). Same unscored-row note as gate-g3-stage1 above.
@@ -1495,15 +1496,23 @@ run_gate_g7_for() {
   # pull-request run cannot afford a second self-compilation anyway.
   # `ensure_stage stage2` already verified and, if needed, rebuilt stage1.
   #
-  # The nightly's stage2 run also cross-checks $STAGE0 against the same
+  # The nightly's stage2 run also cross-checks the Rust host against the same
   # baselines. Nothing else stops a red gate from being turned green by
-  # regenerating the baselines, so while a second compiler that can still
-  # build this tree exists, the gate keeps asking it. It costs what the old
-  # host-oracle gate-g7 already cost, and the flag goes away with the host.
+  # regenerating the baselines, so while a compiler outside the selfhost
+  # lineage still exists, the gate keeps asking it. It costs what the old
+  # host-oracle gate-g7 already cost, and the flag goes away at the cut.
+  #
+  # $HOST_STAGE0_FALLBACK, not $STAGE0: stage0 may resolve to the promoted
+  # official selfhost asset, and cross-checking a selfhost binary against
+  # baselines one of its own ancestors produced proves nothing. The default is
+  # the same `ignis` on PATH, so the nightly (which never sets IGNIS_STAGE0
+  # and puts target/ci on PATH) is unchanged; this only pins what a local or
+  # workflow_dispatch run with IGNIS_STAGE0 set would otherwise get wrong.
+  #
   # The pull-request run (stage1) stays host-free on purpose: it is the shape
   # the gate has after the cut.
   if [[ "$stage" == "stage2" ]]; then
-    reference_arguments=(--reference "$(stage_bin stage1)" --project . --host "$STAGE0")
+    reference_arguments=(--reference "$(stage_bin stage1)" --project . --host "$HOST_STAGE0_FALLBACK")
   fi
 
   mkdir -p "$GATES_DIR"
