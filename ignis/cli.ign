@@ -44,6 +44,9 @@ export record CliOptions {
   public optLevel: Option<u64>;
   public debug: Option<boolean>;
   public features: Vector<String>;
+  /// Rebuild even when the build cache reports the artifacts are current,
+  /// mirroring the host's `ignis build --force`.
+  public force: boolean;
   public filter: String;
   public updateSnapshots: boolean;
   /// Print the ownership checker's drop schedules after analysis, mirroring
@@ -89,6 +92,7 @@ export record CliOptions {
       optLevel: Option::NONE,
       debug: Option::NONE,
       features: Vector::new<String>(),
+      force: false,
       filter: String::new(),
       updateSnapshots: false,
       dumpDropSchedule: false,
@@ -132,6 +136,18 @@ export record CliOptions {
     }
 
     return false;
+  }
+
+  /// True for the commands that write artifacts the build cache guards, which
+  /// are the only ones `--force` has anything to bypass. `check` emits, compiles
+  /// and links nothing, so it rejects the flag the way the host CLI does.
+  public writesCachedArtifacts(&self): boolean {
+    return match (self.command) {
+      CliCommand::BUILD -> true,
+      CliCommand::BUILD_STD -> true,
+      CliCommand::TEST -> true,
+      _ -> false,
+    };
   }
 }
 
@@ -1153,6 +1169,16 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    if (argument.equals("-f") || argument.equals("--force") || argument.equals("--rebuild")) {
+      if (!options.writesCachedArtifacts()) {
+        return Result::ERROR(`error: unknown argument: ${argument.toStr()}`);
+      }
+
+      options.force = true;
+      index += 1;
+      continue;
+    }
+
     if (argument.equals("--dump-drop-schedule")) {
       options.dumpDropSchedule = true;
       index += 1;
@@ -1347,6 +1373,7 @@ export function helpText(): String {
   text.pushStr("  -O, --opt-level <0-3>     Override [build] opt_level\n");
   text.pushStr("      --debug               Build with debug information\n");
   text.pushStr("      --no-debug            Build without debug information\n");
+  text.pushStr("  -f, --force               Rebuild even when the build cache is current\n");
   text.pushStr("      --dump-drop-schedule  Print ownership drop schedules after analysis\n");
   text.pushStr("      --dump-ownership-report[=<FN>]\n");
   text.pushStr("                            Print the ownership checker's decisions as JSON Lines on\n");
@@ -1691,39 +1718,49 @@ function cliRejectsUnknownFlags(): void {
   Test::assertEq<str>(cliParseError(&arguments).toStr(), "error: unknown argument: --nope");
 }
 
-/// This compiler's build path never checks a stamp before recompiling, so
-/// there is no cache for a `--force` flag to bypass; it is rejected like any
-/// other flag this compiler does not answer, on every command, matching the
-/// host CLI rejecting `-f`/`--force` on `ignis check`/`ignis test`.
+/// `-f` and its aliases bypass the build cache on every command that writes
+/// artifacts the cache guards.
 @test
-function cliRejectsForceFlagAndItsAliasesOnBuild(): void {
+function cliForceFlagAndItsAliasesSelectARebuild(): void {
   let mut shortFlag: Vector<String> = Vector::new<String>();
   cliPush(&mut shortFlag, "build");
   cliPush(&mut shortFlag, "-f");
-  Test::assertEq<str>(cliParseError(&shortFlag).toStr(), "error: unknown argument: -f");
+  Test::assertEq<boolean>(cliParse(&shortFlag).force, true);
 
   let mut longFlag: Vector<String> = Vector::new<String>();
   cliPush(&mut longFlag, "build");
   cliPush(&mut longFlag, "--force");
-  Test::assertEq<str>(cliParseError(&longFlag).toStr(), "error: unknown argument: --force");
+  Test::assertEq<boolean>(cliParse(&longFlag).force, true);
 
   let mut aliasFlag: Vector<String> = Vector::new<String>();
   cliPush(&mut aliasFlag, "build");
   cliPush(&mut aliasFlag, "--rebuild");
-  Test::assertEq<str>(cliParseError(&aliasFlag).toStr(), "error: unknown argument: --rebuild");
+  Test::assertEq<boolean>(cliParse(&aliasFlag).force, true);
+
+  let mut standardLibrary: Vector<String> = Vector::new<String>();
+  cliPush(&mut standardLibrary, "build-std");
+  cliPush(&mut standardLibrary, "--force");
+  Test::assertEq<boolean>(cliParse(&standardLibrary).force, true);
+
+  let mut testRun: Vector<String> = Vector::new<String>();
+  cliPush(&mut testRun, "test");
+  cliPush(&mut testRun, "-f");
+  Test::assertEq<boolean>(cliParse(&testRun).force, true);
 }
 
+/// `check` emits, compiles and links nothing, so it has no cached artifacts a
+/// rebuild could bypass and rejects the flag the way the host CLI does.
 @test
-function cliRejectsForceFlagOnCheckAndTest(): void {
+function cliRejectsForceFlagOnCheck(): void {
   let mut checkFlag: Vector<String> = Vector::new<String>();
   cliPush(&mut checkFlag, "check");
   cliPush(&mut checkFlag, "-f");
   Test::assertEq<str>(cliParseError(&checkFlag).toStr(), "error: unknown argument: -f");
 
-  let mut testFlag: Vector<String> = Vector::new<String>();
-  cliPush(&mut testFlag, "test");
-  cliPush(&mut testFlag, "-f");
-  Test::assertEq<str>(cliParseError(&testFlag).toStr(), "error: unknown argument: -f");
+  let mut fmtFlag: Vector<String> = Vector::new<String>();
+  cliPush(&mut fmtFlag, "fmt");
+  cliPush(&mut fmtFlag, "--force");
+  Test::assertEq<str>(cliParseError(&fmtFlag).toStr(), "error: unknown argument: --force");
 }
 
 /// A first argument that is neither a subcommand nor a path is a typo.
