@@ -3785,14 +3785,14 @@ export namespace CodegenC {
   /// Written name of the std function that carries the symbol above.
   const ALLOC_TRACE_REPORT_NAME: str = "ignisAllocTraceReport";
 
-  /// Whether `defId` was declared by a file under `stdRoot`.
+  /// Whether `defId` was declared by a module under the std root.
   ///
-  /// The host answers this from `classify_def_with_std_path` in
-  /// `crates/ignis_codegen_c/src/classify.rs`, which also goes by path.
-  ///
-  /// `ModuleInfo.kind` would be the obvious source and is not usable: it reads
-  /// `PROJECT` for std files in this pipeline, so a `kind` test rejects the std
-  /// hook itself. The recorded module path is correct, so the path decides.
+  /// The host answers the equivalent question from `classify_def_with_std_path`
+  /// in `crates/ignis_codegen_c/src/classify.rs`, which classifies by path.
+  /// Module discovery here now assigns `ModuleInfo.kind` from the resolved
+  /// module path too (`resolverModuleKindForPath` in `ignis/build/resolver.ign`),
+  /// so `kind` is the direct answer; `stdRoot` stays only as a guard against a
+  /// build with no std root configured at all.
   function isStdDefinition(
     defStore: &mut Analyzer::DefinitionStore,
     moduleInfos: &Vector<Analyzer::Imports::ModuleInfo>,
@@ -3813,7 +3813,7 @@ export namespace CodegenC {
       return false;
     };
 
-    return info.pathText.startsWith(root.toStr());
+    return info.kind == Analyzer::Imports::ModuleKind::STD;
   }
 
   /// Whether the std allocation tracer is part of this build.

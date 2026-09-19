@@ -947,6 +947,54 @@ function resolverAliasMatch(
   return bestMatch;
 }
 
+/// A `tests.ign` companion file stays `PROJECT` even when it lives under the
+/// std root, mirroring the host driver's `is_std_test_companion_path`.
+function resolverIsStdTestCompanionPath(path: &Path::PathBuf): boolean {
+  let Option::SOME(fileName) = path.fileName() else {
+    return false;
+  };
+
+  return fileName.equals("tests.ign");
+}
+
+function resolverPathUnderRoot(path: &Path::PathBuf, root: &Path::PathBuf): boolean {
+  let pathText: String = path.toString();
+  let rootText: String = root.toString();
+
+  if (!pathText.startsWith(rootText.toStr())) {
+    return false;
+  }
+
+  if (pathText.length() == rootText.length()) {
+    return true;
+  }
+
+  let Option::SOME(boundary) = pathText.charAt(rootText.length()) else {
+    return false;
+  };
+
+  return boundary == '/';
+}
+
+/// Classifies a resolved module path the way the host driver's
+/// `classify_def_with_std_path` classifies definitions: any path under the
+/// std root is `STD`, regardless of the import syntax that reached it, except
+/// a `tests.ign` companion file, which stays `PROJECT`.
+function resolverModuleKindForPath(
+  project: &ResolverProject,
+  path: &Path::PathBuf
+): BuildModuleKind {
+  if (!resolverPathUnderRoot(path, &project.stdRoot)) {
+    return BuildModuleKind::PROJECT;
+  }
+
+  if (resolverIsStdTestCompanionPath(path)) {
+    return BuildModuleKind::PROJECT;
+  }
+
+  return BuildModuleKind::STD;
+}
+
 function resolverResolveImport(
   project: &ResolverProject,
   manifest: &StdManifest,
@@ -971,8 +1019,8 @@ function resolverResolveImport(
 
     let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
     return Result::OK(ResolvedImportTarget {
-      path: resolved,
-      kind: BuildModuleKind::STD,
+      path: resolved.clone(),
+      kind: resolverModuleKindForPath(project, &resolved),
     });
   }
 
@@ -984,8 +1032,8 @@ function resolverResolveImport(
 
     let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
     return Result::OK(ResolvedImportTarget {
-      path: resolved,
-      kind: BuildModuleKind::PROJECT,
+      path: resolved.clone(),
+      kind: resolverModuleKindForPath(project, &resolved),
     });
   }
 
@@ -997,8 +1045,8 @@ function resolverResolveImport(
     let candidateBase: Path::PathBuf = parent.join(importSource.toStr()).normalize();
     let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
     return Result::OK(ResolvedImportTarget {
-      path: resolved,
-      kind: BuildModuleKind::PROJECT,
+      path: resolved.clone(),
+      kind: resolverModuleKindForPath(project, &resolved),
     });
   }
 
@@ -1007,8 +1055,8 @@ function resolverResolveImport(
   let candidateBase: Path::PathBuf = projectRoot.join(importSource.toStr()).normalize();
   let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
   return Result::OK(ResolvedImportTarget {
-    path: resolved,
-    kind: BuildModuleKind::PROJECT,
+    path: resolved.clone(),
+    kind: resolverModuleKindForPath(project, &resolved),
   });
 }
 
@@ -1242,7 +1290,7 @@ function resolverDiscoverProjectRoots(
     }
 
     let mut preludeStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, BuildModuleKind::STD, &mut preludeStack)!;
+    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut preludeStack)!;
     preludePaths.push(candidateBase.clone());
     preludeIndex += 1;
   }
@@ -1336,7 +1384,7 @@ function resolverDiscoverStdRoots(
     }
 
     let mut preludeStack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, BuildModuleKind::STD, &mut preludeStack)!;
+    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut preludeStack)!;
     preludePaths.push(candidateBase.clone());
     preludeIndex += 1;
   }
@@ -1355,7 +1403,7 @@ function resolverDiscoverStdRoots(
 
     let candidateBase: Path::PathBuf = project.stdRoot.join(module.path.toStr()).normalize();
     let mut stack: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
-    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, BuildModuleKind::STD, &mut stack)!;
+    resolverDiscoverModule(project, manifest, &mut graph, &candidateBase, resolverModuleKindForPath(project, &candidateBase), &mut stack)!;
     moduleIndex += 1;
   }
 
@@ -1526,6 +1574,32 @@ export namespace Resolver {
     };
 
     return resolverDiagnosticSummary(&bag);
+  }
+
+  /// The `BuildModuleKind` discovery assigned to the node at `relativePath`,
+  /// relative to `root`.
+  function kindAtRelativePath(
+    discovery: &DiscoveryResult,
+    root: &Path::PathBuf,
+    relativePath: str
+  ): Option<BuildModuleKind> {
+    let expected: String = String::create(relativePath);
+    let mut index: u64 = 0;
+
+    while (index < discovery.graph.nodes.length()) {
+      let Option::SOME(node) = discovery.graph.nodes.get(index) else {
+        break;
+      };
+
+      let relative: String = resolverRelativePathText(&node.path, root);
+      if (relative.equals(&expected)) {
+        return Option::SOME(node.kind);
+      }
+
+      index += 1;
+    }
+
+    return Option::NONE;
   }
 }
 
@@ -1841,4 +1915,63 @@ function resolverReportsCycleDiagnostic(): void {
   let expected: String = resolverReadText(&expectedPath).trimAsciiWhitespace();
   let actual: String = Resolver::firstDiagnosticSummary(&fixtureRoot).trimAsciiWhitespace();
   Test::assertEq<str>(actual.toStr(), expected.toStr());
+}
+
+/// A std module a project import reaches directly (`std::core`) is `STD`, and
+/// so is a std module that module reaches through a relative import
+/// (`./helper`) rather than another `std::` import: the kind discovery
+/// assigns comes from the resolved path under the std root, not from which
+/// import syntax reached it. A project module stays `PROJECT`. See #237.
+@test
+function resolverAssignsStdKindToModulesUnderTheStdRootRegardlessOfImportSyntax(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_module_kind");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let Option::SOME(entryKind) = Resolver::kindAtRelativePath(&discovery, &fixtureRoot, "src/main.ign") else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(directStdKind) = Resolver::kindAtRelativePath(&discovery, &fixtureRoot, "std/core/mod.ign") else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(transitiveStdKind) = Resolver::kindAtRelativePath(&discovery, &fixtureRoot, "std/core/helper.ign") else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(entryKind == BuildModuleKind::PROJECT, true);
+  Test::assertEq<boolean>(directStdKind == BuildModuleKind::STD, true);
+  Test::assertEq<boolean>(transitiveStdKind == BuildModuleKind::STD, true);
+}
+
+/// `--std-path` decides which modules are `STD` the same way the project
+/// file's own `std_path` does: a module the override root reaches is `STD`
+/// even though the project file declares no `std_path` of its own.
+@test
+function resolverAssignsStdKindUnderAStdPathOverride(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_module_kind_override");
+  let mut overrides: BuildOverrides = BuildOverrides::none();
+  overrides.stdPath = Option::SOME(fixtureRoot.join("std").toString());
+
+  let discovery: DiscoveryResult = match (Resolver::discover(&fixtureRoot, &overrides, false)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let Option::SOME(widgetKind) = Resolver::kindAtRelativePath(&discovery, &fixtureRoot, "std/widget/mod.ign") else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(widgetKind == BuildModuleKind::STD, true);
 }
