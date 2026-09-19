@@ -978,8 +978,18 @@ function resolverPathUnderRoot(path: &Path::PathBuf, root: &Path::PathBuf): bool
 
 /// Classifies a resolved module path the way the host driver's
 /// `classify_def_with_std_path` classifies definitions: any path under the
-/// std root is `STD`, regardless of the import syntax that reached it, except
-/// a `tests.ign` companion file, which stays `PROJECT`.
+/// std root is `STD`, except a `tests.ign` companion file, which stays
+/// `PROJECT`.
+///
+/// One deliberate difference from the host: `classify_def_with_std_path`
+/// only applies the `tests.ign` carve-out to a module its own discovery
+/// tagged `ModulePath::Project` (reached by something other than a `std::`
+/// import) — a module already tagged `ModulePath::Std` is `Std` even if it
+/// happens to be named `tests.ign`. Here the carve-out applies uniformly,
+/// regardless of which import syntax reached the path, because a real
+/// `std::` import can never resolve to a `tests.ign` companion file (the std
+/// manifest never declares one as a module), so the two only disagree on a
+/// path no manifest produces.
 function resolverModuleKindForPath(
   project: &ResolverProject,
   path: &Path::PathBuf
@@ -1018,9 +1028,10 @@ function resolverResolveImport(
     };
 
     let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
+    let kind: BuildModuleKind = resolverModuleKindForPath(project, &resolved);
     return Result::OK(ResolvedImportTarget {
-      path: resolved.clone(),
-      kind: resolverModuleKindForPath(project, &resolved),
+      path: resolved,
+      kind: kind,
     });
   }
 
@@ -1031,9 +1042,10 @@ function resolverResolveImport(
     }
 
     let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
+    let kind: BuildModuleKind = resolverModuleKindForPath(project, &resolved);
     return Result::OK(ResolvedImportTarget {
-      path: resolved.clone(),
-      kind: resolverModuleKindForPath(project, &resolved),
+      path: resolved,
+      kind: kind,
     });
   }
 
@@ -1044,9 +1056,10 @@ function resolverResolveImport(
 
     let candidateBase: Path::PathBuf = parent.join(importSource.toStr()).normalize();
     let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
+    let kind: BuildModuleKind = resolverModuleKindForPath(project, &resolved);
     return Result::OK(ResolvedImportTarget {
-      path: resolved.clone(),
-      kind: resolverModuleKindForPath(project, &resolved),
+      path: resolved,
+      kind: kind,
     });
   }
 
@@ -1054,9 +1067,10 @@ function resolverResolveImport(
 
   let candidateBase: Path::PathBuf = projectRoot.join(importSource.toStr()).normalize();
   let resolved: Path::PathBuf = resolverResolveFsPath(currentFile, importSource, span, &candidateBase)!;
+  let kind: BuildModuleKind = resolverModuleKindForPath(project, &resolved);
   return Result::OK(ResolvedImportTarget {
-    path: resolved.clone(),
-    kind: resolverModuleKindForPath(project, &resolved),
+    path: resolved,
+    kind: kind,
   });
 }
 
@@ -1575,32 +1589,32 @@ export namespace Resolver {
 
     return resolverDiagnosticSummary(&bag);
   }
+}
 
-  /// The `BuildModuleKind` discovery assigned to the node at `relativePath`,
-  /// relative to `root`.
-  function kindAtRelativePath(
-    discovery: &DiscoveryResult,
-    root: &Path::PathBuf,
-    relativePath: str
-  ): Option<BuildModuleKind> {
-    let expected: String = String::create(relativePath);
-    let mut index: u64 = 0;
+/// The `BuildModuleKind` discovery assigned to the node at `relativePath`,
+/// relative to `root`. Test-only, like `resolverDiagnosticSummary` above.
+function resolverKindAtRelativePath(
+  discovery: &DiscoveryResult,
+  root: &Path::PathBuf,
+  relativePath: str,
+): Option<BuildModuleKind> {
+  let expected: String = String::create(relativePath);
+  let mut index: u64 = 0;
 
-    while (index < discovery.graph.nodes.length()) {
-      let Option::SOME(node) = discovery.graph.nodes.get(index) else {
-        break;
-      };
+  while (index < discovery.graph.nodes.length()) {
+    let Option::SOME(node) = discovery.graph.nodes.get(index) else {
+      break;
+    };
 
-      let relative: String = resolverRelativePathText(&node.path, root);
-      if (relative.equals(&expected)) {
-        return Option::SOME(node.kind);
-      }
-
-      index += 1;
+    let relative: String = resolverRelativePathText(&node.path, root);
+    if (relative.equals(&expected)) {
+      return Option::SOME(node.kind);
     }
 
-    return Option::NONE;
+    index += 1;
   }
+
+  return Option::NONE;
 }
 
 /// `[build] debug = true` in the project's `ignis.toml` is the base value of
@@ -1933,15 +1947,15 @@ function resolverAssignsStdKindToModulesUnderTheStdRootRegardlessOfImportSyntax(
     },
   };
 
-  let Option::SOME(entryKind) = Resolver::kindAtRelativePath(&discovery, &fixtureRoot, "src/main.ign") else {
+  let Option::SOME(entryKind) = resolverKindAtRelativePath(&discovery, &fixtureRoot, "src/main.ign") else {
     Test::fail();
     return;
   };
-  let Option::SOME(directStdKind) = Resolver::kindAtRelativePath(&discovery, &fixtureRoot, "std/core/mod.ign") else {
+  let Option::SOME(directStdKind) = resolverKindAtRelativePath(&discovery, &fixtureRoot, "std/core/mod.ign") else {
     Test::fail();
     return;
   };
-  let Option::SOME(transitiveStdKind) = Resolver::kindAtRelativePath(&discovery, &fixtureRoot, "std/core/helper.ign") else {
+  let Option::SOME(transitiveStdKind) = resolverKindAtRelativePath(&discovery, &fixtureRoot, "std/core/helper.ign") else {
     Test::fail();
     return;
   };
@@ -1968,10 +1982,50 @@ function resolverAssignsStdKindUnderAStdPathOverride(): void {
     },
   };
 
-  let Option::SOME(widgetKind) = Resolver::kindAtRelativePath(&discovery, &fixtureRoot, "std/widget/mod.ign") else {
+  let Option::SOME(widgetKind) = resolverKindAtRelativePath(&discovery, &fixtureRoot, "std/widget/mod.ign") else {
     Test::fail();
     return;
   };
 
   Test::assertEq<boolean>(widgetKind == BuildModuleKind::STD, true);
+}
+
+/// A `tests.ign` companion file stays `PROJECT` even though it lives under
+/// the std root and is reached the same way any other std module is: through
+/// `std/core/mod.ign`'s own relative import of `./tests`.
+@test
+function resolverKeepsATestsIgnCompanionAsProjectEvenUnderTheStdRoot(): void {
+  let fixtureRoot: Path::PathBuf = resolverFixturePath("test_cases/selfhost/build/std_module_kind");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let Option::SOME(testsKind) = resolverKindAtRelativePath(&discovery, &fixtureRoot, "std/core/tests.ign") else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<boolean>(testsKind == BuildModuleKind::PROJECT, true);
+}
+
+/// `resolverPathUnderRoot` compares path text with a `/` boundary, not a bare
+/// prefix: a sibling directory whose name happens to start with the root's
+/// name (`std2` vs `std`) must not be mistaken for a path under that root.
+@test
+function resolverPathUnderRootRejectsASiblingDirectoryWithAPrefixMatch(): void {
+  let rootText: String = String::create("/x/std");
+  let root: Path::PathBuf = Path::PathBuf::fromString(&rootText);
+
+  let siblingText: String = String::create("/x/std2/a.ign");
+  let sibling: Path::PathBuf = Path::PathBuf::fromString(&siblingText);
+
+  let insideText: String = String::create("/x/std/a.ign");
+  let inside: Path::PathBuf = Path::PathBuf::fromString(&insideText);
+
+  Test::assertEq<boolean>(resolverPathUnderRoot(&sibling, &root), false);
+  Test::assertEq<boolean>(resolverPathUnderRoot(&inside, &root), true);
 }

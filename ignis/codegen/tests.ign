@@ -1,9 +1,12 @@
+import Env from "std::env";
+import Path from "std::path";
 import Test from "std::test";
 import Vector from "std::vector";
 
 import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
 import Id from "@compiler::ids";
 import Analyzer from "@compiler::analyzer";
+import BuildModuleKind, DiscoveryResult, Resolver from "@compiler::build";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
 import Borrowck from "@compiler::analyzer::borrowck";
@@ -161,7 +164,6 @@ function codegenEmitExposing(source: str, externalNames: &Vector<String>): Codeg
     &lowered.program,
     &externalSymbols,
     &moduleInfos,
-    "std",
   );
 
   return CodegenEmission {
@@ -654,9 +656,9 @@ function codegenRejectsAUserDefinitionOfTheAllocTraceSymbol(): void {
     0,
   );
 
-  Test::assert(!CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, "std/", decoy));
-  Test::assert(!CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, "std/", impostor));
-  Test::assert(!CodegenC::allocTraceEnabled(&mut defStore, &mut symbols, &infos, "std/"));
+  Test::assert(!CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, decoy));
+  Test::assert(!CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, impostor));
+  Test::assert(!CodegenC::allocTraceEnabled(&mut defStore, &mut symbols, &infos));
 }
 
 @test
@@ -672,6 +674,132 @@ function codegenAcceptsTheStdDefinitionOfTheAllocTraceSymbol(): void {
     1,
   );
 
-  Test::assert(CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, "std/", hook));
-  Test::assert(CodegenC::allocTraceEnabled(&mut defStore, &mut symbols, &infos, "std/"));
+  Test::assert(CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, hook));
+  Test::assert(CodegenC::allocTraceEnabled(&mut defStore, &mut symbols, &infos));
+}
+
+function codegenFixturePath(relativePath: str): Path::PathBuf {
+  match (Env::currentDir()) {
+    Result::OK(root) -> {
+      return root.join(relativePath).normalize();
+    },
+    Result::ERROR(_) -> {
+      Test::fail();
+      return Path::PathBuf::new();
+    },
+  };
+
+  return Path::PathBuf::new();
+}
+
+/// Builds the `ModuleInfo` vector the way `ignis/main.ign`'s
+/// `compileDiscovered` does: one entry per `discovery.order` position, in
+/// that same order, so a position here is the `moduleIndex`
+/// `Analyzer::DefinitionStore::setDefModule` records for a definition in the
+/// corresponding module — not the raw `BuildGraph` node index.
+function codegenModuleInfosFromDiscovery(
+  discovery: &DiscoveryResult
+): Vector<Analyzer::Imports::ModuleInfo> {
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+  let mut orderIndex: u64 = 0;
+
+  while (orderIndex < discovery.order.length()) {
+    let Option::SOME(nodeIndex) = discovery.order.get(orderIndex) else {
+      break;
+    };
+    let Option::SOME(node) = discovery.graph.nodes.get(*nodeIndex) else {
+      orderIndex += 1;
+      continue;
+    };
+
+    let kind: Analyzer::Imports::ModuleKind = match (node.kind) {
+      BuildModuleKind::PROJECT -> Analyzer::Imports::ModuleKind::PROJECT,
+      BuildModuleKind::STD -> Analyzer::Imports::ModuleKind::STD,
+    };
+
+    infos.push(Analyzer::Imports::ModuleInfo {
+      index: *nodeIndex,
+      pathText: node.path.toString(),
+      kind: kind,
+    });
+
+    orderIndex += 1;
+  }
+
+  return infos;
+}
+
+/// The position in `infos` (i.e. the `moduleIndex` a definition in that
+/// module would carry) whose path ends with `relativePath`.
+function codegenModuleInfoPositionForRelativePath(
+  infos: &Vector<Analyzer::Imports::ModuleInfo>,
+  relativePath: str,
+): Option<u64> {
+  let suffix: String = String::create("/").concat(relativePath);
+  let mut position: u64 = 0;
+
+  while (position < infos.length()) {
+    let Option::SOME(info) = infos.get(position) else {
+      break;
+    };
+
+    if (info.pathText.endsWith(suffix.toStr())) {
+      return Option::SOME(position);
+    }
+
+    position += 1;
+  }
+
+  return Option::NONE;
+}
+
+/// End-to-end: real discovery, not a hand-built `ModuleInfo` vector, has to
+/// be what decides `isAllocTraceReport`. The fixture's
+/// `std/tracer/mod.ign` reaches `std/tracer/report.ign` with a relative
+/// import, the same shape `std/memory/allocator.ign` reaches
+/// `alloc_trace.ign` with — issue #237's bug had that exact path hardcoded
+/// `PROJECT`, which `codegenAcceptsTheStdDefinitionOfTheAllocTraceSymbol`
+/// above could not have caught because it hand-sets `kind: STD` regardless
+/// of what discovery would have produced.
+@test
+function codegenAllocTraceReportIsDecidedByRealDiscoveryNotAHandBuiltModuleInfo(): void {
+  let fixtureRoot: Path::PathBuf = codegenFixturePath("test_cases/selfhost/codegen/alloc_trace_relative_std");
+  let discovery: DiscoveryResult = match (Resolver::discoverProject(&fixtureRoot)) {
+    Result::OK(value) -> value,
+    Result::ERROR(_) -> {
+      Test::fail();
+      return;
+    },
+  };
+
+  let infos: Vector<Analyzer::Imports::ModuleInfo> = codegenModuleInfosFromDiscovery(&discovery);
+
+  let Option::SOME(stdModuleIndex) = codegenModuleInfoPositionForRelativePath(&infos, "std/tracer/report.ign") else {
+    Test::fail();
+    return;
+  };
+  let Option::SOME(projectModuleIndex) = codegenModuleInfoPositionForRelativePath(&infos, "src/main.ign") else {
+    Test::fail();
+    return;
+  };
+
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+
+  let hook: Analyzer::DefinitionId = pushAllocTraceCandidate(
+    &mut defStore,
+    &mut symbols,
+    "ignisAllocTraceReport",
+    stdModuleIndex,
+  );
+
+  let decoy: Analyzer::DefinitionId = pushAllocTraceCandidate(
+    &mut defStore,
+    &mut symbols,
+    "ignisAllocTraceReport",
+    projectModuleIndex,
+  );
+
+  Test::assert(CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, hook));
+  Test::assert(!CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, decoy));
 }
