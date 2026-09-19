@@ -1,0 +1,1005 @@
+//!
+//! # Allocation Tracer
+//!
+//! An opt-in ledger of every allocation the process allocator hands out, built
+//! for leak and double-free investigation.
+//!
+//! ## Availability
+//!
+//! Every item in this module is gated behind `@configFlag(@feature("alloc-trace"))`.
+//! A `@configFlag` on a declaration is folded at parse time, so without
+//! `--feature alloc-trace` none of this becomes AST and the emitted C is
+//! unchanged, byte for byte.
+//!
+//! ```bash
+//! ignis build main.ign --feature alloc-trace
+//! ```
+//!
+//! ## Self-containment
+//!
+//! The ledger never allocates through `RawAllocator`. Its table, its optional
+//! frame slots and its formatting scratch come from one `calloc` each, and every
+//! byte it prints goes out through `stdio`. That is what keeps a record of an
+//! allocation from being an allocation.
+//!
+//! ## Table
+//!
+//! A fixed-capacity open-addressed table keyed by payload address, with linear
+//! probing. A freed slot is kept as a tombstone so a second free of the same
+//! address is recognised rather than mistaken for an unknown address. Slots are
+//! recycled from tombstones under pressure; a request that finds neither a
+//! tombstone nor an empty slot is counted as an overflow and the allocation goes
+//! untracked.
+//!
+//! Untracked allocations are why a free of an unknown address stops being fatal
+//! once anything has overflowed: the ledger can no longer tell a real error from
+//! its own blind spot, and killing a correct program over a blind spot is worse
+//! than reporting one. Raise `IGNIS_ALLOC_TRACE_SLOTS` to get the fatal check
+//! back.
+//!
+//! ## Environment
+//!
+//! | Variable                   | Effect                                          |
+//! |----------------------------|-------------------------------------------------|
+//! | `IGNIS_ALLOC_TRACE`        | Write to this path instead of stderr            |
+//! | `IGNIS_ALLOC_TRACE_QUIET`  | `1` drops the per-event log, keeps the reports  |
+//! | `IGNIS_ALLOC_TRACE_SLOTS`  | Table slots, rounded up to a power of two       |
+//! | `IGNIS_ALLOC_TRACE_FRAMES` | Return-address slots per live allocation        |
+//!
+//! `IGNIS_ALLOC_TRACE_FRAMES` defaults to 0, so the frame block costs nothing
+//! until something fills it. The slots are reserved and zeroed; writing
+//! `backtrace()` into them is separate work.
+//!
+//! ## Failure behavior
+//!
+//! A double free, or a free of an unknown address while nothing has overflowed,
+//! prints an immediate report and exits with `ALLOC_TRACE_EXIT_CODE`, which is
+//! distinct from the panic code 101 and from LeakSanitizer's 23.
+
+@configFlag(@feature("alloc-trace"))
+import CType, LibC from "std::libc";
+
+/// One table slot: an allocation, or the tombstone it left behind.
+@configFlag(@feature("alloc-trace"))
+record AllocTraceEntry {
+  /// Payload address handed to the caller. Meaningless while `state` is empty.
+  public address: u64;
+
+  /// Payload size the caller asked for.
+  public size: u64;
+
+  /// Event number of the allocation.
+  public sequence: u64;
+
+  /// Event number of the first free, once `state` is a tombstone.
+  public freeSequence: u64;
+
+  /// Entry point that produced the allocation.
+  public entryPoint: u8;
+
+  /// Entry point that produced the first free.
+  public freeEntryPoint: u8;
+
+  /// `SLOT_EMPTY`, `SLOT_LIVE` or `SLOT_FREED`.
+  public state: u8;
+}
+
+/// Tracer process state.
+///
+/// The fields are process globals with translation-unit linkage, so every
+/// reader has to live in this file.
+@configFlag(@feature("alloc-trace"))
+record AllocTraceState {
+  static mut ENTRIES: *mut u8 = null;
+  static mut FRAMES: *mut u8 = null;
+  static mut SCRATCH: *mut u8 = null;
+  static mut SINK: *mut void = null;
+  static mut READY: boolean = false;
+  static mut QUIET: boolean = false;
+  static mut EXIT_ON_ERROR: boolean = true;
+  static mut CAPACITY: u64 = 0;
+  static mut MASK: u64 = 0;
+  static mut FRAME_SLOTS: u64 = 0;
+  static mut PENDING_ENTRY_POINT: u8 = 255;
+  static mut SEQUENCE: u64 = 0;
+  static mut LIVE: u64 = 0;
+  static mut OVERFLOWED: u64 = 0;
+  static mut UNTRACKED_LIVE: u64 = 0;
+  static mut UNTRACKED_FREES: u64 = 0;
+  static mut ERRORS: u64 = 0;
+}
+
+/// The at-exit summary the generated C `main` wrapper reaches.
+///
+/// Both compilers emit a call to this fixed symbol, and only when the build
+/// enables `alloc-trace`; with the feature off the symbol does not exist and
+/// neither does the call. The name is reserved in both compilers so a user
+/// `@externName` cannot claim it and leave the wrapper calling nothing.
+@configFlag(@feature("alloc-trace"))
+@externName("ignis_alloc_trace_report")
+export function ignisAllocTraceReport(): void {
+  AllocTrace::report();
+}
+
+/// The allocation ledger behind `--feature alloc-trace`.
+@configFlag(@feature("alloc-trace"))
+export namespace AllocTrace {
+  /// Table slots when `IGNIS_ALLOC_TRACE_SLOTS` says nothing.
+  const DEFAULT_CAPACITY: u64 = 65536;
+
+  /// Floor on the table size, and the first power of two the search starts at.
+  const MIN_CAPACITY: u64 = 1024;
+
+  /// Ceiling on the table size, about 40 MB of slots.
+  const MAX_CAPACITY: u64 = 1048576;
+
+  /// Ceiling on `IGNIS_ALLOC_TRACE_FRAMES`.
+  const MAX_FRAME_SLOTS: u64 = 64;
+
+  /// Bytes of scratch for decimal and hexadecimal formatting.
+  const SCRATCH_SIZE: u64 = 32;
+
+  /// Exit status for a double free or a free of an unknown address.
+  const ALLOC_TRACE_EXIT_CODE: i32 = 66;
+
+  const SLOT_EMPTY: u8 = 0;
+  const SLOT_LIVE: u8 = 1;
+  const SLOT_FREED: u8 = 2;
+
+  /// `RawAllocator::allocateAligned`.
+  const ENTRY_ALLOCATE: u8 = 0;
+
+  /// `RawAllocator::allocateZeroedAligned`.
+  const ENTRY_ALLOCATE_ZEROED: u8 = 1;
+
+  /// `RawAllocator::reallocateAligned`.
+  const ENTRY_REALLOCATE: u8 = 2;
+
+  /// `RawAllocator::free`.
+  const ENTRY_FREE: u8 = 3;
+
+  /// `PENDING_ENTRY_POINT` when no entry point has claimed the next allocation.
+  const ENTRY_NONE: u8 = 255;
+
+  const STDERR_FD: i32 = 2;
+
+  function entryPointName(entryPoint: u8): str {
+    if (entryPoint == AllocTrace::ENTRY_ALLOCATE) {
+      return "RawAllocator::allocateAligned";
+    }
+
+    if (entryPoint == AllocTrace::ENTRY_ALLOCATE_ZEROED) {
+      return "RawAllocator::allocateZeroedAligned";
+    }
+
+    if (entryPoint == AllocTrace::ENTRY_REALLOCATE) {
+      return "RawAllocator::reallocateAligned";
+    }
+
+    return "RawAllocator::free";
+  }
+
+  function entrySize(): u64 {
+    return @sizeOf<AllocTraceEntry>();
+  }
+
+  function slotAt(index: u64): AllocTraceEntry {
+    let address: u64 = AllocTraceState::ENTRIES as u64 + index * AllocTrace::entrySize();
+
+    return @read<AllocTraceEntry>(address as *mut AllocTraceEntry);
+  }
+
+  function setSlotAt(index: u64, entry: AllocTraceEntry): void {
+    let address: u64 = AllocTraceState::ENTRIES as u64 + index * AllocTrace::entrySize();
+
+    @write<AllocTraceEntry>(address as *mut AllocTraceEntry, entry);
+  }
+
+  /// Zeroes the return-address slots of a slot about to be reused.
+  ///
+  /// A no-op until `IGNIS_ALLOC_TRACE_FRAMES` reserves any.
+  function clearFramesAt(index: u64): void {
+    if (AllocTraceState::FRAMES == null || AllocTraceState::FRAME_SLOTS == 0) {
+      return;
+    }
+
+    let stride: u64 = AllocTraceState::FRAME_SLOTS * 8;
+    let start: u64 = AllocTraceState::FRAMES as u64 + index * stride;
+
+    LibC::MemoryOperations::memset(start as *mut void, 0, stride);
+  }
+
+  /// Slot index a payload address hashes to.
+  ///
+  /// Payloads are at least 16-byte aligned, so the low nibble carries nothing;
+  /// folding a higher slice in keeps runs of adjacent blocks off one chain.
+  function slotOf(address: u64): u64 {
+    return ((address >> 4) ^ (address >> 20)) & AllocTraceState::MASK;
+  }
+
+  function writeText(text: str): void {
+    let bytes: CType::CConstStr = text as CType::CConstStr;
+    let count: u64 = LibC::String::strlen(bytes);
+
+    if (count > 0) {
+      LibC::Stdio::fwrite(bytes as CType::CConstVoidPtr, 1, count, AllocTraceState::SINK);
+    }
+  }
+
+  function writeUnsigned(value: u64): void {
+    let scratch: *mut u8 = AllocTraceState::SCRATCH;
+    let mut index: u64 = AllocTrace::SCRATCH_SIZE;
+    let mut remaining: u64 = value;
+
+    if (remaining == 0) {
+      index -= 1;
+      @write<u8>(scratch + index, 48);
+    }
+
+    while (remaining > 0) {
+      index -= 1;
+      @write<u8>(scratch + index, (48 + remaining % 10) as u8);
+      remaining /= 10;
+    }
+
+    let start: *mut u8 = scratch + index;
+
+    LibC::Stdio::fwrite(
+      start as CType::CConstVoidPtr,
+      1,
+      AllocTrace::SCRATCH_SIZE - index,
+      AllocTraceState::SINK,
+    );
+  }
+
+  function writeAddress(value: u64): void {
+    AllocTrace::writeText("0x");
+
+    if (value == 0) {
+      AllocTrace::writeText("0");
+      return;
+    }
+
+    let scratch: *mut u8 = AllocTraceState::SCRATCH;
+    let mut index: u64 = AllocTrace::SCRATCH_SIZE;
+    let mut remaining: u64 = value;
+
+    while (remaining > 0) {
+      let digit: u64 = remaining & 15;
+
+      index -= 1;
+
+      if (digit < 10) {
+        @write<u8>(scratch + index, (48 + digit) as u8);
+      } else {
+        @write<u8>(scratch + index, (87 + digit) as u8);
+      }
+
+      remaining >>= 4;
+    }
+
+    let start: *mut u8 = scratch + index;
+
+    LibC::Stdio::fwrite(
+      start as CType::CConstVoidPtr,
+      1,
+      AllocTrace::SCRATCH_SIZE - index,
+      AllocTraceState::SINK,
+    );
+  }
+
+  function flush(): void {
+    LibC::Stdio::fflush(AllocTraceState::SINK);
+  }
+
+  /// Reads `name` as a decimal count, falling back on anything else.
+  function readEnvUnsigned(name: str, fallback: u64): u64 {
+    let raw: CType::CStr = LibC::Process::getenv(name as CType::CConstStr);
+
+    if (raw == null) {
+      return fallback;
+    }
+
+    let mut index: u64 = 0;
+    let mut value: u64 = 0;
+
+    while (@read<u8>(raw + index) != 0) {
+      let byte: u8 = @read<u8>(raw + index);
+
+      if (byte < 48 || byte > 57 || index >= 10) {
+        return fallback;
+      }
+
+      value = value * 10 + (byte - 48) as u64;
+      index += 1;
+    }
+
+    if (index == 0) {
+      return fallback;
+    }
+
+    return value;
+  }
+
+  /// Smallest power of two at least `value`, clamped to the table bounds.
+  function capacityFor(value: u64): u64 {
+    let mut result: u64 = AllocTrace::MIN_CAPACITY;
+
+    while (result < value && result < AllocTrace::MAX_CAPACITY) {
+      result <<= 1;
+    }
+
+    return result;
+  }
+
+  /// Points the sink at stderr, then at `IGNIS_ALLOC_TRACE` if it opens.
+  ///
+  /// stderr comes first so a path that will not open has somewhere to say so.
+  function openSink(): void {
+    AllocTraceState::SINK = LibC::Stdio::fdopen(
+      AllocTrace::STDERR_FD,
+      "w" as CType::CConstStr,
+    );
+
+    let path: CType::CStr = LibC::Process::getenv("IGNIS_ALLOC_TRACE" as CType::CConstStr);
+
+    if (path == null || @read<u8>(path) == 0) {
+      return;
+    }
+
+    let stream: CType::FilePtr = LibC::Stdio::fopen(
+      path as CType::CConstStr,
+      "w" as CType::CConstStr,
+    );
+
+    if (stream != null) {
+      AllocTraceState::SINK = stream;
+      return;
+    }
+
+    AllocTrace::writeText("alloc-trace: cannot open IGNIS_ALLOC_TRACE path, writing to stderr\n");
+    AllocTrace::flush();
+  }
+
+  function readQuiet(): boolean {
+    let quiet: CType::CStr = LibC::Process::getenv(
+      "IGNIS_ALLOC_TRACE_QUIET" as CType::CConstStr,
+    );
+
+    if (quiet == null) {
+      return false;
+    }
+
+    return LibC::String::strcmp(quiet as CType::CConstStr, "1" as CType::CConstStr) == 0;
+  }
+
+  /// Allocates the ledger on first use, straight from libc.
+  ///
+  /// Going through `RawAllocator` here would make the tracer trace itself and
+  /// recurse forever, so it does not.
+  function ensureReady(): void {
+    if (AllocTraceState::READY) {
+      return;
+    }
+
+    AllocTraceState::READY = true;
+
+    AllocTraceState::SCRATCH = LibC::Allocator::calloc(
+      AllocTrace::SCRATCH_SIZE,
+      1,
+    ) as *mut u8;
+
+    AllocTrace::openSink();
+    AllocTraceState::QUIET = AllocTrace::readQuiet();
+
+    AllocTraceState::CAPACITY = AllocTrace::capacityFor(
+      AllocTrace::readEnvUnsigned("IGNIS_ALLOC_TRACE_SLOTS", AllocTrace::DEFAULT_CAPACITY),
+    );
+    AllocTraceState::MASK = AllocTraceState::CAPACITY - 1;
+
+    AllocTraceState::ENTRIES = LibC::Allocator::calloc(
+      AllocTraceState::CAPACITY,
+      AllocTrace::entrySize(),
+    ) as *mut u8;
+
+    let frames: u64 = AllocTrace::readEnvUnsigned("IGNIS_ALLOC_TRACE_FRAMES", 0);
+
+    if (frames > AllocTrace::MAX_FRAME_SLOTS) {
+      AllocTraceState::FRAME_SLOTS = AllocTrace::MAX_FRAME_SLOTS;
+    } else {
+      AllocTraceState::FRAME_SLOTS = frames;
+    }
+
+    if (AllocTraceState::FRAME_SLOTS > 0) {
+      AllocTraceState::FRAMES = LibC::Allocator::calloc(
+        AllocTraceState::CAPACITY * AllocTraceState::FRAME_SLOTS,
+        8,
+      ) as *mut u8;
+    }
+  }
+
+  function usable(): boolean {
+    if (AllocTraceState::ENTRIES == null || AllocTraceState::SCRATCH == null) {
+      return false;
+    }
+
+    return AllocTraceState::SINK != null;
+  }
+
+  /// Index of the live or tombstoned slot for `address`, or `CAPACITY`.
+  function findSlot(address: u64): u64 {
+    let mut index: u64 = AllocTrace::slotOf(address);
+    let mut probes: u64 = 0;
+
+    while (probes < AllocTraceState::CAPACITY) {
+      let entry: AllocTraceEntry = AllocTrace::slotAt(index);
+
+      if (entry.state == AllocTrace::SLOT_EMPTY) {
+        return AllocTraceState::CAPACITY;
+      }
+
+      if (entry.address == address) {
+        return index;
+      }
+
+      index = (index + 1) & AllocTraceState::MASK;
+      probes += 1;
+    }
+
+    return AllocTraceState::CAPACITY;
+  }
+
+  /// Index to write a fresh record of `address` into, or `CAPACITY`.
+  ///
+  /// An empty slot wins, a tombstone is recycled when no empty slot is on the
+  /// probe chain, and a chain of nothing but live slots means the table is full.
+  function claimSlot(address: u64): u64 {
+    let mut index: u64 = AllocTrace::slotOf(address);
+    let mut recycled: u64 = AllocTraceState::CAPACITY;
+    let mut probes: u64 = 0;
+
+    while (probes < AllocTraceState::CAPACITY) {
+      let entry: AllocTraceEntry = AllocTrace::slotAt(index);
+
+      if (entry.state == AllocTrace::SLOT_EMPTY) {
+        return index;
+      }
+
+      if (entry.address == address) {
+        return index;
+      }
+
+      if (entry.state == AllocTrace::SLOT_FREED && recycled == AllocTraceState::CAPACITY) {
+        recycled = index;
+      }
+
+      index = (index + 1) & AllocTraceState::MASK;
+      probes += 1;
+    }
+
+    return recycled;
+  }
+
+  function beginEvent(operation: str, address: u64, sequence: u64): void {
+    AllocTrace::writeText("alloc-trace: #");
+    AllocTrace::writeUnsigned(sequence);
+    AllocTrace::writeText(" ");
+    AllocTrace::writeText(operation);
+    AllocTrace::writeText(" ");
+    AllocTrace::writeAddress(address);
+  }
+
+  function writeAllocatedAt(entryPoint: u8, sequence: u64): void {
+    AllocTrace::writeText(" allocated-at=");
+    AllocTrace::writeText(AllocTrace::entryPointName(entryPoint));
+    AllocTrace::writeText(" allocated-seq=#");
+    AllocTrace::writeUnsigned(sequence);
+  }
+
+  function logAlloc(operation: str, address: u64, size: u64, entryPoint: u8, sequence: u64): void {
+    if (AllocTraceState::QUIET) {
+      return;
+    }
+
+    AllocTrace::beginEvent(operation, address, sequence);
+    AllocTrace::writeText(" size=");
+    AllocTrace::writeUnsigned(size);
+    AllocTrace::writeText(" at=");
+    AllocTrace::writeText(AllocTrace::entryPointName(entryPoint));
+    AllocTrace::writeText("\n");
+  }
+
+  /// A release event, naming the freeing site and the allocating one apart.
+  function logRelease(
+    operation: str,
+    address: u64,
+    size: u64,
+    freeEntryPoint: u8,
+    entry: AllocTraceEntry,
+  ): void {
+    if (AllocTraceState::QUIET) {
+      return;
+    }
+
+    AllocTrace::beginEvent(operation, address, AllocTraceState::SEQUENCE);
+    AllocTrace::writeText(" size=");
+    AllocTrace::writeUnsigned(size);
+    AllocTrace::writeText(" at=");
+    AllocTrace::writeText(AllocTrace::entryPointName(freeEntryPoint));
+    AllocTrace::writeAllocatedAt(entry.entryPoint, entry.sequence);
+    AllocTrace::writeText("\n");
+  }
+
+  /// The release half of a reallocation, which never reaches `free`.
+  function logReallocRelease(previous: u64, moved: u64, entry: AllocTraceEntry): void {
+    if (AllocTraceState::QUIET) {
+      return;
+    }
+
+    AllocTrace::beginEvent("realloc-release", previous, AllocTraceState::SEQUENCE);
+    AllocTrace::writeText(" new=");
+    AllocTrace::writeAddress(moved);
+    AllocTrace::writeText(" size=");
+    AllocTrace::writeUnsigned(entry.size);
+    AllocTrace::writeText(" at=");
+    AllocTrace::writeText(AllocTrace::entryPointName(AllocTrace::ENTRY_REALLOCATE));
+    AllocTrace::writeAllocatedAt(entry.entryPoint, entry.sequence);
+    AllocTrace::writeText("\n");
+  }
+
+  /// An event the table had no room to record.
+  function logUntracked(operation: str, address: u64, note: str): void {
+    if (AllocTraceState::QUIET) {
+      return;
+    }
+
+    AllocTrace::beginEvent(operation, address, AllocTraceState::SEQUENCE);
+    AllocTrace::writeText(" ");
+    AllocTrace::writeText(note);
+    AllocTrace::writeText("\n");
+  }
+
+  function failHeader(headline: str, operation: str, entryPoint: u8, address: u64): void {
+    AllocTraceState::ERRORS += 1;
+
+    AllocTrace::writeText("alloc-trace: ERROR ");
+    AllocTrace::writeText(headline);
+    AllocTrace::writeText("\n");
+
+    AllocTrace::writeText("alloc-trace:   operation ");
+    AllocTrace::writeText(operation);
+    AllocTrace::writeText(" at ");
+    AllocTrace::writeText(AllocTrace::entryPointName(entryPoint));
+    AllocTrace::writeText("\n");
+
+    AllocTrace::writeText("alloc-trace:   address ");
+    AllocTrace::writeAddress(address);
+    AllocTrace::writeText("\n");
+
+    AllocTrace::writeText("alloc-trace:   sequence #");
+    AllocTrace::writeUnsigned(AllocTraceState::SEQUENCE);
+    AllocTrace::writeText("\n");
+  }
+
+  function failTail(): void {
+    AllocTrace::flush();
+
+    if (AllocTraceState::EXIT_ON_ERROR) {
+      LibC::Process::exit(AllocTrace::ALLOC_TRACE_EXIT_CODE);
+    }
+  }
+
+  /// Reports a release of an address the ledger never handed out.
+  function failUnknown(operation: str, entryPoint: u8, address: u64): void {
+    AllocTrace::failHeader("free of unknown address", operation, entryPoint, address);
+    AllocTrace::failTail();
+  }
+
+  /// Reports a second release of an address, with both releases named.
+  function failDoubleFree(
+    operation: str,
+    entryPoint: u8,
+    address: u64,
+    entry: AllocTraceEntry,
+  ): void {
+    AllocTrace::failHeader("double free", operation, entryPoint, address);
+
+    AllocTrace::writeText("alloc-trace:   allocated #");
+    AllocTrace::writeUnsigned(entry.sequence);
+    AllocTrace::writeText(" at ");
+    AllocTrace::writeText(AllocTrace::entryPointName(entry.entryPoint));
+    AllocTrace::writeText(" size=");
+    AllocTrace::writeUnsigned(entry.size);
+    AllocTrace::writeText("\n");
+
+    AllocTrace::writeText("alloc-trace:   first freed #");
+    AllocTrace::writeUnsigned(entry.freeSequence);
+    AllocTrace::writeText(" at ");
+    AllocTrace::writeText(AllocTrace::entryPointName(entry.freeEntryPoint));
+    AllocTrace::writeText("\n");
+
+    AllocTrace::failTail();
+  }
+
+  /// Records a release of an address that has no slot.
+  ///
+  /// Fatal only while the table has never overflowed. Past that the ledger has a
+  /// blind spot it cannot distinguish from a real error, and a correct program
+  /// must not die for it.
+  function releaseUntracked(operation: str, entryPoint: u8, address: u64): void {
+    if (AllocTraceState::OVERFLOWED == 0) {
+      AllocTrace::failUnknown(operation, entryPoint, address);
+      return;
+    }
+
+    AllocTraceState::UNTRACKED_FREES += 1;
+
+    if (AllocTraceState::UNTRACKED_LIVE > 0) {
+      AllocTraceState::UNTRACKED_LIVE -= 1;
+    }
+
+    AllocTrace::logUntracked(operation, address, "untracked (table overflowed)");
+  }
+
+  /// Claims the entry point of the next allocation recorded.
+  ///
+  /// `allocateZeroedAligned` hands its work to `allocateAligned`, so without
+  /// this the log would name the inner entry point. Paired with `endEntryPoint`,
+  /// and safe because an allocator entry point never reenters another.
+  function beginEntryPoint(entryPoint: u8): void {
+    AllocTraceState::PENDING_ENTRY_POINT = entryPoint;
+  }
+
+  /// Releases the claim `beginEntryPoint` made, taken or not.
+  function endEntryPoint(): void {
+    AllocTraceState::PENDING_ENTRY_POINT = AllocTrace::ENTRY_NONE;
+  }
+
+  function effectiveEntryPoint(entryPoint: u8): u8 {
+    if (AllocTraceState::PENDING_ENTRY_POINT == AllocTrace::ENTRY_NONE) {
+      return entryPoint;
+    }
+
+    return AllocTraceState::PENDING_ENTRY_POINT;
+  }
+
+  /// Records an allocation `entryPoint` just handed out.
+  function recordAlloc(pointer: *mut u8, size: u64, entryPoint: u8): void {
+    if (pointer == null) {
+      return;
+    }
+
+    AllocTrace::ensureReady();
+
+    if (!AllocTrace::usable()) {
+      return;
+    }
+
+    let effective: u8 = AllocTrace::effectiveEntryPoint(entryPoint);
+    let address: u64 = pointer as u64;
+
+    AllocTraceState::SEQUENCE += 1;
+
+    let index: u64 = AllocTrace::claimSlot(address);
+
+    if (index == AllocTraceState::CAPACITY) {
+      AllocTraceState::OVERFLOWED += 1;
+      AllocTraceState::UNTRACKED_LIVE += 1;
+      AllocTrace::logUntracked("alloc", address, "untracked (table overflowed)");
+
+      return;
+    }
+
+    AllocTrace::setSlotAt(index, AllocTraceEntry {
+        address: address,
+        size: size,
+        sequence: AllocTraceState::SEQUENCE,
+        freeSequence: 0,
+        entryPoint: effective,
+        freeEntryPoint: 0,
+        state: AllocTrace::SLOT_LIVE,
+      });
+
+    AllocTrace::clearFramesAt(index);
+    AllocTraceState::LIVE += 1;
+
+    AllocTrace::logAlloc("alloc", address, size, effective, AllocTraceState::SEQUENCE);
+  }
+
+  /// Records a release of `pointer`, reporting a double or unknown free.
+  function recordFree(pointer: *mut u8, entryPoint: u8): void {
+    if (pointer == null) {
+      return;
+    }
+
+    AllocTrace::ensureReady();
+
+    if (!AllocTrace::usable()) {
+      return;
+    }
+
+    let address: u64 = pointer as u64;
+
+    AllocTraceState::SEQUENCE += 1;
+
+    let index: u64 = AllocTrace::findSlot(address);
+
+    if (index == AllocTraceState::CAPACITY) {
+      AllocTrace::releaseUntracked("free", entryPoint, address);
+
+      return;
+    }
+
+    let mut entry: AllocTraceEntry = AllocTrace::slotAt(index);
+
+    if (entry.state == AllocTrace::SLOT_FREED) {
+      AllocTrace::failDoubleFree("free", entryPoint, address, entry);
+
+      return;
+    }
+
+    AllocTrace::logRelease("free", address, entry.size, entryPoint, entry);
+
+    entry.state = AllocTrace::SLOT_FREED;
+    entry.freeSequence = AllocTraceState::SEQUENCE;
+    entry.freeEntryPoint = entryPoint;
+
+    AllocTrace::setSlotAt(index, entry);
+    AllocTraceState::LIVE -= 1;
+  }
+
+  /// Retires the record of `previous`, which a reallocation released directly.
+  function releasePrevious(previous: u64, moved: u64): void {
+    AllocTraceState::SEQUENCE += 1;
+
+    let index: u64 = AllocTrace::findSlot(previous);
+
+    if (index == AllocTraceState::CAPACITY) {
+      AllocTrace::releaseUntracked("realloc-release", AllocTrace::ENTRY_REALLOCATE, previous);
+
+      return;
+    }
+
+    let mut entry: AllocTraceEntry = AllocTrace::slotAt(index);
+
+    if (entry.state == AllocTrace::SLOT_FREED) {
+      AllocTrace::failDoubleFree(
+        "realloc-release",
+        AllocTrace::ENTRY_REALLOCATE,
+        previous,
+        entry,
+      );
+
+      return;
+    }
+
+    AllocTrace::logReallocRelease(previous, moved, entry);
+
+    entry.state = AllocTrace::SLOT_FREED;
+    entry.freeSequence = AllocTraceState::SEQUENCE;
+    entry.freeEntryPoint = AllocTrace::ENTRY_REALLOCATE;
+
+    AllocTrace::setSlotAt(index, entry);
+    AllocTraceState::LIVE -= 1;
+  }
+
+  /// Records the move `reallocateAligned` performs without going through `free`.
+  function recordRealloc(previous: *mut u8, moved: *mut u8, size: u64): void {
+    AllocTrace::ensureReady();
+
+    if (!AllocTrace::usable()) {
+      return;
+    }
+
+    if (previous != null) {
+      AllocTrace::releasePrevious(previous as u64, moved as u64);
+    }
+
+    if (moved == null) {
+      return;
+    }
+
+    AllocTraceState::SEQUENCE += 1;
+
+    let index: u64 = AllocTrace::claimSlot(moved as u64);
+
+    if (index == AllocTraceState::CAPACITY) {
+      AllocTraceState::OVERFLOWED += 1;
+      AllocTraceState::UNTRACKED_LIVE += 1;
+      AllocTrace::logUntracked("realloc", moved as u64, "untracked (table overflowed)");
+
+      return;
+    }
+
+    AllocTrace::setSlotAt(index, AllocTraceEntry {
+        address: moved as u64,
+        size: size,
+        sequence: AllocTraceState::SEQUENCE,
+        freeSequence: 0,
+        entryPoint: AllocTrace::ENTRY_REALLOCATE,
+        freeEntryPoint: 0,
+        state: AllocTrace::SLOT_LIVE,
+      });
+
+    AllocTrace::clearFramesAt(index);
+    AllocTraceState::LIVE += 1;
+
+    AllocTrace::logAlloc(
+      "realloc",
+      moved as u64,
+      size,
+      AllocTrace::ENTRY_REALLOCATE,
+      AllocTraceState::SEQUENCE,
+    );
+  }
+
+  function reportGroup(entryPoint: u8, count: u64, bytes: u64): void {
+    if (count == 0) {
+      return;
+    }
+
+    AllocTrace::writeText("alloc-trace:     ");
+    AllocTrace::writeText(AllocTrace::entryPointName(entryPoint));
+    AllocTrace::writeText(" count=");
+    AllocTrace::writeUnsigned(count);
+    AllocTrace::writeText(" bytes=");
+    AllocTrace::writeUnsigned(bytes);
+    AllocTrace::writeText("\n");
+  }
+
+  /// Prints the live allocations grouped by entry point, plus the totals.
+  ///
+  /// Safe to call at any point in a run, and safe to call when nothing was
+  /// ever traced.
+  function report(): void {
+    if (!AllocTraceState::READY || !AllocTrace::usable()) {
+      return;
+    }
+
+    let mut allocateCount: u64 = 0;
+    let mut allocateBytes: u64 = 0;
+    let mut zeroedCount: u64 = 0;
+    let mut zeroedBytes: u64 = 0;
+    let mut reallocateCount: u64 = 0;
+    let mut reallocateBytes: u64 = 0;
+    let mut totalBytes: u64 = 0;
+    let mut index: u64 = 0;
+
+    while (index < AllocTraceState::CAPACITY) {
+      let entry: AllocTraceEntry = AllocTrace::slotAt(index);
+
+      if (entry.state == AllocTrace::SLOT_LIVE) {
+        totalBytes += entry.size;
+
+        if (entry.entryPoint == AllocTrace::ENTRY_ALLOCATE_ZEROED) {
+          zeroedCount += 1;
+          zeroedBytes += entry.size;
+        } else if (entry.entryPoint == AllocTrace::ENTRY_REALLOCATE) {
+          reallocateCount += 1;
+          reallocateBytes += entry.size;
+        } else {
+          allocateCount += 1;
+          allocateBytes += entry.size;
+        }
+      }
+
+      index += 1;
+    }
+
+    AllocTrace::writeText("alloc-trace: report\n");
+    AllocTrace::writeText("alloc-trace:   live by entry point\n");
+    AllocTrace::reportGroup(AllocTrace::ENTRY_ALLOCATE, allocateCount, allocateBytes);
+    AllocTrace::reportGroup(AllocTrace::ENTRY_ALLOCATE_ZEROED, zeroedCount, zeroedBytes);
+    AllocTrace::reportGroup(AllocTrace::ENTRY_REALLOCATE, reallocateCount, reallocateBytes);
+
+    AllocTrace::writeText("alloc-trace:   live allocations=");
+    AllocTrace::writeUnsigned(AllocTraceState::LIVE);
+    AllocTrace::writeText(" bytes=");
+    AllocTrace::writeUnsigned(totalBytes);
+    AllocTrace::writeText("\n");
+
+    AllocTrace::writeText("alloc-trace:   events=");
+    AllocTrace::writeUnsigned(AllocTraceState::SEQUENCE);
+    AllocTrace::writeText(" slots=");
+    AllocTrace::writeUnsigned(AllocTraceState::CAPACITY);
+    AllocTrace::writeText(" overflowed=");
+    AllocTrace::writeUnsigned(AllocTraceState::OVERFLOWED);
+    AllocTrace::writeText("\n");
+
+    if (AllocTraceState::OVERFLOWED > 0) {
+      AllocTrace::writeText("alloc-trace:   untracked live=");
+      AllocTrace::writeUnsigned(AllocTraceState::UNTRACKED_LIVE);
+      AllocTrace::writeText(" frees=");
+      AllocTrace::writeUnsigned(AllocTraceState::UNTRACKED_FREES);
+      AllocTrace::writeText(
+        " (raise IGNIS_ALLOC_TRACE_SLOTS to track them and restore the unknown-free check)\n",
+      );
+    }
+
+    AllocTrace::flush();
+  }
+
+  /// Live tracked allocations.
+  function liveCount(): u64 {
+    return AllocTraceState::LIVE;
+  }
+
+  /// Events the table had no room for.
+  function overflowCount(): u64 {
+    return AllocTraceState::OVERFLOWED;
+  }
+
+  /// Live allocations the table had no room to record.
+  function untrackedLiveCount(): u64 {
+    return AllocTraceState::UNTRACKED_LIVE;
+  }
+
+  /// Releases of addresses the table never recorded.
+  function untrackedFreeCount(): u64 {
+    return AllocTraceState::UNTRACKED_FREES;
+  }
+
+  /// Table slots, after the environment and the power-of-two rounding.
+  function slotCount(): u64 {
+    AllocTrace::ensureReady();
+
+    return AllocTraceState::CAPACITY;
+  }
+
+  /// Events recorded since the last reset.
+  function eventCount(): u64 {
+    return AllocTraceState::SEQUENCE;
+  }
+
+  /// Double frees and unknown frees seen since the last reset.
+  function errorCount(): u64 {
+    return AllocTraceState::ERRORS;
+  }
+
+  /// Turns the per-event log on or off, leaving the reports alone.
+  ///
+  /// The same switch `IGNIS_ALLOC_TRACE_QUIET=1` sets at startup.
+  function setQuiet(enabled: boolean): void {
+    AllocTrace::ensureReady();
+    AllocTraceState::QUIET = enabled;
+  }
+
+  /// Turns the process exit on a double or unknown free on or off.
+  ///
+  /// Off is for tests that have to observe the detection and keep running.
+  function setExitOnError(enabled: boolean): void {
+    AllocTrace::ensureReady();
+    AllocTraceState::EXIT_ON_ERROR = enabled;
+  }
+
+  /// Empties the table and clears every counter.
+  function reset(): void {
+    AllocTrace::ensureReady();
+
+    if (!AllocTrace::usable()) {
+      return;
+    }
+
+    LibC::MemoryOperations::memset(
+      AllocTraceState::ENTRIES as *mut void,
+      0,
+      AllocTraceState::CAPACITY * AllocTrace::entrySize(),
+    );
+
+    if (AllocTraceState::FRAMES != null && AllocTraceState::FRAME_SLOTS > 0) {
+      LibC::MemoryOperations::memset(
+        AllocTraceState::FRAMES as *mut void,
+        0,
+        AllocTraceState::CAPACITY * AllocTraceState::FRAME_SLOTS * 8,
+      );
+    }
+
+    AllocTraceState::PENDING_ENTRY_POINT = AllocTrace::ENTRY_NONE;
+    AllocTraceState::SEQUENCE = 0;
+    AllocTraceState::LIVE = 0;
+    AllocTraceState::OVERFLOWED = 0;
+    AllocTraceState::UNTRACKED_LIVE = 0;
+    AllocTraceState::UNTRACKED_FREES = 0;
+    AllocTraceState::ERRORS = 0;
+  }
+}

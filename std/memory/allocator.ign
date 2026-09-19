@@ -42,6 +42,9 @@
 
 import LibC from "std::libc";
 
+@configFlag(@feature("alloc-trace"))
+import AllocTrace from "./alloc_trace";
+
 /// Alignment of the C `max_align_t` on every host Ignis targets.
 ///
 /// It is the floor for every allocation, so a pointer handed back by this
@@ -177,6 +180,9 @@ export namespace RawAllocator {
 
     trackAlloc(size);
 
+    @configFlag(@feature("alloc-trace"))
+    AllocTrace::recordAlloc(pointer, size, AllocTrace::ENTRY_ALLOCATE);
+
     return pointer;
   }
 
@@ -188,7 +194,13 @@ export namespace RawAllocator {
       @panic("ignis: allocation size overflow");
     }
 
+    @configFlag(@feature("alloc-trace"))
+    AllocTrace::beginEntryPoint(AllocTrace::ENTRY_ALLOCATE_ZEROED);
+
     let pointer: *mut u8 = RawAllocator::allocateAligned(total, alignment);
+
+    @configFlag(@feature("alloc-trace"))
+    AllocTrace::endEntryPoint();
 
     if (pointer != null) {
       LibC::MemoryOperations::memset(pointer as *mut void, 0, total);
@@ -224,6 +236,10 @@ export namespace RawAllocator {
     }
 
     AllocStats::BYTES_LIVE = AllocStats::BYTES_LIVE - header.size + size;
+
+    @configFlag(@feature("alloc-trace"))
+    AllocTrace::recordRealloc(pointer, moved, size);
+
     LibC::Allocator::free(header.base as *mut void);
 
     return moved;
@@ -234,6 +250,9 @@ export namespace RawAllocator {
     if (pointer == null) {
       return;
     }
+
+    @configFlag(@feature("alloc-trace"))
+    AllocTrace::recordFree(pointer, AllocTrace::ENTRY_FREE);
 
     let header: AllocHeader = headerOf(pointer);
 

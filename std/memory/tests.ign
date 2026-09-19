@@ -2,6 +2,9 @@ import ArenaAllocator, Layout, Memory, RawAllocator, Stats from "std::memory";
 import Hasher from "std::hash";
 import Test from "std::test";
 
+@configFlag(@feature("alloc-trace"))
+import AllocTrace from "std::memory";
+
 /// FNV-1a 64-bit offset basis, the seed a fresh `Hasher` starts from.
 const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
 
@@ -161,4 +164,171 @@ function stringHashingIsDeterministicAndSeedDependent(): void {
   Test::assertEq<u64>(first, second);
   Test::assertNe<u64>(first, FNV_OFFSET_BASIS);
   Test::assertNe<u64>(first, different);
+}
+
+@configFlag(@feature("alloc-trace"))
+function traceAddress(index: u64): *mut u8 {
+  return ((index + 1) * 16) as *mut u8;
+}
+
+@configFlag(@feature("alloc-trace"))
+function startTrace(): void {
+  AllocTrace::reset();
+  AllocTrace::setQuiet(true);
+  AllocTrace::setExitOnError(false);
+}
+
+@configFlag(@feature("alloc-trace"))
+@test
+function allocTraceFollowsOneAllocationThroughItsFree(): void {
+  startTrace();
+
+  let address: *mut u8 = traceAddress(0);
+
+  AllocTrace::recordAlloc(address, 64, AllocTrace::ENTRY_ALLOCATE);
+
+  let live: u64 = AllocTrace::liveCount();
+  let events: u64 = AllocTrace::eventCount();
+
+  AllocTrace::recordFree(address, AllocTrace::ENTRY_FREE);
+
+  let released: u64 = AllocTrace::liveCount();
+
+  Test::assertEq<u64>(live, 1);
+  Test::assertEq<u64>(events, 1);
+  Test::assertEq<u64>(released, 0);
+  Test::assertEq<u64>(AllocTrace::errorCount(), 0);
+}
+
+@configFlag(@feature("alloc-trace"))
+@test
+function allocTraceMovesTheRecordWhenAReallocationMoves(): void {
+  startTrace();
+
+  let previous: *mut u8 = traceAddress(1);
+  let moved: *mut u8 = traceAddress(2);
+
+  AllocTrace::recordAlloc(previous, 32, AllocTrace::ENTRY_ALLOCATE);
+  AllocTrace::recordRealloc(previous, moved, 128);
+
+  let live: u64 = AllocTrace::liveCount();
+
+  AllocTrace::recordFree(moved, AllocTrace::ENTRY_FREE);
+
+  let released: u64 = AllocTrace::liveCount();
+  let errors: u64 = AllocTrace::errorCount();
+
+  Test::assertEq<u64>(live, 1);
+  Test::assertEq<u64>(released, 0);
+  Test::assertEq<u64>(errors, 0);
+}
+
+@configFlag(@feature("alloc-trace"))
+@test
+function allocTraceCountsTheEventsItHasNoRoomFor(): void {
+  startTrace();
+
+  let slots: u64 = AllocTrace::slotCount();
+  let mut index: u64 = 0;
+
+  while (index < slots) {
+    AllocTrace::recordAlloc(traceAddress(index), 8, AllocTrace::ENTRY_ALLOCATE);
+    index += 1;
+  }
+
+  let filled: u64 = AllocTrace::overflowCount();
+
+  AllocTrace::recordAlloc(traceAddress(slots), 8, AllocTrace::ENTRY_ALLOCATE);
+
+  let overflowed: u64 = AllocTrace::overflowCount();
+  let untracked: u64 = AllocTrace::untrackedLiveCount();
+  let live: u64 = AllocTrace::liveCount();
+
+  Test::assertEq<u64>(filled, 0);
+  Test::assertEq<u64>(overflowed, 1);
+  Test::assertEq<u64>(untracked, 1);
+  Test::assertEq<u64>(live, slots);
+}
+
+@configFlag(@feature("alloc-trace"))
+@test
+function allocTraceKeepsAnOverflowedFreeNonFatal(): void {
+  startTrace();
+
+  let slots: u64 = AllocTrace::slotCount();
+  let mut index: u64 = 0;
+
+  while (index < slots) {
+    AllocTrace::recordAlloc(traceAddress(index), 8, AllocTrace::ENTRY_ALLOCATE);
+    index += 1;
+  }
+
+  let overflowedAddress: *mut u8 = traceAddress(slots);
+
+  AllocTrace::recordAlloc(overflowedAddress, 8, AllocTrace::ENTRY_ALLOCATE);
+  AllocTrace::recordFree(overflowedAddress, AllocTrace::ENTRY_FREE);
+
+  let errors: u64 = AllocTrace::errorCount();
+  let untrackedFrees: u64 = AllocTrace::untrackedFreeCount();
+  let untrackedLive: u64 = AllocTrace::untrackedLiveCount();
+
+  Test::assertEq<u64>(errors, 0);
+  Test::assertEq<u64>(untrackedFrees, 1);
+  Test::assertEq<u64>(untrackedLive, 0);
+}
+
+@configFlag(@feature("alloc-trace"))
+@test
+function allocTraceKeepsAnOverflowedReallocationNonFatal(): void {
+  startTrace();
+
+  let slots: u64 = AllocTrace::slotCount();
+  let mut index: u64 = 0;
+
+  while (index < slots) {
+    AllocTrace::recordAlloc(traceAddress(index), 8, AllocTrace::ENTRY_ALLOCATE);
+    index += 1;
+  }
+
+  let overflowedAddress: *mut u8 = traceAddress(slots);
+
+  AllocTrace::recordAlloc(overflowedAddress, 8, AllocTrace::ENTRY_ALLOCATE);
+  AllocTrace::recordRealloc(overflowedAddress, traceAddress(slots + 1), 16);
+
+  let errors: u64 = AllocTrace::errorCount();
+  let untrackedFrees: u64 = AllocTrace::untrackedFreeCount();
+
+  Test::assertEq<u64>(errors, 0);
+  Test::assertEq<u64>(untrackedFrees, 1);
+}
+
+@configFlag(@feature("alloc-trace"))
+@test
+function allocTraceReportsASecondFreeOfTheSameAddress(): void {
+  startTrace();
+
+  let address: *mut u8 = traceAddress(3);
+
+  AllocTrace::recordAlloc(address, 16, AllocTrace::ENTRY_ALLOCATE);
+  AllocTrace::recordFree(address, AllocTrace::ENTRY_FREE);
+
+  let clean: u64 = AllocTrace::errorCount();
+
+  AllocTrace::recordFree(address, AllocTrace::ENTRY_FREE);
+
+  let detected: u64 = AllocTrace::errorCount();
+
+  Test::assertEq<u64>(clean, 0);
+  Test::assertEq<u64>(detected, 1);
+}
+
+@configFlag(@feature("alloc-trace"))
+@test
+function allocTraceReportsAFreeItNeverHandedOut(): void {
+  startTrace();
+
+  AllocTrace::recordFree(traceAddress(4), AllocTrace::ENTRY_FREE);
+
+  Test::assertEq<u64>(AllocTrace::errorCount(), 1);
+  Test::assertEq<u64>(AllocTrace::liveCount(), 0);
 }

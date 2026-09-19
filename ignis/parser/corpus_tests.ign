@@ -11,7 +11,7 @@ import
   DiagnosticFixtureParser,
   SourceFile,
 from "@compiler::diagnostics";
-import Parser from "@compiler::parser";
+import CompileFlags, ParseOutput, Parser from "@compiler::parser";
 
 record ParseResult {
   public source: SourceFile;
@@ -56,6 +56,59 @@ function skipReasonForPath(path: &String): Option<str> {
   }
 
   return Option::NONE;
+}
+
+/// Feature names `sourceText` mentions in a `@feature("...")` predicate.
+function featureNamesIn(sourceText: &String): Vector<String> {
+  let marker: String = String::create("@feature(\"");
+  let quote: String = String::create("\"");
+  let mut names: Vector<String> = Vector::new<String>();
+  let mut cursor: u64 = 0;
+
+  while (cursor < sourceText.length()) {
+    let rest: String = sourceText.substringBytes(cursor, sourceText.length());
+
+    let Option::SOME(offset) = rest.indexOf(&marker) else {
+      return names;
+    };
+
+    let open: u64 = cursor + offset + marker.length();
+    let tail: String = sourceText.substringBytes(open, sourceText.length());
+
+    let Option::SOME(closeOffset) = tail.indexOf(&quote) else {
+      return names;
+    };
+
+    let close: u64 = open + closeOffset;
+
+    names.push(sourceText.substringBytes(open, close));
+    cursor = close + 1;
+  }
+
+  return names;
+}
+
+/// Whether a clean parse of `sourceText` legitimately produces no roots.
+///
+/// `@configFlag` is folded at parse time, so a module whose every declaration
+/// sits behind a feature the corpus does not enable parses to nothing. Proven
+/// rather than asserted: the same text is parsed again with every feature it
+/// names enabled, and a module that then produces roots was fully gated, not
+/// empty. That is the zero-cost guarantee working, not a parser failure.
+function isFullyFeatureGatedModule(path: str, sourceText: &String): boolean {
+  let names: Vector<String> = featureNamesIn(sourceText);
+
+  if (names.length() == 0) {
+    return false;
+  }
+
+  let mut flags: CompileFlags = CompileFlags::hostDefault();
+  flags.features = names;
+
+  let source: SourceFile = SourceFile::create(path, sourceText.toStr());
+  let output: ParseOutput = Parser::parseFileWithFlags(&source, &flags);
+
+  return output.module.roots.length() > 0;
 }
 
 function parseText(path: str, sourceText: str): ParseResult {
@@ -264,7 +317,8 @@ function renderStructuredDiagnostics(diagnostics: &DiagnosticBag): String {
 }
 
 function assertParsesWithoutDiagnostics(path: str): void {
-  let result: ParseResult = parseFixture(path);
+  let sourceText: String = readCorpusFixture(path);
+  let result: ParseResult = parseText(path, sourceText.toStr());
 
   if (result.diagnostics.length() != 0) {
     let mut message: String = String::create("expected parser corpus file to parse without diagnostics: ");
@@ -275,7 +329,7 @@ function assertParsesWithoutDiagnostics(path: str): void {
     Test::fail();
   }
 
-  if (result.module.roots.length() == 0) {
+  if (result.module.roots.length() == 0 && !isFullyFeatureGatedModule(path, &sourceText)) {
     let mut message: String = String::create("expected parser corpus file to produce roots: ");
     message.pushStr(path);
     Io::eprintln(message);

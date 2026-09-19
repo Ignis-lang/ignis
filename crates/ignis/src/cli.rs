@@ -389,6 +389,14 @@ pub struct TestStdCommand {
   /// Output directory for std test build artifacts
   #[arg(short = 'o', long)]
   pub output_dir: Option<String>,
+
+  /// Enable one feature (can be repeated)
+  #[arg(long = "feature", action = clap::ArgAction::Append)]
+  pub feature: Vec<String>,
+
+  /// Enable multiple features separated by commas
+  #[arg(long = "features", value_delimiter = ',')]
+  pub features: Vec<String>,
 }
 
 #[derive(Parser, Debug, Clone, PartialEq)]
@@ -593,6 +601,10 @@ mod tests {
       "./std",
       "--output-dir",
       "./build/std-tests",
+      "--feature",
+      "alloc-trace",
+      "--features",
+      "one,two",
     ]);
 
     match cli.subcommand {
@@ -601,6 +613,8 @@ mod tests {
         assert!(cmd.update_snapshots);
         assert_eq!(cmd.std_path.as_deref(), Some("./std"));
         assert_eq!(cmd.output_dir.as_deref(), Some("./build/std-tests"));
+        assert_eq!(cmd.feature, vec!["alloc-trace".to_string()]);
+        assert_eq!(cmd.features, vec!["one".to_string(), "two".to_string()]);
       },
       other => panic!("expected test-std subcommand, got {:?}", other),
     }
@@ -616,6 +630,8 @@ mod tests {
         assert!(!cmd.update_snapshots);
         assert_eq!(cmd.std_path, None);
         assert_eq!(cmd.output_dir, None);
+        assert!(cmd.feature.is_empty());
+        assert!(cmd.features.is_empty());
       },
       other => panic!("expected test-std subcommand, got {:?}", other),
     }

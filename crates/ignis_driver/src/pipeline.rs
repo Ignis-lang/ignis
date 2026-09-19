@@ -1582,6 +1582,7 @@ fn build_single_file_test_driver_input(
 fn build_std_test_driver_input(
   std_root: &Path,
   output_dir: Option<&Path>,
+  features: &HashSet<String>,
 ) -> Result<TestDriverInput, ()> {
   if !std_root.exists() {
     eprintln!("{} std root '{}' does not exist", "Error:".red().bold(), std_root.display());
@@ -1599,6 +1600,7 @@ fn build_std_test_driver_input(
   config.auto_load_std = true;
   config.manifest = load_manifest(&std_root);
   config.test = true;
+  config.enabled_features = features.clone();
   config.c_compiler = "cc".to_string();
   config.cflags = Vec::new();
   config.project_config = Some(IgnisProjectConfig::new(
@@ -3930,9 +3932,21 @@ pub fn run_std_tests(
   update_snapshots: bool,
   output_dir: Option<&Path>,
 ) -> Result<(), ()> {
+  run_std_tests_with_features(std_root, filter, update_snapshots, output_dir, &HashSet::new())
+}
+
+/// `run_std_tests` with an explicit feature set, so `@configFlag`-gated std
+/// tests can be selected from the command line.
+pub fn run_std_tests_with_features(
+  std_root: &Path,
+  filter: Option<&str>,
+  update_snapshots: bool,
+  output_dir: Option<&Path>,
+  features: &HashSet<String>,
+) -> Result<(), ()> {
   let start = Instant::now();
   let timeout = TestRunOptions::default().resolved_timeout();
-  let input = build_std_test_driver_input(std_root, output_dir)?;
+  let input = build_std_test_driver_input(std_root, output_dir, features)?;
   let config = input.config.clone();
 
   cmd_header!(&config, "Testing std", input.entry_path.display());

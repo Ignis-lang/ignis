@@ -347,3 +347,33 @@ function main(): i32 {
 "#,
   );
 }
+
+/// A user function may carry the allocation tracer's fixed C symbol without the
+/// generated `main` wrapper calling it.
+///
+/// With `alloc-trace` off the tracer does not exist and this function is
+/// unreferenced, so reachability drops it. A wrapper that decided the feature
+/// was on from the `@externName` alone would emit a call to a symbol that is no
+/// longer in the translation unit, and the link would fail. This case stays an
+/// inline test rather than an `e2e/ok` fixture because an unreferenced
+/// `@externName` export is where the host and the selfhost disagree today: the
+/// host drops it from the drop-schedule dump and the selfhost keeps it, so the
+/// fixture form fails G7 for a reason unrelated to what it checks.
+#[test]
+fn e2e_alloc_trace_symbol_is_not_claimed_by_user_code() {
+  let result = common::compile_and_run(
+    r#"
+@externName("ignis_alloc_trace_report")
+export function decoyReport(): void {
+    return;
+}
+
+function main(): i32 {
+    return 0;
+}
+"#,
+  )
+  .expect("a user @externName on the tracer symbol should still build and link");
+
+  assert_eq!(result.exit_code, 0, "expected the program to run normally");
+}
