@@ -30,8 +30,19 @@
 //!
 //! - functions are sorted by body position, then name, then definition index;
 //! - values are sorted by declaration position, then name, then definition index;
-//! - sites are sorted by position, then reason;
-//! - duplicate sites are collapsed.
+//! - sites are sorted by position, then reason.
+//!
+//! Sites are **not** deduplicated. A schedule that holds the same drop twice is a double
+//! free, and the dump is the only oracle gate G7 has: collapsing the repeat would print
+//! the same bytes for a correct schedule and for a broken one. Two identical lines mean
+//! two entries.
+//!
+//! Two entries are not always one schedule list holding a value twice. A chain of `&&`
+//! nests left, and every link starts at the same byte, so `if (let A = f() && let B = g()
+//! && let C = h())` writes an `on_condition_fail` entry for `A` under two different
+//! `Binary` nodes that render at one position. Only one of those paths runs, so the pair
+//! is correct; what the dump guarantees is that a list which grew an extra entry cannot
+//! print the same bytes as one that did not.
 //!
 //! # Attribution
 //!
@@ -449,21 +460,21 @@ impl<'a> DropScheduleDumper<'a> {
     body: HIRId,
     nodes: &HashSet<HIRId>,
     declarations: &HashMap<DefinitionId, Declaration>,
-  ) -> BTreeMap<(Declaration, String, u32), BTreeSet<Site>> {
-    let mut values: BTreeMap<(Declaration, String, u32), BTreeSet<Site>> = BTreeMap::new();
+  ) -> BTreeMap<(Declaration, String, u32), Vec<Site>> {
+    let mut values: BTreeMap<(Declaration, String, u32), Vec<Site>> = BTreeMap::new();
     let fallback = Declaration {
       position: self.position(&self.span_of(body)),
       kind: KIND_VALUE,
     };
 
-    let record = |dumper: &Self, values: &mut BTreeMap<_, BTreeSet<Site>>, value: DefinitionId, site: Site| {
+    let record = |dumper: &Self, values: &mut BTreeMap<_, Vec<Site>>, value: DefinitionId, site: Site| {
       let declaration = declarations.get(&value).cloned().unwrap_or_else(|| fallback.clone());
       let key = (
         declaration,
         dumper.symbols.get(&dumper.defs.get(&value).name).to_string(),
         value.index(),
       );
-      values.entry(key).or_default().insert(site);
+      values.entry(key).or_default().push(site);
     };
 
     let record_drops =
@@ -530,6 +541,13 @@ impl<'a> DropScheduleDumper<'a> {
         let position = self.position(&site.span);
         record(self, &mut values, *value, Site::Move { position });
       }
+    }
+
+    // The schedules are hash maps, so recording order is not stable; sorting is what makes
+    // the output reproducible. Equal sites render as equal lines, so keeping both is what
+    // lets a duplicated schedule entry reach the dump.
+    for sites in values.values_mut() {
+      sites.sort();
     }
 
     values

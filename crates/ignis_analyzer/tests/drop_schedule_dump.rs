@@ -36,7 +36,8 @@ fn dump(src: &str) -> String {
     .render()
 }
 
-/// The raw `on_overwrite` lists, which the dump collapses.
+/// The raw `on_overwrite` lists, read straight off the schedule rather than through the
+/// dump, so the pin fails on a second entry even if the renderer changes.
 fn overwrite_schedule(src: &str) -> Vec<Vec<String>> {
   let mut source_map = SourceMap::new();
   let file_id = source_map.add_file("test.ign", src.to_string());
@@ -75,8 +76,7 @@ fn overwrite_schedule(src: &str) -> Vec<Vec<String>> {
 fn an_overwrite_inside_a_loop_is_scheduled_once() {
   // `check_loop` walks the body a second time to simulate another iteration. One
   // assignment drops one value, so the second walk must not add a second drop —
-  // for a closure-environment owner that was a double free, and the dump alone
-  // cannot see it because it collapses the list.
+  // for a closure-environment owner that was a double free.
   assert_eq!(
     overwrite_schedule(
       "function make(limit: i32): (i32) -> i32 {
@@ -323,6 +323,10 @@ function drain(): i32 {{
 
   // The inner `break` returns to the outer body, where `outer` is still live and still
   // the outer condition's to free, so only `inner` is listed against it.
+  //
+  // `inner` is listed as moved twice at the same site: the ownership walk goes through
+  // the inner loop body a second time to simulate another iteration and records the same
+  // move again. The dump prints what the schedule holds, so the repeat is visible here.
   assert_eq!(
     dump(&source),
     "drop-schedule v1
@@ -337,6 +341,7 @@ function drain at test.ign:19:23
     drop at test.ign:23:48 reason=scope-end
   value inner kind=local declared at test.ign:27:5
     drop at test.ign:32:7 reason=break
+    moved at test.ign:29:12
     moved at test.ign:29:12
   value innerInner kind=binding declared at test.ign:29:12
     drop at test.ign:29:50 reason=scope-end
