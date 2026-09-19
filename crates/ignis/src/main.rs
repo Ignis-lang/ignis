@@ -627,8 +627,15 @@ fn run_test_std(
 ) -> Result<(), ()> {
   let std_path = resolve_std_path(cmd.std_path.as_deref());
   let output_dir = cmd.output_dir.as_deref().map(Path::new);
+  let features = collect_cli_features(&cmd.feature, &cmd.features);
 
-  run_std_tests(Path::new(&std_path), cmd.filter.as_deref(), cmd.update_snapshots, output_dir)
+  run_std_tests(
+    Path::new(&std_path),
+    cmd.filter.as_deref(),
+    cmd.update_snapshots,
+    output_dir,
+    &features,
+  )
 }
 
 // =============================================================================
