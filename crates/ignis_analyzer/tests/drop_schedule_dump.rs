@@ -322,7 +322,7 @@ function drop at test.ign:5:25
   <no owned values>
 function take at test.ign:15:35
   value slot kind=local declared at test.ign:17:3
-    drop at test.ign:19:7 reason=condition-skip
+    drop at test.ign:19:7 reason=condition-skip node-end=19:45
     moved at test.ign:19:15
   value inner kind=binding declared at test.ign:19:15
     drop at test.ign:19:47 reason=scope-end
@@ -367,10 +367,59 @@ function make at test.ign:15:23
   <no owned values>
 function take at test.ign:19:22
   value first kind=binding declared at test.ign:22:7
-    drop at test.ign:22:7 reason=condition-fail
+    drop at test.ign:22:7 reason=condition-fail node-end=22:76
     drop at test.ign:22:78 reason=scope-end
   value second kind=binding declared at test.ign:22:43
     drop at test.ign:22:78 reason=scope-end
+"
+  );
+}
+
+#[test]
+fn a_three_link_chain_tells_its_two_short_circuit_entries_apart() {
+  let source = format!(
+    "{RESOURCE}
+enum Slot {{
+  Filled(Resource),
+  Empty,
+}}
+
+function make(): Slot {{
+  return Slot::Filled(Resource {{ value: 1 }});
+}}
+
+function take(): i32 {{
+  let mut seen: i32 = 0;
+
+  if (let Slot::Filled(first) = make() && let Slot::Filled(second) = make() && let Slot::Filled(third) = make()) {{
+    seen = first.value + second.value + third.value;
+  }}
+
+  return seen;
+}}
+"
+  );
+
+  // `first` is owed on the false path of both links of the chain, which nest left and so
+  // start at the same byte. Two correct entries on disjoint edges: the key's end position
+  // is what keeps them from printing as one repeated line.
+  assert_eq!(
+    dump(&source),
+    "drop-schedule v1
+function drop at test.ign:5:25
+  <no owned values>
+function make at test.ign:15:23
+  <no owned values>
+function take at test.ign:19:22
+  value first kind=binding declared at test.ign:22:7
+    drop at test.ign:22:7 reason=condition-fail node-end=22:76
+    drop at test.ign:22:7 reason=condition-fail node-end=22:112
+    drop at test.ign:22:114 reason=scope-end
+  value second kind=binding declared at test.ign:22:43
+    drop at test.ign:22:7 reason=condition-fail node-end=22:112
+    drop at test.ign:22:114 reason=scope-end
+  value third kind=binding declared at test.ign:22:80
+    drop at test.ign:22:114 reason=scope-end
 "
   );
 }

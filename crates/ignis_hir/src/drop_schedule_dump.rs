@@ -34,15 +34,16 @@
 //!
 //! Sites are **not** deduplicated. A schedule that holds the same drop twice is a double
 //! free, and the dump is the only oracle gate G7 has: collapsing the repeat would print
-//! the same bytes for a correct schedule and for a broken one. Two identical lines mean
-//! two entries.
+//! the same bytes for a correct schedule and for a broken one.
 //!
-//! Two entries are not always one schedule list holding a value twice. A chain of `&&`
-//! nests left, and every link starts at the same byte, so `if (let A = f() && let B = g()
-//! && let C = h())` writes an `on_condition_fail` entry for `A` under two different
-//! `Binary` nodes that render at one position. Only one of those paths runs, so the pair
-//! is correct; what the dump guarantees is that a list which grew an extra entry cannot
-//! print the same bytes as one that did not.
+//! **Two identical drop lines mean one schedule list holding a value twice, with no
+//! exception.** Distinct keys always print distinct lines: a chain of `&&` nests left and
+//! every link starts at the same byte, so `if (let A = f() && let B = g() && let C = h())`
+//! owes `A` on the false path of two different `Binary` nodes — two correct entries on
+//! disjoint edges — and the `condition-fail` and `condition-skip` lines carry the key's
+//! end position (`node-end=<line>:<column>`) to tell those apart. Every other reason is
+//! keyed by a node a value reaches once, so its position already identifies the entry and
+//! its line is unchanged.
 //!
 //! # Attribution
 //!
@@ -137,6 +138,21 @@ impl DropReason {
       DropReason::ConditionSkip => "condition-skip",
     }
   }
+
+  /// Whether two entries of this reason can be keyed by different nodes that start at the
+  /// same byte, and so render at the same position.
+  ///
+  /// A chain of `&&` nests left and every link starts where the leftmost operand does, so
+  /// `if (let A = f() && let B = g() && let C = h())` owes `A` on the false path of both
+  /// `Binary` nodes. Those are disjoint edges and both entries are correct. Every other
+  /// reason is keyed by a node a value can only reach once — one declaring block, one arm,
+  /// one assignment, one `return` — so its position identifies the entry on its own.
+  ///
+  /// A site whose reason answers true prints the key's end position too, which is what
+  /// keeps a repeated line meaning a repeated entry and nothing else.
+  fn keys_can_share_a_start(self) -> bool {
+    matches!(self, DropReason::ConditionFail | DropReason::ConditionSkip)
+  }
 }
 
 /// How a value entered the function it is listed under.
@@ -157,6 +173,11 @@ impl Position {
   fn render(&self) -> String {
     format!("{}:{}:{}", self.path, self.line, self.column)
   }
+
+  /// Without the path, for the second position on a line that already names the file.
+  fn render_line_column(&self) -> String {
+    format!("{}:{}", self.line, self.column)
+  }
 }
 
 /// Where and how a value entered the function.
@@ -168,8 +189,16 @@ struct Declaration {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Site {
-  Drop { position: Position, reason: DropReason },
-  Move { position: Position },
+  Drop {
+    position: Position,
+    reason: DropReason,
+    /// End of the node the schedule keyed on, for the reasons whose key can share a start
+    /// position with another key. `None` for every other reason, which prints as before.
+    node_end: Option<Position>,
+  },
+  Move {
+    position: Position,
+  },
 }
 
 /// Renders the drop schedules of a whole program.
@@ -247,8 +276,18 @@ impl<'a> DropScheduleDumper<'a> {
 
         for site in sites {
           match site {
-            Site::Drop { position, reason } => {
-              writeln!(output, "    drop at {} reason={}", position.render(), reason.as_str()).unwrap()
+            Site::Drop {
+              position,
+              reason,
+              node_end,
+            } => {
+              write!(output, "    drop at {} reason={}", position.render(), reason.as_str()).unwrap();
+
+              if let Some(end) = node_end {
+                write!(output, " node-end={}", end.render_line_column()).unwrap();
+              }
+
+              writeln!(output).unwrap();
             },
             Site::Move { position } => writeln!(output, "    moved at {}", position.render()).unwrap(),
           }
@@ -480,6 +519,8 @@ impl<'a> DropScheduleDumper<'a> {
     let record_drops =
       |dumper: &Self, values: &mut BTreeMap<_, _>, span: &Span, reason: DropReason, dropped: &[DefinitionId]| {
         let position = dumper.position(span);
+        let node_end = reason.keys_can_share_a_start().then(|| dumper.position_end(span));
+
         for value in dropped {
           record(
             dumper,
@@ -488,6 +529,7 @@ impl<'a> DropScheduleDumper<'a> {
             Site::Drop {
               position: position.clone(),
               reason,
+              node_end: node_end.clone(),
             },
           );
         }
@@ -630,6 +672,21 @@ impl<'a> DropScheduleDumper<'a> {
     &self,
     span: &Span,
   ) -> Position {
+    self.position_at(span, span.start.0)
+  }
+
+  fn position_end(
+    &self,
+    span: &Span,
+  ) -> Position {
+    self.position_at(span, span.end.0)
+  }
+
+  fn position_at(
+    &self,
+    span: &Span,
+    offset: u32,
+  ) -> Position {
     let synthetic = Position {
       path: "<synthetic>".to_string(),
       line: 0,
@@ -644,7 +701,7 @@ impl<'a> DropScheduleDumper<'a> {
       return synthetic;
     };
 
-    let (line, column) = source_map.byte_line_col(&span.file, BytePosition(span.start.0));
+    let (line, column) = source_map.byte_line_col(&span.file, BytePosition(offset));
 
     Position {
       path: normalize_path(&source_map.get(&span.file).path.to_string_lossy(), &self.working_directory),
