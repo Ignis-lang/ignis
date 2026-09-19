@@ -2344,3 +2344,124 @@ fn same_named_tests_in_different_modules_link_and_run() {
 
   cleanup_project_dir(&project_dir);
 }
+
+/// Write a project whose standard library is the copy under `std_root`, so a
+/// test can edit a std source without touching the checkout.
+fn write_build_cache_project(
+  project_dir: &Path,
+  std_root: &Path,
+  source: &str,
+) {
+  fs::write(project_dir.join("src/main.ign"), source).expect("write main module");
+
+  fs::write(
+    project_dir.join("ignis.toml"),
+    format!(
+      "[package]\nname = \"build_cache_fixture\"\nversion = \"0.1.0\"\nauthors = []\ndescription = \"fixture\"\nkeywords = []\nlicense = \"MIT\"\nrepository = \"\"\n\n[ignis]\nstd = true\nstd_path = \"{}\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 0\ndebug = false\ntarget = \"c\"\ncc = \"cc\"\ncflags = []\nemit = []\n",
+      std_root.display()
+    ),
+  )
+  .expect("write ignis.toml");
+}
+
+/// Run one selfhost project build and return everything it reported.
+fn run_selfhost_build(
+  compiler: &Path,
+  project_dir: &Path,
+  extra_arguments: &[&str],
+) -> String {
+  let output = Command::new(compiler)
+    .current_dir(project_dir)
+    .arg("build")
+    .arg(project_dir)
+    .args(extra_arguments)
+    .output()
+    .expect("run selfhost build");
+
+  let reported = format!(
+    "{}{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  assert!(output.status.success(), "expected the selfhost build to succeed\n{reported}");
+
+  reported
+}
+
+fn assert_cache_line(
+  reported: &str,
+  expected: &str,
+) {
+  assert!(
+    reported.contains(expected),
+    "expected the build to report `{expected}`\n{reported}"
+  );
+}
+
+/// The selfhost build cache reuses a warm build and names the input that moved
+/// when it cannot.
+///
+/// The compiler emits user and standard-library code into one translation
+/// unit, so the fingerprint covers both: editing a std source invalidates the
+/// same artifacts a user edit does, and running a different compiler binary
+/// invalidates them even though every source is unchanged.
+#[test]
+fn selfhost_build_cache_reuses_warm_builds_and_invalidates_on_every_input() {
+  let project_dir = make_temp_project_dir("build-cache");
+  let std_root = copy_workspace_std(&project_dir);
+  write_build_cache_project(&project_dir, &std_root, NO_TESTS_MAIN);
+
+  let compiler = selfhost_compiler();
+  let binary = project_dir.join("build/bin/build_cache_fixture");
+
+  assert_cache_line(&run_selfhost_build(compiler, &project_dir, &[]), "cache: rebuilding, no stamp");
+  assert!(binary.exists(), "the cold build must link a binary");
+
+  assert_cache_line(&run_selfhost_build(compiler, &project_dir, &[]), "cache: reused");
+  assert!(binary.exists(), "a reused build must leave the binary in place");
+
+  assert_cache_line(
+    &run_selfhost_build(compiler, &project_dir, &["-f"]),
+    "cache: rebuilding, --force",
+  );
+  assert_cache_line(&run_selfhost_build(compiler, &project_dir, &[]), "cache: reused");
+
+  assert_cache_line(
+    &run_selfhost_build(compiler, &project_dir, &["--feature", "demo"]),
+    "cache: rebuilding, feature set changed",
+  );
+  assert_cache_line(
+    &run_selfhost_build(compiler, &project_dir, &["--feature", "demo"]),
+    "cache: reused",
+  );
+
+  let std_source = std_root.join("io/mod.ign");
+  let mut edited = fs::read_to_string(&std_source).expect("read std source");
+  edited.push_str("\n// build cache invalidation probe\n");
+  fs::write(&std_source, edited).expect("write std source");
+
+  assert_cache_line(
+    &run_selfhost_build(compiler, &project_dir, &["--feature", "demo"]),
+    "cache: rebuilding, sources changed",
+  );
+
+  let other_compiler = project_dir.join("other-ignis");
+  fs::copy(compiler, &other_compiler).expect("copy the compiler binary");
+
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(&other_compiler).expect("read copy metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&other_compiler, permissions).expect("make the copy executable");
+  }
+
+  assert_cache_line(
+    &run_selfhost_build(&other_compiler, &project_dir, &["--feature", "demo"]),
+    "cache: rebuilding, compiler changed",
+  );
+
+  cleanup_project_dir(&project_dir);
+}
