@@ -4,6 +4,7 @@ import Vector from "std::vector";
 
 import Diagnostic, DiagnosticBag, Severity, SourceSpan from "@compiler::diagnostics";
 
+import fingerprintNormalizeFeatures from "./fingerprint";
 import StdManifest from "./manifest";
 
 // Diagnostic codes for build-config validation errors.
@@ -83,6 +84,12 @@ export record BuildConfig {
   public emit: String;
   public stdManifest: Option<StdManifest>;
 
+  /// Enabled compile-time features, sorted and deduplicated by `fromProject`.
+  ///
+  /// Threaded into `BuildFingerprint` so a build that enables a feature
+  /// cannot silently reuse a std archive or per-module stamp built without it.
+  public features: Vector<String>;
+
   // fromProject constructs a BuildConfig from pre-extracted string fields.
   // Callers are expected to derive these from a ResolvedProject
   // (ignis/config/project.ign). A separate import is avoided to prevent
@@ -101,6 +108,7 @@ export record BuildConfig {
     cflags: Vector<String>,
     emit: String,
     manifest: Option<StdManifest>,
+    features: Vector<String>,
   ): Result<BuildConfig, DiagnosticBag> {
     if (entry.length() == 0) {
       return Result::ERROR(buildConfigSingleDiagnostic(
@@ -114,6 +122,7 @@ export record BuildConfig {
 
     let aliasesCopy: Vector<BuildAlias> = buildConfigCloneAliases(&aliases);
     let cflagsCopy: Vector<String> = buildConfigCloneStringVector(&cflags);
+    let featuresCopy: Vector<String> = fingerprintNormalizeFeatures(&features);
 
     return Result::OK(BuildConfig {
       root: root,
@@ -128,6 +137,7 @@ export record BuildConfig {
       cflags: cflagsCopy,
       emit: emit,
       stdManifest: manifest,
+      features: featuresCopy,
     });
   }
 
@@ -162,6 +172,11 @@ function buildConfigFromProjectHappyPath(): void {
 
   let aliases: Vector<BuildAlias> = Vector::new<BuildAlias>();
 
+  let mut features: Vector<String> = Vector::new<String>();
+  features.push(String::create("simd"));
+  features.push(String::create("simd"));
+  features.push(String::create("alloc-trace"));
+
   let config: BuildConfig = match (BuildConfig::fromProject(
     String::create("/project/root"),
     String::create("/project/root/src"),
@@ -174,6 +189,7 @@ function buildConfigFromProjectHappyPath(): void {
     cflags,
     String::create("c"),
     Option::NONE,
+    features,
   )) {
     Result::OK(value) -> value,
     Result::ERROR(_) -> {
@@ -201,12 +217,22 @@ function buildConfigFromProjectHappyPath(): void {
   };
   Test::assertEq<str>(config.emit.toStr(), "c");
   Test::assert(config.stdManifest.isNone());
+  Test::assertEq<u64>(config.features.length(), 2);
+  match (config.features.get(0)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "alloc-trace"),
+    Option::NONE -> Test::fail(),
+  };
+  match (config.features.get(1)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "simd"),
+    Option::NONE -> Test::fail(),
+  };
 }
 
 @test
 function buildConfigFromProjectRejectsEmptyEntry(): void {
   let aliases: Vector<BuildAlias> = Vector::new<BuildAlias>();
   let cflags: Vector<String> = Vector::new<String>();
+  let features: Vector<String> = Vector::new<String>();
 
   match (BuildConfig::fromProject(
     String::create("/root"),
@@ -220,6 +246,7 @@ function buildConfigFromProjectRejectsEmptyEntry(): void {
     cflags,
     String::new(),
     Option::NONE,
+    features,
   )) {
     Result::OK(_) -> Test::fail(),
     Result::ERROR(bag) -> {
