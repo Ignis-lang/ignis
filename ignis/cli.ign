@@ -7,6 +7,9 @@ import Vector from "std::vector";
 /// binary answers it.
 export const IGNIS_VERSION: str = "0.4.0";
 
+/// Byte length of `--dump-ownership-report=`, where the function name starts.
+const OWNERSHIP_REPORT_FLAG_PREFIX_LENGTH: u64 = 24;
+
 /// The subcommand a command line selected.
 export enum CliCommand {
   BUILD,
@@ -46,6 +49,11 @@ export record CliOptions {
   /// Print the ownership checker's drop schedules after analysis, mirroring
   /// the host's `--dump-drop-schedule`.
   public dumpDropSchedule: boolean;
+  /// Print the fused borrow/ownership checker's decisions as JSON Lines after
+  /// analysis.
+  public dumpOwnershipReport: boolean;
+  /// Limits the ownership report to one function by name; empty keeps all.
+  public ownershipReportFunction: String;
   /// Fixture directories added to the ones the project file declares.
   public fixtureDirs: Vector<String>;
   /// The shard a run executes, absent when the command line named none.
@@ -84,6 +92,8 @@ export record CliOptions {
       filter: String::new(),
       updateSnapshots: false,
       dumpDropSchedule: false,
+      dumpOwnershipReport: false,
+      ownershipReportFunction: String::new(),
       fixtureDirs: Vector::new<String>(),
       partition: Option::NONE,
       testTimeout: Option::NONE,
@@ -1111,6 +1121,38 @@ export function parseArguments(arguments: &Vector<String>): Result<CliOptions, S
       continue;
     }
 
+    if (argument.equals("--dump-ownership-report")) {
+      options.dumpOwnershipReport = true;
+      index += 1;
+      continue;
+    }
+
+    if (argument.startsWith("--dump-ownership-report=")) {
+      let name: String = argument.substringBytes(OWNERSHIP_REPORT_FLAG_PREFIX_LENGTH, argument.length());
+
+      if (name.length() == 0) {
+        return Result::ERROR(cliMissingValue("--dump-ownership-report", "a function name"));
+      }
+
+      options.dumpOwnershipReport = true;
+      options.ownershipReportFunction = name;
+      index += 1;
+      continue;
+    }
+
+    // Naming a function is enough to ask for the report: a filter with nothing
+    // to filter would print nothing and say nothing about why.
+    if (argument.equals("--ownership-report-function")) {
+      let Option::SOME(value) = arguments.get(index + 1) else {
+        return Result::ERROR(cliMissingValue("--ownership-report-function", "a function name"));
+      };
+
+      options.dumpOwnershipReport = true;
+      options.ownershipReportFunction = value.clone();
+      index += 2;
+      continue;
+    }
+
     if (argument.equals("--feature")) {
       let Option::SOME(value) = arguments.get(index + 1) else {
         return Result::ERROR(cliMissingValue("--feature", "a name"));
@@ -1261,6 +1303,16 @@ export function helpText(): String {
   text.pushStr("      --debug               Build with debug information\n");
   text.pushStr("      --no-debug            Build without debug information\n");
   text.pushStr("      --dump-drop-schedule  Print ownership drop schedules after analysis\n");
+  text.pushStr("      --dump-ownership-report[=<FN>]\n");
+  text.pushStr("                            Print the ownership checker's decisions as JSON Lines on\n");
+  text.pushStr("                            stdout; progress lines move to stderr so stdout stays\n");
+  text.pushStr("                            parseable one record per line\n");
+  text.pushStr("      --ownership-report-function <FN>\n");
+  text.pushStr("                            Limit the ownership report to named functions. A name\n");
+  text.pushStr("                            with '::' matches the qualified path exactly; a bare name\n");
+  text.pushStr("                            matches the symbol, the last segment of the qualified\n");
+  text.pushStr("                            path, and any '__' segment of a mangled instantiation, so\n");
+  text.pushStr("                            'push' and 'Vector::push' both reach Vector__String__push\n");
   text.pushStr("      --feature <NAME>      Enable one feature (can be repeated)\n");
   text.pushStr("      --features <LIST>     Enable features separated by commas\n");
   text.pushStr("      --filter <SUBSTRING>  Select tests whose name contains it (test only)\n");
