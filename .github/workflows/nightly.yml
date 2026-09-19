@@ -335,125 +335,37 @@ jobs:
       # currently on the release is still official: a later non-candidate run
       # resets its streak to zero without removing the asset, so the streak is
       # read fresh rather than assumed from the asset's mere presence.
+      # `mode` records the workflow_dispatch input (auto/host/official) so
+      # `scripts/bootstrap.sh stages` can tell an explicit `stage0=official`
+      # (must fail outright if the asset cannot build stage1) apart from an
+      # `auto` resolution that landed on official (may fall back to the host
+      # — see build_stage1's stage0_explicit_official()). `identity` is
+      # target/ci/ignis's own content identity — always hashable directly by
+      # every job (ladder or gate) once it is built, since it travels in the
+      # bootstrap-stages artifact too, but recorded here anyway for the same
+      # uniform lookup every kind gets.
+      #
+      # This is scripts/resolve_official_stage0.sh, shared with ci.yml's
+      # "Official stage0 gate" job so the download/verify/streak logic is not
+      # duplicated between the two workflows. `identity` (unlike `source`) is
+      # exactly what every later gate job needs and can actually use: a gate
+      # job's own `ensure_stage stage1` reads it back from the downloaded
+      # stage0.json to confirm stage1's stamp still matches this run's
+      # official asset, without ever needing the asset itself — and a gate
+      # job never gets the official/selfhost asset itself (an ephemeral
+      # ${RUNNER_TEMP}/stage0/... path that dies with this job): without a
+      # recorded identity to fall back on, `ensure_stage stage1` in every gate
+      # job would see a bare "ignis" resolve to the host on PATH instead, read
+      # that as "stage0 identity changed", and either rebuild against the
+      # wrong compiler or (correctly, but needlessly) refuse via its
+      # stage0-lineage guard — on any night the promotion streak is >= 3
+      # (IGN-210 follow-up, review blocker/should-fix from PR #222).
       - name: Resolve stage0
         id: stage0
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STAGE0_MODE: ${{ inputs.stage0 || 'auto' }}
-        run: |
-          set -uo pipefail
-
-          mkdir -p build/bootstrap
-          STAGE0_JSON="build/bootstrap/stage0.json"
-
-          # Same format `ensure_stage`'s `compiler_identity_of` computes and
-          # compares against (scripts/bootstrap.sh): "sha256:<hex>:<size>", or
-          # "unknown" if the file cannot be read. Recorded here, once, in
-          # stage0.json — not just implied by $STAGE0 — because a gate job
-          # never gets the official/selfhost asset itself (an ephemeral
-          # ${RUNNER_TEMP}/stage0/... path that dies with this job); without
-          # a recorded identity to fall back on, `ensure_stage stage1` in
-          # every gate job would see a bare "ignis" resolve to the host on
-          # PATH instead, read that as "stage0 identity changed", and either
-          # rebuild against the wrong compiler or (correctly, but
-          # needlessly) refuse via its stage0-lineage guard — on any night
-          # the promotion streak is >= 3 (IGN-210 follow-up, review
-          # blocker/should-fix from PR #222).
-          compiler_identity_of() {
-            local bin="$1"
-            if [ ! -f "$bin" ]; then
-              echo "unknown"
-              return 0
-            fi
-            local size hash
-            size=$(stat -c '%s' "$bin")
-            hash=$(sha256sum "$bin" | cut -d' ' -f1)
-            echo "sha256:${hash}:${size}"
-          }
-
-          # `mode` records the workflow_dispatch input (auto/host/official) so
-          # `scripts/bootstrap.sh stages` can tell an explicit `stage0=official`
-          # (must fail outright if the asset cannot build stage1) apart from an
-          # `auto` resolution that landed on official (may fall back to the
-          # host — see build_stage1's stage0_explicit_official()). `identity`
-          # is target/ci/ignis's own content identity — always hashable
-          # directly by every job (ladder or gate) once it is built, since it
-          # travels in the bootstrap-stages artifact too, but recorded here
-          # anyway for the same uniform lookup every kind gets.
-          write_host_stage0() {
-            local identity
-            identity=$(compiler_identity_of "${GITHUB_WORKSPACE}/target/ci/ignis")
-            jq -n --arg mode "$STAGE0_MODE" --arg identity "$identity" \
-              '{kind: "host", source: "target/ci/ignis", sha256: "", mode: $mode, identity: $identity}' >"$STAGE0_JSON"
-          }
-
-          if [ "$STAGE0_MODE" = "host" ]; then
-            echo "stage0: host forced by workflow_dispatch input"
-            write_host_stage0
-            exit 0
-          fi
-
-          # `official` fails the step outright on any problem, since it exists
-          # to let a maintainer force and inspect that path; `auto` falls back
-          # to the host and leaves IGNIS_STAGE0 unset instead.
-          fall_back_or_fail() {
-            echo "stage0: $1"
-
-            if [ "$STAGE0_MODE" = "official" ]; then
-              echo "stage0: official was forced by workflow_dispatch input but is unavailable"
-              exit 1
-            fi
-
-            echo "stage0: falling back to the host compiler"
-            write_host_stage0
-            exit 0
-          }
-
-          WORKDIR="${RUNNER_TEMP}/stage0"
-          mkdir -p "$WORKDIR"
-
-          if ! gh release download nightly \
-            --pattern 'ignis-selfhost-linux-amd64' \
-            --pattern 'ignis-selfhost-linux-amd64.sha256' \
-            --pattern 'promotion-streak.json' \
-            --dir "$WORKDIR"; then
-            fall_back_or_fail "the official selfhost asset is not on the nightly release"
-          fi
-
-          if [ ! -f "$WORKDIR/ignis-selfhost-linux-amd64" ] || [ ! -f "$WORKDIR/ignis-selfhost-linux-amd64.sha256" ]; then
-            fall_back_or_fail "the official selfhost asset or its checksum is missing"
-          fi
-
-          if ! (cd "$WORKDIR" && sha256sum -c ignis-selfhost-linux-amd64.sha256); then
-            fall_back_or_fail "the official selfhost asset failed checksum verification"
-          fi
-
-          if [ ! -f "$WORKDIR/promotion-streak.json" ]; then
-            fall_back_or_fail "promotion-streak.json is missing; cannot confirm the asset is official"
-          fi
-
-          STREAK=$(jq -r '.streak // 0' "$WORKDIR/promotion-streak.json")
-
-          if [ "$STREAK" -lt 3 ]; then
-            fall_back_or_fail "the promotion streak is ${STREAK}, below the official threshold of 3"
-          fi
-
-          chmod +x "$WORKDIR/ignis-selfhost-linux-amd64"
-          SHA256=$(cut -d' ' -f1 "$WORKDIR/ignis-selfhost-linux-amd64.sha256")
-          IDENTITY=$(compiler_identity_of "${WORKDIR}/ignis-selfhost-linux-amd64")
-
-          echo "IGNIS_STAGE0=${WORKDIR}/ignis-selfhost-linux-amd64" >>"$GITHUB_ENV"
-
-          # `source` stays the ephemeral ${RUNNER_TEMP} path — dead once this
-          # job ends — but `identity` (unlike `source`) is exactly what every
-          # later gate job needs and can actually use: a gate job's own
-          # `ensure_stage stage1` reads it back from the downloaded
-          # stage0.json to confirm stage1's stamp still matches this run's
-          # official asset, without ever needing the asset itself.
-          jq -n --arg source "${WORKDIR}/ignis-selfhost-linux-amd64" --arg sha256 "$SHA256" --arg mode "$STAGE0_MODE" --arg identity "$IDENTITY" \
-            '{kind: "official", source: $source, sha256: $sha256, mode: $mode, identity: $identity}' >"$STAGE0_JSON"
-
-          echo "stage0: official (sha ${SHA256})"
+        run: scripts/resolve_official_stage0.sh
 
       # stage1 and stage2 have to succeed because every gate runs against
       # stage2's binary. G4 belongs to this job because its two measurements

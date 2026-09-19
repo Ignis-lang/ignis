@@ -76,6 +76,9 @@ Usage: $(basename "$0") <command>
 
 Commands:
   stage1   Build stage1 with the host compiler (\$IGNIS_STAGE0, default: \`ignis\` on PATH).
+           Set IGNIS_STAGE0_NO_FALLBACK=1 to fail instead of falling back to
+           the host when an official/selfhost stage0 cannot build stage1 (the
+           two-step-rule PR gate; see BOOTSTRAP.md).
   stage2   Build stage2 with stage1 (builds stage1 first when missing).
   stage3   Build stage3 with stage2 and check that its C matches stage2's (fixed point, G1).
   all      stage1, stage2, stage3 in order.
@@ -826,6 +829,16 @@ build_stage1() {
 
     if stage0_explicit_official; then
       fail "stage1: the official stage0 compiler reported errors (${first_error}), see $(stage_dir stage1)/log.txt"
+    fi
+
+    # The PR-time two-step-rule gate (ci.yml's "Official stage0 gate") sets
+    # this to require stage1 to build with the official binary alone, with no
+    # silent fallback to the host masking a violation the way it would for
+    # every other caller of build_stage1. The rule: a language change may only
+    # be used in ignis/ or std/ after compiler support for it has been
+    # promoted to the official binary — see BOOTSTRAP.md.
+    if [[ "${IGNIS_STAGE0_NO_FALLBACK:-}" == "1" ]]; then
+      fail "stage1: the official stage0 compiler reported errors (${first_error}), see $(stage_dir stage1)/log.txt -- two-step rule violated: a language change may only be used in ignis/ or std/ after compiler support for it has been promoted to the official binary. Split this PR (land the compiler support, wait for it to promote to official, then use the feature in a follow-up), or, only if this is a bug fix the official binary genuinely cannot express, apply the 'stage0-break-approved' label to override this gate."
     fi
 
     # A published selfhost binary can go stale against a link or runtime

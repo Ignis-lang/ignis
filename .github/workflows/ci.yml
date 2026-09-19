@@ -304,3 +304,89 @@ jobs:
             build/bootstrap/parity-err-stage1.md
             build/bootstrap/parity-err-stage1.json
           if-no-files-found: ignore
+
+  # The two-step rule: a language change may only be USED in ignis/ or std/
+  # after compiler support for it has been promoted to the official selfhost
+  # binary. Today `scripts/bootstrap.sh`'s stage1 falls back from a failing
+  # official stage0 to the host compiler (build_stage1_with_host), so a PR
+  # that lands a language feature together with its first use in the
+  # compiler's own sources still passes `selfhost` above — the host always
+  # builds it — and the violation only surfaces on the nightly ladder, hours
+  # later, against the still-unpromoted official binary. See BOOTSTRAP.md.
+  #
+  # This job reproduces exactly that one check on the PR itself: resolve the
+  # current official asset (scripts/resolve_official_stage0.sh, the same
+  # logic nightly.yml's "Resolve stage0" step runs) and build stage1 with it
+  # alone, fallback disabled. It needs no Rust toolchain: the official binary
+  # already exists, and linking its output only needs the runner's gcc.
+  #
+  # A fresh fork or a repository whose promotion streak has not yet reached 3
+  # has no official asset to check against — that is not a violation, it is
+  # "nothing to check yet", so the job skips rather than fails (job summary
+  # notice, exit 0). Parallel to `rust` and `selfhost` so it does not lengthen
+  # the critical path.
+  official-stage0-gate:
+    name: Official stage0 gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Exits 2 (not 0) on the skip path (no official asset to check against
+      # yet), which would otherwise fail this step and skip every step below
+      # it; continue-on-error keeps the job going so the next step can read
+      # `steps.stage0.outputs.resolved` and turn that into a notice.
+      - name: Resolve the official stage0 asset
+        id: stage0
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STAGE0_MODE: official
+          STAGE0_UNAVAILABLE_ACTION: skip
+        run: scripts/resolve_official_stage0.sh
+
+      - name: No official asset to check yet
+        if: steps.stage0.outputs.resolved != 'true'
+        run: echo "::notice::No official selfhost asset is published yet (fresh fork, or the promotion streak has not reached 3); skipping the two-step rule gate."
+
+      # `id: build` plus `continue-on-error` so the next step can turn a
+      # failure into a warning when the override label is present, instead of
+      # the job stopping here.
+      - name: Build stage1 with the official compiler (fallback disabled)
+        id: build
+        if: steps.stage0.outputs.resolved == 'true'
+        continue-on-error: true
+        env:
+          IGNIS_STAGE0_NO_FALLBACK: "1"
+        run: scripts/bootstrap.sh stage1
+
+      # `stage0-break-approved` exists for the one case the two-step rule
+      # cannot itself tell apart from an ordinary violation: a bug fix the
+      # official binary genuinely cannot express (e.g. the fix's own
+      # correctness depends on a compiler change that has not promoted yet).
+      # Labels only exist on `pull_request` events; a push to `main` carries
+      # none, so this always enforces there.
+      - name: Enforce the two-step rule
+        if: steps.stage0.outputs.resolved == 'true' && steps.build.outcome != 'success'
+        env:
+          LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+
+          if echo "$LABELS_JSON" | jq -e 'index("stage0-break-approved") != null' >/dev/null 2>&1; then
+            echo "::warning::stage1 failed to build with the official stage0 compiler (two-step rule), but the 'stage0-break-approved' label overrides this to a warning. See build/bootstrap/stage1/log.txt."
+            exit 0
+          fi
+
+          echo "::error::stage1 failed to build with the official stage0 compiler. A language change may only be used in ignis/ or std/ after compiler support for it has been promoted to the official binary. Split this PR (land the compiler support, wait for it to promote, then use the feature), or, only if this is a bug fix the official binary genuinely cannot express, apply the 'stage0-break-approved' label."
+          exit 1
+
+      - name: Upload the stage1 log
+        if: always() && steps.stage0.outputs.resolved == 'true' && steps.build.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-stage0-gate-log
+          path: build/bootstrap/stage1/log*.txt
+          if-no-files-found: ignore
