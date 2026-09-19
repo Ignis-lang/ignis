@@ -3770,11 +3770,51 @@ export namespace CodegenC {
     };
   }
 
+  /// Fixed symbol of the std at-exit summary behind `--feature alloc-trace`.
+  ///
+  /// The wrapper does not consult the feature set: with the feature off the
+  /// gated std declaration never becomes AST, so the definition is absent and
+  /// so is the call. Presence of the definition is the feature being on, and it
+  /// cannot disagree with the std the program links against. The host decides
+  /// the same way, in `emit_entry_wrapper` in
+  /// `crates/ignis_codegen_c/src/emit.rs`, and writes the same wrapper text.
+  const ALLOC_TRACE_REPORT_SYMBOL: str = "ignis_alloc_trace_report";
+
+  /// Whether the std allocation tracer is part of this build.
+  function allocTraceEnabled(defStore: &mut Analyzer::DefinitionStore): boolean {
+    let mut index: u64 = 0;
+
+    while (index < defStore.length()) {
+      let id: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
+
+      if (let Option::SOME(definition) = defStore.get(id)) {
+        let found: boolean = match (definition) {
+          Analyzer::Definition::Function(functionDef) -> match (&functionDef.externName) {
+            Option::SOME(name) -> name.equals(CodegenC::ALLOC_TRACE_REPORT_SYMBOL),
+            Option::NONE -> false,
+          },
+          _ -> false,
+        };
+
+        if (found) {
+          return true;
+        }
+      }
+
+      index += 1;
+    }
+
+    return false;
+  }
+
   /// The C `main` around the program's entry point, as the host writes it:
   /// the runtime is initialised with the process arguments, then the user's
   /// `main` runs with no arguments or with `(argc, argv)`, and an `i32`
   /// result becomes the exit code while a `void` one exits 0. A `Result`
   /// entry point is outside what this emitter covers and returns 1.
+  ///
+  /// With `--feature alloc-trace` on, the allocation summary runs after the
+  /// user's `main` returns, on every path that leaves through this wrapper.
   function emitEntryWrapper(
     defStore: &mut Analyzer::DefinitionStore,
     typeStore: &mut Analyzer::TypeStore,
@@ -3796,17 +3836,30 @@ export namespace CodegenC {
       call = `${name.toStr()}((i32)argc, (const char**)argv)`;
     }
 
+    let allocTrace: boolean = CodegenC::allocTraceEnabled(defStore);
+    let mut report: String = String::create("");
+    let mut prototype: String = String::create("");
+
+    if (allocTrace) {
+      report = `    ${CodegenC::ALLOC_TRACE_REPORT_SYMBOL}();\n`;
+      prototype = `void ${CodegenC::ALLOC_TRACE_REPORT_SYMBOL}(void);\n`;
+    }
+
     let mut body: String = String::create("");
 
     if (CodegenC::isVoidType(typeStore, entry.returnType)) {
-      body = `    ${call.toStr()};\n    return 0;\n`;
+      body = `    ${call.toStr()};\n${report.toStr()}    return 0;\n`;
     } else if (CodegenC::isI32Type(typeStore, entry.returnType)) {
-      body = `    return ${call.toStr()};\n`;
+      if (allocTrace) {
+        body = `    i32 __ignis_main_code = ${call.toStr()};\n${report.toStr()}    return __ignis_main_code;\n`;
+      } else {
+        body = `    return ${call.toStr()};\n`;
+      }
     } else {
-      body = `    (void)${call.toStr()};\n    return 1;\n`;
+      body = `    (void)${call.toStr()};\n${report.toStr()}    return 1;\n`;
     }
 
-    let wrapper: String = `\nint main(int argc, char** argv) {\n    ignis_runtime_init((i32)argc, argv);\n${body.toStr()}}\n`;
+    let wrapper: String = `\n${prototype.toStr()}int main(int argc, char** argv) {\n    ignis_runtime_init((i32)argc, argv);\n${body.toStr()}}\n`;
 
     let mut outputRef: &mut String = output;
     outputRef.pushStr(wrapper.toStr());

@@ -25,6 +25,14 @@ use crate::reserved::mangle_reserved_c_name;
 use crate::EmitInput;
 
 const USER_MAIN_SYMBOL: &str = "__ignis_user_main";
+
+/// Fixed symbol of the std at-exit summary behind `--feature alloc-trace`.
+///
+/// The wrapper does not consult the feature set: with the feature off the gated
+/// std declaration never becomes AST, so the definition is absent and so is the
+/// call. Presence of the definition *is* the feature being on, and it cannot
+/// disagree with the std the program links against.
+const ALLOC_TRACE_REPORT_SYMBOL: &str = "ignis_alloc_trace_report";
 const GENERATED_C_LINE_FILE: &str = "<generated-c>";
 
 /// One closure env struct's info: the owning thunk, its captured field types,
@@ -2185,6 +2193,28 @@ impl<'a> CEmitter<'a> {
     }
   }
 
+  /// Whether the std allocation tracer is part of this build.
+  fn alloc_trace_enabled(&self) -> bool {
+    self.defs.iter().any(|(_, def)| {
+      let attrs = match &def.kind {
+        DefinitionKind::Function(function) => &function.attrs,
+        _ => return false,
+      };
+
+      attrs
+        .iter()
+        .any(|attr| matches!(attr, FunctionAttr::ExternName(name) if name == ALLOC_TRACE_REPORT_SYMBOL))
+    })
+  }
+
+  fn emit_alloc_trace_prototype(&mut self) {
+    writeln!(self.output, "void {}(void);", ALLOC_TRACE_REPORT_SYMBOL).unwrap();
+  }
+
+  fn emit_alloc_trace_report(&mut self) {
+    writeln!(self.output, "    {}();", ALLOC_TRACE_REPORT_SYMBOL).unwrap();
+  }
+
   fn emit_entry_wrapper(&mut self) {
     if let Some(test_harness) = self.test_harness {
       self.emit_test_harness_wrapper(test_harness);
@@ -2218,6 +2248,12 @@ impl<'a> CEmitter<'a> {
       },
     };
 
+    let alloc_trace = self.alloc_trace_enabled();
+
+    if alloc_trace {
+      self.emit_alloc_trace_prototype();
+    }
+
     writeln!(self.output, "int main(int argc, char** argv) {{").unwrap();
     writeln!(self.output, "    ignis_runtime_init((i32)argc, argv);").unwrap();
 
@@ -2228,10 +2264,21 @@ impl<'a> CEmitter<'a> {
 
     match self.entry_main_return_kind() {
       Some(EntryMainReturn::I32) => {
-        writeln!(self.output, "    return {};", user_main_call).unwrap();
+        if alloc_trace {
+          writeln!(self.output, "    i32 __ignis_main_code = {};", user_main_call).unwrap();
+          self.emit_alloc_trace_report();
+          writeln!(self.output, "    return __ignis_main_code;").unwrap();
+        } else {
+          writeln!(self.output, "    return {};", user_main_call).unwrap();
+        }
       },
       Some(EntryMainReturn::Void) => {
         writeln!(self.output, "    {};", user_main_call).unwrap();
+
+        if alloc_trace {
+          self.emit_alloc_trace_report();
+        }
+
         writeln!(self.output, "    return 0;").unwrap();
       },
       Some(EntryMainReturn::TryI32 {
@@ -2243,6 +2290,11 @@ impl<'a> CEmitter<'a> {
 
         writeln!(self.output, "    {} __ignis_main_result = {};", result_ty, user_main_call).unwrap();
         writeln!(self.output, "    if (__ignis_main_result.tag == {}) {{", ok_tag).unwrap();
+
+        if alloc_trace {
+          writeln!(self.output, "        {}();", ALLOC_TRACE_REPORT_SYMBOL).unwrap();
+        }
+
         writeln!(
           self.output,
           "        return __ignis_main_result.payload.variant_{}.field_0;",
@@ -2259,6 +2311,11 @@ impl<'a> CEmitter<'a> {
         };
 
         writeln!(self.output, "    fprintf(stderr, \"Error: %s\\n\", {});", err_msg_expr).unwrap();
+
+        if alloc_trace {
+          self.emit_alloc_trace_report();
+        }
+
         writeln!(self.output, "    exit(101);").unwrap();
       },
       None => {
