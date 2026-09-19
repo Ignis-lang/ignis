@@ -18,8 +18,57 @@ export record SourceHash {
   public hash: String;
 }
 
+/// Reports whether `name` is a syntactically valid feature name.
+///
+/// A valid name is non-empty ASCII containing only letters, digits, `_`,
+/// `.` or `-`. Enforced at every boundary a feature name enters the
+/// compiler -- CLI `--feature`/`--features` and `ignis.toml`'s
+/// `[build] known_features`/`default_features` -- because the build
+/// fingerprint's stamp format serializes the enabled set as a single
+/// `features=a,b,c` line: a name containing `,` collides with the
+/// delimiter (`--feature 'a,b'` and `--feature a --feature b` would
+/// serialize identically, letting an archive built for one reuse the
+/// other's stamp), a name containing `=` or whitespace corrupts the
+/// `key=value` line, and a name containing a newline injects extra lines
+/// into the stamp file.
+///
+/// Mirrors the Rust host's `is_valid_feature_name` in
+/// `crates/ignis_config/src/lib.rs`.
+export function fingerprintIsValidFeatureName(name: &String): boolean {
+  if (name.length() == 0) {
+    return false;
+  }
+
+  let mut index: u64 = 0;
+  while (index < name.length()) {
+    let Option::SOME(byte) = name.byteAt(index) else {
+      return false;
+    };
+
+    let isDigit: boolean = byte >= 48 && byte <= 57;
+    let isUpper: boolean = byte >= 65 && byte <= 90;
+    let isLower: boolean = byte >= 97 && byte <= 122;
+    let isAllowedSymbol: boolean = byte == 95 || byte == 46 || byte == 45;
+
+    if (!isDigit && !isUpper && !isLower && !isAllowedSymbol) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
 /// Orders and deduplicates a feature set so the fingerprint does not depend on
 /// the order the features were supplied in.
+///
+/// Also filters out any name that fails `fingerprintIsValidFeatureName`.
+/// Every entry point that can add a feature already rejects an invalid name
+/// with a diagnostic before it reaches here, so this is a defensive
+/// backstop: it guarantees the `features=a,b,c` stamp line can never
+/// contain the `,` delimiter, an `=`, whitespace, or a newline, regardless
+/// of how a name got into the set.
 ///
 /// Mirrors the Rust host's `normalize_features` in
 /// `crates/ignis_driver/src/build_layout.rs`.
@@ -31,7 +80,9 @@ export function fingerprintNormalizeFeatures(features: &Vector<String>): Vector<
     let Option::SOME(feature) = features.get(index) else {
       break;
     };
-    normalized.push(feature.clone());
+    if (fingerprintIsValidFeatureName(feature)) {
+      normalized.push(feature.clone());
+    }
     index += 1;
   }
 
@@ -384,12 +435,12 @@ export function fingerprintSerialize(fp: &BuildFingerprint): String {
   out.pushStr("features=");
   let mut featureIdx: u64 = 0;
   while (featureIdx < fp.features.length()) {
-    if (featureIdx > 0) {
-      out.pushChar(',');
-    }
     let Option::SOME(feature) = fp.features.get(featureIdx) else {
       break;
     };
+    if (featureIdx > 0) {
+      out.pushChar(',');
+    }
     out.push(feature);
     featureIdx += 1;
   }
@@ -805,6 +856,49 @@ function fingerprintIsIndependentOfFeatureOrderAndDuplicates(): void {
   let fp2: BuildFingerprint = fingerprintBaselineWithFeatures(&reorderedWithDuplicates);
 
   Test::assertEq<boolean>(fingerprintEquals(&fp1, &fp2), true);
+}
+
+@test
+function fingerprintIsValidFeatureNameAcceptsAndRejects(): void {
+  let simd: String = String::create("simd");
+  let allocTrace: String = String::create("alloc-trace");
+  let allocTraceUnderscore: String = String::create("alloc_trace");
+  let versioned: String = String::create("v1.2");
+  let empty: String = String::new();
+  let comma: String = String::create("a,b");
+  let equals: String = String::create("a=b");
+  let space: String = String::create("a b");
+
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&simd), true);
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&allocTrace), true);
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&allocTraceUnderscore), true);
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&versioned), true);
+
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&empty), false);
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&comma), false);
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&equals), false);
+  Test::assertEq<boolean>(fingerprintIsValidFeatureName(&space), false);
+}
+
+@test
+function fingerprintNormalizeFeaturesFiltersInvalidNames(): void {
+  // Defensive backstop: even if an invalid name somehow reached
+  // fingerprintNormalizeFeatures (every real entry point rejects it
+  // first), it must never reach the serialized stamp.
+  let mut raw: Vector<String> = Vector::new<String>();
+  raw.push(String::create("simd"));
+  raw.push(String::create("a,b"));
+  raw.push(String::create("a=b"));
+  raw.push(String::create("a b"));
+  raw.push(String::new());
+
+  let normalized: Vector<String> = fingerprintNormalizeFeatures(&raw);
+
+  Test::assertEq<u64>(normalized.length(), 1);
+  match (normalized.get(0)) {
+    Option::SOME(value) -> Test::assertEq<str>(value.toStr(), "simd"),
+    Option::NONE -> Test::fail(),
+  };
 }
 
 @test

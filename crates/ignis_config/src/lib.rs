@@ -11,6 +11,59 @@ use serde::{Deserialize, Serialize};
 /// guards the same type prelude the emitter already writes inline.
 pub const STD_BASE_HEADER: &str = "runtime/ignis_rt.h";
 
+/// Reports whether `name` is a syntactically valid feature name.
+///
+/// A valid name is non-empty ASCII containing only letters, digits, `_`,
+/// `.` or `-`. Enforced at every boundary a feature name enters the
+/// compiler -- CLI `--feature`/`--features` and `ignis.toml`'s
+/// `[build] known_features`/`default_features` -- because the build
+/// fingerprint's stamp format serializes the enabled set as a single
+/// `features=a,b,c` line: a name containing `,` collides with the
+/// delimiter (`--feature 'a,b'` and `--feature a --feature b` would
+/// serialize identically, letting an archive built for one reuse the
+/// other's stamp), a name containing `=` or whitespace corrupts the
+/// `key=value` line, and a name containing a newline injects extra lines
+/// into the stamp file.
+pub fn is_valid_feature_name(name: &str) -> bool {
+  !name.is_empty()
+    && name
+      .bytes()
+      .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
+}
+
+#[cfg(test)]
+mod feature_name_tests {
+  use super::is_valid_feature_name;
+
+  #[test]
+  fn accepts_typical_names() {
+    assert!(is_valid_feature_name("simd"));
+    assert!(is_valid_feature_name("alloc-trace"));
+    assert!(is_valid_feature_name("alloc_trace"));
+    assert!(is_valid_feature_name("v1.2"));
+    assert!(is_valid_feature_name("A1"));
+  }
+
+  #[test]
+  fn rejects_empty_name() {
+    assert!(!is_valid_feature_name(""));
+  }
+
+  #[test]
+  fn rejects_delimiter_characters() {
+    assert!(!is_valid_feature_name("a,b"));
+    assert!(!is_valid_feature_name("a=b"));
+    assert!(!is_valid_feature_name("a b"));
+    assert!(!is_valid_feature_name("a\tb"));
+    assert!(!is_valid_feature_name("a\nb"));
+  }
+
+  #[test]
+  fn rejects_non_ascii() {
+    assert!(!is_valid_feature_name("café"));
+  }
+}
+
 /// Header to include in generated C code with style info
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CHeader {

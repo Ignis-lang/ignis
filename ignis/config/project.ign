@@ -394,6 +394,80 @@ function stringArrayOrDefault(
   return Result::OK(result);
 }
 
+/// Reports whether `name` is a syntactically valid feature name.
+///
+/// A valid name is non-empty ASCII containing only letters, digits, `_`,
+/// `.` or `-`. Enforced here (rather than imported from `./build/fingerprint`)
+/// to avoid the Ignis relative-import-key collision bug -- see the identical
+/// workaround in `ignis/build/config.ign`. Mirrors
+/// `fingerprintIsValidFeatureName` in `ignis/build/fingerprint.ign` and the
+/// Rust host's `is_valid_feature_name` in `crates/ignis_config/src/lib.rs`.
+function projectIsValidFeatureName(name: &String): boolean {
+  if (name.length() == 0) {
+    return false;
+  }
+
+  let mut index: u64 = 0;
+  while (index < name.length()) {
+    let Option::SOME(byte) = name.byteAt(index) else {
+      return false;
+    };
+
+    let isDigit: boolean = byte >= 48 && byte <= 57;
+    let isUpper: boolean = byte >= 65 && byte <= 90;
+    let isLower: boolean = byte >= 97 && byte <= 122;
+    let isAllowedSymbol: boolean = byte == 95 || byte == 46 || byte == 45;
+
+    if (!isDigit && !isUpper && !isLower && !isAllowedSymbol) {
+      return false;
+    }
+
+    index += 1;
+  }
+
+  return true;
+}
+
+/// Validates every name in a `known_features`/`default_features` array,
+/// reporting the field's own span on the first invalid name. See
+/// `projectIsValidFeatureName` for what "invalid" means and why it matters
+/// to the build fingerprint.
+function validateFeatureNameList(
+  document: &TomlDocument,
+  configPath: &Path::PathBuf,
+  fieldPath: str,
+  names: &Vector<String>
+): Result<void, DiagnosticBag> {
+  let mut index: u64 = 0;
+
+  while (index < names.length()) {
+    let Option::SOME(name) = names.get(index) else {
+      break;
+    };
+
+    if (!projectIsValidFeatureName(name)) {
+      let mut start: u64 = 0;
+      let mut end: u64 = 0;
+      if (let Option::SOME(value) = document.get(fieldPath)) {
+        start = value.span.start;
+        end = value.span.end;
+      }
+
+      return Result::ERROR(ConfigDiagnostics::invalidFieldType(
+        configPath,
+        fieldPath,
+        "feature names containing only ASCII letters, digits, '_', '.' or '-'",
+        start,
+        end,
+      ));
+    }
+
+    index += 1;
+  }
+
+  return Result::OK(());
+}
+
 function resolveProjectPath(root: &Path::PathBuf, value: &String): Path::PathBuf {
   let rawPath: Path::PathBuf = Path::PathBuf::fromString(value);
 
@@ -1198,8 +1272,10 @@ export namespace Config {
     let emit: Vector<String> = stringArrayOrDefault(&document, configPath, "build.emit", &emptyEmit)!;
     let emptyDefaultFeatures: Vector<String> = Vector::new<String>();
     let defaultFeatures: Vector<String> = stringArrayOrDefault(&document, configPath, "build.default_features", &emptyDefaultFeatures)!;
+    validateFeatureNameList(&document, configPath, "build.default_features", &defaultFeatures)!;
     let emptyKnownFeatures: Vector<String> = Vector::new<String>();
     let knownFeatures: Vector<String> = stringArrayOrDefault(&document, configPath, "build.known_features", &emptyKnownFeatures)!;
+    validateFeatureNameList(&document, configPath, "build.known_features", &knownFeatures)!;
 
     let emptyFixtures: Vector<String> = Vector::new<String>();
     let fixtureEntries: Vector<String> = stringArrayOrDefault(&document, configPath, "test.fixtures", &emptyFixtures)!;
@@ -1572,6 +1648,37 @@ function projectLoaderReportsMissingConfig(): void {
 function projectLoaderReportsMalformedToml(): void {
   let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/malformed_toml/ignis.toml");
   expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::MALFORMED_TOML);
+}
+
+/// A `,` in `[build] known_features` is rejected: it collides with the
+/// delimiter the build fingerprint's stamp format uses to join the enabled
+/// set. See `projectIsValidFeatureName`.
+@test
+function projectLoaderReportsInvalidFeatureName(): void {
+  let configPath: Path::PathBuf = fixturePath("test_cases/selfhost/resolver/config/invalid_feature_name/ignis.toml");
+  expectSingleDiagnosticCode(Config::loadProjectFile(&configPath), ConfigDiagnosticCode::INVALID_FIELD_TYPE);
+}
+
+@test
+function projectIsValidFeatureNameAcceptsAndRejects(): void {
+  let simd: String = String::create("simd");
+  let allocTrace: String = String::create("alloc-trace");
+  let allocTraceUnderscore: String = String::create("alloc_trace");
+  let versioned: String = String::create("v1.2");
+  let empty: String = String::new();
+  let comma: String = String::create("a,b");
+  let equals: String = String::create("a=b");
+  let space: String = String::create("a b");
+
+  Test::assertEq<boolean>(projectIsValidFeatureName(&simd), true);
+  Test::assertEq<boolean>(projectIsValidFeatureName(&allocTrace), true);
+  Test::assertEq<boolean>(projectIsValidFeatureName(&allocTraceUnderscore), true);
+  Test::assertEq<boolean>(projectIsValidFeatureName(&versioned), true);
+
+  Test::assertEq<boolean>(projectIsValidFeatureName(&empty), false);
+  Test::assertEq<boolean>(projectIsValidFeatureName(&comma), false);
+  Test::assertEq<boolean>(projectIsValidFeatureName(&equals), false);
+  Test::assertEq<boolean>(projectIsValidFeatureName(&space), false);
 }
 
 @test

@@ -211,6 +211,23 @@ pub fn resolve_project(
   let known_features = toml.build.known_features.clone();
   let default_features = toml.build.default_features.clone();
 
+  for name in &known_features {
+    if !ignis_config::is_valid_feature_name(name) {
+      return Err(ProjectError::InvalidFeatureName {
+        name: name.clone(),
+        field: "known_features",
+      });
+    }
+  }
+  for name in &default_features {
+    if !ignis_config::is_valid_feature_name(name) {
+      return Err(ProjectError::InvalidFeatureName {
+        name: name.clone(),
+        field: "default_features",
+      });
+    }
+  }
+
   // Resolve cc
   let cc = overrides.cc.clone().unwrap_or(toml.build.cc);
 

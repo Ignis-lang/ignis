@@ -639,6 +639,8 @@ fn run_build(
   cli: &Cli,
   cmd: &BuildCommand,
 ) -> Result<(), ()> {
+  validate_cli_feature_names(&cmd.feature, &cmd.features)?;
+
   let overrides = build_cli_overrides(cmd);
   let input = resolve_compile_input(&cmd.file_path, &cmd.project, &overrides)?;
 
@@ -690,6 +692,27 @@ fn collect_cli_features(
     set.insert(f.clone());
   }
   set
+}
+
+/// Rejects a `--feature`/`--features` name that is empty or contains a
+/// character the build fingerprint's `features=a,b,c` stamp line cannot
+/// round-trip (see `ignis_config::is_valid_feature_name`), before it ever
+/// reaches `enabled_features`.
+fn validate_cli_feature_names(
+  cmd_feature: &[String],
+  cmd_features: &[String],
+) -> Result<(), ()> {
+  for name in cmd_feature.iter().chain(cmd_features.iter()) {
+    if !ignis_config::is_valid_feature_name(name) {
+      eprintln!(
+        "{} invalid feature name '{}': feature names must be non-empty and contain only ASCII letters, digits, '_', '.' or '-'",
+        "Error:".red().bold(),
+        name
+      );
+      return Err(());
+    }
+  }
+  Ok(())
 }
 
 fn build_config_from_project(
@@ -850,6 +873,8 @@ fn run_check(
   cli: &Cli,
   cmd: &CheckCommand,
 ) -> Result<(), ()> {
+  validate_cli_feature_names(&cmd.feature, &cmd.features)?;
+
   let overrides = check_cli_overrides(cmd);
   let input = resolve_compile_input(&cmd.file_path, &cmd.project, &overrides)?;
 
