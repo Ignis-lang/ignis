@@ -1490,8 +1490,8 @@ run_gate_g7_for() {
   # Only the stage2 run carries the project case: stage1 is its reference, so
   # asking stage1 to be compared against itself would prove nothing, and the
   # pull-request run cannot afford a second self-compilation anyway.
+  # `ensure_stage stage2` already verified and, if needed, rebuilt stage1.
   if [[ "$stage" == "stage2" ]]; then
-    ensure_stage stage1
     reference_arguments=(--reference "$(stage_bin stage1)" --project .)
   fi
 

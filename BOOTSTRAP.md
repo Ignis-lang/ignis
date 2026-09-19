@@ -48,7 +48,12 @@ G3 | `gate-g3` | the selfhost test suite, run under stage2 vs. under the host
 G4 | `gate-g4` | stage2's resource use (RSS, wall time) against stage1's, within 1.25x
 G5 | `gate-g5` | diagnostics: stage2's error corpus output against the host's
 G6 | `gate-g6` | syntax: which programs stage2 accepts/rejects, against the host's parser
-G7 | `gate-g7` | `--dump-drop-schedule` output, stage2 against the host
+G7 | `gate-g7` | `--dump-drop-schedule` output, stage2 against committed baselines
+
+G7 is the first gate that does not use the host as a live oracle. Its
+baselines were generated from the host while it still existed, verified
+byte-identical against the selfhost compiler, and committed under
+`test_cases/e2e/ok/__drop_schedules__/`. See "Drop-schedule baselines" below.
 
 `scripts/bootstrap.sh gates` runs every stage and gate locally, then
 `report` turns `build/bootstrap/gates/*.json` into `report.md` and
@@ -60,6 +65,61 @@ A run where every gate passes is a *promotion candidate*. Three consecutive
 candidate nightly runs promote that run's stage2 binary to
 `ignis-selfhost-linux-amd64` on the `nightly` release — the new official
 stage0 for every following build.
+
+## Drop-schedule baselines (G7)
+
+Each `ok` end-to-end fixture has a committed dump of its drop schedule at
+`test_cases/e2e/ok/__drop_schedules__/<case>.txt` — the `--dump-drop-schedule`
+output for that fixture, with the standard-library functions removed, and
+every path repo-relative so the file is the same on every machine. G7 compiles
+each fixture with the compiler under test and compares byte for byte.
+
+Two cases deliberately have no baseline: `--project` roots (the selfhost
+compiler compiling itself) and `--extra` entry points. The compiler's own
+drop schedule changes with almost every commit to `ignis/`, so a baseline for
+it would be churn rather than evidence. `gate-g7` compares that case against
+stage1 instead — the same sources built by a different compiler, so equal
+dumps mean stage0 did not change what `ignis/` means to its own ownership
+analysis.
+
+### Adding a fixture
+
+Add the `.ign` file under `test_cases/e2e/ok/` as usual, then record its
+baseline and commit both together:
+
+```bash
+scripts/bootstrap.sh gate-g7-baselines               # from $IGNIS_STAGE0
+# or, with any compiler:
+python3 scripts/selfhost_drop_schedule_parity.py --compiler <bin> --write-baselines
+```
+
+A fixture with no baseline fails G7 with `baseline-missing`, and pull-request
+CI rejects it in under a second (`--check-coverage`, which runs no compiler).
+A baseline whose fixture is gone fails the same way, as `stale`.
+
+### Updating baselines
+
+Regenerating is the same command. It rewrites every baseline and deletes the
+ones whose fixture is gone, so an unrelated ownership change shows up as a
+diff in the cases it touched.
+
+**A baseline diff in a pull request is a semantic change.** It says the
+compiler now drops something somewhere else, or at a different time, or not at
+all. A reviewer has to read those lines and agree with them; "regenerated the
+baselines" is not a reason to approve one.
+
+### Cross-checking against the host
+
+While the Rust host still exists, it can be asked whether it still agrees with
+the baselines it produced:
+
+```bash
+python3 scripts/selfhost_drop_schedule_parity.py \
+  --compiler build/bootstrap/stage2/ignis --host ignis
+```
+
+The gate itself never does this, and `--host-compare` still performs the
+original direct host-vs-selfhost diff, so the move to baselines is reversible.
 
 ## The two-step rule
 
