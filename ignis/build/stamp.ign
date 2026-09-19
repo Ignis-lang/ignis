@@ -1,5 +1,9 @@
+import FFI from "std::ffi";
 import Fs from "std::fs";
+import Hasher from "std::hash";
+import LibC from "std::libc";
 import Path from "std::path";
+import Process from "std::process";
 import Sort from "std::sort";
 import String from "std::string";
 import Test from "std::test";
@@ -12,6 +16,7 @@ import
   fingerprintEquals,
   fingerprintHashFile,
   fingerprintHashStr,
+  fingerprintResolveThroughPath,
   fingerprintSerialize,
   fingerprintTransitiveHash,
 from "./fingerprint";
@@ -34,6 +39,115 @@ export function stampPathForObject(objectPath: &Path::PathBuf): Path::PathBuf {
   let objectText: String = objectPath.toString();
   let stampText: String = objectText.concat(".stamp");
   return Path::PathBuf::fromString(&stampText);
+}
+
+/// Where a build keeps the diagnostics it rendered, so a reused build can
+/// print exactly what the build that produced the artifacts printed.
+export function stampReportPathForObject(objectPath: &Path::PathBuf): Path::PathBuf {
+  let objectText: String = objectPath.toString();
+  let reportText: String = objectText.concat(".report");
+  return Path::PathBuf::fromString(&reportText);
+}
+
+/// Size and modification time of a produced file, folded into one key.
+///
+/// Content hashing is wrong here: the file this guards is a linked binary,
+/// which `Fs::readToString` cannot carry, and rehashing megabytes on the
+/// cache-hit path would cost more than the hit saves. Size and full-precision
+/// mtime move on every relink.
+export function stampOutputKey(path: &Path::PathBuf): String {
+  let Result::OK(stat) = Fs::Sys::stat(path.asStr()) else {
+    return String::new();
+  };
+
+  let mut hasher: Hasher = Hasher::new();
+  hasher.writeI64(stat.size);
+  hasher.writeI64(stat.mtime);
+  hasher.writeI64(stat.mtimeNsec);
+  let key: u64 = hasher.finish();
+  return key.toString();
+}
+
+/// Per-process memo for `stampCCompilerIdentity`, keyed by the resolved
+/// driver's own metadata so a second call in the same process never spawns
+/// `--version` again.
+record CCompilerIdentityCache {
+  static mut initialized: boolean = false;
+  static mut probeKey: u64 = 0;
+  static mut identity: u64 = 0;
+}
+
+/// The `--version` banner a C toolchain driver prints, or an empty string when
+/// it could not be run.
+function stampCCompilerVersionBanner(resolved: &Path::PathBuf): String {
+  let mut command: Process::Command = Process::command(resolved.asStr());
+  command.arg("--version");
+
+  let Result::OK(output) = command.output() else {
+    return String::new();
+  };
+
+  if (!output.status().success) {
+    return String::new();
+  }
+
+  return output.stdout();
+}
+
+/// Identity of the C toolchain driver a build invokes.
+///
+/// `[build] cc` is a name, and a toolchain upgraded in place keeps that name
+/// while the objects it produces change. The identity folds the resolved
+/// binary's path, size and mtime together with its `--version` banner, so an
+/// upgrade at the same path invalidates every stamp written before it.
+///
+/// A driver that cannot be resolved or run degrades to its spelling, which is
+/// what the cache key held before: no worse than the name alone.
+export function stampCCompilerIdentity(cc: str): String {
+  let name: String = String::create(cc);
+
+  let resolved: Path::PathBuf = match (fingerprintResolveThroughPath(cc)) {
+    Option::SOME(value) -> value,
+    Option::NONE -> match (Fs::canonicalize(cc)) {
+      Result::OK(value) -> value,
+      Result::ERROR(_) -> Path::PathBuf::new(),
+    },
+  };
+
+  let resolvedText: String = resolved.toString();
+
+  if (resolvedText.length() == 0) {
+    return name.concat(":unresolved");
+  }
+
+  let Result::OK(stat) = Fs::Sys::stat(resolved.asStr()) else {
+    return name.concat(":unresolved");
+  };
+
+  let mut probeHasher: Hasher = Hasher::new();
+  probeHasher.writeStr(resolved.asStr());
+  probeHasher.writeI64(stat.size);
+  probeHasher.writeI64(stat.mtime);
+  probeHasher.writeI64(stat.mtimeNsec);
+  let probeKey: u64 = probeHasher.finish();
+
+  if (CCompilerIdentityCache::initialized && CCompilerIdentityCache::probeKey == probeKey) {
+    let cached: u64 = CCompilerIdentityCache::identity;
+    return cached.toString();
+  }
+
+  let banner: String = stampCCompilerVersionBanner(&resolved);
+
+  let mut hasher: Hasher = Hasher::new();
+  hasher.writeU64(probeKey);
+  hasher.writeStr(banner.toStr());
+  let identity: u64 = hasher.finish();
+
+  CCompilerIdentityCache::initialized = true;
+  CCompilerIdentityCache::probeKey = probeKey;
+  CCompilerIdentityCache::identity = identity;
+
+  return identity.toString();
 }
 
 /// Hash every source the build reads, in alphabetical path order.
@@ -132,12 +246,17 @@ export function stampProgramFingerprint(
   let entries: Vector<SourceHash> = stampSourceHashes(sources);
   let transitiveHash: String = fingerprintTransitiveHash(&entries);
 
+  let mut toolchain: String = String::create(cc);
+  toolchain.pushChar('|');
+  let identity: String = stampCCompilerIdentity(cc);
+  toolchain.push(&identity);
+
   return BuildFingerprint::withSources(
     compilerVersion,
     SELFHOST_CODEGEN_ABI_VERSION,
     targetTriple,
     SELFHOST_BACKEND,
-    cc,
+    toolchain.toStr(),
     profileHash,
     manifestHash,
     features,
@@ -171,43 +290,212 @@ function stampFeaturesEqual(left: &Vector<String>, right: &Vector<String>): bool
   return true;
 }
 
-/// Why a cached build cannot be reused, or an empty string when it can.
+/// Everything a completed build recorded about what it produced.
 ///
-/// The reason is what the build reports, so it names the input that moved
-/// rather than restating that the stamp did not match. The stamp is read
-/// first: on a cold build every artifact is missing too, and "no stamp" says
-/// more about that run than the name of one file that was never written.
-export function stampStaleReason(
+/// The fingerprint answers "would this build compute the same object". The
+/// output fields answer "is the binary the caller is asking for the one this
+/// object was linked into", which a fingerprint cannot: `-o` changes where the
+/// binary goes without changing a single input.
+export record BuildStamp {
+  public fingerprint: BuildFingerprint;
+  /// Path of the binary the recorded build linked, empty when it linked none.
+  public outputPath: String;
+  /// `stampOutputKey` of that binary at the moment it was linked.
+  public outputKey: String;
+  /// Warnings the recorded build reported, replayed on a hit.
+  public warnings: u64;
+}
+
+const STAMP_OUTPUT_PATH_KEY: str = "stamp_output_path";
+const STAMP_OUTPUT_KEY_KEY: str = "stamp_output_key";
+const STAMP_WARNINGS_KEY: str = "stamp_warnings";
+
+/// Look up one of this module's own `key=value` lines.
+///
+/// The fingerprint block is serialized first and parsed by its own reader,
+/// which looks keys up by name; these lines are appended after it under names
+/// no fingerprint field uses.
+function stampLookupKey(lines: &Vector<String>, key: str): String {
+  let searchKey: String = String::create(key);
+  let mut index: u64 = 0;
+
+  while (index < lines.length()) {
+    let Option::SOME(line) = lines.get(index) else {
+      break;
+    };
+
+    index += 1;
+
+    let trimmed: String = line.trimAsciiWhitespace();
+
+    let Option::SOME(separator) = trimmed.indexOfCharFrom('=', 0) else {
+      continue;
+    };
+
+    let lineKey: String = trimmed.substringBytes(0, separator);
+
+    if (lineKey.equals(&searchKey)) {
+      return trimmed.substringBytes(separator + 1, trimmed.length());
+    }
+  }
+
+  return String::new();
+}
+
+function stampParseU64(text: &String): u64 {
+  let mut value: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < text.length()) {
+    let Option::SOME(byte) = text.byteAt(index) else {
+      return 0;
+    };
+
+    if (byte < 48 || byte > 57) {
+      return 0;
+    }
+
+    value = value * 10 + ((byte - 48) as u64);
+    index += 1;
+  }
+
+  return value;
+}
+
+export function stampSerialize(
+  fingerprint: &BuildFingerprint,
+  outputPath: &String,
+  outputKey: &String,
+  warnings: u64,
+): String {
+  let mut content: String = fingerprintSerialize(fingerprint);
+
+  // The fingerprint block ends with its last value, not with a newline, so
+  // appending straight onto it would run this module's first key into that
+  // value and make the block parse back as something it never held.
+  if (!content.endsWith("\n")) {
+    content.pushChar('\n');
+  }
+
+  content.pushStr(STAMP_OUTPUT_PATH_KEY);
+  content.pushChar('=');
+  content.push(outputPath);
+  content.pushChar('\n');
+
+  content.pushStr(STAMP_OUTPUT_KEY_KEY);
+  content.pushChar('=');
+  content.push(outputKey);
+  content.pushChar('\n');
+
+  content.pushStr(STAMP_WARNINGS_KEY);
+  content.pushChar('=');
+  let warningsText: String = warnings.toString();
+  content.push(&warningsText);
+  content.pushChar('\n');
+
+  return content;
+}
+export function stampDeserialize(text: &String): Option<BuildStamp> {
+  let Option::SOME(fingerprint) = fingerprintDeserialize(text) else {
+    return Option::NONE;
+  };
+
+  let lines: Vector<String> = text.split((byte: u8): boolean -> {
+  return byte == 10;
+});
+
+  let warningsText: String = stampLookupKey(&lines, STAMP_WARNINGS_KEY);
+
+  return Option::SOME(BuildStamp {
+    fingerprint: fingerprint,
+    outputPath: stampLookupKey(&lines, STAMP_OUTPUT_PATH_KEY),
+    outputKey: stampLookupKey(&lines, STAMP_OUTPUT_KEY_KEY),
+    warnings: stampParseU64(&warningsText),
+  });
+}
+
+/// What a build should do with the artifacts a stamp describes.
+export record StampVerdict {
+  /// Empty when the artifacts can be reused as they are.
+  public reason: String;
+  /// True when every input matched and only the binary has to be linked again,
+  /// which is what `-o` naming a different path leaves to do.
+  public relinkOnly: boolean;
+  /// Warnings the recorded build reported.
+  public warnings: u64;
+
+  public static reuse(warnings: u64): StampVerdict {
+    return StampVerdict {
+      reason: String::new(),
+      relinkOnly: false,
+      warnings: warnings,
+    };
+  }
+
+  public static rebuild(reason: str): StampVerdict {
+    return StampVerdict {
+      reason: String::create(reason),
+      relinkOnly: false,
+      warnings: 0,
+    };
+  }
+
+  public static relink(reason: str, warnings: u64): StampVerdict {
+    return StampVerdict {
+      reason: String::create(reason),
+      relinkOnly: true,
+      warnings: warnings,
+    };
+  }
+}
+
+/// Decide what a build can reuse, naming the input that moved when it cannot.
+///
+/// The stamp is read first: on a cold build every artifact is missing too, and
+/// "no stamp" says more about that run than the name of one file that was
+/// never written. `missing <path>` is left for the case worth naming a path
+/// for, where the stamp matches and an artifact is gone.
+///
+/// `outputPath` is the binary this run was asked to produce. It is compared
+/// against the one the stamp recorded, and against that binary's size and
+/// mtime, because neither is an input the fingerprint can see.
+export function stampVerdict(
   stampPath: &Path::PathBuf,
   fingerprint: &BuildFingerprint,
   artifacts: &Vector<Path::PathBuf>,
-): String {
+  outputPath: &Path::PathBuf,
+  linksExecutable: boolean,
+): StampVerdict {
   if (!Fs::exists(stampPath.asStr())) {
-    return String::create("no stamp");
+    return StampVerdict::rebuild("no stamp");
   }
 
   let Result::OK(content) = Fs::readToString(stampPath) else {
-    return String::create("unreadable stamp");
+    return StampVerdict::rebuild("unreadable stamp");
   };
 
-  let Option::SOME(existing) = fingerprintDeserialize(&content) else {
-    return String::create("unreadable stamp");
+  let Option::SOME(existing) = stampDeserialize(&content) else {
+    return StampVerdict::rebuild("unreadable stamp");
   };
 
-  if (!existing.compilerIdentity.equals(&fingerprint.compilerIdentity)) {
-    return String::create("compiler changed");
+  if (!existing.fingerprint.compilerIdentity.equals(&fingerprint.compilerIdentity)) {
+    return StampVerdict::rebuild("compiler changed");
   }
 
-  if (!stampFeaturesEqual(&existing.features, &fingerprint.features)) {
-    return String::create("feature set changed");
+  if (!existing.fingerprint.cc.equals(&fingerprint.cc)) {
+    return StampVerdict::rebuild("C compiler changed");
   }
 
-  if (!existing.transitiveHash.equals(&fingerprint.transitiveHash)) {
-    return String::create("sources changed");
+  if (!stampFeaturesEqual(&existing.fingerprint.features, &fingerprint.features)) {
+    return StampVerdict::rebuild("feature set changed");
   }
 
-  if (!fingerprintEquals(fingerprint, &existing)) {
-    return String::create("build configuration changed");
+  if (!existing.fingerprint.transitiveHash.equals(&fingerprint.transitiveHash)) {
+    return StampVerdict::rebuild("sources changed");
+  }
+
+  if (!fingerprintEquals(fingerprint, &existing.fingerprint)) {
+    return StampVerdict::rebuild("build configuration changed");
   }
 
   let mut index: u64 = 0;
@@ -218,13 +506,29 @@ export function stampStaleReason(
     };
 
     if (!Fs::exists(artifact.asStr())) {
-      return `missing ${artifact.asStr()}`;
+      return StampVerdict::rebuild(`missing ${artifact.asStr()}`.toStr());
     }
 
     index += 1;
   }
 
-  return String::new();
+  if (!linksExecutable) {
+    return StampVerdict::reuse(existing.warnings);
+  }
+
+  let requested: String = outputPath.toString();
+
+  if (!existing.outputPath.equals(&requested)) {
+    return StampVerdict::relink("output changed", existing.warnings);
+  }
+
+  let currentKey: String = stampOutputKey(outputPath);
+
+  if (currentKey.length() == 0 || !existing.outputKey.equals(&currentKey)) {
+    return StampVerdict::relink("output changed", existing.warnings);
+  }
+
+  return StampVerdict::reuse(existing.warnings);
 }
 
 /// Drop a stamp so a build that fails part way through cannot leave one behind
@@ -240,14 +544,59 @@ export function stampInvalidate(stampPath: &Path::PathBuf): void {
   };
 }
 
-/// Record the fingerprint the artifacts beside `stampPath` were built from.
+/// Move `source` onto `destination` in one step.
 ///
-/// A failed write is not a build failure: the next run simply finds no stamp
-/// and rebuilds.
-export function stampWrite(stampPath: &Path::PathBuf, fingerprint: &BuildFingerprint): void {
-  let content: String = fingerprintSerialize(fingerprint);
+/// Returns false when either path cannot cross the FFI boundary or the rename
+/// itself fails.
+function stampRename(source: &Path::PathBuf, destination: &Path::PathBuf): boolean {
+  let sourceText: String = source.toString();
+  let destinationText: String = destination.toString();
 
-  match (Fs::writeString(stampPath, &content)) {
+  let Result::OK(sourceC) = FFI::CString::ofString(&sourceText) else {
+    return false;
+  };
+
+  let Result::OK(destinationC) = FFI::CString::ofString(&destinationText) else {
+    return false;
+  };
+
+  return LibC::Stdio::rename(sourceC.asStr(), destinationC.asStr()) == 0;
+}
+
+/// Record what the artifacts beside `stampPath` were built from.
+///
+/// Written to a sibling temporary file and renamed into place, so a run that
+/// dies mid-write leaves either the previous stamp or none, never a truncated
+/// one that a later run would have to guess about. A failed write is not a
+/// build failure: the next run simply finds no stamp and rebuilds.
+export function stampWrite(
+  stampPath: &Path::PathBuf,
+  fingerprint: &BuildFingerprint,
+  outputPath: &String,
+  outputKey: &String,
+  warnings: u64,
+): void {
+  let content: String = stampSerialize(fingerprint, outputPath, outputKey, warnings);
+  let stampText: String = stampPath.toString();
+  let pendingText: String = stampText.concat(".pending");
+  let pendingPath: Path::PathBuf = Path::PathBuf::fromString(&pendingText);
+
+  if (let Result::ERROR(_) = Fs::writeString(&pendingPath, &content)) {
+    return;
+  }
+
+  if (!stampRename(&pendingPath, stampPath)) {
+    match (Fs::removeFile(&pendingPath)) {
+      Result::OK(_) -> {},
+      Result::ERROR(_) -> {},
+    };
+  }
+}
+
+/// The report a build renders, kept beside its object so a reused build can
+/// print it again instead of reporting a count it did not compute.
+export function stampWriteReport(reportPath: &Path::PathBuf, report: &String): void {
+  match (Fs::writeString(reportPath, report)) {
     Result::OK(_) -> {},
     Result::ERROR(_) -> {},
   };
@@ -270,6 +619,26 @@ function stampTestFingerprint(
   features: &Vector<String>
 ): BuildFingerprint {
   return stampProgramFingerprint("0.4.0", "", "cc", "profile", "manifest", features, sources);
+}
+
+/// Record a stamp for a build that linked nothing, so its verdict rests on the
+/// fingerprint and the artifact list alone.
+function stampTestWrite(
+  stampPath: &Path::PathBuf,
+  fingerprint: &BuildFingerprint,
+  warnings: u64
+): void {
+  let empty: String = String::new();
+  stampWrite(stampPath, fingerprint, &empty, &empty, warnings);
+}
+
+function stampTestReason(
+  stampPath: &Path::PathBuf,
+  fingerprint: &BuildFingerprint,
+  artifacts: &Vector<Path::PathBuf>
+): String {
+  let empty: Path::PathBuf = Path::PathBuf::new();
+  return stampVerdict(stampPath, fingerprint, artifacts, &empty, false).reason;
 }
 
 /// A stamp is a plain suffix on the object path, so it can never be mistaken
@@ -348,36 +717,40 @@ function stampStaleReasonNamesWhatMoved(): void {
   stampInvalidate(&stamp);
 
   let cold: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
-  let coldReason: String = stampStaleReason(&stamp, &cold, &artifacts);
+  let coldReason: String = stampTestReason(&stamp, &cold, &artifacts);
   Test::assertEq<str>(coldReason.toStr(), "no stamp");
 
-  stampWrite(&stamp, &cold);
+  let coldRecorded: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
+  stampTestWrite(&stamp, &coldRecorded, 3);
 
   let warm: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
-  let warmReason: String = stampStaleReason(&stamp, &warm, &artifacts);
-  Test::assertEq<str>(warmReason.toStr(), "");
+  let empty: Path::PathBuf = Path::PathBuf::new();
+  let warmVerdict: StampVerdict = stampVerdict(&stamp, &warm, &artifacts, &empty, false);
+  Test::assertEq<str>(warmVerdict.reason.toStr(), "");
+  Test::assertEq<u64>(warmVerdict.warnings, 3);
 
   let mut features: Vector<String> = Vector::new<String>();
   features.push(String::create("tracing"));
 
   let featured: BuildFingerprint = stampTestFingerprint(&sources, &features);
-  let featureReason: String = stampStaleReason(&stamp, &featured, &artifacts);
+  let featureReason: String = stampTestReason(&stamp, &featured, &artifacts);
   Test::assertEq<str>(featureReason.toStr(), "feature set changed");
 
   stampTestWriteSource(&source, "function main(): i32 { return 1; }\n");
 
   let edited: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
-  let editedReason: String = stampStaleReason(&stamp, &edited, &artifacts);
+  let editedReason: String = stampTestReason(&stamp, &edited, &artifacts);
   Test::assertEq<str>(editedReason.toStr(), "sources changed");
 
-  stampWrite(&stamp, &edited);
+  let editedRecorded: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
+  stampTestWrite(&stamp, &editedRecorded, 0);
 
   match (Fs::removeFile(&object)) {
     Result::OK(_) -> {},
     Result::ERROR(_) -> {},
   };
 
-  let missingReason: String = stampStaleReason(&stamp, &edited, &artifacts);
+  let missingReason: String = stampTestReason(&stamp, &edited, &artifacts);
   Test::assertEq<boolean>(missingReason.startsWith("missing "), true);
 
   stampInvalidate(&stamp);
@@ -385,6 +758,98 @@ function stampStaleReasonNamesWhatMoved(): void {
     Result::OK(_) -> {},
     Result::ERROR(_) -> {},
   };
+}
+
+/// A build whose inputs all match but whose binary is not the one the stamp
+/// recorded has to link again rather than hand back whatever sits at that
+/// path: `-o` moves the binary without moving a single input.
+@test
+function stampVerdictRelinksWhenTheOutputIsNotTheRecordedOne(): void {
+  let dir: Path::PathBuf = stampTestDir();
+
+  match (Fs::createDirAll(&dir)) {
+    Result::OK(_) -> {},
+    Result::ERROR(_) -> Test::fail(),
+  };
+
+  let source: Path::PathBuf = dir.join("linked.ign");
+  let object: Path::PathBuf = dir.join("linked.o");
+  let linkedBinary: Path::PathBuf = dir.join("linked.bin");
+  let elsewhere: Path::PathBuf = dir.join("elsewhere.bin");
+  stampTestWriteSource(&source, "function main(): void {}\n");
+  stampTestWriteSource(&object, "object\n");
+  stampTestWriteSource(&linkedBinary, "binary\n");
+
+  let mut sources: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  sources.push(source.clone());
+
+  let mut artifacts: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  artifacts.push(object.clone());
+
+  let noFeatures: Vector<String> = Vector::new<String>();
+  let stamp: Path::PathBuf = stampPathForObject(&object);
+  stampInvalidate(&stamp);
+
+  let recordedOutput: String = linkedBinary.toString();
+  let recordedKey: String = stampOutputKey(&linkedBinary);
+  let recordedFingerprint: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
+  stampWrite(&stamp, &recordedFingerprint, &recordedOutput, &recordedKey, 1);
+
+  let fingerprint: BuildFingerprint = stampTestFingerprint(&sources, &noFeatures);
+
+  let sameOutput: StampVerdict = stampVerdict(&stamp, &fingerprint, &artifacts, &linkedBinary, true);
+  Test::assertEq<str>(sameOutput.reason.toStr(), "");
+  Test::assertEq<boolean>(sameOutput.relinkOnly, false);
+  Test::assertEq<u64>(sameOutput.warnings, 1);
+
+  let otherOutput: StampVerdict = stampVerdict(&stamp, &fingerprint, &artifacts, &elsewhere, true);
+  Test::assertEq<str>(otherOutput.reason.toStr(), "output changed");
+  Test::assertEq<boolean>(otherOutput.relinkOnly, true);
+
+  stampTestWriteSource(&linkedBinary, "a different binary altogether\n");
+
+  let replaced: StampVerdict = stampVerdict(&stamp, &fingerprint, &artifacts, &linkedBinary, true);
+  Test::assertEq<str>(replaced.reason.toStr(), "output changed");
+  Test::assertEq<boolean>(replaced.relinkOnly, true);
+
+  stampInvalidate(&stamp);
+}
+
+/// A toolchain upgraded in place keeps its name, so the name alone cannot key
+/// the cache: the identity moves when the resolved binary or its banner does.
+@test
+function stampCCompilerIdentityDistinguishesDrivers(): void {
+  let first: String = stampCCompilerIdentity("cc");
+  let again: String = stampCCompilerIdentity("cc");
+  Test::assertEq<str>(first.toStr(), again.toStr());
+  Test::assertEq<boolean>(first.length() > 0, true);
+
+  let missing: String = stampCCompilerIdentity("ignis-no-such-c-compiler");
+  Test::assertEq<str>(missing.toStr(), "ignis-no-such-c-compiler:unresolved");
+}
+
+/// The stamp carries the fingerprint block plus this module's own lines, and
+/// reads back exactly what it wrote.
+@test
+function stampSerializationRoundtrips(): void {
+  let sources: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
+  let features: Vector<String> = Vector::new<String>();
+
+  let fingerprint: BuildFingerprint = stampTestFingerprint(&sources, &features);
+  let outputPath: String = String::create("/tmp/somewhere/app");
+  let outputKey: String = String::create("12345");
+
+  let text: String = stampSerialize(&fingerprint, &outputPath, &outputKey, 7);
+
+  let Option::SOME(parsed) = stampDeserialize(&text) else {
+    Test::fail();
+    return;
+  };
+
+  Test::assertEq<str>(parsed.outputPath.toStr(), "/tmp/somewhere/app");
+  Test::assertEq<str>(parsed.outputKey.toStr(), "12345");
+  Test::assertEq<u64>(parsed.warnings, 7);
+  Test::assertEq<boolean>(fingerprintEquals(&parsed.fingerprint, &fingerprint), true);
 }
 
 /// The profile hash folds the optimization level and the debug switch in, so a
