@@ -3635,6 +3635,8 @@ export namespace CodegenC {
     symbols: &mut Analyzer::SymbolTable,
     program: &Lir::LirProgram,
     externalSymbols: &Vector<u32>,
+    moduleInfos: &Vector<Analyzer::Imports::ModuleInfo>,
+    stdRoot: str,
   ): CodegenC::EmitOutput {
     let mut source: String = String::create("");
     let mut unsupported: u64 = 0;
@@ -3761,7 +3763,7 @@ export namespace CodegenC {
       bodyIndex += 1;
     }
 
-    CodegenC::emitEntryWrapper(defStore, typeStore, symbols, &mut source, program);
+    CodegenC::emitEntryWrapper(defStore, typeStore, symbols, &mut source, program, moduleInfos, stdRoot);
 
     return CodegenC::EmitOutput {
       source: source,
@@ -3781,25 +3783,52 @@ export namespace CodegenC {
   const ALLOC_TRACE_REPORT_SYMBOL: str = "ignis_alloc_trace_report";
 
   /// Written name of the std function that carries the symbol above.
-  ///
-  /// A user function has to match both this and the `@externName` before the
-  /// wrapper will call it, so an `@externName("ignis_alloc_trace_report")` on
-  /// some unrelated function with the feature off cannot make the wrapper call
-  /// a symbol dead-code elimination then removes. The name is also in the
-  /// reserved list in `ignis/codegen/reserved.ign`.
   const ALLOC_TRACE_REPORT_NAME: str = "ignisAllocTraceReport";
+
+  /// Whether `defId` was declared by a file under `stdRoot`.
+  ///
+  /// The host answers this from `classify_def_with_std_path` in
+  /// `crates/ignis_codegen_c/src/classify.rs`, which also goes by path.
+  ///
+  /// `ModuleInfo.kind` would be the obvious source and is not usable: it reads
+  /// `PROJECT` for std files in this pipeline, so a `kind` test rejects the std
+  /// hook itself. The recorded module path is correct, so the path decides.
+  function isStdDefinition(
+    defStore: &mut Analyzer::DefinitionStore,
+    moduleInfos: &Vector<Analyzer::Imports::ModuleInfo>,
+    stdRoot: str,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let root: String = String::create(stdRoot);
+
+    if (root.length() == 0) {
+      return false;
+    }
+
+    let Option::SOME(moduleIndex) = defStore.defModuleOf(defId) else {
+      return false;
+    };
+
+    let Option::SOME(info) = moduleInfos.get(moduleIndex) else {
+      return false;
+    };
+
+    return info.pathText.startsWith(root.toStr());
+  }
 
   /// Whether the std allocation tracer is part of this build.
   function allocTraceEnabled(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
+    moduleInfos: &Vector<Analyzer::Imports::ModuleInfo>,
+    stdRoot: str,
   ): boolean {
     let mut index: u64 = 0;
 
     while (index < defStore.length()) {
       let id: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
 
-      if (CodegenC::isAllocTraceReport(defStore, symbols, id)) {
+      if (CodegenC::isAllocTraceReport(defStore, symbols, moduleInfos, stdRoot, id)) {
         return true;
       }
 
@@ -3809,9 +3838,19 @@ export namespace CodegenC {
     return false;
   }
 
+  /// Whether `defId` is the std tracer hook the wrapper is allowed to call.
+  ///
+  /// All three of the `@externName`, the written name and the declaring module
+  /// have to line up. A user function carrying the same `@externName` with the
+  /// feature off is not the tracer: it is also dead code, and calling it from
+  /// the wrapper would either leave the link with an undefined reference or run
+  /// the user's own function as if it were the at-exit summary. The name is
+  /// reserved in `ignis/codegen/reserved.ign` for the same reason.
   function isAllocTraceReport(
     defStore: &mut Analyzer::DefinitionStore,
     symbols: &mut Analyzer::SymbolTable,
+    moduleInfos: &Vector<Analyzer::Imports::ModuleInfo>,
+    stdRoot: str,
     defId: Analyzer::DefinitionId,
   ): boolean {
     let Option::SOME(definition) = defStore.get(defId) else {
@@ -3839,7 +3878,11 @@ export namespace CodegenC {
       return false;
     };
 
-    return text.equals(CodegenC::ALLOC_TRACE_REPORT_NAME);
+    if (!text.equals(CodegenC::ALLOC_TRACE_REPORT_NAME)) {
+      return false;
+    }
+
+    return CodegenC::isStdDefinition(defStore, moduleInfos, stdRoot, defId);
   }
 
   /// The C `main` around the program's entry point, as the host writes it:
@@ -3856,6 +3899,8 @@ export namespace CodegenC {
     symbols: &mut Analyzer::SymbolTable,
     output: &mut String,
     program: &Lir::LirProgram,
+    moduleInfos: &Vector<Analyzer::Imports::ModuleInfo>,
+    stdRoot: str,
   ): void {
     let Option::SOME(entryDef) = program.entryPoint else {
       return;
@@ -3871,7 +3916,7 @@ export namespace CodegenC {
       call = `${name.toStr()}((i32)argc, (const char**)argv)`;
     }
 
-    let allocTrace: boolean = CodegenC::allocTraceEnabled(defStore, symbols);
+    let allocTrace: boolean = CodegenC::allocTraceEnabled(defStore, symbols, moduleInfos, stdRoot);
     let mut report: String = String::create("");
     let mut prototype: String = String::create("");
 

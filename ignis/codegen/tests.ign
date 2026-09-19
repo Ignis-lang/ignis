@@ -152,6 +152,7 @@ function codegenEmitExposing(source: str, externalNames: &Vector<String>): Codeg
   );
 
   let externalSymbols: Vector<u32> = codegenFunctionDefIds(&mut defStore, &mut symbols, externalNames);
+  let moduleInfos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
 
   let emitted: CodegenC::EmitOutput = CodegenC::emitProgram(
     &mut defStore,
@@ -159,6 +160,8 @@ function codegenEmitExposing(source: str, externalNames: &Vector<String>): Codeg
     &mut symbols,
     &lowered.program,
     &externalSymbols,
+    &moduleInfos,
+    "std",
   );
 
   return CodegenEmission {
@@ -580,4 +583,95 @@ function codegenLeavesOrdinaryCIdentifiersAlone(): void {
 
   let untouched: String = CodegenReserved::mangleReservedCName(String::create("value"));
   Test::assert(untouched.equals("value"));
+}
+
+/// A definition carrying the tracer's fixed `@externName`, in a module of the
+/// given kind.
+function pushAllocTraceCandidate(
+  defStore: &mut Analyzer::DefinitionStore,
+  symbols: &mut Analyzer::SymbolTable,
+  name: str,
+  moduleIndex: u64,
+): Analyzer::DefinitionId {
+  let mut symbolsRef: &mut Analyzer::SymbolTable = symbols;
+  let mut defsRef: &mut Analyzer::DefinitionStore = defStore;
+
+  let defId: Analyzer::DefinitionId = defsRef.push(Analyzer::Definition::Function(Analyzer::FunctionDef {
+      name: symbolsRef.intern(name),
+      visibility: Analyzer::Visibility::PUBLIC,
+      typeParams: Vector::new<Analyzer::DefinitionId>(),
+      params: Vector::new<Analyzer::DefinitionId>(),
+      returnType: Id::fromRaw<Analyzer::TypeTag>(0),
+      isDeprecated: false,
+      deprecatedMessage: Option::NONE,
+      extensionTarget: Option::NONE,
+      extensionMutable: false,
+      isExtern: false,
+      externName: Option::SOME(String::create("ignis_alloc_trace_report")),
+    }));
+
+  let mut moduleRef: &mut Analyzer::DefinitionStore = defStore;
+  moduleRef.setDefModule(defId, moduleIndex);
+
+  return defId;
+}
+
+function allocTraceModuleInfos(): Vector<Analyzer::Imports::ModuleInfo> {
+  let mut infos: Vector<Analyzer::Imports::ModuleInfo> = Vector::new<Analyzer::Imports::ModuleInfo>();
+
+  infos.push(Analyzer::Imports::ModuleInfo {
+      index: 0,
+      pathText: String::create("src/main.ign"),
+      kind: Analyzer::Imports::ModuleKind::PROJECT,
+    });
+
+  infos.push(Analyzer::Imports::ModuleInfo {
+      index: 1,
+      pathText: String::create("std/memory/alloc_trace.ign"),
+      kind: Analyzer::Imports::ModuleKind::STD,
+    });
+
+  return infos;
+}
+
+@test
+function codegenRejectsAUserDefinitionOfTheAllocTraceSymbol(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let infos: Vector<Analyzer::Imports::ModuleInfo> = allocTraceModuleInfos();
+
+  let decoy: Analyzer::DefinitionId = pushAllocTraceCandidate(
+    &mut defStore,
+    &mut symbols,
+    "decoyReport",
+    0,
+  );
+
+  let impostor: Analyzer::DefinitionId = pushAllocTraceCandidate(
+    &mut defStore,
+    &mut symbols,
+    "ignisAllocTraceReport",
+    0,
+  );
+
+  Test::assert(!CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, "std/", decoy));
+  Test::assert(!CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, "std/", impostor));
+  Test::assert(!CodegenC::allocTraceEnabled(&mut defStore, &mut symbols, &infos, "std/"));
+}
+
+@test
+function codegenAcceptsTheStdDefinitionOfTheAllocTraceSymbol(): void {
+  let mut defStore: Analyzer::DefinitionStore = Analyzer::DefinitionStore::init();
+  let mut symbols: Analyzer::SymbolTable = Analyzer::SymbolTable::init();
+  let infos: Vector<Analyzer::Imports::ModuleInfo> = allocTraceModuleInfos();
+
+  let hook: Analyzer::DefinitionId = pushAllocTraceCandidate(
+    &mut defStore,
+    &mut symbols,
+    "ignisAllocTraceReport",
+    1,
+  );
+
+  Test::assert(CodegenC::isAllocTraceReport(&mut defStore, &mut symbols, &infos, "std/", hook));
+  Test::assert(CodegenC::allocTraceEnabled(&mut defStore, &mut symbols, &infos, "std/"));
 }
