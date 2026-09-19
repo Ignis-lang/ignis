@@ -27,6 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 BOOTSTRAP_SH="${REPO_ROOT}/bootstrap.sh"
 MEASURE_RUN_PY="${REPO_ROOT}/measure_run.py"
+RESOLVE_STAGE0_SH="${REPO_ROOT}/resolve_official_stage0.sh"
 
 FAILURES=0
 TESTS_RUN=0
@@ -53,6 +54,8 @@ make_sandbox() {
   mkdir -p "$root/scripts" "$root/ignis" "$root/bin" "$root/build/bootstrap"
   cp "$BOOTSTRAP_SH" "$root/scripts/bootstrap.sh"
   cp "$MEASURE_RUN_PY" "$root/scripts/measure_run.py"
+  cp "$RESOLVE_STAGE0_SH" "$root/scripts/resolve_official_stage0.sh"
+  chmod +x "$root/scripts/resolve_official_stage0.sh"
   printf 'function main(): i32 { return 0; }\n' >"$root/ignis/main.ign"
 
   echo "$root"
@@ -107,6 +110,73 @@ write_failing_host_compiler() {
 #!/usr/bin/env bash
 echo "error: host compiler is broken too" >&2
 exit 1
+EOF
+  chmod +x "$path"
+}
+
+# A selfhost-shaped compiler that succeeds: same invocation form as
+# write_failing_official_compiler (`compiler entry -o output`), but writes a
+# working stub binary at the requested `-o` path instead of failing.
+write_working_official_compiler() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+out=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-o" ]]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+if [[ -z "$out" ]]; then
+  echo "error: no -o output given" >&2
+  exit 1
+fi
+printf '#!/usr/bin/env bash\nexit 0\n' >"$out"
+chmod +x "$out"
+exit 0
+EOF
+  chmod +x "$path"
+}
+
+# Stands in for `gh` when scripts/resolve_official_stage0.sh needs the
+# download to fail the way it would with no official asset published yet
+# (a fresh fork, or a promotion streak that has never reached 3).
+write_failing_gh() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+echo "error: release not found" >&2
+exit 1
+EOF
+  chmod +x "$path"
+}
+
+# Stands in for `gh` succeeding at the download (asset, checksum, and streak
+# file all present) but with a corrupt promotion-streak.json — an
+# *unexpected* failure (a bug, a truncated download) rather than "no asset
+# published", which resolve_official_stage0.sh's `unavailable()` path is
+# for. Used to prove `set -e` (not `set -uo pipefail`) is in effect: without
+# it, `STREAK=$(jq -r '.streak // 0' ...)` failing would silently continue
+# past the assignment with $STREAK empty rather than aborting the script.
+write_gh_with_corrupt_streak() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+dir=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--dir" ]]; then
+    dir="$arg"
+  fi
+  prev="$arg"
+done
+mkdir -p "$dir"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$dir/ignis-selfhost-linux-amd64"
+sha256sum "$dir/ignis-selfhost-linux-amd64" >"$dir/ignis-selfhost-linux-amd64.sha256"
+echo "this is not valid json" >"$dir/promotion-streak.json"
+exit 0
 EOF
   chmod +x "$path"
 }
@@ -367,7 +437,212 @@ test_fallback_and_host_both_fail() {
   rm -rf "$root"
 }
 
-# Test 6: `scripts/bootstrap.sh promotion-decide` is the nightly's "Publish
+# Test 7: the two-step-rule PR gate (ci.yml's "Official stage0 gate") sets
+# IGNIS_STAGE0_NO_FALLBACK=1 so a failing official stage0 fails stage1
+# outright instead of silently rebuilding it with the host, which is exactly
+# what let a language change land together with its first use in the
+# compiler's own sources this week (Error[A0014]) without any PR ever going
+# red for it.
+# Parameterized over `mode`: `auto` (stage0 resolved to official without a
+# forced choice) and `official` (a forced/explicit mode, which is what
+# ci.yml's "Official stage0 gate" job actually sets — see
+# scripts/resolve_official_stage0.sh's STAGE0_MODE=official). Before the F1
+# fix, `mode=official` made build_stage1's stage0_explicit_official() check
+# run first and `fail` with the plain "official stage0 compiler reported
+# errors" message, never reaching the IGNIS_STAGE0_NO_FALLBACK branch at
+# all — so the real gate's failure never named the rule it exists to
+# enforce. Covering both modes here pins that the two-step-rule message is
+# reachable regardless of which check sees it first.
+run_no_fallback_official_fails_case() {
+  local mode="$1"
+
+  local root
+  root="$(make_sandbox)"
+  write_failing_official_compiler "$root/bin/ignis-official"
+  write_working_host_compiler "$root/bin/ignis-host"
+  write_stage0_json "$root" official "$mode"
+
+  local status=0
+  (
+    cd "$root"
+    IGNIS_STAGE0="$root/bin/ignis-official" \
+      IGNIS_STAGE0_HOST_FALLBACK="$root/bin/ignis-host" \
+      IGNIS_STAGE0_NO_FALLBACK=1 \
+      scripts/bootstrap.sh stage1
+  ) >"$root/run.log" 2>&1 || status=$?
+
+  if [[ "$status" -eq 0 ]]; then
+    fail_test "mode=${mode}: expected stage1 to fail, it exited 0, see ${root}/run.log"
+  else
+    pass "mode=${mode}: stage1 exited non-zero (${status})"
+  fi
+
+  if [[ -x "$root/build/bootstrap/stage1/ignis" ]]; then
+    fail_test "mode=${mode}: build/bootstrap/stage1/ignis should not exist when the fallback is disabled"
+  else
+    pass "mode=${mode}: no stage1 binary was produced"
+  fi
+
+  if grep -q 'falling back to the host' "$root/run.log"; then
+    fail_test "mode=${mode}: the fallback must not run when IGNIS_STAGE0_NO_FALLBACK=1, see ${root}/run.log"
+  else
+    pass "mode=${mode}: no fallback was attempted"
+  fi
+
+  if grep -q 'two-step rule' "$root/run.log"; then
+    pass "mode=${mode}: the failure names the two-step rule"
+  else
+    fail_test "mode=${mode}: the failure message does not mention the two-step rule, see ${root}/run.log"
+  fi
+
+  if grep -q 'undefined reference to symbol from libignis_rt.a' "$root/run.log"; then
+    pass "mode=${mode}: the failure points at the first compiler error"
+  else
+    fail_test "mode=${mode}: the failure message does not include the first compiler error, see ${root}/run.log"
+  fi
+
+  if grep -q 'stage0-break-approved' "$root/run.log"; then
+    pass "mode=${mode}: the failure names the override label"
+  else
+    fail_test "mode=${mode}: the failure message does not name the stage0-break-approved override, see ${root}/run.log"
+  fi
+
+  rm -rf "$root"
+}
+
+test_no_fallback_official_fails() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: IGNIS_STAGE0_NO_FALLBACK=1 fails outright instead of falling back to the host (mode=auto)"
+  run_no_fallback_official_fails_case auto
+}
+
+# The config ci.yml's gate actually uses (STAGE0_MODE=official in
+# scripts/resolve_official_stage0.sh, recorded as stage0.json's mode) —
+# see the comment on run_no_fallback_official_fails_case above.
+test_no_fallback_official_fails_explicit_mode() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: IGNIS_STAGE0_NO_FALLBACK=1 fails outright instead of falling back to the host (mode=official, the gate's real config)"
+  run_no_fallback_official_fails_case official
+}
+
+# Test 8: the fallback-disabled gate must not block a PR whose official
+# stage0 build actually succeeds.
+test_no_fallback_official_succeeds() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: IGNIS_STAGE0_NO_FALLBACK=1 still succeeds when the official stage0 build works"
+
+  local root
+  root="$(make_sandbox)"
+  write_working_official_compiler "$root/bin/ignis-official"
+  write_stage0_json "$root" official auto
+
+  local status=0
+  (
+    cd "$root"
+    IGNIS_STAGE0="$root/bin/ignis-official" \
+      IGNIS_STAGE0_NO_FALLBACK=1 \
+      scripts/bootstrap.sh stage1
+  ) >"$root/run.log" 2>&1 || status=$?
+
+  if [[ "$status" -eq 0 ]]; then
+    pass "stage1 exited 0"
+  else
+    fail_test "expected stage1 to succeed, exit ${status}, see ${root}/run.log"
+    sed 's/^/    /' "$root/run.log"
+  fi
+
+  if [[ -x "$root/build/bootstrap/stage1/ignis" ]]; then
+    pass "build/bootstrap/stage1/ignis was produced"
+  else
+    fail_test "build/bootstrap/stage1/ignis is missing"
+  fi
+
+  rm -rf "$root"
+}
+
+# Test 9: with no official asset published (fresh fork, or a promotion
+# streak that never reached 3), scripts/resolve_official_stage0.sh must skip
+# rather than fail the PR — there is nothing to check yet.
+test_no_official_asset_skips() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: resolve_official_stage0.sh skips when no official asset is published"
+
+  local root
+  root="$(make_sandbox)"
+  write_failing_gh "$root/bin/gh"
+
+  local status=0
+  (
+    cd "$root"
+    PATH="$root/bin:$PATH" \
+      STAGE0_MODE=official \
+      STAGE0_UNAVAILABLE_ACTION=skip \
+      GH_TOKEN=fake \
+      scripts/resolve_official_stage0.sh
+  ) >"$root/run.log" 2>&1 || status=$?
+
+  [[ "$status" -eq 2 ]] && pass "resolve_official_stage0.sh exits 2 on the skip path" \
+    || fail_test "expected exit 2, got ${status}, see ${root}/run.log"
+
+  if grep -q 'skipping' "$root/run.log"; then
+    pass "the skip was logged"
+  else
+    fail_test "no skip notice, see ${root}/run.log"
+  fi
+
+  if [[ -f "$root/build/bootstrap/stage0.json" ]]; then
+    fail_test "stage0.json should not be written on the skip path"
+  else
+    pass "no stage0.json was written on the skip path"
+  fi
+
+  rm -rf "$root"
+}
+
+# Test 11 (the reviewer's F2/F3 case): an unexpected failure inside
+# resolve_official_stage0.sh (here, a corrupt promotion-streak.json after a
+# successful download) must abort under `set -e` before any `resolved=`
+# output is written — ci.yml's gate treats an empty `resolved` output as an
+# unexpected error (fails the job) and only a `resolved=false` line as the
+# legitimate "no asset published" skip. Conflating the two would let a gh
+# outage, a missing jq, or a script bug pass the gate silently green.
+test_unexpected_failure_emits_no_resolved_output() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "test: an unexpected resolve_official_stage0.sh failure emits no resolved= output"
+
+  local root
+  root="$(make_sandbox)"
+  write_gh_with_corrupt_streak "$root/bin/gh"
+
+  local status=0
+  local github_output="$root/github_output.txt"
+  : >"$github_output"
+  (
+    cd "$root"
+    PATH="$root/bin:$PATH" \
+      STAGE0_MODE=official \
+      STAGE0_UNAVAILABLE_ACTION=skip \
+      GH_TOKEN=fake \
+      GITHUB_OUTPUT="$github_output" \
+      scripts/resolve_official_stage0.sh
+  ) >"$root/run.log" 2>&1 || status=$?
+
+  if [[ "$status" -eq 0 || "$status" -eq 2 ]]; then
+    fail_test "expected an unexpected-failure exit status (neither 0 nor the skip code 2), got ${status}, see ${root}/run.log"
+  else
+    pass "resolve_official_stage0.sh exited non-zero and not the skip code (${status})"
+  fi
+
+  if grep -q '^resolved=' "$github_output"; then
+    fail_test "resolved= was written despite the unexpected failure, see ${github_output}"
+  else
+    pass "no resolved= output was written"
+  fi
+
+  rm -rf "$root"
+}
+
+# Test 10: `scripts/bootstrap.sh promotion-decide` is the nightly's "Publish
 # the promotion state" step's decision logic (see the "Promotion flow"
 # comment in .github/workflows/nightly.yml), factored into a pure function so
 # it can be exercised directly here without a gh/release round trip.
@@ -429,6 +704,11 @@ test_explicit_official_does_not_fall_back
 test_host_stage0_is_unaffected
 test_repeated_stage1_falls_back_every_time
 test_fallback_and_host_both_fail
+test_no_fallback_official_fails
+test_no_fallback_official_fails_explicit_mode
+test_no_fallback_official_succeeds
+test_no_official_asset_skips
+test_unexpected_failure_emits_no_resolved_output
 test_promotion_decide
 
 echo
