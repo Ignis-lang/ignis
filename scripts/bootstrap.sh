@@ -1505,6 +1505,7 @@ run_gate_g7_for() {
     --compiler "$(stage_bin "$stage")" \
     --std "${PROJECT_ROOT}/std" \
     "${reference_arguments[@]}" \
+    --gate-id "$gate_id" \
     --counts-json "$counts" \
     --report "$report" \
     --gate-json "$gate_file" || true

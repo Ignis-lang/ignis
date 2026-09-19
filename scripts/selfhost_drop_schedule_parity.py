@@ -141,6 +141,10 @@ class Settings:
   host: Path | None = None
   host_compare: bool = False
   compare_everything: bool = False
+  # What the gate file calls itself. The pull-request run against stage1
+  # writes `G7-STAGE1`, which the promotion report lists as an unscored row
+  # instead of confusing it with the ladder's own G7.
+  gate_id: str = GATE_ID
 
 
 @dataclass
@@ -771,7 +775,7 @@ def build_gate(
   healthy = total > 0 and passed == total and not stale and not cross_check_failures
 
   gate = {
-    "gate": GATE_ID,
+    "gate": settings.gate_id,
     "status": "pass" if healthy else "fail",
     "summary": f"drop-schedule parity {passed}/{total} {scope} vs {source}{stale_note}{cross_note}{retry_note}",
     "details": {
@@ -901,6 +905,11 @@ def parse_arguments(repository_root: Path) -> argparse.Namespace:
   parser.add_argument("--report", type=Path, help="markdown report path")
   parser.add_argument("--counts-json", type=Path, help="per-class counts JSON path")
   parser.add_argument("--gate-json", type=Path, help="bootstrap gate result path")
+  parser.add_argument(
+    "--gate-id",
+    default=GATE_ID,
+    help=f"what the gate file calls itself (default: {GATE_ID}; the stage1 PR run uses {GATE_ID}-STAGE1)",
+  )
 
   arguments = parser.parse_args()
 
@@ -934,6 +943,7 @@ def main() -> int:
     host=arguments.host,
     host_compare=arguments.host_compare,
     compare_everything=arguments.compare_everything,
+    gate_id=arguments.gate_id,
   )
 
   cases = collect_cases(repository_root, arguments.extra, arguments.project, arguments.filter)
