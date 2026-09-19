@@ -373,6 +373,7 @@ function compileAndLinkUnits(
   stdRoot: &Path::PathBuf,
   profile: &BuildProfile,
   file: &SourceFile,
+  statusToStderr: boolean,
 ): u64 {
   let cc: str = profile.cc.toStr();
   let runtimeDir: Path::PathBuf = stdRoot.join("runtime");
@@ -403,7 +404,7 @@ function compileAndLinkUnits(
     TestRunner::jobLimit(),
   )) {
     renderBagToStderr(&compileBag, file);
-    Io::println(String::create("  link: failed"));
+    printStatus(String::create("  link: failed"), statusToStderr);
     return 1;
   }
 
@@ -423,11 +424,11 @@ function compileAndLinkUnits(
     &linkFlags,
   )) {
     renderBagToStderr(&linkBag, file);
-    Io::println(String::create("  link: failed"));
+    printStatus(String::create("  link: failed"), statusToStderr);
     return 1;
   }
 
-  Io::println(`  link: ${outputPath.asStr()}`);
+  printStatus(`  link: ${outputPath.asStr()}`, statusToStderr);
   return 0;
 }
 
@@ -453,6 +454,8 @@ record CompileOptions {
   public dumpOwnershipReport: boolean;
   /// Limits the ownership report to one function by name; empty keeps all.
   public ownershipReportFunction: String;
+  /// Send progress lines to stderr so stdout carries only report records.
+  public statusToStderr: boolean;
 
   public static build(emitCode: boolean): CompileOptions {
     return CompileOptions {
@@ -464,6 +467,7 @@ record CompileOptions {
       dumpDropSchedule: false,
       dumpOwnershipReport: false,
       ownershipReportFunction: String::new(),
+      statusToStderr: false,
     };
   }
 }
@@ -563,15 +567,36 @@ function collectDiagnosticMessages(
   }
 }
 
+/// Where a run's progress lines go.
+///
+/// `--dump-ownership-report` writes JSON Lines to stdout, and a reader piping
+/// that into a JSON tool gets a parse error from the first phase line. With the
+/// flag on, every status line moves to stderr and stdout carries records alone.
+/// `--dump-drop-schedule` keeps writing to stdout, because gate G7 diffs
+/// exactly those bytes against the host.
+function printStatus(message: String, toStderr: boolean): void {
+  if (toStderr) {
+    Io::eprintln(message);
+    return;
+  }
+
+  Io::println(message);
+}
+
 /// Render a module-discovery failure the way the phase lines do.
-function reportDiscoveryFailure(diagnostics: &DiagnosticBag, file: &SourceFile): void {
+function reportDiscoveryFailure(
+  diagnostics: &DiagnosticBag,
+  file: &SourceFile,
+  statusToStderr: boolean,
+): void {
   let discoveryErrors: u64 = countBySeverity(diagnostics, Severity::ERROR);
   let discoveryWarnings: u64 = countBySeverity(diagnostics, Severity::WARNING);
 
-  Io::println(formatPhaseLine("discover", discoveryErrors, discoveryWarnings));
+  printStatus(formatPhaseLine("discover", discoveryErrors, discoveryWarnings), statusToStderr);
   renderBagToStderr(diagnostics, file);
-  Io::println(
-    `  summary: ${discoveryErrors} errors, ${discoveryWarnings} warnings`
+  printStatus(
+    `  summary: ${discoveryErrors} errors, ${discoveryWarnings} warnings`,
+    statusToStderr
   );
 }
 
@@ -590,6 +615,7 @@ function compileDiscovered(
   let quiet: boolean = options.quiet;
   let dumpDropSchedule: boolean = options.dumpDropSchedule;
   let dumpOwnershipReport: boolean = options.dumpOwnershipReport;
+  let statusToStderr: boolean = options.statusToStderr;
   let emitCode: boolean = options.emitCode && !options.stopAfterAnalyze;
 
   let mut errorMessages: Vector<String> = Vector::new<String>();
@@ -666,9 +692,9 @@ function compileDiscovered(
   }
 
   if (!quiet) {
-    Io::println(formatPhaseLine("lex  ", lexErrors, lexWarnings));
-    Io::println(formatPhaseLine("parse", parseErrors, parseWarnings));
-    Io::println(`  roots: ${rootCount}`);
+    printStatus(formatPhaseLine("lex  ", lexErrors, lexWarnings), statusToStderr);
+    printStatus(formatPhaseLine("parse", parseErrors, parseWarnings), statusToStderr);
+    printStatus(`  roots: ${rootCount}`, statusToStderr);
   }
 
   let frontendErrors: u64 = lexErrors + parseErrors;
@@ -676,7 +702,7 @@ function compileDiscovered(
 
   if (frontendErrors > 0) {
     if (!quiet) {
-      Io::println(String::create("  analyze: skipped (frontend errors)"));
+      printStatus(String::create("  analyze: skipped (frontend errors)"), statusToStderr);
     }
 
     let mut stopped: CompiledProgram = failedCompilation(frontendErrors, frontendWarnings);
@@ -736,7 +762,7 @@ function compileDiscovered(
   }
 
   if (!quiet) {
-    Io::println(formatPhaseLine("analyze", analyzeErrors, analyzeWarnings));
+    printStatus(formatPhaseLine("analyze", analyzeErrors, analyzeWarnings), statusToStderr);
   }
 
   // Lowering runs only over a clean analysis: its inputs assume every
@@ -744,7 +770,7 @@ function compileDiscovered(
   // `HirKind::Error` nodes, counted per module.
   if (analyzeErrors > 0) {
     if (!quiet) {
-      Io::println(String::create("  lower: skipped (analyze errors)"));
+      printStatus(String::create("  lower: skipped (analyze errors)"), statusToStderr);
     }
 
     let mut stopped: CompiledProgram = failedCompilation(
@@ -806,7 +832,7 @@ function compileDiscovered(
     }
 
     if (!quiet) {
-      Io::println(`  tests: ${tests.length()} discovered`);
+      printStatus(`  tests: ${tests.length()} discovered`, statusToStderr);
     }
   }
 
@@ -877,7 +903,7 @@ function compileDiscovered(
     collectDiagnosticMessages(&captureDiagnostics, Severity::ERROR, true, &mut errorMessages);
     collectDiagnosticMessages(&captureDiagnostics, Severity::WARNING, false, &mut warningMessages);
   } else {
-    Io::println(formatPhaseLine("capture", captureErrors, captureWarnings));
+    printStatus(formatPhaseLine("capture", captureErrors, captureWarnings), statusToStderr);
     renderBagToStderr(&captureDiagnostics, file);
   }
 
@@ -907,7 +933,7 @@ function compileDiscovered(
   let monoGenericNodes: u64 = Mono::countRemainingGenerics(&mut typeStore, &monoResult.hir);
 
   if (!quiet) {
-    Io::println(`  mono: ${monoResult.instantiations} instantiations, ${monoResult.hir.nodes.length()} nodes, ${monoGenericNodes} generic nodes left`);
+    printStatus(`  mono: ${monoResult.instantiations} instantiations, ${monoResult.hir.nodes.length()} nodes, ${monoGenericNodes} generic nodes left`, statusToStderr);
   }
 
   // Ownership and borrow checking runs over the monomorphized HIR, the same
@@ -929,7 +955,7 @@ function compileDiscovered(
 
     let filter: str = options.ownershipReportFunction.toStr();
 
-    let summary: String = Borrowck::OwnershipReport::renderSummary(
+    let reports: Vector<Borrowck::OwnershipReport::FunctionReport> = Borrowck::OwnershipReport::build(
       &monoResult.hir,
       &defStore,
       &symbols,
@@ -940,19 +966,8 @@ function compileDiscovered(
       filter,
     );
 
-    let report: String = Borrowck::OwnershipReport::renderJson(
-      &monoResult.hir,
-      &defStore,
-      &symbols,
-      &checked.dropSchedules,
-      &checked.ownershipEvents,
-      &files,
-      workingDirectory.toStr(),
-      filter,
-    );
-
-    Io::eprint(summary);
-    Io::print(report);
+    Io::eprint(Borrowck::OwnershipReport::renderSummary(&reports));
+    Io::print(Borrowck::OwnershipReport::renderJson(&reports));
   }
 
   if (dumpDropSchedule) {
@@ -980,7 +995,7 @@ function compileDiscovered(
     collectDiagnosticMessages(&checked.diagnostics, Severity::ERROR, true, &mut errorMessages);
     collectDiagnosticMessages(&checked.diagnostics, Severity::WARNING, false, &mut warningMessages);
   } else {
-    Io::println(formatPhaseLine("ownership", ownershipErrors, ownershipWarnings));
+    printStatus(formatPhaseLine("ownership", ownershipErrors, ownershipWarnings), statusToStderr);
     renderBagToStderr(&checked.diagnostics, file);
   }
 
@@ -1010,8 +1025,8 @@ function compileDiscovered(
   let verifyFindings: Vector<String> = LirVerify::verifyProgram(&mut defStore, &mut typeStore, &lirResult.program);
 
   if (!quiet) {
-    Io::println(`  lower: ${hirErrorNodes} error nodes, ${hirNodes} hir nodes, ${loweredModules} modules`);
-    Io::println(`  lir: ${lirResult.unsupported} unsupported, ${lirResult.loweredFunctions} functions, ${verifyFindings.length()} verify errors`);
+    printStatus(`  lower: ${hirErrorNodes} error nodes, ${hirNodes} hir nodes, ${loweredModules} modules`, statusToStderr);
+    printStatus(`  lir: ${lirResult.unsupported} unsupported, ${lirResult.loweredFunctions} functions, ${verifyFindings.length()} verify errors`, statusToStderr);
   }
 
   // The harness translation unit defines `main` and calls the selected tests
@@ -1059,8 +1074,9 @@ function compileDiscovered(
   );
 
   if (!quiet) {
-    Io::println(
-      `  codegen: ${emitResult.unsupported} unsupported, ${emitResult.functions} functions, ${emitResult.source.length()} bytes`
+    printStatus(
+      `  codegen: ${emitResult.unsupported} unsupported, ${emitResult.functions} functions, ${emitResult.source.length()} bytes`,
+      statusToStderr
     );
   }
 
@@ -1139,7 +1155,7 @@ function discoverFor(
     },
     Result::ERROR(diagnostics) -> {
       let file: SourceFile = entrySourceFile(startPath);
-      reportDiscoveryFailure(&diagnostics, &file);
+      reportDiscoveryFailure(&diagnostics, &file, options.dumpOwnershipReport);
       return Option::NONE;
     },
   };
@@ -1162,9 +1178,10 @@ function runCompile(
   checkOnly: boolean,
   projectMode: boolean,
 ): i32 {
+  let statusToStderr: boolean = options.dumpOwnershipReport;
   let banner: str = checkOnly ? "ignis selfhost check" : "ignis selfhost (partial pipeline)";
-  Io::println(String::create(banner));
-  Io::println(`  source: ${startPath.asStr()}`);
+  printStatus(String::create(banner), statusToStderr);
+  printStatus(`  source: ${startPath.asStr()}`, statusToStderr);
 
   let Option::SOME(discovery) = discoverFor(startPath, options, false) else {
     return 1;
@@ -1176,6 +1193,7 @@ function runCompile(
   compileOptions.dumpDropSchedule = options.dumpDropSchedule;
   compileOptions.dumpOwnershipReport = options.dumpOwnershipReport;
   compileOptions.ownershipReportFunction = options.ownershipReportFunction.clone();
+  compileOptions.statusToStderr = options.dumpOwnershipReport;
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
   let mut linkErrors: u64 = 0;
 
@@ -1190,9 +1208,9 @@ function runCompile(
     }
 
     if (let Result::ERROR(_) = Fs::writeString(&artifacts.source, &compiled.source)) {
-      Io::println(`  emit: could not write ${artifacts.source.asStr()}`);
+      printStatus(`  emit: could not write ${artifacts.source.asStr()}`, statusToStderr);
     } else {
-      Io::println(`  emit: ${artifacts.source.asStr()}`);
+      printStatus(`  emit: ${artifacts.source.asStr()}`, statusToStderr);
 
       let mut sourcePaths: Vector<Path::PathBuf> = Vector::new<Path::PathBuf>();
       sourcePaths.push(artifacts.source.clone());
@@ -1208,6 +1226,7 @@ function runCompile(
           &discovery.stdRoot,
           &profile,
           &file,
+          statusToStderr,
         );
       }
     }
@@ -1215,8 +1234,9 @@ function runCompile(
 
   let totalErrors: u64 = compiled.errors + linkErrors;
 
-  Io::println(
-    `  summary: ${totalErrors} errors, ${compiled.warnings} warnings`
+  printStatus(
+    `  summary: ${totalErrors} errors, ${compiled.warnings} warnings`,
+    statusToStderr
   );
 
   if (totalErrors > 0) {
@@ -1793,7 +1813,7 @@ function runProjectTests(startPath: &Path::PathBuf, options: &CliOptions): i32 {
 
   let binaryPath: Path::PathBuf = Path::PathBuf::fromString(&outputPath);
 
-  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &binaryPath, &discovery.stdRoot, &profile, &file) > 0) {
+  if (compileAndLinkUnits(&sourcePaths, &objectPaths, &binaryPath, &discovery.stdRoot, &profile, &file, false) > 0) {
     Io::eprintln(String::create("error: test setup failed"));
     return 1;
   }
@@ -2915,7 +2935,7 @@ function buildStandardLibrary(startPath: &Path::PathBuf, options: &CliOptions): 
     Result::OK(value) -> value,
     Result::ERROR(diagnostics) -> {
       let startFile: SourceFile = entrySourceFile(startPath);
-      reportDiscoveryFailure(&diagnostics, &startFile);
+      reportDiscoveryFailure(&diagnostics, &startFile, false);
       return 1;
     },
   };

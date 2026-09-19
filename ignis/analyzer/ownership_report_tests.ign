@@ -1,7 +1,7 @@
 import Vector from "std::vector";
 import Test from "std::test";
 
-import DiagnosticBag, Severity, SourceFile from "@compiler::diagnostics";
+import DiagnosticBag, DiagnosticCode, Severity, SourceFile from "@compiler::diagnostics";
 import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import ParseOutput, Parser from "@compiler::parser";
@@ -35,18 +35,40 @@ function ownershipReportCountErrors(bag: &DiagnosticBag): u64 {
   return count;
 }
 
+/// Whether `bag` holds a diagnostic spelled `code`, at any severity.
+function ownershipReportBagHasCode(bag: &DiagnosticBag, code: str): boolean {
+  let mut index: u64 = 0;
+
+  while (index < bag.length()) {
+    if (let Option::SOME(diagnostic) = bag.get(index)) {
+      let reported: String = diagnostic.code.toString();
+
+      if (reported.equals(code)) {
+        return true;
+      }
+    }
+
+    index += 1;
+  }
+
+  return false;
+}
+
 /// What one run of the checker produced, kept together so the JSON and the
 /// summary of one program are rendered from the same walk.
 record OwnershipReportRun {
   public json: String;
   public summary: String;
   public ownershipErrors: u64;
+  public hasCode: boolean;
+  public eventForCode: boolean;
 }
 
 /// Parses, analyzes, lowers and ownership-checks `source` with the report on,
 /// then renders it exactly as `--dump-ownership-report` would for a single
-/// file named `test.ign`.
-function runOwnershipReport(source: str, filter: str): OwnershipReportRun {
+/// file named `test.ign`. `code` is the diagnostic the caller expects, or the
+/// empty string when it expects none.
+function runOwnershipReport(source: str, filter: str, code: str): OwnershipReportRun {
   let file: SourceFile = SourceFile::create("test.ign", source);
   let parsed: ParseOutput = Parser::parseFile(&file);
 
@@ -94,25 +116,49 @@ function runOwnershipReport(source: str, filter: str): OwnershipReportRun {
   let mut files: Vector<SourceFile> = Vector::new<SourceFile>();
   files.push(SourceFile::create("test.ign", source));
 
-  let json: String = Borrowck::OwnershipReport::renderJson(
-    &hir, &defStore, &symbols, &checked.dropSchedules, &checked.ownershipEvents, &files, "", filter,
-  );
-  let summary: String = Borrowck::OwnershipReport::renderSummary(
+  let reports: Vector<Borrowck::OwnershipReport::FunctionReport> = Borrowck::OwnershipReport::build(
     &hir, &defStore, &symbols, &checked.dropSchedules, &checked.ownershipEvents, &files, "", filter,
   );
 
   return OwnershipReportRun {
-    json: json,
-    summary: summary,
+    json: Borrowck::OwnershipReport::renderJson(&reports),
+    summary: Borrowck::OwnershipReport::renderSummary(&reports),
     ownershipErrors: ownershipReportCountErrors(&checked.diagnostics),
+    hasCode: ownershipReportBagHasCode(&checked.diagnostics, code),
+    eventForCode: ownershipReportEventsHaveCode(&checked.ownershipEvents, code),
   };
+}
+
+/// Whether the walk recorded a diagnostic event spelled `code`.
+function ownershipReportEventsHaveCode(
+  events: &Vector<Borrowck::OwnershipEvent>,
+  code: str,
+): boolean {
+  let mut index: u64 = 0;
+
+  while (index < events.length()) {
+    if (let Option::SOME(event) = events.get(index)) {
+      let recorded: String = event.code.toString();
+
+      if (recorded.equals(code)) {
+        return true;
+      }
+    }
+
+    index += 1;
+  }
+
+  return false;
 }
 
 const OWNERSHIP_REPORT_RESOURCE: str = "@implements(Drop)\nrecord Resource {\n  public value: i32;\n\n  drop(&mut self): void {\n    return;\n  }\n}\n";
 
 /// A program that reaches every event kind the report models except the
-/// diagnostic one: it moves, borrows, overwrites, returns early, matches on a
-/// reference scrutinee and returns a capturing closure through an alias.
+/// diagnostic one: it moves (as a call argument, a `let` initializer and a
+/// closure capture), borrows, overwrites, returns early, matches on a
+/// reference scrutinee, owns the arm bindings of a match over an owned
+/// scrutinee, drops on a chained `let` condition's failing and skipped paths,
+/// and returns a capturing closure through an alias.
 function ownershipReportWideSource(): String {
   let mut source: String = String::create(OWNERSHIP_REPORT_RESOURCE);
   source.pushStr("\nenum Slot {\n  Filled(Resource),\n  Empty,\n}\n");
@@ -120,18 +166,25 @@ function ownershipReportWideSource(): String {
   source.pushStr("\nfunction consume(resource: Resource): i32 {\n  return resource.value;\n}\n");
   source.pushStr("\nfunction readSlot(slot: &Slot): i32 {\n  match (slot) {\n    Slot::Filled(inner) -> {\n      return inner.value;\n    },\n    Slot::Empty -> {\n      return 0;\n    },\n  };\n\n  return -1;\n}\n");
   source.pushStr("\nfunction makeCounter(start: i32): (i32) -> i32 {\n  let counter = (step: i32): i32 -> step + start;\n  let alias = counter;\n\n  return alias;\n}\n");
+  source.pushStr("\nfunction captureByMove(): i32 {\n  let held: Resource = Resource { value: 7 };\n  let read = (): i32 -> consume(@move held);\n\n  return read();\n}\n");
+  source.pushStr("\nfunction makeSlot(value: i32): Slot {\n  return Slot::Filled(Resource { value: value });\n}\n");
+  source.pushStr("\nfunction takeSlot(slot: Slot): i32 {\n  match (slot) {\n    Slot::Filled(inner) -> {\n      return inner.value;\n    },\n    Slot::Empty -> {\n      return 0;\n    },\n  };\n\n  return -1;\n}\n");
+  source.pushStr("\nfunction chainedConditions(flag: boolean): i32 {\n  let first: Slot = makeSlot(1);\n  let second: Slot = makeSlot(2);\n\n  if (let Slot::Filled(left) = first && let Slot::Filled(right) = second) {\n    return left.value + right.value;\n  }\n\n  return 0;\n}\n");
+  source.pushStr("\nfunction skippedCondition(flag: boolean): i32 {\n  let only: Slot = makeSlot(3);\n\n  if (flag && let Slot::Filled(inner) = only) {\n    return inner.value;\n  }\n\n  return 0;\n}\n");
   source.pushStr("\nfunction borrowAndOverwrite(flag: boolean): i32 {\n  let mut held: Resource = Resource { value: 1 };\n  let seen: i32 = readValue(&held);\n\n  if (flag) {\n    return seen;\n  }\n\n  held = Resource { value: 2 };\n\n  let moved: Resource = held;\n  return consume(moved) + seen;\n}\n");
-  source.pushStr("\nfunction main(): i32 {\n  let slot: Slot = Slot::Filled(Resource { value: 3 });\n  let read: i32 = readSlot(&slot);\n  let counter: (i32) -> i32 = makeCounter(read);\n\n  return borrowAndOverwrite(false) + counter(1);\n}\n");
+  source.pushStr("\nfunction main(): i32 {\n  let slot: Slot = Slot::Filled(Resource { value: 3 });\n  let read: i32 = readSlot(&slot);\n  let counter: (i32) -> i32 = makeCounter(read);\n\n  return borrowAndOverwrite(false) + counter(1) + captureByMove() + chainedConditions(true) + skippedCondition(false) + takeSlot(makeSlot(4));\n}\n");
   return source;
 }
 
-/// Scenario: one program covering move, borrow open and release, drop with
-/// every reason it can carry here, closure environment ownership and aliasing,
-/// and a by-reference pattern binding.
+/// Scenario: one program covering move (including a closure capture), borrow
+/// open and release, drop with every reason it can carry here — scope end,
+/// return, overwrite, match arm end, condition fail and condition skip —
+/// closure environment ownership and aliasing, and a by-reference pattern
+/// binding.
 @test
 function ownershipReportCoversEveryEventKind(): void {
   let source: String = ownershipReportWideSource();
-  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "");
+  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "", "");
 
   Test::assertEq<u64>(run.ownershipErrors, 0);
   Test::assertSnapshot("ownership-report-wide", run.json.toStr());
@@ -142,9 +195,62 @@ function ownershipReportCoversEveryEventKind(): void {
 @test
 function ownershipReportFunctionFilterKeepsOneRecord(): void {
   let source: String = ownershipReportWideSource();
-  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "borrowAndOverwrite");
+  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "borrowAndOverwrite", "");
 
   Test::assertSnapshot("ownership-report-filtered", run.json.toStr());
+}
+
+/// Scenario: a bare filter reaches a method through the last segment of its
+/// qualified path, and the qualified spelling of the same method selects it
+/// exactly. Both records name the qualified path and the symbol.
+@test
+function ownershipReportFilterAcceptsBareAndQualifiedNames(): void {
+  let mut source: String = String::create("namespace Tools {\n  function bump(value: i32): i32 {\n    return value + 1;\n  }\n}\n");
+  source.pushStr("\nfunction main(): i32 {\n  return Tools::bump(1);\n}\n");
+
+  let bare: OwnershipReportRun = runOwnershipReport(source.toStr(), "bump", "");
+  let qualified: OwnershipReportRun = runOwnershipReport(source.toStr(), "Tools::bump", "");
+
+  Test::assertEq<str>(bare.json.toStr(), qualified.json.toStr());
+  Test::assertSnapshot("ownership-report-filter-names", bare.json.toStr());
+}
+
+/// Scenario: the bare-name rule against the symbols monomorphization mangles.
+/// A method's name sits last (`Vector__String__push`) and a generic function's
+/// name sits first (`new__String`), so a reader typing either name has to
+/// reach the instantiation. Checked against the rule directly, because
+/// mangled symbols only exist after monomorphization and this harness stops
+/// at the ownership walk.
+@test
+function ownershipReportFilterReachesMangledInstantiations(): void {
+  let method: String = String::create("Vector__String__push");
+  let generic: String = String::create("new__String");
+  let plain: String = String::create("Counter::bump");
+
+  Test::assertEq<boolean>(
+    Borrowck::OwnershipReport::nameMatchesFilter(&method, "Vector__String__push", "push"),
+    true
+  );
+  Test::assertEq<boolean>(
+    Borrowck::OwnershipReport::nameMatchesFilter(&generic, "new__String", "new"),
+    true
+  );
+  Test::assertEq<boolean>(
+    Borrowck::OwnershipReport::nameMatchesFilter(&method, "Vector__String__push", "pop"),
+    false
+  );
+  Test::assertEq<boolean>(
+    Borrowck::OwnershipReport::nameMatchesFilter(&plain, "bump", "Counter::bump"),
+    true
+  );
+  Test::assertEq<boolean>(
+    Borrowck::OwnershipReport::nameMatchesFilter(&plain, "bump", "Other::bump"),
+    false
+  );
+  Test::assertEq<boolean>(
+    Borrowck::OwnershipReport::nameMatchesFilter(&plain, "bump", ""),
+    true
+  );
 }
 
 /// Scenario: the stderr summary of the filtered report, which is what a reader
@@ -152,9 +258,26 @@ function ownershipReportFunctionFilterKeepsOneRecord(): void {
 @test
 function ownershipReportSummaryCountsEventsPerFunction(): void {
   let source: String = ownershipReportWideSource();
-  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "borrowAndOverwrite");
+  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "borrowAndOverwrite", "");
 
   Test::assertSnapshot("ownership-report-summary", run.summary.toStr());
+}
+
+/// Scenario: a reference handed to a call is one logical borrow, even though
+/// the walk visits it twice — once as the `&x` expression and once as the
+/// call's temporary borrow. Opens and releases must balance and must not
+/// double.
+@test
+function ownershipReportCountsOneBorrowPerReference(): void {
+  let mut source: String = String::create("record Counter {\n  public value: i32;\n}\n");
+  source.pushStr("\nfunction read(counter: &Counter): i32 {\n  return counter.value;\n}\n");
+  source.pushStr("\nfunction bump(counter: &mut Counter): void {\n  counter.value += 1;\n}\n");
+  source.pushStr("\nfunction main(): i32 {\n  let mut counter: Counter = Counter { value: 0 };\n  bump(&mut counter);\n\n  return read(&counter);\n}\n");
+
+  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "main", "");
+
+  Test::assertEq<u64>(run.ownershipErrors, 0);
+  Test::assertSnapshot("ownership-report-one-borrow-per-reference", run.summary.toStr());
 }
 
 /// Scenario: a use after move. The diagnostic event carries the code and the
@@ -166,7 +289,7 @@ function ownershipReportRecordsDiagnosticsWithOwnershipState(): void {
   source.pushStr("\nfunction consume(resource: Resource): i32 {\n  return resource.value;\n}\n");
   source.pushStr("\nfunction main(): i32 {\n  let held: Resource = Resource { value: 1 };\n  let first: i32 = consume(held);\n  let second: i32 = consume(held);\n\n  return first + second;\n}\n");
 
-  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "main");
+  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "main", "");
 
   Test::assertEq<u64>(run.ownershipErrors, 1);
   Test::assertSnapshot("ownership-report-diagnostic", run.json.toStr());
@@ -176,8 +299,108 @@ function ownershipReportRecordsDiagnosticsWithOwnershipState(): void {
 /// between two builds shows a function that lost all of its events.
 @test
 function ownershipReportListsFunctionsWithoutEvents(): void {
-  let run: OwnershipReportRun = runOwnershipReport("function main(): i32 {\n  return 0;\n}\n", "");
+  let run: OwnershipReportRun = runOwnershipReport("function main(): i32 {\n  return 0;\n}\n", "", "");
 
   Test::assertEq<u64>(run.ownershipErrors, 0);
   Test::assertSnapshot("ownership-report-empty", run.json.toStr());
+}
+
+/// A program that provokes the diagnostic spelled `code`, paired with it.
+record OwnershipDiagnosticCase {
+  public code: str;
+  public source: String;
+}
+
+function ownershipDiagnosticCase(code: str, body: str): OwnershipDiagnosticCase {
+  let mut source: String = String::create(OWNERSHIP_REPORT_RESOURCE);
+  source.pushStr(body);
+
+  return OwnershipDiagnosticCase { code: code, source: source };
+}
+
+/// One program per diagnostic this checker can emit, in the order
+/// `Borrowck::ownershipDiagnosticCodes` lists them.
+function ownershipDiagnosticCases(): Vector<OwnershipDiagnosticCase> {
+  let mut cases: Vector<OwnershipDiagnosticCase> = Vector::new<OwnershipDiagnosticCase>();
+
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::USE_AFTER_MOVE,
+    "\nfunction consume(resource: Resource): i32 {\n  return resource.value;\n}\n\nfunction main(): i32 {\n  let held: Resource = Resource { value: 1 };\n  return consume(held) + consume(held);\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::USE_AFTER_DROP,
+    "\nfunction main(): i32 {\n  let mut held: Resource = Resource { value: 1 };\n  held.drop();\n\n  return held.value;\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::DOUBLE_DROP,
+    "\nfunction main(): i32 {\n  let mut held: Resource = Resource { value: 1 };\n  held.drop();\n  held.drop();\n\n  return 0;\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::CANNOT_MOVE_OUT_OF_BORROW,
+    "\nenum Slot {\n  Filled(Resource),\n  Empty,\n}\n\nfunction consume(resource: Resource): i32 {\n  return resource.value;\n}\n\nfunction readSlot(slot: &Slot): i32 {\n  match (slot) {\n    Slot::Filled(inner) -> {\n      return consume(inner);\n    },\n    Slot::Empty -> {\n      return 0;\n    },\n  };\n\n  return -1;\n}\n\nfunction main(): i32 {\n  let slot: Slot = Slot::Filled(Resource { value: 1 });\n  return readSlot(&slot);\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::BORROW_MUTABLE_WHILE_MUTABLE,
+    "\nfunction main(): i32 {\n  let mut held: Resource = Resource { value: 1 };\n  let first: &mut Resource = &mut held;\n  let second: &mut Resource = &mut held;\n\n  return first.value + second.value;\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::BORROW_MUTABLE_WHILE_IMMUTABLE,
+    "\nfunction main(): i32 {\n  let mut held: Resource = Resource { value: 1 };\n  let shared: &Resource = &held;\n  let exclusive: &mut Resource = &mut held;\n\n  return shared.value + exclusive.value;\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::BORROW_IMMUTABLE_WHILE_MUTABLE,
+    "\nfunction main(): i32 {\n  let mut held: Resource = Resource { value: 1 };\n  let exclusive: &mut Resource = &mut held;\n  let shared: &Resource = &held;\n\n  return exclusive.value + shared.value;\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::INCONSISTENT_MOVE_IN_BRANCHES,
+    "\nfunction consume(resource: Resource): i32 {\n  return resource.value;\n}\n\nfunction main(): i32 {\n  let held: Resource = Resource { value: 1 };\n  let mut total: i32 = 0;\n\n  if (total == 0) {\n    total += consume(held);\n  }\n\n  return total;\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::INCONSISTENT_DROP_IN_BRANCHES,
+    "\nfunction main(): i32 {\n  let mut held: Resource = Resource { value: 1 };\n  let mut total: i32 = 0;\n\n  if (total == 0) {\n    held.drop();\n  }\n\n  return total;\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::MUTATED_WHILE_BORROWED,
+    "\nfunction main(): i32 {\n  let mut held: Resource = Resource { value: 1 };\n  let shared: &Resource = &held;\n  held = Resource { value: 2 };\n\n  return shared.value;\n}\n"
+  ));
+  cases.push(ownershipDiagnosticCase(
+    DiagnosticCode::DROP_ON_COMPLEX_RECEIVER,
+    "\nfunction make(): Resource {\n  return Resource { value: 1 };\n}\n\nfunction main(): i32 {\n  make().drop();\n\n  return 0;\n}\n"
+  ));
+
+  return cases;
+}
+
+/// Scenario: every ownership diagnostic the checker can emit also reaches the
+/// report. The table is checked against `Borrowck::ownershipDiagnosticCodes`,
+/// so a code added to the checker without a case here fails this test rather
+/// than leaving a silent hole in the report.
+@test
+function ownershipReportRecordsEveryDiagnosticCode(): void {
+  let codes: Vector<str> = Borrowck::ownershipDiagnosticCodes();
+  let cases: Vector<OwnershipDiagnosticCase> = ownershipDiagnosticCases();
+
+  Test::assertEq<u64>(cases.length(), codes.length());
+
+  let mut index: u64 = 0;
+
+  while (index < codes.length()) {
+    let Option::SOME(code) = codes.get(index) else {
+      index += 1;
+      continue;
+    };
+    let Option::SOME(current) = cases.get(index) else {
+      index += 1;
+      continue;
+    };
+
+    Test::assertEq<str>(current.code, *code);
+
+    let run: OwnershipReportRun = runOwnershipReport(current.source.toStr(), "", *code);
+
+    Test::assertEq<boolean>(run.hasCode, true);
+    Test::assertEq<boolean>(run.eventForCode, true);
+
+    index += 1;
+  }
 }
