@@ -3780,31 +3780,66 @@ export namespace CodegenC {
   /// `crates/ignis_codegen_c/src/emit.rs`, and writes the same wrapper text.
   const ALLOC_TRACE_REPORT_SYMBOL: str = "ignis_alloc_trace_report";
 
+  /// Written name of the std function that carries the symbol above.
+  ///
+  /// A user function has to match both this and the `@externName` before the
+  /// wrapper will call it, so an `@externName("ignis_alloc_trace_report")` on
+  /// some unrelated function with the feature off cannot make the wrapper call
+  /// a symbol dead-code elimination then removes. The name is also in the
+  /// reserved list in `ignis/codegen/reserved.ign`.
+  const ALLOC_TRACE_REPORT_NAME: str = "ignisAllocTraceReport";
+
   /// Whether the std allocation tracer is part of this build.
-  function allocTraceEnabled(defStore: &mut Analyzer::DefinitionStore): boolean {
+  function allocTraceEnabled(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+  ): boolean {
     let mut index: u64 = 0;
 
     while (index < defStore.length()) {
       let id: Analyzer::DefinitionId = Id::fromRaw<Analyzer::DefinitionTag>(index as u32);
 
-      if (let Option::SOME(definition) = defStore.get(id)) {
-        let found: boolean = match (definition) {
-          Analyzer::Definition::Function(functionDef) -> match (&functionDef.externName) {
-            Option::SOME(name) -> name.equals(CodegenC::ALLOC_TRACE_REPORT_SYMBOL),
-            Option::NONE -> false,
-          },
-          _ -> false,
-        };
-
-        if (found) {
-          return true;
-        }
+      if (CodegenC::isAllocTraceReport(defStore, symbols, id)) {
+        return true;
       }
 
       index += 1;
     }
 
     return false;
+  }
+
+  function isAllocTraceReport(
+    defStore: &mut Analyzer::DefinitionStore,
+    symbols: &mut Analyzer::SymbolTable,
+    defId: Analyzer::DefinitionId,
+  ): boolean {
+    let Option::SOME(definition) = defStore.get(defId) else {
+      return false;
+    };
+
+    let named: boolean = match (definition) {
+      Analyzer::Definition::Function(functionDef) -> match (&functionDef.externName) {
+        Option::SOME(name) -> name.equals(CodegenC::ALLOC_TRACE_REPORT_SYMBOL),
+        Option::NONE -> false,
+      },
+      _ -> false,
+    };
+
+    if (!named) {
+      return false;
+    }
+
+    let Option::SOME(definitionAgain) = defStore.get(defId) else {
+      return false;
+    };
+    let nameSymbol: Analyzer::SymbolId = definitionAgain.name();
+
+    let Option::SOME(text) = symbols.resolve(nameSymbol) else {
+      return false;
+    };
+
+    return text.equals(CodegenC::ALLOC_TRACE_REPORT_NAME);
   }
 
   /// The C `main` around the program's entry point, as the host writes it:
@@ -3836,7 +3871,7 @@ export namespace CodegenC {
       call = `${name.toStr()}((i32)argc, (const char**)argv)`;
     }
 
-    let allocTrace: boolean = CodegenC::allocTraceEnabled(defStore);
+    let allocTrace: boolean = CodegenC::allocTraceEnabled(defStore, symbols);
     let mut report: String = String::create("");
     let mut prototype: String = String::create("");
 

@@ -33,6 +33,9 @@ const USER_MAIN_SYMBOL: &str = "__ignis_user_main";
 /// call. Presence of the definition *is* the feature being on, and it cannot
 /// disagree with the std the program links against.
 const ALLOC_TRACE_REPORT_SYMBOL: &str = "ignis_alloc_trace_report";
+
+/// Written name of the std function that carries [`ALLOC_TRACE_REPORT_SYMBOL`].
+const ALLOC_TRACE_REPORT_IGNIS_NAME: &str = "ignisAllocTraceReport";
 const GENERATED_C_LINE_FILE: &str = "<generated-c>";
 
 /// One closure env struct's info: the owning thunk, its captured field types,
@@ -2194,16 +2197,23 @@ impl<'a> CEmitter<'a> {
   }
 
   /// Whether the std allocation tracer is part of this build.
+  ///
+  /// Only a std-classified definition counts. A user function carrying the same
+  /// `@externName` is not the tracer: with the feature off it is also dead code,
+  /// and calling it from the wrapper would leave the link with an undefined
+  /// reference. The symbol is reserved in `reserved.rs` for the same reason.
   fn alloc_trace_enabled(&self) -> bool {
-    self.defs.iter().any(|(_, def)| {
+    self.defs.iter().any(|(def_id, def)| {
       let attrs = match &def.kind {
         DefinitionKind::Function(function) => &function.attrs,
         _ => return false,
       };
 
-      attrs
+      let named = attrs
         .iter()
-        .any(|attr| matches!(attr, FunctionAttr::ExternName(name) if name == ALLOC_TRACE_REPORT_SYMBOL))
+        .any(|attr| matches!(attr, FunctionAttr::ExternName(name) if name == ALLOC_TRACE_REPORT_SYMBOL));
+
+      named && self.symbols.get(&def.name) == ALLOC_TRACE_REPORT_IGNIS_NAME && self.classify(def_id).is_std()
     })
   }
 

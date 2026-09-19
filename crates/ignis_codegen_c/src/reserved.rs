@@ -209,6 +209,7 @@ const EMITTER_OWNED_NAMES: &[&str] = &[
   "__ignis_drop_state",
   "__ignis_main_result",
   "__ignis_user_main",
+  "ignis_alloc_trace_report",
   "ignis_runtime_init",
   "main",
 ];
@@ -274,7 +275,13 @@ mod tests {
 
   #[test]
   fn emitter_owned_names_are_reserved_exactly() {
-    for name in ["__dip", "__ignis_drop_state", "__ignis_user_main", "ignis_runtime_init"] {
+    for name in [
+      "__dip",
+      "__ignis_drop_state",
+      "__ignis_user_main",
+      "ignis_runtime_init",
+      "ignis_alloc_trace_report",
+    ] {
       assert!(is_reserved_c_name(name), "{} should be reserved", name);
     }
 

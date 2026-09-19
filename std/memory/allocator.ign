@@ -194,14 +194,17 @@ export namespace RawAllocator {
       @panic("ignis: allocation size overflow");
     }
 
+    @configFlag(@feature("alloc-trace"))
+    AllocTrace::beginEntryPoint(AllocTrace::ENTRY_ALLOCATE_ZEROED);
+
     let pointer: *mut u8 = RawAllocator::allocateAligned(total, alignment);
+
+    @configFlag(@feature("alloc-trace"))
+    AllocTrace::endEntryPoint();
 
     if (pointer != null) {
       LibC::MemoryOperations::memset(pointer as *mut void, 0, total);
     }
-
-    @configFlag(@feature("alloc-trace"))
-    AllocTrace::setEntryPoint(pointer, AllocTrace::ENTRY_ALLOCATE_ZEROED);
 
     return pointer;
   }
