@@ -214,16 +214,72 @@ export record BuildFingerprint {
   }
 }
 
+/// The `x` bits of a Unix mode, owner, group and other together.
+const EXECUTABLE_MODE_BITS: u32 = 73;
+
+/// Resolve a bare command name through `PATH`.
+///
+/// Returns the first entry of `PATH` that holds an executable file of that
+/// name, canonicalized. A name that already carries a separator is not a
+/// `PATH` lookup and resolves to nothing here; so does an empty `PATH` or a
+/// name that no entry holds.
+export function fingerprintResolveThroughPath(command: str): Option<Path::PathBuf> {
+  let name: String = String::create(command);
+
+  if (name.length() == 0 || name.indexOfCharFrom('/', 0).isSome()) {
+    return Option::NONE;
+  }
+
+  let Result::OK(pathVariable) = Env::var("PATH") else {
+    return Option::NONE;
+  };
+
+  let entries: Vector<String> = pathVariable.split((byte: u8): boolean -> {
+  return byte == 58;
+});
+
+  let mut index: u64 = 0;
+
+  while (index < entries.length()) {
+    let Option::SOME(entry) = entries.get(index) else {
+      break;
+    };
+
+    index += 1;
+
+    if (entry.length() == 0) {
+      continue;
+    }
+
+    let directory: Path::PathBuf = Path::PathBuf::fromString(entry);
+    let candidate: Path::PathBuf = directory.join(command);
+
+    let Result::OK(stat) = Fs::Sys::stat(candidate.asStr()) else {
+      continue;
+    };
+
+    if ((stat.mode & EXECUTABLE_MODE_BITS) == 0) {
+      continue;
+    }
+
+    if (let Result::OK(resolved) = Fs::canonicalize(&candidate)) {
+      return Option::SOME(resolved);
+    }
+  }
+
+  return Option::NONE;
+}
+
 /// Resolves the path of the currently running compiler executable.
 ///
 /// Tries the Linux `/proc/self/exe` magic symlink first (works regardless of
-/// how `argv[0]` was spelled); falls back to `argv[0]` for hosts without
-/// `/proc` (e.g. macOS), but only when it contains a path separator. A bare
-/// command name (e.g. `ignis`, found via `PATH`) would canonicalize relative
-/// to the current working directory instead of the actual binary location --
-/// in this repo, that resolves to a file under `ignis/` instead of the
-/// running executable -- so that case is treated as unresolvable rather than
-/// silently identifying the wrong file.
+/// how `argv[0]` was spelled). Without `/proc` (e.g. macOS) it falls back to
+/// `argv[0]`: a spelling that carries a separator is canonicalized directly,
+/// and a bare command name is looked up in `PATH`, which is where the shell
+/// found it. Canonicalizing a bare name directly would resolve it against the
+/// working directory instead -- in this repo, to a file under `ignis/` rather
+/// than the running executable -- so that spelling never takes the direct
+/// path.
 function fingerprintCurrentExePath(): Option<Path::PathBuf> {
   if (let Result::OK(resolved) = Fs::canonicalize("/proc/self/exe")) {
     return Option::SOME(resolved);
@@ -235,7 +291,7 @@ function fingerprintCurrentExePath(): Option<Path::PathBuf> {
   };
 
   if (arg0.indexOfCharFrom('/', 0).isNone()) {
-    return Option::NONE;
+    return fingerprintResolveThroughPath(arg0.toStr());
   }
 
   return match (Fs::canonicalize(arg0)) {
@@ -352,6 +408,15 @@ export function fingerprintCompilerIdentity(compilerVersion: str): String {
   identity.pushChar('-');
   identity.pushStr(compilerVersion);
   return identity;
+}
+
+/// Whether the running compiler's identity could be established.
+///
+/// A build cache keyed on `"unknown-<version>"` would let every compiler of
+/// that version share one identity, so a caller that would otherwise reuse
+/// artifacts has to stop consulting the cache instead of trusting a constant.
+export function fingerprintCompilerIdentityIsKnown(): boolean {
+  return fingerprintCurrentExeKey().isSome();
 }
 
 /// Compute a deterministic FNV-1a fingerprint hash for a string value.
@@ -935,6 +1000,34 @@ function fingerprintStampFromDifferentFeatureSetIsNotReused(): void {
 
   let fpUntraced: BuildFingerprint = fingerprintBaselineWithFeatures(&empty);
   Test::assertEq<boolean>(fingerprintEquals(&deserializedTraced, &fpUntraced), false);
+}
+
+/// A bare command name resolves the way the shell resolved it, through `PATH`,
+/// which is what keeps the compiler's identity real on a host without `/proc`.
+@test
+function fingerprintResolvesBareNamesThroughPath(): void {
+  let Option::SOME(shell) = fingerprintResolveThroughPath("sh") else {
+    Test::fail();
+    return;
+  };
+
+  let shellText: String = shell.toString();
+  Test::assertEq<boolean>(shellText.startsWith("/"), true);
+  Test::assertEq<boolean>(Fs::exists(shell.asStr()), true);
+
+  Test::assertEq<boolean>(fingerprintResolveThroughPath("/bin/sh").isNone(), true);
+  Test::assertEq<boolean>(fingerprintResolveThroughPath("").isNone(), true);
+  Test::assertEq<boolean>(
+    fingerprintResolveThroughPath("ignis-no-such-command-on-any-path").isNone(),
+    true
+  );
+}
+
+/// The identity of the compiler running this test is always knowable: the test
+/// binary is a real file, reached through `/proc/self/exe` or through `PATH`.
+@test
+function fingerprintKnowsTheRunningCompilerIdentity(): void {
+  Test::assertEq<boolean>(fingerprintCompilerIdentityIsKnown(), true);
 }
 
 @test
