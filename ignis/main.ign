@@ -448,6 +448,11 @@ record CompileOptions {
   /// Print the ownership checker's drop schedules to stdout right after
   /// `Borrowck::checkModule`, mirroring the host's `--dump-drop-schedule`.
   public dumpDropSchedule: boolean;
+  /// Print the fused borrow/ownership checker's decisions as JSON Lines right
+  /// after `Borrowck::checkModule`, with a short summary on stderr.
+  public dumpOwnershipReport: boolean;
+  /// Limits the ownership report to one function by name; empty keeps all.
+  public ownershipReportFunction: String;
 
   public static build(emitCode: boolean): CompileOptions {
     return CompileOptions {
@@ -457,6 +462,8 @@ record CompileOptions {
       quiet: false,
       stopAfterAnalyze: false,
       dumpDropSchedule: false,
+      dumpOwnershipReport: false,
+      ownershipReportFunction: String::new(),
     };
   }
 }
@@ -582,6 +589,7 @@ function compileDiscovered(
   let exportAll: boolean = options.exportAll;
   let quiet: boolean = options.quiet;
   let dumpDropSchedule: boolean = options.dumpDropSchedule;
+  let dumpOwnershipReport: boolean = options.dumpOwnershipReport;
   let emitCode: boolean = options.emitCode && !options.stopAfterAnalyze;
 
   let mut errorMessages: Vector<String> = Vector::new<String>();
@@ -905,12 +913,47 @@ function compileDiscovered(
   // Ownership and borrow checking runs over the monomorphized HIR, the same
   // program LIR lowering is about to walk: its drop schedules are keyed by
   // the nodes that walk visits.
-  let checked: Borrowck::BorrowckOutput = Borrowck::checkModule(
+  let checked: Borrowck::BorrowckOutput = Borrowck::checkModuleReporting(
     &mut defStore,
     &mut typeStore,
     &mut symbols,
     &monoResult.hir,
+    dumpOwnershipReport,
   );
+
+  if (dumpOwnershipReport) {
+    let workingDirectory: String = match (Env::currentDir()) {
+      Result::OK(path) -> path.toString(),
+      Result::ERROR(_) -> String::new(),
+    };
+
+    let filter: str = options.ownershipReportFunction.toStr();
+
+    let summary: String = Borrowck::OwnershipReport::renderSummary(
+      &monoResult.hir,
+      &defStore,
+      &symbols,
+      &checked.dropSchedules,
+      &checked.ownershipEvents,
+      &files,
+      workingDirectory.toStr(),
+      filter,
+    );
+
+    let report: String = Borrowck::OwnershipReport::renderJson(
+      &monoResult.hir,
+      &defStore,
+      &symbols,
+      &checked.dropSchedules,
+      &checked.ownershipEvents,
+      &files,
+      workingDirectory.toStr(),
+      filter,
+    );
+
+    Io::eprint(summary);
+    Io::print(report);
+  }
 
   if (dumpDropSchedule) {
     let workingDirectory: String = match (Env::currentDir()) {
@@ -1131,6 +1174,8 @@ function runCompile(
   let profile: BuildProfile = resolveBuildProfile(&discovery, options.optLevel);
   let mut compileOptions: CompileOptions = CompileOptions::build(!checkOnly);
   compileOptions.dumpDropSchedule = options.dumpDropSchedule;
+  compileOptions.dumpOwnershipReport = options.dumpOwnershipReport;
+  compileOptions.ownershipReportFunction = options.ownershipReportFunction.clone();
   let compiled: CompiledProgram = compileDiscovered(&discovery, &file, &compileOptions);
   let mut linkErrors: u64 = 0;
 
