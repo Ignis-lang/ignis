@@ -625,6 +625,8 @@ fn run_test_std(
   _cli: &Cli,
   cmd: &TestStdCommand,
 ) -> Result<(), ()> {
+  validate_cli_feature_names(&cmd.feature, &cmd.features)?;
+
   let std_path = resolve_std_path(cmd.std_path.as_deref());
   let output_dir = cmd.output_dir.as_deref().map(Path::new);
   let features = collect_cli_features(&cmd.feature, &cmd.features);
