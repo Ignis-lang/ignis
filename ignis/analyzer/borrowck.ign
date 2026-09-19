@@ -12,6 +12,8 @@ import Analyzer from "@compiler::analyzer";
 import Hir from "@compiler::hir";
 import Vector from "std::vector";
 
+import _ from "./ownership_report";
+
 /// HIR borrow and move checking for the Ignis selfhost compiler (IGN-38,
 /// slice A).
 ///
@@ -114,11 +116,13 @@ export namespace Borrowck {
   const BORROW_MUT: u32 = 1;
   const BORROW_SHARED_BASE: u32 = 1;
 
-  /// What one module walk produces: the diagnostics in emission order, and
-  /// the drop schedules the same walk recorded.
+  /// What one module walk produces: the diagnostics in emission order, the
+  /// drop schedules the same walk recorded, and — only when the walk was asked
+  /// for it — the ownership events `--dump-ownership-report` renders.
   record BorrowckOutput {
     public diagnostics: DiagnosticBag;
     public dropSchedules: Hir::DropSchedules;
+    public ownershipEvents: Vector<Borrowck::OwnershipEvent>;
   }
 
   /// Copy of the move map, taken around branches and loop bodies.
@@ -280,6 +284,24 @@ export namespace Borrowck {
     /// else in this checker reads it.
     currentFunction: Analyzer::DefinitionId;
 
+    /// Whether `--dump-ownership-report` asked for the events below. Every
+    /// recording site tests `isRecordingReport` before it builds anything, so
+    /// a run without the flag allocates nothing and takes one boolean test per
+    /// site.
+    reportEnabled: boolean;
+
+    /// True while walking a repeat of a body that was already walked, which is
+    /// the second pass `checkLoop` makes. The walk has to happen — it is what
+    /// finds a value moved on the second iteration — but the events it would
+    /// record are the same ones the first pass already recorded. Drop
+    /// schedules are not suppressed here: a duplicate the schedule really
+    /// holds is what this report exists to show.
+    reportSuppressed: boolean;
+
+    /// Events recorded for the function currently being walked, drained by
+    /// `checkFunction`.
+    reportEvents: Vector<Borrowck::OwnershipEvent>;
+
     public static init(): State {
       return State {
         borrowDefs: Vector::new<u32>(),
@@ -314,7 +336,49 @@ export namespace Borrowck {
         inDefer: false,
         inDropMethod: false,
         currentFunction: Id::fromRaw<Analyzer::DefinitionTag>(0),
+        reportEnabled: false,
+        reportSuppressed: false,
+        reportEvents: Vector::new<Borrowck::OwnershipEvent>(),
       };
+    }
+
+    public setReportEnabled(&mut self, value: boolean): void {
+      self.reportEnabled = value;
+    }
+
+    public setReportSuppressed(&mut self, value: boolean): void {
+      self.reportSuppressed = value;
+    }
+
+    public reportIsSuppressed(&self): boolean {
+      return self.reportSuppressed;
+    }
+
+    /// The one test every recording site makes before building an event.
+    public isRecordingReport(&self): boolean {
+      return self.reportEnabled && !self.reportSuppressed;
+    }
+
+    public pushReportEvent(&mut self, event: Borrowck::OwnershipEvent): void {
+      self.reportEvents.push(event);
+    }
+
+    /// Hands over what this function recorded and starts the next one empty.
+    public takeReportEvents(&mut self): Vector<Borrowck::OwnershipEvent> {
+      let mut taken: Vector<Borrowck::OwnershipEvent> = Vector::new<Borrowck::OwnershipEvent>();
+      let mut index: u64 = 0;
+
+      while (index < self.reportEvents.length()) {
+        if (let Option::SOME(event) = self.reportEvents.get(index)) {
+          taken.push(Borrowck::copyOwnershipEvent(event));
+        }
+
+        index += 1;
+      }
+
+      self.reportEvents = Vector::new<Borrowck::OwnershipEvent>();
+
+      return taken;
     }
 
     public setCurrentFunction(&mut self, defId: Analyzer::DefinitionId): void {
@@ -934,6 +998,7 @@ export namespace Borrowck {
     /// this runs, exactly as the oracle computes them inside `exit_block_scope`
     /// before popping.
     public popScopeReleasing(&mut self): void {
+      let closingDepth: u64 = self.ownedStarts.length();
       let _discardedBlock: Option<u32> = self.scopeBlocks.pop();
       let _discardedHasBlock: Option<u32> = self.scopeHasBlock.pop();
       let _discardedIsLoop: Option<u32> = self.scopeIsLoop.pop();
@@ -961,6 +1026,25 @@ export namespace Borrowck {
         let Option::SOME(flag) = self.heldMutable.pop() else {
           return;
         };
+
+        // A scope-held borrow is released by the scope, not by an expression,
+        // so there is no span to attribute it to; the scope depth is what
+        // pairs it with its open.
+        if (self.isRecordingReport()) {
+          self.reportEvents.push(Borrowck::OwnershipEvent {
+            kind: Borrowck::OwnershipReport::EVENT_BORROW_RELEASE,
+            functionRaw: self.currentFunction.raw(),
+            variableRaw: target,
+            hasVariable: true,
+            relatedRaw: 0,
+            hasRelated: false,
+            detail: 0,
+            flag: flag == 1,
+            scopeDepth: closingDepth,
+            code: "",
+            span: SourceSpan::new("", 0, 0),
+          });
+        }
 
         self.releaseBorrow(target, flag == 1);
       }
@@ -1065,6 +1149,180 @@ export namespace Borrowck {
 
       return false;
     }
+  }
+
+  function copyOwnershipEvent(event: &Borrowck::OwnershipEvent): Borrowck::OwnershipEvent {
+    return Borrowck::OwnershipEvent {
+      kind: event.kind,
+      functionRaw: event.functionRaw,
+      variableRaw: event.variableRaw,
+      hasVariable: event.hasVariable,
+      relatedRaw: event.relatedRaw,
+      hasRelated: event.hasRelated,
+      detail: event.detail,
+      flag: event.flag,
+      scopeDepth: event.scopeDepth,
+      code: event.code,
+      span: event.span,
+    };
+  }
+
+  /// One event about `defRaw`, attributed to the function being walked.
+  /// Every `note*` helper below funnels through here after its own guard.
+  function pushOwnershipEvent(
+    state: &mut Borrowck::State,
+    kind: u32,
+    defRaw: u32,
+    detail: u32,
+    flag: boolean,
+    scopeDepth: u64,
+    code: str,
+    span: SourceSpan,
+  ): void {
+    let functionRaw: u32 = state.currentFunctionId().raw();
+
+    let mut stateRef: &mut Borrowck::State = state;
+    stateRef.pushReportEvent(Borrowck::OwnershipEvent {
+      kind: kind,
+      functionRaw: functionRaw,
+      variableRaw: defRaw,
+      hasVariable: true,
+      relatedRaw: 0,
+      hasRelated: false,
+      detail: detail,
+      flag: flag,
+      scopeDepth: scopeDepth,
+      code: code,
+      span: span,
+    });
+  }
+
+  function noteMove(
+    state: &mut Borrowck::State,
+    defId: Analyzer::DefinitionId,
+    consumer: u32,
+    span: SourceSpan,
+  ): void {
+    if (!state.isRecordingReport()) {
+      return;
+    }
+
+    Borrowck::pushOwnershipEvent(
+      state,
+      Borrowck::OwnershipReport::EVENT_MOVE,
+      defId.raw(),
+      consumer,
+      false,
+      0,
+      "",
+      span,
+    );
+  }
+
+  function noteBorrow(
+    state: &mut Borrowck::State,
+    defRaw: u32,
+    mutable: boolean,
+    opened: boolean,
+    span: SourceSpan,
+  ): void {
+    if (!state.isRecordingReport()) {
+      return;
+    }
+
+    let mut kind: u32 = Borrowck::OwnershipReport::EVENT_BORROW_RELEASE;
+
+    if (opened) {
+      kind = Borrowck::OwnershipReport::EVENT_BORROW_OPEN;
+    }
+
+    let depth: u64 = state.scopeDepth();
+
+    Borrowck::pushOwnershipEvent(state, kind, defRaw, 0, mutable, depth, "", span);
+  }
+
+  /// Records which binding owns a closure environment and which only names it.
+  /// `escapes` is the closure's own escape flag, so a heap environment and a
+  /// stack one are told apart in the report.
+  function noteClosureEnv(
+    state: &mut Borrowck::State,
+    bindingRaw: u32,
+    ownerRaw: u32,
+    escapes: boolean,
+    span: SourceSpan,
+  ): void {
+    if (!state.isRecordingReport()) {
+      return;
+    }
+
+    let functionRaw: u32 = state.currentFunctionId().raw();
+    let mut role: u32 = Borrowck::OwnershipReport::ROLE_ALIAS;
+
+    if (bindingRaw == ownerRaw) {
+      role = Borrowck::OwnershipReport::ROLE_OWNER;
+    }
+
+    let mut stateRef: &mut Borrowck::State = state;
+    stateRef.pushReportEvent(Borrowck::OwnershipEvent {
+      kind: Borrowck::OwnershipReport::EVENT_CLOSURE_ENV,
+      functionRaw: functionRaw,
+      variableRaw: bindingRaw,
+      hasVariable: true,
+      relatedRaw: ownerRaw,
+      hasRelated: true,
+      detail: role,
+      flag: escapes,
+      scopeDepth: 0,
+      code: "",
+      span: span,
+    });
+  }
+
+  function notePatternBinding(state: &mut Borrowck::State, defRaw: u32, span: SourceSpan): void {
+    if (!state.isRecordingReport()) {
+      return;
+    }
+
+    Borrowck::pushOwnershipEvent(
+      state,
+      Borrowck::OwnershipReport::EVENT_PATTERN_BINDING,
+      defRaw,
+      0,
+      false,
+      0,
+      "",
+      span,
+    );
+  }
+
+  /// Records a diagnostic together with the move state the checker held for
+  /// the variable it is about, which is the pair a reader of the report needs
+  /// to tell a real error from a state the walk arrived at wrongly.
+  function noteDiagnostic(
+    state: &mut Borrowck::State,
+    code: str,
+    defId: Analyzer::DefinitionId,
+    span: SourceSpan,
+  ): void {
+    if (!state.isRecordingReport()) {
+      return;
+    }
+
+    let observed: u32 = match (state.moveValue(defId.raw())) {
+      Option::SOME(value) -> value,
+      Option::NONE -> Borrowck::OwnershipReport::STATE_UNTRACKED,
+    };
+
+    Borrowck::pushOwnershipEvent(
+      state,
+      Borrowck::OwnershipReport::EVENT_DIAGNOSTIC,
+      defId.raw(),
+      observed,
+      false,
+      0,
+      code,
+      span,
+    );
   }
 
   function boolAsFlag(value: boolean): u32 {
@@ -2252,6 +2510,8 @@ export namespace Borrowck {
 
     if (mutable) {
       if (current == Borrowck::BORROW_NONE) {
+        Borrowck::noteBorrow(state, target.raw(), true, true, span);
+
         let mut stateRef: &mut Borrowck::State = state;
         stateRef.setBorrowValue(target.raw(), Borrowck::BORROW_MUT);
         return;
@@ -2268,6 +2528,7 @@ export namespace Borrowck {
           message.toStr(),
           "second mutable borrow taken here",
         );
+        Borrowck::noteDiagnostic(state, DiagnosticCode::BORROW_MUTABLE_WHILE_MUTABLE, target, span);
         return;
       }
 
@@ -2279,6 +2540,7 @@ export namespace Borrowck {
         message.toStr(),
         "mutable borrow taken here",
       );
+      Borrowck::noteDiagnostic(state, DiagnosticCode::BORROW_MUTABLE_WHILE_IMMUTABLE, target, span);
       return;
     }
 
@@ -2292,8 +2554,11 @@ export namespace Borrowck {
         message.toStr(),
         "shared borrow taken here",
       );
+      Borrowck::noteDiagnostic(state, DiagnosticCode::BORROW_IMMUTABLE_WHILE_MUTABLE, target, span);
       return;
     }
+
+    Borrowck::noteBorrow(state, target.raw(), false, true, span);
 
     let mut stateRef: &mut Borrowck::State = state;
 
@@ -2331,6 +2596,7 @@ export namespace Borrowck {
         droppedMessage.toStr(),
         "value used here after it was dropped",
       );
+      Borrowck::noteDiagnostic(state, DiagnosticCode::USE_AFTER_DROP, defId, span);
 
       return;
     }
@@ -2340,6 +2606,7 @@ export namespace Borrowck {
     }
 
     Borrowck::emitUseAfterMove(defStore, typeStore, symbols, diagnostics, defId, span);
+    Borrowck::noteDiagnostic(state, DiagnosticCode::USE_AFTER_MOVE, defId, span);
   }
 
   /// Reports handing on a value that lives in borrowed storage. Mirrors the
@@ -2366,6 +2633,7 @@ export namespace Borrowck {
     schedules: &mut Hir::DropSchedules,
     defId: Analyzer::DefinitionId,
     span: SourceSpan,
+    consumer: u32,
   ): void {
     if (let Option::SOME(value) = state.moveValue(defId.raw())) {
       if (value == Borrowck::MOVE_MOVED || value == Borrowck::MOVE_DROPPED || value == Borrowck::MOVE_FREED) {
@@ -2380,6 +2648,8 @@ export namespace Borrowck {
 
     let mut schedulesRef: &mut Hir::DropSchedules = schedules;
     schedulesRef.recordMove(defId, functionId, span);
+
+    Borrowck::noteMove(state, defId, consumer, span);
   }
 
   /// Applies a manual `.drop()` to the local its receiver names. A live local
@@ -2412,6 +2682,7 @@ export namespace Borrowck {
         droppedMessage.toStr(),
         "this value was already dropped",
       );
+      Borrowck::noteDiagnostic(state, DiagnosticCode::DOUBLE_DROP, defId, span);
 
       return;
     }
@@ -2420,6 +2691,7 @@ export namespace Borrowck {
     // the caller owns: the oracle models that as a use after move.
     if (current == Borrowck::MOVE_MOVED || current == Borrowck::MOVE_RETURNED) {
       Borrowck::emitUseAfterMove(defStore, typeStore, symbols, diagnostics, defId, span);
+      Borrowck::noteDiagnostic(state, DiagnosticCode::USE_AFTER_MOVE, defId, span);
 
       return;
     }
@@ -3214,6 +3486,7 @@ export namespace Borrowck {
           message.toStr(),
           "branches disagree on whether this value was moved",
         );
+        Borrowck::noteDiagnostic(state, DiagnosticCode::INCONSISTENT_MOVE_IN_BRANCHES, defId, span);
       }
 
       if (hasDropped && hasValid) {
@@ -3228,6 +3501,7 @@ export namespace Borrowck {
           droppedMessage.toStr(),
           "branches disagree on whether this value was dropped",
         );
+        Borrowck::noteDiagnostic(state, DiagnosticCode::INCONSISTENT_DROP_IN_BRANCHES, droppedDefId, span);
       }
 
       if (hasDropped) {
@@ -3444,7 +3718,7 @@ export namespace Borrowck {
             Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, field.value);
 
             if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, field.value)) {
-              Borrowck::tryConsume(state, schedules, source, span);
+              Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_AGGREGATE);
             }
           }
 
@@ -3462,6 +3736,8 @@ export namespace Borrowck {
             let mut heldRef: &mut Borrowck::State = state;
             heldRef.recordHeldBorrow(target.raw(), reference.mutable);
           } else {
+            Borrowck::noteBorrow(state, target.raw(), reference.mutable, false, span);
+
             let mut releaseRef: &mut Borrowck::State = state;
             releaseRef.releaseBorrow(target.raw(), reference.mutable);
           }
@@ -3513,6 +3789,8 @@ export namespace Borrowck {
           Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, returned);
 
           if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, returned)) {
+            Borrowck::noteMove(state, source, Borrowck::OwnershipReport::CONSUMER_RETURN, span);
+
             let mut returnRef: &mut Borrowck::State = state;
             returnRef.setMoveValue(source.raw(), Borrowck::MOVE_RETURNED);
           }
@@ -3613,7 +3891,7 @@ export namespace Borrowck {
               Borrowck::emitCannotMoveOutOfBorrow(diagnostics, span);
             }
 
-            Borrowck::tryConsume(state, schedules, capture.sourceDef, span);
+            Borrowck::tryConsume(state, schedules, capture.sourceDef, span, Borrowck::OwnershipReport::CONSUMER_CLOSURE_CAPTURE);
           }
         }
       }
@@ -3687,7 +3965,7 @@ export namespace Borrowck {
           Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, receiver);
 
           if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, receiver)) {
-            Borrowck::tryConsume(state, schedules, source, span);
+            Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_METHOD_RECEIVER);
           }
         }
       }
@@ -3750,7 +4028,7 @@ export namespace Borrowck {
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, *operand);
 
         if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *operand)) {
-          Borrowck::tryConsume(state, schedules, source, span);
+          Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_AGGREGATE);
         }
       }
 
@@ -3781,7 +4059,7 @@ export namespace Borrowck {
         Borrowck::checkTemporaryBorrow(defStore, symbols, hir, state, diagnostics, *argument, span);
 
         if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, *argument)) {
-          Borrowck::tryConsume(state, schedules, source, span);
+          Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_CALL_ARGUMENT);
         }
       }
 
@@ -3817,6 +4095,8 @@ export namespace Borrowck {
       return;
     }
 
+    Borrowck::noteBorrow(state, target.raw(), reference.mutable, false, span);
+
     let mut releaseRef: &mut Borrowck::State = state;
     releaseRef.releaseBorrow(target.raw(), reference.mutable);
   }
@@ -3842,6 +4122,8 @@ export namespace Borrowck {
 
     Borrowck::tryBorrow(defStore, symbols, state, diagnostics, target, mutable, span);
 
+    Borrowck::noteBorrow(state, target.raw(), mutable, false, span);
+
     let mut releaseRef: &mut Borrowck::State = state;
     releaseRef.releaseBorrow(target.raw(), mutable);
   }
@@ -3861,7 +4143,7 @@ export namespace Borrowck {
       Borrowck::checkNode(defStore, typeStore, symbols, hir, state, diagnostics, schedules, value);
 
       if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, value)) {
-        Borrowck::tryConsume(state, schedules, source, span);
+        Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_LET_INITIALIZER);
       }
 
       Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, value);
@@ -3898,12 +4180,22 @@ export namespace Borrowck {
       ownsClosureEnv = false;
     }
 
+    let mut escapes: boolean = false;
+
+    if (let Option::SOME(value) = letNode.value) {
+      escapes = Borrowck::closureLiteralEscapes(hir, value);
+    }
+
     if (ownsClosureEnv) {
+      Borrowck::noteClosureEnv(state, letNode.name.raw(), letNode.name.raw(), escapes, span);
+
       let mut ownerRef: &mut Borrowck::State = state;
       ownerRef.recordClosureEnvOwner(letNode.name.raw(), letNode.name.raw());
     } else {
       if (let Option::SOME(value) = letNode.value) {
         if (let Option::SOME(owner) = Borrowck::closureEnvOwner(hir, state, value)) {
+          Borrowck::noteClosureEnv(state, letNode.name.raw(), owner, escapes, span);
+
           let mut aliasRef: &mut Borrowck::State = state;
           aliasRef.recordClosureEnvOwner(letNode.name.raw(), owner);
         }
@@ -3913,6 +4205,22 @@ export namespace Borrowck {
     if (ownsClosureEnv || Borrowck::definitionNeedsDrop(defStore, typeStore, letNode.name)) {
       Borrowck::declareOwned(state, letNode.name);
     }
+  }
+
+  /// Whether `nodeId` is a closure literal whose environment is heap
+  /// allocated because it outlives the scope that made it. A binding
+  /// initialized with anything else reports `false`, which is what the report
+  /// says for an environment that stays on the frame.
+  function closureLiteralEscapes(hir: &Hir::HirStore, nodeId: Hir::HirId): boolean {
+    let Option::SOME(node) = hir.get(nodeId) else {
+      return false;
+    };
+
+    if (let Hir::HirKind::Closure(closure) = &node.kind) {
+      return closure.escapes;
+    }
+
+    return false;
   }
 
   /// The binding that owns the heap closure environment `nodeId` evaluates to,
@@ -4175,7 +4483,7 @@ export namespace Borrowck {
     Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, assign.value);
 
     if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, assign.value)) {
-      Borrowck::tryConsume(state, schedules, source, span);
+      Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_ASSIGNMENT);
     }
   }
 
@@ -4677,7 +4985,7 @@ export namespace Borrowck {
     // scrutinee consumption in the oracle's `LetElse` arm.
     if (bindings.length() > 0 && !bindsBorrowedPayloads) {
       if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, letElse.value)) {
-        Borrowck::tryConsume(state, schedules, source, span);
+        Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_PATTERN);
       }
     }
 
@@ -4688,6 +4996,8 @@ export namespace Borrowck {
         if (bindsBorrowedPayloads) {
           // The payload stays in the referenced storage: the binding is live
           // but owns nothing, so it gets no drop of its own.
+          Borrowck::notePatternBinding(state, *defRaw, span);
+
           let mut borrowedRef: &mut Borrowck::State = state;
           borrowedRef.setMoveValue(*defRaw, Borrowck::MOVE_VALID);
           borrowedRef.markBorrowedBinding(*defRaw);
@@ -4753,7 +5063,7 @@ export namespace Borrowck {
         Borrowck::rejectMoveOutOfBorrow(defStore, typeStore, hir, state, diagnostics, matchNode.scrutinee);
       } else if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
         Borrowck::recordLetConditionScrutinee(defStore, typeStore, state, matchId, source, isLetConditionMatch);
-        Borrowck::tryConsume(state, schedules, source, span);
+        Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_PATTERN);
       } else if (let Option::SOME(_owner) = Borrowck::movedFieldOwner(defStore, typeStore, hir, matchNode.scrutinee)) {
         armBindingsOwnPayload = true;
       } else {
@@ -4763,7 +5073,7 @@ export namespace Borrowck {
       }
     } else if (let Option::SOME(source) = Borrowck::movedVariable(defStore, typeStore, hir, matchNode.scrutinee)) {
       Borrowck::recordLetConditionScrutinee(defStore, typeStore, state, matchId, source, isLetConditionMatch);
-      Borrowck::tryConsume(state, schedules, source, span);
+      Borrowck::tryConsume(state, schedules, source, span, Borrowck::OwnershipReport::CONSUMER_PATTERN);
     }
     let aliasesExternalStorage: boolean = Borrowck::aliasesExternalStorage(hir, matchNode.scrutinee);
     let bindsBorrowedPayloads: boolean = Borrowck::bindsBorrowedPayloads(typeStore, hir, state, matchNode.scrutinee);
@@ -4825,6 +5135,10 @@ export namespace Borrowck {
 
       while (bindingIndex < bindings.length()) {
         if (let Option::SOME(defRaw) = bindings.get(bindingIndex)) {
+          if (bindsBorrowedPayloads) {
+            Borrowck::notePatternBinding(state, *defRaw, span);
+          }
+
           let mut declareRef: &mut Borrowck::State = state;
           declareRef.setMoveValue(*defRaw, Borrowck::MOVE_VALID);
 
@@ -4888,9 +5202,9 @@ export namespace Borrowck {
           // rejection above already reported it and consuming it would schedule a
           // drop for the referent.
           if (Borrowck::containsRaw(&mut bindings, result.raw())) {
-            Borrowck::tryConsume(state, schedules, result, span);
+            Borrowck::tryConsume(state, schedules, result, span, Borrowck::OwnershipReport::CONSUMER_ARM_RESULT);
           } else if (matchValueIsUsed && !resultIsBorrowed && state.isMoveValid(result.raw()) && resultOwnsValue) {
-            Borrowck::tryConsume(state, schedules, result, span);
+            Borrowck::tryConsume(state, schedules, result, span, Borrowck::OwnershipReport::CONSUMER_ARM_RESULT);
             let mut recordRef: &mut Borrowck::State = state;
             recordRef.recordArmResultMove(result.raw());
           }
@@ -5187,6 +5501,15 @@ export namespace Borrowck {
 
       let mut secondPass: DiagnosticBag = DiagnosticBag::init();
 
+      // Everything from here to the end of the second pass is a re-walk of
+      // nodes the first pass already reported on, so its events would be
+      // duplicates of events already recorded. Nesting is handled by restoring
+      // the previous value rather than clearing it, because an inner loop's
+      // first pass inside an outer loop's second pass is still a re-walk.
+      let suppressedBefore: boolean = state.reportIsSuppressed();
+      let mut suppressRef: &mut Borrowck::State = state;
+      suppressRef.setReportSuppressed(true);
+
       Borrowck::checkGuardedBranch(
         defStore,
         typeStore,
@@ -5210,6 +5533,9 @@ export namespace Borrowck {
           Borrowck::checkNode(defStore, typeStore, symbols, hir, state, &mut secondPass, schedules, updateId);
         }
       }
+
+      let mut restoreRef: &mut Borrowck::State = state;
+      restoreRef.setReportSuppressed(suppressedBefore);
 
       Borrowck::appendNewDiagnostics(diagnostics, &secondPass);
     }
@@ -5450,8 +5776,11 @@ export namespace Borrowck {
     statementPositionNodes: &Vector<u32>,
     envsCapturedByEscapingClosures: &Vector<u32>,
     bindingsAssignedClosureEnv: &Vector<u32>,
+    reportEnabled: boolean,
+    reportEvents: &mut Vector<Borrowck::OwnershipEvent>,
   ): void {
     let mut state: Borrowck::State = Borrowck::State::init();
+    state.setReportEnabled(reportEnabled);
     state.setStatementPositionNodes(Borrowck::copyU32Vector(statementPositionNodes));
     state.setEnvsCapturedByEscapingClosures(Borrowck::copyU32Vector(envsCapturedByEscapingClosures));
     state.setBindingsAssignedClosureEnv(Borrowck::copyU32Vector(bindingsAssignedClosureEnv));
@@ -5480,6 +5809,20 @@ export namespace Borrowck {
     Borrowck::recordExitSchedule(&mut state, schedules, &fnEnd, 0);
 
     state.popScopeReleasing();
+
+    if (reportEnabled) {
+      let collected: Vector<Borrowck::OwnershipEvent> = state.takeReportEvents();
+      let mut reportRef: &mut Vector<Borrowck::OwnershipEvent> = reportEvents;
+      let mut index: u64 = 0;
+
+      while (index < collected.length()) {
+        if (let Option::SOME(event) = collected.get(index)) {
+          reportRef.push(Borrowck::copyOwnershipEvent(event));
+        }
+
+        index += 1;
+      }
+    }
   }
 
   /// Borrow-check entry point. Walks every function and method body the HIR
@@ -5494,7 +5837,21 @@ export namespace Borrowck {
     symbols: &mut Analyzer::SymbolTable,
     hir: &Hir::HirStore,
   ): Borrowck::BorrowckOutput {
+    return Borrowck::checkModuleReporting(defStore, typeStore, symbols, hir, false);
+  }
+
+  /// `checkModule` with the ownership report turned on. Kept separate so the
+  /// ordinary entry point stays a four-argument call and so the walk pays
+  /// nothing for a report nobody asked for.
+  function checkModuleReporting(
+    defStore: &mut Analyzer::DefinitionStore,
+    typeStore: &mut Analyzer::TypeStore,
+    symbols: &mut Analyzer::SymbolTable,
+    hir: &Hir::HirStore,
+    reportEnabled: boolean,
+  ): Borrowck::BorrowckOutput {
     let mut diagnostics: DiagnosticBag = DiagnosticBag::init();
+    let mut reportEvents: Vector<Borrowck::OwnershipEvent> = Vector::new<Borrowck::OwnershipEvent>();
     let mut schedules: Hir::DropSchedules = Hir::DropSchedules::init();
     let statementPositionNodes: Vector<u32> = Borrowck::collectStatementPositionNodes(hir);
     let envsCapturedByEscapingClosures: Vector<u32> = Borrowck::collectEnvsCapturedByEscapingClosures(hir);
@@ -5530,11 +5887,17 @@ export namespace Borrowck {
         &statementPositionNodes,
         &envsCapturedByEscapingClosures,
         &bindingsAssignedClosureEnv,
+        reportEnabled,
+        &mut reportEvents,
       );
 
       index += 1;
     }
 
-    return Borrowck::BorrowckOutput { diagnostics: diagnostics, dropSchedules: schedules };
+    return Borrowck::BorrowckOutput {
+      diagnostics: diagnostics,
+      dropSchedules: schedules,
+      ownershipEvents: reportEvents,
+    };
   }
 }

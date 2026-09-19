@@ -1,0 +1,1017 @@
+import Json from "std::json";
+import String from "std::string";
+import Vector from "std::vector";
+
+import SourceFile, SourceLocation, SourceSpan from "@compiler::diagnostics";
+import Id from "@compiler::ids";
+import Analyzer from "@compiler::analyzer";
+import Hir from "@compiler::hir";
+
+/// Machine-readable ownership report for `--dump-ownership-report`.
+///
+/// `--dump-drop-schedule` answers "what will be dropped", collapsing anything
+/// it saw twice. This report answers "what did the checker decide", and keeps
+/// the raw multiplicity of every schedule entry: a duplicated overwrite drop
+/// shows up as two entries here and as one line there, which is the difference
+/// that hides a double free.
+///
+/// # Sources
+///
+/// Two of them, joined per function:
+///   - the events `Borrowck::checkModule` recorded while walking (moves,
+///     borrows, closure environments, by-reference pattern bindings and
+///     ownership diagnostics), recorded only when the report is on,
+///   - the `Hir::DropSchedules` the same walk produced, read back verbatim,
+///     which is what preserves duplicates.
+///
+/// # Format
+///
+/// JSON Lines: one object per function, in the same order
+/// `--dump-drop-schedule` lists its functions (source position, then name,
+/// then definition id), with events sorted by source position, then event
+/// kind, then the order they were recorded in.
+///
+/// ```text
+/// {"version":1,"function":"main","function_id":7,"position":"a.ign:3:20","events":[
+///   {"event":"move","variable":"handle","variable_id":9,"consumer":"call-argument",
+///    "position":"a.ign:6:10","extra":{}}]}
+/// ```
+///
+/// Every event carries an open `extra` object and every record a `version`, so
+/// the Memory Law fields (effective law, inserted borrows, inferred parameter
+/// modes) can be added without moving anything that is already there.
+export namespace Borrowck {
+  /// One decision the checker made, as recorded during the walk.
+  ///
+  /// Flat numeric fields rather than an enum with payloads: the walk pushes
+  /// these on hot paths, and a record of scalars costs one `Vector` push with
+  /// no nested allocation. `detail` is read against `kind`: the consumer for a
+  /// move, the reason for a drop, the role for a closure environment, the move
+  /// state for a diagnostic.
+  record OwnershipEvent {
+    public kind: u32;
+    public functionRaw: u32;
+    public variableRaw: u32;
+    public hasVariable: boolean;
+    public relatedRaw: u32;
+    public hasRelated: boolean;
+    public detail: u32;
+    public flag: boolean;
+    public scopeDepth: u64;
+    public code: str;
+    public span: SourceSpan;
+  }
+
+  namespace OwnershipReport {
+    /// Bumped when a field changes meaning or disappears. Adding a field, or
+    /// adding a key to an event's `extra`, does not bump it.
+    const VERSION: u32 = 1;
+
+    const EVENT_MOVE: u32 = 0;
+    const EVENT_BORROW_OPEN: u32 = 1;
+    const EVENT_BORROW_RELEASE: u32 = 2;
+    const EVENT_DROP: u32 = 3;
+    const EVENT_CLOSURE_ENV: u32 = 4;
+    const EVENT_PATTERN_BINDING: u32 = 5;
+    const EVENT_DIAGNOSTIC: u32 = 6;
+
+    /// What consumed a moved binding.
+    const CONSUMER_CALL_ARGUMENT: u32 = 0;
+    const CONSUMER_RETURN: u32 = 1;
+    const CONSUMER_AGGREGATE: u32 = 2;
+    const CONSUMER_PATTERN: u32 = 3;
+    const CONSUMER_ARM_RESULT: u32 = 4;
+    const CONSUMER_CLOSURE_CAPTURE: u32 = 5;
+    const CONSUMER_LET_INITIALIZER: u32 = 6;
+    const CONSUMER_ASSIGNMENT: u32 = 7;
+    const CONSUMER_METHOD_RECEIVER: u32 = 8;
+
+    /// Why a drop was scheduled. One per `Hir::DropSchedules` map, plus one
+    /// per `Hir::ExitKey` variant.
+    const REASON_SCOPE_END: u32 = 0;
+    const REASON_MATCH_ARM_END: u32 = 1;
+    const REASON_OVERWRITE: u32 = 2;
+    const REASON_FIELD_OVERWRITE: u32 = 3;
+    const REASON_CONDITION_FAIL: u32 = 4;
+    const REASON_CONDITION_SKIP: u32 = 5;
+    const REASON_RETURN: u32 = 6;
+    const REASON_BREAK: u32 = 7;
+    const REASON_CONTINUE: u32 = 8;
+    const REASON_FN_END: u32 = 9;
+
+    /// Whether a binding owns a closure environment or only aliases one.
+    const ROLE_OWNER: u32 = 0;
+    const ROLE_ALIAS: u32 = 1;
+
+    /// Move states, numbered like `Borrowck`'s own `MOVE_*` ranking so a state
+    /// read out of the checker needs no translation. `STATE_UNTRACKED` is the
+    /// checker's absent key.
+    const STATE_VALID: u32 = 0;
+    const STATE_RETURNED: u32 = 1;
+    const STATE_FREED: u32 = 2;
+    const STATE_MOVED: u32 = 3;
+    const STATE_DROPPED: u32 = 4;
+    const STATE_UNTRACKED: u32 = 5;
+
+    /// A resolved source position, owning its path so it outlives the source
+    /// file table it was read from.
+    record ReportPosition {
+      public path: String;
+      public line: u32;
+      public column: u32;
+    }
+
+    /// One event with everything needed to print it, names resolved.
+    record ReportEvent {
+      public kind: u32;
+      public variableRaw: u32;
+      public hasVariable: boolean;
+      public variableName: str;
+      public relatedRaw: u32;
+      public hasRelated: boolean;
+      public relatedName: str;
+      public detail: u32;
+      public flag: boolean;
+      public scopeDepth: u64;
+      public code: str;
+      public position: Borrowck::OwnershipReport::ReportPosition;
+      public order: u64;
+    }
+
+    /// One function's record, in the order it will be printed.
+    record FunctionReport {
+      public name: str;
+      public defRaw: u32;
+      public position: Borrowck::OwnershipReport::ReportPosition;
+      public events: Vector<Borrowck::OwnershipReport::ReportEvent>;
+    }
+
+    // --- names -------------------------------------------------------------
+
+    function eventName(kind: u32): str {
+      if (kind == Borrowck::OwnershipReport::EVENT_MOVE) {
+        return "move";
+      }
+
+      if (kind == Borrowck::OwnershipReport::EVENT_BORROW_OPEN) {
+        return "borrow";
+      }
+
+      if (kind == Borrowck::OwnershipReport::EVENT_BORROW_RELEASE) {
+        return "borrow";
+      }
+
+      if (kind == Borrowck::OwnershipReport::EVENT_DROP) {
+        return "drop";
+      }
+
+      if (kind == Borrowck::OwnershipReport::EVENT_CLOSURE_ENV) {
+        return "closure-env";
+      }
+
+      if (kind == Borrowck::OwnershipReport::EVENT_PATTERN_BINDING) {
+        return "pattern-binding";
+      }
+
+      return "diagnostic";
+    }
+
+    function consumerName(detail: u32): str {
+      if (detail == Borrowck::OwnershipReport::CONSUMER_CALL_ARGUMENT) {
+        return "call-argument";
+      }
+
+      if (detail == Borrowck::OwnershipReport::CONSUMER_RETURN) {
+        return "return";
+      }
+
+      if (detail == Borrowck::OwnershipReport::CONSUMER_AGGREGATE) {
+        return "aggregate";
+      }
+
+      if (detail == Borrowck::OwnershipReport::CONSUMER_PATTERN) {
+        return "pattern";
+      }
+
+      if (detail == Borrowck::OwnershipReport::CONSUMER_ARM_RESULT) {
+        return "arm-result";
+      }
+
+      if (detail == Borrowck::OwnershipReport::CONSUMER_CLOSURE_CAPTURE) {
+        return "closure-capture";
+      }
+
+      if (detail == Borrowck::OwnershipReport::CONSUMER_LET_INITIALIZER) {
+        return "let-initializer";
+      }
+
+      if (detail == Borrowck::OwnershipReport::CONSUMER_ASSIGNMENT) {
+        return "assignment";
+      }
+
+      return "method-receiver";
+    }
+
+    function reasonName(detail: u32): str {
+      if (detail == Borrowck::OwnershipReport::REASON_SCOPE_END) {
+        return "scope-end";
+      }
+
+      if (detail == Borrowck::OwnershipReport::REASON_MATCH_ARM_END) {
+        return "match-arm-end";
+      }
+
+      if (detail == Borrowck::OwnershipReport::REASON_OVERWRITE) {
+        return "overwrite";
+      }
+
+      if (detail == Borrowck::OwnershipReport::REASON_FIELD_OVERWRITE) {
+        return "field-overwrite";
+      }
+
+      if (detail == Borrowck::OwnershipReport::REASON_CONDITION_FAIL) {
+        return "condition-fail";
+      }
+
+      if (detail == Borrowck::OwnershipReport::REASON_CONDITION_SKIP) {
+        return "condition-skip";
+      }
+
+      if (detail == Borrowck::OwnershipReport::REASON_RETURN) {
+        return "return";
+      }
+
+      if (detail == Borrowck::OwnershipReport::REASON_BREAK) {
+        return "break";
+      }
+
+      if (detail == Borrowck::OwnershipReport::REASON_CONTINUE) {
+        return "continue";
+      }
+
+      return "fn-end";
+    }
+
+    function stateName(detail: u32): str {
+      if (detail == Borrowck::OwnershipReport::STATE_VALID) {
+        return "valid";
+      }
+
+      if (detail == Borrowck::OwnershipReport::STATE_RETURNED) {
+        return "returned";
+      }
+
+      if (detail == Borrowck::OwnershipReport::STATE_FREED) {
+        return "freed";
+      }
+
+      if (detail == Borrowck::OwnershipReport::STATE_MOVED) {
+        return "moved";
+      }
+
+      if (detail == Borrowck::OwnershipReport::STATE_DROPPED) {
+        return "dropped";
+      }
+
+      return "untracked";
+    }
+
+    // --- positions ---------------------------------------------------------
+
+    function syntheticPosition(): Borrowck::OwnershipReport::ReportPosition {
+      return Borrowck::OwnershipReport::ReportPosition {
+        path: String::create("<synthetic>"),
+        line: 0,
+        column: 0,
+      };
+    }
+
+    function copyPosition(
+      position: &Borrowck::OwnershipReport::ReportPosition,
+    ): Borrowck::OwnershipReport::ReportPosition {
+      return Borrowck::OwnershipReport::ReportPosition {
+        path: position.path.clone(),
+        line: position.line,
+        column: position.column,
+      };
+    }
+
+    /// Resolves a span the same way `--dump-drop-schedule` does, down to the
+    /// `<synthetic>:0:0` spelling for a span that carries no file, so the two
+    /// dumps of one program name the same places.
+    function positionOf(
+      span: &SourceSpan,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+    ): Borrowck::OwnershipReport::ReportPosition {
+      let filePathString: String = span.filePath.toString();
+
+      if (filePathString.length() == 0) {
+        return Borrowck::OwnershipReport::syntheticPosition();
+      }
+
+      let Option::SOME(file) = Hir::DropScheduleDump::findSourceFile(files, span.filePath) else {
+        return Borrowck::OwnershipReport::syntheticPosition();
+      };
+
+      let location: SourceLocation = file.byteLineCol(span.start);
+      let normalized: String = Hir::DropScheduleDump::normalizePath(span.filePath, workingDirectory);
+
+      return Borrowck::OwnershipReport::ReportPosition {
+        path: normalized,
+        line: location.line,
+        column: location.byteColumn,
+      };
+    }
+
+    function renderPosition(position: &Borrowck::OwnershipReport::ReportPosition): String {
+      return `${position.path.toStr()}:${position.line}:${position.column}`;
+    }
+
+    function comparePositions(
+      a: &Borrowck::OwnershipReport::ReportPosition,
+      b: &Borrowck::OwnershipReport::ReportPosition,
+    ): i32 {
+      let pathCompare: i32 = Hir::DropScheduleDump::compareStr(a.path.toStr(), b.path.toStr());
+
+      if (pathCompare != 0) {
+        return pathCompare;
+      }
+
+      if (a.line != b.line) {
+        return Hir::DropScheduleDump::compareU32(a.line, b.line);
+      }
+
+      return Hir::DropScheduleDump::compareU32(a.column, b.column);
+    }
+
+    /// Total order over the events of one function: source position first, so
+    /// the report reads top to bottom like the source does, then event kind,
+    /// then the order the walk recorded them in. The last key is what keeps
+    /// two identical entries — the duplicate this report exists to show — both
+    /// present and adjacent instead of collapsed.
+    function compareEvents(
+      a: &Borrowck::OwnershipReport::ReportEvent,
+      b: &Borrowck::OwnershipReport::ReportEvent,
+    ): i32 {
+      let positionCompare: i32 = Borrowck::OwnershipReport::comparePositions(&a.position, &b.position);
+
+      if (positionCompare != 0) {
+        return positionCompare;
+      }
+
+      if (a.kind != b.kind) {
+        return Hir::DropScheduleDump::compareU32(a.kind, b.kind);
+      }
+
+      if (a.order < b.order) {
+        return -1;
+      }
+
+      if (a.order > b.order) {
+        return 1;
+      }
+
+      return 0;
+    }
+
+    /// Indices into `events`, ordered by `compareEvents`. Sorting indices
+    /// rather than the records keeps the owning `String` in each position from
+    /// being cloned once per comparison.
+    function sortedEventOrder(
+      events: &Vector<Borrowck::OwnershipReport::ReportEvent>,
+    ): Vector<u64> {
+      let total: u64 = events.length();
+      let mut used: Vector<boolean> = Vector::new<boolean>();
+      let mut order: Vector<u64> = Vector::new<u64>();
+      let mut initIndex: u64 = 0;
+
+      while (initIndex < total) {
+        used.push(false);
+        initIndex += 1;
+      }
+
+      let mut picked: u64 = 0;
+
+      while (picked < total) {
+        let mut bestIndex: u64 = 0;
+        let mut haveBest: boolean = false;
+        let mut scan: u64 = 0;
+
+        while (scan < total) {
+          if (let Option::SOME(alreadyUsed) = used.get(scan)) {
+            if (!*alreadyUsed) {
+              let mut isBetter: boolean = !haveBest;
+
+              if (haveBest) {
+                if (let Option::SOME(candidate) = events.get(scan)) {
+                  if (let Option::SOME(currentBest) = events.get(bestIndex)) {
+                    if (Borrowck::OwnershipReport::compareEvents(candidate, currentBest) < 0) {
+                      isBetter = true;
+                    }
+                  }
+                }
+              }
+
+              if (isBetter) {
+                bestIndex = scan;
+                haveBest = true;
+              }
+            }
+          }
+
+          scan += 1;
+        }
+
+        if (haveBest) {
+          order.push(bestIndex);
+          used.set(bestIndex, true);
+        }
+
+        picked += 1;
+      }
+
+      return order;
+    }
+
+    // --- model construction -------------------------------------------------
+
+    function nameOf(
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      defRaw: u32,
+    ): str {
+      return Hir::DropScheduleDump::valueName(defs, symbols, Id::fromRaw<Analyzer::DefinitionTag>(defRaw));
+    }
+
+    function emptyEventList(): Vector<Borrowck::OwnershipReport::ReportEvent> {
+      return Vector::new<Borrowck::OwnershipReport::ReportEvent>();
+    }
+
+    /// Turns one recorded checker event into a printable one.
+    function resolveEvent(
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      event: &Borrowck::OwnershipEvent,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      order: u64,
+    ): Borrowck::OwnershipReport::ReportEvent {
+      let mut variableName: str = "";
+      let mut relatedName: str = "";
+
+      if (event.hasVariable) {
+        variableName = Borrowck::OwnershipReport::nameOf(defs, symbols, event.variableRaw);
+      }
+
+      if (event.hasRelated) {
+        relatedName = Borrowck::OwnershipReport::nameOf(defs, symbols, event.relatedRaw);
+      }
+
+      return Borrowck::OwnershipReport::ReportEvent {
+        kind: event.kind,
+        variableRaw: event.variableRaw,
+        hasVariable: event.hasVariable,
+        variableName: variableName,
+        relatedRaw: event.relatedRaw,
+        hasRelated: event.hasRelated,
+        relatedName: relatedName,
+        detail: event.detail,
+        flag: event.flag,
+        scopeDepth: event.scopeDepth,
+        code: event.code,
+        position: Borrowck::OwnershipReport::positionOf(&event.span, files, workingDirectory),
+        order: order,
+      };
+    }
+
+    /// One drop event per definition in one schedule entry, in the order the
+    /// entry lists them and without collapsing repeats.
+    function appendDropEntry(
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      entryDefs: &Vector<Analyzer::DefinitionId>,
+      reason: u32,
+      position: &Borrowck::OwnershipReport::ReportPosition,
+      events: &mut Vector<Borrowck::OwnershipReport::ReportEvent>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < entryDefs.length()) {
+        let Option::SOME(defId) = entryDefs.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let mut eventsRef: &mut Vector<Borrowck::OwnershipReport::ReportEvent> = events;
+        let order: u64 = eventsRef.length();
+
+        eventsRef.push(Borrowck::OwnershipReport::ReportEvent {
+          kind: Borrowck::OwnershipReport::EVENT_DROP,
+          variableRaw: defId.raw(),
+          hasVariable: true,
+          variableName: Borrowck::OwnershipReport::nameOf(defs, symbols, defId.raw()),
+          relatedRaw: 0,
+          hasRelated: false,
+          relatedName: "",
+          detail: reason,
+          flag: false,
+          scopeDepth: 0,
+          code: "",
+          position: Borrowck::OwnershipReport::copyPosition(position),
+          order: order,
+        });
+
+        index += 1;
+      }
+    }
+
+    /// Drop events from one node-keyed schedule map, restricted to the nodes
+    /// of the function being built.
+    function appendNodeDrops(
+      hir: &Hir::HirStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      entries: &Vector<Hir::NodeDropEntry>,
+      reason: u32,
+      member: &Vector<boolean>,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      events: &mut Vector<Borrowck::OwnershipReport::ReportEvent>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < entries.length()) {
+        let Option::SOME(entry) = entries.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (!Hir::DropScheduleDump::isMember(member, entry.node.raw())) {
+          index += 1;
+          continue;
+        }
+
+        let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, entry.node);
+        let position: Borrowck::OwnershipReport::ReportPosition = Borrowck::OwnershipReport::positionOf(&span, files, workingDirectory);
+
+        Borrowck::OwnershipReport::appendDropEntry(defs, symbols, &entry.defs, reason, &position, events);
+
+        index += 1;
+      }
+    }
+
+    /// Drop events from the exit-keyed map. `FnEnd` belongs to the function it
+    /// names; every other key belongs to the function whose body holds its
+    /// node.
+    function appendExitDrops(
+      hir: &Hir::HirStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      entries: &Vector<Hir::ExitDropEntry>,
+      functionRaw: u32,
+      functionPosition: &Borrowck::OwnershipReport::ReportPosition,
+      member: &Vector<boolean>,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      events: &mut Vector<Borrowck::OwnershipReport::ReportEvent>,
+    ): void {
+      let mut index: u64 = 0;
+
+      while (index < entries.length()) {
+        let Option::SOME(entry) = entries.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        let tag: u32 = Hir::exitKeyTag(&entry.key);
+        let raw: u32 = Hir::exitKeyRaw(&entry.key);
+
+        if (tag == 3) {
+          if (raw != functionRaw) {
+            index += 1;
+            continue;
+          }
+
+          Borrowck::OwnershipReport::appendDropEntry(
+            defs,
+            symbols,
+            &entry.defs,
+            Borrowck::OwnershipReport::REASON_FN_END,
+            functionPosition,
+            events,
+          );
+
+          index += 1;
+          continue;
+        }
+
+        if (!Hir::DropScheduleDump::isMember(member, raw)) {
+          index += 1;
+          continue;
+        }
+
+        let mut reason: u32 = Borrowck::OwnershipReport::REASON_RETURN;
+
+        if (tag == 1) {
+          reason = Borrowck::OwnershipReport::REASON_BREAK;
+        }
+
+        if (tag == 2) {
+          reason = Borrowck::OwnershipReport::REASON_CONTINUE;
+        }
+
+        let span: SourceSpan = Hir::DropScheduleDump::spanOf(hir, Id::fromRaw<Hir::NodeTag>(raw));
+        let position: Borrowck::OwnershipReport::ReportPosition = Borrowck::OwnershipReport::positionOf(&span, files, workingDirectory);
+
+        Borrowck::OwnershipReport::appendDropEntry(defs, symbols, &entry.defs, reason, &position, events);
+
+        index += 1;
+      }
+    }
+
+    function nameMatchesFilter(name: str, filter: str): boolean {
+      let filterString: String = filter.toString();
+
+      if (filterString.length() == 0) {
+        return true;
+      }
+
+      return filterString.equals(name);
+    }
+
+    /// Builds every function's record. `filter` selects one function by name;
+    /// an empty filter keeps them all.
+    function build(
+      hir: &Hir::HirStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      schedules: &Hir::DropSchedules,
+      events: &Vector<Borrowck::OwnershipEvent>,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      filter: str,
+    ): Vector<Borrowck::OwnershipReport::FunctionReport> {
+      let mut reports: Vector<Borrowck::OwnershipReport::FunctionReport> = Vector::new<Borrowck::OwnershipReport::FunctionReport>();
+      let mut storage: Vector<String> = Vector::new<String>();
+
+      let thunks: Vector<Hir::DropScheduleDump::ThunkSpan> = Hir::DropScheduleDump::collectClosureThunks(hir);
+      let functions: Vector<Hir::DropScheduleDump::FunctionEntry> = Hir::DropScheduleDump::collectFunctions(
+        hir, defs, symbols, files, workingDirectory, &mut storage, &thunks,
+      );
+
+      let mut member: Vector<boolean> = Hir::DropScheduleDump::newMembership(hir.length());
+      let mut functionIndex: u64 = 0;
+
+      while (functionIndex < functions.length()) {
+        let Option::SOME(entry) = functions.get(functionIndex) else {
+          functionIndex += 1;
+          continue;
+        };
+
+        if (!Borrowck::OwnershipReport::nameMatchesFilter(entry.name, filter)) {
+          functionIndex += 1;
+          continue;
+        }
+
+        let bodyNodesResult: Hir::DropScheduleDump::BodyNodes = Hir::DropScheduleDump::bodyNodes(hir, entry.bodyId, member);
+        let nodes: Vector<u32> = bodyNodesResult.raw;
+        member = bodyNodesResult.member;
+
+        let functionRaw: u32 = entry.defId.raw();
+        let functionPosition: Borrowck::OwnershipReport::ReportPosition = Borrowck::OwnershipReport::ReportPosition {
+          path: entry.position.path.toString(),
+          line: entry.position.line,
+          column: entry.position.column,
+        };
+
+        let mut collected: Vector<Borrowck::OwnershipReport::ReportEvent> = Borrowck::OwnershipReport::emptyEventList();
+        let mut nextOrder: u64 = 0;
+        let mut eventIndex: u64 = 0;
+
+        while (eventIndex < events.length()) {
+          if (let Option::SOME(event) = events.get(eventIndex)) {
+            if (event.functionRaw == functionRaw) {
+              collected.push(Borrowck::OwnershipReport::resolveEvent(defs, symbols, event, files, workingDirectory, nextOrder));
+              nextOrder += 1;
+            }
+          }
+
+          eventIndex += 1;
+        }
+
+        Borrowck::OwnershipReport::appendNodeDrops(
+          hir, defs, symbols, &schedules.onScopeEnd, Borrowck::OwnershipReport::REASON_SCOPE_END,
+          &member, files, workingDirectory, &mut collected,
+        );
+        Borrowck::OwnershipReport::appendNodeDrops(
+          hir, defs, symbols, &schedules.onMatchArmEnd, Borrowck::OwnershipReport::REASON_MATCH_ARM_END,
+          &member, files, workingDirectory, &mut collected,
+        );
+        Borrowck::OwnershipReport::appendNodeDrops(
+          hir, defs, symbols, &schedules.onOverwrite, Borrowck::OwnershipReport::REASON_OVERWRITE,
+          &member, files, workingDirectory, &mut collected,
+        );
+        Borrowck::OwnershipReport::appendNodeDrops(
+          hir, defs, symbols, &schedules.onFieldOverwrite, Borrowck::OwnershipReport::REASON_FIELD_OVERWRITE,
+          &member, files, workingDirectory, &mut collected,
+        );
+        Borrowck::OwnershipReport::appendNodeDrops(
+          hir, defs, symbols, &schedules.onConditionFail, Borrowck::OwnershipReport::REASON_CONDITION_FAIL,
+          &member, files, workingDirectory, &mut collected,
+        );
+        Borrowck::OwnershipReport::appendNodeDrops(
+          hir, defs, symbols, &schedules.onConditionSkip, Borrowck::OwnershipReport::REASON_CONDITION_SKIP,
+          &member, files, workingDirectory, &mut collected,
+        );
+        Borrowck::OwnershipReport::appendExitDrops(
+          hir, defs, symbols, &schedules.onExit, functionRaw, &functionPosition,
+          &member, files, workingDirectory, &mut collected,
+        );
+
+        reports.push(Borrowck::OwnershipReport::FunctionReport {
+          name: entry.name,
+          defRaw: functionRaw,
+          position: functionPosition,
+          events: collected,
+        });
+
+        member = Hir::DropScheduleDump::clearMembership(member, &nodes);
+        functionIndex += 1;
+      }
+
+      return reports;
+    }
+
+    // --- JSON ---------------------------------------------------------------
+
+    /// Appends `value` as a quoted JSON string. `std::json` owns the escaping,
+    /// so control characters and quotes inside an identifier or a path cannot
+    /// break a line of the output.
+    function pushJsonString(output: &mut String, value: str): void {
+      let mut outputRef: &mut String = output;
+
+      if (let Result::ERROR(_) = Json::writeRoot(outputRef, value)) {
+        outputRef.pushStr("\"\"");
+      }
+    }
+
+    function pushJsonField(output: &mut String, key: str, value: str): void {
+      let mut outputRef: &mut String = output;
+      Borrowck::OwnershipReport::pushJsonString(outputRef, key);
+      outputRef.pushStr(":");
+      Borrowck::OwnershipReport::pushJsonString(outputRef, value);
+    }
+
+    function pushJsonNumberField(output: &mut String, key: str, value: u64): void {
+      let mut outputRef: &mut String = output;
+      Borrowck::OwnershipReport::pushJsonString(outputRef, key);
+      outputRef.pushStr(`:${value}`.toStr());
+    }
+
+    function pushJsonBooleanField(output: &mut String, key: str, value: boolean): void {
+      let mut outputRef: &mut String = output;
+      Borrowck::OwnershipReport::pushJsonString(outputRef, key);
+
+      if (value) {
+        outputRef.pushStr(":true");
+        return;
+      }
+
+      outputRef.pushStr(":false");
+    }
+
+    /// The fields that depend on the event kind, written after the shared ones.
+    function pushEventDetail(
+      output: &mut String,
+      event: &Borrowck::OwnershipReport::ReportEvent,
+    ): void {
+      let mut outputRef: &mut String = output;
+
+      if (event.kind == Borrowck::OwnershipReport::EVENT_MOVE) {
+        outputRef.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonField(outputRef, "consumer", Borrowck::OwnershipReport::consumerName(event.detail));
+        return;
+      }
+
+      if (event.kind == Borrowck::OwnershipReport::EVENT_BORROW_OPEN || event.kind == Borrowck::OwnershipReport::EVENT_BORROW_RELEASE) {
+        outputRef.pushStr(",");
+
+        if (event.kind == Borrowck::OwnershipReport::EVENT_BORROW_OPEN) {
+          Borrowck::OwnershipReport::pushJsonField(outputRef, "action", "open");
+        } else {
+          Borrowck::OwnershipReport::pushJsonField(outputRef, "action", "release");
+        }
+
+        outputRef.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonBooleanField(outputRef, "mutable", event.flag);
+        outputRef.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonNumberField(outputRef, "scope", event.scopeDepth);
+        return;
+      }
+
+      if (event.kind == Borrowck::OwnershipReport::EVENT_DROP) {
+        outputRef.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonField(outputRef, "reason", Borrowck::OwnershipReport::reasonName(event.detail));
+        return;
+      }
+
+      if (event.kind == Borrowck::OwnershipReport::EVENT_CLOSURE_ENV) {
+        outputRef.pushStr(",");
+
+        if (event.detail == Borrowck::OwnershipReport::ROLE_OWNER) {
+          Borrowck::OwnershipReport::pushJsonField(outputRef, "role", "owner");
+        } else {
+          Borrowck::OwnershipReport::pushJsonField(outputRef, "role", "alias");
+        }
+
+        if (event.hasRelated) {
+          outputRef.pushStr(",");
+          Borrowck::OwnershipReport::pushJsonField(outputRef, "owner", event.relatedName);
+          outputRef.pushStr(",");
+          Borrowck::OwnershipReport::pushJsonNumberField(outputRef, "owner_id", event.relatedRaw as u64);
+        }
+
+        outputRef.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonBooleanField(outputRef, "escapes", event.flag);
+        return;
+      }
+
+      if (event.kind == Borrowck::OwnershipReport::EVENT_PATTERN_BINDING) {
+        outputRef.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonField(outputRef, "binding", "by-reference");
+        return;
+      }
+
+      outputRef.pushStr(",");
+      Borrowck::OwnershipReport::pushJsonField(outputRef, "code", event.code);
+      outputRef.pushStr(",");
+      Borrowck::OwnershipReport::pushJsonField(outputRef, "state", Borrowck::OwnershipReport::stateName(event.detail));
+    }
+
+    function pushEvent(output: &mut String, event: &Borrowck::OwnershipReport::ReportEvent): void {
+      let mut outputRef: &mut String = output;
+      outputRef.pushStr("{");
+      Borrowck::OwnershipReport::pushJsonField(outputRef, "event", Borrowck::OwnershipReport::eventName(event.kind));
+
+      if (event.hasVariable) {
+        outputRef.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonField(outputRef, "variable", event.variableName);
+        outputRef.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonNumberField(outputRef, "variable_id", event.variableRaw as u64);
+      }
+
+      Borrowck::OwnershipReport::pushEventDetail(outputRef, event);
+
+      outputRef.pushStr(",");
+      let rendered: String = Borrowck::OwnershipReport::renderPosition(&event.position);
+      Borrowck::OwnershipReport::pushJsonField(outputRef, "position", rendered.toStr());
+
+      outputRef.pushStr(",");
+      Borrowck::OwnershipReport::pushJsonString(outputRef, "extra");
+      outputRef.pushStr(":{}}");
+    }
+
+    /// The whole report as JSON Lines, one object per function.
+    function renderJson(
+      hir: &Hir::HirStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      schedules: &Hir::DropSchedules,
+      events: &Vector<Borrowck::OwnershipEvent>,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      filter: str,
+    ): String {
+      let reports: Vector<Borrowck::OwnershipReport::FunctionReport> = Borrowck::OwnershipReport::build(
+        hir, defs, symbols, schedules, events, files, workingDirectory, filter,
+      );
+
+      let mut output: String = String::new();
+      let mut index: u64 = 0;
+
+      while (index < reports.length()) {
+        let Option::SOME(report) = reports.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        output.pushStr("{");
+        Borrowck::OwnershipReport::pushJsonNumberField(&mut output, "version", Borrowck::OwnershipReport::VERSION as u64);
+        output.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonField(&mut output, "function", report.name);
+        output.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonNumberField(&mut output, "function_id", report.defRaw as u64);
+        output.pushStr(",");
+
+        let renderedPosition: String = Borrowck::OwnershipReport::renderPosition(&report.position);
+        Borrowck::OwnershipReport::pushJsonField(&mut output, "position", renderedPosition.toStr());
+
+        output.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonString(&mut output, "events");
+        output.pushStr(":[");
+
+        let order: Vector<u64> = Borrowck::OwnershipReport::sortedEventOrder(&report.events);
+        let mut orderIndex: u64 = 0;
+
+        while (orderIndex < order.length()) {
+          if (let Option::SOME(eventIndex) = order.get(orderIndex)) {
+            if (let Option::SOME(event) = report.events.get(*eventIndex)) {
+              if (orderIndex > 0) {
+                output.pushStr(",");
+              }
+
+              Borrowck::OwnershipReport::pushEvent(&mut output, event);
+            }
+          }
+
+          orderIndex += 1;
+        }
+
+        output.pushStr("]}\n");
+        index += 1;
+      }
+
+      return output;
+    }
+
+    // --- summary ------------------------------------------------------------
+
+    function countKind(events: &Vector<Borrowck::OwnershipReport::ReportEvent>, kind: u32): u64 {
+      let mut count: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index < events.length()) {
+        if (let Option::SOME(event) = events.get(index)) {
+          if (event.kind == kind) {
+            count += 1;
+          }
+        }
+
+        index += 1;
+      }
+
+      return count;
+    }
+
+    /// A few lines for a human reading the terminal, while the JSON goes to a
+    /// file or a diff. One line per function that recorded anything.
+    function renderSummary(
+      hir: &Hir::HirStore,
+      defs: &Analyzer::DefinitionStore,
+      symbols: &Analyzer::SymbolTable,
+      schedules: &Hir::DropSchedules,
+      events: &Vector<Borrowck::OwnershipEvent>,
+      files: &Vector<SourceFile>,
+      workingDirectory: str,
+      filter: str,
+    ): String {
+      let reports: Vector<Borrowck::OwnershipReport::FunctionReport> = Borrowck::OwnershipReport::build(
+        hir, defs, symbols, schedules, events, files, workingDirectory, filter,
+      );
+
+      let mut totalEvents: u64 = 0;
+      let mut countIndex: u64 = 0;
+
+      while (countIndex < reports.length()) {
+        if (let Option::SOME(report) = reports.get(countIndex)) {
+          totalEvents += report.events.length();
+        }
+
+        countIndex += 1;
+      }
+
+      let mut output: String = `ownership-report v${Borrowck::OwnershipReport::VERSION}: ${reports.length()} functions, ${totalEvents} events\n`;
+      let mut index: u64 = 0;
+
+      while (index < reports.length()) {
+        let Option::SOME(report) = reports.get(index) else {
+          index += 1;
+          continue;
+        };
+
+        if (report.events.isEmpty()) {
+          index += 1;
+          continue;
+        }
+
+        let moves: u64 = Borrowck::OwnershipReport::countKind(&report.events, Borrowck::OwnershipReport::EVENT_MOVE);
+        let opened: u64 = Borrowck::OwnershipReport::countKind(&report.events, Borrowck::OwnershipReport::EVENT_BORROW_OPEN);
+        let released: u64 = Borrowck::OwnershipReport::countKind(&report.events, Borrowck::OwnershipReport::EVENT_BORROW_RELEASE);
+        let drops: u64 = Borrowck::OwnershipReport::countKind(&report.events, Borrowck::OwnershipReport::EVENT_DROP);
+        let closureEnvs: u64 = Borrowck::OwnershipReport::countKind(&report.events, Borrowck::OwnershipReport::EVENT_CLOSURE_ENV);
+        let patternBindings: u64 = Borrowck::OwnershipReport::countKind(&report.events, Borrowck::OwnershipReport::EVENT_PATTERN_BINDING);
+        let diagnostics: u64 = Borrowck::OwnershipReport::countKind(&report.events, Borrowck::OwnershipReport::EVENT_DIAGNOSTIC);
+
+        let renderedPosition: String = Borrowck::OwnershipReport::renderPosition(&report.position);
+        let line: String = `  ${report.name} at ${renderedPosition.toStr()}: ${moves} moves, ${opened} borrows opened, ${released} released, ${drops} drops, ${closureEnvs} closure envs, ${patternBindings} ref bindings, ${diagnostics} diagnostics\n`;
+
+        output.pushStr(line.toStr());
+
+        index += 1;
+      }
+
+      return output;
+    }
+  }
+}
