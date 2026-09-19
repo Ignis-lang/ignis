@@ -2472,3 +2472,246 @@ fn selfhost_build_cache_reuses_warm_builds_and_invalidates_on_every_input() {
 
   cleanup_project_dir(&project_dir);
 }
+
+const CACHE_PROGRAM_ONE: &str = "import Io from \"std::io\";\n\nfunction main(): void {\n  Io::println(\"ONE\");\n}\n";
+const CACHE_PROGRAM_TWO: &str = "import Io from \"std::io\";\n\nfunction main(): void {\n  Io::println(\"TWO\");\n}\n";
+const CACHE_PROGRAM_WARNS: &str =
+  "import Io from \"std::io\";\n\nfunction main(): void {\n  let unusedValue: i32 = 1;\n  Io::println(\"WARN\");\n}\n";
+
+/// Run a selfhost build and return everything it reported, without requiring
+/// success — some cases only care about what the run said.
+fn run_selfhost_build_reporting(
+  compiler: &Path,
+  project_dir: &Path,
+  extra_arguments: &[&str],
+) -> String {
+  let output = Command::new(compiler)
+    .current_dir(project_dir)
+    .arg("build")
+    .arg(project_dir)
+    .args(extra_arguments)
+    .output()
+    .expect("run selfhost build");
+
+  format!(
+    "{}{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  )
+}
+
+fn run_program(path: &Path) -> String {
+  let output = Command::new(path).output().expect("run the built program");
+  String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// A binary named by `-o` is the one this build produced, never whatever a
+/// previous build happened to leave at that path.
+///
+/// The object and its stamp live where the layout puts them, and `-o` moves
+/// only the binary, so a stamp that matched on inputs alone would hand back a
+/// binary built from sources that have since changed.
+#[test]
+fn selfhost_build_cache_relinks_when_the_requested_output_is_not_the_recorded_one() {
+  let project_dir = make_temp_project_dir("cache-output");
+  let std_root = copy_workspace_std(&project_dir);
+  write_build_cache_project(&project_dir, &std_root, CACHE_PROGRAM_ONE);
+
+  let compiler = selfhost_compiler();
+  let elsewhere = project_dir.join("dist/app");
+
+  run_selfhost_build(compiler, &project_dir, &["-o", elsewhere.to_str().expect("output path")]);
+  assert_eq!(run_program(&elsewhere), "ONE");
+
+  fs::write(project_dir.join("src/main.ign"), CACHE_PROGRAM_TWO).expect("edit the program");
+
+  run_selfhost_build(compiler, &project_dir, &[]);
+
+  let reported = run_selfhost_build(compiler, &project_dir, &["-o", elsewhere.to_str().expect("output path")]);
+  assert!(
+    !reported.contains("cache: reused"),
+    "a build for a different output path must not report a plain reuse\n{reported}"
+  );
+  assert_eq!(
+    run_program(&elsewhere),
+    "TWO",
+    "the binary at the requested path must be the one this build produced\n{reported}"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+/// A reused build prints the diagnostics the build that produced the artifacts
+/// printed, and the count it reports is the one that run computed.
+#[test]
+fn selfhost_build_cache_replays_the_warnings_of_the_build_it_reuses() {
+  let project_dir = make_temp_project_dir("cache-warnings");
+  let std_root = copy_workspace_std(&project_dir);
+  write_build_cache_project(&project_dir, &std_root, CACHE_PROGRAM_WARNS);
+
+  let compiler = selfhost_compiler();
+
+  let cold = run_selfhost_build(compiler, &project_dir, &[]);
+  assert!(cold.contains("unusedValue"), "the cold build must warn\n{cold}");
+  assert!(cold.contains("summary: 0 errors, 1 warnings"), "{cold}");
+
+  let warm = run_selfhost_build(compiler, &project_dir, &[]);
+  assert_cache_line(&warm, "cache: reused");
+  assert!(
+    warm.contains("unusedValue"),
+    "a reused build must replay the warning it recorded\n{warm}"
+  );
+  assert!(
+    warm.contains("summary: 0 errors, 1 warnings"),
+    "a reused build must report the warning count it recorded\n{warm}"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+/// Output only the pipeline can produce forces the pipeline to run: a stamp
+/// records what the artifacts were built from, never the drop schedules a dump
+/// flag asks for.
+#[test]
+fn selfhost_build_cache_runs_the_pipeline_for_flags_it_cannot_serve() {
+  let project_dir = make_temp_project_dir("cache-dumps");
+  let std_root = copy_workspace_std(&project_dir);
+  write_build_cache_project(&project_dir, &std_root, CACHE_PROGRAM_ONE);
+
+  let compiler = selfhost_compiler();
+
+  run_selfhost_build(compiler, &project_dir, &[]);
+  assert_cache_line(&run_selfhost_build(compiler, &project_dir, &[]), "cache: reused");
+
+  let dumped = run_selfhost_build_reporting(compiler, &project_dir, &["--dump-drop-schedule"]);
+  assert_cache_line(&dumped, "cache: rebuilding, --dump-drop-schedule requested");
+  assert!(
+    dumped.contains("drop"),
+    "a warm run asked for drop schedules must print them\n{dumped}"
+  );
+
+  let reported = run_selfhost_build_reporting(compiler, &project_dir, &["--dump-ownership-report"]);
+  assert_cache_line(&reported, "cache: rebuilding, --dump-ownership-report requested");
+
+  cleanup_project_dir(&project_dir);
+}
+
+/// A C toolchain upgraded in place keeps its name, so the name alone cannot
+/// key the cache.
+#[test]
+fn selfhost_build_cache_rebuilds_when_the_c_compiler_changes_in_place() {
+  let project_dir = make_temp_project_dir("cache-cc");
+  let std_root = copy_workspace_std(&project_dir);
+
+  let wrapper = project_dir.join("fake-cc");
+  write_fake_c_compiler(&wrapper, "1");
+
+  fs::write(project_dir.join("src/main.ign"), CACHE_PROGRAM_ONE).expect("write main module");
+  write_build_cache_project_with_cc(&project_dir, &std_root, wrapper.to_str().expect("wrapper path"));
+
+  let compiler = selfhost_compiler();
+
+  run_selfhost_build(compiler, &project_dir, &[]);
+  assert_cache_line(&run_selfhost_build(compiler, &project_dir, &[]), "cache: reused");
+
+  write_fake_c_compiler(&wrapper, "2");
+
+  assert_cache_line(
+    &run_selfhost_build(compiler, &project_dir, &[]),
+    "cache: rebuilding, C compiler changed",
+  );
+
+  cleanup_project_dir(&project_dir);
+}
+
+/// A C toolchain driver that forwards to the real one but reports its own
+/// version, so a test can upgrade it in place.
+fn write_fake_c_compiler(
+  path: &Path,
+  version: &str,
+) {
+  fs::write(
+    path,
+    format!("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"fake c compiler {version}\"\n  exit 0\nfi\nexec cc \"$@\"\n"),
+  )
+  .expect("write the fake c compiler");
+
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path).expect("read wrapper metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("make the wrapper executable");
+  }
+}
+
+fn write_build_cache_project_with_cc(
+  project_dir: &Path,
+  std_root: &Path,
+  cc: &str,
+) {
+  fs::write(
+    project_dir.join("ignis.toml"),
+    format!(
+      "[package]\nname = \"build_cache_fixture\"\nversion = \"0.1.0\"\nauthors = []\ndescription = \"fixture\"\nkeywords = []\nlicense = \"MIT\"\nrepository = \"\"\n\n[ignis]\nstd = true\nstd_path = \"{}\"\n\n[build]\nbin = true\nsource_dir = \"src\"\nentry = \"main.ign\"\nout_dir = \"build\"\nopt_level = 0\ndebug = false\ntarget = \"c\"\ncc = \"{}\"\ncflags = []\nemit = []\n",
+      std_root.display(),
+      cc
+    ),
+  )
+  .expect("write ignis.toml");
+}
+
+/// Single-file mode puts the object and its stamp in the working directory and
+/// lets `-o` name the binary anywhere, so the same stale-output hazard as
+/// project mode applies and the same recorded output has to close it.
+#[test]
+fn selfhost_single_file_build_cache_relinks_for_a_different_output_path() {
+  let project_dir = make_temp_project_dir("cache-single-file");
+  let std_root = copy_workspace_std(&project_dir);
+  write_build_cache_project(&project_dir, &std_root, CACHE_PROGRAM_ONE);
+
+  let compiler = selfhost_compiler();
+  let entry = project_dir.join("src/main.ign");
+  let first = project_dir.join("first-out");
+  let second = project_dir.join("second-out");
+
+  let build = |output: &Path| -> String {
+    let result = Command::new(compiler)
+      .current_dir(&project_dir)
+      .arg(&entry)
+      .arg("-o")
+      .arg(output)
+      .output()
+      .expect("run the single-file build");
+
+    let reported = format!(
+      "{}{}",
+      String::from_utf8_lossy(&result.stdout),
+      String::from_utf8_lossy(&result.stderr)
+    );
+
+    assert!(result.status.success(), "expected the single-file build to succeed\n{reported}");
+    reported
+  };
+
+  build(&first);
+  assert_eq!(run_program(&first), "ONE");
+
+  fs::write(&entry, CACHE_PROGRAM_TWO).expect("edit the program");
+  build(&second);
+  assert_eq!(run_program(&second), "TWO");
+
+  let reported = build(&first);
+  assert!(
+    !reported.contains("cache: reused"),
+    "a build for a different output path must not report a plain reuse\n{reported}"
+  );
+  assert_eq!(
+    run_program(&first),
+    "TWO",
+    "the binary at the requested path must be the one this build produced\n{reported}"
+  );
+
+  cleanup_project_dir(&project_dir);
+}
