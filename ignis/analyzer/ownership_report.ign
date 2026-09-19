@@ -82,6 +82,18 @@ export namespace Borrowck {
     const EVENT_CLOSURE_ENV: u32 = 4;
     const EVENT_PATTERN_BINDING: u32 = 5;
     const EVENT_DIAGNOSTIC: u32 = 6;
+    const EVENT_BORROW_REJECTED: u32 = 7;
+
+    /// What already held a borrow the checker refused to grant. The borrow map
+    /// records a state, not a holder, so this is everything it knows.
+    const HELD_MUTABLE: u32 = 0;
+    const HELD_SHARED: u32 = 1;
+
+    /// The path a span with no source file renders as, and the one position
+    /// that sorts after every real one: an event the checker could not
+    /// attribute belongs at the end of its function's record, not in front of
+    /// the first line of source.
+    const SYNTHETIC_PATH: str = "<synthetic>";
 
     /// What consumed a moved binding.
     const CONSUMER_CALL_ARGUMENT: u32 = 0;
@@ -193,6 +205,10 @@ export namespace Borrowck {
 
       if (kind == Borrowck::OwnershipReport::EVENT_PATTERN_BINDING) {
         return "pattern-binding";
+      }
+
+      if (kind == Borrowck::OwnershipReport::EVENT_BORROW_REJECTED) {
+        return "borrow-rejected";
       }
 
       return "diagnostic";
@@ -314,10 +330,14 @@ export namespace Borrowck {
 
     function syntheticPosition(): Borrowck::OwnershipReport::ReportPosition {
       return Borrowck::OwnershipReport::ReportPosition {
-        path: String::create("<synthetic>"),
+        path: String::create(Borrowck::OwnershipReport::SYNTHETIC_PATH),
         line: 0,
         column: 0,
       };
+    }
+
+    function isSyntheticPath(path: &String): boolean {
+      return path.equals(Borrowck::OwnershipReport::SYNTHETIC_PATH);
     }
 
     function copyPosition(
@@ -362,10 +382,25 @@ export namespace Borrowck {
       return `${position.path.toStr()}:${position.line}:${position.column}`;
     }
 
+    /// Orders two positions, with an unattributable one after every real one.
+    /// `<synthetic>` would otherwise sort before every absolute path and put an
+    /// event the checker could not place in front of the source it belongs
+    /// after.
     function comparePositions(
       a: &Borrowck::OwnershipReport::ReportPosition,
       b: &Borrowck::OwnershipReport::ReportPosition,
     ): i32 {
+      let leftSynthetic: boolean = Borrowck::OwnershipReport::isSyntheticPath(&a.path);
+      let rightSynthetic: boolean = Borrowck::OwnershipReport::isSyntheticPath(&b.path);
+
+      if (leftSynthetic && !rightSynthetic) {
+        return 1;
+      }
+
+      if (!leftSynthetic && rightSynthetic) {
+        return -1;
+      }
+
       let pathCompare: i32 = Hir::DropScheduleDump::compareStr(a.path.toStr(), b.path.toStr());
 
       if (pathCompare != 0) {
@@ -569,6 +604,110 @@ export namespace Borrowck {
       return false;
     }
 
+    /// The `__`-separated pieces of a mangled symbol, in order.
+    function mangledSegments(symbol: str): Vector<String> {
+      let symbolString: String = symbol.toString();
+      let mut segments: Vector<String> = Vector::new<String>();
+      let mut start: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index <= symbolString.length()) {
+        let atEnd: boolean = index == symbolString.length();
+        let mut atSeparator: boolean = false;
+
+        if (!atEnd) {
+          if (let Option::SOME(first) = symbolString.byteAt(index)) {
+            if (let Option::SOME(second) = symbolString.byteAt(index + 1)) {
+              atSeparator = first == ('_' as u8) && second == ('_' as u8);
+            }
+          }
+        }
+
+        if (atEnd || atSeparator) {
+          segments.push(symbolString.substringBytes(start, index));
+          start = index + 2;
+          index += 2;
+          continue;
+        }
+
+        index += 1;
+      }
+
+      return segments;
+    }
+
+    /// Whether a qualified filter `A::b` names the generic function a mangled
+    /// symbol was specialized from.
+    ///
+    /// Monomorphization gives an instantiation a fresh definition that carries
+    /// no qualified name, and `MonoOutput` does not keep the generic
+    /// definition it came from, so there is nothing to compare a path against.
+    /// The symbol is what is left: a method of `A` mangles to
+    /// `A__<args>__b`, so the filter matches when the symbol's first segment
+    /// is the filter's second-to-last segment and its last segment is the
+    /// filter's last. `Vector::push` therefore reaches `Vector__String__push`
+    /// and not `Option__u64__push` or `Vector__String__pop`.
+    function mangledMatchesQualified(symbolName: str, filter: &String): boolean {
+      let filterSegments: Vector<String> = Borrowck::OwnershipReport::pathSegments(filter);
+
+      if (filterSegments.length() < 2) {
+        return false;
+      }
+
+      let Option::SOME(owner) = filterSegments.get(filterSegments.length() - 2) else {
+        return false;
+      };
+      let Option::SOME(method) = filterSegments.get(filterSegments.length() - 1) else {
+        return false;
+      };
+
+      let symbolSegments: Vector<String> = Borrowck::OwnershipReport::mangledSegments(symbolName);
+
+      if (symbolSegments.length() < 3) {
+        return false;
+      }
+
+      let Option::SOME(first) = symbolSegments.get(0) else {
+        return false;
+      };
+      let Option::SOME(last) = symbolSegments.get(symbolSegments.length() - 1) else {
+        return false;
+      };
+
+      return first.equals(owner.toStr()) && last.equals(method.toStr());
+    }
+
+    /// The `::`-separated pieces of a qualified path, in order.
+    function pathSegments(value: &String): Vector<String> {
+      let mut segments: Vector<String> = Vector::new<String>();
+      let mut start: u64 = 0;
+      let mut index: u64 = 0;
+
+      while (index <= value.length()) {
+        let atEnd: boolean = index == value.length();
+        let mut atSeparator: boolean = false;
+
+        if (!atEnd) {
+          if (let Option::SOME(first) = value.byteAt(index)) {
+            if (let Option::SOME(second) = value.byteAt(index + 1)) {
+              atSeparator = first == (':' as u8) && second == (':' as u8);
+            }
+          }
+        }
+
+        if (atEnd || atSeparator) {
+          segments.push(value.substringBytes(start, index));
+          start = index + 2;
+          index += 2;
+          continue;
+        }
+
+        index += 1;
+      }
+
+      return segments;
+    }
+
     function containsPathSeparator(value: &String): boolean {
       let mut index: u64 = 0;
 
@@ -589,12 +728,14 @@ export namespace Borrowck {
 
     /// Whether one function is selected by `filter`.
     ///
-    /// An empty filter keeps everything. A filter spelled with `::` is matched
-    /// against the qualified path exactly, which is how one function out of
-    /// several sharing a last segment is singled out. A bare filter matches
-    /// the symbol, the last segment of the qualified path, and any
-    /// `__`-separated segment of a mangled symbol, so `push` reaches both
-    /// `Vector::push` and `Vector__String__push`.
+    /// An empty filter keeps everything. A filter spelled with `::` matches
+    /// the qualified path exactly, and also a mangled instantiation whose
+    /// first `__` segment is the filter's owner and whose last is the filter's
+    /// method (see `mangledMatchesQualified`), which is how one function out of
+    /// several sharing a last segment is singled out. A bare filter matches the
+    /// symbol, the last segment of the qualified path, and any `__`-separated
+    /// segment of a mangled symbol, so `push` reaches both `Vector::push` and
+    /// `Vector__String__push`.
     ///
     /// The last rule over-matches by design: `String` also reaches
     /// `Vector__String__push`. A reader who gets more records than they wanted
@@ -608,7 +749,11 @@ export namespace Borrowck {
       }
 
       if (Borrowck::OwnershipReport::containsPathSeparator(&filterString)) {
-        return qualifiedName.equals(filter);
+        if (qualifiedName.equals(filter)) {
+          return true;
+        }
+
+        return Borrowck::OwnershipReport::mangledMatchesQualified(symbolName, &filterString);
       }
 
       if (filterString.equals(symbolName)) {
@@ -1029,6 +1174,22 @@ export namespace Borrowck {
         return;
       }
 
+      if (event.kind == Borrowck::OwnershipReport::EVENT_BORROW_REJECTED) {
+        outputRef.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonBooleanField(outputRef, "mutable", event.flag);
+        outputRef.pushStr(",");
+
+        if (event.detail == Borrowck::OwnershipReport::HELD_MUTABLE) {
+          Borrowck::OwnershipReport::pushJsonField(outputRef, "held", "mutable");
+        } else {
+          Borrowck::OwnershipReport::pushJsonField(outputRef, "held", "shared");
+        }
+
+        outputRef.pushStr(",");
+        Borrowck::OwnershipReport::pushJsonNumberField(outputRef, "scope", event.scopeDepth);
+        return;
+      }
+
       outputRef.pushStr(",");
       Borrowck::OwnershipReport::pushJsonField(outputRef, "code", event.code);
       outputRef.pushStr(",");
@@ -1186,14 +1347,35 @@ export namespace Borrowck {
       let closureEnvs: u64 = Borrowck::OwnershipReport::countKind(&report.events, Borrowck::OwnershipReport::EVENT_CLOSURE_ENV);
       let patternBindings: u64 = Borrowck::OwnershipReport::countKind(&report.events, Borrowck::OwnershipReport::EVENT_PATTERN_BINDING);
       let diagnostics: u64 = Borrowck::OwnershipReport::countKind(&report.events, Borrowck::OwnershipReport::EVENT_DIAGNOSTIC);
+      let rejected: u64 = Borrowck::OwnershipReport::countKind(&report.events, Borrowck::OwnershipReport::EVENT_BORROW_REJECTED);
       let renderedPosition: String = Borrowck::OwnershipReport::renderPosition(&report.position);
 
-      return `  ${report.qualifiedName.toStr()} at ${renderedPosition.toStr()}: ${moves} moves, ${opened} borrows opened, ${released} released, ${drops} drops, ${closureEnvs} closure envs, ${patternBindings} ref bindings, ${diagnostics} diagnostics\n`;
+      return `  ${report.qualifiedName.toStr()} at ${renderedPosition.toStr()}: ${moves} moves, ${opened} borrows opened, ${released} released, ${rejected} refused, ${drops} drops, ${closureEnvs} closure envs, ${patternBindings} ref bindings, ${diagnostics} diagnostics\n`;
+    }
+
+    /// What to say when the report holds nothing. A filter that matched no
+    /// function is worth explaining: the walk runs after monomorphization, so
+    /// a function nothing reaches was pruned before it and cannot be named.
+    function emptySummary(filter: str): String {
+      let filterString: String = filter.toString();
+
+      if (filterString.length() == 0) {
+        return String::create("ownership-report v1: 0 functions, 0 events\n");
+      }
+
+      return `ownership-report v${Borrowck::OwnershipReport::VERSION}: no function matched '${filter}'; the walk runs after monomorphization, so a function nothing reaches is pruned before it\n`;
     }
 
     /// A few lines for a human reading the terminal, while the JSON goes to a
     /// file or a diff. One line per function that recorded anything.
-    function renderSummary(reports: &Vector<Borrowck::OwnershipReport::FunctionReport>): String {
+    function renderSummary(
+      reports: &Vector<Borrowck::OwnershipReport::FunctionReport>,
+      filter: str,
+    ): String {
+      if (reports.isEmpty()) {
+        return Borrowck::OwnershipReport::emptySummary(filter);
+      }
+
       let mut totalEvents: u64 = 0;
       let mut countIndex: u64 = 0;
 

@@ -62,6 +62,26 @@ record OwnershipReportRun {
   public ownershipErrors: u64;
   public hasCode: boolean;
   public eventForCode: boolean;
+  public borrowOpens: u64;
+  public borrowReleases: u64;
+}
+
+/// How many events of one kind the walk recorded.
+function ownershipReportCountEventKind(events: &Vector<Borrowck::OwnershipEvent>, kind: u32): u64 {
+  let mut count: u64 = 0;
+  let mut index: u64 = 0;
+
+  while (index < events.length()) {
+    if (let Option::SOME(event) = events.get(index)) {
+      if (event.kind == kind) {
+        count += 1;
+      }
+    }
+
+    index += 1;
+  }
+
+  return count;
 }
 
 /// Parses, analyzes, lowers and ownership-checks `source` with the report on,
@@ -122,10 +142,18 @@ function runOwnershipReport(source: str, filter: str, code: str): OwnershipRepor
 
   return OwnershipReportRun {
     json: Borrowck::OwnershipReport::renderJson(&reports),
-    summary: Borrowck::OwnershipReport::renderSummary(&reports),
+    summary: Borrowck::OwnershipReport::renderSummary(&reports, filter),
     ownershipErrors: ownershipReportCountErrors(&checked.diagnostics),
     hasCode: ownershipReportBagHasCode(&checked.diagnostics, code),
     eventForCode: ownershipReportEventsHaveCode(&checked.ownershipEvents, code),
+    borrowOpens: ownershipReportCountEventKind(
+      &checked.ownershipEvents,
+      Borrowck::OwnershipReport::EVENT_BORROW_OPEN
+    ),
+    borrowReleases: ownershipReportCountEventKind(
+      &checked.ownershipEvents,
+      Borrowck::OwnershipReport::EVENT_BORROW_RELEASE
+    ),
   };
 }
 
@@ -251,6 +279,41 @@ function ownershipReportFilterReachesMangledInstantiations(): void {
     Borrowck::OwnershipReport::nameMatchesFilter(&plain, "bump", ""),
     true
   );
+
+  // A `::` filter has to reach the instantiation too: after monomorphization
+  // the instance carries no qualified path of its own, so `Vector::push` has
+  // only the mangled symbol to match against.
+  Test::assertEq<boolean>(
+    Borrowck::OwnershipReport::nameMatchesFilter(&method, "Vector__String__push", "Vector::push"),
+    true
+  );
+  Test::assertEq<boolean>(
+    Borrowck::OwnershipReport::nameMatchesFilter(&method, "Vector__String__push", "Vector::pop"),
+    false
+  );
+  Test::assertEq<boolean>(
+    Borrowck::OwnershipReport::nameMatchesFilter(&method, "Vector__String__push", "Option::push"),
+    false
+  );
+  Test::assertEq<boolean>(
+    Borrowck::OwnershipReport::nameMatchesFilter(&generic, "new__String", "Vector::new"),
+    false
+  );
+}
+
+/// Scenario: a filter that matches nothing says why. The walk runs after
+/// monomorphization, so a function nothing reaches was pruned before it and
+/// cannot be reported under any spelling.
+@test
+function ownershipReportExplainsAFilterThatMatchedNothing(): void {
+  let run: OwnershipReportRun = runOwnershipReport(
+    "function main(): i32 {\n  return 0;\n}\n",
+    "absent",
+    ""
+  );
+
+  Test::assertEq<str>(run.json.toStr(), "");
+  Test::assertSnapshot("ownership-report-no-match", run.summary.toStr());
 }
 
 /// Scenario: the stderr summary of the filtered report, which is what a reader
@@ -277,7 +340,40 @@ function ownershipReportCountsOneBorrowPerReference(): void {
   let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "main", "");
 
   Test::assertEq<u64>(run.ownershipErrors, 0);
+  Test::assertEq<u64>(run.borrowOpens, run.borrowReleases);
   Test::assertSnapshot("ownership-report-one-borrow-per-reference", run.summary.toStr());
+}
+
+/// Scenario: a refused borrow. The checker leaves the borrow state untouched,
+/// so nothing is released and nothing may be reported as released; the refusal
+/// is its own event, carrying what already held the target. A conflict is the
+/// case this report exists for, so opens and releases have to stay balanced
+/// through it.
+@test
+function ownershipReportBalancesBorrowsThroughAConflict(): void {
+  let mut source: String = String::create("record Counter {\n  public value: i32;\n}\n");
+  source.pushStr("\nfunction main(): i32 {\n  let mut counter: Counter = Counter { value: 0 };\n  let first: &mut Counter = &mut counter;\n  let second: &mut Counter = &mut counter;\n\n  return first.value + second.value;\n}\n");
+
+  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "main", "");
+
+  Test::assertEq<u64>(run.ownershipErrors, 1);
+  Test::assertEq<u64>(run.borrowOpens, run.borrowReleases);
+  Test::assertSnapshot("ownership-report-borrow-conflict", run.json.toStr());
+}
+
+/// Scenario: a binding whose environment arrives by a later assignment. At the
+/// `let` the binding is already the owner, but where the environment will live
+/// is not known yet, and the report says `unknown` rather than guessing.
+@test
+function ownershipReportReportsUnknownEnvironmentPlacement(): void {
+  let mut source: String = String::create("function inc(x: i32): i32 {\n  return x + 1;\n}\n");
+  source.pushStr("\nfunction make(): (i32) -> i32 {\n  let base: i32 = 40;\n  let mut f = inc;\n  f = (x: i32): i32 -> x + base;\n\n  return f;\n}\n");
+  source.pushStr("\nfunction main(): i32 {\n  let g = make();\n\n  return g(2);\n}\n");
+
+  let run: OwnershipReportRun = runOwnershipReport(source.toStr(), "make", "");
+
+  Test::assertEq<u64>(run.ownershipErrors, 0);
+  Test::assertSnapshot("ownership-report-unknown-env", run.json.toStr());
 }
 
 /// Scenario: a use after move. The diagnostic event carries the code and the
