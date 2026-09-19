@@ -23,14 +23,12 @@ monomorphizer keeps alive is a mono question rather than a drop question, and
 including them would make every baseline churn on an unrelated mono change.
 The count of dropped std functions is reported, not gated.
 
-Two kinds of case never get a baseline:
-
-- `--project` roots (the selfhost compiler compiling itself) and `--extra`
-  entry points. A project baseline would change with nearly every compiler
-  commit, which makes it noise rather than evidence. Those cases are compared
-  against a second compiler given with `--reference` instead — in the gate,
-  stage2's dump of `ignis/` against stage1's, a self-consistency check on the
-  same sources.
+Two kinds of case never get a baseline: `--project` roots (the selfhost
+compiler compiling itself) and `--extra` entry points. A project baseline
+would change with nearly every compiler commit, which makes it noise rather
+than evidence. Those cases are compared against a second compiler given with
+`--reference` instead — in the gate, stage2's dump of `ignis/` against
+stage1's, a self-consistency check on the same sources.
 
 `--host` stays available as a cross-check (does the host still agree with the
 baselines?) and `--host-compare` still performs the original direct
