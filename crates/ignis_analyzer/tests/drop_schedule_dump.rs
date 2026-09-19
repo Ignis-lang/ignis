@@ -83,15 +83,11 @@ fn overwrite_schedule(src: &str) -> Vec<Vec<String>> {
 }
 
 fn field_overwrite_schedule(src: &str) -> Vec<Vec<String>> {
-  named_lists(src, |schedules| {
-    schedules.on_field_overwrite.values().cloned().collect()
-  })
+  named_lists(src, |schedules| schedules.on_field_overwrite.values().cloned().collect())
 }
 
 fn match_arm_end_schedule(src: &str) -> Vec<Vec<String>> {
-  named_lists(src, |schedules| {
-    schedules.on_match_arm_end.values().cloned().collect()
-  })
+  named_lists(src, |schedules| schedules.on_match_arm_end.values().cloned().collect())
 }
 
 /// One list per moved binding, holding that binding's name once per recorded move site.
